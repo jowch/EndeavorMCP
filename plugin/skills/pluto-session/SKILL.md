@@ -48,7 +48,7 @@ Reach for this skill when neither is present and you genuinely don't know which 
 | Call `start_pluto_session` / `stop_pluto_session` | Not needed — Endeavor manages the Pluto process for the whole app session |
 | `open_notebook` without a user-specified path | Never guess a path or scan the filesystem for a notebook to open |
 | Hand-write a new `.jl` notebook file | `new_notebook()` — let Pluto write it |
-| Re-`open_notebook` a path that's already open | `list_notebooks` first; it may already be there (`notebook_in_use` otherwise) |
+| Re-`open_notebook` a path that's already open | `list_notebooks` first; if it's there, use its `notebook_id` (re-opening errors) |
 | Ask the user to start Julia or run a setup script | Endeavor already runs Pluto + PlutoMCP |
 
 ## Additional resources

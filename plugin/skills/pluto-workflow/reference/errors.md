@@ -6,7 +6,7 @@
 |-------|---------|--------|
 | `pluto_not_running` | Endeavor's Pluto session isn't up | Unusual in normal use — Endeavor starts Pluto with the app; tell the user something's wrong rather than calling lifecycle tools yourself |
 | `notebook_not_found` | Unknown or stale `notebook_id` | Confirm the notebook/path with the user; `list_notebooks` to see what's open |
-| `notebook_in_use` | That path is already open in the session | `list_notebooks` and use the existing notebook instead of reopening it |
+| `NotebookIsRunningException` (from `open_notebook`) | That path is already open in the session | `list_notebooks` and use the existing notebook instead of reopening it |
 
 If one of these fires before you've established any `notebook_id`, go to **pluto-session** first.
 
