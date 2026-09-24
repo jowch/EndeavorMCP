@@ -32,6 +32,8 @@ PlutoMCP enforces read-before-edit itself: editing a cell you haven't read yet, 
 
 **Safe preview:** notebooks open with code loaded but not executed (`execution_blocked` shows up in mutation responses). Keep editing normally — staging and `submit_changes` still work, they just don't run yet. The user exits it themselves by clicking "Run notebook code" in the pane; call `allow_execution` yourself only when the user explicitly asks you to run the notebook. See [safe-preview.md](reference/safe-preview.md).
 
+**Running code needs the user's approval.** `execute_cell`, `submit_changes`, `run_all_cells`, `allow_execution`, `delete_cell` (it re-runs dependents), and `add_cell` / `edit_cell` with `run_after=true` each show the user an approval prompt (they may choose to stop being asked). Staging edits never asks. Batch your edits and run once rather than asking repeatedly. If a run is denied, don't retry or look for another way to run it: say what you'd run and why, and continue with what you can do without running.
+
 **Checking visual output:** `read_cell` only describes plots and other non-text outputs (e.g. `[image/svg+xml output, … bytes; call view_cell_output to see it]`). After making or changing a plot, call `view_cell_output(notebook_id, cell_id)` to actually look at it (axes, labels, whether the data looks right) before telling the user it's done. It needs the notebook to be running (not safe preview).
 
 **Cell structure / parse errors:** → **pluto-semantics** — [cell-structure.md](../pluto-semantics/reference/cell-structure.md).

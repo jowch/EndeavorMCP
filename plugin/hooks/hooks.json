@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__pluto__.*",
+        "hooks": [{ "type": "command", "command": "\"$ENDEAVOR_BIN\" hook-pretool", "timeout": 5 }]
+      }
+    ]
+  }
+}
