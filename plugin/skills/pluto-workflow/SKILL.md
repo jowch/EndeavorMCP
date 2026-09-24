@@ -32,6 +32,8 @@ PlutoMCP enforces read-before-edit itself: editing a cell you haven't read yet, 
 
 **Safe preview:** notebooks open with code loaded but not executed (`execution_blocked` shows up in mutation responses). Keep editing normally — staging and `submit_changes` still work, they just don't run yet. The user exits it themselves by clicking "Run notebook code" in the pane; call `allow_execution` yourself only when the user explicitly asks you to run the notebook. See [safe-preview.md](reference/safe-preview.md).
 
+**Checking visual output:** `read_cell` only describes plots and other non-text outputs (e.g. `[image/svg+xml output, … bytes; call view_cell_output to see it]`). After making or changing a plot, call `view_cell_output(notebook_id, cell_id)` to actually look at it (axes, labels, whether the data looks right) before telling the user it's done. It needs the notebook to be running (not safe preview).
+
 **Cell structure / parse errors:** → **pluto-semantics** — [cell-structure.md](../pluto-semantics/reference/cell-structure.md).
 
 ## REQUIRED chain
@@ -50,6 +52,7 @@ PlutoMCP enforces read-before-edit itself: editing a cell you haven't read yet, 
 | Claim outputs/widgets are live while still in safe preview | Only true once the user clicks "Run notebook code", or you call `allow_execution` because they asked |
 | Markdown cell added with its code showing | `add_cell(..., folded=true)`; `fold_cell(folded=true)` for existing prose cells |
 | Treat a `pluto://notebook/{id}/cell/{id}` link as a URL to fetch | It's a join key — `read_cell(notebook_id, cell_id)` instead |
+| Say a plot "looks right" from its code or `read_cell` alone | `view_cell_output` and look at it |
 
 ## Additional resources
 

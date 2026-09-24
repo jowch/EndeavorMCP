@@ -22,8 +22,9 @@ Comment on the 2 cell(s) above: <the user's comment text>
 `pluto://notebook/{id}/cell/{id}` links are **not fetchable** — they're a join key, not a URL. For each linked cell:
 
 1. Call `read_cell(notebook_id, cell_id)` to get its current code, output, and any error.
-2. Address the user's comment in terms of that cell's actual, current content — not whatever the pane was showing when they clicked. The pane's rendering can be stale by the time you respond; `read_cell` is the source of truth.
-3. If the comment implies a change, follow the normal [edit loop](edit-loop.md) on those cells.
+2. If the comment is about how an output looks (a plot, figure, or image), also call `view_cell_output(notebook_id, cell_id)` to see it.
+3. Address the user's comment in terms of that cell's actual, current content — not whatever the pane was showing when they clicked. The pane's rendering can be stale by the time you respond; `read_cell` is the source of truth.
+4. If the comment implies a change, follow the normal [edit loop](edit-loop.md) on those cells.
 
 ## Multiple cells
 
