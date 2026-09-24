@@ -1,0 +1,5 @@
+{
+  "name": "endeavor",
+  "version": "0.1.0",
+  "description": "Endeavor's built-in Pluto skills and guards, loaded into every agent session (successor to styx)."
+}
