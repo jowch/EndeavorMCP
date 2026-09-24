@@ -293,8 +293,8 @@ version = "1.2.2"
 
 [[deps.PlutoMCP]]
 deps = ["Base64", "HTTP", "JSON", "Pluto", "UUIDs"]
-git-tree-sha1 = "f2ec320f71f2f042af08240be6ee1e0d0f860370"
-repo-rev = "4a73c72"
+git-tree-sha1 = "71d445b9429cd6de770f14dc11603ebf15690df9"
+repo-rev = "f0461b4"
 repo-url = "https://github.com/jowch/PlutoMCP.jl"
 uuid = "22d0dc7c-8f49-4890-9bf9-be4a32466a36"
 version = "1.4.1"

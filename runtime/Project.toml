@@ -3,4 +3,4 @@ Pluto = "c3e4b0f8-55cb-11ea-2926-15256bba5781"
 PlutoMCP = "22d0dc7c-8f49-4890-9bf9-be4a32466a36"
 
 [sources]
-PlutoMCP = {url = "https://github.com/jowch/PlutoMCP.jl", rev = "4a73c72"}
+PlutoMCP = {url = "https://github.com/jowch/PlutoMCP.jl", rev = "f0461b4"}
