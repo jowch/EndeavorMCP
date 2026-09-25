@@ -136,6 +136,8 @@ end
 function _stage_cells!(session, nb, cells)
     for cell in cells
         mark_pending!(nb.notebook_id, cell.cell_id)
+        # Before Pluto hears of the change, or its state event would call it the user's.
+        note_agent_edit!(nb.notebook_id, cell)
     end
     nb.topology = Pluto.updated_topology(nb.topology, nb, cells)
     Pluto.save_notebook(session, nb)

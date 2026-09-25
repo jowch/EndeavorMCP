@@ -1495,12 +1495,34 @@ end
                 startswith(line, "data: ") && put!(events, line[7:end])
             end
             next_event() = (timedwait(() -> isready(events), 30.0) == :ok ? take!(events) : error("no event"))
-            @test next_event() == "[]"   # the current list, on connect
+            @test JSON.parse(next_event())["notebooks"] == []   # the current state, on connect
             call = JSON.json(Dict("jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
                 "params" => Dict("name" => "open_notebook", "arguments" => Dict("path" => fixture, "run_notebook" => false))))
             HTTP.post("http://127.0.0.1:$mcp_port/call", ["Content-Type" => "application/json"], call; readtimeout=30)
-            opened = JSON.parse(next_event())
+            event = JSON.parse(next_event())
+            opened = event["notebooks"]
             @test length(opened) == 1 && opened[1]["path"] == abspath(fixture)
+            nid = opened[1]["notebook_id"]
+            cells = event["cells"][nid]
+            @test [c["cell_id"] for c in cells] == [string(id) for id in EndeavorRuntime.standalone_session().notebooks[UUID(nid)].cell_order]
+            @test all(c -> c["author"] === nothing && !c["unrun"], cells)
+
+            # An agent edit: unrun, authored by the agent.
+            sess = EndeavorRuntime.standalone_session()
+            nb = sess.notebooks[UUID(nid)]
+            ycell = nb.cells_dict[UUID("22222222-2222-2222-2222-222222222222")]
+            read_cells!(sess, nb, ycell)
+            EndeavorRuntime.tool_edit_cell(sess, Dict("notebook_id" => nid, "cell_id" => string(ycell.cell_id), "code" => "y = x * 8"))
+            state(ev) = only(filter(c -> c["cell_id"] == string(ycell.cell_id), ev["cells"][nid]))
+            ev = JSON.parse(next_event())
+            while !(state(ev)["unrun"]) ; ev = JSON.parse(next_event()) ; end
+            @test state(ev)["author"] == "agent"
+
+            # A change the tools didn't make (Pluto's editor submitting code): the user's.
+            ycell.code = "y = x * 9"
+            EndeavorRuntime.publish_notebooks!()
+            ev = JSON.parse(next_event())
+            @test state(ev)["author"] == "user"
             close(sock)
         finally
             EndeavorRuntime.stop_pluto_stack!()
