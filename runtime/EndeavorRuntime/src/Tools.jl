@@ -198,6 +198,11 @@ end
 # Tool implementations
 # ---------------------------------------------------------------------------
 
+# Pluto marks every cell `queued` when it loads a notebook, ahead of the planned
+# run; in safe preview that run never happens, so the flag lingers. A queued cell
+# only counts while the notebook is actually running something.
+is_running(nb, cell) = cell.running || (cell.queued && any(c -> c.running, values(nb.cells_dict)))
+
 function tool_list_notebooks(session, _args)
     [
         Dict{String,Any}(
@@ -207,7 +212,7 @@ function tool_list_notebooks(session, _args)
             # Run state without read receipts, so a host can check it (e.g. at the end
             # of an agent turn) without weakening read-before-edit.
             "pending_run"       => [string(id) for id in pending_run_ids(nb.notebook_id)],
-            "running"           => [string(id) for id in nb.cell_order if (c = nb.cells_dict[id]; c.running || c.queued)],
+            "running"           => [string(id) for id in nb.cell_order if is_running(nb, nb.cells_dict[id])],
             "execution_allowed" => Pluto.will_run_code(nb),
         )
         for nb in values(session.notebooks)

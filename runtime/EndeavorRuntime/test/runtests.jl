@@ -62,11 +62,15 @@ end
 
     @testset "list_notebooks reports running cells" begin
         session, nb, cells = make_session_with_notebook("a = 1", "b = 2")
+        # A queued flag with nothing running is Pluto's leftover (e.g. safe preview).
         cells[2].queued = true
         result = EndeavorRuntime.tool_list_notebooks(session, Dict())
-        @test result[1]["running"] == [string(cells[2].cell_id)]
-        cells[2].queued = false
+        @test result[1]["running"] == String[]
+        # While a cell runs, queued ones count too.
         cells[1].running = true
+        result = EndeavorRuntime.tool_list_notebooks(session, Dict())
+        @test result[1]["running"] == [string(cells[1].cell_id), string(cells[2].cell_id)]
+        cells[2].queued = false
         result = EndeavorRuntime.tool_list_notebooks(session, Dict())
         @test result[1]["running"] == [string(cells[1].cell_id)]
     end

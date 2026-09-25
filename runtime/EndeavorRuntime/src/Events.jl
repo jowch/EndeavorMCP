@@ -44,7 +44,7 @@ function _cell_states(nb)
     [
         Dict{String,Any}(
             "cell_id" => string(id),
-            "running" => c.running || c.queued,
+            "running" => is_running(nb, c),
             "errored" => c.errored,
             "unrun"   => id in pending,
             "author"  => _author!(nb.notebook_id, c),
