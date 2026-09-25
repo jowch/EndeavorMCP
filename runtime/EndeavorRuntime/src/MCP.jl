@@ -386,8 +386,10 @@ function _handle_tool_call(session, name, arguments)
     Dict{String,Any}("content" => content, "isError" => false)
 end
 
-function _safe_handle_tool_call(session, name, arguments)
+function _safe_handle_tool_call(session, name, arguments; owner::AbstractString="")
     try
+        refusal = policy_refusal(owner, name)
+        refusal === nothing || throw(refusal)
         _handle_tool_call(session, name, arguments)
     catch e
         raw = sprint(showerror, e)
@@ -415,7 +417,8 @@ end
 # JSON-RPC dispatch (shared by stdio and HTTP/SSE transports)
 # ---------------------------------------------------------------------------
 
-function _dispatch_mcp(session, msg::Dict{String,Any})
+# `owner` = the calling agent session (its X-Endeavor-Session header), for policy.
+function _dispatch_mcp(session, msg::Dict{String,Any}; owner::AbstractString="")
     method = get(msg, "method", "")
     id     = get(msg, "id", nothing)
 
@@ -436,7 +439,7 @@ function _dispatch_mcp(session, msg::Dict{String,Any})
         params    = get(msg, "params", Dict{String,Any}())
         name      = get(params, "name", "")
         arguments = get(params, "arguments", Dict{String,Any}())
-        result    = _safe_handle_tool_call(session, name, arguments)
+        result    = _safe_handle_tool_call(session, name, arguments; owner)
         publish_notebooks!()
         _ok(id, result)
 

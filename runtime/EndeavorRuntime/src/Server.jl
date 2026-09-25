@@ -93,7 +93,8 @@ function _handle_post(http::HTTP.Stream, pluto_session)
         return
     end
 
-    resp = _dispatch_mcp(pluto_session, msg)
+    owner = HTTP.header(http.message, "X-Endeavor-Session", "")
+    resp = _dispatch_mcp(pluto_session, msg; owner)
     isopen(ch) && resp !== nothing && put!(ch, JSON.json(resp))
 
     HTTP.setstatus(http, 202)
@@ -187,7 +188,14 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
             end
             active   = standalone_session()
             sess     = active !== nothing ? active : pluto_session
-            resp     = _dispatch_mcp(sess, msg)
+            # App-only (not reachable through the agent's /message path).
+            resp = if get(msg, "method", "") == "endeavor/set_policy"
+                p = get(msg, "params", Dict{String,Any}())
+                set_policy!(string(get(p, "owner", "")), string(get(p, "policy", "ask")))
+                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
+            else
+                _dispatch_mcp(sess, msg)
+            end
             resp_json = resp !== nothing ? JSON.json(resp) : "{}"
             HTTP.setstatus(http, 200)
             HTTP.setheader(http, "Content-Type" => "application/json")

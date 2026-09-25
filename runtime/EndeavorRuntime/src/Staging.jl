@@ -82,7 +82,15 @@ function _open_notebook(notebook_id::UUID)
     sess === nothing ? nothing : get(sess.notebooks, notebook_id, nothing)
 end
 
-_ran_since(nb, cell_id, t) = (c = get(nb.cells_dict, cell_id, nothing); c !== nothing && c.output.last_run_timestamp >= t)
+# Ran since `t`: a run that *started* after the edit and has finished. Pluto stamps
+# `last_run_timestamp` when a run ends, so a run already under way at the edit
+# (old code) ends after it; subtract the run's duration to get its start.
+function _ran_since(nb, cell_id, t)
+    c = get(nb.cells_dict, cell_id, nothing)
+    (c === nothing || c.running || c.queued) && return false
+    started = c.output.last_run_timestamp - something(c.runtime, 0) / 1e9
+    return c.output.last_run_timestamp > 0 && started >= t
+end
 
 "Cells edited through our tools that haven't run since (a run from anywhere counts)."
 function pending_run_ids(notebook_id::UUID, nb = _open_notebook(notebook_id))

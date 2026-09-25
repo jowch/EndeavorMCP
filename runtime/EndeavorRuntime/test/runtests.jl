@@ -1518,6 +1518,12 @@ end
             while !(state(ev)["unrun"]) ; ev = JSON.parse(next_event()) ; end
             @test state(ev)["author"] == "agent"
 
+            # An edit that runs straight away is the agent's too.
+            read_cells!(sess, nb, ycell)
+            EndeavorRuntime.tool_edit_cell(sess, Dict("notebook_id" => nid, "cell_id" => string(ycell.cell_id), "code" => "y = x * 10", "run_after" => true))
+            EndeavorRuntime.publish_notebooks!()
+            @test EndeavorRuntime._author!(nb.notebook_id, ycell) == "agent"
+
             # A change the tools didn't make (Pluto's editor submitting code): the user's.
             ycell.code = "y = x * 9"
             EndeavorRuntime.publish_notebooks!()
@@ -1526,6 +1532,28 @@ end
             close(sock)
         finally
             EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
+    @testset "plan policy refuses writes and runs for that session only" begin
+        call(name; owner) = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
+            "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
+            "params" => Dict{String,Any}("name" => name, "arguments" => Dict{String,Any}())); owner)
+        err(resp) = JSON.parse(resp["result"]["content"][1]["text"])["error"]
+        try
+            EndeavorRuntime.set_policy!("7", "plan")
+            @test err(call("edit_cell"; owner="7")) == "plan_mode"
+            @test err(call("run_all_cells"; owner="7")) == "plan_mode"
+            @test err(call("new_notebook"; owner="7")) == "plan_mode"
+            # Reads still work in plan (they fail here only because Pluto isn't running).
+            @test err(call("list_notebooks"; owner="7")) != "plan_mode"
+            # Another session, and the app's own calls, aren't affected.
+            @test err(call("edit_cell"; owner="8")) != "plan_mode"
+            @test err(call("edit_cell"; owner="")) != "plan_mode"
+            EndeavorRuntime.set_policy!("7", "ask")
+            @test err(call("edit_cell"; owner="7")) != "plan_mode"
+        finally
+            EndeavorRuntime.set_policy!("7", "ask")
         end
     end
 

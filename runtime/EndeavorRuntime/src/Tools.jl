@@ -136,8 +136,6 @@ end
 function _stage_cells!(session, nb, cells)
     for cell in cells
         mark_pending!(nb.notebook_id, cell.cell_id)
-        # Before Pluto hears of the change, or its state event would call it the user's.
-        note_agent_edit!(nb.notebook_id, cell)
     end
     nb.topology = Pluto.updated_topology(nb.topology, nb, cells)
     Pluto.save_notebook(session, nb)
@@ -249,6 +247,7 @@ function tool_edit_cell(session, args)
     require_fresh_read!(nb.notebook_id, cell)
 
     cell.code = code
+    note_agent_edit!(nb.notebook_id, cell)
     record_read!(nb.notebook_id, cell.cell_id, code)
 
     if run_after
@@ -282,6 +281,7 @@ function tool_edit_cells(session, args)
     for edit in edits
         cell = _get_cell(nb, edit["cell_id"])
         cell.code = edit["code"]
+        note_agent_edit!(nb.notebook_id, cell)
         record_read!(nb.notebook_id, cell.cell_id, edit["code"])
         push!(edited_ids, cell.cell_id)
         push!(staged_cells, cell)
@@ -318,6 +318,7 @@ function tool_add_cell(session, args)
 
     new_cell = Pluto.Cell(; code=string(code), code_folded=folded)
     nb.cells_dict[new_cell.cell_id] = new_cell
+    note_agent_edit!(nb.notebook_id, new_cell)
     record_read!(nb.notebook_id, new_cell.cell_id, string(code))
 
     if after_cell_id === nothing || after_cell_id == ""

@@ -91,11 +91,13 @@ end
 function _handle_events(http::HTTP.Stream)
     read(http)
     ch = Channel{String}(Inf)
-    first = lock(_EVENT_LOCK) do
-        push!(_EVENT_SUBSCRIBERS, ch)
-        _notebooks_json()
-    end
     try
+        # Register and snapshot together, so no change falls between them; inside
+        # the try, so a failed snapshot doesn't leave a dead subscriber behind.
+        first = lock(_EVENT_LOCK) do
+            push!(_EVENT_SUBSCRIBERS, ch)
+            _notebooks_json()
+        end
         HTTP.setstatus(http, 200)
         HTTP.setheader(http, "Content-Type" => "text/event-stream")
         HTTP.setheader(http, "Cache-Control" => "no-cache")
