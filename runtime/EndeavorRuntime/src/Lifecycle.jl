@@ -88,6 +88,11 @@ end
 function _handle_pluto_event(event)::Nothing
     if event isa Pluto.ServerStartEvent
         _STANDALONE_PLUTO_PORT[] = Int(event.port)
+    elseif event isa Pluto.StateChangeEvent || event isa Pluto.NotebookExecutionDoneEvent || event isa Pluto.OpenNotebookEvent
+        publish_notebooks!()
+    elseif event isa Pluto.ShutdownNotebookEvent
+        # Fired before the notebook leaves the session.
+        @async (sleep(0.2); publish_notebooks!())
     end
     nothing
 end
@@ -174,6 +179,9 @@ function start_pluto_stack!(;
 end
 
 function _close_standalone_http!()
+    # Closing the server waits for open connections; event streams never end on
+    # their own, so end them first.
+    close_event_streams!()
     http_server = _STANDALONE_HTTP_SERVER[]
     if http_server !== nothing
         try

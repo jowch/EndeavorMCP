@@ -437,6 +437,7 @@ function _dispatch_mcp(session, msg::Dict{String,Any})
         name      = get(params, "name", "")
         arguments = get(params, "arguments", Dict{String,Any}())
         result    = _safe_handle_tool_call(session, name, arguments)
+        publish_notebooks!()
         _ok(id, result)
 
     elseif method == "ping"

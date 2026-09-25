@@ -165,7 +165,10 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
             return
         end
 
-        if method == "GET" && startswith(target, "/sse")
+        if method == "GET" && startswith(target, "/events")
+            _handle_events(http)
+
+        elseif method == "GET" && startswith(target, "/sse")
             _handle_sse(http)
 
         elseif method == "POST" && startswith(target, "/message")

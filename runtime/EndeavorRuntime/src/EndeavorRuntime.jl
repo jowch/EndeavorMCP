@@ -14,6 +14,7 @@ include("Tools.jl")
 include("Graph.jl")
 include("Lifecycle.jl")
 include("MCP.jl")
+include("Events.jl")
 include("Server.jl")
 
 register_http_bridge!(_run_http_mcp_server)

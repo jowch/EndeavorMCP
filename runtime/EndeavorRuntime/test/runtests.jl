@@ -1451,6 +1451,33 @@ end
         end
     end
 
+    @testset "events stream pushes notebook changes" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        pluto_port = 1450 + rand(0:99)
+        mcp_port = 2650 + rand(0:99)
+        EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port)
+        fixture = fresh_fixture()
+        try
+            EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
+            sock = Sockets.connect("127.0.0.1", mcp_port)
+            write(sock, "GET /events HTTP/1.0\r\nHost: 127.0.0.1:$mcp_port\r\n\r\n")
+            events = Channel{String}(Inf)
+            reader = @async for line in eachline(sock)
+                startswith(line, "data: ") && put!(events, line[7:end])
+            end
+            next_event() = (timedwait(() -> isready(events), 30.0) == :ok ? take!(events) : error("no event"))
+            @test next_event() == "[]"   # the current list, on connect
+            call = JSON.json(Dict("jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
+                "params" => Dict("name" => "open_notebook", "arguments" => Dict("path" => fixture, "run_notebook" => false))))
+            HTTP.post("http://127.0.0.1:$mcp_port/call", ["Content-Type" => "application/json"], call; readtimeout=30)
+            opened = JSON.parse(next_event())
+            @test length(opened) == 1 && opened[1]["path"] == abspath(fixture)
+            close(sock)
+        finally
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
     @testset "MCP protocol: deferred pluto_session_status" begin
         EndeavorRuntime.stop_pluto_stack!()
 
