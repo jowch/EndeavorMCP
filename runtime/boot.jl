@@ -7,7 +7,12 @@ Pkg.instantiate(; io=stderr)
 using EndeavorRuntime
 
 pluto_port, mcp_port = parse.(Int, ARGS[1:2])
-EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port)
+# The app passes the bridge's bearer token in the environment (not argv, which
+# `ps` shows to every user); drop it so notebook worker processes don't inherit it.
+token = get(ENV, "ENDEAVOR_TOKEN", "")
+isempty(token) && error("ENDEAVOR_TOKEN is not set; the app starts this script with one.")
+delete!(ENV, "ENDEAVOR_TOKEN")
+EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port, token)
 EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false)
 secret = EndeavorRuntime.standalone_session().secret
 

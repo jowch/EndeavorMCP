@@ -19,6 +19,8 @@ const _STANDALONE_MCP_PORT = Ref{Union{Nothing,Int}}(2346)
 const _STANDALONE_PLUTO_PORT_HINT = Ref(1234)
 const _STANDALONE_MCP_PORT_HINT = Ref(2346)
 const _STANDALONE_REQUIRE_SECRET = Ref(true)
+# Bearer token the bridge requires on every request; empty = no check (tests).
+const _BRIDGE_TOKEN = Ref("")
 const _HTTP_BRIDGE_RUNNER = Ref{Function}(
     (session, port; kwargs...) -> error("HTTP bridge not registered"),
 )
@@ -33,7 +35,9 @@ function configure_standalone!(;
     pluto_port_hint=nothing,
     mcp_port_hint=nothing,
     require_secret_for_access=true,
+    token::AbstractString="",
 )
+    _BRIDGE_TOKEN[] = String(token)
     hint_pluto = pluto_port_hint === nothing ? Int(pluto_port) : Int(pluto_port_hint)
     hint_mcp = mcp_port_hint === nothing ? Int(mcp_port) : Int(mcp_port_hint)
     _STANDALONE_PLUTO_PORT_HINT[] = hint_pluto

@@ -123,6 +123,22 @@ function _refuse(http::HTTP.Stream, code::AbstractString)
     write(http, """{"error":"$code"}""")
 end
 
+# `Authorization: Bearer <token>` matches the configured token, compared in
+# constant time. Loopback isn't private on a shared machine: any local user can
+# reach the port, so the token is what keeps them out.
+function _authorized(http::HTTP.Stream)
+    token = _BRIDGE_TOKEN[]
+    isempty(token) && return true
+    given = HTTP.header(http.message, "Authorization", "")
+    expected = "Bearer " * token
+    length(given) == length(expected) || return false
+    diff = 0x00
+    for (a, b) in zip(codeunits(given), codeunits(expected))
+        diff |= a ⊻ b
+    end
+    return diff == 0x00
+end
+
 function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
     function handler(http::HTTP.Stream)
         # Loopback control bridge, never a web API: no CORS, and any request that
@@ -140,6 +156,14 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
 
         method = http.message.method
         target = http.message.target
+        if !(method == "GET" && (target == "/health" || startswith(target, "/health?"))) && !_authorized(http)
+            read(http)
+            HTTP.setstatus(http, 401)
+            HTTP.setheader(http, "Content-Type" => "application/json")
+            HTTP.startwrite(http)
+            write(http, """{"error":"unauthorized"}""")
+            return
+        end
 
         if method == "GET" && startswith(target, "/sse")
             _handle_sse(http)

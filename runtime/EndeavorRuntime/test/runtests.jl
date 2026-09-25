@@ -1426,6 +1426,31 @@ end
         end
     end
 
+    @testset "bridge requires the bearer token when one is configured" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        pluto_port = 1350 + rand(0:99)
+        mcp_port = 2550 + rand(0:99)
+        EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port, token="s3cret-token")
+        list = JSON.json(Dict("jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => Dict()))
+        call(headers) = HTTP.post("http://127.0.0.1:$mcp_port/call", ["Content-Type" => "application/json", headers...], list;
+            status_exception=false, readtimeout=5)
+        try
+            EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
+            @test call([]).status == 401
+            @test call(["Authorization" => "Bearer wrong-token!"]).status == 401
+            @test call(["Authorization" => "Bearer s3cret-token-and-more"]).status == 401
+            ok = call(["Authorization" => "Bearer s3cret-token"])
+            @test ok.status == 200
+            @test !isempty(JSON.parse(String(ok.body))["result"]["tools"])
+            sse = HTTP.get("http://127.0.0.1:$mcp_port/sse"; status_exception=false, readtimeout=2)
+            @test sse.status == 401
+            @test HTTP.get("http://127.0.0.1:$mcp_port/health"; status_exception=false, readtimeout=2).status == 200
+        finally
+            EndeavorRuntime.stop_pluto_stack!()
+            EndeavorRuntime.configure_standalone!(; token="")
+        end
+    end
+
     @testset "MCP protocol: deferred pluto_session_status" begin
         EndeavorRuntime.stop_pluto_stack!()
 
