@@ -890,6 +890,19 @@ end
         @test isempty(leaf_dependents["downstream"])
     end
 
+    @testset "run_preview names targets and counts dependents" begin
+        session, nb, cells = make_session_with_notebook("x = 1", "y = x * 7", "z = y + 1")
+        Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
+        id = string(nb.notebook_id)
+        p = EndeavorRuntime.run_preview(session, "execute_cell", Dict("notebook_id" => id, "cell_id" => string(cells[1].cell_id)))
+        @test p["cells"][1]["name"] == "x"
+        @test (p["count"], p["dependents"], p["all"]) == (1, 2, false)
+        p = EndeavorRuntime.run_preview(session, "submit_changes", Dict("notebook_id" => id, "cell_ids" => [string(cells[2].cell_id)]))
+        @test (p["cells"][1]["name"], p["dependents"]) == ("y", 1)
+        p = EndeavorRuntime.run_preview(session, "run_all_cells", Dict("notebook_id" => id))
+        @test (p["all"], p["count"], p["dependents"]) == (true, 3, 0)
+    end
+
     @testset "find_symbol_definitions and references" begin
         session, nb, cells = make_session_with_notebook("x = 1", "y = x * 7")
         Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
@@ -1243,7 +1256,9 @@ end
             result = EndeavorRuntime.tool_new_notebook(Dict{String,Any}("path" => path))
             @test result["created"] == true
             @test result["path"] == path
-            @test result["execution_allowed"] == false
+            # Nothing to distrust in a notebook we just made: no safe preview.
+            @test result["execution_allowed"] == true
+            @test length(result["cell_ids"]) == 1
             @test isfile(path)
             @test startswith(read(path, String), "### A Pluto.jl notebook ###")
             @test haskey(session.notebooks, UUID(result["notebook_id"]))

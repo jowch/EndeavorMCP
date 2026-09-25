@@ -386,9 +386,13 @@ function tool_new_notebook(args)
         Pluto.emptynotebook(path)
     end
     # Pluto serializes the file (never a hand-written header), then the normal open
-    # path loads it: same safe preview as open_notebook.
+    # path loads it. No safe preview: a notebook we just made has no code to distrust,
+    # and its runs are gated like any other.
     Pluto.save_notebook(nb, nb.path)
-    result = tool_open_notebook(Dict{String,Any}("path" => nb.path))
+    result = tool_open_notebook(Dict{String,Any}("path" => nb.path, "run_notebook" => true))
+    delete!(result, "warnings")
+    # Pluto starts every notebook with one empty cell: edit it rather than adding around it.
+    result["cell_ids"] = [string(c.cell_id) for c in nb.cells]
     result["created"] = true
     return result
 end

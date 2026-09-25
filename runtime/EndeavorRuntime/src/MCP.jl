@@ -315,7 +315,7 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "new_notebook",
-        "description" => "Create a new empty notebook file (written by Pluto itself) and load it into the live Pluto session in safe preview. Use this instead of writing a .jl file by hand. Omit path to use Pluto's default new-notebook location; an existing file is never overwritten (use open_notebook for that).",
+        "description" => "Create a new empty notebook file (written by Pluto itself) and load it into the live Pluto session, ready to run (no safe preview: it has no code yet). It starts with one empty cell, whose id is in cell_ids: edit it for the first cell. Use this instead of writing a .jl file by hand. Omit path to use Pluto's default new-notebook location; an existing file is never overwritten (use open_notebook for that).",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(

@@ -41,21 +41,31 @@ function _handle_sse(http::HTTP.Stream)
     write(http, "event: endpoint\ndata: /message?sessionId=$sid\n\n")
     flush(http)
 
-    # Background keepalive so proxies don't close idle connections
+    # One writer at a time: the keepalive and the message loop share this chunked
+    # stream, and interleaved chunks corrupt it (the client then reconnects and
+    # the response in flight is lost).
+    wlock = ReentrantLock()
+    send(text) = lock(wlock) do
+        write(http, text)
+        flush(http)
+    end
+
+    # Background keepalive so proxies don't close idle connections. A failed
+    # write means the client is gone: close the channel so this session stops
+    # taking messages (their POSTs get 404 and the client reconnects).
     keepalive = @async while isopen(ch)
         sleep(15)
         try
-            write(http, ": keepalive\n\n")
-            flush(http)
+            isopen(ch) && send(": keepalive\n\n")
         catch
+            close(ch)
             break
         end
     end
 
     try
         for msg_json in ch
-            write(http, "event: message\ndata: $msg_json\n\n")
-            flush(http)
+            send("event: message\ndata: $msg_json\n\n")
         end
     catch
         # Client disconnected
@@ -76,7 +86,7 @@ function _handle_post(http::HTTP.Stream, pluto_session)
         get(_SSE_SESSIONS, sid, nothing)
     end
 
-    if ch === nothing
+    if ch === nothing || !isopen(ch)
         HTTP.setstatus(http, 404)
         HTTP.startwrite(http)
         write(http, """{"error":"Session not found"}""")
@@ -195,6 +205,14 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
                 set_policy!(owner, policy)
                 @info "Session $owner policy: $policy"
                 Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
+            elseif get(msg, "method", "") == "endeavor/run_preview"
+                p = get(msg, "params", Dict{String,Any}())
+                try
+                    result = run_preview(sess, string(get(p, "tool", "")), get(p, "arguments", Dict{String,Any}()))
+                    Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => result)
+                catch e
+                    Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "error" => Dict("code" => -32000, "message" => sprint(showerror, e)))
+                end
             else
                 _dispatch_mcp(sess, msg)
             end

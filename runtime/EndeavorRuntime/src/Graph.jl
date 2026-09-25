@@ -169,3 +169,31 @@ function tool_search_code(session, args)
     end
     return results
 end
+
+# The app's approval card: what a run tool call would run. `cells` are the cells
+# it targets (named by the symbols they define), `all` means the whole notebook,
+# and `dependents` counts the other cells that re-run with them.
+function run_preview(session, tool::AbstractString, args)
+    nb = _get_notebook(session, args["notebook_id"])
+    topo = _ensure_topology!(nb)
+    targets = if tool == "submit_changes"
+        ids = haskey(args, "cell_ids") ? [UUID(c) for c in args["cell_ids"]] : pending_run_ids(nb.notebook_id, nb)
+        [nb.cells_dict[id] for id in ids if haskey(nb.cells_dict, id)]
+    elseif haskey(args, "cell_id")  # execute_cell, delete_cell, edit_cell with run_after
+        [_get_cell(nb, args["cell_id"])]
+    else  # run_all_cells, allow_execution; add_cell's new cell doesn't exist yet
+        Pluto.Cell[]
+    end
+    all_cells = tool in ("run_all_cells", "allow_execution")
+    down = isempty(targets) ? Set{Pluto.Cell}() : setdiff(Pluto.MoreAnalysis.downstream_recursive(topo, targets), targets)
+    name(cell) = let node = topo.nodes[cell]
+        defs = sort!(string.(collect(union(node.definitions, node.funcdefs_without_signatures))))
+        isempty(defs) ? nothing : join(first(defs, 3), ", ")
+    end
+    return Dict{String,Any}(
+        "all"        => all_cells,
+        "count"      => all_cells ? length(nb.cells) : length(targets),
+        "cells"      => [Dict{String,Any}("id" => string(c.cell_id), "name" => name(c), "code" => c.code) for c in targets],
+        "dependents" => all_cells ? 0 : length(down),
+    )
+end
