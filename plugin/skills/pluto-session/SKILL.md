@@ -29,10 +29,11 @@ Reach for this skill when neither is present and you genuinely don't know which 
 | User wants | Tool |
 |------------|------|
 | A notebook they named (a path or a clear, unambiguous reference) | `open_notebook(path=...)` |
-| A brand-new notebook | `new_notebook()` (optional `path`) |
+| A brand-new notebook | `new_notebook(path=<working directory>/<descriptive_name>.jl)` |
 | Unclear, or no notebook named | `list_notebooks`, then ask — or offer to create one with `new_notebook` |
 
 - `open_notebook` and `new_notebook` both switch the notebook pane to that notebook automatically once they succeed. There's no landing page to click through and no separate step to "show" the notebook to the user.
+- **Always pass `path` to `new_notebook`, inside your current working directory** (the folder this Endeavor session was started in), with a short descriptive `snake_case.jl` name, unless the user names another place. Without a path, Pluto puts the file in an internal app folder the user won't find.
 - Never hand-write a `.jl` notebook file or otherwise create one outside PlutoMCP (no `Write`, no generating a UUID yourself). `new_notebook` has Pluto itself write the file, and it never overwrites an existing one. Use `open_notebook` for anything that already exists on disk.
 - Freshly opened or newly created notebooks come up in **safe preview** — code is loaded but not run until the user clicks "Run notebook code" in the pane (or you call `allow_execution` because they asked). See **pluto-workflow** → [safe-preview.md](../pluto-workflow/reference/safe-preview.md).
 

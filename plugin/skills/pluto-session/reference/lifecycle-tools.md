@@ -7,7 +7,7 @@ Tools relevant to session orientation and opening/creating notebooks in Endeavor
 | `pluto_session_status` | Whether Pluto is running, what notebooks are open, session info | Orientation; safe to call anytime |
 | `list_notebooks` | List notebooks currently open in the session | Check before assuming a notebook isn't already open |
 | `open_notebook` | Load an existing `.jl` file into the session | Requires a user-specified path; errors (`NotebookIsRunningException`) if that path is already open; defaults to safe preview |
-| `new_notebook` | Create a new, empty notebook — written by Pluto itself — and load it | Optional `path`; never overwrites an existing file; defaults to safe preview |
+| `new_notebook` | Create a new, empty notebook — written by Pluto itself — and load it | Pass `path` in the working directory (the default location is an internal app folder); never overwrites an existing file; opens in safe preview |
 | `allow_execution` | Exit safe preview on an open notebook | Call only when the user explicitly asks you to run the notebook; `run_notebook` defaults to `true` (one non-blocking full run), pass `false` to exit the gate without running |
 | `start_pluto_session` | Start the Pluto server | Not needed in normal use — Endeavor starts it with the app |
 | `stop_pluto_session` | Shut down notebooks and the Pluto server | Not needed in normal use |
