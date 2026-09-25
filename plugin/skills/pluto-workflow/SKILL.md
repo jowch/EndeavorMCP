@@ -1,7 +1,7 @@
 ---
 name: pluto-workflow
 description: >-
-  Use when editing Pluto notebook cells via PlutoMCP, staging changes before
+  Use when editing Pluto notebook cells via the notebook tools, staging changes before
   submit_changes, handling read_required/stale_read/execution_blocked
   responses, exiting safe preview, or acting on an annotation-mode comment on
   notebook cells.
@@ -28,7 +28,7 @@ read_cell / read_notebook_code → edit_cell / edit_cells / add_cell (run_after=
   → read_cell (verify; poll if still running/queued)
 ```
 
-PlutoMCP enforces read-before-edit itself: editing a cell you haven't read yet, or that changed since your last read, returns `read_required` / `stale_read` — re-read with `read_cell` and retry, rather than assuming your edit was wrong. `submit_changes` responses track `pending_run`.
+The notebook tools enforce read-before-edit themselves: editing a cell you haven't read yet, or that changed since your last read, returns `read_required` / `stale_read` — re-read with `read_cell` and retry, rather than assuming your edit was wrong. `submit_changes` responses track `pending_run`.
 
 **Safe preview:** notebooks open with code loaded but not executed (`execution_blocked` shows up in mutation responses). Keep editing normally — staging and `submit_changes` still work, they just don't run yet. The user exits it themselves by clicking "Run notebook code" in the pane; call `allow_execution` yourself only when the user explicitly asks you to run the notebook. See [safe-preview.md](reference/safe-preview.md).
 
@@ -47,7 +47,7 @@ PlutoMCP enforces read-before-edit itself: editing a cell you haven't read yet, 
 
 | Mistake | Fix |
 |---------|-----|
-| Edit without `read_cell` first | Read first — PlutoMCP enforces this and returns `read_required` |
+| Edit without `read_cell` first | Read first — the notebook tools enforce this and returns `read_required` |
 | Ignore a `stale_read` response | `read_cell` again, then retry the edit |
 | Tell the user to open a browser or click through a landing page | There isn't one — the pane already reflects the notebook from context |
 | End the turn with staged edits | `submit_changes(wait_for_completion=false)` first |

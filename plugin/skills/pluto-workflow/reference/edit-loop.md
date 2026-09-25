@@ -1,6 +1,6 @@
 # Stage-first edit loop
 
-Pluto is a **live reactive session**, not a `.jl` file to patch. PlutoMCP writes directly to Pluto's server state; the notebook pane is a live view of that same running notebook and has its own in-place cell editing — a concurrent edit there and a `edit_cell` call on the same cell is last-write-wins.
+Pluto is a **live reactive session**, not a `.jl` file to patch. The notebook tools write directly to Pluto's server state; the notebook pane is a live view of that same running notebook and has its own in-place cell editing — a concurrent edit there and a `edit_cell` call on the same cell is last-write-wins.
 
 ## Pipeline
 
@@ -16,7 +16,7 @@ notebook_id from context (viewing / annotation) → read_cell (note safe preview
 
 | Step | Tool | Notes |
 |------|------|-------|
-| Read | `read_cell`, `read_notebook_code` | Required before writes — PlutoMCP returns `read_required` / `stale_read` otherwise |
+| Read | `read_cell`, `read_notebook_code` | Required before writes — the tools return `read_required` / `stale_read` otherwise |
 | Stage | `edit_cell`, `edit_cells`, `add_cell` | Default `run_after=false` |
 | Fold | `fold_cell`, `add_cell(folded=…)` | Metadata only — no run / no `submit_changes`. Prefer `folded=true` for `md` prose. Verify via `read_cell` → `code_folded` |
 | Validate | `validate_cell` | Optional |

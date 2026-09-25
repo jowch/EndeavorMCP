@@ -43,6 +43,6 @@ If one of these fires before you've established any `notebook_id`, go to **pluto
 |---------|-----|
 | Edit without `read_cell` | `read_cell` first |
 | Ignore `read_required` / `stale_read` | Re-read, then retry |
-| Patch the `.jl` file on disk directly | PlutoMCP only — never hand-edit the notebook file |
+| Patch the `.jl` file on disk directly | Notebook tools only — never hand-edit the notebook file |
 | Leave safe preview on when outputs are needed | User clicks "Run notebook code" in the pane, or `allow_execution` when they ask you to |
 | Claim `submit_changes` ran cells while `execution_blocked` is set | Wait for safe preview to be exited, then poll `read_cell` for outputs |

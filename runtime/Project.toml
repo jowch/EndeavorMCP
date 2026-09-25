@@ -1,6 +1,6 @@
 [deps]
+EndeavorRuntime = "9c048436-5824-40ce-b1d7-dfbd8086df84"
 Pluto = "c3e4b0f8-55cb-11ea-2926-15256bba5781"
-PlutoMCP = "22d0dc7c-8f49-4890-9bf9-be4a32466a36"
 
 [sources]
-PlutoMCP = {url = "https://github.com/jowch/PlutoMCP.jl", rev = "918e75d"}
+EndeavorRuntime = {path = "EndeavorRuntime"}

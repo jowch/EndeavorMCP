@@ -7,7 +7,7 @@ Curated from Pluto.jl source and docs. Pluto is **not** a file you patch — it 
 - Each **cell** is one node in a dependency graph; cells share one notebook module scope.
 - Pluto owns parsing, dependency analysis, execution, persistence, and pane sync.
 - Notebooks save as `.jl` files, but **runtime state is in-memory** — re-read before edit.
-- PlutoMCP writes **server state**; the notebook pane has its own in-place editing (last-write-wins against a concurrent edit to the same cell).
+- The notebook tools write **server state**; the notebook pane has its own in-place editing (last-write-wins against a concurrent edit to the same cell).
 - **No hidden workspace state:** Pluto deletes/redefines globals on reactive runs (`bump_workspace_module`).
 - **Visual order ≠ execution order** — use `read_notebook_code` (execution order) or dependency graph.
 - **Fold = UI presentation** (`code_folded`, file markers `╟─` folded vs `╠═` open) — persisted metadata, not an execution gate; prefer `add_cell(..., folded=true)` for prose.

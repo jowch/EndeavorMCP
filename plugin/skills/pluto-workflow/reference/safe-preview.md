@@ -2,7 +2,7 @@
 
 Notebooks opened with `open_notebook`, or created with `new_notebook`, default to **safe preview** — Pluto loads and shows cells but does not execute them yet.
 
-**Not an edit gate:** still stage edits and call `submit_changes(wait_for_completion=false)` as usual. PlutoMCP returns an `execution_blocked` warning and keeps the cells in `pending_run` rather than dropping the work — they run once safe preview is exited.
+**Not an edit gate:** still stage edits and call `submit_changes(wait_for_completion=false)` as usual. The tools return an `execution_blocked` warning and keeps the cells in `pending_run` rather than dropping the work — they run once safe preview is exited.
 
 ## Exiting safe preview
 
