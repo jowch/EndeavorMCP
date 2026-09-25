@@ -1,7 +1,12 @@
-# Per-session staging state: cells edited but not yet executed via submit_changes.
+# Per-session staging state: cells the agent edited that haven't run since.
+#
+# Each edit records its time; a cell stops being pending once Pluto's
+# `last_run_timestamp` for it is newer, however it ran (our run tools, Pluto's
+# own run button, a reactive re-run). Submitting code in Pluto's UI runs it at
+# once, so only our tools leave a cell edited-but-unrun.
 
 const _STAGING_LOCK = ReentrantLock()
-const _pending_run = Dict{UUID, Set{UUID}}()
+const _pending_run = Dict{UUID, Dict{UUID, Float64}}()   # notebook => cell => edit time
 const _read_receipts = Dict{UUID, Dict{UUID, String}}()
 
 function _with_staging_lock(f)
@@ -12,13 +17,13 @@ end
 
 function _pending_for(notebook_id::UUID)
     get!(_pending_run, notebook_id) do
-        Set{UUID}()
+        Dict{UUID, Float64}()
     end
 end
 
 function mark_pending!(notebook_id::UUID, cell_id::UUID)
     _with_staging_lock() do
-        push!(_pending_for(notebook_id), cell_id)
+        _pending_for(notebook_id)[cell_id] = time()
     end
     return nothing
 end
@@ -50,7 +55,7 @@ function prune_orphan_pending!(nb::Pluto.Notebook)
     _with_staging_lock() do
         pending = get(_pending_run, nb.notebook_id, nothing)
         pending === nothing && return nothing
-        filter!(cid -> haskey(nb.cells_dict, cid), pending)
+        filter!(((cid, _),) -> haskey(nb.cells_dict, cid), pending)
         isempty(pending) && delete!(_pending_run, nb.notebook_id)
     end
     return nothing
@@ -72,21 +77,25 @@ function reset_staging_state!()
     return nothing
 end
 
-function pending_run_ids(notebook_id::UUID)
+function _open_notebook(notebook_id::UUID)
+    sess = standalone_session()
+    sess === nothing ? nothing : get(sess.notebooks, notebook_id, nothing)
+end
+
+_ran_since(nb, cell_id, t) = (c = get(nb.cells_dict, cell_id, nothing); c !== nothing && c.output.last_run_timestamp >= t)
+
+"Cells edited through our tools that haven't run since (a run from anywhere counts)."
+function pending_run_ids(notebook_id::UUID, nb = _open_notebook(notebook_id))
     _with_staging_lock() do
         pending = get(_pending_run, notebook_id, nothing)
         pending === nothing && return UUID[]
-        return collect(pending)
+        nb !== nothing && filter!(((cid, t),) -> !_ran_since(nb, cid, t), pending)
+        isempty(pending) && delete!(_pending_run, notebook_id)
+        return collect(keys(pending))
     end
 end
 
-function is_stale(notebook_id::UUID, cell_id::UUID)
-    _with_staging_lock() do
-        pending = get(_pending_run, notebook_id, nothing)
-        pending === nothing && return false
-        return cell_id in pending
-    end
-end
+is_stale(notebook_id::UUID, cell_id::UUID) = cell_id in pending_run_ids(notebook_id)
 
 function _read_receipts_for(notebook_id::UUID)
     get!(_read_receipts, notebook_id) do

@@ -1258,6 +1258,35 @@ end
         end
     end
 
+    @testset "pending clears when the cell runs outside our tools" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        fixture = fresh_fixture()
+        pluto_port = 1550 + rand(0:99)
+        mcp_port = 2750 + rand(0:99)
+        EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
+        try
+            nid = EndeavorRuntime.tool_open_notebook(Dict("path" => fixture, "run_notebook" => true))["notebook_id"]
+            sess = EndeavorRuntime.standalone_session()
+            nb = sess.notebooks[UUID(nid)]
+            ycell = nb.cells_dict[UUID("22222222-2222-2222-2222-222222222222")]
+            deadline = time() + 60
+            while (ycell.queued || ycell.running || ycell.output.last_run_timestamp == 0) && time() < deadline
+                sleep(0.25)
+            end
+            read_cells!(sess, nb, ycell)
+            EndeavorRuntime.tool_edit_cell(sess, Dict("notebook_id" => nid, "cell_id" => string(ycell.cell_id), "code" => "y = x * 8"))
+            @test ycell.cell_id in EndeavorRuntime.pending_run_ids(nb.notebook_id)
+            @test EndeavorRuntime.is_stale(nb.notebook_id, ycell.cell_id)
+
+            # Run it the way Pluto's own run button does, not through our tools.
+            Pluto.update_save_run!(sess, nb, [ycell]; run_async=false)
+            @test isempty(EndeavorRuntime.pending_run_ids(nb.notebook_id))
+            @test !EndeavorRuntime.is_stale(nb.notebook_id, ycell.cell_id)
+        finally
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
     @testset "lifecycle: allow_execution exits safe preview" begin
         EndeavorRuntime.stop_pluto_stack!()
         fixture = fresh_fixture()
