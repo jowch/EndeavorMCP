@@ -338,6 +338,12 @@ const MCP_TOOLS = [
     ),
 ]
 
+# MCP's read-only hint (what Claude Code's plan mode checks before prompting):
+# everything except the tools that write or run (Policy.jl).
+for tool in MCP_TOOLS
+    tool["annotations"] = Dict{String,Any}("readOnlyHint" => !(tool["name"] in _WRITE_TOOLS))
+end
+
 # ---------------------------------------------------------------------------
 # JSON-RPC / MCP framing
 # ---------------------------------------------------------------------------

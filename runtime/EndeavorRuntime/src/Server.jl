@@ -191,7 +191,9 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
             # App-only (not reachable through the agent's /message path).
             resp = if get(msg, "method", "") == "endeavor/set_policy"
                 p = get(msg, "params", Dict{String,Any}())
-                set_policy!(string(get(p, "owner", "")), string(get(p, "policy", "ask")))
+                owner, policy = string(get(p, "owner", "")), string(get(p, "policy", "ask"))
+                set_policy!(owner, policy)
+                @info "Session $owner policy: $policy"
                 Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
             else
                 _dispatch_mcp(sess, msg)
