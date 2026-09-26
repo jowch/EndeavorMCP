@@ -1531,11 +1531,19 @@ end
             nb = sess.notebooks[UUID(nid)]
             ycell = nb.cells_dict[UUID("22222222-2222-2222-2222-222222222222")]
             read_cells!(sess, nb, ycell)
+            original = ycell.code
             EndeavorRuntime.tool_edit_cell(sess, Dict("notebook_id" => nid, "cell_id" => string(ycell.cell_id), "code" => "y = x * 8"))
             state(ev) = only(filter(c -> c["cell_id"] == string(ycell.cell_id), ev["cells"][nid]))
             ev = JSON.parse(next_event())
             while !(state(ev)["unrun"]) ; ev = JSON.parse(next_event()) ; end
             @test state(ev)["author"] == "agent"
+            # The code it replaced, for the in-editor diff; a later edit keeps the first before-text.
+            @test state(ev)["before"] == original
+            EndeavorRuntime.note_agent_edit!(nb.notebook_id, ycell, "y = x * 8")
+            @test EndeavorRuntime._before!(nb.notebook_id, ycell, true) == original
+            # Once the cell runs it's forgotten.
+            @test EndeavorRuntime._before!(nb.notebook_id, ycell, false) === nothing
+            @test EndeavorRuntime._before!(nb.notebook_id, ycell, true) === nothing
 
             # An edit that runs straight away is the agent's too.
             read_cells!(sess, nb, ycell)
@@ -1546,7 +1554,9 @@ end
             # A change the tools didn't make (Pluto's editor submitting code): the user's.
             ycell.code = "y = x * 9"
             EndeavorRuntime.publish_notebooks!()
+            # Earlier states (e.g. the before-text clearing after the run) may still be queued.
             ev = JSON.parse(next_event())
+            while state(ev)["author"] != "user" ; ev = JSON.parse(next_event()) ; end
             @test state(ev)["author"] == "user"
             close(sock)
         finally

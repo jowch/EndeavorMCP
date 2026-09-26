@@ -1,10 +1,12 @@
 # Pushes notebook state to the app over `GET /events` (server-sent events)
 # whenever it changes, so the app doesn't poll. Each event is
 #   {"notebooks": [the list_notebooks summary],
-#    "cells": {notebook_id: [{cell_id, running, errored, unrun, author}, ...]}}
+#    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before}, ...]}}
 # in notebook order. `unrun`: edited by the agent and not run since. `author`:
 # who last changed the cell's code ("agent", "user", or null if unchanged since
-# the runtime first saw it). Triggered by Pluto's events and after each tool call
+# the runtime first saw it). `before`: an unrun cell's code before the agent's
+# first edit since it last ran ("" for a cell the agent added), for the
+# in-editor diff; absent otherwise. Triggered by Pluto's events and after each tool call
 # (pending-run changes don't always reach Pluto's state).
 
 const _EVENT_LOCK = ReentrantLock()
@@ -17,10 +19,27 @@ const _AUTHORS = Dict{UUID, Dict{UUID, Tuple{UInt64, String}}}()
 
 _authors_for(notebook_id::UUID) = get!(() -> Dict{UUID, Tuple{UInt64, String}}(), _AUTHORS, notebook_id)
 
-"The agent's tools just wrote this cell's code."
-function note_agent_edit!(notebook_id::UUID, cell)::Nothing
-    lock(() -> (_authors_for(notebook_id)[cell.cell_id] = (hash(cell.code), "agent")), _AUTHOR_LOCK)
+# Each unrun cell's code before the agent's first edit since it last ran.
+const _BEFORES = Dict{UUID, Dict{UUID, String}}()
+_befores_for(notebook_id::UUID) = get!(() -> Dict{UUID, String}(), _BEFORES, notebook_id)
+
+"The agent's tools just wrote this cell's code; `before` is what it replaced."
+function note_agent_edit!(notebook_id::UUID, cell, before::AbstractString)::Nothing
+    lock(_AUTHOR_LOCK) do
+        _authors_for(notebook_id)[cell.cell_id] = (hash(cell.code), "agent")
+        get!(_befores_for(notebook_id), cell.cell_id, String(before))
+    end
     return nothing
+end
+
+# The before-text while the cell is unrun and differs; forgotten once it runs.
+function _before!(notebook_id::UUID, cell, unrun::Bool)
+    lock(_AUTHOR_LOCK) do
+        befores = _befores_for(notebook_id)
+        unrun || (delete!(befores, cell.cell_id); return nothing)
+        before = get(befores, cell.cell_id, nothing)
+        before == cell.code ? nothing : before
+    end
 end
 
 # Code that changed without our tools writing it was changed by the user.
@@ -48,6 +67,7 @@ function _cell_states(nb)
             "errored" => c.errored,
             "unrun"   => id in pending,
             "author"  => _author!(nb.notebook_id, c),
+            "before"  => _before!(nb.notebook_id, c, id in pending),
         )
         for id in nb.cell_order for c in (nb.cells_dict[id],)
     ]
