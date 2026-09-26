@@ -7,7 +7,9 @@
 
 const _STAGING_LOCK = ReentrantLock()
 const _pending_run = Dict{UUID, Dict{UUID, Float64}}()   # notebook => cell => edit time
-const _read_receipts = Dict{UUID, Dict{UUID, String}}()
+# notebook => (owner, cell) => (code read, when). Per owner, so one agent
+# session's reads and edits don't count as another's.
+const _read_receipts = Dict{UUID, Dict{Tuple{String, UUID}, Tuple{String, Int}}}()
 
 function _with_staging_lock(f)
     lock(_STAGING_LOCK) do
@@ -65,6 +67,7 @@ function clear_notebook_staging!(notebook_id::UUID)
     _with_staging_lock() do
         delete!(_pending_run, notebook_id)
         delete!(_read_receipts, notebook_id)
+        delete!(_CHANGES, notebook_id)
     end
     return nothing
 end
@@ -73,6 +76,7 @@ function reset_staging_state!()
     _with_staging_lock() do
         empty!(_pending_run)
         empty!(_read_receipts)
+        empty!(_CHANGES)
     end
     return nothing
 end
@@ -107,22 +111,30 @@ is_stale(notebook_id::UUID, cell_id::UUID) = cell_id in pending_run_ids(notebook
 
 function _read_receipts_for(notebook_id::UUID)
     get!(_read_receipts, notebook_id) do
-        Dict{UUID, String}()
+        Dict{Tuple{String, UUID}, Tuple{String, Int}}()
     end
 end
 
 function record_read!(notebook_id::UUID, cell_id::UUID, code::String)
     _with_staging_lock() do
-        _read_receipts_for(notebook_id)[cell_id] = code
+        _read_receipts_for(notebook_id)[(current_owner(), cell_id)] = (code, _next_seq!())
     end
     return nothing
+end
+
+# Call with the staging lock held. 0 when the owner never read the cell.
+function _read_seq(notebook_id::UUID, owner::AbstractString, cell_id::UUID)
+    receipts = get(_read_receipts, notebook_id, nothing)
+    receipts === nothing && return 0
+    receipt = get(receipts, (String(owner), cell_id), nothing)
+    return receipt === nothing ? 0 : receipt[2]
 end
 
 function clear_read_receipt!(notebook_id::UUID, cell_id::UUID)
     _with_staging_lock() do
         receipts = get(_read_receipts, notebook_id, nothing)
         receipts === nothing && return nothing
-        delete!(receipts, cell_id)
+        filter!(((key, _),) -> key[2] != cell_id, receipts)
         isempty(receipts) && delete!(_read_receipts, notebook_id)
     end
     return nothing
@@ -131,12 +143,13 @@ end
 function require_fresh_read!(notebook_id::UUID, cell::Pluto.Cell)
     _with_staging_lock() do
         receipts = get(_read_receipts, notebook_id, nothing)
-        if receipts === nothing || !haskey(receipts, cell.cell_id)
+        receipt = receipts === nothing ? nothing : get(receipts, (current_owner(), cell.cell_id), nothing)
+        if receipt === nothing
             throw(ArgumentError(
                 "read_required::Call read_cell or read_notebook_code before editing cell $(cell.cell_id)"
             ))
         end
-        if receipts[cell.cell_id] != cell.code
+        if receipt[1] != cell.code
             throw(ArgumentError(
                 "stale_read::Cell $(cell.cell_id) changed since last read; call read_cell again"
             ))

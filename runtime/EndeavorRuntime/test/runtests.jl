@@ -1591,6 +1591,78 @@ end
         end
     end
 
+    @testset "several sessions on one notebook" begin
+        session, nb, cells = make_session_with_notebook("a = 1", "b = a + 1", "c = 10")
+        Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
+        a, b, c = (string(cell.cell_id) for cell in cells)
+        call(name, args; owner) = EndeavorRuntime._dispatch_mcp(session, Dict{String,Any}(
+            "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
+            "params" => Dict{String,Any}("name" => name,
+                "arguments" => merge(Dict{String,Any}("notebook_id" => string(nb.notebook_id)), args))); owner)
+        body(resp) = JSON.parse(resp["result"]["content"][1]["text"])
+        err(resp) = resp["result"]["isError"] ? body(resp)["error"] : nothing
+        other_session(resp) = filter(w -> startswith(w, "other_session::"), body(resp)["warnings"])
+        clock = Ref(1000.0)
+        EndeavorRuntime._CLOCK[] = () -> clock[]
+        try
+            for owner in ("A", "B")
+                @test err(call("read_notebook_code", Dict{String,Any}(); owner)) === nothing
+            end
+            edited = call("edit_cell", Dict{String,Any}("cell_id" => a, "code" => "a = 2"); owner="B")
+            @test err(edited) === nothing
+            @test isempty(other_session(edited))
+
+            # B's edit doesn't count as A's read of the cell.
+            @test err(call("edit_cell", Dict{String,Any}("cell_id" => a, "code" => "a = 3"); owner="A")) == "stale_read"
+
+            clock[] += 30
+            unrelated = call("edit_cell", Dict{String,Any}("cell_id" => c, "code" => "c = 11"); owner="A")
+            @test err(unrelated) === nothing
+            @test other_session(unrelated) == ["other_session::Another Endeavor session changed $a in this notebook 30 s ago. " *
+                                               "Read cells before relying on them."]
+
+            refused = call("execute_cell", Dict{String,Any}("cell_id" => b); owner="A")
+            @test err(refused) == "run_conflict"
+            @test body(refused)["message"] == "Another Endeavor session changed $a since you last read them, and the cells " *
+                "you're running depend on them. Read them (read_cell or read_notebook_code), then run again."
+            @test err(call("run_all_cells", Dict{String,Any}(); owner="A")) == "run_conflict"
+            # Pending runs include B's staged edit of a.
+            @test err(call("submit_changes", Dict{String,Any}(); owner="A")) == "run_conflict"
+
+            ran = call("submit_changes", Dict{String,Any}("cell_ids" => [c], "wait_for_completion" => true); owner="A")
+            @test err(ran) === nothing
+            @test body(ran)["execution"]["status"] == "completed"
+            @test occursin("11", repr(cells[3].output.body))
+
+            # An edit that would run into the conflict is kept but left staged.
+            staged = call("edit_cell", Dict{String,Any}("cell_id" => b, "code" => "b = a + 2", "run_after" => true); owner="A")
+            @test err(staged) === nothing
+            @test body(staged)["execution"]["status"] == "staged"
+            @test b in body(staged)["pending_run"]
+            @test any(w -> startswith(w, "run_conflict::Another Endeavor session changed $a") &&
+                           endswith(w, "The edit is staged, not run."), body(staged)["warnings"])
+
+            @test err(call("read_cell", Dict{String,Any}("cell_id" => a); owner="A")) === nothing
+            cleared = call("execute_cell", Dict{String,Any}("cell_id" => b, "wait_for_completion" => true); owner="A")
+            @test err(cleared) === nothing
+            @test body(cleared)["execution"]["status"] == "completed"
+
+            clock[] += 91
+            expired = call("fold_cell", Dict{String,Any}("cell_id" => c, "folded" => true); owner="A")
+            @test err(expired) === nothing
+            @test isempty(other_session(expired))
+
+            # Calls without an owner are exempt, and their changes aren't another session's.
+            @test err(call("edit_cell", Dict{String,Any}("cell_id" => a, "code" => "a = 4"); owner="B")) === nothing
+            @test err(call("execute_cell", Dict{String,Any}("cell_id" => b); owner="")) === nothing
+            @test err(call("read_cell", Dict{String,Any}("cell_id" => a); owner="")) === nothing
+            @test err(call("edit_cell", Dict{String,Any}("cell_id" => a, "code" => "a = 5"); owner="")) === nothing
+            @test err(call("execute_cell", Dict{String,Any}("cell_id" => b); owner="A")) === nothing
+        finally
+            EndeavorRuntime._CLOCK[] = time
+        end
+    end
+
     @testset "plan policy refuses writes and runs for that session only" begin
         call(name; owner) = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
             "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",

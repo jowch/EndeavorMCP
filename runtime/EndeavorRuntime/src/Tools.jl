@@ -193,6 +193,18 @@ function _run_cells!(session, nb, cells; wait_for_completion=true)
     return warnings
 end
 
+# An edit's run_after: the edit stands either way, but a run that conflicts with
+# another session's unread changes is left staged. Returns (warnings, ran).
+function _run_or_stage!(session, nb, cell, run_after::Bool)
+    conflict = run_after ? run_conflict(nb, [cell]) : nothing
+    if run_after && conflict === nothing
+        # Non-blocking: blocking wait on stdio-bound sessions can starve MCP (#3).
+        return _run_cells!(session, nb, [cell]; wait_for_completion=false), true
+    end
+    _stage_cell!(session, nb, cell)
+    return conflict === nothing ? String[] : ["$conflict The edit is staged, not run."], false
+end
+
 
 # ---------------------------------------------------------------------------
 # Tool implementations
@@ -254,20 +266,15 @@ function tool_edit_cell(session, args)
     before = cell.code
     cell.code = code
     note_agent_edit!(nb.notebook_id, cell, before)
+    note_cell_changed!(nb.notebook_id, cell.cell_id)
     record_read!(nb.notebook_id, cell.cell_id, code)
 
-    if run_after
-        # Non-blocking: blocking wait on stdio-bound sessions can starve MCP (#3).
-        warnings = _run_cells!(session, nb, [cell]; wait_for_completion=false)
-    else
-        _stage_cell!(session, nb, cell)
-        warnings = String[]
-    end
+    warnings, ran = _run_or_stage!(session, nb, cell, run_after)
 
     receipt = _mutation_receipt(session, nb;
         applied=true,
         mutation=Dict{String,Any}("type" => "edit_cell", "cell_id" => string(cell.cell_id)),
-        cell_ids_run=run_after ? [cell.cell_id] : UUID[],
+        cell_ids_run=ran ? [cell.cell_id] : UUID[],
         warnings=warnings,
     )
     merge!(receipt, _cell_to_dict(cell; notebook_id=nb.notebook_id))
@@ -289,6 +296,7 @@ function tool_edit_cells(session, args)
         before = cell.code
         cell.code = edit["code"]
         note_agent_edit!(nb.notebook_id, cell, before)
+        note_cell_changed!(nb.notebook_id, cell.cell_id)
         record_read!(nb.notebook_id, cell.cell_id, edit["code"])
         push!(edited_ids, cell.cell_id)
         push!(staged_cells, cell)
@@ -326,6 +334,7 @@ function tool_add_cell(session, args)
     new_cell = Pluto.Cell(; code=string(code), code_folded=folded)
     nb.cells_dict[new_cell.cell_id] = new_cell
     note_agent_edit!(nb.notebook_id, new_cell, "")
+    note_cell_changed!(nb.notebook_id, new_cell.cell_id)
     record_read!(nb.notebook_id, new_cell.cell_id, string(code))
 
     if after_cell_id === nothing || after_cell_id == ""
@@ -339,18 +348,12 @@ function tool_add_cell(session, args)
         _insert_cell_after!(nb, target_id, new_cell.cell_id)
     end
 
-    if run_after
-        # Non-blocking: blocking wait on stdio-bound sessions can starve MCP (#3).
-        warnings = _run_cells!(session, nb, [new_cell]; wait_for_completion=false)
-    else
-        _stage_cell!(session, nb, new_cell)
-        warnings = String[]
-    end
+    warnings, ran = _run_or_stage!(session, nb, new_cell, run_after)
 
     receipt = _mutation_receipt(session, nb;
         applied=true,
         mutation=Dict{String,Any}("type" => "add_cell", "cell_id" => string(new_cell.cell_id)),
-        cell_ids_run=run_after ? [new_cell.cell_id] : UUID[],
+        cell_ids_run=ran ? [new_cell.cell_id] : UUID[],
         warnings=warnings,
     )
     merge!(receipt, _cell_to_dict(new_cell; notebook_id=nb.notebook_id))
@@ -367,6 +370,7 @@ function tool_delete_cell(session, args)
     delete!(nb.cells_dict, cell.cell_id)
     clear_pending!(nb.notebook_id, [cell.cell_id])
     clear_read_receipt!(nb.notebook_id, cell.cell_id)
+    note_cell_changed!(nb.notebook_id, cell.cell_id)
 
     # Non-blocking: run_async=false blocked the MCP stdio thread on reactive
     # cleanup / nbpkg (Styx #3 residual footgun after wait-default flip).
@@ -387,6 +391,7 @@ function tool_execute_cell(session, args)
     cell     = _get_cell(nb, args["cell_id"])
     wait_for = get(args, "wait_for_completion", false)
 
+    require_no_run_conflict!(nb, [cell])
     warnings = _run_cells!(session, nb, [cell]; wait_for_completion=wait_for)
 
     return _mutation_receipt(session, nb;
@@ -431,6 +436,7 @@ function tool_submit_changes(session, args)
     end
 
     cells = [_get_cell(nb, string(cid)) for cid in target_ids]
+    require_no_run_conflict!(nb, cells)
     warnings = _run_cells!(session, nb, cells; wait_for_completion=wait_for)
 
     return _mutation_receipt(session, nb;
@@ -447,6 +453,7 @@ function tool_run_all_cells(session, args)
 
     cells = collect(nb.cells)
     cell_ids = [c.cell_id for c in cells]
+    require_no_run_conflict!(nb, cells)
     # Same queue/run/wait/clear path as submit_changes; every cell is a target,
     # so per-cell clear_pending! covers the whole notebook once it completes.
     warnings = _run_cells!(session, nb, cells; wait_for_completion=wait_for)
