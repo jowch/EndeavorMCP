@@ -1539,6 +1539,7 @@ end
             @test state(ev)["author"] == "agent"
             # The code it replaced, for the in-editor diff; a later edit keeps the first before-text.
             @test state(ev)["before"] == original
+            @test state(ev)["version"] == string(hash("y = x * 8"); base=16)
             EndeavorRuntime.note_agent_edit!(nb.notebook_id, ycell, "y = x * 8")
             @test EndeavorRuntime._before!(nb.notebook_id, ycell, true) == original
             # Once the cell runs it's forgotten.

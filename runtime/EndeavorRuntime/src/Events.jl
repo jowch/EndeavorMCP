@@ -1,12 +1,14 @@
 # Pushes notebook state to the app over `GET /events` (server-sent events)
 # whenever it changes, so the app doesn't poll. Each event is
 #   {"notebooks": [the list_notebooks summary],
-#    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before}, ...]}}
+#    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before, version, name}, ...]}}
 # in notebook order. `unrun`: edited by the agent and not run since. `author`:
 # who last changed the cell's code ("agent", "user", or null if unchanged since
 # the runtime first saw it). `before`: an unrun cell's code before the agent's
 # first edit since it last ran ("" for a cell the agent added), for the
-# in-editor diff; absent otherwise. Triggered by Pluto's events and after each tool call
+# in-editor diff; absent otherwise. `version`: a hash of the code, so the app sees
+# each edit. `name`: what the cell defines, as of its last run (null if nothing).
+# Triggered by Pluto's events and after each tool call
 # (pending-run changes don't always reach Pluto's state).
 
 const _EVENT_LOCK = ReentrantLock()
@@ -68,9 +70,18 @@ function _cell_states(nb)
             "unrun"   => id in pending,
             "author"  => _author!(nb.notebook_id, c),
             "before"  => _before!(nb.notebook_id, c, id in pending),
+            "version" => string(hash(c.code); base=16),
+            "name"    => _cell_name(nb, c),
         )
         for id in nb.cell_order for c in (nb.cells_dict[id],)
     ]
+end
+
+# Pluto's dependency data as of the last run: no reanalysis on every event.
+function _cell_name(nb, cell)
+    node = nb.topology.nodes[cell]   # a default dict: an unanalysed cell is an empty node
+    defs = sort!(string.(collect(union(node.definitions, node.funcdefs_without_signatures))))
+    isempty(defs) ? nothing : join(first(defs, 3), ", ")
 end
 
 function _notebooks_json()
