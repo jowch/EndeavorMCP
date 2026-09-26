@@ -9,6 +9,7 @@ using Pluto
 
 include("Output.jl")
 include("Staging.jl")
+include("Sharing.jl")
 include("Projection.jl")
 include("Tools.jl")
 include("Graph.jl")

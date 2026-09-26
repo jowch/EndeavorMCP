@@ -396,6 +396,11 @@ function _handle_tool_call(session, name, arguments; owner::AbstractString="")
     if name in ("open_notebook", "new_notebook") && result isa AbstractDict
         note_notebook_opened!(owner, result["path"])
     end
+    nid = tryparse(UUID, string(get(arguments, "notebook_id", "")))
+    if name in _WRITE_TOOLS && nid !== nothing && result isa AbstractDict
+        warning = other_session_warning(nid, owner)
+        warning === nothing || push!(get!(() -> String[], result, "warnings"), warning)
+    end
     content = if result isa CellImage
         [
             Dict{String,Any}("type" => "text", "text" => JSON.json(result.meta)),
@@ -413,7 +418,7 @@ function _safe_handle_tool_call(session, name, arguments; owner::AbstractString=
         for refusal in (policy_refusal(owner, name), notebook_refusal(session, owner, name, arguments))
             refusal === nothing || throw(refusal)
         end
-        _handle_tool_call(session, name, arguments; owner)
+        with_owner(() -> _handle_tool_call(session, name, arguments; owner), owner)
     catch e
         raw = sprint(showerror, e)
         # Error format: "error_type::human message" (ArgumentError may prefix the type name)

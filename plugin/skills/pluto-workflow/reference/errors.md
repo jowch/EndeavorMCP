@@ -20,6 +20,18 @@ If one of these fires before you've established any `notebook_id`, go to **pluto
 
 `edit_cells` is all-or-nothing on this guard across the whole batch.
 
+## Another session on the same notebook
+
+Several Endeavor sessions can work on one notebook. Your reads count only for you: a cell another session edited needs a fresh read before you edit it (`stale_read`).
+
+| Signal | Meaning | Action |
+|--------|---------|--------|
+| `other_session` warning (on a write or run result) | Another session changed the listed cells in the last two minutes | Read those cells before relying on their code or outputs |
+| `run_conflict` error (from `execute_cell`, `submit_changes`, `run_all_cells`) | A cell you're running depends on cells another session changed since you last read them; nothing ran | Read the named cells, then run again |
+| `run_conflict` warning (from `edit_cell` / `add_cell` with `run_after`) | Same conflict; your edit was applied and staged, not run | Read the named cells, then `submit_changes` |
+
+Cells that don't depend on the other session's changes run normally.
+
 ## Cell error fields (from `read_cell` / mutation results)
 
 | Field | Use |
