@@ -102,6 +102,8 @@ function _init_pluto_session!(; pluto_port, launch_browser, require_secret_for_a
         port                      = pluto_port,
         launch_browser            = launch_browser,
         require_secret_for_access = require_secret_for_access,
+        # Pluto's "Ask AI" and "Fix with AI"; the app adds its own agent's buttons.
+        enable_ai_editor_features = false,
         on_event                  = _handle_pluto_event,
     )
     sess = Pluto.ServerSession(; options = opts)
@@ -298,7 +300,7 @@ function allow_notebook_execution!(session, notebook; run_async::Bool=true, run_
     end
     if haskey(notebook.metadata, "risky_file_source")
         throw(ArgumentError(
-            "risky_source::Cannot allow execution for risky remote sources via MCP; use Glass UI",
+            "risky_source::Cannot allow execution for risky remote sources via MCP; ask the user to run it from the notebook pane",
         ))
     end
 
