@@ -377,6 +377,25 @@ function tool_open_notebook(args)
     return result
 end
 
+"""
+    stop_notebook!(session, path)
+
+Shut down the open notebook at `path` (the app's "Stop notebook"): its process
+ends and it leaves the session. `safe_preview` says whether it was still in safe
+preview, so the app can reopen it the same way.
+"""
+function stop_notebook!(session, path::AbstractString)
+    session === nothing && return Dict{String,Any}("stopped" => false)
+    target = _canonical_path(path)
+    nb = findfirst(nb -> _canonical_path(nb.path) == target, session.notebooks)
+    nb === nothing && return Dict{String,Any}("stopped" => false)
+    notebook = session.notebooks[nb]
+    safe_preview = notebook.process_status === Pluto.ProcessStatus.waiting_for_permission
+    Pluto.SessionActions.shutdown(session, notebook; async = false, verbose = false)
+    publish_notebooks!()
+    return Dict{String,Any}("stopped" => true, "safe_preview" => safe_preview)
+end
+
 function tool_new_notebook(args)
     require_standalone_session!()
     requested = get(args, "path", nothing)

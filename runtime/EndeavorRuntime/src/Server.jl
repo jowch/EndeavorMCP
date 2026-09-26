@@ -211,6 +211,11 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
                 bind_notebook!(owner, notebook)
                 @info "Session $owner notebook: $(isempty(notebook) ? "(none)" : notebook)"
                 Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
+            elseif get(msg, "method", "") == "endeavor/stop_notebook"
+                p = get(msg, "params", Dict{String,Any}())
+                result = stop_notebook!(sess, string(get(p, "path", "")))
+                @info "Stopped notebook $(get(p, "path", "")): $(result["stopped"])"
+                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => result)
             elseif get(msg, "method", "") == "endeavor/run_preview"
                 p = get(msg, "params", Dict{String,Any}())
                 try

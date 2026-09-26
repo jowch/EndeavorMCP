@@ -1507,6 +1507,14 @@ end
             @test EndeavorRuntime.bound_notebook("42") == nbpath
             @test bind("").status == 200
             @test EndeavorRuntime.bound_notebook("42") === nothing
+
+            stop = HTTP.post("http://127.0.0.1:$mcp_port/call",
+                ["Content-Type" => "application/json", "Authorization" => "Bearer s3cret-token"],
+                JSON.json(Dict("jsonrpc" => "2.0", "id" => 3, "method" => "endeavor/stop_notebook",
+                               "params" => Dict("path" => nbpath)));
+                status_exception=false, readtimeout=5)
+            @test stop.status == 200
+            @test JSON.parse(String(stop.body))["result"] == Dict("stopped" => false)
         finally
             EndeavorRuntime.stop_pluto_stack!()
             EndeavorRuntime.configure_standalone!(; token="")
@@ -1660,6 +1668,27 @@ end
             @test err(call("open_notebook", Dict{String,Any}("path" => first_nb); owner="c")) == "one_notebook"
         finally
             foreach(o -> EndeavorRuntime.bind_notebook!(o, ""), ("a", "b", "c"))
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
+    @testset "stop_notebook shuts the notebook down and says if it was in safe preview" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        session = Pluto.ServerSession()
+        EndeavorRuntime.bind_standalone_session!(session)
+        previewed, allowed = fresh_fixture(), fresh_fixture()
+        try
+            EndeavorRuntime.tool_open_notebook(Dict{String,Any}("path" => previewed))
+            @test EndeavorRuntime.stop_notebook!(session, previewed) == Dict("stopped" => true, "safe_preview" => true)
+            @test isempty(session.notebooks)
+            @test EndeavorRuntime.stop_notebook!(session, previewed) == Dict("stopped" => false)
+
+            nb = Pluto.SessionActions.open(session, allowed; run_async = true, execution_allowed = false)
+            nb.process_status = Pluto.ProcessStatus.ready
+            @test EndeavorRuntime.stop_notebook!(session, allowed) == Dict("stopped" => true, "safe_preview" => false)
+            @test isempty(session.notebooks)
+            @test EndeavorRuntime.stop_notebook!(nothing, allowed) == Dict("stopped" => false)
+        finally
             EndeavorRuntime.stop_pluto_stack!()
         end
     end
