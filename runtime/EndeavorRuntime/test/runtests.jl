@@ -901,6 +901,8 @@ end
         @test (p["cells"][1]["name"], p["dependents"]) == ("y", 1)
         p = EndeavorRuntime.run_preview(session, "run_all_cells", Dict("notebook_id" => id))
         @test (p["all"], p["count"], p["dependents"]) == (true, 3, 0)
+        p = EndeavorRuntime.run_preview(session, "allow_execution", Dict("notebook_id" => id, "run_notebook" => false))
+        @test (p["all"], p["count"]) == (false, 0)
     end
 
     @testset "find_symbol_definitions and references" begin

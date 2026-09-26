@@ -184,7 +184,8 @@ function run_preview(session, tool::AbstractString, args)
     else  # run_all_cells, allow_execution; add_cell's new cell doesn't exist yet
         Pluto.Cell[]
     end
-    all_cells = tool in ("run_all_cells", "allow_execution")
+    # allow_execution with run_notebook=false only lifts safe preview.
+    all_cells = tool == "run_all_cells" || (tool == "allow_execution" && get(args, "run_notebook", true) != false)
     down = isempty(targets) ? Set{Pluto.Cell}() : setdiff(Pluto.MoreAnalysis.downstream_recursive(topo, targets), targets)
     name(cell) = let node = topo.nodes[cell]
         defs = sort!(string.(collect(union(node.definitions, node.funcdefs_without_signatures))))
