@@ -1264,6 +1264,10 @@ end
             @test isfile(path)
             @test startswith(read(path, String), "### A Pluto.jl notebook ###")
             @test haskey(session.notebooks, UUID(result["notebook_id"]))
+            # Its empty first cell can be edited straight away, without a read first.
+            EndeavorRuntime.tool_edit_cell(session, Dict{String,Any}(
+                "notebook_id" => result["notebook_id"], "cell_id" => only(result["cell_ids"]), "code" => "x = 1"))
+            @test session.notebooks[UUID(result["notebook_id"])].cells[1].code == "x = 1"
 
             # Never clobber, and reject non-notebook paths.
             @test_throws ArgumentError EndeavorRuntime.tool_new_notebook(Dict{String,Any}("path" => path))

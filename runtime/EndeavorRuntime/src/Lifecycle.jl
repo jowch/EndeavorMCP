@@ -420,6 +420,9 @@ function tool_new_notebook(args)
     delete!(result, "warnings")
     # Pluto starts every notebook with one empty cell: edit it rather than adding around it.
     result["cell_ids"] = [string(c.cell_id) for c in nb.cells]
+    # The caller knows these cells are empty; without a receipt the first edit is refused.
+    opened = UUID(result["notebook_id"])
+    foreach(c -> record_read!(opened, c.cell_id, c.code), nb.cells)
     result["created"] = true
     return result
 end
