@@ -26,7 +26,7 @@ Editing a cell re-runs that cell and all **downstream** dependents in topologica
 
 ## Pluto source citations
 
-Curated from Pluto 0.20.x. Local path: `~/.julia/packages/Pluto/*/`. Upstream: [JuliaPluto/Pluto.jl](https://github.com/JuliaPluto/Pluto.jl).
+Curated from Pluto 1.0 (the version `runtime/Manifest.toml` pins). Local path: `~/.julia/packages/Pluto/*/`. Upstream: [JuliaPluto/Pluto.jl](https://github.com/JuliaPluto/Pluto.jl).
 
 | Path | Topic |
 |------|-------|

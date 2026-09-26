@@ -34,7 +34,7 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "view_cell_output",
-        "description" => "See a cell's output as an image (PNG): plots, figures, rendered images. Use to check what a visual output actually looks like; read_cell only describes non-text outputs. Needs the notebook to be running code (not safe preview) unless the output already is a PNG, and waits while the notebook's worker is busy running cells. Outputs with no PNG form (Markdown, HTML, text) fail with no_image; use read_cell for those.",
+        "description" => "See a cell's output as an image (PNG): plots, figures, rendered images. Use to check what a visual output actually looks like; read_cell only describes non-text outputs. Needs the notebook to be running code (not safe preview) unless the output already is a PNG, and waits while the notebook's worker is busy running cells. Outputs with no PNG form (Markdown, HTML, text) fail with no_image; use read_cell for those. Renders over 4 MB fail with image_too_large.",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(
@@ -98,7 +98,7 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "delete_cell",
-        "description" => "Delete a cell from the notebook. This is irreversible within the session.",
+        "description" => "Delete a cell from the notebook. Cells that depend on it re-run, so this runs notebook code. Irreversible within the session.",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(
@@ -179,7 +179,7 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "read_notebook_code",
-        "description" => "Return the notebook as a single code string with cell markers. Default order is execution (dependency) order; use order=visual for UI layout order.",
+        "description" => "Return the notebook as a single code string with cell markers. Default order is execution (dependency) order; use order=visual for UI layout order. Counts as a read of every cell it returns, for edit_cell, edit_cells, and add_cell's after_cell_id. Leaves out Pluto's package-environment cells and, unless include_markdown=true, md\"...\" cells.",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(
@@ -303,7 +303,7 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "open_notebook",
-        "description" => "Load a .jl notebook file into the live Pluto session (user-confirmed path). Default safe preview (no auto-run); set run_notebook=true to queue a single non-blocking full run via SessionActions.open (no second run_all).",
+        "description" => "Load a .jl notebook file into the live Pluto session (user-confirmed path). Default safe preview (no auto-run); set run_notebook=true to queue a single non-blocking full run; don't also call run_all_cells, which would run it twice.",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(
@@ -326,7 +326,7 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "allow_execution",
-        "description" => "Exit safe preview on an open notebook (Glass Run notebook code equivalent). Use when the user explicitly asks to run the notebook. Default run_notebook=true queues a single non-blocking full run (poll read_cell for completion). run_notebook=false exits the gate without queuing a run.",
+        "description" => "Exit safe preview on an open notebook (same as the user clicking \"Run notebook code\" in the pane). Use when the user explicitly asks to run the notebook. Default run_notebook=true queues a single non-blocking full run (poll read_cell for completion). run_notebook=false exits the gate without queuing a run.",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(

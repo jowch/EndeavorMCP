@@ -60,4 +60,4 @@ Teaching notebooks use micro-cells and bare echo cells after `@bind`. **Agents d
 | `pluto_multi_expression` | [grammar.md](grammar.md) + ex. 8 |
 | Dependency order unclear | `read_notebook_code` |
 
-**Projection:** folding a cell whose code starts with `md` may omit it from default `read_notebook_code`. Use `read_cell` / `include_markdown` when you need that source.
+**Projection:** folding a cell whose code starts with `md` may omit it from default `read_notebook_code`. Use `read_cell`, or `read_notebook_code(include_markdown=true)`, when you need that source.
