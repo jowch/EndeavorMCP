@@ -293,6 +293,18 @@ const MCP_TOOLS = [
         ),
     ),
     Dict{String,Any}(
+        "name"        => "keep_notebook_alive",
+        "description" => "Use only when the user asks to keep the notebook running. Notebooks otherwise stop after a stretch with no tool calls, edits, or running cells (the user sets how long). keep=true exempts this notebook until you call it with keep=false or the notebook is stopped.",
+        "inputSchema" => Dict{String,Any}(
+            "type"       => "object",
+            "properties" => Dict{String,Any}(
+                "notebook_id" => Dict("type" => "string", "description" => "The notebook UUID."),
+                "keep"        => Dict("type" => "boolean", "description" => "true keeps it running; false lets it stop when idle again."),
+            ),
+            "required" => ["notebook_id", "keep"],
+        ),
+    ),
+    Dict{String,Any}(
         "name"        => "pluto_session_status",
         "description" => "Return whether Pluto is running, open notebooks, and (when managed) session_id plus mcp/pluto URLs.",
         "inputSchema" => Dict{String,Any}(
@@ -397,6 +409,7 @@ end
 
 function _safe_handle_tool_call(session, name, arguments; owner::AbstractString="")
     try
+        note_activity!(arguments)
         for refusal in (policy_refusal(owner, name), notebook_refusal(session, owner, name, arguments))
             refusal === nothing || throw(refusal)
         end

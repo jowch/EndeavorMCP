@@ -1,13 +1,15 @@
 # Pushes notebook state to the app over `GET /events` (server-sent events)
 # whenever it changes, so the app doesn't poll. Each event is
 #   {"notebooks": [the list_notebooks summary],
-#    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before, version, name}, ...]}}
-# in notebook order. `unrun`: edited by the agent and not run since. `author`:
-# who last changed the cell's code ("agent", "user", or null if unchanged since
-# the runtime first saw it). `before`: an unrun cell's code before the agent's
-# first edit since it last ran ("" for a cell the agent added), for the
-# in-editor diff; absent otherwise. `version`: a hash of the code, so the app sees
-# each edit. `name`: what the cell defines, as of its last run (null if nothing).
+#    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before, version, name}, ...]},
+#    "idle_stopped": [{path, hours, safe_preview}, ...]}
+# with cells in notebook order. `idle_stopped`: notebooks the idle check
+# (Idle.jl) stopped and that haven't opened since. `unrun`: edited by the agent
+# and not run since. `author`: who last changed the cell's code ("agent",
+# "user", or null if unchanged since the runtime first saw it). `before`: an
+# unrun cell's code before the agent's first edit since it last ran ("" for a
+# cell the agent added), for the in-editor diff; absent otherwise. `version`: a
+# hash of the code, so the app sees each edit. `name`: what the cell defines, as of its last run (null if nothing).
 # Triggered by Pluto's events and after each tool call
 # (pending-run changes don't always reach Pluto's state).
 
@@ -86,10 +88,11 @@ end
 
 function _notebooks_json()
     sess = standalone_session()
-    sess === nothing && return JSON.json(Dict("notebooks" => [], "cells" => Dict()))
+    sess === nothing && return JSON.json(Dict("notebooks" => [], "cells" => Dict(), "idle_stopped" => idle_stopped()))
     return JSON.json(Dict(
-        "notebooks" => tool_list_notebooks(sess, Dict{String,Any}()),
-        "cells"     => Dict(string(nb.notebook_id) => _cell_states(nb) for nb in values(sess.notebooks)),
+        "notebooks"    => tool_list_notebooks(sess, Dict{String,Any}()),
+        "cells"        => Dict(string(nb.notebook_id) => _cell_states(nb) for nb in values(sess.notebooks)),
+        "idle_stopped" => idle_stopped(),
     ))
 end
 

@@ -554,6 +554,8 @@ function call_tool(session, name, arguments)
         tool_validate_cell(session, arguments)
     elseif name == "search_code"
         tool_search_code(session, arguments)
+    elseif name == "keep_notebook_alive"
+        tool_keep_notebook_alive(session, arguments)
     else
         throw(ArgumentError("unknown_tool::Unknown tool: '$name'"))
     end

@@ -88,9 +88,14 @@ end
 function _handle_pluto_event(event)::Nothing
     if event isa Pluto.ServerStartEvent
         _STANDALONE_PLUTO_PORT[] = Int(event.port)
+    elseif event isa Pluto.FileSaveEvent
+        note_activity!(event.notebook.notebook_id)
     elseif event isa Pluto.StateChangeEvent || event isa Pluto.NotebookExecutionDoneEvent || event isa Pluto.OpenNotebookEvent
+        event isa Pluto.NotebookExecutionDoneEvent && note_activity!(event.notebook.notebook_id)
+        event isa Pluto.OpenNotebookEvent && note_opened!(event.notebook)
         publish_notebooks!()
     elseif event isa Pluto.ShutdownNotebookEvent
+        note_shut_down!(event.notebook.notebook_id)
         # Fired before the notebook leaves the session.
         @async (sleep(0.2); publish_notebooks!())
     end
@@ -162,6 +167,7 @@ function start_pluto_stack!(;
         notebook,
     )
     _STANDALONE_SESSION[] = sess
+    start_idle_checks!(sess)
 
     if http_async && _STANDALONE_HTTP_SERVER[] === nothing
         _STANDALONE_HTTP_TASK[] = @async begin
@@ -392,6 +398,7 @@ function stop_notebook!(session, path::AbstractString)
     notebook = session.notebooks[nb]
     safe_preview = notebook.process_status === Pluto.ProcessStatus.waiting_for_permission
     Pluto.SessionActions.shutdown(session, notebook; async = false, verbose = false)
+    note_shut_down!(notebook.notebook_id)
     publish_notebooks!()
     return Dict{String,Any}("stopped" => true, "safe_preview" => safe_preview)
 end

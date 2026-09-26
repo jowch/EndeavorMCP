@@ -1519,9 +1519,18 @@ end
                 status_exception=false, readtimeout=5)
             @test stop.status == 200
             @test JSON.parse(String(stop.body))["result"] == Dict("stopped" => false)
+
+            limit = HTTP.post("http://127.0.0.1:$mcp_port/call",
+                ["Content-Type" => "application/json", "Authorization" => "Bearer s3cret-token"],
+                JSON.json(Dict("jsonrpc" => "2.0", "id" => 4, "method" => "endeavor/set_idle_limit",
+                               "params" => Dict("hours" => 12)));
+                status_exception=false, readtimeout=5)
+            @test limit.status == 200
+            @test EndeavorRuntime._IDLE_LIMIT_HOURS[] == 12
         finally
             EndeavorRuntime.stop_pluto_stack!()
             EndeavorRuntime.configure_standalone!(; token="")
+            EndeavorRuntime.set_idle_limit!(48)
         end
     end
 
@@ -1693,6 +1702,71 @@ end
             @test isempty(session.notebooks)
             @test EndeavorRuntime.stop_notebook!(nothing, allowed) == Dict("stopped" => false)
         finally
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
+    @testset "idle notebooks stop; running, kept-alive and recently used ones don't" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        session = Pluto.ServerSession(; options = Pluto.Configuration.from_flat_kwargs(on_event = EndeavorRuntime._handle_pluto_event))
+        EndeavorRuntime.bind_standalone_session!(session)
+        clock = Ref(1.0e6)
+        EndeavorRuntime._IDLE_CLOCK[] = () -> clock[]
+        hours(h) = (clock[] += h * 3600)
+        call(name, args) = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
+            "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
+            "params" => Dict{String,Any}("name" => name, "arguments" => args)))
+        body(resp) = JSON.parse(resp["result"]["content"][1]["text"])
+        idle, running, kept, used = paths = [fresh_fixture() for _ in 1:4]
+        stop_idle() = EndeavorRuntime.stop_idle_notebooks!(session)
+        open_paths() = sort([nb.path for nb in values(session.notebooks)])
+        try
+            EndeavorRuntime.set_idle_limit!(48)
+            ids = Dict(p => body(call("open_notebook", Dict{String,Any}("path" => p)))["notebook_id"] for p in paths)
+            notebook(p) = session.notebooks[UUID(ids[p])]
+            kept_alive = body(call("keep_notebook_alive", Dict{String,Any}("notebook_id" => ids[kept], "keep" => true)))
+            @test kept_alive == Dict("notebook_id" => ids[kept], "kept_alive" => true)
+            busy = first(notebook(running).cells)
+            busy.running = true
+
+            hours(47)
+            @test stop_idle() == String[]
+            call("read_notebook_code", Dict{String,Any}("notebook_id" => ids[used]))
+            hours(2)
+            @test stop_idle() == [abspath(idle)]
+            @test open_paths() == sort(abspath.([running, kept, used]))
+            stopped = [Dict("path" => abspath(idle), "hours" => 48, "safe_preview" => true)]
+            @test EndeavorRuntime.idle_stopped() == stopped
+            @test JSON.parse(EndeavorRuntime._notebooks_json())["idle_stopped"] == stopped
+
+            # A run's clock starts when it's last seen running; the tool call's at the call.
+            busy.running = false
+            hours(46)
+            @test stop_idle() == [abspath(used)]
+            hours(2)
+            @test stop_idle() == [abspath(running)]
+            @test open_paths() == [abspath(kept)]
+
+            # Kept alive until turned off; then the usual limit applies from then.
+            hours(500)
+            @test stop_idle() == String[]
+            call("keep_notebook_alive", Dict{String,Any}("notebook_id" => ids[kept], "keep" => false))
+            hours(47)
+            @test stop_idle() == String[]
+            hours(1)
+            @test stop_idle() == [abspath(kept)]
+            @test isempty(session.notebooks)
+
+            # Opening a stopped notebook again clears its record; 0 means never stop.
+            call("open_notebook", Dict{String,Any}("path" => idle))
+            @test all(s -> s["path"] != abspath(idle), EndeavorRuntime.idle_stopped())
+            EndeavorRuntime.set_idle_limit!(0)
+            hours(10_000)
+            @test stop_idle() == String[]
+            @test open_paths() == [abspath(idle)]
+        finally
+            EndeavorRuntime._IDLE_CLOCK[] = time
+            EndeavorRuntime.set_idle_limit!(48)
             EndeavorRuntime.stop_pluto_stack!()
         end
     end

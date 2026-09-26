@@ -211,6 +211,11 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
                 bind_notebook!(owner, notebook)
                 @info "Session $owner notebook: $(isempty(notebook) ? "(none)" : notebook)"
                 Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
+            elseif get(msg, "method", "") == "endeavor/set_idle_limit"
+                hours = get(get(msg, "params", Dict{String,Any}()), "hours", 48)
+                set_idle_limit!(hours isa Real ? hours : 48)
+                @info "Idle notebooks stop after: $(hours == 0 ? "never" : "$hours hours")"
+                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
             elseif get(msg, "method", "") == "endeavor/stop_notebook"
                 p = get(msg, "params", Dict{String,Any}())
                 result = stop_notebook!(sess, string(get(p, "path", "")))
