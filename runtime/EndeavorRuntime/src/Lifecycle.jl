@@ -354,7 +354,13 @@ function tool_open_notebook(args)
 
     # SessionActions.open already queues update_save_run! when execution_allowed;
     # do not call tool_run_all_cells again (double-run starved MCP / raced executetoken).
-    nb = Pluto.SessionActions.open(sess, path; run_async = true, execution_allowed = run_nb)
+    nb = try
+        Pluto.SessionActions.open(sess, path; run_async = true, execution_allowed = run_nb)
+    catch e
+        # Printing this exception walks the whole Notebook and never finishes.
+        e isa Pluto.SessionActions.NotebookIsRunningException || rethrow()
+        throw(ArgumentError("notebook_already_open::'$path' is already open as notebook_id $(e.notebook.notebook_id); use that id"))
+    end
 
     result = Dict{String,Any}(
         "notebook_id"         => string(nb.notebook_id),

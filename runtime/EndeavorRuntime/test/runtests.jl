@@ -1495,6 +1495,18 @@ end
             sse = HTTP.get("http://127.0.0.1:$mcp_port/sse"; status_exception=false, readtimeout=2)
             @test sse.status == 401
             @test HTTP.get("http://127.0.0.1:$mcp_port/health"; status_exception=false, readtimeout=2).status == 200
+
+            # The app binds a session to its notebook, and clears it with an empty path.
+            bind(notebook) = HTTP.post("http://127.0.0.1:$mcp_port/call",
+                ["Content-Type" => "application/json", "Authorization" => "Bearer s3cret-token"],
+                JSON.json(Dict("jsonrpc" => "2.0", "id" => 2, "method" => "endeavor/set_notebook",
+                               "params" => Dict("owner" => "42", "notebook" => notebook)));
+                status_exception=false, readtimeout=5)
+            nbpath = joinpath(realpath(mktempdir()), "bound.jl")
+            @test bind(nbpath).status == 200
+            @test EndeavorRuntime.bound_notebook("42") == nbpath
+            @test bind("").status == 200
+            @test EndeavorRuntime.bound_notebook("42") === nothing
         finally
             EndeavorRuntime.stop_pluto_stack!()
             EndeavorRuntime.configure_standalone!(; token="")
@@ -1586,6 +1598,69 @@ end
             @test err(call("edit_cell"; owner="7")) != "plan_mode"
         finally
             EndeavorRuntime.set_policy!("7", "ask")
+        end
+    end
+
+    @testset "one notebook per session" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        session = Pluto.ServerSession()
+        EndeavorRuntime.bind_standalone_session!(session)
+        call(name, args; owner) = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
+            "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
+            "params" => Dict{String,Any}("name" => name, "arguments" => args)); owner)
+        body(resp) = JSON.parse(resp["result"]["content"][1]["text"])
+        err(resp) = resp["result"]["isError"] ? body(resp)["error"] : nothing
+        first_nb, second_nb = fresh_fixture(), fresh_fixture()
+        try
+            # The first notebook an agent session opens becomes its notebook.
+            opened = call("open_notebook", Dict{String,Any}("path" => first_nb); owner="a")
+            @test err(opened) === nothing
+            first_id = body(opened)["notebook_id"]
+            @test EndeavorRuntime.bound_notebook("a") == realpath(first_nb)
+
+            refused = call("open_notebook", Dict{String,Any}("path" => second_nb); owner="a")
+            @test err(refused) == "one_notebook"
+            @test body(refused)["message"] == "This session works on one notebook, $(realpath(first_nb)), so it can't open $(second_nb). " *
+                "You can still read other notebooks as plain .jl files. " *
+                "To work on another notebook, suggest the user start a new session with it."
+            @test err(call("new_notebook", Dict{String,Any}(); owner="a")) == "one_notebook"
+            @test err(call("new_notebook", Dict{String,Any}("path" => joinpath(mktempdir(), "other.jl")); owner="a")) == "one_notebook"
+            # Its own notebook isn't refused by the binding; this one is simply open already.
+            @test err(call("open_notebook", Dict{String,Any}("path" => first_nb); owner="a")) == "notebook_already_open"
+
+            # Calls without an owner (the app, tests) are unrestricted.
+            second = call("open_notebook", Dict{String,Any}("path" => second_nb); owner="")
+            @test err(second) === nothing
+            second_id = body(second)["notebook_id"]
+
+            # Writes and runs on another open notebook are refused; reads are not.
+            cell = string(first(session.notebooks[UUID(second_id)].cell_order))
+            @test err(call("edit_cell", Dict{String,Any}("notebook_id" => second_id, "cell_id" => cell, "code" => "1"); owner="a")) == "one_notebook"
+            @test err(call("run_all_cells", Dict{String,Any}("notebook_id" => second_id); owner="a")) == "one_notebook"
+            @test err(call("read_notebook_code", Dict{String,Any}("notebook_id" => second_id); owner="a")) === nothing
+            @test err(call("get_cell_order", Dict{String,Any}("notebook_id" => first_id); owner="a")) === nothing
+            own_cell = string(first(session.notebooks[UUID(first_id)].cell_order))
+            @test err(call("fold_cell", Dict{String,Any}("notebook_id" => first_id, "cell_id" => own_cell, "folded" => true); owner="a")) === nothing
+
+            # A binding set by the app is respected, and clearing it lifts the limit.
+            EndeavorRuntime.bind_notebook!("b", second_nb)
+            @test err(call("open_notebook", Dict{String,Any}("path" => first_nb); owner="b")) == "one_notebook"
+            @test err(call("run_all_cells", Dict{String,Any}("notebook_id" => first_id); owner="b")) == "one_notebook"
+            @test err(call("get_cell_order", Dict{String,Any}("notebook_id" => first_id); owner="b")) === nothing
+            EndeavorRuntime.bind_notebook!("b", "")
+            @test EndeavorRuntime.bound_notebook("b") === nothing
+            @test err(call("run_all_cells", Dict{String,Any}("notebook_id" => first_id); owner="b")) != "one_notebook"
+
+            # A "New notebook" session: the notebook it creates becomes its notebook.
+            created_path = joinpath(mktempdir(), "analysis.jl")
+            created = call("new_notebook", Dict{String,Any}("path" => created_path); owner="c")
+            @test err(created) === nothing
+            @test EndeavorRuntime.bound_notebook("c") == realpath(created_path)
+            @test err(call("new_notebook", Dict{String,Any}("path" => joinpath(mktempdir(), "second.jl")); owner="c")) == "one_notebook"
+            @test err(call("open_notebook", Dict{String,Any}("path" => first_nb); owner="c")) == "one_notebook"
+        finally
+            foreach(o -> EndeavorRuntime.bind_notebook!(o, ""), ("a", "b", "c"))
+            EndeavorRuntime.stop_pluto_stack!()
         end
     end
 

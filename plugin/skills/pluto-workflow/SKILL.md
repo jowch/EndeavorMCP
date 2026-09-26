@@ -15,7 +15,7 @@ Live reactive session — not a `.jl` file to patch. See [pluto-mental-model.md]
 
 Endeavor already shows the live notebook in a pane next to the chat — there's no landing page, no browser tool, and nothing to navigate. The notebook you're acting on comes from the prompt itself:
 
-- **Viewing context.** A prompt may open with "[Endeavor] The user is viewing Pluto notebook {id} in the notebook pane…" — that `notebook_id` is "the notebook" unless the user names another one.
+- **Viewing context.** A prompt may open with "[Endeavor] The user is viewing Pluto notebook {id} in the notebook pane…" — that `notebook_id` is "the notebook". Each session edits and runs only its own notebook; other notebooks can be read as plain `.jl` files (see **pluto-session**).
 - **Annotation mode.** A prompt may instead open with "[Endeavor] The user annotated notebook cells in annotation mode…", followed by one or more `pluto://notebook/{notebook_id}/cell/{cell_id}` resource links and "Comment on the N cell(s) above: …". These links are **not fetchable** — call `read_cell(notebook_id, cell_id)` on each before responding. See [annotations.md](reference/annotations.md).
 
 If neither is present and you don't already know the notebook_id, use **pluto-session** first.

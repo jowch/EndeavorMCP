@@ -24,6 +24,15 @@ Reach for this skill when neither is present and you genuinely don't know which 
 - `pluto_session_status` — whether Pluto is running, what notebooks are open, session info.
 - `list_notebooks` — what's currently open in the session.
 
+## One notebook per session
+
+Each Endeavor session works on exactly one notebook. A session started from an existing notebook already has it. A session started as "New notebook" can create one with `new_notebook`, and that becomes its notebook.
+
+- Once the session has its notebook, `open_notebook` and `new_notebook` refuse any other path with a `one_notebook` error, and edits or runs on another open notebook are refused the same way.
+- You can still read any other notebook as a plain `.jl` file (for example with `Read`) to reuse its code or check what it did.
+- If the user wants to work on a different notebook, tell them to start a new session with it. Don't try to work around the refusal.
+- A notebook holds a whole line of analysis on a dataset. When the user asks for a new analysis step, add a new section to the current notebook (a markdown heading cell, then the cells for that step) instead of suggesting a new notebook.
+
 ## Opening vs. creating
 
 | User wants | Tool |
@@ -48,6 +57,7 @@ Reach for this skill when neither is present and you genuinely don't know which 
 |---------|-----|
 | `open_notebook` without a user-specified path | Never guess a path or scan the filesystem for a notebook to open |
 | Hand-write a new `.jl` notebook file | `new_notebook()` — let Pluto write it |
+| Open or create a second notebook in the same session | Add a new section to the current notebook, read the other file with `Read`, or suggest a new session for it |
 | Re-`open_notebook` a path that's already open | `list_notebooks` first; if it's there, use its `notebook_id` (re-opening errors) |
 | Ask the user to start Julia or run a setup script | Endeavor already runs Pluto and the notebook tools |
 

@@ -205,6 +205,12 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
                 set_policy!(owner, policy)
                 @info "Session $owner policy: $policy"
                 Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
+            elseif get(msg, "method", "") == "endeavor/set_notebook"
+                p = get(msg, "params", Dict{String,Any}())
+                owner, notebook = string(get(p, "owner", "")), string(something(get(p, "notebook", ""), ""))
+                bind_notebook!(owner, notebook)
+                @info "Session $owner notebook: $(isempty(notebook) ? "(none)" : notebook)"
+                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
             elseif get(msg, "method", "") == "endeavor/run_preview"
                 p = get(msg, "params", Dict{String,Any}())
                 try

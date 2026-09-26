@@ -303,7 +303,7 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "open_notebook",
-        "description" => "Load a .jl notebook file into the live Pluto session (user-confirmed path). Default safe preview (no auto-run); set run_notebook=true to queue a single non-blocking full run; don't also call run_all_cells, which would run it twice.",
+        "description" => "Load a .jl notebook file into the live Pluto session (user-confirmed path). Default safe preview (no auto-run); set run_notebook=true to queue a single non-blocking full run; don't also call run_all_cells, which would run it twice. Each session works on one notebook: once it has one, opening a different path is refused (read other notebooks as plain .jl files instead).",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(
@@ -315,7 +315,7 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "new_notebook",
-        "description" => "Create a new empty notebook file (written by Pluto itself) and load it into the live Pluto session, ready to run (no safe preview: it has no code yet). It starts with one empty cell, whose id is in cell_ids: edit it for the first cell. Use this instead of writing a .jl file by hand. Omit path to use Pluto's default new-notebook location; an existing file is never overwritten (use open_notebook for that).",
+        "description" => "Create a new empty notebook file (written by Pluto itself) and load it into the live Pluto session, ready to run (no safe preview: it has no code yet). It starts with one empty cell, whose id is in cell_ids: edit it for the first cell. Use this instead of writing a .jl file by hand. Omit path to use Pluto's default new-notebook location; an existing file is never overwritten (use open_notebook for that). Each session works on one notebook: if it already has one, this is refused. For a new analysis step, add a section to the current notebook rather than creating another.",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(
@@ -379,8 +379,11 @@ _err(id, code, message) = Dict{String,Any}(
 # Tool call dispatch
 # ---------------------------------------------------------------------------
 
-function _handle_tool_call(session, name, arguments)
+function _handle_tool_call(session, name, arguments; owner::AbstractString="")
     result = call_tool_with_session(session, name, arguments)
+    if name in ("open_notebook", "new_notebook") && result isa AbstractDict
+        note_notebook_opened!(owner, result["path"])
+    end
     content = if result isa CellImage
         [
             Dict{String,Any}("type" => "text", "text" => JSON.json(result.meta)),
@@ -394,9 +397,10 @@ end
 
 function _safe_handle_tool_call(session, name, arguments; owner::AbstractString="")
     try
-        refusal = policy_refusal(owner, name)
-        refusal === nothing || throw(refusal)
-        _handle_tool_call(session, name, arguments)
+        for refusal in (policy_refusal(owner, name), notebook_refusal(session, owner, name, arguments))
+            refusal === nothing || throw(refusal)
+        end
+        _handle_tool_call(session, name, arguments; owner)
     catch e
         raw = sprint(showerror, e)
         # Error format: "error_type::human message" (ArgumentError may prefix the type name)
