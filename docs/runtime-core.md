@@ -75,10 +75,22 @@ app ── ssh/stdio frames ── endeavor-remote ── core (Rust, bridge por
 
 ## The engine interface
 
-Every adapter speaks the same JSON-RPC calls on stdio. The core keeps one
-`AdapterProcess` per engine kind; what differs per kind (launch command,
-detection, page adapter, skills) is the small `Backend` enum
-[marimo.md](marimo.md) proposes for the app.
+Every adapter speaks the same calls and notifications over loopback HTTP on
+its own bridge port, with the bearer token the core gives it: the core
+`POST`s each call to `/adapter` as `{"method", "params"}` and reads the
+reply's `result` or `error`, and reads notifications from one long-lived
+`GET /notifications` stream, a `data: {"method", "params"}` line each. Not
+stdio: an engine's stdout and stderr are the runtime log, which Pluto,
+packages and notebook code all print to, so a stdio protocol would need a
+pipe of its own, and every adapter already serves HTTP (Pluto's UI, and
+until step 5 is done, the tools the core passes on). The core opens the
+stream once the engine answers and reopens it if it drops, rereading every
+notebook when it does. The core keeps one `AdapterProcess` per engine kind;
+what differs per kind (launch command, detection, page adapter, skills) is
+the small `Backend` enum [marimo.md](marimo.md) proposes for the app.
+
+Built so far (step 5a) are `snapshot`, `graph` and `shutdown`, and all the
+notifications; the other calls come with the handlers that need them.
 
 Core → engine:
 
@@ -87,20 +99,28 @@ Core → engine:
 | `open(path, allow_run)` / `new(path?)` | notebook id, cells, whether execution is gated |
 | `shutdown(nid)` | whether it was in safe preview |
 | `allow_execution(nid, run)` | — |
-| `snapshot(nid)` | path, order, per cell: code, folded, running, queued, errored, last run time, runtime, output summary or structured error, process status |
-| `graph(nid)` | per cell: definitions, references; topological order |
+| `snapshot(nid)` | path, order, process status, whether execution is allowed, whether it's in safe preview, per cell: code, folded, running, queued, errored, last run time, runtime, output summary or structured error. Without `nid`, every open notebook, in the engine's order. Pluto's also lists the staged cells (`pending_run`) until staging moves to the core |
+| `graph(nid)` | per cell: definitions, function names, references, as of the engine's last analysis (no reanalysis); topological order |
 | `apply(nid, ops)` | ops: set code, insert, delete, move, fold. The engine saves the file and updates its own UI |
 | `run(nid, cells)` | accepted, or refused because gated |
 | `interrupt(nid)`, `restart(nid)` | — |
 | `render_png(nid, cell)` | image bytes or none |
 | `validate(nid, code)` | parse errors |
 
-Engine → core, as notifications:
+Engine → core, as notifications, each naming its notebook:
 
-- `cell_state(nid, cell, {...})` including code, because users edit in the
-  engine's UI;
-- `notebook_opened`, `notebook_shut_down`, `file_saved`,
-  `topology_changed`.
+- `cell_state(nid, cells)`: cells whose state changed, each with its code
+  (users edit in the engine's UI), running, queued and errored. Pluto's hook
+  doesn't say which cell changed, so its adapter sends every cell;
+- `notebook_opened(nid, path)`; `notebook_shut_down(nid)`, once it has left
+  the engine (a restart in place isn't one); `file_saved(nid)`;
+  `execution_done(nid)`, when a run finishes; `topology_changed(nid)`, when
+  the dependency graph changed.
+
+Notifications say when to look; the core reads a fresh `snapshot` and `graph`
+each time it tells the app anything, coalescing a burst of notifications
+into one read. The code in `cell_state` also goes straight into `author`
+tracking, so an edit undone before the next read still counts as the user's.
 
 Everything else (staging, receipts, `run_preview`, `before`/`author`,
 conflict warnings, event diffing) is computed in the core from these.
@@ -163,15 +183,30 @@ ending in an app that behaves as before:
    plan mode, and host tools. Idle stop, sharing checks and the
    one-notebook-per-session binding stay for step 5: each needs a
    notebook's cells, running state or path.
-5. The adapter interface over stdio, then the handlers that need the graph:
-   staging and read receipts, `run_preview`, author and `before` tracking,
-   event diffing. What is left in Julia is the Pluto adapter.
+5. The adapter interface, then the handlers that need the graph. In two
+   parts:
+   - 5a, done: the interface (`snapshot`, `graph`, `shutdown` and the
+     notifications) and the core's own `NotebookState` per notebook, dropped
+     when it shuts down. The core serves `/events` (subscribers, the state on
+     connect, sending only what changed) and keeps author, `before` and
+     version tracking, cell names, idle stop (`keep_notebook_alive`,
+     `endeavor/set_idle_limit`, `idle_stopped`), `endeavor/stop_notebook`,
+     and the one-notebook-per-session binding (`endeavor/set_notebook`). It
+     attributes an edit to the agent by watching `edit_cell`, `edit_cells`
+     and `add_cell` pass through, reading the notebook just before.
+   - 5b: staging and read receipts, `submit_changes`, `run_preview`,
+     `run_conflict` and other-session warnings, the dependency and symbol
+     tools, and the calls they need (`open`, `new`, `allow_execution`,
+     `apply`, `run`, `interrupt`, `render_png`, `validate`). Staging joins
+     `NotebookState` beside the author tracking, and `pending_run` leaves
+     `snapshot`. What is left in Julia is then the Pluto adapter.
 
 ## Open questions
 
-- **Transport to adapters:** stdio JSON-RPC is simplest and needs no port.
-  Pluto's adapter also serves Pluto's HTTP UI, so it listens on a port
-  regardless. Stdio for control, a port only for the UI, is the proposal.
+- **Transport to adapters:** settled in step 5a as loopback HTTP (see "The
+  engine interface"). A marimo or turtleR adapter whose engine keeps stdout
+  clean could use stdio instead; the core would need a second
+  `Upstream` for it.
 - **Is step 1 worth doing before R?** The alternative is building the core
   for R only and leaving Pluto on the Julia runtime. That keeps two
   implementations of the same tool rules, which would drift. Not
