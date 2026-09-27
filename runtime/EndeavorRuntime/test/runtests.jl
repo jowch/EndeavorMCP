@@ -8,6 +8,9 @@ using Sockets
 using SHA
 using Base64
 
+# Notebooks made without a path would otherwise pile up in the app's own depot.
+ENV["JULIA_PLUTO_NEW_NOTEBOOKS_DIR"] = mktempdir()
+
 # Pluto saves (and backs up) notebooks it opens, so tests work on a temp copy.
 fresh_fixture() = cp(joinpath(@__DIR__, "fixtures", "test_notebook.jl"), joinpath(mktempdir(), "test_notebook.jl"))
 
