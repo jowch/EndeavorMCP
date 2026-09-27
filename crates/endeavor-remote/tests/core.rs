@@ -237,26 +237,135 @@ fn streams_events_as_written_and_closes_with_either_side() {
     reader.read_to_end(&mut rest).unwrap();
 }
 
-#[test]
-fn carries_mcp_over_sse_and_message() {
-    let dir = state_dir("core-mcp");
-    let bridge = FakeBridge::start(&dir);
-    let core = Core::start(&dir, &bridge);
-    let mut stream = core.connect();
-    let mut events = BufReader::new(stream.try_clone().unwrap());
-    write!(stream, "GET /sse HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nAccept: text/event-stream\r\n\r\n").unwrap();
-    read_until(&mut events, "data: /message?sessionId=s1");
+/// An agent session's MCP connection: its event stream and its session id.
+struct Session {
+    events: BufReader<TcpStream>,
+    id: String,
+}
 
-    let message = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
-    let mut post = core.connect();
+impl Session {
+    fn open(core: &Core) -> Session {
+        let mut stream = core.connect();
+        write!(stream, "GET /sse HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nAccept: text/event-stream\r\n\r\n", core.port).unwrap();
+        let mut events = BufReader::new(stream);
+        let head = read_until(&mut events, "\r\n\r\n");
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        assert!(head.contains("Content-Type: text/event-stream\r\n") && head.contains("Transfer-Encoding: chunked\r\n"), "{head}");
+        let endpoint = read_until(&mut events, "\n\n");
+        let id = endpoint.split("data: /message?sessionId=").nth(1).expect(&endpoint).trim().to_owned();
+        Session { events, id }
+    }
+
+    /// The next reply on the stream, as the core wrote it.
+    fn reply(&mut self) -> String {
+        let text = read_until(&mut self.events, "\n\n");
+        let data = text.split("event: message\ndata: ").nth(1).unwrap_or_else(|| panic!("no message in {text:?}"));
+        data.trim_end().to_owned()
+    }
+}
+
+/// POST one message to a session as the agent does: its status and body.
+fn post(core: &Core, session: &str, message: &str, caller: &[(&str, &str)]) -> (String, String) {
+    let mut socket = core.connect();
+    let headers: String = caller.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
     write!(
-        post,
-        "POST /message?sessionId=s1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{message}",
+        socket,
+        "POST /message?sessionId={session} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\n\r\n{message}",
+        core.port,
         message.len()
     )
     .unwrap();
-    assert_eq!(response(&mut BufReader::new(post)).0, "HTTP/1.1 202 Accepted");
-    read_until(&mut events, &format!("event: message\ndata: {message}"));
+    let (status, _, body) = response(&mut BufReader::new(socket));
+    (status, body)
+}
+
+#[test]
+fn serves_the_agents_mcp_sessions_and_asks_julia_with_the_caller() {
+    let dir = state_dir("core-mcp");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let mut session = Session::open(&core);
+    let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
+
+    let message = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+    assert_eq!(post(&core, &session.id, message, &caller), ("HTTP/1.1 202 Accepted".into(), String::new()));
+    assert_eq!(session.reply(), r#"{"id":1,"jsonrpc":"2.0","result":{"host":"gpu-box","method":"tools/list","owner":"7"}}"#);
+    let asked: Vec<_> = bridge.seen().into_iter().filter(|s| s.line == "POST /dispatch HTTP/1.1").collect();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].body, message.as_bytes(), "the message as the agent sent it");
+    assert_eq!(asked[0].header("Authorization"), Some(format!("Bearer {TOKEN}").as_str()));
+
+    // Answered here: ping, and notifications (which get no reply).
+    assert_eq!(post(&core, &session.id, r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#, &caller).0, "HTTP/1.1 202 Accepted");
+    assert_eq!(session.reply(), r#"{"id":"p","jsonrpc":"2.0","result":{}}"#);
+    assert_eq!(post(&core, &session.id, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &caller).0, "HTTP/1.1 202 Accepted");
+    assert_eq!(post(&core, &session.id, r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#, &[]).0, "HTTP/1.1 202 Accepted");
+    assert_eq!(session.reply(), r#"{"id":2,"jsonrpc":"2.0","result":{"host":"","method":"initialize","owner":""}}"#, "the app's own calls have no caller");
+    assert_eq!(bridge.seen().iter().filter(|s| s.line == "POST /dispatch HTTP/1.1").count(), 2);
+
+    assert_eq!(post(&core, "nope", message, &caller), ("HTTP/1.1 404 Not Found".into(), r#"{"error":"Session not found"}"#.into()));
+    assert_eq!(post(&core, &session.id, "{nope", &caller), ("HTTP/1.1 400 Bad Request".into(), r#"{"error":"Invalid JSON"}"#.into()));
+    assert_eq!(post(&core, &session.id, "[1]", &caller).0, "HTTP/1.1 400 Bad Request");
+}
+
+#[test]
+fn keeps_concurrent_sessions_apart() {
+    let dir = state_dir("core-sessions");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let mut sessions = [Session::open(&core), Session::open(&core)];
+    assert_ne!(sessions[0].id, sessions[1].id);
+    std::thread::scope(|scope| {
+        for (n, session) in sessions.iter().enumerate() {
+            for i in 0..10 {
+                let (core, id) = (&core, session.id.clone());
+                scope.spawn(move || {
+                    let message = format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"tools/call"}}"#);
+                    assert_eq!(post(core, &id, &message, &[("X-Endeavor-Session", &n.to_string())]).0, "HTTP/1.1 202 Accepted");
+                });
+            }
+        }
+    });
+    for (n, session) in sessions.iter_mut().enumerate() {
+        let mut ids: Vec<i64> = (0..10)
+            .map(|_| {
+                let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
+                assert_eq!(reply["result"]["owner"], n.to_string());
+                reply["id"].as_i64().unwrap()
+            })
+            .collect();
+        ids.sort();
+        assert_eq!(ids, (0..10).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
+    let dir = state_dir("core-refuse");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let ask = |request: &str| {
+        let mut socket = core.connect();
+        socket.write_all(request.as_bytes()).unwrap();
+        let (status, _, body) = response(&mut BufReader::new(socket));
+        (status, body)
+    };
+    let auth = format!("Authorization: Bearer {TOKEN}\r\n");
+    let refused = |status: &str, error: &str| (format!("HTTP/1.1 {status}"), format!(r#"{{"error":"{error}"}}"#));
+    for route in ["GET /sse", "POST /message?sessionId=x"] {
+        let request = |headers: &str| format!("{route} HTTP/1.1\r\n{headers}Content-Length: 0\r\n\r\n");
+        assert_eq!(ask(&request("Host: 127.0.0.1\r\n")), refused("401 Unauthorized", "unauthorized"));
+        assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace('0', "1")))), refused("401 Unauthorized", "unauthorized"));
+        assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace("\r\n", "0\r\n")))), refused("401 Unauthorized", "unauthorized"));
+        assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\nOrigin: https://example.com\r\n{auth}"))), refused("403 Forbidden", "browser_origin_refused"));
+        assert_eq!(ask(&request(&format!("Host: evil.example:80\r\n{auth}"))), refused("403 Forbidden", "host_not_loopback"));
+        assert_eq!(ask(&request(&format!("Host: 127.0.0.1.evil.example\r\n{auth}"))), refused("403 Forbidden", "host_not_loopback"));
+    }
+    for host in ["localhost", "[::1]:9", "127.0.0.1:9"] {
+        let request = format!("POST /message?sessionId=x HTTP/1.1\r\nHost: {host}\r\n{auth}Content-Length: 2\r\n\r\n{{}}");
+        assert_eq!(ask(&request).0, "HTTP/1.1 404 Not Found", "{host} is loopback");
+    }
+    assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 }
 
 #[test]

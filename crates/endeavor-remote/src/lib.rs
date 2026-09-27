@@ -16,6 +16,7 @@ mod askpass;
 mod core;
 mod http;
 mod julia;
+mod mcp;
 mod slurm;
 
 use std::fs::{File, OpenOptions};

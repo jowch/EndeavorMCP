@@ -1,8 +1,9 @@
 //! `endeavor-remote core`: the runtime the helper starts (docs/runtime-core.md).
 //! It starts `julia boot.jl` as its child, serves the bridge port, and writes
-//! `runtime.json` once Julia is ready. For now every request on the bridge
-//! port is passed to Julia's own bridge unchanged but for its Host; the plan
-//! moves handlers here one at a time.
+//! `runtime.json` once Julia is ready. It serves the agent's MCP connection
+//! itself (see `mcp`) and passes every other request on the bridge port to
+//! Julia's own bridge unchanged but for its Host; the plan moves handlers here
+//! one at a time.
 //!
 //! Julia shares the core's process group, which the helper created, so the
 //! helper's signals to the group reach both. The core exits when Julia does,
@@ -15,12 +16,13 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::http::{self, Head};
+use crate::mcp::Bridge;
 use crate::{USAGE, bridge_answers, parse_state, remove_state};
 
 /// Where boot.jl writes its state for the core, in the state folder.
@@ -87,20 +89,20 @@ pub fn main(argv: &[String]) -> ! {
     let julia_pid = julia.id() as i32;
     pass_on_stop_signals(stop_signals, julia_pid);
 
-    let upstream = Arc::new(OnceLock::new());
+    let bridge = Arc::new(Bridge::new(token));
     let bridge_port = listener.local_addr().unwrap().port();
-    accept(listener, upstream.clone());
+    accept(listener, bridge.clone());
 
     let status = loop {
         if let Some(status) = julia.try_wait().unwrap_or(None) {
             break status;
         }
-        if upstream.get().is_none()
+        if bridge.upstream.get().is_none()
             && let Some(port) = julia_ready(&julia_state, &args.state_dir, bridge_port)
         {
-            let _ = upstream.set(port);
+            let _ = bridge.upstream.set(port);
         }
-        if upstream.get().is_some() {
+        if bridge.upstream.get().is_some() {
             break julia.wait().unwrap_or_else(|e| fail(format!("waiting for Julia: {e}")));
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -218,31 +220,89 @@ fn pass_on_stop_signals(set: libc::sigset_t, julia_pid: i32) {
 
 /// Serve the bridge port: a thread per client, of which there are only a few
 /// (the helper's relayed streams).
-fn accept(listener: TcpListener, upstream: Arc<OnceLock<u16>>) {
+fn accept(listener: TcpListener, bridge: Arc<Bridge>) {
     std::thread::spawn(move || {
         for client in listener.incoming().map_while(Result::ok) {
-            let upstream = upstream.clone();
+            let bridge = bridge.clone();
             std::thread::spawn(move || {
-                let _ = serve_client(client, &upstream);
+                let _ = serve_client(client, &bridge);
             });
         }
     });
 }
 
-/// One client's requests in turn, until either side closes.
-fn serve_client(client: TcpStream, upstream: &OnceLock<u16>) -> io::Result<()> {
+/// One client's requests in turn, until either side closes. The agent's MCP
+/// connection is served here; everything else goes to Julia.
+fn serve_client(client: TcpStream, bridge: &Bridge) -> io::Result<()> {
     let _ = client.set_nodelay(true);
     let mut reader = BufReader::new(client.try_clone()?);
     let mut client = client;
     while let Some(request) = Head::read(&mut reader)? {
-        let Some(&port) = upstream.get() else {
+        let Some(&port) = bridge.upstream.get() else {
             return refuse(&mut client, "503 Service Unavailable", "Julia isn't ready yet");
         };
-        if !forward(request, &mut reader, &mut client, port)? {
+        let (method, target) = (request.method(), request.target());
+        let sse = method == "GET" && target.starts_with("/sse");
+        let message = method == "POST" && target.starts_with("/message");
+        if (sse || message)
+            && let Some((status, error)) = refusal(&request, &bridge.token)
+        {
+            http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
+            let body = serde_json::json!({ "error": error }).to_string();
+            http::respond(&mut client, status, Some("application/json"), body.as_bytes(), request.keeps_alive())?;
+            if !request.keeps_alive() {
+                break;
+            }
+            continue;
+        }
+        let keep_alive = if sse {
+            return bridge.stream(&request, client);
+        } else if message {
+            bridge.post(&request, &mut reader, &mut client)?
+        } else {
+            forward(request, &mut reader, &mut client, port)?
+        };
+        if !keep_alive {
             break;
         }
     }
     Ok(())
+}
+
+/// Why the bridge won't serve a request: a status and an error code. It's a
+/// loopback control bridge, never a web API: any request with an Origin header
+/// came from a browser page (cross-site fetches and preflights always send one;
+/// MCP clients never do), and a DNS-rebinding page sends a same-origin request
+/// with no Origin but a foreign Host. Loopback isn't private on a shared
+/// machine, so the bearer token is what keeps other local users out.
+fn refusal(request: &Head, token: &str) -> Option<(&'static str, &'static str)> {
+    if request.header("Origin").is_some() {
+        return Some(("403 Forbidden", "browser_origin_refused"));
+    }
+    if !loopback_host(request.header("Host").unwrap_or_default()) {
+        return Some(("403 Forbidden", "host_not_loopback"));
+    }
+    let target = request.target();
+    let health = request.method() == "GET" && (target == "/health" || target.starts_with("/health?"));
+    if !health && !token_matches(request.header("Authorization").unwrap_or_default(), token) {
+        return Some(("401 Unauthorized", "unauthorized"));
+    }
+    None
+}
+
+/// `Host` as clients send it: `127.0.0.1:2346`, `localhost`, `[::1]:2346`.
+fn loopback_host(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(_) => host.find(']').map_or("", |end| &host[..=end]),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    matches!(name, "127.0.0.1" | "localhost" | "[::1]")
+}
+
+/// `Authorization: Bearer <token>`, compared in constant time.
+fn token_matches(given: &str, token: &str) -> bool {
+    let expected = format!("Bearer {token}");
+    given.len() == expected.len() && given.bytes().zip(expected.bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 
 /// Pass one request to Julia's bridge on a connection of its own, and its

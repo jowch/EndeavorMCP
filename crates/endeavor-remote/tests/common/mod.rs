@@ -1,12 +1,11 @@
 //! A stand-in for Julia under `endeavor-remote core`: a script that writes the
 //! state boot.jl would and then sleeps, naming a bridge served by this test
 //! process. The bridge answers like Julia's (chunked responses to HTTP/1.1,
-//! close-delimited to HTTP/1.0, SSE streams on `/events` and `/sse`) and
-//! records what it was sent.
+//! close-delimited to HTTP/1.0, an SSE stream on `/events`, the agent's MCP
+//! messages on `/dispatch`) and records what it was sent.
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -83,8 +82,6 @@ struct Shared {
     seen: Mutex<Vec<Seen>>,
     /// The open `/events` stream: events to write, or `None` to end it abruptly.
     events: Mutex<Option<Sender<Option<String>>>>,
-    /// MCP sessions by id: messages for their `/sse` streams.
-    sessions: Mutex<HashMap<String, Sender<String>>>,
     /// Said when the core closes the `/events` stream's upstream connection.
     closed: Mutex<Option<Sender<()>>>,
 }
@@ -157,13 +154,9 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
             let _ = socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
         } else if target == "/events" {
             return events(socket, shared);
-        } else if target == "/sse" {
-            return sse(socket, shared);
-        } else if let Some(session) = target.strip_prefix("/message?sessionId=") {
-            let message = String::from_utf8(seen.body).unwrap();
-            let found = shared.sessions.lock().unwrap().get(session).map(|tx| tx.send(message).is_ok());
-            let status = if found == Some(true) { "202 Accepted" } else { "404 Not Found" };
-            let _ = write!(socket, "HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+        } else if target == "/dispatch" {
+            let reply = dispatch(&seen);
+            let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{reply}\r\n0\r\n\r\n", reply.len());
         } else if target == "/echo" {
             let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", seen.body.len());
             let _ = socket.write_all(&seen.body);
@@ -248,14 +241,16 @@ fn events(mut socket: TcpStream, shared: &Arc<Shared>) {
     let _ = socket.shutdown(Shutdown::Both);
 }
 
-fn sse(mut socket: TcpStream, shared: &Shared) {
-    let (tx, rx) = mpsc::channel();
-    shared.sessions.lock().unwrap().insert("s1".into(), tx);
-    let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
-    let _ = chunk(&mut socket, "event: endpoint\ndata: /message?sessionId=s1\n\n");
-    for message in rx {
-        if chunk(&mut socket, &format!("event: message\ndata: {message}\n\n")).is_err() {
-            return;
-        }
-    }
+/// Julia's reply to an MCP message, keys sorted as Julia writes them: it names
+/// the message and its caller.
+fn dispatch(seen: &Seen) -> String {
+    let message: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+    let caller = |name| serde_json::Value::from(seen.header(name).unwrap_or_default());
+    format!(
+        r#"{{"id":{},"jsonrpc":"2.0","result":{{"host":{},"method":{},"owner":{}}}}}"#,
+        message["id"],
+        caller("X-Endeavor-Host"),
+        message["method"],
+        caller("X-Endeavor-Session")
+    )
 }

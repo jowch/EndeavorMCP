@@ -1,98 +1,11 @@
 # ---------------------------------------------------------------------------
-# URL query-string parser (avoids HTTP.URIs API uncertainty)
+# The agent's MCP messages, from the core (`endeavor-remote core`), which
+# serves the agent's MCP connection and passes on what it doesn't answer, with
+# the caller's X-Endeavor-Session and X-Endeavor-Host headers. The reply is the
+# JSON-RPC response ("null" for a notification).
 # ---------------------------------------------------------------------------
 
-function _query_params(target::String)
-    d   = Dict{String,String}()
-    idx = findfirst('?', target)
-    idx === nothing && return d
-    for pair in split(target[idx+1:end], '&')
-        kv = split(pair, '='; limit=2)
-        length(kv) == 2 && (d[kv[1]] = kv[2])
-    end
-    d
-end
-
-# ---------------------------------------------------------------------------
-# SSE session state
-# ---------------------------------------------------------------------------
-
-const _SSE_SESSIONS      = Dict{String,Channel{String}}()
-const _SSE_SESSIONS_LOCK = ReentrantLock()
-
-# ---------------------------------------------------------------------------
-# Internal HTTP/SSE endpoint handlers
-# ---------------------------------------------------------------------------
-
-function _handle_sse(http::HTTP.Stream)
-    sid = string(uuid4())
-    ch  = Channel{String}(64)
-
-    lock(_SSE_SESSIONS_LOCK) do
-        _SSE_SESSIONS[sid] = ch
-    end
-
-    HTTP.setheader(http, "Content-Type"  => "text/event-stream")
-    HTTP.setheader(http, "Cache-Control" => "no-cache")
-    HTTP.setheader(http, "Connection"    => "keep-alive")
-    HTTP.startwrite(http)
-
-    # Tell the client where to POST messages
-    write(http, "event: endpoint\ndata: /message?sessionId=$sid\n\n")
-    flush(http)
-
-    # One writer at a time: the keepalive and the message loop share this chunked
-    # stream, and interleaved chunks corrupt it (the client then reconnects and
-    # the response in flight is lost).
-    wlock = ReentrantLock()
-    send(text) = lock(wlock) do
-        write(http, text)
-        flush(http)
-    end
-
-    # Background keepalive so proxies don't close idle connections. A failed
-    # write means the client is gone: close the channel so this session stops
-    # taking messages (their POSTs get 404 and the client reconnects).
-    keepalive = @async while isopen(ch)
-        sleep(15)
-        try
-            isopen(ch) && send(": keepalive\n\n")
-        catch
-            close(ch)
-            break
-        end
-    end
-
-    try
-        for msg_json in ch
-            send("event: message\ndata: $msg_json\n\n")
-        end
-    catch
-        # Client disconnected
-    finally
-        lock(_SSE_SESSIONS_LOCK) do
-            delete!(_SSE_SESSIONS, sid)
-        end
-        isopen(ch) && close(ch)
-        try schedule(keepalive, InterruptException(); error=true) catch end
-    end
-end
-
-function _handle_post(http::HTTP.Stream, pluto_session)
-    params = _query_params(http.message.target)
-    sid    = get(params, "sessionId", "")
-
-    ch = lock(_SSE_SESSIONS_LOCK) do
-        get(_SSE_SESSIONS, sid, nothing)
-    end
-
-    if ch === nothing || !isopen(ch)
-        HTTP.setstatus(http, 404)
-        HTTP.startwrite(http)
-        write(http, """{"error":"Session not found"}""")
-        return
-    end
-
+function _handle_dispatch(http::HTTP.Stream, pluto_session)
     body = String(read(http))
     msg  = try
         JSON.parse(body, Dict{String,Any})
@@ -102,18 +15,17 @@ function _handle_post(http::HTTP.Stream, pluto_session)
         write(http, """{"error":"Invalid JSON"}""")
         return
     end
-
     owner = HTTP.header(http.message, "X-Endeavor-Session", "")
     host  = HTTP.header(http.message, "X-Endeavor-Host", "")
-    resp = _dispatch_mcp(pluto_session, msg; owner, host)
-    isopen(ch) && resp !== nothing && put!(ch, JSON.json(resp))
-
-    HTTP.setstatus(http, 202)
+    resp  = _dispatch_mcp(pluto_session, msg; owner, host)
+    HTTP.setstatus(http, 200)
+    HTTP.setheader(http, "Content-Type" => "application/json")
     HTTP.startwrite(http)
+    write(http, JSON.json(resp))
 end
 
 # ---------------------------------------------------------------------------
-# HTTP/SSE MCP server
+# HTTP bridge
 # ---------------------------------------------------------------------------
 
 # `Host` as clients send it: `127.0.0.1:2346`, `localhost`, `[::1]:2346`.
@@ -180,11 +92,8 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
         if method == "GET" && startswith(target, "/events")
             _handle_events(http)
 
-        elseif method == "GET" && startswith(target, "/sse")
-            _handle_sse(http)
-
-        elseif method == "POST" && startswith(target, "/message")
-            _handle_post(http, pluto_session)
+        elseif method == "POST" && startswith(target, "/dispatch")
+            _handle_dispatch(http, pluto_session)
 
         elseif method == "POST" && startswith(target, "/call")
             # Must read the body before responding (HTTP.jl stream contract).
@@ -199,7 +108,7 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
             end
             active   = standalone_session()
             sess     = active !== nothing ? active : pluto_session
-            # App-only (not reachable through the agent's /message path).
+            # App-only (not reachable through the agent's MCP connection).
             resp = if get(msg, "method", "") == "endeavor/set_policy"
                 p = get(msg, "params", Dict{String,Any}())
                 owner, policy = string(get(p, "owner", "")), string(get(p, "policy", "ask"))

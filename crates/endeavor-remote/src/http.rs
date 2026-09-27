@@ -1,7 +1,8 @@
 //! Just enough HTTP/1.1 for the core to pass requests through to Julia's bridge
 //! one at a time: request and response heads, and bodies relayed as they arrive
 //! in whatever framing the sender used (a length, chunks, or until the
-//! connection closes), so a stream of events reaches the client as it's written.
+//! connection closes), so a stream of events reaches the client as it's written;
+//! and whole requests and responses, for what the core answers itself and asks Julia.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -64,6 +65,11 @@ impl Head {
 
     pub fn method(&self) -> &str {
         self.line.split(' ').next().unwrap_or_default()
+    }
+
+    /// A request's target: its path and query.
+    pub fn target(&self) -> &str {
+        self.line.split(' ').nth(1).unwrap_or_default()
     }
 
     /// A response's status code.
@@ -226,6 +232,87 @@ pub fn copy_body(from: &mut impl BufRead, to: &mut impl Write, framing: &mut Fra
         from.consume(n);
     }
     Ok(())
+}
+
+/// Read a whole body, undoing chunked framing.
+pub fn read_body(from: &mut impl BufRead, framing: Framing) -> io::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    match framing {
+        Framing::Length(length) => {
+            from.take(length).read_to_end(&mut body)?;
+            if body.len() as u64 != length {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+        }
+        Framing::UntilClose => {
+            from.read_to_end(&mut body)?;
+        }
+        Framing::Chunked(_) => loop {
+            let mut line = String::new();
+            from.take(1024).read_line(&mut line)?;
+            let digits = line.split([';', '\r', '\n']).next().unwrap_or_default().trim();
+            let size = u64::from_str_radix(digits, 16).map_err(|_| invalid("bad chunk size"))?;
+            if size == 0 {
+                // Trailers, up to a blank line.
+                while !matches!(line.as_str(), "\r\n" | "\n") {
+                    line.clear();
+                    if from.take(MAX_HEAD as u64).read_line(&mut line)? == 0 {
+                        return Err(io::ErrorKind::UnexpectedEof.into());
+                    }
+                }
+                break;
+            }
+            let start = body.len() as u64;
+            from.take(size).read_to_end(&mut body)?;
+            if body.len() as u64 - start != size {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            line.clear();
+            from.take(2).read_line(&mut line)?;
+        },
+    }
+    Ok(body)
+}
+
+/// Write a whole response with a body of known length.
+pub fn respond(out: &mut impl Write, status: &str, content_type: Option<&str>, body: &[u8], keep_alive: bool) -> io::Result<()> {
+    let mut head = format!("HTTP/1.1 {status}\r\n");
+    if let Some(content_type) = content_type {
+        head.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
+    head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    if !keep_alive {
+        head.push_str("Connection: close\r\n");
+    }
+    head.push_str("\r\n");
+    out.write_all(head.as_bytes())?;
+    out.write_all(body)
+}
+
+/// POST `body` to `path` on the loopback server at `port`: the response's
+/// status and whole body.
+pub fn post(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> io::Result<(u16, Vec<u8>)> {
+    let upstream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), std::time::Duration::from_secs(5))?;
+    let _ = upstream.set_nodelay(true);
+    let mut head = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    for (name, value) in headers {
+        // A value can't end the header early.
+        let value: String = value.chars().filter(|c| !c.is_control()).collect();
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    let mut out = &upstream;
+    out.write_all(head.as_bytes())?;
+    out.write_all(body)?;
+    let mut reader = BufReader::new(&upstream);
+    let response = loop {
+        let response = Head::read(&mut reader)?.ok_or(io::ErrorKind::UnexpectedEof)?;
+        if !(100..200).contains(&response.status()) {
+            break response;
+        }
+    };
+    let body = read_body(&mut reader, response.response_body("POST")?)?;
+    Ok((response.status(), body))
 }
 
 /// Relay a response body from `upstream` to `client` as it arrives, like

@@ -1518,8 +1518,13 @@ end
             ok = call(["Authorization" => "Bearer s3cret-token"])
             @test ok.status == 200
             @test !isempty(JSON.parse(String(ok.body))["result"]["tools"])
-            sse = HTTP.get("http://127.0.0.1:$mcp_port/sse"; status_exception=false, readtimeout=2)
-            @test sse.status == 401
+            dispatch(headers) = HTTP.post("http://127.0.0.1:$mcp_port/dispatch", ["Content-Type" => "application/json", headers...], list;
+                status_exception=false, readtimeout=5)
+            @test dispatch([]).status == 401
+            # The core passes on the agent's messages with their caller's headers.
+            listed(headers) = [t["name"] for t in JSON.parse(String(dispatch(["Authorization" => "Bearer s3cret-token", headers...]).body))["result"]["tools"]]
+            @test "list_folder" in listed(["X-Endeavor-Session" => "7", "X-Endeavor-Host" => "gpu-box"])
+            @test !("list_folder" in listed([]))
             @test HTTP.get("http://127.0.0.1:$mcp_port/health"; status_exception=false, readtimeout=2).status == 200
 
             # The app binds a session to its notebook, and clears it with an empty path.
