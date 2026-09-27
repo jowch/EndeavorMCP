@@ -158,6 +158,11 @@ ending in an app that behaves as before:
 4. Move the handlers that need no notebook state into the core, one at a
    time: run policy and plan mode, host tools, idle stop, sharing checks,
    auth and Host/Origin checks. Their tests move to Rust; the Julia code goes.
+   Done for the agent's MCP connection (Julia answers what the core passes
+   to its internal `/dispatch`), auth and Host/Origin checks, run policy and
+   plan mode, and host tools. Idle stop, sharing checks and the
+   one-notebook-per-session binding stay for step 5: each needs a
+   notebook's cells, running state or path.
 5. The adapter interface over stdio, then the handlers that need the graph:
    staging and read receipts, `run_preview`, author and `before` tracking,
    event diffing. What is left in Julia is the Pluto adapter.
