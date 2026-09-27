@@ -1,7 +1,7 @@
-//! Questions about a host's files that the new-session screen asks before any
-//! runtime exists: a folder's contents, the Pluto notebooks under a folder, and
-//! a notebook's first cells. The helper answers them for a server, the app
-//! itself for This Mac, both with [`answer`].
+//! Questions about a host that the app asks before (or without) attaching to
+//! its runtime: a folder's contents, the Pluto notebooks under a folder, a
+//! notebook's first cells, Slurm's partitions, and whether a runtime or its job
+//! is there. The helper answers them, all but `Runtime` with [`answer`].
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,9 @@ pub enum Request {
     Preview { path: String },
     /// Slurm's partitions here, and `$SCRATCH`.
     Slurm,
+    /// Whether a runtime (or its job) is there, found without taking it over.
+    /// Only the helper knows its state folder, so it answers this one itself.
+    Runtime,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -30,7 +33,21 @@ pub enum Reply {
     Notebooks { found: Vec<Found> },
     Preview { preview: Preview },
     Slurm { scheduler: crate::slurm::Scheduler },
+    Runtime { runtime: RuntimeState },
     Error { message: String },
+}
+
+/// What runs from a host's state folder.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "is")]
+pub enum RuntimeState {
+    NotRunning,
+    /// `notebooks` is how many are open, when the helper could ask (not through
+    /// a cluster job's node); `job` is the cluster job it runs in.
+    Running { node: String, notebooks: Option<u32>, job: Option<crate::slurm::Job> },
+    /// A cluster job for it waits in the queue (`state` PENDING and the like),
+    /// or has a node (`state` RUNNING) and Julia is starting there.
+    Queued { job: String, state: String, reason: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -45,6 +62,7 @@ pub fn answer(request: &Request) -> Reply {
         Request::Notebooks { path } => Ok(Reply::Notebooks { found: notebooks::scan(&expand(path)) }),
         Request::Preview { path } => notebooks::read_preview(&expand(path)).map(|preview| Reply::Preview { preview }),
         Request::Slurm => crate::slurm::probe().map(|scheduler| Reply::Slurm { scheduler }),
+        Request::Runtime => Err("Only the helper knows about its runtime.".into()),
     };
     result.unwrap_or_else(|message| Reply::Error { message })
 }
@@ -124,5 +142,9 @@ mod tests {
         assert_eq!(json, serde_json::json!({ "kind": "Notebooks", "path": "~/x" }));
         let reply = Reply::Error { message: "no".into() };
         assert_eq!(serde_json::from_value::<Reply>(serde_json::to_value(&reply).unwrap()).unwrap(), reply);
+        let queued = Reply::Runtime { runtime: RuntimeState::Queued { job: "16".into(), state: "PENDING".into(), reason: "Resources".into() } };
+        let json = serde_json::to_value(&queued).unwrap();
+        assert_eq!((json["kind"].as_str(), json["runtime"]["is"].as_str()), (Some("Runtime"), Some("Queued")));
+        assert_eq!(serde_json::from_value::<Reply>(json).unwrap(), queued);
     }
 }

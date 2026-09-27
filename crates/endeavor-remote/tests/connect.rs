@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wire::files::{Reply, Request};
+use wire::files::{Reply, Request, RuntimeState};
 use wire::relay::Mux;
 use wire::{Target, ToApp, ToHelper};
 
@@ -111,6 +111,10 @@ fn bridge(mut socket: TcpStream, process: &Mutex<Child>) {
         let mut process = process.lock().unwrap();
         let _ = process.kill();
         let _ = process.wait();
+    }
+    if String::from_utf8_lossy(&body).contains("list_notebooks") {
+        let _ = write!(socket, "HTTP/1.1 200 OK\r\n\r\n{}", r#"{"result":{"content":[{"text":"[{\"path\":\"a.jl\"},{\"path\":\"b.jl\"}]"}]}}"#);
+        return;
     }
     let _ = write!(socket, "HTTP/1.1 200 OK\r\n\r\n{{\"said\":{:?}}}", request.trim_end());
 }
@@ -300,6 +304,30 @@ fn answers_file_requests_before_any_runtime() {
     assert_eq!(preview.cells[0].code, "x = 1");
     assert!(matches!(ask(4, Request::List { path: "~/nope".into() }), Reply::Error { .. }));
     assert!(!dir.join("lock").exists(), "no runtime was asked for, so no lock");
+}
+
+/// Ask the helper what runs from its state folder.
+fn check(helper: &Helper, id: u32) -> RuntimeState {
+    helper.send(ToHelper::Files { id, request: Request::Runtime });
+    match helper.next() {
+        ToApp::Files { id: got, reply: Reply::Runtime { runtime } } if got == id => runtime,
+        other => panic!("expected Runtime {id}, got {other:?}"),
+    }
+}
+
+#[test]
+fn checks_and_stops_a_runtime_without_attaching() {
+    let dir = state_dir("check");
+    let helper = Helper::start(&dir, &["--any-node"]);
+    helper.hello();
+    assert_eq!(check(&helper, 1), RuntimeState::NotRunning);
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    assert_eq!(check(&helper, 2), RuntimeState::Running { node: "labbox3".into(), notebooks: Some(2), job: None });
+    assert!(!dir.join("lock").exists(), "checking takes nothing over");
+    helper.send(ToHelper::Stop);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    assert!(!runtime.alive(), "Stop reaches a runtime nobody had attached to");
+    assert_eq!(check(&helper, 3), RuntimeState::NotRunning);
 }
 
 #[test]
@@ -599,4 +627,37 @@ fn stopping_a_running_job_shuts_julia_down_then_cancels_the_job() {
     assert!(!runtime.alive(), "the runtime was asked to shut down");
     assert_eq!(slurm.read("scancel.log").trim(), "42");
     assert!(!dir.join("runtime.json").exists());
+}
+
+#[test]
+fn a_cluster_check_sees_the_job_and_stop_cancels_it_without_attaching() {
+    let dir = state_dir("slurm-check");
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let mut first = slurm.helper(&dir, &julia);
+    first.hello();
+    first.send(ToHelper::StartRuntime { job: small_job() });
+    assert!(matches!(first.after_progress(), ToApp::FoundJulia { .. }));
+    assert!(matches!(first.next(), ToApp::Submitted { .. }));
+    assert!(matches!(first.next(), ToApp::Queued { .. }));
+    first.send(ToHelper::Detach);
+    first.exits();
+
+    let helper = slurm.helper(&dir, &julia);
+    helper.hello();
+    assert_eq!(check(&helper, 1), RuntimeState::Queued { job: "42".into(), state: "PENDING".into(), reason: "Priority".into() });
+    slurm.set("node", &this_host());
+    slurm.set("state", "RUNNING");
+    assert_eq!(check(&helper, 2), RuntimeState::Queued { job: "42".into(), state: "RUNNING".into(), reason: this_host() });
+    let _runtime = FakeRuntime::in_job(&dir, &this_host(), "42");
+    let RuntimeState::Running { node, notebooks: None, job: Some(job) } = check(&helper, 3) else { panic!("expected Running") };
+    assert_eq!((node, job.id.as_str(), job.node), (this_host(), "42", this_host()));
+    assert!(job.ends_at.is_some());
+    assert_eq!(slurm.read("srun.args"), "", "checking doesn't reach the node");
+
+    helper.send(ToHelper::Stop);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    assert_eq!(slurm.read("scancel.log").trim(), "42");
+    assert!(!dir.join("runtime.json").exists() && !dir.join("job.json").exists());
+    assert_eq!(check(&helper, 4), RuntimeState::NotRunning);
 }

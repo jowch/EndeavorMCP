@@ -191,7 +191,8 @@ pub enum ToHelper {
         #[serde(default)]
         job: Option<slurm::JobRequest>,
     },
-    /// Stop the runtime and stay connected.
+    /// Stop the runtime and stay connected: the attached one, else the one
+    /// recorded in the state folder, or on a cluster the job waiting for it.
     Stop,
     /// Exit and leave the runtime running.
     Detach,
