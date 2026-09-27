@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use wire::relay::Mux;
+use wire::files::RuntimeState;
 use wire::slurm::JobRequest;
 use wire::{Frame, Target, ToApp, ToHelper};
 
@@ -97,6 +98,9 @@ enum Route {
 }
 
 type Routes = Arc<RwLock<Route>>;
+
+/// How the helper answers the app's file requests.
+type Answer = Arc<dyn Fn(&wire::files::Request) -> wire::files::Reply + Send + Sync>;
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -181,7 +185,14 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<
     let (events, rx) = mpsc::channel();
     watch_replace_signal(replace_signal, events.clone());
     let routes: Routes = Arc::new(RwLock::new(Route::None));
-    relay_stdin(mux.clone(), routes.clone(), events.clone());
+    let answer: Answer = {
+        let (dir, launcher, any_node) = (args.state_dir.clone(), args.launcher, args.any_node);
+        Arc::new(move |request| match request {
+            wire::files::Request::Runtime => wire::files::Reply::Runtime { runtime: check(&dir, launcher, any_node) },
+            other => wire::files::answer(other),
+        })
+    };
+    relay_stdin(mux.clone(), routes.clone(), events.clone(), answer);
     let home = wire::files::home().display().to_string();
     let slurm_here = wire::slurm::has("sinfo");
     let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: slurm_here }.frame());
@@ -210,9 +221,12 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<
                 }
             }
             Event::App(ToHelper::Stop) => {
-                if let Some(runtime) = attached.take() {
-                    *routes.write().unwrap() = Route::None;
-                    runtime.stop(&rx);
+                match attached.take() {
+                    Some(runtime) => {
+                        *routes.write().unwrap() = Route::None;
+                        runtime.stop(&rx);
+                    }
+                    None => stop_recorded(args, &events),
                 }
                 let _ = mux.send(&ToApp::Stopped.frame());
             }
@@ -333,6 +347,53 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     let runtime = Runtime { pid, exit: Exit::watch_child(child, pid, events.clone()), state_dir: args.state_dir.clone() };
     let state = boot(args, mux, &runtime, rx)?;
     Ok(Attached { how: How::Process(runtime), state, reattached: false, _lock: lock })
+}
+
+/// Stop the runtime recorded in the state folder without attaching to it (on
+/// a cluster, cancel its job, or the job waiting for a node): the app's Stop
+/// for a host it only browsed. Taking the lock first makes any other client
+/// let go.
+fn stop_recorded(args: &Args, events: &Sender<Event>) {
+    let _lock = match lock(&args.state_dir) {
+        Ok(lock) => lock,
+        Err(e) => return eprintln!("endeavor-remote: not stopping: {e}"),
+    };
+    match args.launcher {
+        Launcher::Process => match existing(args) {
+            Ok(Some(state)) => {
+                let runtime = Runtime { pid: state.pid, exit: Exit::watch_pid(state.pid, events.clone()), state_dir: args.state_dir.clone() };
+                runtime.stop(Some(&state));
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("endeavor-remote: not stopping: {e}"),
+        },
+        Launcher::Slurm => slurm::cancel_recorded(&args.state_dir),
+    }
+}
+
+/// What runs from the state folder, found without taking it over.
+fn check(dir: &Path, launcher: Launcher, any_node: bool) -> RuntimeState {
+    if launcher == Launcher::Slurm {
+        return slurm::check(dir);
+    }
+    let Some(state) = read_state(dir) else { return RuntimeState::NotRunning };
+    if state.node != hostname() && !any_node {
+        return RuntimeState::Running { node: state.node, notebooks: None, job: None };
+    }
+    if !pid_alive(state.pid) || !(bridge_answers(&state) || bridge_answers(&state)) {
+        return RuntimeState::NotRunning;
+    }
+    let notebooks = open_notebooks(&state);
+    RuntimeState::Running { node: state.node, notebooks, job: None }
+}
+
+/// How many notebooks the runtime has open, from its `list_notebooks` tool.
+fn open_notebooks(state: &State) -> Option<u32> {
+    let params = json!({ "name": "list_notebooks", "arguments": {} });
+    let reply = bridge_rpc(state.mcp_port, &state.token, "tools/call", params).ok()?;
+    let text = reply["result"]["content"][0]["text"].as_str()?;
+    let list: Value = serde_json::from_str(text).ok()?;
+    list.as_array().map(|a| a.len() as u32)
 }
 
 /// Wait for a runtime we just started to write its state and answer. A runtime
@@ -560,8 +621,9 @@ fn watch_replace_signal(set: libc::sigset_t, events: Sender<Event>) {
 
 /// Read frames from the app: streams go where the attached runtime is (its
 /// ports here, or the relay on its job's node), file requests are answered on
-/// their own threads, other control messages and the end of input become events.
-fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>) {
+/// their own threads with `answer`, other control messages and the end of input
+/// become events.
+fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Answer) {
     std::thread::spawn(move || {
         // SAFETY: fd 0 is our stdin; only this thread reads it.
         let mut stdin = BufReader::new(unsafe { File::from_raw_fd(0) });
@@ -578,8 +640,8 @@ fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>) {
             match frame {
                 Frame::Control(json) => match serde_json::from_slice::<ToHelper>(&json) {
                     Ok(ToHelper::Files { id, request }) => {
-                        let mux = mux.clone();
-                        std::thread::spawn(move || drop(mux.send(&ToApp::Files { id, reply: wire::files::answer(&request) }.frame())));
+                        let (mux, answer) = (mux.clone(), answer.clone());
+                        std::thread::spawn(move || drop(mux.send(&ToApp::Files { id, reply: answer(&request) }.frame())));
                     }
                     Ok(message) => drop(events.send(Event::App(message))),
                     Err(e) => eprintln!("endeavor-remote: ignoring control message: {e}"),
@@ -792,6 +854,24 @@ fn hostname() -> String {
 
 fn bridge_answers(state: &State) -> bool {
     bridge_call(state.mcp_port, &state.token, "ping").is_ok_and(|status| status == 200)
+}
+
+/// POST one JSON-RPC call to the bridge's `/call`; its reply.
+fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::Result<Value> {
+    let mut socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(2))?;
+    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(3)))?;
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string();
+    write!(
+        socket,
+        "POST /call HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )?;
+    // HTTP/1.0: the body runs to the end of the connection.
+    let mut response = String::new();
+    socket.read_to_string(&mut response)?;
+    let (_, payload) = response.split_once("\r\n\r\n").ok_or(std::io::ErrorKind::InvalidData)?;
+    serde_json::from_str(payload).map_err(|_| std::io::ErrorKind::InvalidData.into())
 }
 
 /// POST one JSON-RPC call to the bridge's `/call`; its HTTP status.

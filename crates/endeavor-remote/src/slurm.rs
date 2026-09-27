@@ -183,6 +183,44 @@ fn waiting_job(dir: &Path) -> Option<(String, String)> {
     }
 }
 
+/// What runs from `dir`, found without taking it over: the job the runtime
+/// runs in, or a job still waiting for a node or for Julia to start.
+pub fn check(dir: &Path) -> RuntimeState {
+    if let Some(state) = read_state(dir).filter(|s| s.launcher == "slurm")
+        && let Some(job) = state.job
+        && let Ok(Some(q)) = squeue(&job)
+        && q.running()
+    {
+        let info = Job { id: job, node: q.node.clone(), ends_at: ends_at(&q), route: String::new() };
+        return RuntimeState::Running { node: state.node, notebooks: None, job: Some(info) };
+    }
+    let recorded = std::fs::read_to_string(dir.join("job.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    if let Some(job) = recorded.as_ref().and_then(|v| v["job"].as_str())
+        && let Ok(Some(q)) = squeue(job)
+    {
+        if q.pending() {
+            return RuntimeState::Queued { job: job.to_owned(), state: q.state, reason: q.reason };
+        }
+        if q.running() {
+            return RuntimeState::Queued { job: job.to_owned(), state: q.state, reason: q.node };
+        }
+    }
+    RuntimeState::NotRunning
+}
+
+/// Cancel the job recorded in `dir`: the one running the runtime, or one
+/// still waiting for a node.
+pub fn cancel_recorded(dir: &Path) {
+    if let Some(job) = read_state(dir).filter(|s| s.launcher == "slurm").and_then(|s| s.job) {
+        scancel(&job);
+        forget(dir, &job);
+    }
+    if let Some((job, _)) = waiting_job(dir) {
+        scancel(&job);
+        forget(dir, &job);
+    }
+}
+
 /// Find Julia (here, on the shared filesystem), write the job script and
 /// submit it. The job's id.
 fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, String> {
@@ -543,7 +581,7 @@ pub fn relay_main(argv: &[String]) -> ! {
         std::process::exit(1);
     };
     let runtime = Runtime { pid: state.pid, exit: Exit::watch_pid(state.pid, events.clone()), state_dir: dir.clone() };
-    relay_stdin(mux.clone(), Arc::new(RwLock::new(Route::Local([state.pluto_port, state.mcp_port]))), events);
+    relay_stdin(mux.clone(), Arc::new(RwLock::new(Route::Local([state.pluto_port, state.mcp_port]))), events, Arc::new(wire::files::answer));
     let ready = ToApp::Ready {
         launcher: state.launcher.clone(),
         node: state.node.clone(),
