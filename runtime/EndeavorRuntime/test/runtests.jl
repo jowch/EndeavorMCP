@@ -1579,6 +1579,103 @@ end
         end
     end
 
+    @testset "adapter: snapshot, graph and shutdown, and notifications of Pluto's changes" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        pluto_port = 1450 + rand(0:99)
+        mcp_port = 2650 + rand(0:99)
+        EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port)
+        fixture = fresh_fixture()
+        X, Y = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+        try
+            EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
+            sock = Sockets.connect("127.0.0.1", mcp_port)
+            write(sock, "GET /notifications HTTP/1.0\r\nHost: 127.0.0.1:$mcp_port\r\n\r\n")
+            notes = Channel{Dict{String,Any}}(Inf)
+            @async for line in eachline(sock)
+                startswith(line, "data: ") && put!(notes, JSON.parse(line[7:end]))
+            end
+            # The next notification `method` names, skipping others.
+            function next_note(method; nid = nothing)
+                deadline = time() + 60
+                while time() < deadline
+                    timedwait(() -> isready(notes), max(0.0, deadline - time())) == :ok || break
+                    note = take!(notes)
+                    note["method"] == method && (nid === nothing || note["params"]["notebook_id"] == nid) && return note["params"]
+                end
+                error("no $method notification")
+            end
+            adapter(method, params) = JSON.parse(String(HTTP.post("http://127.0.0.1:$mcp_port/adapter", [],
+                JSON.json(Dict("method" => method, "params" => params)); readtimeout=30).body))
+            tool(name, args) = JSON.parse(JSON.parse(String(HTTP.post("http://127.0.0.1:$mcp_port/call", ["Content-Type" => "application/json"],
+                JSON.json(Dict("jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
+                    "params" => Dict("name" => name, "arguments" => args))); readtimeout=30).body))["result"]["content"][1]["text"])
+            sleep(0.5)   # the stream is open before anything happens
+
+            nid = tool("open_notebook", Dict("path" => fixture, "run_notebook" => true))["notebook_id"]
+            @test next_note("notebook_opened") == Dict("notebook_id" => nid, "path" => abspath(fixture))
+            @test next_note("execution_done") == Dict("notebook_id" => nid)
+            @test adapter("snapshot", Dict())["result"]["notebooks"] == [adapter("snapshot", Dict("notebook_id" => nid))["result"]]
+            snap = adapter("snapshot", Dict("notebook_id" => nid))["result"]
+            @test (snap["path"], snap["cell_order"], snap["execution_allowed"], snap["safe_preview"], snap["pending_run"]) ==
+                  (abspath(fixture), [X, Y], true, false, [])
+            y = snap["cells"][2]
+            @test (y["cell_id"], y["code"], y["folded"], y["running"], y["queued"], y["errored"], y["output"]) ==
+                  (Y, "y = x * 7", false, false, false, false, "42")
+            @test y["last_run"] > 0 && y["runtime"] isa Integer && !haskey(y, "error")
+            graph = adapter("graph", Dict("notebook_id" => nid))["result"]
+            @test graph["cells"] == [
+                Dict("cell_id" => X, "definitions" => ["x"], "functions" => [], "references" => []),
+                Dict("cell_id" => Y, "definitions" => ["y"], "functions" => [], "references" => ["*", "x"]),
+            ]
+            @test graph["order"] == [X, Y]
+
+            # An edit through the tools: staged, its code in the next cell_state, the graph changed.
+            tool("read_cell", Dict("notebook_id" => nid, "cell_id" => Y))
+            tool("edit_cell", Dict("notebook_id" => nid, "cell_id" => Y, "code" => "y = x * 8 + z"))
+            state = next_note("cell_state")
+            while only(filter(c -> c["cell_id"] == Y, state["cells"]))["code"] != "y = x * 8 + z"
+                state = next_note("cell_state")
+            end
+            @test only(filter(c -> c["cell_id"] == Y, state["cells"])) ==
+                  Dict("cell_id" => Y, "code" => "y = x * 8 + z", "running" => false, "queued" => false, "errored" => false)
+            @test next_note("topology_changed") == Dict("notebook_id" => nid)
+            @test adapter("snapshot", Dict("notebook_id" => nid))["result"]["pending_run"] == [Y]
+            @test adapter("graph", Dict("notebook_id" => nid))["result"]["cells"][2]["references"] == ["*", "+", "x", "z"]
+
+            # A change the tools didn't make (Pluto's editor submitting code) reaches the core too.
+            sess = EndeavorRuntime.standalone_session()
+            nb = sess.notebooks[UUID(nid)]
+            nb.cells_dict[UUID(X)].code = "x = 5"
+            EndeavorRuntime._notify_browser(sess, nb)
+            state = next_note("cell_state")
+            while state["cells"][1]["code"] != "x = 5"
+                state = next_note("cell_state")
+            end
+            @test state["notebook_id"] == nid
+
+            # An error names the notebook the core asked about.
+            missing = string(uuid4())
+            @test adapter("snapshot", Dict("notebook_id" => missing)) ==
+                  Dict("error" => "KeyError: key \"notebook_not_found::No notebook with id '$missing' in the current session\" not found")
+            @test adapter("graph", Dict("notebook_id" => "nope")) == Dict("error" => "ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nope'")
+            @test adapter("render", Dict("notebook_id" => nid)) == Dict("error" => "ArgumentError: unknown_method::Unknown adapter method: 'render'")
+            @test HTTP.post("http://127.0.0.1:$mcp_port/adapter", [], "{nope"; status_exception=false).status == 400
+
+            # Shutting it down: whether it was in safe preview, and its staging goes.
+            @test adapter("shutdown", Dict("notebook_id" => nid)) == Dict("result" => Dict("safe_preview" => false))
+            @test next_note("notebook_shut_down") == Dict("notebook_id" => nid)
+            @test adapter("snapshot", Dict())["result"]["notebooks"] == []
+            @test !haskey(EndeavorRuntime._pending_run, UUID(nid))
+
+            previewed = tool("open_notebook", Dict("path" => fresh_fixture()))["notebook_id"]
+            @test adapter("snapshot", Dict("notebook_id" => previewed))["result"]["safe_preview"]
+            @test adapter("shutdown", Dict("notebook_id" => previewed)) == Dict("result" => Dict("safe_preview" => true))
+            close(sock)
+        finally
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
     @testset "events stream pushes notebook changes" begin
         EndeavorRuntime.stop_pluto_stack!()
         pluto_port = 1450 + rand(0:99)

@@ -18,6 +18,7 @@ include("Policy.jl")
 include("Idle.jl")
 include("MCP.jl")
 include("Events.jl")
+include("Adapter.jl")
 include("Server.jl")
 
 register_http_bridge!(_run_http_mcp_server)

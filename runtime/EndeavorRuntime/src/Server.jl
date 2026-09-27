@@ -61,6 +61,13 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
         if method == "GET" && startswith(target, "/events")
             _handle_events(http)
 
+        elseif method == "GET" && startswith(target, "/notifications")
+            _handle_notifications(http)
+
+        elseif method == "POST" && startswith(target, "/adapter")
+            active = standalone_session()
+            _handle_adapter(http, active !== nothing ? active : pluto_session)
+
         elseif method == "POST" && startswith(target, "/dispatch")
             _handle_dispatch(http, pluto_session)
 
