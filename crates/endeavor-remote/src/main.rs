@@ -29,7 +29,7 @@ struct Args {
     julia: String,
     runtime: PathBuf,
     depot: String,
-    /// Stop the runtime when the app goes away, not only when it says Stop.
+    /// Stop the runtime when the app goes away without saying Stop or Detach.
     quit_with_client: bool,
     /// The state folder belongs to this one machine, so a different node name
     /// only means the machine was renamed.
@@ -155,7 +155,9 @@ fn connect(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Resul
         match rx.recv().expect("senders live as long as their threads") {
             Event::Exited(status) => runtime.died(mux, status),
             Event::App(ToHelper::Stop) => runtime.stop(Some(&state)),
-            Event::App(ToHelper::Detach) | Event::Eof if args.quit_with_client => runtime.stop(Some(&state)),
+            Event::Eof if args.quit_with_client => runtime.stop(Some(&state)),
+            // An explicit Detach wins over --quit-with-client: the app decides at
+            // quit, and the flag only covers an app that vanishes without saying.
             Event::App(ToHelper::Detach) | Event::Eof => std::process::exit(0),
             Event::Replaced => {
                 let _ = mux.send(&ToApp::Replaced.frame());
@@ -170,7 +172,7 @@ fn connect(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Resul
 fn boot(args: &Args, mux: &Arc<Mux>, pid: i32, exit: &Arc<Exit>, rx: &mpsc::Receiver<Event>) -> Result<State, String> {
     let runtime = Runtime { pid, exit: exit.clone(), state_dir: args.state_dir.clone() };
     let ready = Arc::new(AtomicBool::new(false));
-    follow_log(args.state_dir.join("runtime.log"), mux.clone(), ready.clone(), exit.clone());
+    let log = follow_log(args.state_dir.join("runtime.log"), mux.clone(), ready.clone(), exit.clone());
     let result = loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Exited(status)) => runtime.died(mux, status),
@@ -191,7 +193,9 @@ fn boot(args: &Args, mux: &Arc<Mux>, pid: i32, exit: &Arc<Exit>, rx: &mpsc::Rece
             }
         }
     };
+    // Its progress lines go out before Hello.
     ready.store(true, Ordering::SeqCst);
+    let _ = log.join();
     result
 }
 
@@ -518,25 +522,27 @@ fn free_ports() -> Result<[u16; 2], String> {
     Ok([&pluto, &mcp].map(|l| l.local_addr().unwrap().port()))
 }
 
-/// Send the runtime's log lines as `Progress` until it's ready or gone.
-fn follow_log(path: PathBuf, mux: Arc<Mux>, ready: Arc<AtomicBool>, exit: Arc<Exit>) {
+/// Send the runtime's log lines as `Progress` until it's ready (then what's
+/// been written so far) or gone.
+fn follow_log(path: PathBuf, mux: Arc<Mux>, ready: Arc<AtomicBool>, exit: Arc<Exit>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let Ok(file) = File::open(&path) else { return };
         let mut lines = BufReader::new(file);
         let mut line = String::new();
-        while !ready.load(Ordering::SeqCst) {
+        loop {
+            let last_pass = ready.load(Ordering::SeqCst) || exit.status().is_some();
             match lines.read_line(&mut line) {
                 Ok(n) if n > 0 && line.ends_with('\n') => {
                     let text = redact_secret(line.trim_end());
                     let _ = mux.send(&ToApp::Progress { line: text }.frame());
                     line.clear();
                 }
-                // A partial line waits for the rest.
-                Ok(_) if exit.status().is_none() => std::thread::sleep(Duration::from_millis(100)),
+                // At the end for now; a partial line waits for the rest.
+                Ok(_) if !last_pass => std::thread::sleep(Duration::from_millis(100)),
                 _ => return,
             }
         }
-    });
+    })
 }
 
 /// The end of the runtime's log, secrets masked.

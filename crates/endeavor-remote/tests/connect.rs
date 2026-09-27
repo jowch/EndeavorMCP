@@ -237,19 +237,18 @@ fn attaches_relays_hands_over_and_stops() {
 fn detaching_leaves_the_runtime_and_quit_with_client_stops_it_on_eof() {
     let dir = state_dir("detach");
     let runtime = FakeRuntime::start(&dir, "labbox3");
+    // The app's own word at quit wins over the flag.
     let mut helper = Helper::start(&dir, &["--any-node", "--quit-with-client"]);
     helper.hello();
     helper.send(ToHelper::Detach);
     helper.exits();
-    // --quit-with-client makes Detach a Stop.
-    assert!(!runtime.alive());
+    assert!(runtime.alive() && dir.join("runtime.json").exists());
 
-    let runtime = FakeRuntime::start(&dir, "labbox3");
     let mut helper = Helper::start(&dir, &["--any-node"]);
     helper.hello();
-    helper.send(ToHelper::Detach);
+    helper.stdin.0.lock().unwrap().take();
     helper.exits();
-    assert!(runtime.alive() && dir.join("runtime.json").exists());
+    assert!(runtime.alive() && dir.join("runtime.json").exists(), "without the flag, the app vanishing leaves it");
 
     let mut helper = Helper::start(&dir, &["--any-node", "--quit-with-client"]);
     helper.hello();

@@ -4,6 +4,11 @@
 # runtime.json) and ENDEAVOR_LAUNCHER in the environment. Once Pluto and the bridge
 # are up it writes runtime.json, which is how the helper learns the runtime is
 # ready; it serves until the bridge's `endeavor/shutdown` or a signal ends it.
+
+# Our stdout and stderr are runtime.log, a file, which Julia buffers. The helper
+# reads that file for boot progress and for a crash's last lines, so flush often.
+const log_flusher = Timer(_ -> (flush(stdout); flush(stderr)), 0.25; interval=0.25)
+
 import Pkg
 Pkg.instantiate(; io=stderr)
 using EndeavorRuntime
