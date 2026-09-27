@@ -3,6 +3,10 @@
 //! whose reply goes out on that stream. Each agent session's messages carry
 //! `X-Endeavor-Session` (its key) and, on a server, `X-Endeavor-Host`. What the
 //! core doesn't answer itself goes to Julia's `/dispatch` with those headers.
+//!
+//! Each session has a run policy the app sets ("plan" | "ask" | "auto"). In
+//! "plan" its notebook writes and runs are refused. "ask" and "auto" pass
+//! through for now: runs are still gated by the app's Claude hook.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
@@ -20,12 +24,23 @@ const KEEPALIVE: Duration = Duration::from_secs(15);
 /// Replies waiting for a session's stream; a full queue holds up the next POST.
 const QUEUE: usize = 64;
 
+/// Tools that change the notebook or run code, here or on the server.
+const WRITE_TOOLS: [&str; 12] = [
+    "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
+    "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell",
+];
+
+/// Tools that act on the machine the runtime runs on, for sessions on a server.
+const HOST_TOOLS: [&str; 3] = ["list_folder", "read_file", "run_shell"];
+
 /// What every client connection shares.
 pub struct Bridge {
     /// Julia's bridge port, once it answers.
     pub upstream: OnceLock<u16>,
     pub token: String,
     sessions: Mutex<HashMap<String, SyncSender<String>>>,
+    /// Each agent session's run policy, by its key.
+    policies: Mutex<HashMap<String, String>>,
 }
 
 /// Who sent a message: the agent session's key and the server it works on,
@@ -45,7 +60,31 @@ impl Caller {
 
 impl Bridge {
     pub fn new(token: String) -> Bridge {
-        Bridge { upstream: OnceLock::new(), token, sessions: Mutex::default() }
+        Bridge { upstream: OnceLock::new(), token, sessions: Mutex::default(), policies: Mutex::default() }
+    }
+
+    /// The reply to one of the app's `/call`s, if the core answers it; `None`
+    /// passes it to Julia's `/call`. Only the app calls this route, so its
+    /// tool calls have no caller.
+    pub fn app_call(&self, raw: &[u8]) -> io::Result<Option<String>> {
+        let Some(message) = serde_json::from_slice::<Value>(raw).ok().filter(Value::is_object) else {
+            return Ok(None);
+        };
+        let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+        let text = |key: &str, default: &str| params.get(key).map_or(default.to_owned(), julia_string);
+        match message["method"].as_str().unwrap_or_default() {
+            "endeavor/set_policy" => {
+                let (owner, policy) = (text("owner", ""), text("policy", "ask"));
+                eprintln!("[ Info: Session {owner} policy: {policy}");
+                self.policies.lock().unwrap().insert(owner, policy);
+            }
+            "tools/list" | "tools/call" => {
+                return Ok(Some(self.dispatch(&message, raw, &Caller::default())?.unwrap_or_else(|| "{}".into())));
+            }
+            _ => return Ok(None),
+        }
+        let id = message.get("id").cloned().unwrap_or(Value::Null);
+        Ok(Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }))))
     }
 
     /// Serve `GET /sse`: a new session, and its stream until the client goes.
@@ -105,14 +144,61 @@ impl Bridge {
             None | Some(Value::Null) => return Ok(None),
             Some(id) => id,
         };
+        let ok = |result: Value| Ok(Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))));
         match message["method"].as_str().unwrap_or_default() {
-            "ping" => Ok(Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))),
-            _ => self.ask_julia(raw, caller).map(Some),
+            "ping" => ok(json!({})),
+            "tools/list" => {
+                let mut reply: Value = serde_json::from_str(&self.ask_julia("/dispatch", raw, caller)?)?;
+                for tool in reply["result"]["tools"].as_array_mut().into_iter().flatten() {
+                    // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
+                    let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name));
+                    tool["annotations"] = json!({ "readOnlyHint": read_only });
+                }
+                Ok(Some(to_json(&reply)))
+            }
+            "tools/call" => {
+                let params = &message["params"];
+                let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                // Julia reads a call's arguments before anything else, and fails
+                // arguments that aren't an object its own way.
+                if let (Some(name), true) = (params["name"].as_str(), arguments.is_object())
+                    && let Some(refusal) = self.refusal(caller, name)
+                {
+                    let _ = self.tool_called(&arguments);
+                    return ok(tool_error(&refusal));
+                }
+                self.ask_julia("/dispatch", raw, caller).map(Some)
+            }
+            _ => self.ask_julia("/dispatch", raw, caller).map(Some),
         }
     }
 
-    /// Julia's reply to a message, from its `/dispatch`.
-    fn ask_julia(&self, raw: &[u8], caller: &Caller) -> io::Result<String> {
+    /// Why a session may not call `tool`, as the error Julia raised for it.
+    fn refusal(&self, caller: &Caller, tool: &str) -> Option<String> {
+        if HOST_TOOLS.contains(&tool) && caller.host.is_empty() {
+            return Some(format!(
+                "ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on this Mac: use your own file and shell tools."
+            ));
+        }
+        let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p == "plan");
+        if plan && WRITE_TOOLS.contains(&tool) {
+            let what = if tool == "run_shell" { "run a command on the server" } else { "change or run the notebook" };
+            return Some(format!(
+                "ArgumentError: plan_mode::Plan mode is read-only: `{tool}` would {what}. Finish the plan; the user switches modes to carry it out."
+            ));
+        }
+        None
+    }
+
+    /// Tell Julia about a tool call the core answered: it counts as activity on
+    /// the notebook it names, and the app hears the notebooks' state after it.
+    fn tool_called(&self, arguments: &Value) -> io::Result<()> {
+        let message = json!({ "jsonrpc": "2.0", "id": 0, "method": "endeavor/tool_called", "params": { "arguments": arguments } });
+        self.ask_julia("/call", message.to_string().as_bytes(), &Caller::default()).map(drop)
+    }
+
+    /// Julia's reply to a message on its `path`.
+    fn ask_julia(&self, path: &str, raw: &[u8], caller: &Caller) -> io::Result<String> {
         let port = *self.upstream.get().ok_or(io::ErrorKind::NotConnected)?;
         let authorization = format!("Bearer {}", self.token);
         let headers = [
@@ -122,11 +208,34 @@ impl Bridge {
             ("X-Endeavor-Host", caller.host.as_str()),
         ];
         let headers: Vec<_> = headers.into_iter().filter(|(_, value)| !value.is_empty()).collect();
-        let (status, body) = http::post(port, "/dispatch", &headers, raw)?;
+        let (status, body) = http::post(port, path, &headers, raw)?;
         if status != 200 {
-            return Err(io::Error::other(format!("Julia's /dispatch answered {status}")));
+            return Err(io::Error::other(format!("Julia's {path} answered {status}")));
         }
         String::from_utf8(body).map_err(|_| io::ErrorKind::InvalidData.into())
+    }
+}
+
+/// A failed tool call's result, from the text of the error Julia raised:
+/// `ArgumentError: kind::message` names its kind; anything else is a `tool_error`.
+fn tool_error(raw: &str) -> Value {
+    let (kind, message) = match raw.split_once("::") {
+        Some((kind, message)) => {
+            let kind = kind.trim();
+            (kind.rsplit(':').next().unwrap_or_default().trim(), message)
+        }
+        None => ("tool_error", raw),
+    };
+    let text = to_json(&json!({ "error": kind, "message": message }));
+    json!({ "content": [{ "type": "text", "text": text }], "isError": true })
+}
+
+/// A JSON value as Julia's `string` shows it.
+pub fn julia_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => "nothing".into(),
+        other => other.to_string(),
     }
 }
 
@@ -220,6 +329,15 @@ mod tests {
     fn writes_json_as_julia_does() {
         let value = json!({ "b": 1, "A": [true, null, 2.5], "a": { "z": "x\u{7f}\u{1}/\"é", "_": {} }, "aa": [] });
         assert_eq!(to_json(&value), r#"{"A":[true,null,2.5],"a":{"_":{},"z":"x\u007f\u0001/\"é"},"aa":[],"b":1}"#);
+    }
+
+    #[test]
+    fn reads_errors_as_julia_did() {
+        let text = |raw: &str| tool_error(raw)["content"][0]["text"].as_str().unwrap().to_owned();
+        assert_eq!(text("ArgumentError: not_found::No folder at /x::y"), r#"{"error":"not_found","message":"No folder at /x::y"}"#);
+        assert_eq!(text("SystemError: opening file \"/x\": Permission denied"), r#"{"error":"tool_error","message":"SystemError: opening file \"/x\": Permission denied"}"#);
+        assert_eq!(text("IOError: readdir(\"/a::b\"): denied"), r#"{"error":"readdir(\"/a","message":"b\"): denied"}"#);
+        assert_eq!(tool_error("x")["isError"], true);
     }
 
     #[test]

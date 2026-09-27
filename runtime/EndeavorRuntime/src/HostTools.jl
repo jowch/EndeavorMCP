@@ -10,12 +10,6 @@ const _READ_FILE_MAX_LINE      = 2000
 const _SHELL_KEEP_HALF         = 15_000
 const _SHELL_DRAIN_GRACE       = 2.0
 
-function host_tool_refusal(host::AbstractString, tool::AbstractString)
-    (tool in HOST_TOOL_NAMES && isempty(host)) || return nothing
-    return ArgumentError("host_tools::`$tool` is only for sessions on a server. " *
-                         "This session runs on this Mac: use your own file and shell tools.")
-end
-
 function _host_path(path)
     p = path === nothing ? "" : strip(string(path))
     isempty(p) && return homedir()

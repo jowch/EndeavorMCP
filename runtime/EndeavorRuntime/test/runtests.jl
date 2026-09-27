@@ -1559,6 +1559,11 @@ end
             @test app_call("endeavor/set_folder", Dict("path" => folder)).status == 200
             @test EndeavorRuntime.standalone_session().options.server.notebook_path_suggestion == joinpath(folder, "")
 
+            # The core tells Julia about tool calls it answered itself.
+            told = app_call("endeavor/tool_called", Dict("arguments" => Dict("notebook_id" => string(uuid4()))))
+            @test told.status == 200
+            @test JSON.parse(String(told.body))["result"] == Dict()
+
             # Shutdown answers first, then ends the process.
             shut_down = Channel{Bool}(1)
             EndeavorRuntime._SHUTDOWN[] = () -> put!(shut_down, true)
@@ -1712,28 +1717,6 @@ end
         end
     end
 
-    @testset "plan policy refuses writes and runs for that session only" begin
-        call(name; owner) = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
-            "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
-            "params" => Dict{String,Any}("name" => name, "arguments" => Dict{String,Any}())); owner)
-        err(resp) = JSON.parse(resp["result"]["content"][1]["text"])["error"]
-        try
-            EndeavorRuntime.set_policy!("7", "plan")
-            @test err(call("edit_cell"; owner="7")) == "plan_mode"
-            @test err(call("run_all_cells"; owner="7")) == "plan_mode"
-            @test err(call("new_notebook"; owner="7")) == "plan_mode"
-            # Reads still work in plan (they fail here only because Pluto isn't running).
-            @test err(call("list_notebooks"; owner="7")) != "plan_mode"
-            # Another session, and the app's own calls, aren't affected.
-            @test err(call("edit_cell"; owner="8")) != "plan_mode"
-            @test err(call("edit_cell"; owner="")) != "plan_mode"
-            EndeavorRuntime.set_policy!("7", "ask")
-            @test err(call("edit_cell"; owner="7")) != "plan_mode"
-        finally
-            EndeavorRuntime.set_policy!("7", "ask")
-        end
-    end
-
     @testset "host tools: only for sessions on a server" begin
         rpc(method, params; owner="", host="") = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
             "jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => params); owner, host)
@@ -1747,14 +1730,6 @@ end
         @test isempty(intersect(tool_names(""), host_tools))
         @test issubset(host_tools, tool_names("gpu-box"))
         @test "read_cell" in tool_names("gpu-box")
-        hints = Dict(t["name"] => t["annotations"]["readOnlyHint"] for t in EndeavorRuntime.HOST_TOOLS)
-        @test hints == Dict("list_folder" => true, "read_file" => true, "run_shell" => false)
-
-        refused = call("list_folder", Dict{String,Any}(); host="")
-        @test err(refused) == "host_tools"
-        @test body(refused)["message"] == "`list_folder` is only for sessions on a server. " *
-                                          "This session runs on this Mac: use your own file and shell tools."
-        @test err(call("run_shell", Dict{String,Any}("command" => "true"); host="")) == "host_tools"
 
         home = mktempdir()
         mkdir(joinpath(home, "b_dir"))
@@ -1848,15 +1823,6 @@ end
         @test slow["timed_out"] == true
         @test slow["exit_code"] === nothing
         @test time() - started < 4
-
-        try
-            EndeavorRuntime.set_policy!("9", "plan")
-            @test err(call("run_shell", Dict{String,Any}("command" => "true"); owner="9")) == "plan_mode"
-            @test err(call("read_file", Dict{String,Any}("path" => text_file); owner="9")) === nothing
-            @test err(call("list_folder", Dict{String,Any}(); owner="9")) === nothing
-        finally
-            EndeavorRuntime.set_policy!("9", "ask")
-        end
     end
 
     @testset "one notebook per session" begin

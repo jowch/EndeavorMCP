@@ -142,7 +142,7 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     let core = Core::start(&dir, &bridge);
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
-    let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_notebooks"}}"#;
+    let body = r#"{"jsonrpc":"2.0","id":7,"method":"endeavor/stop_notebook","params":{"path":"/n/a.jl"}}"#;
     write!(
         socket,
         "POST /call HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nX-Endeavor-Host: labbox3\r\nContent-Length: {}\r\n\r\n{body}",
@@ -161,6 +161,14 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     assert_eq!(seen.header("Authorization"), Some(format!("Bearer {TOKEN}").as_str()));
     assert_eq!(seen.header("Content-Type"), Some("application/json"));
     assert_eq!(seen.header("X-Endeavor-Host"), Some("labbox3"));
+
+    // A chunked call, which the core reads whole to see its method, reaches Julia whole.
+    write!(socket, "POST /call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+    write!(socket, "{:x}\r\n{}\r\n", 20, &body[..20]).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    write!(socket, "{:x}\r\n{}\r\n0\r\n\r\n", body.len() - 20, &body[20..]).unwrap();
+    let reply: serde_json::Value = serde_json::from_str(&response(&mut reader).2).unwrap();
+    assert_eq!(reply["result"]["body"].as_str(), Some(body));
 
     // The same connection carries the next request.
     write!(socket, "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", core.port).unwrap();
@@ -286,9 +294,9 @@ fn serves_the_agents_mcp_sessions_and_asks_julia_with_the_caller() {
     let mut session = Session::open(&core);
     let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
 
-    let message = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+    let message = r#"{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{}}"#;
     assert_eq!(post(&core, &session.id, message, &caller), ("HTTP/1.1 202 Accepted".into(), String::new()));
-    assert_eq!(session.reply(), r#"{"id":1,"jsonrpc":"2.0","result":{"host":"gpu-box","method":"tools/list","owner":"7"}}"#);
+    assert_eq!(session.reply(), r#"{"id":1,"jsonrpc":"2.0","result":{"host":"gpu-box","method":"resources/list","owner":"7"}}"#);
     let asked: Vec<_> = bridge.seen().into_iter().filter(|s| s.line == "POST /dispatch HTTP/1.1").collect();
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].body, message.as_bytes(), "the message as the agent sent it");
@@ -336,6 +344,80 @@ fn keeps_concurrent_sessions_apart() {
         ids.sort();
         assert_eq!(ids, (0..10).collect::<Vec<_>>());
     }
+}
+
+/// One of the app's `/call`s, as the app makes them: the reply's body.
+fn app_call(core: &Core, body: &str) -> String {
+    let mut socket = core.connect();
+    write!(socket, "POST /call HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", core.port, body.len()).unwrap();
+    let (status, _, reply) = response(&mut BufReader::new(socket));
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    reply
+}
+
+/// A failed tool call's reply, as the agent saw it from Julia.
+fn tool_error(id: u32, kind: &str, message: &str) -> String {
+    let text = serde_json::Value::from(format!(r#"{{"error":"{kind}","message":{}}}"#, serde_json::Value::from(message)));
+    format!(r#"{{"id":{id},"jsonrpc":"2.0","result":{{"content":[{{"text":{text},"type":"text"}}],"isError":true}}}}"#)
+}
+
+#[test]
+fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
+    let dir = state_dir("core-policy");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let mut session = Session::open(&core);
+    let tool = |id: u32, name: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"notebook_id":"n1"}}}}}}"#);
+    let asked = || bridge.seen().iter().filter(|s| s.line == "POST /dispatch HTTP/1.1").count();
+    let told = || bridge.seen().iter().filter(|s| String::from_utf8_lossy(&s.body).contains("endeavor/tool_called")).count();
+    let plan_edit = "Plan mode is read-only: `edit_cell` would change or run the notebook. Finish the plan; the user switches modes to carry it out.";
+
+    let set = r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/set_policy","params":{"owner":"7","policy":"plan"}}"#;
+    assert_eq!(app_call(&core, set), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
+    assert!(!bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("set_policy")), "the core keeps policies");
+
+    let seven = [("X-Endeavor-Session", "7")];
+    post(&core, &session.id, &tool(1, "edit_cell"), &seven);
+    assert_eq!(session.reply(), tool_error(1, "plan_mode", plan_edit));
+    assert_eq!((asked(), told()), (0, 1), "refused here; Julia hears of the call");
+    let called = bridge.seen().into_iter().find(|s| String::from_utf8_lossy(&s.body).contains("endeavor/tool_called")).unwrap();
+    let called: serde_json::Value = serde_json::from_slice(&called.body).unwrap();
+    assert_eq!(called["params"]["arguments"], serde_json::json!({ "notebook_id": "n1" }));
+
+    // Reads pass, and so do other sessions' writes and the app's own.
+    post(&core, &session.id, &tool(2, "read_cell"), &seven);
+    assert!(session.reply().contains(r#""method":"tools/call","owner":"7""#));
+    post(&core, &session.id, &tool(3, "edit_cell"), &[("X-Endeavor-Session", "8")]);
+    assert!(session.reply().contains(r#""owner":"8""#));
+    assert!(app_call(&core, &tool(4, "edit_cell")).contains(r#""method":"tools/call","owner":"""#));
+    assert_eq!(asked(), 3);
+
+    // Host tools: plan mode refuses run_shell too; without a server, none run.
+    let on_server = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
+    post(&core, &session.id, &tool(5, "run_shell"), &on_server);
+    let plan_shell = "Plan mode is read-only: `run_shell` would run a command on the server. Finish the plan; the user switches modes to carry it out.";
+    assert_eq!(session.reply(), tool_error(5, "plan_mode", plan_shell));
+    let not_here = |tool: &str| format!("`{tool}` is only for sessions on a server. This session runs on this Mac: use your own file and shell tools.");
+    post(&core, &session.id, &tool(6, "run_shell"), &seven);
+    assert_eq!(session.reply(), tool_error(6, "host_tools", &not_here("run_shell")), "the host check comes first");
+    assert_eq!(app_call(&core, &tool(7, "list_folder")), tool_error(7, "host_tools", &not_here("list_folder")));
+    assert_eq!((asked(), told()), (3, 4));
+
+    // A call with arguments Julia can't read goes to Julia, which says so its own way.
+    post(&core, &session.id, r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":null}}"#, &seven);
+    session.reply();
+    assert_eq!(asked(), 4);
+
+    assert_eq!(app_call(&core, &set.replace("plan", "ask")), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
+    post(&core, &session.id, &tool(9, "edit_cell"), &seven);
+    assert!(session.reply().contains(r#""owner":"7""#));
+
+    // Every tool says whether it only reads, for Claude Code's own plan mode.
+    post(&core, &session.id, r#"{"jsonrpc":"2.0","id":10,"method":"tools/list"}"#, &seven);
+    assert_eq!(
+        session.reply(),
+        r#"{"id":10,"jsonrpc":"2.0","result":{"tools":[{"annotations":{"readOnlyHint":false},"name":"edit_cell"},{"annotations":{"readOnlyHint":true},"name":"read_cell"}]}}"#
+    );
 }
 
 #[test]

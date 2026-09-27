@@ -251,14 +251,25 @@ fn serve_client(client: TcpStream, bridge: &Bridge) -> io::Result<()> {
             return refuse(&mut client, "503 Service Unavailable", "Julia isn't ready yet");
         };
         let (method, target) = (request.method(), request.target());
-        let sse = method == "GET" && target.starts_with("/sse");
-        let message = method == "POST" && target.starts_with("/message");
-        let keep_alive = if sse {
+        let keep_alive = if method == "GET" && target.starts_with("/sse") {
             return bridge.stream(&request, client);
-        } else if message {
+        } else if method == "POST" && target.starts_with("/message") {
             bridge.post(&request, &mut reader, &mut client)?
+        } else if method == "POST" && target.starts_with("/call") {
+            let body = http::read_body(&mut reader, request.request_body()?)?;
+            match bridge.app_call(&body) {
+                Ok(Some(reply)) => {
+                    http::respond(&mut client, "200 OK", Some("application/json"), reply.as_bytes(), request.keeps_alive())?;
+                    request.keeps_alive()
+                }
+                Ok(None) => forward(request, Body::Read(&body), &mut client, port)?,
+                Err(_) => {
+                    refuse(&mut client, "502 Bad Gateway", "Julia's bridge isn't answering")?;
+                    false
+                }
+            }
         } else {
-            forward(request, &mut reader, &mut client, port)?
+            forward(request, Body::Stream(&mut reader), &mut client, port)?
         };
         if !keep_alive {
             break;
@@ -303,9 +314,15 @@ fn token_matches(given: &str, token: &str) -> bool {
     given.len() == expected.len() && given.bytes().zip(expected.bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 
+/// A request's body: still to come from the client, or already read.
+enum Body<'a> {
+    Stream(&'a mut BufReader<TcpStream>),
+    Read(&'a [u8]),
+}
+
 /// Pass one request to Julia's bridge on a connection of its own, and its
 /// response back as it comes. Whether the client connection can carry another request.
-fn forward(mut request: Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream, port: u16) -> io::Result<bool> {
+fn forward(mut request: Head, body: Body, client: &mut TcpStream, port: u16) -> io::Result<bool> {
     let upstream = match TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)) {
         Ok(upstream) => upstream,
         Err(_) => {
@@ -316,8 +333,18 @@ fn forward(mut request: Head, reader: &mut BufReader<TcpStream>, client: &mut Tc
     let _ = upstream.set_nodelay(true);
     request.replace("Host", &format!("127.0.0.1:{port}"));
     let mut to_julia = upstream.try_clone()?;
-    request.write_to(&mut to_julia)?;
-    http::copy_body(reader, &mut to_julia, &mut request.request_body()?)?;
+    match body {
+        Body::Stream(reader) => {
+            request.write_to(&mut to_julia)?;
+            http::copy_body(reader, &mut to_julia, &mut request.request_body()?)?;
+        }
+        Body::Read(bytes) => {
+            request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Transfer-Encoding") && !name.eq_ignore_ascii_case("Content-Length"));
+            request.headers.push(("Content-Length".into(), bytes.len().to_string()));
+            request.write_to(&mut to_julia)?;
+            to_julia.write_all(bytes)?;
+        }
+    }
 
     let mut from_julia = BufReader::new(upstream);
     let response = loop {

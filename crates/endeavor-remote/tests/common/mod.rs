@@ -241,10 +241,13 @@ fn events(mut socket: TcpStream, shared: &Arc<Shared>) {
     let _ = socket.shutdown(Shutdown::Both);
 }
 
-/// Julia's reply to an MCP message, keys sorted as Julia writes them: it names
-/// the message and its caller.
+/// Julia's reply to an MCP message, keys sorted as Julia writes them: for
+/// `tools/list`, a few notebook tools; otherwise it names the message and its caller.
 fn dispatch(seen: &Seen) -> String {
     let message: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+    if message["method"] == "tools/list" {
+        return format!(r#"{{"id":{},"jsonrpc":"2.0","result":{{"tools":[{{"name":"edit_cell"}},{{"name":"read_cell"}}]}}}}"#, message["id"]);
+    }
     let caller = |name| serde_json::Value::from(seen.header(name).unwrap_or_default());
     format!(
         r#"{{"id":{},"jsonrpc":"2.0","result":{{"host":{},"method":{},"owner":{}}}}}"#,

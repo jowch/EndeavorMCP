@@ -390,12 +390,6 @@ const HOST_TOOLS = [
     ),
 ]
 
-# MCP's read-only hint (what Claude Code's plan mode checks before prompting):
-# everything except the tools that write or run (Policy.jl).
-for tool in vcat(MCP_TOOLS, HOST_TOOLS)
-    tool["annotations"] = Dict{String,Any}("readOnlyHint" => !(tool["name"] in _WRITE_TOOLS))
-end
-
 # ---------------------------------------------------------------------------
 # JSON-RPC / MCP framing
 # ---------------------------------------------------------------------------
@@ -455,9 +449,8 @@ end
 function _safe_handle_tool_call(session, name, arguments; owner::AbstractString="", host::AbstractString="")
     try
         note_activity!(arguments)
-        for refusal in (host_tool_refusal(host, name), policy_refusal(owner, name), notebook_refusal(session, owner, name, arguments))
-            refusal === nothing || throw(refusal)
-        end
+        refusal = notebook_refusal(session, owner, name, arguments)
+        refusal === nothing || throw(refusal)
         with_owner(() -> _handle_tool_call(session, name, arguments; owner), owner)
     catch e
         raw = sprint(showerror, e)
