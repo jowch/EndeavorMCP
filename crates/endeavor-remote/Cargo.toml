@@ -1,0 +1,9 @@
+[package]
+name = "endeavor-remote"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+wire = { path = "../wire" }
+serde_json = "1"
+libc = "0.2"
