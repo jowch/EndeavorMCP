@@ -152,7 +152,7 @@ end
 function tool_run_shell(args)
     command = _string_arg(args, "command")
     isempty(strip(command)) && throw(ArgumentError("invalid_argument::command is empty"))
-    cwd = _host_path(get(args, "cwd", nothing))
+    cwd = _host_path(something(get(args, "cwd", nothing), session_folder(current_owner()), Some(nothing)))
     isdir(cwd) || throw(ArgumentError("not_found::No folder at $cwd"))
     timeout = clamp(_int_arg(args, "timeout_seconds", 120), 1, 600)
 

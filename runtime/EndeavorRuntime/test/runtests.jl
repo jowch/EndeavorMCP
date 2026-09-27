@@ -1806,6 +1806,15 @@ end
         withenv("HOME" => folder) do
             @test body(call("run_shell", Dict{String,Any}("command" => "pwd")))["stdout"] == "$folder\n"
         end
+        # A session's own folder is where it runs by default.
+        session_dir = realpath(mktempdir())
+        try
+            EndeavorRuntime.set_session_folder!("8", session_dir)
+            @test body(call("run_shell", Dict{String,Any}("command" => "pwd"); owner="8"))["stdout"] == "$session_dir\n"
+            @test body(call("run_shell", Dict{String,Any}("command" => "pwd", "cwd" => folder); owner="8"))["stdout"] == "$folder\n"
+        finally
+            EndeavorRuntime.set_session_folder!("8", "")
+        end
 
         loud = body(call("run_shell", Dict{String,Any}("command" => "yes | head -c 100000")))
         @test occursin("[… 70000 bytes left out …]", loud["stdout"])

@@ -39,9 +39,9 @@ When the notebook runs on a server, the notebook and its files live on that serv
 
 - `list_folder(path)` — what's in a folder.
 - `read_file(path, offset, limit)` — read a text file (numbered lines; continue with `offset=end_line+1`).
-- `run_shell(command, cwd)` — run a command. The user approves each run, so batch related steps into one command.
+- `run_shell(command, cwd)` — run a command, in the session's folder unless you give `cwd`. The user approves each run, so batch related steps into one command.
 
-Paths are the server's: `~` is the server's home folder, and a relative path starts there, not in your working folder. Change notebooks only with the notebook tools, never with `run_shell` (Pluto overwrites the file).
+Paths are the server's: `~` is the server's home folder, and a relative path starts there, not in your working folder. Change notebooks only with the notebook tools, never with `run_shell` (Pluto overwrites the file). Don't use `run_shell` to sleep or to wait for cells to finish: each call asks the user again. To follow a run, poll `read_cell` until the cell is no longer running or queued.
 
 ## Idle notebooks stop
 

@@ -45,6 +45,19 @@ end
 
 bound_notebook(owner::AbstractString) = lock(() -> get(_BINDINGS, owner, nothing), _POLICY_LOCK)
 
+# owner => the session's working folder on this machine, where run_shell runs
+# unless told otherwise. The app sets it when the runtime is ready.
+const _FOLDERS = Dict{String,String}()
+
+function set_session_folder!(owner::AbstractString, folder::AbstractString)
+    lock(_POLICY_LOCK) do
+        isempty(folder) ? delete!(_FOLDERS, String(owner)) : (_FOLDERS[String(owner)] = String(folder))
+    end
+    return nothing
+end
+
+session_folder(owner::AbstractString) = lock(() -> get(_FOLDERS, owner, nothing), _POLICY_LOCK)
+
 # After a successful open/new: bind the owner if it isn't bound yet.
 function note_notebook_opened!(owner::AbstractString, path::AbstractString)
     isempty(owner) && return nothing

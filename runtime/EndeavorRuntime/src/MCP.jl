@@ -382,7 +382,7 @@ const HOST_TOOLS = [
             "type"       => "object",
             "properties" => Dict{String,Any}(
                 "command"         => Dict("type" => "string", "description" => "The command, as you would type it in a terminal."),
-                "cwd"             => Dict("type" => "string", "description" => "Folder to run in. ~ is the home folder; a relative path is taken from the home folder. Default: the home folder."),
+                "cwd"             => Dict("type" => "string", "description" => "Folder to run in. ~ is the home folder; a relative path is taken from the home folder. Default: the session's working folder."),
                 "timeout_seconds" => Dict("type" => "integer", "description" => "Kill the command and everything it started after this many seconds. Default: 120; at most 600."),
             ),
             "required"   => ["command"],
