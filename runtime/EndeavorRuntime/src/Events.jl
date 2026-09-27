@@ -27,6 +27,14 @@ _authors_for(notebook_id::UUID) = get!(() -> Dict{UUID, Tuple{UInt64, String}}()
 const _BEFORES = Dict{UUID, Dict{UUID, String}}()
 _befores_for(notebook_id::UUID) = get!(() -> Dict{UUID, String}(), _BEFORES, notebook_id)
 
+function clear_notebook_authors!(notebook_id::UUID)::Nothing
+    lock(_AUTHOR_LOCK) do
+        delete!(_AUTHORS, notebook_id)
+        delete!(_BEFORES, notebook_id)
+    end
+    return nothing
+end
+
 "The agent's tools just wrote this cell's code; `before` is what it replaced."
 function note_agent_edit!(notebook_id::UUID, cell, before::AbstractString)::Nothing
     lock(_AUTHOR_LOCK) do

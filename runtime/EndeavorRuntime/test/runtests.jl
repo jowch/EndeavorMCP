@@ -2045,6 +2045,63 @@ end
         end
     end
 
+    @testset "a notebook's state goes when it shuts down, however it shuts down" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        session = Pluto.ServerSession(; options = Pluto.Configuration.from_flat_kwargs(on_event = EndeavorRuntime._handle_pluto_event))
+        EndeavorRuntime.bind_standalone_session!(session)
+        clock = Ref(1.0e6)
+        EndeavorRuntime._IDLE_CLOCK[] = () -> clock[]
+        call(name, args) = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
+            "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
+            "params" => Dict{String,Any}("name" => name, "arguments" => args)))
+        body(resp) = JSON.parse(resp["result"]["content"][1]["text"])
+        held(nid) = Dict(
+            "pending_run"   => haskey(EndeavorRuntime._pending_run, nid),
+            "read_receipts" => haskey(EndeavorRuntime._read_receipts, nid),
+            "changes"       => haskey(EndeavorRuntime._CHANGES, nid),
+            "authors"       => haskey(EndeavorRuntime._AUTHORS, nid),
+            "befores"       => haskey(EndeavorRuntime._BEFORES, nid),
+            "last_active"   => haskey(EndeavorRuntime._LAST_ACTIVE, nid),
+            "kept_alive"    => nid in EndeavorRuntime._KEPT_ALIVE,
+        )
+        all_held = Dict(k => true for k in keys(held(uuid4())))
+        none_held = Dict(k => false for k in keys(held(uuid4())))
+        by_pluto, by_app, by_idle = paths = [fresh_fixture() for _ in 1:3]
+        try
+            EndeavorRuntime.set_idle_limit!(48)
+            ids = Dict(p => UUID(body(call("open_notebook", Dict{String,Any}("path" => p)))["notebook_id"]) for p in paths)
+            for nid in values(ids)
+                args = Dict{String,Any}("notebook_id" => string(nid), "cell_id" => "11111111-1111-1111-1111-111111111111")
+                call("read_cell", args)
+                @test !call("edit_cell", merge(args, Dict{String,Any}("code" => "x = 7")))["result"]["isError"]
+            end
+            call("keep_notebook_alive", Dict{String,Any}("notebook_id" => string(ids[by_app]), "keep" => true))
+            call("keep_notebook_alive", Dict{String,Any}("notebook_id" => string(ids[by_pluto]), "keep" => true))
+            @test held(ids[by_app]) == all_held
+            @test held(ids[by_pluto]) == all_held
+
+            # Restarting in place (leaving safe preview) keeps the notebook's state.
+            call("allow_execution", Dict{String,Any}("notebook_id" => string(ids[by_pluto]), "run_notebook" => false))
+            @test held(ids[by_pluto]) == all_held
+
+            Pluto.SessionActions.shutdown(session, session.notebooks[ids[by_pluto]]; async = false, verbose = false)
+            @test held(ids[by_pluto]) == none_held
+
+            @test EndeavorRuntime.stop_notebook!(session, by_app)["stopped"]
+            @test held(ids[by_app]) == none_held
+
+            clock[] += 49 * 3600
+            @test EndeavorRuntime.stop_idle_notebooks!(session) == [abspath(by_idle)]
+            @test held(ids[by_idle]) == none_held
+            # Kept so the app can say why the notebook stopped and offer to reopen it.
+            @test abspath(by_idle) in [s["path"] for s in EndeavorRuntime.idle_stopped()]
+            @test isempty(session.notebooks)
+        finally
+            EndeavorRuntime._IDLE_CLOCK[] = time
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
     @testset "MCP protocol: deferred pluto_session_status" begin
         EndeavorRuntime.stop_pluto_stack!()
 

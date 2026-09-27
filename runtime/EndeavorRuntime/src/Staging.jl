@@ -42,13 +42,6 @@ function clear_pending!(notebook_id::UUID, cell_ids)
     return nothing
 end
 
-function clear_all_pending!(notebook_id::UUID)
-    _with_staging_lock() do
-        delete!(_pending_run, notebook_id)
-    end
-    return nothing
-end
-
 # Drop pending ids for cells no longer in the notebook. Pluto's file hot-reload
 # (update_from_file) and the browser delete remove cells straight from
 # cells_dict, bypassing delete_cell's clear_pending!, and a ghost id would

@@ -29,7 +29,7 @@ function note_opened!(notebook)
     return nothing
 end
 
-function note_shut_down!(notebook_id::UUID)
+function clear_notebook_idle!(notebook_id::UUID)
     lock(_IDLE_LOCK) do
         delete!(_LAST_ACTIVE, notebook_id)
         delete!(_KEPT_ALIVE, notebook_id)

@@ -95,11 +95,22 @@ function _handle_pluto_event(event)::Nothing
         event isa Pluto.OpenNotebookEvent && note_opened!(event.notebook)
         publish_notebooks!()
     elseif event isa Pluto.ShutdownNotebookEvent
-        note_shut_down!(event.notebook.notebook_id)
-        # Fired before the notebook leaves the session.
+        # Also fired when a notebook restarts in place (safe preview's "Run
+        # notebook code"); it stays in the session then and keeps its state.
+        sess = standalone_session()
+        nid = event.notebook.notebook_id
+        (sess === nothing || !haskey(sess.notebooks, nid)) && forget_notebook!(nid)
         @async (sleep(0.2); publish_notebooks!())
     end
     nothing
+end
+
+"Drop everything the runtime keeps about a notebook that has left the session."
+function forget_notebook!(notebook_id::UUID)::Nothing
+    clear_notebook_staging!(notebook_id)
+    clear_notebook_authors!(notebook_id)
+    clear_notebook_idle!(notebook_id)
+    return nothing
 end
 
 function _init_pluto_session!(; pluto_port, launch_browser, require_secret_for_access, notebook)
@@ -398,7 +409,6 @@ function stop_notebook!(session, path::AbstractString)
     notebook = session.notebooks[nb]
     safe_preview = notebook.process_status === Pluto.ProcessStatus.waiting_for_permission
     Pluto.SessionActions.shutdown(session, notebook; async = false, verbose = false)
-    note_shut_down!(notebook.notebook_id)
     publish_notebooks!()
     return Dict{String,Any}("stopped" => true, "safe_preview" => safe_preview)
 end
