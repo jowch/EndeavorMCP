@@ -1,27 +1,47 @@
-# Started by the app: `julia --project=runtime runtime/boot.jl <pluto_port> <mcp_port>`.
-# Prints one `READY <pluto_url> <mcp_url>` line on stdout, then serves until stdin closes.
-# Stdin lines are commands from the app: `folder <path>` makes <path> the folder Pluto's
-# "Save notebook" box suggests (new notebooks start unsaved in Pluto's scratch folder).
+# Started detached by endeavor-remote:
+#   julia --project=runtime runtime/boot.jl <pluto_port> <mcp_port>
+# with ENDEAVOR_TOKEN (the bridge's bearer token), ENDEAVOR_STATE (where to write
+# runtime.json) and ENDEAVOR_LAUNCHER in the environment. Once Pluto and the bridge
+# are up it writes runtime.json, which is how the helper learns the runtime is
+# ready; it serves until the bridge's `endeavor/shutdown` or a signal ends it.
 import Pkg
 Pkg.instantiate(; io=stderr)
 using EndeavorRuntime
 
 pluto_port, mcp_port = parse.(Int, ARGS[1:2])
-# The app passes the bridge's bearer token in the environment (not argv, which
-# `ps` shows to every user); drop it so notebook worker processes don't inherit it.
+# Taken from the environment (not argv, which `ps` shows to every user) and dropped
+# so notebook worker processes don't inherit them.
 token = get(ENV, "ENDEAVOR_TOKEN", "")
-isempty(token) && error("ENDEAVOR_TOKEN is not set; the app starts this script with one.")
-delete!(ENV, "ENDEAVOR_TOKEN")
+isempty(token) && error("ENDEAVOR_TOKEN is not set; endeavor-remote starts this script with one.")
+state = get(ENV, "ENDEAVOR_STATE", "")
+isempty(state) && error("ENDEAVOR_STATE is not set; endeavor-remote starts this script with one.")
+launcher = get(ENV, "ENDEAVOR_LAUNCHER", "process")
+foreach(k -> delete!(ENV, k), ("ENDEAVOR_TOKEN", "ENDEAVOR_STATE", "ENDEAVOR_LAUNCHER"))
+
 EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port, token)
 EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false)
 secret = EndeavorRuntime.standalone_session().secret
 
-println("READY http://127.0.0.1:$pluto_port/?secret=$secret http://127.0.0.1:$mcp_port/sse")
-flush(stdout)
-
-# ponytail: the app holds our stdin; EOF means it quit or crashed, so no PID bookkeeping.
-options = EndeavorRuntime.standalone_session().options.server
-for line in eachline(stdin)
-    startswith(line, "folder ") && (options.notebook_path_suggestion = joinpath(line[8:end], ""))
+# The helper checks the bridge answers before using it; wait here too, so the state
+# file never names a runtime that isn't serving yet.
+for _ in 1:600
+    EndeavorRuntime._STANDALONE_HTTP_SERVER[] !== nothing && break
+    sleep(0.05)
 end
-exit()
+
+# Made private before the token goes in, then moved into place whole, so a reader
+# never sees half a file and nobody else can read the token.
+tmp = state * ".tmp"
+open(tmp, "w") do io
+    chmod(tmp, 0o600)
+    EndeavorRuntime.JSON.print(io, Dict(
+        "launcher" => launcher, "node" => gethostname(), "pid" => getpid(),
+        "pluto_port" => pluto_port, "mcp_port" => mcp_port,
+        "token" => token, "pluto_secret" => secret,
+    ))
+end
+mv(tmp, state; force=true)
+atexit(() -> rm(state; force=true))
+@info "Runtime ready" pluto_port mcp_port
+
+wait(Condition())
