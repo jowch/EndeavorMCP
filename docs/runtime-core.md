@@ -154,7 +154,7 @@ ending in an app that behaves as before:
    planning this). Done.
 3. `endeavor-remote core`: the core owns the bridge port, starts Julia as its
    child and writes `runtime.json`, and forwards every request to Julia's
-   bridge unchanged.
+   bridge unchanged. Done.
 4. Move the handlers that need no notebook state into the core, one at a
    time: run policy and plan mode, host tools, idle stop, sharing checks,
    auth and Host/Origin checks. Their tests move to Rust; the Julia code goes.
