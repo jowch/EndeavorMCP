@@ -23,8 +23,13 @@ struct Core {
 impl Core {
     /// Start the core in `dir` and wait for its `runtime.json`.
     fn start(dir: &Path, bridge: &FakeBridge) -> Core {
+        Core::start_with_home(dir, bridge, &std::env::var("HOME").unwrap())
+    }
+
+    fn start_with_home(dir: &Path, bridge: &FakeBridge, home: &str) -> Core {
         let julia = serving_julia(dir, bridge);
         let process = Command::new(env!("CARGO_BIN_EXE_endeavor-remote"))
+            .env("HOME", home)
             .arg("core")
             .arg("--state-dir")
             .arg(dir)
@@ -418,6 +423,210 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
         session.reply(),
         r#"{"id":10,"jsonrpc":"2.0","result":{"tools":[{"annotations":{"readOnlyHint":false},"name":"edit_cell"},{"annotations":{"readOnlyHint":true},"name":"read_cell"}]}}"#
     );
+}
+
+/// A folder of its own for a test.
+fn temp_folder(name: &str) -> std::path::PathBuf {
+    let dir = state_dir(name);
+    dir.canonicalize().unwrap()
+}
+
+/// A session on a server, calling host tools.
+struct OnServer<'a> {
+    core: &'a Core,
+    session: Session,
+    next: u32,
+}
+
+impl OnServer<'_> {
+    /// A tool call's result (`Ok`) or error (`Err`), as the agent reads them.
+    fn call(&mut self, owner: &str, name: &str, arguments: serde_json::Value) -> Result<serde_json::Value, serde_json::Value> {
+        self.next += 1;
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": self.next, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        let caller = [("X-Endeavor-Session", owner), ("X-Endeavor-Host", "gpu-box")];
+        assert_eq!(post(self.core, &self.session.id, &message.to_string(), &caller).0, "HTTP/1.1 202 Accepted");
+        let reply: serde_json::Value = serde_json::from_str(&self.session.reply()).unwrap();
+        assert_eq!(reply["id"], self.next);
+        let body: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        if reply["result"]["isError"] == true { Err(body) } else { Ok(body) }
+    }
+
+    fn run(&mut self, arguments: serde_json::Value) -> serde_json::Value {
+        self.call("", "run_shell", arguments).unwrap()
+    }
+}
+
+#[test]
+fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
+    let dir = state_dir("core-host-list");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let mut session = Session::open(&core);
+    let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    post(&core, &session.id, list, &[("X-Endeavor-Host", "gpu-box")]);
+    let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
+    let tools = reply["result"]["tools"].as_array().unwrap();
+    let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["edit_cell", "read_cell", "list_folder", "read_file", "run_shell"], "Julia's tools, then the host tools");
+    let hints: Vec<_> = tools.iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
+    assert_eq!(hints, [false, true, true, true, false]);
+    assert_eq!(tools[4]["inputSchema"]["required"], serde_json::json!(["command"]));
+    post(&core, &session.id, list, &[]);
+    assert!(!session.reply().contains("list_folder"), "not on this Mac");
+
+    // Answered here, and Julia hears of each call.
+    let mut server = OnServer { core: &core, session, next: 1 };
+    let told = || bridge.seen().iter().filter(|s| String::from_utf8_lossy(&s.body).contains("endeavor/tool_called")).count();
+    server.run(serde_json::json!({ "command": "true" }));
+    assert_eq!(told(), 1);
+    assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch") && String::from_utf8_lossy(&s.body).contains("run_shell")));
+}
+
+#[test]
+fn list_folder_and_read_file_read_the_server() {
+    let dir = state_dir("core-host-files");
+    let bridge = FakeBridge::start(&dir);
+    let home = temp_folder("core-host-files-home");
+    std::fs::create_dir(home.join("b_dir")).unwrap();
+    std::fs::create_dir(home.join("z_dir")).unwrap();
+    std::fs::write(home.join(".env"), "KEY=1\n").unwrap();
+    std::fs::write(home.join("a.txt"), "hello\n").unwrap();
+    let core = Core::start_with_home(&dir, &bridge, home.to_str().unwrap());
+    let mut server = OnServer { core: &core, session: Session::open(&core), next: 0 };
+    let home_path = home.to_str().unwrap();
+
+    for path in ["~", "", "  "] {
+        let listed = server.call("", "list_folder", serde_json::json!({ "path": path })).unwrap();
+        assert_eq!(listed["path"], home_path);
+        let names: Vec<_> = listed["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["b_dir", "z_dir", ".env", "a.txt"]);
+        let kinds: Vec<_> = listed["entries"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["dir", "dir", "file", "file"]);
+        assert_eq!(listed["entries"][3]["size"], 6);
+        assert!(listed["entries"][0].get("size").is_none());
+        assert!(listed["entries"][3]["modified"].is_i64());
+        assert_eq!((&listed["total"], &listed["truncated"]), (&serde_json::json!(4), &serde_json::json!(false)));
+    }
+    assert_eq!(server.call("", "list_folder", serde_json::json!({})).unwrap()["path"], home_path);
+    let b_dir = format!("{home_path}/b_dir");
+    for path in ["~/b_dir", "b_dir", "~/z_dir/../b_dir"] {
+        assert_eq!(server.call("", "list_folder", serde_json::json!({ "path": path })).unwrap()["path"], b_dir.as_str(), "{path}");
+    }
+    let error = |kind: &str, message: String| serde_json::json!({ "error": kind, "message": message });
+    assert_eq!(server.call("", "list_folder", serde_json::json!({ "path": "~/missing" })), Err(error("not_found", format!("No folder at {home_path}/missing"))));
+    assert_eq!(server.call("", "list_folder", serde_json::json!({ "path": "~/a.txt" })), Err(error("not_a_folder", format!("{home_path}/a.txt is a file, not a folder"))));
+    assert_eq!(server.call("", "list_folder", serde_json::json!({ "path": "~bob" })), Err(error("tool_error", "ArgumentError: ~user tilde expansion not yet implemented".into())));
+
+    let many = temp_folder("core-host-many");
+    for i in 1..=1005 {
+        std::fs::write(many.join(format!("f{i}")), "").unwrap();
+    }
+    let crowded = server.call("", "list_folder", serde_json::json!({ "path": many })).unwrap();
+    assert_eq!((crowded["entries"].as_array().unwrap().len(), &crowded["total"], &crowded["truncated"]), (1000, &serde_json::json!(1005), &serde_json::json!(true)));
+    assert_eq!(crowded["entries"][1]["name"], "f10", "sorted by name");
+
+    let files = temp_folder("core-host-read");
+    let lines = files.join("lines.txt");
+    std::fs::write(&lines, (1..=10).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+    let part = server.call("", "read_file", serde_json::json!({ "path": lines, "offset": 3, "limit": 2 })).unwrap();
+    assert_eq!(part["text"], "     3\tline 3\n     4\tline 4\n");
+    assert_eq!((&part["start_line"], &part["end_line"], &part["total_lines"], &part["truncated"]), (&serde_json::json!(3), &serde_json::json!(4), &serde_json::json!(10), &serde_json::json!(true)));
+    let whole = server.call("", "read_file", serde_json::json!({ "path": lines })).unwrap();
+    assert_eq!((&whole["end_line"], &whole["total_lines"], &whole["truncated"]), (&serde_json::json!(10), &serde_json::json!(10), &serde_json::json!(false)));
+    let tail = server.call("", "read_file", serde_json::json!({ "path": lines, "offset": 9.0 })).unwrap();
+    assert_eq!((&tail["text"], &tail["truncated"]), (&serde_json::json!("     9\tline 9\n    10\tline 10\n"), &serde_json::json!(false)));
+    let invalid = |message: &str| Err(error("invalid_argument", message.into()));
+    assert_eq!(server.call("", "read_file", serde_json::json!({ "path": lines, "offset": 0 })), invalid("offset is the first line to read, 1 or more"));
+    assert_eq!(server.call("", "read_file", serde_json::json!({ "path": lines, "limit": 0 })), invalid("limit must be 1 or more"));
+    assert_eq!(server.call("", "read_file", serde_json::json!({ "path": lines, "limit": 1.5 })), invalid("limit must be a whole number"));
+    assert_eq!(server.call("", "read_file", serde_json::json!({ "path": 5 })), invalid("path must be a string"));
+    assert_eq!(server.call("", "read_file", serde_json::json!({ "path": "~/b_dir" })), Err(error("not_a_file", format!("{b_dir} is a folder; use list_folder"))));
+    assert_eq!(server.call("", "read_file", serde_json::json!({ "path": "nope" })), Err(error("not_found", format!("No file at {home_path}/nope"))));
+
+    let crlf = files.join("crlf.txt");
+    std::fs::write(&crlf, "one\r\ntwo\r\nthree").unwrap();
+    assert_eq!(server.call("", "read_file", serde_json::json!({ "path": crlf })).unwrap()["text"], "     1\tone\n     2\ttwo\n     3\tthree\n");
+
+    let long = files.join("long.txt");
+    std::fs::write(&long, format!("{}\nshort\n", "é".repeat(3000))).unwrap();
+    let long = server.call("", "read_file", serde_json::json!({ "path": long })).unwrap();
+    let text = long["text"].as_str().unwrap();
+    assert!(text.starts_with(&format!("     1\t{} [line cut at 2000 characters]\n", "é".repeat(2000))), "cut at 2000 characters, not bytes");
+    assert!(text.ends_with("     2\tshort\n"));
+    assert_eq!(long["truncated"], true);
+
+    let big = files.join("big.txt");
+    std::fs::write(&big, format!("{}\n", "y".repeat(999)).repeat(1000)).unwrap();
+    let big = server.call("", "read_file", serde_json::json!({ "path": big })).unwrap();
+    assert_eq!((&big["total_lines"], &big["truncated"]), (&serde_json::json!(1000), &serde_json::json!(true)));
+    assert!(big["end_line"].as_i64().unwrap() < 1000);
+    let size = big["text"].as_str().unwrap().len();
+    assert!((256 * 1024..256 * 1024 + 1100).contains(&size), "{size}");
+
+    let binary = files.join("data.bin");
+    std::fs::write(&binary, [0x41, 0x00, 0x42]).unwrap();
+    let message = format!("{} is a binary file (it has NUL bytes); read_file only reads text", binary.display());
+    assert_eq!(server.call("", "read_file", serde_json::json!({ "path": binary })), Err(error("binary_file", message)));
+
+    let bad = files.join("bad.txt");
+    std::fs::write(&bad, [0x61, 0xe2, 0x82, 0x62, 0x0a, 0xff, 0xc0, 0x80, 0x7f]).unwrap();
+    assert_eq!(server.call("", "read_file", serde_json::json!({ "path": bad })).unwrap()["text"], "     1\ta\u{fffd}b\n     2\t\u{fffd}\u{fffd}\u{7f}\n");
+
+    let locked = files.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = server.call("", "list_folder", serde_json::json!({ "path": locked }));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(denied, Err(error("tool_error", format!("IOError: readdir(\"{}\"): permission denied (EACCES)", locked.display()))));
+}
+
+#[test]
+fn run_shell_runs_in_the_login_shell_and_keeps_to_its_limits() {
+    let dir = state_dir("core-host-shell");
+    let bridge = FakeBridge::start(&dir);
+    let home = temp_folder("core-host-shell-home");
+    let core = Core::start_with_home(&dir, &bridge, home.to_str().unwrap());
+    let mut server = OnServer { core: &core, session: Session::open(&core), next: 0 };
+    let folder = temp_folder("core-host-shell-cwd");
+
+    let ran = server.run(serde_json::json!({ "command": "echo out; echo err >&2; pwd; exit 3", "cwd": folder }));
+    assert_eq!(ran, serde_json::json!({ "exit_code": 3, "stdout": format!("out\n{}\n", folder.display()), "stderr": "err\n", "timed_out": false, "cwd": folder }));
+    assert_eq!(server.run(serde_json::json!({ "command": "pwd" }))["stdout"], format!("{}\n", home.display()), "home by default");
+    let env = server.run(serde_json::json!({ "command": "echo \"$JULIA_DEPOT_PATH|$ENDEAVOR_TOKEN|$ENDEAVOR_LAUNCHER\"" }));
+    assert_eq!(env["stdout"], "/opt/depot:||\n", "Julia's environment, without the runtime's secrets");
+
+    // A session's own folder is where it runs by default; Julia keeps it too.
+    let set = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_session_folder","params":{{"owner":"8","folder":"{}"}}}}"#, folder.display());
+    assert!(app_call(&core, &set).contains("set_session_folder"), "Julia's reply");
+    assert_eq!(server.call("8", "run_shell", serde_json::json!({ "command": "pwd" })).unwrap()["stdout"], format!("{}\n", folder.display()));
+    assert_eq!(server.call("8", "run_shell", serde_json::json!({ "command": "pwd", "cwd": "~" })).unwrap()["stdout"], format!("{}\n", home.display()));
+    app_call(&core, &set.replace(&folder.display().to_string(), ""));
+    assert_eq!(server.call("8", "run_shell", serde_json::json!({ "command": "pwd" })).unwrap()["stdout"], format!("{}\n", home.display()));
+
+    let error = |kind: &str, message: &str| Err(serde_json::json!({ "error": kind, "message": message }));
+    assert_eq!(server.call("", "run_shell", serde_json::json!({ "command": "  " })), error("invalid_argument", "command is empty"));
+    assert_eq!(server.call("", "run_shell", serde_json::json!({})), error("invalid_argument", "command must be a string"));
+    assert_eq!(server.call("", "run_shell", serde_json::json!({ "command": "true", "cwd": "nope" })), error("not_found", &format!("No folder at {}/nope", home.display())));
+    assert_eq!(server.call("", "run_shell", serde_json::json!({ "command": "true", "timeout_seconds": "x" })), error("invalid_argument", "timeout_seconds must be a whole number"));
+
+    let loud = server.run(serde_json::json!({ "command": "yes | head -c 100000" }));
+    let stdout = loud["stdout"].as_str().unwrap();
+    assert!(stdout.contains("\n[… 70000 bytes left out …]\n") && stdout.len() < 30_100, "{}", stdout.len());
+
+    let killed = server.run(serde_json::json!({ "command": "kill -9 $$" }));
+    assert_eq!((&killed["exit_code"], &killed["timed_out"]), (&serde_json::Value::Null, &serde_json::json!(false)));
+
+    // A timeout kills everything the command started, background jobs included.
+    let started = std::time::Instant::now();
+    let slow = server.run(serde_json::json!({ "command": "sleep 5 & sleep 5", "timeout_seconds": 1 }));
+    assert_eq!((&slow["exit_code"], &slow["timed_out"]), (&serde_json::Value::Null, &serde_json::json!(true)));
+    assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+
+    // A background job that outlives the command holds its output open only so long.
+    let started = std::time::Instant::now();
+    let lingering = server.run(serde_json::json!({ "command": "echo done; sleep 30 &" }));
+    assert_eq!((&lingering["exit_code"], &lingering["stdout"]), (&serde_json::json!(0), &serde_json::json!("done\n")));
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
 }
 
 #[test]

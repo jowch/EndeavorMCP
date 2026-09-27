@@ -1517,10 +1517,10 @@ end
             dispatch(headers) = HTTP.post("http://127.0.0.1:$mcp_port/dispatch", ["Content-Type" => "application/json", headers...], list;
                 status_exception=false, readtimeout=5)
             @test dispatch([]).status == 401
-            # The core passes on the agent's messages with their caller's headers.
+            # The core passes on the agent's notebook tool calls; host tools are its own.
             listed(headers) = [t["name"] for t in JSON.parse(String(dispatch(["Authorization" => "Bearer s3cret-token", headers...]).body))["result"]["tools"]]
-            @test "list_folder" in listed(["X-Endeavor-Session" => "7", "X-Endeavor-Host" => "gpu-box"])
-            @test !("list_folder" in listed([]))
+            @test "read_cell" in listed(["X-Endeavor-Session" => "7"])
+            @test !("list_folder" in listed(["X-Endeavor-Session" => "7", "X-Endeavor-Host" => "gpu-box"]))
             @test HTTP.get("http://127.0.0.1:$mcp_port/health"; status_exception=false, readtimeout=2).status == 200
 
             # The app binds a session to its notebook, and clears it with an empty path.
@@ -1715,114 +1715,6 @@ end
         finally
             EndeavorRuntime._CLOCK[] = time
         end
-    end
-
-    @testset "host tools: only for sessions on a server" begin
-        rpc(method, params; owner="", host="") = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
-            "jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => params); owner, host)
-        call(name, args; owner="", host="server") = rpc("tools/call",
-            Dict{String,Any}("name" => name, "arguments" => args); owner, host)
-        body(resp) = JSON.parse(resp["result"]["content"][1]["text"])
-        err(resp) = resp["result"]["isError"] ? body(resp)["error"] : nothing
-        tool_names(host) = [t["name"] for t in rpc("tools/list", Dict{String,Any}(); host)["result"]["tools"]]
-
-        host_tools = ["list_folder", "read_file", "run_shell"]
-        @test isempty(intersect(tool_names(""), host_tools))
-        @test issubset(host_tools, tool_names("gpu-box"))
-        @test "read_cell" in tool_names("gpu-box")
-
-        home = mktempdir()
-        mkdir(joinpath(home, "b_dir"))
-        mkdir(joinpath(home, "z_dir"))
-        write(joinpath(home, ".env"), "KEY=1\n")
-        write(joinpath(home, "a.txt"), "hello\n")
-        withenv("HOME" => home) do
-            for path in ("~", "")
-                listed = body(call("list_folder", Dict{String,Any}("path" => path)))
-                @test listed["path"] == home
-                @test [e["name"] for e in listed["entries"]] == ["b_dir", "z_dir", ".env", "a.txt"]
-                @test [e["kind"] for e in listed["entries"]] == ["dir", "dir", "file", "file"]
-                @test listed["entries"][4]["size"] == 6
-                @test !haskey(listed["entries"][1], "size")
-                @test listed["entries"][4]["modified"] isa Integer
-                @test listed["truncated"] == false
-            end
-            @test body(call("list_folder", Dict{String,Any}("path" => "~/b_dir")))["path"] == joinpath(home, "b_dir")
-            @test body(call("list_folder", Dict{String,Any}("path" => "b_dir")))["path"] == joinpath(home, "b_dir")
-            @test err(call("list_folder", Dict{String,Any}("path" => "~/missing"))) == "not_found"
-            @test err(call("list_folder", Dict{String,Any}("path" => "~/a.txt"))) == "not_a_folder"
-        end
-
-        many = mktempdir()
-        for i in 1:1005
-            touch(joinpath(many, "f$i"))
-        end
-        crowded = body(call("list_folder", Dict{String,Any}("path" => many)))
-        @test length(crowded["entries"]) == 1000
-        @test crowded["total"] == 1005
-        @test crowded["truncated"] == true
-
-        text_file = joinpath(mktempdir(), "lines.txt")
-        write(text_file, join(("line $i" for i in 1:10), "\n") * "\n")
-        part = body(call("read_file", Dict{String,Any}("path" => text_file, "offset" => 3, "limit" => 2)))
-        @test part["text"] == "     3\tline 3\n     4\tline 4\n"
-        @test (part["start_line"], part["end_line"], part["total_lines"], part["truncated"]) == (3, 4, 10, true)
-        whole = body(call("read_file", Dict{String,Any}("path" => text_file)))
-        @test (whole["end_line"], whole["total_lines"], whole["truncated"]) == (10, 10, false)
-        tail = body(call("read_file", Dict{String,Any}("path" => text_file, "offset" => 9)))
-        @test tail["text"] == "     9\tline 9\n    10\tline 10\n"
-        @test tail["truncated"] == false
-        @test err(call("read_file", Dict{String,Any}("path" => text_file, "offset" => 0))) == "invalid_argument"
-
-        long_file = joinpath(mktempdir(), "long.txt")
-        write(long_file, repeat("x", 3000) * "\nshort\n")
-        long = body(call("read_file", Dict{String,Any}("path" => long_file)))
-        @test startswith(long["text"], "     1\t" * repeat("x", 2000) * " [line cut at 2000 characters]\n")
-        @test endswith(long["text"], "     2\tshort\n")
-        @test long["truncated"] == true
-
-        big_file = joinpath(mktempdir(), "big.txt")
-        write(big_file, repeat(repeat("y", 999) * "\n", 1000))
-        big = body(call("read_file", Dict{String,Any}("path" => big_file)))
-        @test big["total_lines"] == 1000
-        @test big["end_line"] < 1000
-        @test big["truncated"] == true
-        @test 256 * 1024 <= sizeof(big["text"]) < 256 * 1024 + 1100
-
-        binary_file = joinpath(mktempdir(), "data.bin")
-        write(binary_file, UInt8[0x41, 0x00, 0x42])
-        binary = call("read_file", Dict{String,Any}("path" => binary_file))
-        @test err(binary) == "binary_file"
-        @test occursin("binary file", body(binary)["message"])
-
-        folder = realpath(mktempdir())
-        ran = body(call("run_shell", Dict{String,Any}("command" => "echo out; echo err >&2; pwd; exit 3", "cwd" => folder)))
-        @test ran["exit_code"] == 3
-        @test ran["stdout"] == "out\n$folder\n"
-        @test ran["stderr"] == "err\n"
-        @test ran["timed_out"] == false
-        withenv("HOME" => folder) do
-            @test body(call("run_shell", Dict{String,Any}("command" => "pwd")))["stdout"] == "$folder\n"
-        end
-        # A session's own folder is where it runs by default.
-        session_dir = realpath(mktempdir())
-        try
-            EndeavorRuntime.set_session_folder!("8", session_dir)
-            @test body(call("run_shell", Dict{String,Any}("command" => "pwd"); owner="8"))["stdout"] == "$session_dir\n"
-            @test body(call("run_shell", Dict{String,Any}("command" => "pwd", "cwd" => folder); owner="8"))["stdout"] == "$folder\n"
-        finally
-            EndeavorRuntime.set_session_folder!("8", "")
-        end
-
-        loud = body(call("run_shell", Dict{String,Any}("command" => "yes | head -c 100000")))
-        @test occursin("[… 70000 bytes left out …]", loud["stdout"])
-        @test sizeof(loud["stdout"]) < 30_100
-
-        started = time()
-        slow = body(call("run_shell", Dict{String,Any}("command" => "sleep 5 & sleep 5", "timeout_seconds" => 1)))
-        @test slow["timed_out"] == true
-        @test slow["exit_code"] === nothing
-        @test time() - started < 4
     end
 
     @testset "one notebook per session" begin

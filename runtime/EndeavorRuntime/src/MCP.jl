@@ -350,46 +350,6 @@ const MCP_TOOLS = [
     ),
 ]
 
-const HOST_TOOLS = [
-    Dict{String,Any}(
-        "name"        => "list_folder",
-        "description" => "List a folder on the server this session works on (your own file tools see the user's Mac, not the server). Returns entries with name, kind (dir, file, or link), size in bytes (files only), and modified (Unix time in seconds), folders first, hidden entries included. At most 1000 entries; truncated=true when there are more (total gives the count).",
-        "inputSchema" => Dict{String,Any}(
-            "type"       => "object",
-            "properties" => Dict{String,Any}(
-                "path" => Dict("type" => "string", "description" => "Folder on the server. ~ is the home folder; a relative path is taken from the home folder, not the session's working folder. Default: the home folder."),
-            ),
-            "required"   => String[],
-        ),
-    ),
-    Dict{String,Any}(
-        "name"        => "read_file",
-        "description" => "Read a text file on the server this session works on. text has each line numbered like cat -n (line number, tab, line); the numbers are not part of the file. Returns start_line, end_line (last line returned), total_lines, and truncated=true when lines after end_line were left out or a line was cut (lines over 2000 characters are cut; at most about 256 KB per call). Read further with offset=end_line+1. Refuses binary files. Read notebooks with the notebook tools while they are open.",
-        "inputSchema" => Dict{String,Any}(
-            "type"       => "object",
-            "properties" => Dict{String,Any}(
-                "path"   => Dict("type" => "string", "description" => "File on the server. ~ is the home folder; a relative path is taken from the home folder."),
-                "offset" => Dict("type" => "integer", "description" => "First line to return, counting from 1. Default: 1."),
-                "limit"  => Dict("type" => "integer", "description" => "Most lines to return. Default: 2000."),
-            ),
-            "required"   => ["path"],
-        ),
-    ),
-    Dict{String,Any}(
-        "name"        => "run_shell",
-        "description" => "Run a shell command on the server this session works on, in the user's login shell (so module and PATH setup apply), with no input. The user approves each run. Returns exit_code (null if the command was killed), stdout, stderr (each at most 30000 bytes: the start and end are kept, with a note of how much was left out), timed_out, and cwd. Never write or edit a notebook .jl file with it: Pluto overwrites the file; change notebooks with the notebook tools.",
-        "inputSchema" => Dict{String,Any}(
-            "type"       => "object",
-            "properties" => Dict{String,Any}(
-                "command"         => Dict("type" => "string", "description" => "The command, as you would type it in a terminal."),
-                "cwd"             => Dict("type" => "string", "description" => "Folder to run in. ~ is the home folder; a relative path is taken from the home folder. Default: the session's working folder."),
-                "timeout_seconds" => Dict("type" => "integer", "description" => "Kill the command and everything it started after this many seconds. Default: 120; at most 600."),
-            ),
-            "required"   => ["command"],
-        ),
-    ),
-]
-
 # ---------------------------------------------------------------------------
 # JSON-RPC / MCP framing
 # ---------------------------------------------------------------------------
@@ -426,7 +386,7 @@ _err(id, code, message) = Dict{String,Any}(
 # ---------------------------------------------------------------------------
 
 function _handle_tool_call(session, name, arguments; owner::AbstractString="")
-    result = name in HOST_TOOL_NAMES ? call_host_tool(name, arguments) : call_tool_with_session(session, name, arguments)
+    result = call_tool_with_session(session, name, arguments)
     if name in ("open_notebook", "new_notebook") && result isa AbstractDict
         note_notebook_opened!(owner, result["path"])
     end
@@ -446,7 +406,7 @@ function _handle_tool_call(session, name, arguments; owner::AbstractString="")
     Dict{String,Any}("content" => content, "isError" => false)
 end
 
-function _safe_handle_tool_call(session, name, arguments; owner::AbstractString="", host::AbstractString="")
+function _safe_handle_tool_call(session, name, arguments; owner::AbstractString="")
     try
         note_activity!(arguments)
         refusal = notebook_refusal(session, owner, name, arguments)
@@ -479,8 +439,7 @@ end
 # ---------------------------------------------------------------------------
 
 # `owner` = the calling agent session (its X-Endeavor-Session header), for policy.
-# `host` = the server it works on (its X-Endeavor-Host header), empty on this Mac.
-function _dispatch_mcp(session, msg::Dict{String,Any}; owner::AbstractString="", host::AbstractString="")
+function _dispatch_mcp(session, msg::Dict{String,Any}; owner::AbstractString="")
     method = get(msg, "method", "")
     id     = get(msg, "id", nothing)
 
@@ -495,13 +454,13 @@ function _dispatch_mcp(session, msg::Dict{String,Any}; owner::AbstractString="",
         ))
 
     elseif method == "tools/list"
-        _ok(id, Dict{String,Any}("tools" => isempty(host) ? MCP_TOOLS : vcat(MCP_TOOLS, HOST_TOOLS)))
+        _ok(id, Dict{String,Any}("tools" => MCP_TOOLS))
 
     elseif method == "tools/call"
         params    = get(msg, "params", Dict{String,Any}())
         name      = get(params, "name", "")
         arguments = get(params, "arguments", Dict{String,Any}())
-        result    = _safe_handle_tool_call(session, name, arguments; owner, host)
+        result    = _safe_handle_tool_call(session, name, arguments; owner)
         publish_notebooks!()
         _ok(id, result)
 

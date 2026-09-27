@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------------------
 # The agent's MCP messages, from the core (`endeavor-remote core`), which
 # serves the agent's MCP connection and passes on what it doesn't answer, with
-# the caller's X-Endeavor-Session and X-Endeavor-Host headers. The reply is the
-# JSON-RPC response ("null" for a notification).
+# the caller's X-Endeavor-Session header. The reply is the JSON-RPC response
+# ("null" for a notification).
 # ---------------------------------------------------------------------------
 
 function _handle_dispatch(http::HTTP.Stream, pluto_session)
@@ -16,8 +16,7 @@ function _handle_dispatch(http::HTTP.Stream, pluto_session)
         return
     end
     owner = HTTP.header(http.message, "X-Endeavor-Session", "")
-    host  = HTTP.header(http.message, "X-Endeavor-Host", "")
-    resp  = _dispatch_mcp(pluto_session, msg; owner, host)
+    resp  = _dispatch_mcp(pluto_session, msg; owner)
     HTTP.setstatus(http, 200)
     HTTP.setheader(http, "Content-Type" => "application/json")
     HTTP.startwrite(http)

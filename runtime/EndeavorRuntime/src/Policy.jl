@@ -5,10 +5,10 @@
 
 const _POLICY_LOCK = ReentrantLock()
 
-# Tools that change the notebook or run code (the core's list, less its own).
+# Tools that change the notebook or run code (the core's list, less its host tools).
 const _WRITE_TOOLS = Set([
     "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
-    "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell",
+    "execute_cell", "submit_changes", "run_all_cells", "allow_execution",
 ])
 
 # One notebook per agent session: owner => the notebook path it works on. The
@@ -33,8 +33,8 @@ end
 
 bound_notebook(owner::AbstractString) = lock(() -> get(_BINDINGS, owner, nothing), _POLICY_LOCK)
 
-# owner => the session's working folder on this machine, where run_shell runs
-# unless told otherwise. The app sets it when the runtime is ready.
+# owner => the session's working folder on this machine, where new_notebook puts
+# an unnamed notebook. The app sets it (the core keeps a copy for run_shell).
 const _FOLDERS = Dict{String,String}()
 
 function set_session_folder!(owner::AbstractString, folder::AbstractString)

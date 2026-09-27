@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::host_tools;
 use crate::http::{self, Head};
 
 const KEEPALIVE: Duration = Duration::from_secs(15);
@@ -30,9 +31,6 @@ const WRITE_TOOLS: [&str; 12] = [
     "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell",
 ];
 
-/// Tools that act on the machine the runtime runs on, for sessions on a server.
-const HOST_TOOLS: [&str; 3] = ["list_folder", "read_file", "run_shell"];
-
 /// What every client connection shares.
 pub struct Bridge {
     /// Julia's bridge port, once it answers.
@@ -41,6 +39,11 @@ pub struct Bridge {
     sessions: Mutex<HashMap<String, SyncSender<String>>>,
     /// Each agent session's run policy, by its key.
     policies: Mutex<HashMap<String, String>>,
+    /// Each agent session's working folder on this machine, by its key.
+    folders: Mutex<HashMap<String, String>>,
+    /// `run_shell`'s environment, changed from ours as Julia's was: its
+    /// depot, and none of what the helper passes the runtime.
+    shell_env: Vec<(&'static str, Option<String>)>,
 }
 
 /// Who sent a message: the agent session's key and the server it works on,
@@ -59,8 +62,22 @@ impl Caller {
 }
 
 impl Bridge {
-    pub fn new(token: String) -> Bridge {
-        Bridge { upstream: OnceLock::new(), token, sessions: Mutex::default(), policies: Mutex::default() }
+    /// `depot` is Julia's JULIA_DEPOT_PATH.
+    pub fn new(token: String, depot: &str) -> Bridge {
+        let shell_env = vec![
+            ("JULIA_DEPOT_PATH", Some(depot.to_owned())),
+            ("ENDEAVOR_TOKEN", None),
+            ("ENDEAVOR_STATE", None),
+            ("ENDEAVOR_LAUNCHER", None),
+        ];
+        Bridge {
+            upstream: OnceLock::new(),
+            token,
+            sessions: Mutex::default(),
+            policies: Mutex::default(),
+            folders: Mutex::default(),
+            shell_env,
+        }
     }
 
     /// The reply to one of the app's `/call`s, if the core answers it; `None`
@@ -77,6 +94,17 @@ impl Bridge {
                 let (owner, policy) = (text("owner", ""), text("policy", "ask"));
                 eprintln!("[ Info: Session {owner} policy: {policy}");
                 self.policies.lock().unwrap().insert(owner, policy);
+            }
+            // Julia keeps it too, for new_notebook: its reply is the app's.
+            "endeavor/set_session_folder" => {
+                let (owner, folder) = (text("owner", ""), params.get("folder").filter(|f| !f.is_null()).map_or(String::new(), julia_string));
+                let mut folders = self.folders.lock().unwrap();
+                if folder.is_empty() {
+                    folders.remove(&owner);
+                } else {
+                    folders.insert(owner, folder);
+                }
+                return Ok(None);
             }
             "tools/list" | "tools/call" => {
                 return Ok(Some(self.dispatch(&message, raw, &Caller::default())?.unwrap_or_else(|| "{}".into())));
@@ -149,6 +177,11 @@ impl Bridge {
             "ping" => ok(json!({})),
             "tools/list" => {
                 let mut reply: Value = serde_json::from_str(&self.ask_julia("/dispatch", raw, caller)?)?;
+                if !caller.host.is_empty()
+                    && let Some(tools) = reply["result"]["tools"].as_array_mut()
+                {
+                    tools.extend(host_tools::schemas());
+                }
                 for tool in reply["result"]["tools"].as_array_mut().into_iter().flatten() {
                     // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
                     let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name));
@@ -161,13 +194,23 @@ impl Bridge {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                 // Julia reads a call's arguments before anything else, and fails
                 // arguments that aren't an object its own way.
-                if let (Some(name), true) = (params["name"].as_str(), arguments.is_object())
-                    && let Some(refusal) = self.refusal(caller, name)
-                {
-                    let _ = self.tool_called(&arguments);
-                    return ok(tool_error(&refusal));
-                }
-                self.ask_julia("/dispatch", raw, caller).map(Some)
+                let Some(name) = params["name"].as_str().filter(|_| arguments.is_object()) else {
+                    return self.ask_julia("/dispatch", raw, caller).map(Some);
+                };
+                let result = if let Some(refusal) = self.refusal(caller, name) {
+                    tool_error(&refusal)
+                } else if host_tools::NAMES.contains(&name) {
+                    let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
+                    let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
+                    match host_tools::call(name, &arguments, &host_tools::Shell { folder: folder.as_deref(), env: &env }) {
+                        Ok(result) => json!({ "content": [{ "type": "text", "text": to_json(&result) }], "isError": false }),
+                        Err(error) => tool_error(&error),
+                    }
+                } else {
+                    return self.ask_julia("/dispatch", raw, caller).map(Some);
+                };
+                let _ = self.tool_called(&arguments);
+                ok(result)
             }
             _ => self.ask_julia("/dispatch", raw, caller).map(Some),
         }
@@ -175,7 +218,7 @@ impl Bridge {
 
     /// Why a session may not call `tool`, as the error Julia raised for it.
     fn refusal(&self, caller: &Caller, tool: &str) -> Option<String> {
-        if HOST_TOOLS.contains(&tool) && caller.host.is_empty() {
+        if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(format!(
                 "ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on this Mac: use your own file and shell tools."
             ));

@@ -89,7 +89,7 @@ pub fn main(argv: &[String]) -> ! {
     let julia_pid = julia.id() as i32;
     pass_on_stop_signals(stop_signals, julia_pid);
 
-    let bridge = Arc::new(Bridge::new(token));
+    let bridge = Arc::new(Bridge::new(token, &args.depot));
     let bridge_port = listener.local_addr().unwrap().port();
     accept(listener, bridge.clone());
 

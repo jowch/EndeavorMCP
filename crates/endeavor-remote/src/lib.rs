@@ -14,6 +14,7 @@
 
 mod askpass;
 mod core;
+mod host_tools;
 mod http;
 mod julia;
 mod mcp;
