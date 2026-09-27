@@ -1277,10 +1277,23 @@ end
             @test_throws ArgumentError EndeavorRuntime.tool_new_notebook(Dict{String,Any}("path" => joinpath(dir, "x.txt")))
             @test_throws ArgumentError EndeavorRuntime.tool_new_notebook(Dict{String,Any}("path" => joinpath(dir, "missing", "y.jl")))
 
-            default = EndeavorRuntime.tool_new_notebook(Dict{String,Any}())
-            @test isfile(default["path"])
-            @test haskey(session.notebooks, UUID(default["notebook_id"]))
-            rm(default["path"]; force=true)
+            # A session with a folder gets its new notebooks there, named or not.
+            session_dir = realpath(mktempdir())
+            EndeavorRuntime.set_session_folder!("9", session_dir)
+            try
+                EndeavorRuntime.with_owner("9") do
+                    default = EndeavorRuntime.tool_new_notebook(Dict{String,Any}())
+                    @test dirname(default["path"]) == session_dir
+                    @test endswith(default["path"], ".jl")
+                    @test isfile(default["path"])
+                    @test haskey(session.notebooks, UUID(default["notebook_id"]))
+                    named = EndeavorRuntime.tool_new_notebook(Dict{String,Any}("path" => "named.jl"))
+                    @test named["path"] == joinpath(session_dir, "named.jl")
+                    @test isfile(named["path"])
+                end
+            finally
+                EndeavorRuntime.set_session_folder!("9", "")
+            end
         finally
             EndeavorRuntime.stop_pluto_stack!()
         end

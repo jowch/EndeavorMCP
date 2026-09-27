@@ -417,11 +417,15 @@ const _SHUTDOWN = Ref{Function}(() -> exit(0))
 function tool_new_notebook(args)
     require_standalone_session!()
     requested = get(args, "path", nothing)
-    nb = if requested === nothing
-        # Pluto's own naming in its new-notebooks directory, like "Create a new notebook".
+    folder = session_folder(current_owner())
+    nb = if requested === nothing && folder !== nothing && isdir(folder)
+        # Pluto's own naming, like "Create a new notebook", in the session's folder.
+        Pluto.emptynotebook(Pluto.numbered_until_new(joinpath(folder, Pluto.cutename()); create_file=false))
+    elseif requested === nothing
         Pluto.emptynotebook()
     else
-        path = abspath(expanduser(String(requested)))
+        path = expanduser(String(requested))
+        path = abspath(isabspath(path) || folder === nothing ? path : joinpath(folder, path))
         endswith(path, ".jl") ||
             throw(ArgumentError("invalid_path::Notebook path must end in .jl: '$path'"))
         ispath(path) &&

@@ -52,11 +52,11 @@ A notebook nobody has used for a while (no tool calls, edits, or running cells; 
 | User wants | Tool |
 |------------|------|
 | A notebook they named (a path or a clear, unambiguous reference) | `open_notebook(path=...)` |
-| A brand-new notebook | `new_notebook(path=<working directory>/<descriptive_name>.jl)` |
+| A brand-new notebook | `new_notebook(path=<descriptive_name>.jl)` |
 | Unclear, or no notebook named | `list_notebooks`, then ask — or offer to create one with `new_notebook` |
 
 - `open_notebook` and `new_notebook` both switch the notebook pane to that notebook automatically once they succeed. There's no landing page to click through and no separate step to "show" the notebook to the user.
-- **Always pass `path` to `new_notebook`, inside your current working directory** (the folder this Endeavor session was started in), with a short descriptive `snake_case.jl` name, unless the user names another place. Without a path, Pluto puts the file in an internal app folder the user won't find.
+- **Pass `path` to `new_notebook` as a short descriptive `snake_case.jl` file name**, unless the user names another place. A relative path lands in the folder this Endeavor session was started in (on a server session, that folder on the server). Without a path, Pluto picks a random name in that same folder.
 - Never hand-write a `.jl` notebook file or otherwise create one outside the notebook tools (no `Write`, no generating a UUID yourself). `new_notebook` has Pluto itself write the file, and it never overwrites an existing one. Use `open_notebook` for anything that already exists on disk.
 - Notebooks opened with `open_notebook` come up in **safe preview** — code is loaded but not run until the user clicks "Run notebook code" in the pane (or you call `allow_execution` because they asked). `new_notebook` skips safe preview: a new notebook has no code to distrust. See **pluto-workflow** → [safe-preview.md](../pluto-workflow/reference/safe-preview.md).
 

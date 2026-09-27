@@ -327,11 +327,11 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "new_notebook",
-        "description" => "Create a new empty notebook file (written by Pluto itself) and load it into the live Pluto session, ready to run (no safe preview: it has no code yet). It starts with one empty cell, whose id is in cell_ids: edit it for the first cell. Use this instead of writing a .jl file by hand. Omit path to use Pluto's default new-notebook location; an existing file is never overwritten (use open_notebook for that). Each session works on one notebook: if it already has one, this is refused. For a new analysis step, add a section to the current notebook rather than creating another.",
+        "description" => "Create a new empty notebook file (written by Pluto itself) and load it into the live Pluto session, ready to run (no safe preview: it has no code yet). It starts with one empty cell, whose id is in cell_ids: edit it for the first cell. Use this instead of writing a .jl file by hand. Omit path to get a Pluto-named file in the session's folder; an existing file is never overwritten (use open_notebook for that). Each session works on one notebook: if it already has one, this is refused. For a new analysis step, add a section to the current notebook rather than creating another.",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(
-                "path" => Dict("type" => "string", "description" => "Optional filesystem path for the new .jl file. Must not exist yet; its directory must."),
+                "path" => Dict("type" => "string", "description" => "Optional filesystem path for the new .jl file; a relative path is inside the session's folder. Must not exist yet; its directory must."),
             ),
             "required"   => String[],
         ),
