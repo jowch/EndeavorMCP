@@ -1,6 +1,7 @@
 //! The helper binary against a stand-in runtime (a `sleep` process plus two
-//! small TCP servers on loopback), so no Julia is needed: attaching, relaying,
-//! one client at a time, and each way a connection ends.
+//! small TCP servers on loopback), so no Julia is needed: file requests before
+//! any runtime, attaching on request, relaying, one client at a time, and each
+//! way a connection ends.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -11,6 +12,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use wire::files::{Reply, Request};
 use wire::relay::Mux;
 use wire::{Target, ToApp, ToHelper};
 
@@ -164,6 +166,23 @@ impl Helper {
         hello
     }
 
+    /// The next message after any lines of the runtime's log.
+    fn after_progress(&self) -> ToApp {
+        loop {
+            match self.next() {
+                ToApp::Progress { .. } => {}
+                other => return other,
+            }
+        }
+    }
+
+    /// Hello, then ask for the runtime: its answer.
+    fn start_runtime(&self) -> ToApp {
+        self.hello();
+        self.send(ToHelper::StartRuntime);
+        self.next()
+    }
+
     fn send(&self, message: ToHelper) {
         self.mux.send(&message.frame()).unwrap();
     }
@@ -205,7 +224,7 @@ fn attaches_relays_hands_over_and_stops() {
     let dir = state_dir("attach");
     let runtime = FakeRuntime::start(&dir, "labbox3");
     let mut first = Helper::start(&dir, &["--any-node"]);
-    let ToApp::Hello { launcher, node, pid, token, pluto_secret, reattached, .. } = first.hello() else { unreachable!() };
+    let ToApp::Ready { launcher, node, pid, token, pluto_secret, reattached } = first.start_runtime() else { unreachable!() };
     assert_eq!((launcher.as_str(), node.as_str(), pid), ("process", "labbox3", runtime.pid));
     assert_eq!((token.as_str(), pluto_secret.as_str(), reattached), (TOKEN, "s3cret", true));
 
@@ -221,22 +240,57 @@ fn attaches_relays_hands_over_and_stops() {
     call.read_to_string(&mut reply).unwrap();
     assert!(reply.starts_with("HTTP/1.1 200") && reply.ends_with("{\"said\":\"POST /call HTTP/1.0\"}"), "{reply}");
 
-    // A second client takes over; the first hears why and exits, its streams closed.
-    let second = Helper::start(&dir, &["--any-node", "--quit-with-client"]);
+    // A second client only connecting takes nothing; asking for the runtime takes
+    // it over: the first hears why and exits, its streams closed.
+    let mut second = Helper::start(&dir, &["--any-node", "--quit-with-client"]);
+    second.hello();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(first.control.try_recv().is_err(), "connecting alone replaced the first client");
+    second.send(ToHelper::StartRuntime);
     assert_eq!(first.next(), ToApp::Replaced);
     first.exits();
     let mut rest = Vec::new();
     assert_eq!(pluto.read_to_end(&mut rest).unwrap_or(0), 0);
-    let ToApp::Hello { reattached, .. } = second.hello() else { unreachable!() };
+    let ToApp::Ready { reattached, .. } = second.next() else { unreachable!() };
     assert!(reattached);
     assert!(runtime.alive(), "handing over doesn't stop the runtime");
 
-    // Stop shuts the runtime down through its bridge and clears the state.
-    let mut second = second;
+    // Stop shuts the runtime down through its bridge and clears the state; the
+    // helper stays connected until the app goes.
     second.send(ToHelper::Stop);
-    second.exits();
+    assert_eq!(second.next(), ToApp::Stopped);
     assert!(!runtime.alive());
     assert!(!dir.join("runtime.json").exists());
+    assert!(second.process.try_wait().unwrap().is_none(), "a stop keeps the helper");
+    second.stdin.0.lock().unwrap().take();
+    second.exits();
+}
+
+#[test]
+fn answers_file_requests_before_any_runtime() {
+    let dir = state_dir("files");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join("decay-fits/sub")).unwrap();
+    std::fs::write(home.join("decay-fits/fit.jl"), "### A Pluto.jl notebook ###\n\n# ╔═╡ 1a2b3c4d-0000-4000-8000-000000000001\nx = 1\n").unwrap();
+    let helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[("HOME", home.to_str().unwrap())]);
+    let ToApp::Hello { home: said, .. } = helper.hello() else { unreachable!() };
+    assert_eq!(said, home.display().to_string());
+    let ask = |id: u32, request: Request| {
+        helper.send(ToHelper::Files { id, request });
+        match helper.next() {
+            ToApp::Files { id: got, reply } if got == id => reply,
+            other => panic!("expected Files {id}, got {other:?}"),
+        }
+    };
+    let Reply::List { path, entries } = ask(1, Request::List { path: "~/decay-fits".into() }) else { panic!() };
+    assert_eq!(path, home.join("decay-fits").canonicalize().unwrap());
+    assert_eq!(entries.iter().map(|e| (e.name.as_str(), e.dir)).collect::<Vec<_>>(), [("sub", true), ("fit.jl", false)]);
+    let Reply::Notebooks { found } = ask(2, Request::Notebooks { path: "~/decay-fits".into() }) else { panic!() };
+    assert_eq!(found.len(), 1);
+    let Reply::Preview { preview } = ask(3, Request::Preview { path: "~/decay-fits/fit.jl".into() }) else { panic!() };
+    assert_eq!(preview.cells[0].code, "x = 1");
+    assert!(matches!(ask(4, Request::List { path: "~/nope".into() }), Reply::Error { .. }));
+    assert!(!dir.join("lock").exists(), "no runtime was asked for, so no lock");
 }
 
 #[test]
@@ -245,19 +299,19 @@ fn detaching_leaves_the_runtime_and_quit_with_client_stops_it_on_eof() {
     let runtime = FakeRuntime::start(&dir, "labbox3");
     // The app's own word at quit wins over the flag.
     let mut helper = Helper::start(&dir, &["--any-node", "--quit-with-client"]);
-    helper.hello();
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
     helper.send(ToHelper::Detach);
     helper.exits();
     assert!(runtime.alive() && dir.join("runtime.json").exists());
 
     let mut helper = Helper::start(&dir, &["--any-node"]);
-    helper.hello();
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
     assert!(runtime.alive() && dir.join("runtime.json").exists(), "without the flag, the app vanishing leaves it");
 
     let mut helper = Helper::start(&dir, &["--any-node", "--quit-with-client"]);
-    helper.hello();
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
     assert!(!runtime.alive(), "the app going away stops it with --quit-with-client");
@@ -270,13 +324,17 @@ fn a_runtime_that_dies_is_reported_with_its_log() {
     let runtime = FakeRuntime::start(&dir, "labbox3");
     std::fs::write(dir.join("runtime.log"), "booting\nGo to http://localhost:1234/?secret=abc123 now\nERROR: boom\n").unwrap();
     let mut helper = Helper::start(&dir, &["--any-node"]);
-    helper.hello();
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
     runtime.kill();
     let ToApp::Died { status, log_tail } = helper.next() else { panic!("expected Died") };
     assert_eq!(status, "exited");
     assert_eq!(log_tail, ["booting", "Go to http://localhost:1234/?secret=… now", "ERROR: boom"]);
-    helper.exits();
     assert!(!dir.join("runtime.json").exists());
+    // Still connected: asking again tries to start a new one (no Julia here).
+    helper.send(ToHelper::StartRuntime);
+    assert!(matches!(helper.next(), ToApp::StartFailed { .. }));
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
 }
 
 #[test]
@@ -284,8 +342,9 @@ fn a_runtime_recorded_on_another_node_is_not_replaced() {
     let dir = state_dir("node");
     let _runtime = FakeRuntime::start(&dir, "some-other-node");
     let mut helper = Helper::start(&dir, &[]);
-    let ToApp::Error { message } = helper.next() else { panic!("expected Error") };
+    let ToApp::StartFailed { message } = helper.start_runtime() else { panic!("expected StartFailed") };
     assert!(message.contains("some-other-node"), "{message}");
+    helper.stdin.0.lock().unwrap().take();
     helper.exits();
     assert!(dir.join("runtime.json").exists());
 }
@@ -294,8 +353,9 @@ fn a_runtime_recorded_on_another_node_is_not_replaced() {
 fn a_runtime_that_cant_start_is_an_error() {
     let dir = state_dir("nojulia");
     let mut helper = Helper::start(&dir, &[]);
-    let ToApp::Error { message } = helper.next() else { panic!("expected Error") };
+    let ToApp::StartFailed { message } = helper.start_runtime() else { panic!("expected StartFailed") };
     assert!(message.contains("/nonexistent/julia"), "{message}");
+    helper.stdin.0.lock().unwrap().take();
     helper.exits();
 }
 
@@ -315,14 +375,16 @@ fn julia_from_a_shell_line_is_found_and_its_failure_reported() {
     let julia = fake_julia(&dir);
     let line = format!("PATH={}:$PATH", julia.parent().unwrap().display());
     let mut helper = Helper::start_with(&dir, &["--julia-shell", &line], &[("SHELL", "/bin/sh")]);
-    assert_eq!(helper.next(), ToApp::FoundJulia { path: julia.display().to_string(), version: "1.12.0".into() });
-    let ToApp::Died { status, log_tail } = helper.next() else { panic!("expected Died") };
+    assert_eq!(helper.start_runtime(), ToApp::FoundJulia { path: julia.display().to_string(), version: "1.12.0".into() });
+    let ToApp::Died { status, log_tail } = helper.after_progress() else { panic!("expected Died") };
     assert!(status.contains('3'), "{status}");
     assert_eq!(log_tail, ["ERROR: boom"]);
+    helper.stdin.0.lock().unwrap().take();
     helper.exits();
 
     let mut helper = Helper::start_with(&dir, &["--julia-shell", "true"], &[("SHELL", "/bin/sh"), ("PATH", "/usr/bin:/bin")]);
-    let ToApp::Error { message } = helper.next() else { panic!("expected Error") };
+    let ToApp::StartFailed { message } = helper.start_runtime() else { panic!("expected StartFailed") };
     assert!(message.contains("`true`") && message.contains("PATH"), "{message}");
+    helper.stdin.0.lock().unwrap().take();
     helper.exits();
 }

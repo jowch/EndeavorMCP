@@ -19,6 +19,8 @@
 //! already closed are dropped.
 
 pub mod askpass;
+pub mod files;
+pub mod notebooks;
 pub mod relay;
 
 use std::io::{self, ErrorKind, Read, Write};
@@ -123,13 +125,24 @@ fn invalid(message: String) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
 }
 
-/// Helper → app.
+/// Helper → app. The helper says `Hello` as soon as it runs; the runtime starts
+/// (or is attached to) only when the app sends `StartRuntime`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToApp {
-    /// The runtime is up and streams can open.
+    /// The helper is up. File requests work from now on.
     Hello {
         version: String,
+        /// The machine the helper runs on.
+        node: String,
+        home: String,
+    },
+    /// A line of the runtime's log while it starts, or of Julia's download.
+    Progress { line: String },
+    /// The julia the helper starts the runtime with (sent only when it starts one).
+    FoundJulia { path: String, version: String },
+    /// The runtime is up and streams can open.
+    Ready {
         /// How the runtime was started: "process" (later also "slurm").
         launcher: String,
         /// The machine the runtime runs on.
@@ -141,15 +154,18 @@ pub enum ToApp {
         /// The runtime was already running; this connect didn't start it.
         reattached: bool,
     },
-    /// A line of the runtime's log while it starts, or of Julia's download.
-    Progress { line: String },
-    /// The julia the helper starts the runtime with (sent only when it starts one).
-    FoundJulia { path: String, version: String },
-    /// The runtime exited. The helper exits after sending this.
+    /// The runtime couldn't start (no Julia, running on another node, …); the
+    /// helper stays connected, so `StartRuntime` can try again.
+    StartFailed { message: String },
+    /// The runtime exited; the helper stays connected.
     Died { status: String, log_tail: Vec<String> },
+    /// The runtime stopped as the app asked; the helper stays connected.
+    Stopped,
     /// Another client took over this runtime; the helper exits.
     Replaced,
-    /// The helper couldn't do what was asked; it exits.
+    /// The answer to `ToHelper::Files` with the same id.
+    Files { id: u32, reply: files::Reply },
+    /// The helper couldn't go on; it exits.
     Error { message: String },
 }
 
@@ -157,10 +173,13 @@ pub enum ToApp {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToHelper {
-    /// Stop the runtime, then exit.
+    /// Attach to the runtime, starting it if it isn't running.
+    StartRuntime,
+    /// Stop the runtime and stay connected.
     Stop,
     /// Exit and leave the runtime running.
     Detach,
+    Files { id: u32, request: files::Request },
 }
 
 impl ToApp {
@@ -237,8 +256,7 @@ mod tests {
 
     #[test]
     fn control_messages_are_tagged_json() {
-        let hello = ToApp::Hello {
-            version: "0.1.0".into(),
+        let ready = ToApp::Ready {
             launcher: "process".into(),
             node: "labbox3".into(),
             pid: 81234,
@@ -246,11 +264,14 @@ mod tests {
             pluto_secret: "s".into(),
             reattached: true,
         };
-        let Frame::Control(json) = hello.frame() else { panic!() };
+        let Frame::Control(json) = ready.frame() else { panic!() };
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
-        assert_eq!(value["type"], "Hello");
+        assert_eq!(value["type"], "Ready");
         assert_eq!(value["launcher"], "process");
-        assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), hello);
+        assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), ready);
+        let files = ToHelper::Files { id: 3, request: files::Request::List { path: "~".into() } };
+        let Frame::Control(json) = files.frame() else { panic!() };
+        assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Detach"}"#).unwrap(), ToHelper::Detach);
         assert_eq!(serde_json::from_str::<ToApp>(r#"{"type":"Replaced"}"#).unwrap(), ToApp::Replaced);
     }

@@ -1,9 +1,10 @@
-//! `endeavor-remote connect`: the one client of a Julia runtime (Pluto plus
-//! EndeavorRuntime). It attaches to the runtime recorded in the state folder or
-//! starts one, then relays the app's streams to the runtime's loopback ports
-//! over its own stdin/stdout (docs/remote-sessions.md). It runs as a child of
-//! the app on This Mac, and over `ssh` on a server. It is also ssh's askpass
-//! program there (see `askpass`).
+//! `endeavor-remote connect`: the app's end on a machine. It answers questions
+//! about the machine's files at once, and when the app asks, becomes the one
+//! client of its Julia runtime (Pluto plus EndeavorRuntime): it attaches to the
+//! runtime recorded in the state folder or starts one, then relays the app's
+//! streams to the runtime's loopback ports over its own stdin/stdout
+//! (docs/remote-sessions.md). It runs as a child of the app on This Mac, and
+//! over `ssh` on a server. It is also ssh's askpass program there (see `askpass`).
 
 mod askpass;
 mod julia;
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -55,11 +56,14 @@ enum Event {
     App(ToHelper),
     /// The app closed our stdin.
     Eof,
-    /// The runtime exited, with this status.
-    Exited(String),
+    /// The runtime with this pid exited, with this status.
+    Exited(i32, String),
     /// Another helper wants the runtime.
     Replaced,
 }
+
+/// The runtime's two ports while one is attached, for the streams the app opens.
+type Ports = Arc<RwLock<Option<[u16; 2]>>>;
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -82,7 +86,7 @@ fn main() {
     // frames are binary, so skip std's line-buffered Stdout.
     let stdout = unsafe { File::from_raw_fd(1) };
     let mux = Mux::new(stdout);
-    let Err(message) = connect(&args, &mux, replace_signal);
+    let Err(message) = serve(&args, &mux, replace_signal);
     eprintln!("endeavor-remote: {message}");
     let _ = mux.send(&ToApp::Error { message }.frame());
     std::process::exit(1);
@@ -119,88 +123,142 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     })
 }
 
-/// Attach to or start the runtime and relay until told to stop, the app goes
-/// away, or the runtime dies. Returns only on failure.
-fn connect(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<std::convert::Infallible, String> {
+/// Say hello, then serve the app until it detaches or goes away, starting,
+/// stopping and relaying to the runtime as it asks. Returns only on failure.
+fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<std::convert::Infallible, String> {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&args.state_dir)
         .map_err(|e| format!("Couldn't create {}: {e}", args.state_dir.display()))?;
-    let _lock = lock(&args.state_dir)?;
-
     let (events, rx) = mpsc::channel();
     watch_replace_signal(replace_signal, events.clone());
-    let ports: Arc<OnceLock<[u16; 2]>> = Arc::default();
+    let ports: Ports = Arc::default();
     relay_stdin(mux.clone(), ports.clone(), events.clone());
+    let home = wire::files::home().display().to_string();
+    let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home }.frame());
 
-    let (state, pid, exit, reattached) = match existing(args)? {
-        Some(state) => {
-            let (pid, exit) = (state.pid, Exit::watch_pid(state.pid, events.clone()));
-            (state, pid, exit, true)
-        }
-        None => {
-            let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame())))?;
-            let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
-            let token = token(&args.state_dir)?;
-            let child = start(args, &julia, &token)?;
-            let pid = child.id() as i32;
-            let exit = Exit::watch_child(child, events.clone());
-            let state = boot(args, mux, pid, &exit, &rx)?;
-            (state, pid, exit, false)
-        }
-    };
-    let runtime = Runtime { pid, exit, state_dir: args.state_dir.clone() };
-
-    ports.set([state.pluto_port, state.mcp_port]).expect("set once");
-    let _ = mux.send(
-        &ToApp::Hello {
-            version: env!("CARGO_PKG_VERSION").into(),
-            launcher: state.launcher.clone(),
-            node: state.node.clone(),
-            pid: pid as u32,
-            token: state.token.clone(),
-            pluto_secret: state.pluto_secret.clone(),
-            reattached,
-        }
-        .frame(),
-    );
-
+    let mut attached: Option<Attached> = None;
     loop {
         match rx.recv().expect("senders live as long as their threads") {
-            Event::Exited(status) => runtime.died(mux, status),
-            Event::App(ToHelper::Stop) => runtime.stop(Some(&state)),
-            Event::Eof if args.quit_with_client => runtime.stop(Some(&state)),
+            Event::App(ToHelper::StartRuntime) => {
+                if let Some(attached) = &attached {
+                    let _ = mux.send(&attached.ready(true).frame());
+                    continue;
+                }
+                match attach(args, mux, &rx, &events) {
+                    Ok(now) => {
+                        *ports.write().unwrap() = Some([now.state.pluto_port, now.state.mcp_port]);
+                        let _ = mux.send(&now.ready(now.reattached).frame());
+                        attached = Some(now);
+                    }
+                    Err(message) => {
+                        let _ = mux.send(&message.frame());
+                    }
+                }
+            }
+            Event::App(ToHelper::Stop) => {
+                if let Some(runtime) = attached.take() {
+                    *ports.write().unwrap() = None;
+                    runtime.runtime.stop(Some(&runtime.state));
+                }
+                let _ = mux.send(&ToApp::Stopped.frame());
+            }
+            Event::Eof if args.quit_with_client => {
+                if let Some(runtime) = attached.take() {
+                    runtime.runtime.stop(Some(&runtime.state));
+                }
+                std::process::exit(0);
+            }
             // An explicit Detach wins over --quit-with-client: the app decides at
             // quit, and the flag only covers an app that vanishes without saying.
             Event::App(ToHelper::Detach) | Event::Eof => std::process::exit(0),
+            // Answered as they arrive (relay_stdin).
+            Event::App(ToHelper::Files { .. }) => {}
+            Event::Exited(pid, status) => {
+                if attached.as_ref().is_some_and(|a| a.runtime.pid == pid) {
+                    *ports.write().unwrap() = None;
+                    let runtime = attached.take().expect("checked");
+                    let _ = mux.send(&runtime.runtime.died(status).frame());
+                }
+            }
             Event::Replaced => {
-                let _ = mux.send(&ToApp::Replaced.frame());
-                std::process::exit(0);
+                if attached.is_some() {
+                    let _ = mux.send(&ToApp::Replaced.frame());
+                    std::process::exit(0);
+                }
             }
         }
     }
 }
 
+/// The runtime this helper is the client of, and the lock that makes it the only one.
+struct Attached {
+    runtime: Runtime,
+    state: State,
+    reattached: bool,
+    _lock: File,
+}
+
+impl Attached {
+    fn ready(&self, reattached: bool) -> ToApp {
+        let state = &self.state;
+        ToApp::Ready {
+            launcher: state.launcher.clone(),
+            node: state.node.clone(),
+            pid: self.runtime.pid as u32,
+            token: state.token.clone(),
+            pluto_secret: state.pluto_secret.clone(),
+            reattached,
+        }
+    }
+}
+
+/// Take the runtime over, or start one. The error is the app's answer: why it
+/// couldn't start, or that it died while starting.
+fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>) -> Result<Attached, ToApp> {
+    let failed = |message: String| ToApp::StartFailed { message };
+    let lock = lock(&args.state_dir).map_err(failed)?;
+    if let Some(state) = existing(args).map_err(failed)? {
+        let runtime = Runtime { pid: state.pid, exit: Exit::watch_pid(state.pid, events.clone()), state_dir: args.state_dir.clone() };
+        return Ok(Attached { runtime, state, reattached: true, _lock: lock });
+    }
+    let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(failed)?;
+    let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
+    let token = token(&args.state_dir).map_err(failed)?;
+    let child = start(args, &julia, &token).map_err(failed)?;
+    let pid = child.id() as i32;
+    let runtime = Runtime { pid, exit: Exit::watch_child(child, pid, events.clone()), state_dir: args.state_dir.clone() };
+    let state = boot(args, mux, &runtime, rx)?;
+    Ok(Attached { runtime, state, reattached: false, _lock: lock })
+}
+
 /// Wait for a runtime we just started to write its state and answer. A runtime
 /// that isn't ready is never left behind: anything but its readiness stops it.
-fn boot(args: &Args, mux: &Arc<Mux>, pid: i32, exit: &Arc<Exit>, rx: &mpsc::Receiver<Event>) -> Result<State, String> {
-    let runtime = Runtime { pid, exit: exit.clone(), state_dir: args.state_dir.clone() };
+fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, rx: &mpsc::Receiver<Event>) -> Result<State, ToApp> {
     let ready = Arc::new(AtomicBool::new(false));
-    let log = follow_log(args.state_dir.join("runtime.log"), mux.clone(), ready.clone(), exit.clone());
+    let log = follow_log(args.state_dir.join("runtime.log"), mux.clone(), ready.clone(), runtime.exit.clone());
     let result = loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(Event::Exited(status)) => runtime.died(mux, status),
+            Ok(Event::Exited(pid, status)) if pid == runtime.pid => break Err(runtime.died(status)),
+            Ok(Event::Exited(..) | Event::App(ToHelper::StartRuntime | ToHelper::Files { .. })) => {}
             Ok(Event::Replaced) => {
                 runtime.kill();
                 let _ = mux.send(&ToApp::Replaced.frame());
                 std::process::exit(0);
             }
-            Ok(Event::App(_) | Event::Eof) => runtime.stop(None),
+            Ok(Event::App(ToHelper::Stop)) => {
+                runtime.stop(None);
+                break Err(ToApp::Stopped);
+            }
+            Ok(Event::App(ToHelper::Detach) | Event::Eof) => {
+                runtime.stop(None);
+                std::process::exit(0);
+            }
             Err(RecvTimeoutError::Disconnected) => unreachable!("the watchers hold senders"),
             Err(RecvTimeoutError::Timeout) => {
                 if let Some(state) = read_state(&args.state_dir)
-                    && state.pid == pid
+                    && state.pid == runtime.pid
                     && bridge_answers(&state)
                 {
                     break Ok(state);
@@ -208,13 +266,13 @@ fn boot(args: &Args, mux: &Arc<Mux>, pid: i32, exit: &Arc<Exit>, rx: &mpsc::Rece
             }
         }
     };
-    // Its progress lines go out before Hello.
+    // Its progress lines go out before Ready.
     ready.store(true, Ordering::SeqCst);
     let _ = log.join();
     result
 }
 
-/// The runtime this connection is attached to.
+/// A runtime process this helper watches.
 struct Runtime {
     pid: i32,
     exit: Arc<Exit>,
@@ -222,23 +280,22 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn died(&self, mux: &Mux, status: String) -> ! {
+    /// It exited: clean up after it and say so.
+    fn died(&self, status: String) -> ToApp {
         let log_tail = log_tail(&self.state_dir.join("runtime.log"));
         // Its notebook workers are no use without it.
         stop_workers(self.pid);
         remove_state(&self.state_dir, self.pid);
-        let _ = mux.send(&ToApp::Died { status, log_tail }.frame());
-        std::process::exit(0);
+        ToApp::Died { status, log_tail }
     }
 
     /// Ask the runtime to shut down (when its bridge is up), then insist.
-    fn stop(&self, state: Option<&State>) -> ! {
+    fn stop(&self, state: Option<&State>) {
         if let Some(state) = state {
             let _ = bridge_call(state.mcp_port, &state.token, "endeavor/shutdown");
             self.exit.wait(Duration::from_secs(10));
         }
         self.kill();
-        std::process::exit(0);
     }
 
     fn kill(&self) {
@@ -279,12 +336,12 @@ struct Exit {
 }
 
 impl Exit {
-    fn watch_child(mut child: Child, events: Sender<Event>) -> Arc<Exit> {
+    fn watch_child(mut child: Child, pid: i32, events: Sender<Event>) -> Arc<Exit> {
         let exit = Arc::new(Exit::default());
         let e = exit.clone();
         std::thread::spawn(move || {
             let status = child.wait().map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
-            e.set(status, &events);
+            e.set(pid, status, &events);
         });
         exit
     }
@@ -297,15 +354,15 @@ impl Exit {
             while pid_alive(pid) {
                 std::thread::sleep(Duration::from_millis(500));
             }
-            e.set("exited".into(), &events);
+            e.set(pid, "exited".into(), &events);
         });
         exit
     }
 
-    fn set(&self, status: String, events: &Sender<Event>) {
+    fn set(&self, pid: i32, status: String, events: &Sender<Event>) {
         *self.status.lock().unwrap() = Some(status.clone());
         self.changed.notify_all();
-        let _ = events.send(Event::Exited(status));
+        let _ = events.send(Event::Exited(pid, status));
     }
 
     fn status(&self) -> Option<String> {
@@ -386,17 +443,23 @@ fn watch_replace_signal(set: libc::sigset_t, events: Sender<Event>) {
     });
 }
 
-/// Read frames from the app: streams go to the runtime's ports once they're
-/// known, control messages and the end of input become events.
-fn relay_stdin(mux: Arc<Mux>, ports: Arc<OnceLock<[u16; 2]>>, events: Sender<Event>) {
+/// Read frames from the app: streams go to the runtime's ports while one is
+/// attached, file requests are answered on their own threads, other control
+/// messages and the end of input become events.
+fn relay_stdin(mux: Arc<Mux>, ports: Ports, events: Sender<Event>) {
     std::thread::spawn(move || {
         // SAFETY: fd 0 is our stdin; only this thread reads it.
         let stdin = BufReader::new(unsafe { File::from_raw_fd(0) });
         let control = events.clone();
+        let answering = mux.clone();
         let result = mux.run(
             stdin,
-            |mux, id, target| dial(mux, id, target, ports.get()),
+            |mux, id, target| dial(mux, id, target, *ports.read().unwrap()),
             |json| match serde_json::from_slice::<ToHelper>(json) {
+                Ok(ToHelper::Files { id, request }) => {
+                    let mux = answering.clone();
+                    std::thread::spawn(move || drop(mux.send(&ToApp::Files { id, reply: wire::files::answer(&request) }.frame())));
+                }
                 Ok(message) => drop(control.send(Event::App(message))),
                 Err(e) => eprintln!("endeavor-remote: ignoring control message: {e}"),
             },
@@ -408,7 +471,7 @@ fn relay_stdin(mux: Arc<Mux>, ports: Arc<OnceLock<[u16; 2]>>, events: Sender<Eve
     });
 }
 
-fn dial(mux: &Arc<Mux>, id: u32, target: Target, ports: Option<&[u16; 2]>) {
+fn dial(mux: &Arc<Mux>, id: u32, target: Target, ports: Option<[u16; 2]>) {
     let port = ports.map(|p| if target == Target::Pluto { p[0] } else { p[1] });
     let socket = port.ok_or(()).and_then(|port| {
         TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)).map_err(drop)

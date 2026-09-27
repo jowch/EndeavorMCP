@@ -1,8 +1,11 @@
 //! Pluto notebook files on disk, read without Pluto: finding them in a folder,
-//! and the first cells of one for the new-session screen's static preview.
+//! and the first cells of one for the new-session screen's static preview. The
+//! app reads This Mac's files with these; the helper a server's.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+use serde::{Deserialize, Serialize};
 
 const HEADER: &str = "### A Pluto.jl notebook ###";
 const CELL: &str = "# ╔═╡ ";
@@ -11,7 +14,7 @@ const ORDER: &str = "# ╔═╡ Cell order:";
 const PACKAGE_CELLS: [&str; 2] = ["PLUTO_PROJECT_TOML_CONTENTS", "PLUTO_MANIFEST_TOML_CONTENTS"];
 
 /// A notebook found in a folder: its path, and when it last changed.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Found {
     pub path: PathBuf,
     pub modified: SystemTime,
@@ -67,7 +70,7 @@ fn is_notebook(path: &Path) -> bool {
 }
 
 /// The start of a notebook for a static preview.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Preview {
     /// Code of the first cells in notebook order, each cut to `LINES` lines.
     pub cells: Vec<Cell>,
@@ -75,7 +78,7 @@ pub struct Preview {
     pub total: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     pub code: String,
     /// Lines were cut off the end.
@@ -84,6 +87,18 @@ pub struct Cell {
 
 const CELLS: usize = 8;
 const LINES: usize = 12;
+/// Larger files are only their start: Pluto keeps the cell order at the end.
+const MAX_READ: u64 = 16 << 20;
+
+/// The preview of the notebook file at `path`.
+pub fn read_preview(path: &Path) -> Result<Preview, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(MAX_READ).read_to_end(&mut bytes))
+        .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+    Ok(preview(&String::from_utf8_lossy(&bytes)))
+}
 
 /// The first cells of a Pluto notebook file's text, in the notebook's order.
 pub fn preview(text: &str) -> Preview {
