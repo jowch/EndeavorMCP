@@ -15,7 +15,7 @@ Endeavor owns the Pluto session: one Julia process running Pluto and its noteboo
 Most turns you won't need this skill at all — prompts carry their own notebook context:
 
 - **Viewing context.** "[Endeavor] The user is viewing Pluto notebook {id} in the notebook pane…" — that's the notebook, unless the user names a different one.
-- **Annotation mode.** A preface plus `pluto://notebook/{id}/cell/{id}` links — see **pluto-workflow** → [annotations.md](../pluto-workflow/reference/annotations.md).
+- **Annotation mode.** A preface plus `notebook://pluto/{id}/cell/{id}` links — see **pluto-workflow** → [annotations.md](../pluto-workflow/reference/annotations.md).
 
 Reach for this skill when neither is present and you genuinely don't know which notebook is in play, or whether one exists yet.
 

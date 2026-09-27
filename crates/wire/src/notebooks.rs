@@ -7,7 +7,8 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-const HEADER: &str = "### A Pluto.jl notebook ###";
+use crate::backend::Backend;
+
 const CELL: &str = "# ╔═╡ ";
 const ORDER: &str = "# ╔═╡ Cell order:";
 /// Pluto's package cells, which hold the notebook's Project/Manifest.toml.
@@ -25,8 +26,8 @@ const MAX_VISITED: usize = 2000;
 const MAX_FOUND: usize = 200;
 const SKIPPED: [&str; 5] = ["node_modules", ".git", "target", "venv", ".julia"];
 
-/// Pluto notebooks in `folder` and its subfolders (3 levels, skipping hidden and
-/// heavy folders, capped), newest first. Reads each `.jl` file's first line.
+/// Notebooks in `folder` and its subfolders (3 levels, skipping hidden and
+/// heavy folders, capped), newest first. See [`Backend::of_file`].
 pub fn scan(folder: &Path) -> Vec<Found> {
     let mut found = Vec::new();
     let mut visited = 0;
@@ -49,7 +50,7 @@ pub fn scan(folder: &Path) -> Vec<Found> {
                 if depth + 1 < MAX_DEPTH && !SKIPPED.contains(&name.as_ref()) {
                     stack.push((path, depth + 1));
                 }
-            } else if kind.is_file() && name.ends_with(".jl") && is_notebook(&path) {
+            } else if kind.is_file() && Backend::of_file(&path).is_some() {
                 let modified = entry.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
                 found.push(Found { path, modified });
             }
@@ -61,12 +62,6 @@ pub fn scan(folder: &Path) -> Vec<Found> {
 fn sorted(mut found: Vec<Found>) -> Vec<Found> {
     found.sort_by(|a, b| b.modified.cmp(&a.modified));
     found
-}
-
-fn is_notebook(path: &Path) -> bool {
-    use std::io::Read;
-    let mut first = [0u8; HEADER.len()];
-    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut first)).is_ok() && first == HEADER.as_bytes()
 }
 
 /// The start of a notebook for a static preview.

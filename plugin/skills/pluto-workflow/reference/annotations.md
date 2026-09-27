@@ -7,19 +7,19 @@ The user can put the notebook pane into annotation mode, click one or more cells
 ```
 [Endeavor] The user annotated notebook cells in annotation mode...
 
-pluto://notebook/{notebook_id}/cell/{cell_id_1}
-pluto://notebook/{notebook_id}/cell/{cell_id_2}
+notebook://pluto/{notebook_id}/cell/{cell_id_1}
+notebook://pluto/{notebook_id}/cell/{cell_id_2}
 
 Comment on the 2 cell(s) above: <the user's comment text>
 ```
 
 - The preface tells you annotation mode was used; the `notebook_id` embedded in the resource links is the notebook in question.
-- One or more `pluto://notebook/{notebook_id}/cell/{cell_id}` resource links identify the annotated cells.
+- One or more `notebook://pluto/{notebook_id}/cell/{cell_id}` resource links identify the annotated cells.
 - The trailing line is the user's comment, addressed to those specific cells.
 
 ## What to do with the links
 
-`pluto://notebook/{id}/cell/{id}` links are **not fetchable** — they're a join key, not a URL. For each linked cell:
+`notebook://pluto/{id}/cell/{id}` links are **not fetchable** — they're a join key, not a URL. For each linked cell:
 
 1. Call `read_cell(notebook_id, cell_id)` to get its current code, output, and any error.
 2. If the comment is about how an output looks (a plot, figure, or image), also call `view_cell_output(notebook_id, cell_id)` to see it.

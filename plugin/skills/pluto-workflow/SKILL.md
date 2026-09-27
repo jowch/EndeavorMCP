@@ -16,7 +16,7 @@ Live reactive session — not a `.jl` file to patch. See [pluto-mental-model.md]
 Endeavor already shows the live notebook in a pane next to the chat — there's no landing page, no browser tool, and nothing to navigate. The notebook you're acting on comes from the prompt itself:
 
 - **Viewing context.** A prompt may open with "[Endeavor] The user is viewing Pluto notebook {id} in the notebook pane…" — that `notebook_id` is "the notebook". Each session edits and runs only its own notebook; other notebooks can be read as plain `.jl` files (see **pluto-session**).
-- **Annotation mode.** A prompt may instead open with "[Endeavor] The user annotated notebook cells in annotation mode…", followed by one or more `pluto://notebook/{notebook_id}/cell/{cell_id}` resource links and "Comment on the N cell(s) above: …". These links are **not fetchable** — call `read_cell(notebook_id, cell_id)` on each before responding. See [annotations.md](reference/annotations.md).
+- **Annotation mode.** A prompt may instead open with "[Endeavor] The user annotated notebook cells in annotation mode…", followed by one or more `notebook://pluto/{notebook_id}/cell/{cell_id}` resource links and "Comment on the N cell(s) above: …". These links are **not fetchable** — call `read_cell(notebook_id, cell_id)` on each before responding. See [annotations.md](reference/annotations.md).
 
 If neither is present and you don't already know the notebook_id, use **pluto-session** first.
 
@@ -53,7 +53,7 @@ The notebook tools enforce read-before-edit themselves: editing a cell you haven
 | End the turn with staged edits | `submit_changes(wait_for_completion=false)` first |
 | Claim outputs/widgets are live while still in safe preview | Only true once the user clicks "Run notebook code", or you call `allow_execution` because they asked |
 | Markdown cell added with its code showing | `add_cell(..., folded=true)`; `fold_cell(folded=true)` for existing prose cells |
-| Treat a `pluto://notebook/{id}/cell/{id}` link as a URL to fetch | It's a join key — `read_cell(notebook_id, cell_id)` instead |
+| Treat a `notebook://pluto/{id}/cell/{id}` link as a URL to fetch | It's a join key — `read_cell(notebook_id, cell_id)` instead |
 | Say a plot "looks right" from its code or `read_cell` alone | `view_cell_output` and look at it |
 
 ## Additional resources

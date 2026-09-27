@@ -26,4 +26,4 @@ Read `error.msg`, fix code, `submit_changes(wait_for_completion=false)`, re-read
 
 ## Errors surfaced through annotation-mode comments
 
-The user can select an errored cell in annotation mode and comment on it (e.g. "why is this red?"). The prompt gives you `pluto://notebook/{id}/cell/{id}` links, not the error text itself — call `read_cell(notebook_id, cell_id)` and read the `error` object (`kind`, `hint`, `boundaries`, `fixes`) from the response rather than guessing from the comment alone. See **pluto-workflow** → [annotations.md](../../pluto-workflow/reference/annotations.md).
+The user can select an errored cell in annotation mode and comment on it (e.g. "why is this red?"). The prompt gives you `notebook://pluto/{id}/cell/{id}` links, not the error text itself — call `read_cell(notebook_id, cell_id)` and read the `error` object (`kind`, `hint`, `boundaries`, `fixes`) from the response rather than guessing from the comment alone. See **pluto-workflow** → [annotations.md](../../pluto-workflow/reference/annotations.md).

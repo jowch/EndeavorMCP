@@ -19,6 +19,7 @@
 //! already closed are dropped.
 
 pub mod askpass;
+pub mod backend;
 pub mod files;
 pub mod notebooks;
 pub mod relay;

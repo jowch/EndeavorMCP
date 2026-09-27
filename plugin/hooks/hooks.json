@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__pluto__.*",
+        "matcher": "mcp__notebook__.*",
         "hooks": [{ "type": "command", "command": "\"$ENDEAVOR_BIN\" hook-pretool", "timeout": 5 }]
       }
     ]
