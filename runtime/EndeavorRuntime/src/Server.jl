@@ -236,6 +236,22 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
                 @info "Shutting down at the app's request"
                 @async (sleep(0.2); _SHUTDOWN[]())
                 Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
+            elseif get(msg, "method", "") in ("endeavor/restart_notebook", "endeavor/move_notebook", "endeavor/file_info", "endeavor/new_notebook")
+                p = get(msg, "params", Dict{String,Any}())
+                try
+                    result = if msg["method"] == "endeavor/restart_notebook"
+                        restart_notebook!(sess, string(get(p, "notebook_id", "")))
+                    elseif msg["method"] == "endeavor/move_notebook"
+                        move_notebook!(sess, string(get(p, "notebook_id", "")), string(get(p, "path", "")))
+                    elseif msg["method"] == "endeavor/file_info"
+                        file_info(string(get(p, "path", "")))
+                    else
+                        new_notebook_for!(string(get(p, "owner", "")))
+                    end
+                    Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => result)
+                catch e
+                    Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "error" => Dict("code" => -32000, "message" => sprint(showerror, e)))
+                end
             elseif get(msg, "method", "") == "endeavor/run_preview"
                 p = get(msg, "params", Dict{String,Any}())
                 try

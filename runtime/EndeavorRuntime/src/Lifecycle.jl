@@ -403,6 +403,60 @@ function stop_notebook!(session, path::AbstractString)
     return Dict{String,Any}("stopped" => true, "safe_preview" => safe_preview)
 end
 
+"""
+    restart_notebook!(session, notebook_id)
+
+The app's "Restart notebook": what Pluto's own Restart does (a new process, then
+every cell runs). Refused in safe preview, where Run notebook starts it.
+"""
+function restart_notebook!(session, notebook_id::AbstractString)
+    notebook = _lifecycle_get_notebook!(session, notebook_id)
+    ps = notebook.process_status
+    ps === Pluto.ProcessStatus.waiting_for_permission &&
+        throw(ArgumentError("execution_blocked::The notebook is in safe preview; Run notebook starts it"))
+    ps === Pluto.ProcessStatus.waiting_to_restart && return Dict{String,Any}("restarted" => false)
+    notebook.process_status = Pluto.ProcessStatus.waiting_to_restart
+    session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(notebook)
+    _lifecycle_notify_browser(session, notebook)
+    Pluto.SessionActions.shutdown(session, notebook; keep_in_session=true, async=true, verbose=false)
+    notebook.process_status = Pluto.ProcessStatus.starting
+    _lifecycle_notify_browser(session, notebook)
+    _run_cells!(session, notebook, collect(notebook.cells); wait_for_completion=false)
+    return Dict{String,Any}("restarted" => true)
+end
+
+"""
+    move_notebook!(session, notebook_id, path)
+
+Rename or move an open notebook's file (the app's Rename… and Move to…), the way
+Pluto's own file box does. Never overwrites a file.
+"""
+function move_notebook!(session, notebook_id::AbstractString, path::AbstractString)
+    notebook = _lifecycle_get_notebook!(session, notebook_id)
+    newpath = abspath(expanduser(String(path)))
+    endswith(newpath, ".jl") || throw(ArgumentError("invalid_path::Notebook path must end in .jl: '$newpath'"))
+    ispath(newpath) && throw(ArgumentError("file_exists::'$newpath' already exists"))
+    isdir(dirname(newpath)) || throw(ArgumentError("invalid_path::Directory does not exist: '$(dirname(newpath))'"))
+    Pluto.SessionActions.move(session, notebook, newpath)
+    publish_notebooks!()
+    return Dict{String,Any}("path" => notebook.path)
+end
+
+"Whether a notebook file is there, and when it last changed (for the app, on any host)."
+function file_info(path::AbstractString)
+    p = abspath(expanduser(String(path)))
+    isfile(p) || return Dict{String,Any}("exists" => false)
+    return Dict{String,Any}("exists" => true, "modified" => mtime(p))
+end
+
+"The app's \"New notebook\" for session `owner`: a new notebook in its folder, bound to it."
+function new_notebook_for!(owner::AbstractString)
+    bind_notebook!(owner, "")
+    result = with_owner(() -> tool_new_notebook(Dict{String,Any}()), owner)
+    note_notebook_opened!(owner, result["path"])
+    return result
+end
+
 # New notebooks start unsaved in Pluto's scratch folder; this is the folder its
 # "Save notebook" box suggests instead (the page reads it on its next load).
 function set_folder!(session, path::AbstractString)

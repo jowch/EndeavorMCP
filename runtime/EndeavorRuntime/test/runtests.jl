@@ -1936,6 +1936,38 @@ end
         end
     end
 
+    @testset "the app's notebook actions: move, restart refusal, file info, new notebook" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        session = Pluto.ServerSession()
+        EndeavorRuntime.bind_standalone_session!(session)
+        path = fresh_fixture()
+        try
+            opened = EndeavorRuntime.tool_open_notebook(Dict{String,Any}("path" => path))
+            id = opened["notebook_id"]
+            @test_throws ArgumentError EndeavorRuntime.restart_notebook!(session, id)
+
+            moved = joinpath(dirname(path), "renamed.jl")
+            @test EndeavorRuntime.move_notebook!(session, id, moved)["path"] == moved
+            @test isfile(moved) && !isfile(path)
+            @test_throws ArgumentError EndeavorRuntime.move_notebook!(session, id, moved)
+            @test_throws ArgumentError EndeavorRuntime.move_notebook!(session, id, joinpath(dirname(path), "notes.txt"))
+
+            info = EndeavorRuntime.file_info(moved)
+            @test info["exists"] == true && info["modified"] == mtime(moved)
+            @test EndeavorRuntime.file_info(path) == Dict("exists" => false)
+
+            folder = mktempdir()
+            EndeavorRuntime.set_session_folder!("app-new", folder)
+            EndeavorRuntime.bind_notebook!("app-new", moved)
+            created = EndeavorRuntime.new_notebook_for!("app-new")
+            @test dirname(created["path"]) == realpath(folder) || dirname(created["path"]) == folder
+            @test EndeavorRuntime.bound_notebook("app-new") == realpath(created["path"])
+        finally
+            EndeavorRuntime.bind_notebook!("app-new", "")
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
     @testset "idle notebooks stop; running, kept-alive and recently used ones don't" begin
         EndeavorRuntime.stop_pluto_stack!()
         session = Pluto.ServerSession(; options = Pluto.Configuration.from_flat_kwargs(on_event = EndeavorRuntime._handle_pluto_event))
