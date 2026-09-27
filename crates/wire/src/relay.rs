@@ -416,11 +416,14 @@ mod tests {
 
     #[test]
     fn a_channel_that_ends_closes_its_streams() {
-        let (a, b) = UnixStream::pair().unwrap();
+        let (a, mut b) = UnixStream::pair().unwrap();
         let app = Mux::new(a.try_clone().unwrap());
         let a2 = app.clone();
         let run = std::thread::spawn(move || a2.run(a, |_, _, _| {}, |_| {}));
         let mut client = connect(&app, Target::Bridge);
+        // Linux resets a Unix socket whose peer closes with bytes unread, so the
+        // other end reads what it was sent before it goes, as a helper does.
+        assert_eq!(Frame::read_from(&mut b).unwrap(), Some(Frame::Open { id: 1, target: Target::Bridge }));
         drop(b);
         run.join().unwrap().unwrap();
         let mut buf = [0; 1];
