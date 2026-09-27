@@ -58,10 +58,7 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
             return
         end
 
-        if method == "GET" && startswith(target, "/events")
-            _handle_events(http)
-
-        elseif method == "GET" && startswith(target, "/notifications")
+        if method == "GET" && startswith(target, "/notifications")
             _handle_notifications(http)
 
         elseif method == "POST" && startswith(target, "/adapter")
@@ -85,33 +82,11 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
             active   = standalone_session()
             sess     = active !== nothing ? active : pluto_session
             # App-only (not reachable through the agent's MCP connection).
-            resp = if get(msg, "method", "") == "endeavor/tool_called"
-                # A tool call the core answered itself: activity on its notebook,
-                # and the app hears the notebooks' state after it.
-                note_activity!(get(get(msg, "params", Dict{String,Any}()), "arguments", Dict{String,Any}()))
-                publish_notebooks!()
-                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
-            elseif get(msg, "method", "") == "endeavor/set_notebook"
-                p = get(msg, "params", Dict{String,Any}())
-                owner, notebook = string(get(p, "owner", "")), string(something(get(p, "notebook", ""), ""))
-                bind_notebook!(owner, notebook)
-                @info "Session $owner notebook: $(isempty(notebook) ? "(none)" : notebook)"
-                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
-            elseif get(msg, "method", "") == "endeavor/set_session_folder"
+            resp = if get(msg, "method", "") == "endeavor/set_session_folder"
                 p = get(msg, "params", Dict{String,Any}())
                 owner, folder = string(get(p, "owner", "")), string(something(get(p, "folder", ""), ""))
                 set_session_folder!(owner, folder)
                 Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
-            elseif get(msg, "method", "") == "endeavor/set_idle_limit"
-                hours = get(get(msg, "params", Dict{String,Any}()), "hours", 48)
-                set_idle_limit!(hours isa Real ? hours : 48)
-                @info "Idle notebooks stop after: $(hours == 0 ? "never" : "$hours hours")"
-                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
-            elseif get(msg, "method", "") == "endeavor/stop_notebook"
-                p = get(msg, "params", Dict{String,Any}())
-                result = stop_notebook!(sess, string(get(p, "path", "")))
-                @info "Stopped notebook $(get(p, "path", "")): $(result["stopped"])"
-                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => result)
             elseif get(msg, "method", "") == "endeavor/set_folder"
                 path = string(get(get(msg, "params", Dict{String,Any}()), "path", ""))
                 set_folder!(sess, path)
@@ -121,17 +96,15 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
                 @info "Shutting down at the app's request"
                 @async (sleep(0.2); _SHUTDOWN[]())
                 Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
-            elseif get(msg, "method", "") in ("endeavor/restart_notebook", "endeavor/move_notebook", "endeavor/file_info", "endeavor/new_notebook")
+            elseif get(msg, "method", "") in ("endeavor/restart_notebook", "endeavor/move_notebook", "endeavor/file_info")
                 p = get(msg, "params", Dict{String,Any}())
                 try
                     result = if msg["method"] == "endeavor/restart_notebook"
                         restart_notebook!(sess, string(get(p, "notebook_id", "")))
                     elseif msg["method"] == "endeavor/move_notebook"
                         move_notebook!(sess, string(get(p, "notebook_id", "")), string(get(p, "path", "")))
-                    elseif msg["method"] == "endeavor/file_info"
-                        file_info(string(get(p, "path", "")))
                     else
-                        new_notebook_for!(string(get(p, "owner", "")))
+                        file_info(string(get(p, "path", "")))
                     end
                     Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => result)
                 catch e

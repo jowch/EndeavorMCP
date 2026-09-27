@@ -18,6 +18,7 @@ mod host_tools;
 mod http;
 mod julia;
 mod mcp;
+mod notebooks;
 mod slurm;
 
 use std::fs::{File, OpenOptions};

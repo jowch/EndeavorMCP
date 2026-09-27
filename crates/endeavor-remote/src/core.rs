@@ -1,9 +1,9 @@
 //! `endeavor-remote core`: the runtime the helper starts (docs/runtime-core.md).
 //! It starts `julia boot.jl` as its child, serves the bridge port, and writes
 //! `runtime.json` once Julia is ready. It serves the agent's MCP connection
-//! itself (see `mcp`) and passes every other request on the bridge port to
-//! Julia's own bridge unchanged but for its Host; the plan moves handlers here
-//! one at a time.
+//! itself (see `mcp`) and the app's `/events` stream (see `notebooks`), and
+//! passes every other request on the bridge port to Julia's own bridge
+//! unchanged but for its Host; the plan moves handlers here one at a time.
 //!
 //! Julia shares the core's process group, which the helper created, so the
 //! helper's signals to the group reach both. The core exits when Julia does,
@@ -97,12 +97,13 @@ pub fn main(argv: &[String]) -> ! {
         if let Some(status) = julia.try_wait().unwrap_or(None) {
             break status;
         }
-        if bridge.upstream.get().is_none()
+        if bridge.julia.port.get().is_none()
             && let Some(port) = julia_ready(&julia_state, &args.state_dir, bridge_port)
         {
-            let _ = bridge.upstream.set(port);
+            let _ = bridge.julia.port.set(port);
+            bridge.notebooks.start();
         }
-        if bridge.upstream.get().is_some() {
+        if bridge.julia.port.get().is_some() {
             break julia.wait().unwrap_or_else(|e| fail(format!("waiting for Julia: {e}")));
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -247,12 +248,14 @@ fn serve_client(client: TcpStream, bridge: &Bridge) -> io::Result<()> {
             }
             continue;
         }
-        let Some(&port) = bridge.upstream.get() else {
+        let Some(&port) = bridge.julia.port.get() else {
             return refuse(&mut client, "503 Service Unavailable", "Julia isn't ready yet");
         };
         let (method, target) = (request.method(), request.target());
         let keep_alive = if method == "GET" && target.starts_with("/sse") {
             return bridge.stream(&request, client);
+        } else if method == "GET" && target.starts_with("/events") {
+            return bridge.notebooks.stream_events(&request, client);
         } else if method == "POST" && target.starts_with("/message") {
             bridge.post(&request, &mut reader, &mut client)?
         } else if method == "POST" && target.starts_with("/call") {

@@ -1,8 +1,9 @@
 //! A stand-in for Julia under `endeavor-remote core`: a script that writes the
 //! state boot.jl would and then sleeps, naming a bridge served by this test
 //! process. The bridge answers like Julia's (chunked responses to HTTP/1.1,
-//! close-delimited to HTTP/1.0, an SSE stream on `/events`, the agent's MCP
-//! messages on `/dispatch`) and records what it was sent.
+//! close-delimited to HTTP/1.0, an SSE stream on `/stream`, the agent's MCP
+//! messages on `/dispatch`, the adapter's calls on `/adapter` and its
+//! notifications on `/notifications`) and records what it was sent.
 
 #![allow(dead_code)]
 
@@ -80,10 +81,14 @@ impl Seen {
 #[derive(Default)]
 struct Shared {
     seen: Mutex<Vec<Seen>>,
-    /// The open `/events` stream: events to write, or `None` to end it abruptly.
+    /// The open `/stream` stream: events to write, or `None` to end it abruptly.
     events: Mutex<Option<Sender<Option<String>>>>,
-    /// Said when the core closes the `/events` stream's upstream connection.
+    /// Said when the core closes the `/stream` stream's upstream connection.
     closed: Mutex<Option<Sender<()>>>,
+    /// The open `/notifications` streams.
+    notifications: Mutex<Vec<Sender<String>>>,
+    /// What `snapshot` reports: each open notebook.
+    notebooks: Mutex<Vec<serde_json::Value>>,
 }
 
 pub struct FakeBridge {
@@ -123,18 +128,29 @@ impl FakeBridge {
         self.shared.seen.lock().unwrap().clone()
     }
 
-    /// Write an event on the open `/events` stream, waiting for one to open.
+    /// Write an event on the open `/stream` stream, waiting for one to open.
     pub fn event(&self, text: &str) {
-        wait_for("an /events stream", || self.shared.events.lock().unwrap().is_some());
+        wait_for("a /stream stream", || self.shared.events.lock().unwrap().is_some());
         self.shared.events.lock().unwrap().as_ref().unwrap().send(Some(text.to_owned())).unwrap();
     }
 
-    /// End the open `/events` stream without its final chunk, like a crash.
+    /// End the open `/stream` stream without its final chunk, like a crash.
     pub fn drop_events(&self) {
         self.shared.events.lock().unwrap().take().unwrap().send(None).unwrap();
     }
 
-    /// Wait for the core to close the `/events` stream's connection.
+    /// Send a notification to the core, waiting for it to listen.
+    pub fn notify(&self, message: serde_json::Value) {
+        wait_for("a /notifications stream", || !self.shared.notifications.lock().unwrap().is_empty());
+        self.shared.notifications.lock().unwrap().retain(|n| n.send(message.to_string()).is_ok());
+    }
+
+    /// The notebooks the adapter reports from now on.
+    pub fn set_notebooks(&self, notebooks: Vec<serde_json::Value>) {
+        *self.shared.notebooks.lock().unwrap() = notebooks;
+    }
+
+    /// Wait for the core to close the `/stream` stream's connection.
     pub fn events_closed(&self) -> bool {
         self.closed.recv_timeout(Duration::from_secs(5)).is_ok()
     }
@@ -152,8 +168,23 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
             let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         } else if !authorized {
             let _ = socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
-        } else if target == "/events" {
+        } else if target == "/stream" {
             return events(socket, shared);
+        } else if target == "/notifications" {
+            return notifications(socket, shared);
+        } else if target == "/adapter" {
+            let call: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+            let notebooks = shared.notebooks.lock().unwrap().clone();
+            let id = &call["params"]["notebook_id"];
+            let found = notebooks.iter().find(|nb| nb["notebook_id"] == *id).cloned();
+            let reply = match (call["method"].as_str().unwrap(), found) {
+                ("snapshot", _) if id.is_null() => serde_json::json!({ "result": { "notebooks": notebooks } }),
+                ("snapshot", Some(nb)) => serde_json::json!({ "result": nb }),
+                ("graph", Some(_)) => serde_json::json!({ "result": { "cells": [] } }),
+                _ => serde_json::json!({ "error": format!("KeyError: key \"notebook_not_found::No notebook with id '{}' in the current session\" not found", id.as_str().unwrap_or_default()) }),
+            }
+            .to_string();
+            let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len());
         } else if target == "/dispatch" {
             let reply = dispatch(&seen);
             let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{reply}\r\n0\r\n\r\n", reply.len());
@@ -239,6 +270,17 @@ fn events(mut socket: TcpStream, shared: &Arc<Shared>) {
         }
     }
     let _ = socket.shutdown(Shutdown::Both);
+}
+
+fn notifications(mut socket: TcpStream, shared: &Arc<Shared>) {
+    let (tx, rx) = mpsc::channel();
+    let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+    shared.notifications.lock().unwrap().push(tx);
+    for message in rx {
+        if write!(socket, "data: {message}\n\n").is_err() {
+            return;
+        }
+    }
 }
 
 /// Julia's reply to an MCP message, keys sorted as Julia writes them: for

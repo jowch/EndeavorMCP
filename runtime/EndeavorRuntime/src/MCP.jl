@@ -387,9 +387,6 @@ _err(id, code, message) = Dict{String,Any}(
 
 function _handle_tool_call(session, name, arguments; owner::AbstractString="")
     result = call_tool_with_session(session, name, arguments)
-    if name in ("open_notebook", "new_notebook") && result isa AbstractDict
-        note_notebook_opened!(owner, result["path"])
-    end
     nid = tryparse(UUID, string(get(arguments, "notebook_id", "")))
     if name in _WRITE_TOOLS && nid !== nothing && result isa AbstractDict
         warning = other_session_warning(nid, owner)
@@ -408,9 +405,8 @@ end
 
 function _safe_handle_tool_call(session, name, arguments; owner::AbstractString="")
     try
-        note_activity!(arguments)
-        refusal = notebook_refusal(session, owner, name, arguments)
-        refusal === nothing || throw(refusal)
+        # Arguments that aren't an object fail here, as they always have.
+        get(arguments, "notebook_id", "")
         with_owner(() -> _handle_tool_call(session, name, arguments; owner), owner)
     catch e
         raw = sprint(showerror, e)
@@ -461,7 +457,6 @@ function _dispatch_mcp(session, msg::Dict{String,Any}; owner::AbstractString="")
         name      = get(params, "name", "")
         arguments = get(params, "arguments", Dict{String,Any}())
         result    = _safe_handle_tool_call(session, name, arguments; owner)
-        publish_notebooks!()
         _ok(id, result)
 
     elseif method == "ping"

@@ -1522,34 +1522,12 @@ end
             @test "read_cell" in listed(["X-Endeavor-Session" => "7"])
             @test !("list_folder" in listed(["X-Endeavor-Session" => "7", "X-Endeavor-Host" => "gpu-box"]))
             @test HTTP.get("http://127.0.0.1:$mcp_port/health"; status_exception=false, readtimeout=2).status == 200
-
-            # The app binds a session to its notebook, and clears it with an empty path.
-            bind(notebook) = HTTP.post("http://127.0.0.1:$mcp_port/call",
-                ["Content-Type" => "application/json", "Authorization" => "Bearer s3cret-token"],
-                JSON.json(Dict("jsonrpc" => "2.0", "id" => 2, "method" => "endeavor/set_notebook",
-                               "params" => Dict("owner" => "42", "notebook" => notebook)));
-                status_exception=false, readtimeout=5)
-            nbpath = joinpath(realpath(mktempdir()), "bound.jl")
-            @test bind(nbpath).status == 200
-            @test EndeavorRuntime.bound_notebook("42") == nbpath
-            @test bind("").status == 200
-            @test EndeavorRuntime.bound_notebook("42") === nothing
-
-            stop = HTTP.post("http://127.0.0.1:$mcp_port/call",
-                ["Content-Type" => "application/json", "Authorization" => "Bearer s3cret-token"],
-                JSON.json(Dict("jsonrpc" => "2.0", "id" => 3, "method" => "endeavor/stop_notebook",
-                               "params" => Dict("path" => nbpath)));
-                status_exception=false, readtimeout=5)
-            @test stop.status == 200
-            @test JSON.parse(String(stop.body))["result"] == Dict("stopped" => false)
-
-            limit = HTTP.post("http://127.0.0.1:$mcp_port/call",
-                ["Content-Type" => "application/json", "Authorization" => "Bearer s3cret-token"],
-                JSON.json(Dict("jsonrpc" => "2.0", "id" => 4, "method" => "endeavor/set_idle_limit",
-                               "params" => Dict("hours" => 12)));
-                status_exception=false, readtimeout=5)
-            @test limit.status == 200
-            @test EndeavorRuntime._IDLE_LIMIT_HOURS[] == 12
+            # The adapter's routes, which only the core calls.
+            snapshot = JSON.json(Dict("method" => "snapshot", "params" => Dict()))
+            @test HTTP.post("http://127.0.0.1:$mcp_port/adapter", [], snapshot; status_exception=false, readtimeout=5).status == 401
+            @test HTTP.get("http://127.0.0.1:$mcp_port/notifications"; status_exception=false, readtimeout=5).status == 401
+            adapter = HTTP.post("http://127.0.0.1:$mcp_port/adapter", ["Authorization" => "Bearer s3cret-token"], snapshot; status_exception=false, readtimeout=5)
+            @test JSON.parse(String(adapter.body)) == Dict("result" => Dict("notebooks" => []))
 
             app_call(method, params) = HTTP.post("http://127.0.0.1:$mcp_port/call",
                 ["Content-Type" => "application/json", "Authorization" => "Bearer s3cret-token"],
@@ -1558,11 +1536,6 @@ end
             folder = realpath(mktempdir())
             @test app_call("endeavor/set_folder", Dict("path" => folder)).status == 200
             @test EndeavorRuntime.standalone_session().options.server.notebook_path_suggestion == joinpath(folder, "")
-
-            # The core tells Julia about tool calls it answered itself.
-            told = app_call("endeavor/tool_called", Dict("arguments" => Dict("notebook_id" => string(uuid4()))))
-            @test told.status == 200
-            @test JSON.parse(String(told.body))["result"] == Dict()
 
             # Shutdown answers first, then ends the process.
             shut_down = Channel{Bool}(1)
@@ -1575,7 +1548,6 @@ end
             EndeavorRuntime._SHUTDOWN[] = () -> exit(0)
             EndeavorRuntime.stop_pluto_stack!()
             EndeavorRuntime.configure_standalone!(; token="")
-            EndeavorRuntime.set_idle_limit!(48)
         end
     end
 
@@ -1676,72 +1648,6 @@ end
         end
     end
 
-    @testset "events stream pushes notebook changes" begin
-        EndeavorRuntime.stop_pluto_stack!()
-        pluto_port = 1450 + rand(0:99)
-        mcp_port = 2650 + rand(0:99)
-        EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port)
-        fixture = fresh_fixture()
-        try
-            EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
-            sock = Sockets.connect("127.0.0.1", mcp_port)
-            write(sock, "GET /events HTTP/1.0\r\nHost: 127.0.0.1:$mcp_port\r\n\r\n")
-            events = Channel{String}(Inf)
-            reader = @async for line in eachline(sock)
-                startswith(line, "data: ") && put!(events, line[7:end])
-            end
-            next_event() = (timedwait(() -> isready(events), 30.0) == :ok ? take!(events) : error("no event"))
-            @test JSON.parse(next_event())["notebooks"] == []   # the current state, on connect
-            call = JSON.json(Dict("jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
-                "params" => Dict("name" => "open_notebook", "arguments" => Dict("path" => fixture, "run_notebook" => false))))
-            HTTP.post("http://127.0.0.1:$mcp_port/call", ["Content-Type" => "application/json"], call; readtimeout=30)
-            event = JSON.parse(next_event())
-            opened = event["notebooks"]
-            @test length(opened) == 1 && opened[1]["path"] == abspath(fixture)
-            nid = opened[1]["notebook_id"]
-            cells = event["cells"][nid]
-            @test [c["cell_id"] for c in cells] == [string(id) for id in EndeavorRuntime.standalone_session().notebooks[UUID(nid)].cell_order]
-            @test all(c -> c["author"] === nothing && !c["unrun"], cells)
-
-            # An agent edit: unrun, authored by the agent.
-            sess = EndeavorRuntime.standalone_session()
-            nb = sess.notebooks[UUID(nid)]
-            ycell = nb.cells_dict[UUID("22222222-2222-2222-2222-222222222222")]
-            read_cells!(sess, nb, ycell)
-            original = ycell.code
-            EndeavorRuntime.tool_edit_cell(sess, Dict("notebook_id" => nid, "cell_id" => string(ycell.cell_id), "code" => "y = x * 8"))
-            state(ev) = only(filter(c -> c["cell_id"] == string(ycell.cell_id), ev["cells"][nid]))
-            ev = JSON.parse(next_event())
-            while !(state(ev)["unrun"]) ; ev = JSON.parse(next_event()) ; end
-            @test state(ev)["author"] == "agent"
-            # The code it replaced, for the in-editor diff; a later edit keeps the first before-text.
-            @test state(ev)["before"] == original
-            @test state(ev)["version"] == string(hash("y = x * 8"); base=16)
-            EndeavorRuntime.note_agent_edit!(nb.notebook_id, ycell, "y = x * 8")
-            @test EndeavorRuntime._before!(nb.notebook_id, ycell, true) == original
-            # Once the cell runs it's forgotten.
-            @test EndeavorRuntime._before!(nb.notebook_id, ycell, false) === nothing
-            @test EndeavorRuntime._before!(nb.notebook_id, ycell, true) === nothing
-
-            # An edit that runs straight away is the agent's too.
-            read_cells!(sess, nb, ycell)
-            EndeavorRuntime.tool_edit_cell(sess, Dict("notebook_id" => nid, "cell_id" => string(ycell.cell_id), "code" => "y = x * 10", "run_after" => true))
-            EndeavorRuntime.publish_notebooks!()
-            @test EndeavorRuntime._author!(nb.notebook_id, ycell) == "agent"
-
-            # A change the tools didn't make (Pluto's editor submitting code): the user's.
-            ycell.code = "y = x * 9"
-            EndeavorRuntime.publish_notebooks!()
-            # Earlier states (e.g. the before-text clearing after the run) may still be queued.
-            ev = JSON.parse(next_event())
-            while state(ev)["author"] != "user" ; ev = JSON.parse(next_event()) ; end
-            @test state(ev)["author"] == "user"
-            close(sock)
-        finally
-            EndeavorRuntime.stop_pluto_stack!()
-        end
-    end
-
     @testset "several sessions on one notebook" begin
         session, nb, cells = make_session_with_notebook("a = 1", "b = a + 1", "c = 10")
         Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
@@ -1814,97 +1720,7 @@ end
         end
     end
 
-    @testset "one notebook per session" begin
-        EndeavorRuntime.stop_pluto_stack!()
-        session = Pluto.ServerSession()
-        EndeavorRuntime.bind_standalone_session!(session)
-        call(name, args; owner) = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
-            "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
-            "params" => Dict{String,Any}("name" => name, "arguments" => args)); owner)
-        body(resp) = JSON.parse(resp["result"]["content"][1]["text"])
-        err(resp) = resp["result"]["isError"] ? body(resp)["error"] : nothing
-        first_nb, second_nb = fresh_fixture(), fresh_fixture()
-        try
-            # The first notebook an agent session opens becomes its notebook.
-            opened = call("open_notebook", Dict{String,Any}("path" => first_nb); owner="a")
-            @test err(opened) === nothing
-            first_id = body(opened)["notebook_id"]
-            @test EndeavorRuntime.bound_notebook("a") == realpath(first_nb)
-
-            refused = call("open_notebook", Dict{String,Any}("path" => second_nb); owner="a")
-            @test err(refused) == "one_notebook"
-            @test body(refused)["message"] == "This session works on one notebook, $(realpath(first_nb)), so it can't open $(second_nb). " *
-                "You can still read other notebooks as plain .jl files. " *
-                "To work on another notebook, suggest the user start a new session with it."
-            @test err(call("new_notebook", Dict{String,Any}(); owner="a")) == "one_notebook"
-            @test err(call("new_notebook", Dict{String,Any}("path" => joinpath(mktempdir(), "other.jl")); owner="a")) == "one_notebook"
-            # Its own notebook isn't refused by the binding; this one is simply open already.
-            @test err(call("open_notebook", Dict{String,Any}("path" => first_nb); owner="a")) == "notebook_already_open"
-
-            # Calls without an owner (the app, tests) are unrestricted.
-            second = call("open_notebook", Dict{String,Any}("path" => second_nb); owner="")
-            @test err(second) === nothing
-            second_id = body(second)["notebook_id"]
-
-            # Writes and runs on another open notebook are refused; reads are not.
-            cell = string(first(session.notebooks[UUID(second_id)].cell_order))
-            @test err(call("edit_cell", Dict{String,Any}("notebook_id" => second_id, "cell_id" => cell, "code" => "1"); owner="a")) == "one_notebook"
-            @test err(call("run_all_cells", Dict{String,Any}("notebook_id" => second_id); owner="a")) == "one_notebook"
-            @test err(call("read_notebook_code", Dict{String,Any}("notebook_id" => second_id); owner="a")) === nothing
-            @test err(call("get_cell_order", Dict{String,Any}("notebook_id" => first_id); owner="a")) === nothing
-            own_cell = string(first(session.notebooks[UUID(first_id)].cell_order))
-            @test err(call("fold_cell", Dict{String,Any}("notebook_id" => first_id, "cell_id" => own_cell, "folded" => true); owner="a")) === nothing
-
-            # list_notebooks tells a session which open notebook is its own, and a
-            # session with none that it has none.
-            mine(owner) = Dict(nb["notebook_id"] => nb["this_session"] for nb in body(call("list_notebooks", Dict{String,Any}(); owner)))
-            @test mine("a") == Dict(first_id => true, second_id => false)
-            @test mine("unbound") == Dict(first_id => false, second_id => false)
-
-            # A binding set by the app is respected, and clearing it lifts the limit.
-            EndeavorRuntime.bind_notebook!("b", second_nb)
-            @test err(call("open_notebook", Dict{String,Any}("path" => first_nb); owner="b")) == "one_notebook"
-            @test err(call("run_all_cells", Dict{String,Any}("notebook_id" => first_id); owner="b")) == "one_notebook"
-            @test err(call("get_cell_order", Dict{String,Any}("notebook_id" => first_id); owner="b")) === nothing
-            EndeavorRuntime.bind_notebook!("b", "")
-            @test EndeavorRuntime.bound_notebook("b") === nothing
-            @test err(call("run_all_cells", Dict{String,Any}("notebook_id" => first_id); owner="b")) != "one_notebook"
-
-            # A "New notebook" session: the notebook it creates becomes its notebook.
-            created_path = joinpath(mktempdir(), "analysis.jl")
-            created = call("new_notebook", Dict{String,Any}("path" => created_path); owner="c")
-            @test err(created) === nothing
-            @test EndeavorRuntime.bound_notebook("c") == realpath(created_path)
-            @test err(call("new_notebook", Dict{String,Any}("path" => joinpath(mktempdir(), "second.jl")); owner="c")) == "one_notebook"
-            @test err(call("open_notebook", Dict{String,Any}("path" => first_nb); owner="c")) == "one_notebook"
-        finally
-            foreach(o -> EndeavorRuntime.bind_notebook!(o, ""), ("a", "b", "c"))
-            EndeavorRuntime.stop_pluto_stack!()
-        end
-    end
-
-    @testset "stop_notebook shuts the notebook down and says if it was in safe preview" begin
-        EndeavorRuntime.stop_pluto_stack!()
-        session = Pluto.ServerSession()
-        EndeavorRuntime.bind_standalone_session!(session)
-        previewed, allowed = fresh_fixture(), fresh_fixture()
-        try
-            EndeavorRuntime.tool_open_notebook(Dict{String,Any}("path" => previewed))
-            @test EndeavorRuntime.stop_notebook!(session, previewed) == Dict("stopped" => true, "safe_preview" => true)
-            @test isempty(session.notebooks)
-            @test EndeavorRuntime.stop_notebook!(session, previewed) == Dict("stopped" => false)
-
-            nb = Pluto.SessionActions.open(session, allowed; run_async = true, execution_allowed = false)
-            nb.process_status = Pluto.ProcessStatus.ready
-            @test EndeavorRuntime.stop_notebook!(session, allowed) == Dict("stopped" => true, "safe_preview" => false)
-            @test isempty(session.notebooks)
-            @test EndeavorRuntime.stop_notebook!(nothing, allowed) == Dict("stopped" => false)
-        finally
-            EndeavorRuntime.stop_pluto_stack!()
-        end
-    end
-
-    @testset "the app's notebook actions: move, restart refusal, file info, new notebook" begin
+    @testset "the app's notebook actions: move, restart refusal, file info" begin
         EndeavorRuntime.stop_pluto_stack!()
         session = Pluto.ServerSession()
         EndeavorRuntime.bind_standalone_session!(session)
@@ -1923,90 +1739,15 @@ end
             info = EndeavorRuntime.file_info(moved)
             @test info["exists"] == true && info["modified"] == mtime(moved)
             @test EndeavorRuntime.file_info(path) == Dict("exists" => false)
-
-            folder = mktempdir()
-            EndeavorRuntime.set_session_folder!("app-new", folder)
-            EndeavorRuntime.bind_notebook!("app-new", moved)
-            created = EndeavorRuntime.new_notebook_for!("app-new")
-            @test dirname(created["path"]) == realpath(folder) || dirname(created["path"]) == folder
-            @test EndeavorRuntime.bound_notebook("app-new") == realpath(created["path"])
         finally
-            EndeavorRuntime.bind_notebook!("app-new", "")
             EndeavorRuntime.stop_pluto_stack!()
         end
     end
 
-    @testset "idle notebooks stop; running, kept-alive and recently used ones don't" begin
+    @testset "a notebook's staging goes when it leaves the session, however it leaves" begin
         EndeavorRuntime.stop_pluto_stack!()
         session = Pluto.ServerSession(; options = Pluto.Configuration.from_flat_kwargs(on_event = EndeavorRuntime._handle_pluto_event))
         EndeavorRuntime.bind_standalone_session!(session)
-        clock = Ref(1.0e6)
-        EndeavorRuntime._IDLE_CLOCK[] = () -> clock[]
-        hours(h) = (clock[] += h * 3600)
-        call(name, args) = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
-            "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
-            "params" => Dict{String,Any}("name" => name, "arguments" => args)))
-        body(resp) = JSON.parse(resp["result"]["content"][1]["text"])
-        idle, running, kept, used = paths = [fresh_fixture() for _ in 1:4]
-        stop_idle() = EndeavorRuntime.stop_idle_notebooks!(session)
-        open_paths() = sort([nb.path for nb in values(session.notebooks)])
-        try
-            EndeavorRuntime.set_idle_limit!(48)
-            ids = Dict(p => body(call("open_notebook", Dict{String,Any}("path" => p)))["notebook_id"] for p in paths)
-            notebook(p) = session.notebooks[UUID(ids[p])]
-            kept_alive = body(call("keep_notebook_alive", Dict{String,Any}("notebook_id" => ids[kept], "keep" => true)))
-            @test kept_alive == Dict("notebook_id" => ids[kept], "kept_alive" => true)
-            busy = first(notebook(running).cells)
-            busy.running = true
-
-            hours(47)
-            @test stop_idle() == String[]
-            call("read_notebook_code", Dict{String,Any}("notebook_id" => ids[used]))
-            hours(2)
-            @test stop_idle() == [abspath(idle)]
-            @test open_paths() == sort(abspath.([running, kept, used]))
-            stopped = [Dict("path" => abspath(idle), "hours" => 48, "safe_preview" => true)]
-            @test EndeavorRuntime.idle_stopped() == stopped
-            @test JSON.parse(EndeavorRuntime._notebooks_json())["idle_stopped"] == stopped
-
-            # A run's clock starts when it's last seen running; the tool call's at the call.
-            busy.running = false
-            hours(46)
-            @test stop_idle() == [abspath(used)]
-            hours(2)
-            @test stop_idle() == [abspath(running)]
-            @test open_paths() == [abspath(kept)]
-
-            # Kept alive until turned off; then the usual limit applies from then.
-            hours(500)
-            @test stop_idle() == String[]
-            call("keep_notebook_alive", Dict{String,Any}("notebook_id" => ids[kept], "keep" => false))
-            hours(47)
-            @test stop_idle() == String[]
-            hours(1)
-            @test stop_idle() == [abspath(kept)]
-            @test isempty(session.notebooks)
-
-            # Opening a stopped notebook again clears its record; 0 means never stop.
-            call("open_notebook", Dict{String,Any}("path" => idle))
-            @test all(s -> s["path"] != abspath(idle), EndeavorRuntime.idle_stopped())
-            EndeavorRuntime.set_idle_limit!(0)
-            hours(10_000)
-            @test stop_idle() == String[]
-            @test open_paths() == [abspath(idle)]
-        finally
-            EndeavorRuntime._IDLE_CLOCK[] = time
-            EndeavorRuntime.set_idle_limit!(48)
-            EndeavorRuntime.stop_pluto_stack!()
-        end
-    end
-
-    @testset "a notebook's state goes when it shuts down, however it shuts down" begin
-        EndeavorRuntime.stop_pluto_stack!()
-        session = Pluto.ServerSession(; options = Pluto.Configuration.from_flat_kwargs(on_event = EndeavorRuntime._handle_pluto_event))
-        EndeavorRuntime.bind_standalone_session!(session)
-        clock = Ref(1.0e6)
-        EndeavorRuntime._IDLE_CLOCK[] = () -> clock[]
         call(name, args) = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
             "jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
             "params" => Dict{String,Any}("name" => name, "arguments" => args)))
@@ -2015,26 +1756,18 @@ end
             "pending_run"   => haskey(EndeavorRuntime._pending_run, nid),
             "read_receipts" => haskey(EndeavorRuntime._read_receipts, nid),
             "changes"       => haskey(EndeavorRuntime._CHANGES, nid),
-            "authors"       => haskey(EndeavorRuntime._AUTHORS, nid),
-            "befores"       => haskey(EndeavorRuntime._BEFORES, nid),
-            "last_active"   => haskey(EndeavorRuntime._LAST_ACTIVE, nid),
-            "kept_alive"    => nid in EndeavorRuntime._KEPT_ALIVE,
         )
         all_held = Dict(k => true for k in keys(held(uuid4())))
         none_held = Dict(k => false for k in keys(held(uuid4())))
-        by_pluto, by_app, by_idle = paths = [fresh_fixture() for _ in 1:3]
+        by_pluto, by_core = paths = [fresh_fixture() for _ in 1:2]
         try
-            EndeavorRuntime.set_idle_limit!(48)
             ids = Dict(p => UUID(body(call("open_notebook", Dict{String,Any}("path" => p)))["notebook_id"]) for p in paths)
             for nid in values(ids)
                 args = Dict{String,Any}("notebook_id" => string(nid), "cell_id" => "11111111-1111-1111-1111-111111111111")
                 call("read_cell", args)
                 @test !call("edit_cell", merge(args, Dict{String,Any}("code" => "x = 7")))["result"]["isError"]
+                @test held(nid) == all_held
             end
-            call("keep_notebook_alive", Dict{String,Any}("notebook_id" => string(ids[by_app]), "keep" => true))
-            call("keep_notebook_alive", Dict{String,Any}("notebook_id" => string(ids[by_pluto]), "keep" => true))
-            @test held(ids[by_app]) == all_held
-            @test held(ids[by_pluto]) == all_held
 
             # Restarting in place (leaving safe preview) keeps the notebook's state.
             call("allow_execution", Dict{String,Any}("notebook_id" => string(ids[by_pluto]), "run_notebook" => false))
@@ -2043,17 +1776,10 @@ end
             Pluto.SessionActions.shutdown(session, session.notebooks[ids[by_pluto]]; async = false, verbose = false)
             @test held(ids[by_pluto]) == none_held
 
-            @test EndeavorRuntime.stop_notebook!(session, by_app)["stopped"]
-            @test held(ids[by_app]) == none_held
-
-            clock[] += 49 * 3600
-            @test EndeavorRuntime.stop_idle_notebooks!(session) == [abspath(by_idle)]
-            @test held(ids[by_idle]) == none_held
-            # Kept so the app can say why the notebook stopped and offer to reopen it.
-            @test abspath(by_idle) in [s["path"] for s in EndeavorRuntime.idle_stopped()]
+            @test EndeavorRuntime.adapter_call(session, "shutdown", Dict("notebook_id" => string(ids[by_core]))) == Dict("safe_preview" => true)
+            @test held(ids[by_core]) == none_held
             @test isempty(session.notebooks)
         finally
-            EndeavorRuntime._IDLE_CLOCK[] = time
             EndeavorRuntime.stop_pluto_stack!()
         end
     end

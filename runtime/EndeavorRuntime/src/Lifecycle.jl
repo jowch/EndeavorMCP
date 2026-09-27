@@ -89,19 +89,13 @@ function _handle_pluto_event(event)::Nothing
     if event isa Pluto.ServerStartEvent
         _STANDALONE_PLUTO_PORT[] = Int(event.port)
     elseif event isa Pluto.FileSaveEvent
-        note_activity!(event.notebook.notebook_id)
         _notify_notebook!("file_saved", event.notebook)
-    elseif event isa Pluto.StateChangeEvent || event isa Pluto.NotebookExecutionDoneEvent || event isa Pluto.OpenNotebookEvent
-        event isa Pluto.NotebookExecutionDoneEvent && note_activity!(event.notebook.notebook_id)
-        event isa Pluto.OpenNotebookEvent && note_opened!(event.notebook)
-        publish_notebooks!()
-        if event isa Pluto.StateChangeEvent
-            notify_state!(event.notebook)
-        elseif event isa Pluto.NotebookExecutionDoneEvent
-            _notify_notebook!("execution_done", event.notebook)
-        else
-            notify!("notebook_opened", Dict{String,Any}("notebook_id" => string(event.notebook.notebook_id), "path" => event.notebook.path))
-        end
+    elseif event isa Pluto.StateChangeEvent
+        notify_state!(event.notebook)
+    elseif event isa Pluto.NotebookExecutionDoneEvent
+        _notify_notebook!("execution_done", event.notebook)
+    elseif event isa Pluto.OpenNotebookEvent
+        notify!("notebook_opened", Dict{String,Any}("notebook_id" => string(event.notebook.notebook_id), "path" => event.notebook.path))
     elseif event isa Pluto.ShutdownNotebookEvent
         # Also fired when a notebook restarts in place (safe preview's "Run
         # notebook code"); it stays in the session then and keeps its state.
@@ -113,7 +107,6 @@ function _handle_pluto_event(event)::Nothing
         else
             notify_state!(nb)
         end
-        @async (sleep(0.2); publish_notebooks!())
     end
     nothing
 end
@@ -121,8 +114,6 @@ end
 "Drop everything the runtime keeps about a notebook that has left the session."
 function forget_notebook!(notebook_id::UUID)::Nothing
     clear_notebook_staging!(notebook_id)
-    clear_notebook_authors!(notebook_id)
-    clear_notebook_idle!(notebook_id)
     forget_topology!(notebook_id)
     return nothing
 end
@@ -192,7 +183,6 @@ function start_pluto_stack!(;
         notebook,
     )
     _STANDALONE_SESSION[] = sess
-    start_idle_checks!(sess)
 
     if http_async && _STANDALONE_HTTP_SERVER[] === nothing
         _STANDALONE_HTTP_TASK[] = @async begin
@@ -214,7 +204,6 @@ end
 function _close_standalone_http!()
     # Closing the server waits for open connections; event streams never end on
     # their own, so end them first.
-    close_event_streams!()
     close_notification_streams!()
     http_server = _STANDALONE_HTTP_SERVER[]
     if http_server !== nothing
@@ -410,25 +399,6 @@ function tool_open_notebook(args)
 end
 
 """
-    stop_notebook!(session, path)
-
-Shut down the open notebook at `path` (the app's "Stop notebook"): its process
-ends and it leaves the session. `safe_preview` says whether it was still in safe
-preview, so the app can reopen it the same way.
-"""
-function stop_notebook!(session, path::AbstractString)
-    session === nothing && return Dict{String,Any}("stopped" => false)
-    target = _canonical_path(path)
-    nb = findfirst(nb -> _canonical_path(nb.path) == target, session.notebooks)
-    nb === nothing && return Dict{String,Any}("stopped" => false)
-    notebook = session.notebooks[nb]
-    safe_preview = notebook.process_status === Pluto.ProcessStatus.waiting_for_permission
-    Pluto.SessionActions.shutdown(session, notebook; async = false, verbose = false)
-    publish_notebooks!()
-    return Dict{String,Any}("stopped" => true, "safe_preview" => safe_preview)
-end
-
-"""
     restart_notebook!(session, notebook_id)
 
 The app's "Restart notebook": what Pluto's own Restart does (a new process, then
@@ -463,7 +433,6 @@ function move_notebook!(session, notebook_id::AbstractString, path::AbstractStri
     ispath(newpath) && throw(ArgumentError("file_exists::'$newpath' already exists"))
     isdir(dirname(newpath)) || throw(ArgumentError("invalid_path::Directory does not exist: '$(dirname(newpath))'"))
     Pluto.SessionActions.move(session, notebook, newpath)
-    publish_notebooks!()
     return Dict{String,Any}("path" => notebook.path)
 end
 
@@ -472,14 +441,6 @@ function file_info(path::AbstractString)
     p = abspath(expanduser(String(path)))
     isfile(p) || return Dict{String,Any}("exists" => false)
     return Dict{String,Any}("exists" => true, "modified" => mtime(p))
-end
-
-"The app's \"New notebook\" for session `owner`: a new notebook in its folder, bound to it."
-function new_notebook_for!(owner::AbstractString)
-    bind_notebook!(owner, "")
-    result = with_owner(() -> tool_new_notebook(Dict{String,Any}()), owner)
-    note_notebook_opened!(owner, result["path"])
-    return result
 end
 
 # New notebooks start unsaved in Pluto's scratch folder; this is the folder its

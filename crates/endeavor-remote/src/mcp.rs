@@ -2,7 +2,8 @@
 //! stream, and each `POST /message?sessionId=…` carries one JSON-RPC message,
 //! whose reply goes out on that stream. Each agent session's messages carry
 //! `X-Endeavor-Session` (its key) and, on a server, `X-Endeavor-Host`. What the
-//! core doesn't answer itself goes to Julia's `/dispatch` with those headers.
+//! core doesn't answer itself goes to Julia's `/dispatch` with those headers,
+//! and what the core keeps about notebooks (see `notebooks`) hears of each call.
 //!
 //! Each session has a run policy the app sets ("plan" | "ask" | "auto"). In
 //! "plan" its notebook writes and runs are refused. "ask" and "auto" pass
@@ -12,13 +13,14 @@ use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::host_tools;
 use crate::http::{self, Head};
+use crate::notebooks::{Julia, Notebooks, Upstream};
 
 const KEEPALIVE: Duration = Duration::from_secs(15);
 
@@ -26,15 +28,15 @@ const KEEPALIVE: Duration = Duration::from_secs(15);
 const QUEUE: usize = 64;
 
 /// Tools that change the notebook or run code, here or on the server.
-const WRITE_TOOLS: [&str; 12] = [
+pub const WRITE_TOOLS: [&str; 12] = [
     "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
     "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell",
 ];
 
 /// What every client connection shares.
 pub struct Bridge {
-    /// Julia's bridge port, once it answers.
-    pub upstream: OnceLock<u16>,
+    pub julia: Arc<Julia>,
+    pub notebooks: Arc<Notebooks>,
     pub token: String,
     sessions: Mutex<HashMap<String, SyncSender<String>>>,
     /// Each agent session's run policy, by its key.
@@ -70,8 +72,11 @@ impl Bridge {
             ("ENDEAVOR_STATE", None),
             ("ENDEAVOR_LAUNCHER", None),
         ];
+        let julia = Arc::new(Julia::new(token.clone()));
+        let clock = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
         Bridge {
-            upstream: OnceLock::new(),
+            notebooks: Arc::new(Notebooks::new(julia.clone(), Box::new(clock))),
+            julia,
             token,
             sessions: Mutex::default(),
             policies: Mutex::default(),
@@ -94,6 +99,33 @@ impl Bridge {
                 let (owner, policy) = (text("owner", ""), text("policy", "ask"));
                 eprintln!("[ Info: Session {owner} policy: {policy}");
                 self.policies.lock().unwrap().insert(owner, policy);
+            }
+            "endeavor/set_notebook" => {
+                let (owner, notebook) = (text("owner", ""), params.get("notebook").filter(|n| !n.is_null()).map_or(String::new(), julia_string));
+                self.notebooks.bind(&owner, &notebook);
+                eprintln!("[ Info: Session {owner} notebook: {}", if notebook.is_empty() { "(none)" } else { &notebook });
+            }
+            "endeavor/set_idle_limit" => {
+                let hours = match params.get("hours") {
+                    Some(Value::Number(n)) => n.as_f64().unwrap_or(48.0),
+                    Some(Value::Bool(b)) => *b as u8 as f64,
+                    _ => 48.0,
+                };
+                self.notebooks.set_idle_limit(hours);
+                let shown = params.get("hours").map_or("48".into(), julia_string);
+                eprintln!("[ Info: Idle notebooks stop after: {}", if hours == 0.0 { "never".into() } else { format!("{shown} hours") });
+            }
+            "endeavor/stop_notebook" => {
+                let path = text("path", "");
+                let id = message.get("id").cloned().unwrap_or(Value::Null);
+                let reply = match self.notebooks.stop_notebook(&path) {
+                    Ok(result) => {
+                        eprintln!("[ Info: Stopped notebook {path}: {}", result["stopped"]);
+                        json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                    }
+                    Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": e } }),
+                };
+                return Ok(Some(to_json(&reply)));
             }
             // Julia keeps it too, for new_notebook: its reply is the app's.
             "endeavor/set_session_folder" => {
@@ -195,8 +227,11 @@ impl Bridge {
                 // Julia reads a call's arguments before anything else, and fails
                 // arguments that aren't an object its own way.
                 let Some(name) = params["name"].as_str().filter(|_| arguments.is_object()) else {
-                    return self.ask_julia("/dispatch", raw, caller).map(Some);
+                    let reply = self.ask_julia("/dispatch", raw, caller)?;
+                    self.notebooks.publish();
+                    return Ok(Some(reply));
                 };
+                self.notebooks.note_activity(&arguments);
                 let result = if let Some(refusal) = self.refusal(caller, name) {
                     tool_error(&refusal)
                 } else if host_tools::NAMES.contains(&name) {
@@ -206,10 +241,19 @@ impl Bridge {
                         Ok(result) => json!({ "content": [{ "type": "text", "text": to_json(&result) }], "isError": false }),
                         Err(error) => tool_error(&error),
                     }
+                } else if name == "keep_notebook_alive" {
+                    match self.notebooks.keep_alive(&arguments) {
+                        Ok(result) => json!({ "content": [{ "type": "text", "text": to_json(&result) }], "isError": false }),
+                        Err(error) => tool_error(&error),
+                    }
+                } else if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments) {
+                    tool_error(&refusal)
                 } else {
-                    return self.ask_julia("/dispatch", raw, caller).map(Some);
+                    let reply = self.notebooks.forward_tool(&caller.owner, name, &arguments, || self.ask_julia("/dispatch", raw, caller));
+                    self.notebooks.publish();
+                    return reply.map(Some);
                 };
-                let _ = self.tool_called(&arguments);
+                self.notebooks.publish();
                 ok(result)
             }
             _ => self.ask_julia("/dispatch", raw, caller).map(Some),
@@ -233,35 +277,14 @@ impl Bridge {
         None
     }
 
-    /// Tell Julia about a tool call the core answered: it counts as activity on
-    /// the notebook it names, and the app hears the notebooks' state after it.
-    fn tool_called(&self, arguments: &Value) -> io::Result<()> {
-        let message = json!({ "jsonrpc": "2.0", "id": 0, "method": "endeavor/tool_called", "params": { "arguments": arguments } });
-        self.ask_julia("/call", message.to_string().as_bytes(), &Caller::default()).map(drop)
-    }
-
-    /// Julia's reply to a message on its `path`.
     fn ask_julia(&self, path: &str, raw: &[u8], caller: &Caller) -> io::Result<String> {
-        let port = *self.upstream.get().ok_or(io::ErrorKind::NotConnected)?;
-        let authorization = format!("Bearer {}", self.token);
-        let headers = [
-            ("Authorization", authorization.as_str()),
-            ("Content-Type", "application/json"),
-            ("X-Endeavor-Session", caller.owner.as_str()),
-            ("X-Endeavor-Host", caller.host.as_str()),
-        ];
-        let headers: Vec<_> = headers.into_iter().filter(|(_, value)| !value.is_empty()).collect();
-        let (status, body) = http::post(port, path, &headers, raw)?;
-        if status != 200 {
-            return Err(io::Error::other(format!("Julia's {path} answered {status}")));
-        }
-        String::from_utf8(body).map_err(|_| io::ErrorKind::InvalidData.into())
+        self.julia.ask(path, raw, caller)
     }
 }
 
 /// A failed tool call's result, from the text of the error Julia raised:
 /// `ArgumentError: kind::message` names its kind; anything else is a `tool_error`.
-fn tool_error(raw: &str) -> Value {
+pub(crate) fn tool_error(raw: &str) -> Value {
     let (kind, message) = match raw.split_once("::") {
         Some((kind, message)) => {
             let kind = kind.trim();

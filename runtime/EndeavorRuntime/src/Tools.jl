@@ -216,7 +216,6 @@ end
 is_running(nb, cell) = cell.running || (cell.queued && any(c -> c.running, values(nb.cells_dict)))
 
 function tool_list_notebooks(session, _args)
-    bound = bound_notebook(current_owner())
     [
         Dict{String,Any}(
             "notebook_id" => string(nb.notebook_id),
@@ -227,7 +226,6 @@ function tool_list_notebooks(session, _args)
             "pending_run"       => [string(id) for id in pending_run_ids(nb.notebook_id)],
             "running"           => [string(id) for id in nb.cell_order if is_running(nb, nb.cells_dict[id])],
             "execution_allowed" => Pluto.will_run_code(nb),
-            "this_session"      => bound !== nothing && _canonical_path(nb.path) == bound,
         )
         for nb in values(session.notebooks)
     ]
@@ -265,9 +263,7 @@ function tool_edit_cell(session, args)
 
     require_fresh_read!(nb.notebook_id, cell)
 
-    before = cell.code
     cell.code = code
-    note_agent_edit!(nb.notebook_id, cell, before)
     note_cell_changed!(nb.notebook_id, cell.cell_id)
     record_read!(nb.notebook_id, cell.cell_id, code)
 
@@ -295,9 +291,7 @@ function tool_edit_cells(session, args)
     end
     for edit in edits
         cell = _get_cell(nb, edit["cell_id"])
-        before = cell.code
         cell.code = edit["code"]
-        note_agent_edit!(nb.notebook_id, cell, before)
         note_cell_changed!(nb.notebook_id, cell.cell_id)
         record_read!(nb.notebook_id, cell.cell_id, edit["code"])
         push!(edited_ids, cell.cell_id)
@@ -335,7 +329,6 @@ function tool_add_cell(session, args)
 
     new_cell = Pluto.Cell(; code=string(code), code_folded=folded)
     nb.cells_dict[new_cell.cell_id] = new_cell
-    note_agent_edit!(nb.notebook_id, new_cell, "")
     note_cell_changed!(nb.notebook_id, new_cell.cell_id)
     record_read!(nb.notebook_id, new_cell.cell_id, string(code))
 
@@ -563,8 +556,6 @@ function call_tool(session, name, arguments)
         tool_validate_cell(session, arguments)
     elseif name == "search_code"
         tool_search_code(session, arguments)
-    elseif name == "keep_notebook_alive"
-        tool_keep_notebook_alive(session, arguments)
     else
         throw(ArgumentError("unknown_tool::Unknown tool: '$name'"))
     end

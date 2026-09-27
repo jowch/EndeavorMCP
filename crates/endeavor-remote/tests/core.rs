@@ -1,6 +1,7 @@
 //! `endeavor-remote core` with a stand-in Julia (see `common`): it starts it,
-//! writes `runtime.json` once it's ready, passes every request on its bridge
-//! port through, streams as they're written, and lives and dies with it.
+//! writes `runtime.json` once it's ready, passes the requests on its bridge
+//! port it doesn't answer through, streams as they're written, and lives and
+//! dies with it.
 
 mod common;
 
@@ -147,7 +148,7 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     let core = Core::start(&dir, &bridge);
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
-    let body = r#"{"jsonrpc":"2.0","id":7,"method":"endeavor/stop_notebook","params":{"path":"/n/a.jl"}}"#;
+    let body = r#"{"jsonrpc":"2.0","id":7,"method":"endeavor/set_folder","params":{"path":"/n"}}"#;
     write!(
         socket,
         "POST /call HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nX-Endeavor-Host: labbox3\r\nContent-Length: {}\r\n\r\n{body}",
@@ -228,7 +229,7 @@ fn streams_events_as_written_and_closes_with_either_side() {
     let core = Core::start(&dir, &bridge);
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
-    write!(socket, "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    write!(socket, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     bridge.event("first");
     assert!(read_until(&mut reader, "data: first").starts_with("HTTP/1.1 200 OK\r\n"));
     bridge.event("second");
@@ -241,12 +242,60 @@ fn streams_events_as_written_and_closes_with_either_side() {
     // Julia's end closing mid-stream closes the client's.
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
-    write!(socket, "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    write!(socket, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     bridge.event("third");
     read_until(&mut reader, "data: third");
     bridge.drop_events();
     let mut rest = Vec::new();
     reader.read_to_end(&mut rest).unwrap();
+}
+
+/// A notebook as the adapter's `snapshot` reports it, with one cell.
+fn notebook(id: &str, code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "notebook_id": id, "path": "/n/a.jl", "cell_order": ["c1"], "execution_allowed": true, "safe_preview": false, "pending_run": [],
+        "cells": [{ "cell_id": "c1", "code": code, "running": false, "queued": false, "errored": false }],
+    })
+}
+
+#[test]
+fn serves_the_apps_events_from_what_the_adapter_reports() {
+    let dir = state_dir("core-own-events");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    wait_for("the core to follow Julia's notifications", || bridge.seen().iter().any(|s| s.line == "GET /notifications HTTP/1.0"));
+    let mut socket = core.connect();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    // HTTP/1.0, as the app asks: the stream runs to the end of the connection.
+    write!(socket, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    let head = read_until(&mut reader, "\r\n\r\n");
+    assert!(head.starts_with("HTTP/1.1 200 OK\r\n") && head.contains("Content-Type: text/event-stream\r\n") && !head.contains("chunked"), "{head}");
+    assert_eq!(read_until(&mut reader, "\n\n"), "data: {\"cells\":{},\"idle_stopped\":[],\"notebooks\":[]}\n\n", "the state now");
+
+    // Julia says a notebook changed: the core reads it and tells the app.
+    bridge.set_notebooks(vec![notebook("n1", "x = 1")]);
+    bridge.notify(serde_json::json!({ "method": "notebook_opened", "params": { "notebook_id": "n1", "path": "/n/a.jl" } }));
+    let event = read_until(&mut reader, "\n\n");
+    let event: serde_json::Value = serde_json::from_str(event.strip_prefix("data: ").unwrap().trim_end()).unwrap();
+    assert_eq!(event["notebooks"], serde_json::json!([{ "notebook_id": "n1", "path": "/n/a.jl", "cell_count": 1, "pending_run": [], "running": [], "execution_allowed": true }]));
+    assert_eq!(event["cells"]["n1"][0]["author"], serde_json::Value::Null);
+
+    // The same state again isn't news; a change the tools didn't make is the user's.
+    bridge.notify(serde_json::json!({ "method": "topology_changed", "params": { "notebook_id": "n1" } }));
+    bridge.set_notebooks(vec![notebook("n1", "x = 2")]);
+    bridge.notify(serde_json::json!({ "method": "cell_state", "params": { "notebook_id": "n1", "cells": [{ "cell_id": "c1", "code": "x = 2" }] } }));
+    let event = read_until(&mut reader, "\n\n");
+    let event: serde_json::Value = serde_json::from_str(event.strip_prefix("data: ").unwrap().trim_end()).unwrap();
+    assert_eq!(event["cells"]["n1"][0]["author"], "user");
+
+    // Tool calls the core answers are news too, and don't reach Julia.
+    let mut session = Session::open(&core);
+    let keep = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"keep_notebook_alive","arguments":{"notebook_id":"aaaaaaaa-0000-0000-0000-000000000000","keep":true}}}"#;
+    post(&core, &session.id, keep, &[("X-Endeavor-Session", "7")]);
+    let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
+    let error: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(error["message"], "No notebook with id 'aaaaaaaa-0000-0000-0000-000000000000' in the current session\" not found");
+    assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 }
 
 /// An agent session's MCP connection: its event stream and its session id.
@@ -374,7 +423,8 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let mut session = Session::open(&core);
     let tool = |id: u32, name: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"notebook_id":"n1"}}}}}}"#);
     let asked = || bridge.seen().iter().filter(|s| s.line == "POST /dispatch HTTP/1.1").count();
-    let told = || bridge.seen().iter().filter(|s| String::from_utf8_lossy(&s.body).contains("endeavor/tool_called")).count();
+    // The core reads the notebooks' state after every tool call, to tell the app.
+    let reads = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).count();
     let plan_edit = "Plan mode is read-only: `edit_cell` would change or run the notebook. Finish the plan; the user switches modes to carry it out.";
 
     let set = r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/set_policy","params":{"owner":"7","policy":"plan"}}"#;
@@ -382,12 +432,11 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     assert!(!bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("set_policy")), "the core keeps policies");
 
     let seven = [("X-Endeavor-Session", "7")];
+    let before = reads();
     post(&core, &session.id, &tool(1, "edit_cell"), &seven);
     assert_eq!(session.reply(), tool_error(1, "plan_mode", plan_edit));
-    assert_eq!((asked(), told()), (0, 1), "refused here; Julia hears of the call");
-    let called = bridge.seen().into_iter().find(|s| String::from_utf8_lossy(&s.body).contains("endeavor/tool_called")).unwrap();
-    let called: serde_json::Value = serde_json::from_slice(&called.body).unwrap();
-    assert_eq!(called["params"]["arguments"], serde_json::json!({ "notebook_id": "n1" }));
+    assert_eq!(asked(), 0, "refused here");
+    assert!(reads() > before, "the app hears the notebooks' state after it");
 
     // Reads pass, and so do other sessions' writes and the app's own.
     post(&core, &session.id, &tool(2, "read_cell"), &seven);
@@ -406,7 +455,7 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     post(&core, &session.id, &tool(6, "run_shell"), &seven);
     assert_eq!(session.reply(), tool_error(6, "host_tools", &not_here("run_shell")), "the host check comes first");
     assert_eq!(app_call(&core, &tool(7, "list_folder")), tool_error(7, "host_tools", &not_here("list_folder")));
-    assert_eq!((asked(), told()), (3, 4));
+    assert_eq!(asked(), 3);
 
     // A call with arguments Julia can't read goes to Julia, which says so its own way.
     post(&core, &session.id, r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":null}}"#, &seven);
@@ -474,11 +523,12 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     post(&core, &session.id, list, &[]);
     assert!(!session.reply().contains("list_folder"), "not on this Mac");
 
-    // Answered here, and Julia hears of each call.
+    // Answered here, and the app hears the notebooks' state after each call.
     let mut server = OnServer { core: &core, session, next: 1 };
-    let told = || bridge.seen().iter().filter(|s| String::from_utf8_lossy(&s.body).contains("endeavor/tool_called")).count();
+    let reads = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).count();
+    let before = reads();
     server.run(serde_json::json!({ "command": "true" }));
-    assert_eq!(told(), 1);
+    assert!(reads() > before);
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch") && String::from_utf8_lossy(&s.body).contains("run_shell")));
 }
 

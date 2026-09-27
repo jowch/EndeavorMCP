@@ -119,7 +119,7 @@ fn int_arg(args: &Value, name: &str, default: i64) -> Result<i64, String> {
     }
 }
 
-fn home() -> String {
+pub fn home() -> String {
     if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
         return home.to_string_lossy().into_owned();
     }
@@ -152,7 +152,7 @@ fn host_path(path: Option<&str>) -> Result<String, String> {
 
 /// Julia's `normpath`: `.` and `x/..` gone, repeated slashes collapsed, and a
 /// path naming a folder (ending in `/`, `/.` or `/..`) still ends in `/`.
-fn normpath(path: &str) -> String {
+pub fn normpath(path: &str) -> String {
     let dir_path = |p: &str| p.is_empty() || p == "." || p == ".." || p.ends_with('/') || p.ends_with("/.") || p.ends_with("/..");
     let absolute = path.starts_with('/');
     let mut parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
