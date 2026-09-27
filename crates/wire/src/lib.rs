@@ -22,6 +22,7 @@ pub mod askpass;
 pub mod files;
 pub mod notebooks;
 pub mod relay;
+pub mod slurm;
 
 use std::io::{self, ErrorKind, Read, Write};
 
@@ -136,14 +137,22 @@ pub enum ToApp {
         /// The machine the helper runs on.
         node: String,
         home: String,
+        /// Slurm's commands are here: probably a cluster's login node.
+        #[serde(default)]
+        slurm: bool,
     },
     /// A line of the runtime's log while it starts, or of Julia's download.
     Progress { line: String },
     /// The julia the helper starts the runtime with (sent only when it starts one).
     FoundJulia { path: String, version: String },
+    /// A cluster job for the runtime was submitted (`summary`: "8 CPUs · 32 GB · 8 h").
+    Submitted { job: String, summary: String },
+    /// The job waits in the queue: its state (PENDING, CONFIGURING) and Slurm's
+    /// reason; then once, state RUNNING and (as `reason`) the node it got.
+    Queued { job: String, state: String, reason: String },
     /// The runtime is up and streams can open.
     Ready {
-        /// How the runtime was started: "process" (later also "slurm").
+        /// How the runtime was started: "process" or "slurm".
         launcher: String,
         /// The machine the runtime runs on.
         node: String,
@@ -153,6 +162,9 @@ pub enum ToApp {
         pluto_secret: String,
         /// The runtime was already running; this connect didn't start it.
         reattached: bool,
+        /// The cluster job it runs in.
+        #[serde(default)]
+        job: Option<slurm::Job>,
     },
     /// The runtime couldn't start (no Julia, running on another node, …); the
     /// helper stays connected, so `StartRuntime` can try again.
@@ -173,8 +185,12 @@ pub enum ToApp {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToHelper {
-    /// Attach to the runtime, starting it if it isn't running.
-    StartRuntime,
+    /// Attach to the runtime, starting it if it isn't running. On a cluster,
+    /// `job` says what to submit.
+    StartRuntime {
+        #[serde(default)]
+        job: Option<slurm::JobRequest>,
+    },
     /// Stop the runtime and stay connected.
     Stop,
     /// Exit and leave the runtime running.
@@ -263,6 +279,7 @@ mod tests {
             token: "t".into(),
             pluto_secret: "s".into(),
             reattached: true,
+            job: None,
         };
         let Frame::Control(json) = ready.frame() else { panic!() };
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -274,5 +291,6 @@ mod tests {
         assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Detach"}"#).unwrap(), ToHelper::Detach);
         assert_eq!(serde_json::from_str::<ToApp>(r#"{"type":"Replaced"}"#).unwrap(), ToApp::Replaced);
+        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime"}"#).unwrap(), ToHelper::StartRuntime { job: None });
     }
 }

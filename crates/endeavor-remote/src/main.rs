@@ -5,9 +5,14 @@
 //! streams to the runtime's loopback ports over its own stdin/stdout
 //! (docs/remote-sessions.md). It runs as a child of the app on This Mac, and
 //! over `ssh` on a server. It is also ssh's askpass program there (see `askpass`).
+//!
+//! On a cluster (`--launcher slurm`) the runtime runs in a Slurm job instead,
+//! and the streams go on through a second helper on the job's node
+//! (`endeavor-remote relay`, see `slurm`).
 
 mod askpass;
 mod julia;
+mod slurm;
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -24,9 +29,13 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use wire::relay::Mux;
+use wire::slurm::JobRequest;
 use wire::{Frame, Target, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--quit-with-client] [--any-node]\n       endeavor-remote askpass PROMPT";
+const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node]
+       endeavor-remote relay --state-dir DIR
+       endeavor-remote node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
+       endeavor-remote askpass PROMPT";
 const LOG_TAIL: usize = 40;
 
 struct Args {
@@ -34,11 +43,20 @@ struct Args {
     julia: julia::Source,
     runtime: PathBuf,
     depot: String,
+    launcher: Launcher,
     /// Stop the runtime when the app goes away without saying Stop or Detach.
     quit_with_client: bool,
     /// The state folder belongs to this one machine, so a different node name
     /// only means the machine was renamed.
     any_node: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Launcher {
+    /// A detached process on this machine.
+    Process,
+    /// A Slurm job; this machine is a login node.
+    Slurm,
 }
 
 /// `runtime.json`, written by boot.jl once the runtime is ready.
@@ -50,6 +68,8 @@ struct State {
     mcp_port: u16,
     token: String,
     pluto_secret: String,
+    /// The Slurm job it runs in.
+    job: Option<String>,
 }
 
 enum Event {
@@ -60,15 +80,30 @@ enum Event {
     Exited(i32, String),
     /// Another helper wants the runtime.
     Replaced,
+    /// A control message from the relay on a job's node (`slurm::Link`).
+    Node(u64, ToApp),
+    /// That relay's output ended.
+    NodeGone(u64),
 }
 
-/// The runtime's two ports while one is attached, for the streams the app opens.
-type Ports = Arc<RwLock<Option<[u16; 2]>>>;
+/// Where the app's streams go while a runtime is attached.
+#[derive(Clone)]
+enum Route {
+    None,
+    /// The runtime's two loopback ports here (Pluto, bridge).
+    Local([u16; 2]),
+    /// On to the relay on the job's node.
+    Node(Arc<slurm::Link>),
+}
+
+type Routes = Arc<RwLock<Route>>;
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match argv.first().map(String::as_str) {
         Some("askpass") => askpass::run(argv.get(1).map_or("", String::as_str)),
+        Some("relay") => slurm::relay_main(&argv[1..]),
+        Some("node-start") => slurm::node_start_main(&argv[1..]),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
         Some(prompt) if prompt != "connect" && std::env::var_os(wire::askpass::SOCKET_ENV).is_some() => askpass::run(prompt),
         _ => {}
@@ -82,14 +117,18 @@ fn main() {
     };
     // Before any thread starts, so every thread inherits the mask and only the watcher takes it.
     let replace_signal = block_sigusr1();
-    // SAFETY: fd 1 is our stdout and stays open for the life of the process;
-    // frames are binary, so skip std's line-buffered Stdout.
-    let stdout = unsafe { File::from_raw_fd(1) };
-    let mux = Mux::new(stdout);
+    let mux = stdout_mux();
     let Err(message) = serve(&args, &mux, replace_signal);
     eprintln!("endeavor-remote: {message}");
     let _ = mux.send(&ToApp::Error { message }.frame());
     std::process::exit(1);
+}
+
+fn stdout_mux() -> Arc<Mux> {
+    // SAFETY: fd 1 is our stdout and stays open for the life of the process;
+    // frames are binary, so skip std's line-buffered Stdout.
+    let stdout = unsafe { File::from_raw_fd(1) };
+    Mux::new(stdout)
 }
 
 fn parse_args(args: Vec<String>) -> Result<Args, String> {
@@ -98,7 +137,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         return Err("expected the `connect` command".into());
     }
     let (mut state_dir, mut julia, mut runtime, mut depot) = (None, None::<julia::Source>, None, None);
-    let (mut quit_with_client, mut any_node) = (false, false);
+    let (mut quit_with_client, mut any_node, mut launcher) = (false, false, Launcher::Process);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -108,6 +147,13 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             "--julia-shell" => julia = Some(julia::Source::Shell(value()?)),
             "--runtime" => runtime = Some(PathBuf::from(value()?)),
             "--depot" => depot = Some(value()?),
+            "--launcher" => {
+                launcher = match value()?.as_str() {
+                    "process" => Launcher::Process,
+                    "slurm" => Launcher::Slurm,
+                    other => return Err(format!("unknown launcher {other}")),
+                }
+            }
             "--quit-with-client" => quit_with_client = true,
             "--any-node" => any_node = true,
             _ => return Err(format!("unknown argument {arg}")),
@@ -118,37 +164,43 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         julia: julia.ok_or("--julia or --julia-shell is required")?,
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
+        launcher,
         quit_with_client,
         any_node,
     })
 }
 
+fn make_state_dir(dir: &Path) -> Result<(), String> {
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))
+}
+
 /// Say hello, then serve the app until it detaches or goes away, starting,
 /// stopping and relaying to the runtime as it asks. Returns only on failure.
 fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<std::convert::Infallible, String> {
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&args.state_dir)
-        .map_err(|e| format!("Couldn't create {}: {e}", args.state_dir.display()))?;
+    make_state_dir(&args.state_dir)?;
     let (events, rx) = mpsc::channel();
     watch_replace_signal(replace_signal, events.clone());
-    let ports: Ports = Arc::default();
-    relay_stdin(mux.clone(), ports.clone(), events.clone());
+    let routes: Routes = Arc::new(RwLock::new(Route::None));
+    relay_stdin(mux.clone(), routes.clone(), events.clone());
     let home = wire::files::home().display().to_string();
-    let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home }.frame());
+    let slurm_here = wire::slurm::has("sinfo");
+    let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: slurm_here }.frame());
 
     let mut attached: Option<Attached> = None;
     loop {
         match rx.recv().expect("senders live as long as their threads") {
-            Event::App(ToHelper::StartRuntime) => {
+            Event::App(ToHelper::StartRuntime { job }) => {
                 if let Some(attached) = &attached {
                     let _ = mux.send(&attached.ready(true).frame());
                     continue;
                 }
-                match attach(args, mux, &rx, &events) {
+                let result = match args.launcher {
+                    Launcher::Process => attach(args, mux, &rx, &events),
+                    Launcher::Slurm => slurm::attach(args, mux, &rx, &events, job.unwrap_or_default()),
+                };
+                match result {
                     Ok(now) => {
-                        *ports.write().unwrap() = Some([now.state.pluto_port, now.state.mcp_port]);
+                        *routes.write().unwrap() = now.route();
                         let _ = mux.send(&now.ready(now.reattached).frame());
                         attached = Some(now);
                     }
@@ -159,14 +211,14 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<
             }
             Event::App(ToHelper::Stop) => {
                 if let Some(runtime) = attached.take() {
-                    *ports.write().unwrap() = None;
-                    runtime.runtime.stop(Some(&runtime.state));
+                    *routes.write().unwrap() = Route::None;
+                    runtime.stop(&rx);
                 }
                 let _ = mux.send(&ToApp::Stopped.frame());
             }
             Event::Eof if args.quit_with_client => {
                 if let Some(runtime) = attached.take() {
-                    runtime.runtime.stop(Some(&runtime.state));
+                    runtime.stop(&rx);
                 }
                 std::process::exit(0);
             }
@@ -176,10 +228,21 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<
             // Answered as they arrive (relay_stdin).
             Event::App(ToHelper::Files { .. }) => {}
             Event::Exited(pid, status) => {
-                if attached.as_ref().is_some_and(|a| a.runtime.pid == pid) {
-                    *ports.write().unwrap() = None;
-                    let runtime = attached.take().expect("checked");
-                    let _ = mux.send(&runtime.runtime.died(status).frame());
+                if attached.as_ref().is_some_and(|a| matches!(&a.how, How::Process(r) if r.pid == pid)) {
+                    *routes.write().unwrap() = Route::None;
+                    let Some(How::Process(runtime)) = attached.take().map(|a| a.how) else { unreachable!() };
+                    let _ = mux.send(&runtime.died(status).frame());
+                }
+            }
+            Event::Node(generation, message) => {
+                let ours = attached.as_ref().is_some_and(|a| matches!(&a.how, How::Slurm(j) if j.generation() == generation));
+                if ours && let ToApp::Died { status, log_tail } = message {
+                    lost_node(args, mux, &routes, &mut attached, &events, Some((status, log_tail)));
+                }
+            }
+            Event::NodeGone(generation) => {
+                if attached.as_ref().is_some_and(|a| matches!(&a.how, How::Slurm(j) if j.generation() == generation)) {
+                    lost_node(args, mux, &routes, &mut attached, &events, None);
                 }
             }
             Event::Replaced => {
@@ -192,12 +255,33 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<
     }
 }
 
+/// The relay to the job's node ended: reconnect if the job still runs (the
+/// connection inside the cluster dropped), else say how the job ended.
+fn lost_node(args: &Args, mux: &Arc<Mux>, routes: &Routes, attached: &mut Option<Attached>, events: &Sender<Event>, said: Option<(String, Vec<String>)>) {
+    *routes.write().unwrap() = Route::None;
+    let Some(mut now) = attached.take() else { return };
+    let How::Slurm(job) = &mut now.how else { return };
+    if said.is_none()
+        && let Ok(()) = job.reconnect(mux, events)
+    {
+        *routes.write().unwrap() = now.route();
+        *attached = Some(now);
+        return;
+    }
+    let _ = mux.send(&job.ended(&args.state_dir, said).frame());
+}
+
 /// The runtime this helper is the client of, and the lock that makes it the only one.
 struct Attached {
-    runtime: Runtime,
+    how: How,
     state: State,
     reattached: bool,
     _lock: File,
+}
+
+enum How {
+    Process(Runtime),
+    Slurm(slurm::Running),
 }
 
 impl Attached {
@@ -206,10 +290,28 @@ impl Attached {
         ToApp::Ready {
             launcher: state.launcher.clone(),
             node: state.node.clone(),
-            pid: self.runtime.pid as u32,
+            pid: state.pid as u32,
             token: state.token.clone(),
             pluto_secret: state.pluto_secret.clone(),
             reattached,
+            job: match &self.how {
+                How::Process(_) => None,
+                How::Slurm(job) => Some(job.info()),
+            },
+        }
+    }
+
+    fn route(&self) -> Route {
+        match &self.how {
+            How::Process(_) => Route::Local([self.state.pluto_port, self.state.mcp_port]),
+            How::Slurm(job) => Route::Node(job.link()),
+        }
+    }
+
+    fn stop(self, rx: &mpsc::Receiver<Event>) {
+        match self.how {
+            How::Process(runtime) => runtime.stop(Some(&self.state)),
+            How::Slurm(job) => job.stop(rx),
         }
     }
 }
@@ -221,7 +323,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     let lock = lock(&args.state_dir).map_err(failed)?;
     if let Some(state) = existing(args).map_err(failed)? {
         let runtime = Runtime { pid: state.pid, exit: Exit::watch_pid(state.pid, events.clone()), state_dir: args.state_dir.clone() };
-        return Ok(Attached { runtime, state, reattached: true, _lock: lock });
+        return Ok(Attached { how: How::Process(runtime), state, reattached: true, _lock: lock });
     }
     let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(failed)?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
@@ -230,7 +332,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     let pid = child.id() as i32;
     let runtime = Runtime { pid, exit: Exit::watch_child(child, pid, events.clone()), state_dir: args.state_dir.clone() };
     let state = boot(args, mux, &runtime, rx)?;
-    Ok(Attached { runtime, state, reattached: false, _lock: lock })
+    Ok(Attached { how: How::Process(runtime), state, reattached: false, _lock: lock })
 }
 
 /// Wait for a runtime we just started to write its state and answer. A runtime
@@ -241,7 +343,7 @@ fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, rx: &mpsc::Receiver<Even
     let result = loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Exited(pid, status)) if pid == runtime.pid => break Err(runtime.died(status)),
-            Ok(Event::Exited(..) | Event::App(ToHelper::StartRuntime | ToHelper::Files { .. })) => {}
+            Ok(Event::Exited(..) | Event::Node(..) | Event::NodeGone(_) | Event::App(ToHelper::StartRuntime { .. } | ToHelper::Files { .. })) => {}
             Ok(Event::Replaced) => {
                 runtime.kill();
                 let _ = mux.send(&ToApp::Replaced.frame());
@@ -380,8 +482,10 @@ fn pid_alive(pid: i32) -> bool {
     pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
-/// Take `DIR/lock`: one client per runtime. A helper already holding it is
-/// asked to hand over (it tells its app it was replaced, then exits).
+/// Take `DIR/lock`: one client per runtime. A helper already holding it on
+/// this machine is asked to hand over (it tells its app it was replaced, then
+/// exits). The file says "pid host": on a cluster the folder is shared by
+/// login nodes, and a pid means nothing on another one.
 fn lock(dir: &Path) -> Result<File, String> {
     let path = dir.join("lock");
     let mut file = OpenOptions::new()
@@ -394,14 +498,20 @@ fn lock(dir: &Path) -> Result<File, String> {
         .map_err(|e| format!("Couldn't open {}: {e}", path.display()))?;
     let try_lock = |file: &File| unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
     if !try_lock(&file) {
+        let here = hostname();
         let mut tries = 0;
+        let mut holder = String::new();
         while !try_lock(&file) {
             // Every second, in case the holder hadn't written its pid yet.
             if tries % 10 == 0 {
-                let mut text = String::new();
-                let _ = (&file).seek(SeekFrom::Start(0)).and_then(|_| (&file).read_to_string(&mut text));
-                if let Ok(pid) = text.trim().parse::<i32>()
+                holder.clear();
+                let _ = (&file).seek(SeekFrom::Start(0)).and_then(|_| (&file).read_to_string(&mut holder));
+                let mut words = holder.split_whitespace();
+                let pid = words.next().and_then(|p| p.parse::<i32>().ok());
+                let host = words.next().unwrap_or(&here);
+                if let Some(pid) = pid
                     && pid > 0
+                    && host == here
                     && pid != std::process::id() as i32
                 {
                     // SAFETY: plain syscall.
@@ -410,12 +520,17 @@ fn lock(dir: &Path) -> Result<File, String> {
             }
             tries += 1;
             if tries > 300 {
-                return Err("Another connection to this Julia didn't hand it over.".into());
+                let elsewhere = holder.split_whitespace().nth(1).filter(|h| *h != here);
+                return Err(match elsewhere {
+                    Some(host) => format!("Endeavor is still connected to this Julia from {host}, and it didn't let go. Try again in a minute."),
+                    None => "Another connection to this Julia didn't hand it over.".into(),
+                });
             }
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    file.set_len(0).and_then(|_| file.seek(SeekFrom::Start(0))).and_then(|_| write!(file, "{}", std::process::id()))
+    let me = format!("{} {}", std::process::id(), hostname());
+    file.set_len(0).and_then(|_| file.seek(SeekFrom::Start(0))).and_then(|_| write!(file, "{me}"))
         .map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
     Ok(file)
 }
@@ -443,45 +558,64 @@ fn watch_replace_signal(set: libc::sigset_t, events: Sender<Event>) {
     });
 }
 
-/// Read frames from the app: streams go to the runtime's ports while one is
-/// attached, file requests are answered on their own threads, other control
-/// messages and the end of input become events.
-fn relay_stdin(mux: Arc<Mux>, ports: Ports, events: Sender<Event>) {
+/// Read frames from the app: streams go where the attached runtime is (its
+/// ports here, or the relay on its job's node), file requests are answered on
+/// their own threads, other control messages and the end of input become events.
+fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>) {
     std::thread::spawn(move || {
         // SAFETY: fd 0 is our stdin; only this thread reads it.
-        let stdin = BufReader::new(unsafe { File::from_raw_fd(0) });
-        let control = events.clone();
-        let answering = mux.clone();
-        let result = mux.run(
-            stdin,
-            |mux, id, target| dial(mux, id, target, *ports.read().unwrap()),
-            |json| match serde_json::from_slice::<ToHelper>(json) {
-                Ok(ToHelper::Files { id, request }) => {
-                    let mux = answering.clone();
-                    std::thread::spawn(move || drop(mux.send(&ToApp::Files { id, reply: wire::files::answer(&request) }.frame())));
+        let mut stdin = BufReader::new(unsafe { File::from_raw_fd(0) });
+        loop {
+            let frame = match Frame::read_from(&mut stdin) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(e) => {
+                    eprintln!("endeavor-remote: reading from the app: {e}");
+                    break;
                 }
-                Ok(message) => drop(control.send(Event::App(message))),
-                Err(e) => eprintln!("endeavor-remote: ignoring control message: {e}"),
-            },
-        );
-        if let Err(e) = result {
-            eprintln!("endeavor-remote: reading from the app: {e}");
+            };
+            let Some(frame) = mux.take(frame) else { continue };
+            match frame {
+                Frame::Control(json) => match serde_json::from_slice::<ToHelper>(&json) {
+                    Ok(ToHelper::Files { id, request }) => {
+                        let mux = mux.clone();
+                        std::thread::spawn(move || drop(mux.send(&ToApp::Files { id, reply: wire::files::answer(&request) }.frame())));
+                    }
+                    Ok(message) => drop(events.send(Event::App(message))),
+                    Err(e) => eprintln!("endeavor-remote: ignoring control message: {e}"),
+                },
+                Frame::Open { id, target } => {
+                    let route = routes.read().unwrap().clone();
+                    match route {
+                        Route::Local(ports) => dial(&mux, id, target, ports),
+                        Route::Node(link) => {
+                            if link.open(id, target).is_err() {
+                                let _ = mux.send(&Frame::Close { id });
+                            }
+                        }
+                        Route::None => drop(mux.send(&Frame::Close { id })),
+                    }
+                }
+                frame => {
+                    if let Route::Node(link) = &*routes.read().unwrap() {
+                        link.forward(frame);
+                    }
+                }
+            }
         }
+        mux.close_all();
         let _ = events.send(Event::Eof);
     });
 }
 
-fn dial(mux: &Arc<Mux>, id: u32, target: Target, ports: Option<[u16; 2]>) {
-    let port = ports.map(|p| if target == Target::Pluto { p[0] } else { p[1] });
-    let socket = port.ok_or(()).and_then(|port| {
-        TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)).map_err(drop)
-    });
-    match socket {
+fn dial(mux: &Arc<Mux>, id: u32, target: Target, ports: [u16; 2]) {
+    let port = if target == Target::Pluto { ports[0] } else { ports[1] };
+    match TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)) {
         Ok(socket) => {
             let _ = socket.set_nodelay(true);
             let _ = mux.attach(id, socket);
         }
-        Err(()) => {
+        Err(_) => {
             let _ = mux.send(&Frame::Close { id });
         }
     }
@@ -517,6 +651,7 @@ fn read_state(dir: &Path) -> Option<State> {
         mcp_port: port("mcp_port")?,
         token: text("token")?,
         pluto_secret: text("pluto_secret")?,
+        job: text("job").filter(|j| !j.is_empty()),
     })
 }
 
@@ -552,12 +687,30 @@ fn token(dir: &Path) -> Result<String, String> {
     Ok(token)
 }
 
+/// `julia boot.jl` with the environment it reads (see runtime/boot.jl).
+fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str) -> Result<Command, String> {
+    let ports = free_ports()?;
+    let _ = std::fs::remove_file(state_dir.join("runtime.json"));
+    let runtime = runtime.display();
+    let mut command = Command::new(julia);
+    command
+        .arg("--color=no")
+        .arg(format!("--project={runtime}"))
+        .arg(format!("{runtime}/boot.jl"))
+        .args(ports.map(|p| p.to_string()))
+        .env("JULIA_DEPOT_PATH", depot)
+        // Not argv, which `ps` shows to every user.
+        .env("ENDEAVOR_TOKEN", token)
+        .env("ENDEAVOR_STATE", state_dir.join("runtime.json"))
+        .env("ENDEAVOR_LAUNCHER", launcher)
+        .stdin(Stdio::null());
+    Ok(command)
+}
+
 /// Start `boot.jl` detached from us (its own session, no terminal, stdin from
 /// /dev/null), logging to `runtime.log`.
 fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
-    let ports = free_ports()?;
     let dir = &args.state_dir;
-    let _ = std::fs::remove_file(dir.join("runtime.json"));
     let log_path = dir.join("runtime.log");
     // The log shows Pluto's secret URL.
     let log = OpenOptions::new()
@@ -568,21 +721,8 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
         .and_then(|f| f.set_len(0).map(|_| f))
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let stderr = log.try_clone().map_err(|e| e.to_string())?;
-    let runtime = args.runtime.display();
-    let mut command = Command::new(julia);
-    command
-        .arg("--color=no")
-        .arg(format!("--project={runtime}"))
-        .arg(format!("{runtime}/boot.jl"))
-        .args(ports.map(|p| p.to_string()))
-        .env("JULIA_DEPOT_PATH", &args.depot)
-        // Not argv, which `ps` shows to every user.
-        .env("ENDEAVOR_TOKEN", token)
-        .env("ENDEAVOR_STATE", dir.join("runtime.json"))
-        .env("ENDEAVOR_LAUNCHER", "process")
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(stderr);
+    let mut command = runtime_command(julia, &args.runtime, &args.depot, token, dir, "process")?;
+    command.stdout(log).stderr(stderr);
     // SAFETY: setsid is async-signal-safe.
     unsafe {
         command.pre_exec(|| {
@@ -686,8 +826,10 @@ mod tests {
         let args = |s: &str| parse_args(s.split(' ').map(String::from).collect());
         let a = args("connect --state-dir /s --julia /j --runtime /r --depot /d: --quit-with-client").unwrap();
         assert_eq!((a.state_dir, a.julia, a.depot.as_str()), (PathBuf::from("/s"), julia::Source::Path("/j".into()), "/d:"));
-        assert!(a.quit_with_client && !a.any_node);
+        assert!(a.quit_with_client && !a.any_node && a.launcher == Launcher::Process);
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().julia, julia::Source::Auto);
+        assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --launcher slurm").unwrap().launcher, Launcher::Slurm);
+        assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --launcher pbs").is_err());
         let shell = parse_args(["connect", "--julia-shell", "module load julia", "--state-dir", "/s", "--runtime", "/r", "--depot", "/d"].map(String::from).to_vec());
         assert_eq!(shell.unwrap().julia, julia::Source::Shell("module load julia".into()));
         assert!(args("connect --state-dir /s --julia /j --julia-shell x --runtime /r --depot /d").is_err());

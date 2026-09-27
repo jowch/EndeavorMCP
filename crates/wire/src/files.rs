@@ -18,6 +18,8 @@ pub enum Request {
     Notebooks { path: String },
     /// The first cells of the notebook at `path`.
     Preview { path: String },
+    /// Slurm's partitions here, and `$SCRATCH`.
+    Slurm,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -27,6 +29,7 @@ pub enum Reply {
     List { path: PathBuf, entries: Vec<Entry> },
     Notebooks { found: Vec<Found> },
     Preview { preview: Preview },
+    Slurm { scheduler: crate::slurm::Scheduler },
     Error { message: String },
 }
 
@@ -41,6 +44,7 @@ pub fn answer(request: &Request) -> Reply {
         Request::List { path } => list(&expand(path)),
         Request::Notebooks { path } => Ok(Reply::Notebooks { found: notebooks::scan(&expand(path)) }),
         Request::Preview { path } => notebooks::read_preview(&expand(path)).map(|preview| Reply::Preview { preview }),
+        Request::Slurm => crate::slurm::probe().map(|scheduler| Reply::Slurm { scheduler }),
     };
     result.unwrap_or_else(|message| Reply::Error { message })
 }

@@ -85,6 +85,17 @@ impl Mux {
         result
     }
 
+    /// Take a `Data` or `Close` frame for one of this end's streams; any other
+    /// frame comes back, for a caller that relays some streams elsewhere.
+    pub fn take(&self, frame: Frame) -> Option<Frame> {
+        match frame {
+            Frame::Data { id, bytes } if self.streams.lock().unwrap().contains_key(&id) => self.deliver(id, bytes),
+            Frame::Close { id } if self.streams.lock().unwrap().contains_key(&id) => self.closed_there(id),
+            other => return Some(other),
+        }
+        None
+    }
+
     /// End every stream (their sockets get what was already queued, then EOF).
     pub fn close_all(&self) {
         let streams: Vec<_> = self.streams.lock().unwrap().drain().collect();

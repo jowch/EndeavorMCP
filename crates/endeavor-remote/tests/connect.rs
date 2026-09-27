@@ -27,6 +27,15 @@ struct FakeRuntime {
 
 impl FakeRuntime {
     fn start(dir: &Path, node: &str) -> FakeRuntime {
+        FakeRuntime::start_as(dir, node, serde_json::json!({ "launcher": "process" }))
+    }
+
+    /// One a Slurm job started: `node-start` wrote its state, with the job's id.
+    fn in_job(dir: &Path, node: &str, job: &str) -> FakeRuntime {
+        FakeRuntime::start_as(dir, node, serde_json::json!({ "launcher": "slurm", "job": job }))
+    }
+
+    fn start_as(dir: &Path, node: &str, mut state: serde_json::Value) -> FakeRuntime {
         let process = Command::new("sleep").arg("600").process_group(0).spawn().unwrap();
         let pid = process.id();
         let process = Arc::new(Mutex::new(process));
@@ -36,10 +45,10 @@ impl FakeRuntime {
         });
         let p = process.clone();
         let bridge = serve(move |socket| bridge(socket, &p));
-        let state = serde_json::json!({
-            "launcher": "process", "node": node, "pid": pid, "pluto_port": pluto, "mcp_port": bridge,
-            "token": TOKEN, "pluto_secret": "s3cret",
+        let fields = serde_json::json!({
+            "node": node, "pid": pid, "pluto_port": pluto, "mcp_port": bridge, "token": TOKEN, "pluto_secret": "s3cret",
         });
+        state.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
         FakeRuntime { process, pid }
     }
@@ -179,7 +188,7 @@ impl Helper {
     /// Hello, then ask for the runtime: its answer.
     fn start_runtime(&self) -> ToApp {
         self.hello();
-        self.send(ToHelper::StartRuntime);
+        self.send(ToHelper::StartRuntime { job: None });
         self.next()
     }
 
@@ -224,7 +233,7 @@ fn attaches_relays_hands_over_and_stops() {
     let dir = state_dir("attach");
     let runtime = FakeRuntime::start(&dir, "labbox3");
     let mut first = Helper::start(&dir, &["--any-node"]);
-    let ToApp::Ready { launcher, node, pid, token, pluto_secret, reattached } = first.start_runtime() else { unreachable!() };
+    let ToApp::Ready { launcher, node, pid, token, pluto_secret, reattached, .. } = first.start_runtime() else { unreachable!() };
     assert_eq!((launcher.as_str(), node.as_str(), pid), ("process", "labbox3", runtime.pid));
     assert_eq!((token.as_str(), pluto_secret.as_str(), reattached), (TOKEN, "s3cret", true));
 
@@ -246,7 +255,7 @@ fn attaches_relays_hands_over_and_stops() {
     second.hello();
     std::thread::sleep(Duration::from_millis(300));
     assert!(first.control.try_recv().is_err(), "connecting alone replaced the first client");
-    second.send(ToHelper::StartRuntime);
+    second.send(ToHelper::StartRuntime { job: None });
     assert_eq!(first.next(), ToApp::Replaced);
     first.exits();
     let mut rest = Vec::new();
@@ -331,7 +340,7 @@ fn a_runtime_that_dies_is_reported_with_its_log() {
     assert_eq!(log_tail, ["booting", "Go to http://localhost:1234/?secret=… now", "ERROR: boom"]);
     assert!(!dir.join("runtime.json").exists());
     // Still connected: asking again tries to start a new one (no Julia here).
-    helper.send(ToHelper::StartRuntime);
+    helper.send(ToHelper::StartRuntime { job: None });
     assert!(matches!(helper.next(), ToApp::StartFailed { .. }));
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
@@ -387,4 +396,207 @@ fn julia_from_a_shell_line_is_found_and_its_failure_reported() {
     assert!(message.contains("`true`") && message.contains("PATH"), "{message}");
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
+}
+
+/// Slurm's commands as scripts over files in `dir/slurm`: the test moves a job
+/// through the queue by writing its state (and node, time left, `sacct`'s answer).
+struct FakeSlurm {
+    dir: PathBuf,
+    bin: PathBuf,
+}
+
+impl FakeSlurm {
+    fn new(dir: &Path) -> FakeSlurm {
+        let bin = dir.join("slurmbin");
+        let state = dir.join("slurm");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let scripts = [
+            ("sbatch", "echo \"$@\" >> \"$FAKE_SLURM/sbatch.args\"\nfor a; do last=$a; done\ncp \"$last\" \"$FAKE_SLURM/job.sh\"\necho PENDING > \"$FAKE_SLURM/state\"\necho Priority > \"$FAKE_SLURM/reason\"\necho 42\n"),
+            (
+                "squeue",
+                "state=$(cat \"$FAKE_SLURM/state\" 2>/dev/null)\ncase \"$*\" in *\"-t all\"*) echo \"$state\"; exit 0;; esac\ncase \"$state\" in PENDING|RUNNING) ;; *) exit 0;; esac\necho \"$state|$(cat \"$FAKE_SLURM/reason\")|$(cat \"$FAKE_SLURM/node\" 2>/dev/null)|$(cat \"$FAKE_SLURM/left\" 2>/dev/null || echo 8:00:00)\"\n",
+            ),
+            ("scancel", "echo \"$@\" >> \"$FAKE_SLURM/scancel.log\"\necho CANCELLED > \"$FAKE_SLURM/state\"\n"),
+            ("sacct", "cat \"$FAKE_SLURM/sacct\" 2>/dev/null\nexit 0\n"),
+            (
+                "srun",
+                // Like srun, it holds the step's output until the step ends unless --unbuffered.
+                "echo \"$@\" >> \"$FAKE_SLURM/srun.args\"\ncase \" $* \" in *\" --unbuffered \"*) u=1;; esac\nwhile [ $# -gt 0 ]; do case \"$1\" in -*) shift;; *) break;; esac; done\n[ -n \"$u\" ] && exec \"$@\"\n\"$@\" > \"$FAKE_SLURM/srun.out\"\ncat \"$FAKE_SLURM/srun.out\"\n",
+            ),
+            ("sinfo", "echo 'shared*|8:00:00|10|7492'\n"),
+        ];
+        for (name, body) in scripts {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        FakeSlurm { dir: state, bin }
+    }
+
+    fn set(&self, file: &str, value: &str) {
+        std::fs::write(self.dir.join(file), format!("{value}\n")).unwrap();
+    }
+
+    fn read(&self, file: &str) -> String {
+        std::fs::read_to_string(self.dir.join(file)).unwrap_or_default()
+    }
+
+    /// A helper on this "login node", submitting with `julia`.
+    fn helper(&self, state_dir: &Path, julia: &Path) -> Helper {
+        let path = format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap());
+        let env = [
+            ("PATH", path.as_str()),
+            ("FAKE_SLURM", self.dir.to_str().unwrap()),
+            ("ENDEAVOR_SLURM_POLL_MS", "100"),
+            ("SCRATCH", "/scratch/jc"),
+        ];
+        Helper::start_with(state_dir, &["--launcher", "slurm", "--julia", julia.to_str().unwrap()], &env)
+    }
+}
+
+fn this_host() -> String {
+    String::from_utf8(Command::new("hostname").output().unwrap().stdout).unwrap().trim().to_owned()
+}
+
+fn small_job() -> Option<wire::slurm::JobRequest> {
+    let resources = wire::slurm::Resources { partition: Some("short".into()), cpus: 2, mem_gb: 8, minutes: 30, ..Default::default() };
+    Some(wire::slurm::JobRequest { resources, account: Some("lab".into()), depot: None })
+}
+
+#[test]
+fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
+    let dir = state_dir("slurm");
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let mut helper = slurm.helper(&dir, &julia);
+    let ToApp::Hello { slurm: slurm_here, .. } = helper.hello() else { unreachable!() };
+    assert!(slurm_here, "sinfo is on the PATH");
+    helper.send(ToHelper::StartRuntime { job: small_job() });
+    assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
+    assert_eq!(helper.next(), ToApp::Submitted { job: "42".into(), summary: "2 CPUs · 8 GB · 30 min".into() });
+    assert_eq!(helper.next(), ToApp::Queued { job: "42".into(), state: "PENDING".into(), reason: "Priority".into() });
+    let sbatch = slurm.read("sbatch.args");
+    assert!(sbatch.contains("--parsable --job-name=endeavor"), "{sbatch}");
+    assert!(sbatch.contains("--account=lab --partition=short --cpus-per-task=2 --mem=8G --time=30"), "{sbatch}");
+    assert!(sbatch.contains(&format!("--output={}", dir.join("runtime.log").display())), "{sbatch}");
+    let script = slurm.read("job.sh");
+    assert!(script.contains("node-start") && script.contains("--depot '/scratch/jc/endeavor/depot:'"), "{script}");
+    assert!(dir.join("job.json").exists());
+
+    // Still queued, for another reason; then it runs and its runtime comes up.
+    slurm.set("reason", "Resources");
+    assert_eq!(helper.next(), ToApp::Queued { job: "42".into(), state: "PENDING".into(), reason: "Resources".into() });
+    slurm.set("node", &this_host());
+    slurm.set("left", "29:30");
+    slurm.set("state", "RUNNING");
+    assert_eq!(helper.next(), ToApp::Queued { job: "42".into(), state: "RUNNING".into(), reason: this_host() });
+    let runtime = FakeRuntime::in_job(&dir, &this_host(), "42");
+    let ToApp::Ready { launcher, job: Some(job), reattached, .. } = helper.after_progress() else { panic!("expected Ready") };
+    assert_eq!((launcher.as_str(), job.id.as_str(), job.route.as_str(), reattached), ("slurm", "42", "srun", false));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    assert!(job.ends_at.unwrap().abs_diff(now + 1770) < 5, "ends in 29:30");
+    assert!(slurm.read("srun.args").contains("--jobid=42 --overlap"));
+    assert!(!dir.join("job.json").exists(), "a running job's record is runtime.json");
+
+    // Streams go through both helpers.
+    let mut pluto = helper.connect(Target::Pluto);
+    pluto.write_all(b"via the node").unwrap();
+    let mut back = [0; 12];
+    pluto.read_exact(&mut back).unwrap();
+    assert_eq!(&back, b"via the node");
+
+    // A new connect (from any login node) finds the running job.
+    helper.send(ToHelper::Detach);
+    helper.exits();
+    let mut rest = Vec::new();
+    assert_eq!(pluto.read_to_end(&mut rest).unwrap_or(0), 0);
+    let helper = slurm.helper(&dir, &julia);
+    helper.hello();
+    helper.send(ToHelper::StartRuntime { job: None });
+    let ToApp::Ready { reattached, job: Some(job), .. } = helper.after_progress() else { panic!("expected Ready") };
+    assert!(reattached && job.id == "42");
+    assert_eq!(slurm.read("sbatch.args").lines().count(), 1, "no second job");
+    let mut pluto = helper.connect(Target::Pluto);
+    pluto.write_all(b"again").unwrap();
+    let mut back = [0; 5];
+    pluto.read_exact(&mut back).unwrap();
+
+    // The job hits its time limit: Slurm kills Julia, and the app hears why.
+    slurm.set("state", "TIMEOUT");
+    slurm.set("sacct", "TIMEOUT");
+    runtime.kill();
+    let ToApp::Died { status, .. } = helper.after_progress() else { panic!("expected Died") };
+    assert_eq!(status, "Its Slurm job reached its time limit.");
+    let mut rest = Vec::new();
+    assert_eq!(pluto.read_to_end(&mut rest).unwrap_or(0), 0, "its streams close");
+    assert!(!dir.join("runtime.json").exists());
+}
+
+#[test]
+fn a_queued_job_survives_a_disconnect_and_stop_cancels_it() {
+    let dir = state_dir("slurm-queued");
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let mut helper = slurm.helper(&dir, &julia);
+    helper.hello();
+    helper.send(ToHelper::StartRuntime { job: small_job() });
+    assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
+    assert!(matches!(helper.next(), ToApp::Submitted { .. }));
+    assert!(matches!(helper.next(), ToApp::Queued { .. }));
+    helper.send(ToHelper::Detach);
+    helper.exits();
+    assert_eq!(slurm.read("scancel.log"), "", "leaving doesn't cancel");
+
+    // The next connect waits on the same job instead of submitting another.
+    let helper = slurm.helper(&dir, &julia);
+    assert_eq!(helper.start_runtime(), ToApp::Submitted { job: "42".into(), summary: "2 CPUs · 8 GB · 30 min".into() });
+    assert!(matches!(helper.next(), ToApp::Queued { .. }));
+    assert_eq!(slurm.read("sbatch.args").lines().count(), 1);
+    helper.send(ToHelper::Stop);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    assert_eq!(slurm.read("scancel.log").trim(), "42");
+    assert!(!dir.join("job.json").exists());
+}
+
+#[test]
+fn a_job_that_ends_before_julia_is_ready_says_why() {
+    let dir = state_dir("slurm-early");
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let helper = slurm.helper(&dir, &julia);
+    helper.hello();
+    helper.send(ToHelper::StartRuntime { job: small_job() });
+    assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
+    assert!(matches!(helper.next(), ToApp::Submitted { .. }));
+    assert!(matches!(helper.next(), ToApp::Queued { .. }));
+    std::fs::write(dir.join("runtime.log"), "ERROR: out of disk quota\n").unwrap();
+    slurm.set("sacct", "FAILED");
+    slurm.set("state", "FAILED");
+    let ToApp::StartFailed { message } = helper.after_progress() else { panic!("expected StartFailed") };
+    assert_eq!(message, "Its Slurm job failed. Julia wasn't ready yet. Its last output: ERROR: out of disk quota");
+}
+
+#[test]
+fn stopping_a_running_job_shuts_julia_down_then_cancels_the_job() {
+    let dir = state_dir("slurm-stop");
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let helper = slurm.helper(&dir, &julia);
+    helper.hello();
+    helper.send(ToHelper::StartRuntime { job: small_job() });
+    assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
+    assert!(matches!(helper.next(), ToApp::Submitted { .. }));
+    assert!(matches!(helper.next(), ToApp::Queued { .. }));
+    slurm.set("node", &this_host());
+    slurm.set("state", "RUNNING");
+    assert!(matches!(helper.next(), ToApp::Queued { .. }));
+    let runtime = FakeRuntime::in_job(&dir, &this_host(), "42");
+    assert!(matches!(helper.after_progress(), ToApp::Ready { .. }));
+
+    helper.send(ToHelper::Stop);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    assert!(!runtime.alive(), "the runtime was asked to shut down");
+    assert_eq!(slurm.read("scancel.log").trim(), "42");
+    assert!(!dir.join("runtime.json").exists());
 }

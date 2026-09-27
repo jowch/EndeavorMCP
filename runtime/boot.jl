@@ -1,4 +1,4 @@
-# Started detached by endeavor-remote:
+# Started by endeavor-remote, detached or as a Slurm job's script (node-start):
 #   julia --project=runtime runtime/boot.jl <pluto_port> <mcp_port>
 # with ENDEAVOR_TOKEN (the bridge's bearer token), ENDEAVOR_STATE (where to write
 # runtime.json) and ENDEAVOR_LAUNCHER in the environment. Once Pluto and the bridge
@@ -21,6 +21,8 @@ isempty(token) && error("ENDEAVOR_TOKEN is not set; endeavor-remote starts this 
 state = get(ENV, "ENDEAVOR_STATE", "")
 isempty(state) && error("ENDEAVOR_STATE is not set; endeavor-remote starts this script with one.")
 launcher = get(ENV, "ENDEAVOR_LAUNCHER", "process")
+# A Slurm job's id, so a reconnect can find the job with squeue.
+job = launcher == "slurm" ? get(ENV, "SLURM_JOB_ID", "") : ""
 foreach(k -> delete!(ENV, k), ("ENDEAVOR_TOKEN", "ENDEAVOR_STATE", "ENDEAVOR_LAUNCHER"))
 
 EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port, token)
@@ -42,7 +44,7 @@ open(tmp, "w") do io
     EndeavorRuntime.JSON.print(io, Dict(
         "launcher" => launcher, "node" => gethostname(), "pid" => getpid(),
         "pluto_port" => pluto_port, "mcp_port" => mcp_port,
-        "token" => token, "pluto_secret" => secret,
+        "token" => token, "pluto_secret" => secret, "job" => job,
     ))
 end
 mv(tmp, state; force=true)
