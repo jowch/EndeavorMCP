@@ -14,6 +14,8 @@ use crate::notebooks::{self, Found, Preview};
 pub enum Request {
     /// Folders and `.jl` files in `path`, hidden ones left out.
     List { path: String },
+    /// Every file and folder under `path`, a few levels deep ([`walk`]).
+    Files { path: String },
     /// Pluto notebooks under `path` ([`notebooks::scan`]).
     Notebooks { path: String },
     /// The first cells of the notebook at `path`.
@@ -30,6 +32,8 @@ pub enum Request {
 pub enum Reply {
     /// `path` is the folder listed, absolute and with `~` expanded.
     List { path: PathBuf, entries: Vec<Entry> },
+    /// Paths relative to the folder asked about; folders end with `/`.
+    Files { paths: Vec<String> },
     Notebooks { found: Vec<Found> },
     Preview { preview: Preview },
     Slurm { scheduler: crate::slurm::Scheduler },
@@ -59,6 +63,7 @@ pub struct Entry {
 pub fn answer(request: &Request) -> Reply {
     let result = match request {
         Request::List { path } => list(&expand(path)),
+        Request::Files { path } => Ok(Reply::Files { paths: walk(&expand(path), WALK_DEPTH, WALK_LIMIT) }),
         Request::Notebooks { path } => Ok(Reply::Notebooks { found: notebooks::scan(&expand(path)) }),
         Request::Preview { path } => notebooks::read_preview(&expand(path)).map(|preview| Reply::Preview { preview }),
         Request::Slurm => crate::slurm::probe().map(|scheduler| Reply::Slurm { scheduler }),
@@ -97,6 +102,47 @@ fn list(dir: &Path) -> Result<Reply, String> {
     Ok(Reply::List { path, entries })
 }
 
+const WALK_DEPTH: usize = 4;
+const WALK_LIMIT: usize = 5000;
+
+/// Files and folders under `root`, down to `depth` levels, hidden ones (and
+/// what's inside them) left out, at most `limit` of them: shallower first, then
+/// by name. Paths are relative to `root`; folders end with `/`.
+pub fn walk(root: &Path, depth: usize, limit: usize) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut level = vec![String::new()];
+    for _ in 0..depth {
+        let mut next = Vec::new();
+        for prefix in level {
+            let Ok(read) = std::fs::read_dir(root.join(&prefix)) else { continue };
+            let mut entries: Vec<(String, bool)> = read
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    // Links count as what they point to.
+                    let dir = std::fs::metadata(entry.path()).ok()?.is_dir();
+                    (!name.starts_with('.')).then_some((name, dir))
+                })
+                .collect();
+            entries.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+            for (name, dir) in entries {
+                if found.len() >= limit {
+                    return found;
+                }
+                let path = format!("{prefix}{name}");
+                if dir {
+                    found.push(format!("{path}/"));
+                    next.push(format!("{path}/"));
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        level = next;
+    }
+    found
+}
+
 fn plain(e: &std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::NotFound => "it doesn't exist".into(),
@@ -125,6 +171,26 @@ mod tests {
         assert_eq!(names, [("A-figures", true), ("b-data", true), ("Analysis.jl", false), ("fit.jl", false)]);
         let missing = answer(&Request::List { path: dir.join("nope").display().to_string() });
         assert!(matches!(missing, Reply::Error { message } if message.ends_with("it doesn't exist")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn walks_files_shallow_first_skipping_hidden() {
+        let dir = std::env::temp_dir().join(format!("endeavor-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["data/raw/deep/deeper", ".git/objects"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        for file in ["fit.jl", "notes.txt", ".env", "data/decay.csv", "data/raw/run1.csv", "data/raw/deep/deeper/x.csv"] {
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        assert_eq!(
+            walk(&dir, 3, 100),
+            ["data/", "fit.jl", "notes.txt", "data/decay.csv", "data/raw/", "data/raw/deep/", "data/raw/run1.csv"]
+        );
+        assert_eq!(walk(&dir, 3, 2), ["data/", "fit.jl"]);
+        let Reply::Files { paths } = answer(&Request::Files { path: dir.display().to_string() }) else { panic!() };
+        assert_eq!(paths.last().map(String::as_str), Some("data/raw/deep/deeper/"), "four levels down");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
