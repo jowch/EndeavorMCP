@@ -1711,6 +1711,122 @@ end
         end
     end
 
+    @testset "host tools: only for sessions on a server" begin
+        rpc(method, params; owner="", host="") = EndeavorRuntime._dispatch_mcp(nothing, Dict{String,Any}(
+            "jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => params); owner, host)
+        call(name, args; owner="", host="server") = rpc("tools/call",
+            Dict{String,Any}("name" => name, "arguments" => args); owner, host)
+        body(resp) = JSON.parse(resp["result"]["content"][1]["text"])
+        err(resp) = resp["result"]["isError"] ? body(resp)["error"] : nothing
+        tool_names(host) = [t["name"] for t in rpc("tools/list", Dict{String,Any}(); host)["result"]["tools"]]
+
+        host_tools = ["list_folder", "read_file", "run_shell"]
+        @test isempty(intersect(tool_names(""), host_tools))
+        @test issubset(host_tools, tool_names("gpu-box"))
+        @test "read_cell" in tool_names("gpu-box")
+        hints = Dict(t["name"] => t["annotations"]["readOnlyHint"] for t in EndeavorRuntime.HOST_TOOLS)
+        @test hints == Dict("list_folder" => true, "read_file" => true, "run_shell" => false)
+
+        refused = call("list_folder", Dict{String,Any}(); host="")
+        @test err(refused) == "host_tools"
+        @test body(refused)["message"] == "`list_folder` is only for sessions on a server. " *
+                                          "This session runs on this Mac: use your own file and shell tools."
+        @test err(call("run_shell", Dict{String,Any}("command" => "true"); host="")) == "host_tools"
+
+        home = mktempdir()
+        mkdir(joinpath(home, "b_dir"))
+        mkdir(joinpath(home, "z_dir"))
+        write(joinpath(home, ".env"), "KEY=1\n")
+        write(joinpath(home, "a.txt"), "hello\n")
+        withenv("HOME" => home) do
+            for path in ("~", "")
+                listed = body(call("list_folder", Dict{String,Any}("path" => path)))
+                @test listed["path"] == home
+                @test [e["name"] for e in listed["entries"]] == ["b_dir", "z_dir", ".env", "a.txt"]
+                @test [e["kind"] for e in listed["entries"]] == ["dir", "dir", "file", "file"]
+                @test listed["entries"][4]["size"] == 6
+                @test !haskey(listed["entries"][1], "size")
+                @test listed["entries"][4]["modified"] isa Integer
+                @test listed["truncated"] == false
+            end
+            @test body(call("list_folder", Dict{String,Any}("path" => "~/b_dir")))["path"] == joinpath(home, "b_dir")
+            @test body(call("list_folder", Dict{String,Any}("path" => "b_dir")))["path"] == joinpath(home, "b_dir")
+            @test err(call("list_folder", Dict{String,Any}("path" => "~/missing"))) == "not_found"
+            @test err(call("list_folder", Dict{String,Any}("path" => "~/a.txt"))) == "not_a_folder"
+        end
+
+        many = mktempdir()
+        for i in 1:1005
+            touch(joinpath(many, "f$i"))
+        end
+        crowded = body(call("list_folder", Dict{String,Any}("path" => many)))
+        @test length(crowded["entries"]) == 1000
+        @test crowded["total"] == 1005
+        @test crowded["truncated"] == true
+
+        text_file = joinpath(mktempdir(), "lines.txt")
+        write(text_file, join(("line $i" for i in 1:10), "\n") * "\n")
+        part = body(call("read_file", Dict{String,Any}("path" => text_file, "offset" => 3, "limit" => 2)))
+        @test part["text"] == "     3\tline 3\n     4\tline 4\n"
+        @test (part["start_line"], part["end_line"], part["total_lines"], part["truncated"]) == (3, 4, 10, true)
+        whole = body(call("read_file", Dict{String,Any}("path" => text_file)))
+        @test (whole["end_line"], whole["total_lines"], whole["truncated"]) == (10, 10, false)
+        tail = body(call("read_file", Dict{String,Any}("path" => text_file, "offset" => 9)))
+        @test tail["text"] == "     9\tline 9\n    10\tline 10\n"
+        @test tail["truncated"] == false
+        @test err(call("read_file", Dict{String,Any}("path" => text_file, "offset" => 0))) == "invalid_argument"
+
+        long_file = joinpath(mktempdir(), "long.txt")
+        write(long_file, repeat("x", 3000) * "\nshort\n")
+        long = body(call("read_file", Dict{String,Any}("path" => long_file)))
+        @test startswith(long["text"], "     1\t" * repeat("x", 2000) * " [line cut at 2000 characters]\n")
+        @test endswith(long["text"], "     2\tshort\n")
+        @test long["truncated"] == true
+
+        big_file = joinpath(mktempdir(), "big.txt")
+        write(big_file, repeat(repeat("y", 999) * "\n", 1000))
+        big = body(call("read_file", Dict{String,Any}("path" => big_file)))
+        @test big["total_lines"] == 1000
+        @test big["end_line"] < 1000
+        @test big["truncated"] == true
+        @test 256 * 1024 <= sizeof(big["text"]) < 256 * 1024 + 1100
+
+        binary_file = joinpath(mktempdir(), "data.bin")
+        write(binary_file, UInt8[0x41, 0x00, 0x42])
+        binary = call("read_file", Dict{String,Any}("path" => binary_file))
+        @test err(binary) == "binary_file"
+        @test occursin("binary file", body(binary)["message"])
+
+        folder = realpath(mktempdir())
+        ran = body(call("run_shell", Dict{String,Any}("command" => "echo out; echo err >&2; pwd; exit 3", "cwd" => folder)))
+        @test ran["exit_code"] == 3
+        @test ran["stdout"] == "out\n$folder\n"
+        @test ran["stderr"] == "err\n"
+        @test ran["timed_out"] == false
+        withenv("HOME" => folder) do
+            @test body(call("run_shell", Dict{String,Any}("command" => "pwd")))["stdout"] == "$folder\n"
+        end
+
+        loud = body(call("run_shell", Dict{String,Any}("command" => "yes | head -c 100000")))
+        @test occursin("[… 70000 bytes left out …]", loud["stdout"])
+        @test sizeof(loud["stdout"]) < 30_100
+
+        started = time()
+        slow = body(call("run_shell", Dict{String,Any}("command" => "sleep 5 & sleep 5", "timeout_seconds" => 1)))
+        @test slow["timed_out"] == true
+        @test slow["exit_code"] === nothing
+        @test time() - started < 4
+
+        try
+            EndeavorRuntime.set_policy!("9", "plan")
+            @test err(call("run_shell", Dict{String,Any}("command" => "true"); owner="9")) == "plan_mode"
+            @test err(call("read_file", Dict{String,Any}("path" => text_file); owner="9")) === nothing
+            @test err(call("list_folder", Dict{String,Any}(); owner="9")) === nothing
+        finally
+            EndeavorRuntime.set_policy!("9", "ask")
+        end
+    end
+
     @testset "one notebook per session" begin
         EndeavorRuntime.stop_pluto_stack!()
         session = Pluto.ServerSession()

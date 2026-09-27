@@ -29,9 +29,19 @@ Reach for this skill when neither is present and you genuinely don't know which 
 Each Endeavor session works on exactly one notebook. A session started from an existing notebook already has it. A session started as "New notebook" can create one with `new_notebook`, and that becomes its notebook.
 
 - Once the session has its notebook, `open_notebook` and `new_notebook` refuse any other path with a `one_notebook` error, and edits or runs on another open notebook are refused the same way.
-- You can still read any other notebook as a plain `.jl` file (for example with `Read`) to reuse its code or check what it did.
+- You can still read any other notebook as a plain `.jl` file (for example with `Read`, or `read_file` on a server) to reuse its code or check what it did.
 - If the user wants to work on a different notebook, tell them to start a new session with it. Don't try to work around the refusal.
 - A notebook holds a whole line of analysis on a dataset. When the user asks for a new analysis step, add a new section to the current notebook (a markdown heading cell, then the cells for that step) instead of suggesting a new notebook.
+
+## Sessions on a server
+
+When the notebook runs on a server, the notebook and its files live on that server, not on the user's Mac. Your own file and shell tools (`Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) are turned off because they would see the Mac. Use these instead; they run on the server:
+
+- `list_folder(path)` — what's in a folder.
+- `read_file(path, offset, limit)` — read a text file (numbered lines; continue with `offset=end_line+1`).
+- `run_shell(command, cwd)` — run a command. The user approves each run, so batch related steps into one command.
+
+Paths are the server's: `~` is the server's home folder, and a relative path starts there, not in your working folder. Change notebooks only with the notebook tools, never with `run_shell` (Pluto overwrites the file).
 
 ## Idle notebooks stop
 

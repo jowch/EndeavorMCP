@@ -104,7 +104,8 @@ function _handle_post(http::HTTP.Stream, pluto_session)
     end
 
     owner = HTTP.header(http.message, "X-Endeavor-Session", "")
-    resp = _dispatch_mcp(pluto_session, msg; owner)
+    host  = HTTP.header(http.message, "X-Endeavor-Host", "")
+    resp = _dispatch_mcp(pluto_session, msg; owner, host)
     isopen(ch) && resp !== nothing && put!(ch, JSON.json(resp))
 
     HTTP.setstatus(http, 202)

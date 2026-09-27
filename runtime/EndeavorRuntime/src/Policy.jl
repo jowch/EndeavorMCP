@@ -7,10 +7,10 @@
 const _POLICY_LOCK = ReentrantLock()
 const _POLICIES = Dict{String,String}()
 
-# Tools that change the notebook or run code.
+# Tools that change the notebook or run code, here or on the server.
 const _WRITE_TOOLS = Set([
     "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
-    "execute_cell", "submit_changes", "run_all_cells", "allow_execution",
+    "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell",
 ])
 
 set_policy!(owner::AbstractString, policy::AbstractString) = lock(() -> (_POLICIES[String(owner)] = String(policy)), _POLICY_LOCK)
@@ -18,7 +18,8 @@ policy_of(owner::AbstractString) = lock(() -> get(_POLICIES, owner, "ask"), _POL
 
 function policy_refusal(owner::AbstractString, tool::AbstractString)
     (tool in _WRITE_TOOLS && policy_of(owner) == "plan") || return nothing
-    return ArgumentError("plan_mode::Plan mode is read-only: `$tool` would change or run the notebook. " *
+    what = tool == "run_shell" ? "run a command on the server" : "change or run the notebook"
+    return ArgumentError("plan_mode::Plan mode is read-only: `$tool` would $what. " *
                          "Finish the plan; the user switches modes to carry it out.")
 end
 
