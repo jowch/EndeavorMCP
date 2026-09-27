@@ -145,7 +145,22 @@ adapter: steps 1 and 2 of "The Python runtime" and `marimo_api.py` stay;
 
 Step 1 is the largest risk: about 2,400 lines of tested behaviour are
 rewritten. Doing it against Pluto first means a known-good backend checks the
-port before a new engine adds its own bugs.
+port before a new engine adds its own bugs. It goes in small steps, each
+ending in an app that behaves as before:
+
+1. The app's side: MCP server `notebook`, `notebook://pluto/…` annotation
+   links, `Backend` in the app. Done.
+2. Clear a notebook's runtime state when it shuts down (a leak found while
+   planning this). Done.
+3. `endeavor-remote core`: the core owns the bridge port, starts Julia as its
+   child and writes `runtime.json`, and forwards every request to Julia's
+   bridge unchanged.
+4. Move the handlers that need no notebook state into the core, one at a
+   time: run policy and plan mode, host tools, idle stop, sharing checks,
+   auth and Host/Origin checks. Their tests move to Rust; the Julia code goes.
+5. The adapter interface over stdio, then the handlers that need the graph:
+   staging and read receipts, `run_preview`, author and `before` tracking,
+   event diffing. What is left in Julia is the Pluto adapter.
 
 ## Open questions
 
