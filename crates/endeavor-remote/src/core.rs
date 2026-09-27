@@ -238,15 +238,7 @@ fn serve_client(client: TcpStream, bridge: &Bridge) -> io::Result<()> {
     let mut reader = BufReader::new(client.try_clone()?);
     let mut client = client;
     while let Some(request) = Head::read(&mut reader)? {
-        let Some(&port) = bridge.upstream.get() else {
-            return refuse(&mut client, "503 Service Unavailable", "Julia isn't ready yet");
-        };
-        let (method, target) = (request.method(), request.target());
-        let sse = method == "GET" && target.starts_with("/sse");
-        let message = method == "POST" && target.starts_with("/message");
-        if (sse || message)
-            && let Some((status, error)) = refusal(&request, &bridge.token)
-        {
+        if let Some((status, error)) = refusal(&request, &bridge.token) {
             http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
             let body = serde_json::json!({ "error": error }).to_string();
             http::respond(&mut client, status, Some("application/json"), body.as_bytes(), request.keeps_alive())?;
@@ -255,6 +247,12 @@ fn serve_client(client: TcpStream, bridge: &Bridge) -> io::Result<()> {
             }
             continue;
         }
+        let Some(&port) = bridge.upstream.get() else {
+            return refuse(&mut client, "503 Service Unavailable", "Julia isn't ready yet");
+        };
+        let (method, target) = (request.method(), request.target());
+        let sse = method == "GET" && target.starts_with("/sse");
+        let message = method == "POST" && target.starts_with("/message");
         let keep_alive = if sse {
             return bridge.stream(&request, client);
         } else if message {

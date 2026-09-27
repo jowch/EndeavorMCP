@@ -1489,10 +1489,6 @@ end
             @test EndeavorRuntime.tool_pluto_session_status(Dict{String,Any}())["pluto"] == "running"
             @test port_up("http://127.0.0.1:$mcp_port/health")
             @test port_up("http://127.0.0.1:$pluto_port/ping")
-            from_page = HTTP.get("http://127.0.0.1:$mcp_port/sse";
-                headers = ["Origin" => "https://evil.example"],
-                status_exception = false, readtimeout = 2)
-            @test from_page.status == 403
             EndeavorRuntime.stop_pluto_stack!()
             sleep(0.5)
             @test !port_up("http://127.0.0.1:$mcp_port/health")

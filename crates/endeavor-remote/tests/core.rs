@@ -145,7 +145,7 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_notebooks"}}"#;
     write!(
         socket,
-        "POST /call HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nX-Endeavor-Host: labbox3\r\nOrigin: https://example.com\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /call HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nX-Endeavor-Host: labbox3\r\nContent-Length: {}\r\n\r\n{body}",
         core.port,
         body.len()
     )
@@ -161,7 +161,6 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     assert_eq!(seen.header("Authorization"), Some(format!("Bearer {TOKEN}").as_str()));
     assert_eq!(seen.header("Content-Type"), Some("application/json"));
     assert_eq!(seen.header("X-Endeavor-Host"), Some("labbox3"));
-    assert_eq!(seen.header("Origin"), Some("https://example.com"), "Julia still decides about browsers");
 
     // The same connection carries the next request.
     write!(socket, "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", core.port).unwrap();
@@ -352,20 +351,34 @@ fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
     };
     let auth = format!("Authorization: Bearer {TOKEN}\r\n");
     let refused = |status: &str, error: &str| (format!("HTTP/1.1 {status}"), format!(r#"{{"error":"{error}"}}"#));
-    for route in ["GET /sse", "POST /message?sessionId=x"] {
-        let request = |headers: &str| format!("{route} HTTP/1.1\r\n{headers}Content-Length: 0\r\n\r\n");
-        assert_eq!(ask(&request("Host: 127.0.0.1\r\n")), refused("401 Unauthorized", "unauthorized"));
-        assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace('0', "1")))), refused("401 Unauthorized", "unauthorized"));
-        assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace("\r\n", "0\r\n")))), refused("401 Unauthorized", "unauthorized"));
+    let seen_before = bridge.seen().len();
+    for route in ["GET /sse", "POST /message?sessionId=x", "POST /call", "GET /events", "POST /dispatch", "GET /nope", "GET /health"] {
+        let request = |headers: &str| format!("{route} HTTP/1.1\r\n{headers}Content-Length: 2\r\n\r\n{{}}");
+        if route != "GET /health" {
+            assert_eq!(ask(&request("Host: 127.0.0.1\r\n")), refused("401 Unauthorized", "unauthorized"), "{route}");
+            assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace('0', "1")))), refused("401 Unauthorized", "unauthorized"));
+            assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace("\r\n", "0\r\n")))), refused("401 Unauthorized", "unauthorized"));
+        }
         assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\nOrigin: https://example.com\r\n{auth}"))), refused("403 Forbidden", "browser_origin_refused"));
-        assert_eq!(ask(&request(&format!("Host: evil.example:80\r\n{auth}"))), refused("403 Forbidden", "host_not_loopback"));
+        assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\nOrigin: null\r\n{auth}"))), refused("403 Forbidden", "browser_origin_refused"));
+        assert_eq!(ask(&request(&format!("Host: evil.example:80\r\n{auth}"))), refused("403 Forbidden", "host_not_loopback"), "{route}");
         assert_eq!(ask(&request(&format!("Host: 127.0.0.1.evil.example\r\n{auth}"))), refused("403 Forbidden", "host_not_loopback"));
+        assert_eq!(ask(&request(&auth)), refused("403 Forbidden", "host_not_loopback"));
     }
+    assert_eq!(bridge.seen().len(), seen_before, "nothing refused reaches Julia");
     for host in ["localhost", "[::1]:9", "127.0.0.1:9"] {
         let request = format!("POST /message?sessionId=x HTTP/1.1\r\nHost: {host}\r\n{auth}Content-Length: 2\r\n\r\n{{}}");
         assert_eq!(ask(&request).0, "HTTP/1.1 404 Not Found", "{host} is loopback");
     }
-    assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
+    assert_eq!(ask(&format!("GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")), ("HTTP/1.1 200 OK".into(), "ok".into()), "no token needed");
+
+    // A refused request leaves the connection for the next one.
+    let mut socket = core.connect();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    write!(socket, "POST /call HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
+    assert_eq!(response(&mut reader).0, "HTTP/1.1 401 Unauthorized");
+    write!(socket, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+    assert_eq!(response(&mut reader).2, "ok");
 }
 
 #[test]

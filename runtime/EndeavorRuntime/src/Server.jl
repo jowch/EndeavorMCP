@@ -28,28 +28,11 @@ end
 # HTTP bridge
 # ---------------------------------------------------------------------------
 
-# `Host` as clients send it: `127.0.0.1:2346`, `localhost`, `[::1]:2346`.
-function _loopback_host(host::AbstractString)
-    name = if startswith(host, '[')
-        i = findfirst(']', host)
-        i === nothing ? "" : host[1:i]
-    else
-        first(split(host, ':'; limit=2))
-    end
-    return name == "127.0.0.1" || name == "localhost" || name == "[::1]"
-end
-
-function _refuse(http::HTTP.Stream, code::AbstractString)
-    read(http)
-    HTTP.setstatus(http, 403)
-    HTTP.setheader(http, "Content-Type" => "application/json")
-    HTTP.startwrite(http)
-    write(http, """{"error":"$code"}""")
-end
-
 # `Authorization: Bearer <token>` matches the configured token, compared in
-# constant time. Loopback isn't private on a shared machine: any local user can
-# reach the port, so the token is what keeps them out.
+# constant time. Only the core (`endeavor-remote core`) calls this port, and it
+# checks each request's Origin and Host first; but loopback isn't private on a
+# shared machine: any local user can reach the port, so the token is what keeps
+# them out.
 function _authorized(http::HTTP.Stream)
     token = _BRIDGE_TOKEN[]
     isempty(token) && return true
@@ -65,19 +48,6 @@ end
 
 function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
     function handler(http::HTTP.Stream)
-        # Loopback control bridge, never a web API: no CORS, and any request that
-        # carries an Origin header came from a browser page (cross-site fetches and
-        # preflights always send one; MCP clients never do), so refuse it outright.
-        # A DNS-rebinding page sends a same-origin GET with no Origin but a foreign
-        # Host, so Host must name loopback too.
-        if HTTP.header(http.message, "Origin", nothing) !== nothing
-            _refuse(http, "browser_origin_refused")
-            return
-        elseif !_loopback_host(HTTP.header(http.message, "Host", ""))
-            _refuse(http, "host_not_loopback")
-            return
-        end
-
         method = http.message.method
         target = http.message.target
         if !(method == "GET" && (target == "/health" || startswith(target, "/health?"))) && !_authorized(http)
