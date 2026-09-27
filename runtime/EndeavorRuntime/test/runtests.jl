@@ -904,8 +904,14 @@ end
         @test (p["cells"][1]["name"], p["dependents"]) == ("y", 1)
         p = EndeavorRuntime.run_preview(session, "run_all_cells", Dict("notebook_id" => id))
         @test (p["all"], p["count"], p["dependents"]) == (true, 3, 0)
+        @test p["packages"] == String[]
         p = EndeavorRuntime.run_preview(session, "allow_execution", Dict("notebook_id" => id, "run_notebook" => false))
         @test (p["all"], p["count"]) == (false, 0)
+
+        # A whole-notebook run names the packages it loads, in notebook order.
+        session, nb, _ = make_session_with_notebook("using Statistics, Dates", "import LinearAlgebra: norm", "using Dates")
+        p = EndeavorRuntime.run_preview(session, "allow_execution", Dict("notebook_id" => string(nb.notebook_id)))
+        @test p["packages"] == ["Dates", "Statistics", "LinearAlgebra"]
     end
 
     @testset "find_symbol_definitions and references" begin

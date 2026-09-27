@@ -191,10 +191,22 @@ function run_preview(session, tool::AbstractString, args)
         defs = sort!(string.(collect(union(node.definitions, node.funcdefs_without_signatures))))
         isempty(defs) ? nothing : join(first(defs, 3), ", ")
     end
+    # What a whole-notebook run loads, in notebook order ("Let this notebook run?" names them).
+    packages = String[]
+    if all_cells
+        # The cells as they are now: in safe preview some were never analysed.
+        analysed = Pluto.updated_topology(topo, nb, nb.cells)
+        for c in nb.cells
+            for p in sort!(string.(collect(Pluto.ExpressionExplorer.external_package_names(analysed.codes[c].module_usings_imports))))
+                p in packages || push!(packages, p)
+            end
+        end
+    end
     return Dict{String,Any}(
         "all"        => all_cells,
         "count"      => all_cells ? length(nb.cells) : length(targets),
         "cells"      => [Dict{String,Any}("id" => string(c.cell_id), "name" => name(c), "code" => c.code) for c in targets],
         "dependents" => all_cells ? 0 : length(down),
+        "packages"   => packages,
     )
 end
