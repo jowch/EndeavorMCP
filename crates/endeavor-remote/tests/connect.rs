@@ -128,11 +128,17 @@ impl Write for Stdin {
 
 impl Helper {
     fn start(dir: &Path, flags: &[&str]) -> Helper {
+        let flags = [&["--julia", "/nonexistent/julia"], flags].concat();
+        Helper::start_with(dir, &flags, &[])
+    }
+
+    fn start_with(dir: &Path, flags: &[&str], env: &[(&str, &str)]) -> Helper {
         let mut process = Command::new(env!("CARGO_BIN_EXE_endeavor-remote"))
             .args(["connect", "--state-dir"])
             .arg(dir)
-            .args(["--julia", "/nonexistent/julia", "--runtime", "/nonexistent", "--depot", "/nonexistent"])
+            .args(["--runtime", "/nonexistent", "--depot", "/nonexistent"])
             .args(flags)
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -291,5 +297,32 @@ fn a_runtime_that_cant_start_is_an_error() {
     let ToApp::Error { message } = helper.next() else { panic!("expected Error") };
     assert!(message.contains("/nonexistent/julia"), "{message}");
     helper.exits();
-    assert!(dir.join("token").exists());
+}
+
+/// A julia that says it's 1.12 and then fails to boot.
+fn fake_julia(dir: &Path) -> PathBuf {
+    let bin = dir.join("fakebin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let julia = bin.join("julia");
+    std::fs::write(&julia, "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'julia version 1.12.0'; exit 0; }\necho 'ERROR: boom'\nexit 3\n").unwrap();
+    std::fs::set_permissions(&julia, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    julia
+}
+
+#[test]
+fn julia_from_a_shell_line_is_found_and_its_failure_reported() {
+    let dir = state_dir("shell-julia");
+    let julia = fake_julia(&dir);
+    let line = format!("PATH={}:$PATH", julia.parent().unwrap().display());
+    let mut helper = Helper::start_with(&dir, &["--julia-shell", &line], &[("SHELL", "/bin/sh")]);
+    assert_eq!(helper.next(), ToApp::FoundJulia { path: julia.display().to_string(), version: "1.12.0".into() });
+    let ToApp::Died { status, log_tail } = helper.next() else { panic!("expected Died") };
+    assert!(status.contains('3'), "{status}");
+    assert_eq!(log_tail, ["ERROR: boom"]);
+    helper.exits();
+
+    let mut helper = Helper::start_with(&dir, &["--julia-shell", "true"], &[("SHELL", "/bin/sh"), ("PATH", "/usr/bin:/bin")]);
+    let ToApp::Error { message } = helper.next() else { panic!("expected Error") };
+    assert!(message.contains("`true`") && message.contains("PATH"), "{message}");
+    helper.exits();
 }

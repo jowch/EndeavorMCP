@@ -2,7 +2,11 @@
 //! EndeavorRuntime). It attaches to the runtime recorded in the state folder or
 //! starts one, then relays the app's streams to the runtime's loopback ports
 //! over its own stdin/stdout (docs/remote-sessions.md). It runs as a child of
-//! the app on This Mac, and later over `ssh` on a remote host.
+//! the app on This Mac, and over `ssh` on a server. It is also ssh's askpass
+//! program there (see `askpass`).
+
+mod askpass;
+mod julia;
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -21,12 +25,12 @@ use serde_json::{Value, json};
 use wire::relay::Mux;
 use wire::{Frame, Target, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--quit-with-client] [--any-node]";
+const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--quit-with-client] [--any-node]\n       endeavor-remote askpass PROMPT";
 const LOG_TAIL: usize = 40;
 
 struct Args {
     state_dir: PathBuf,
-    julia: String,
+    julia: julia::Source,
     runtime: PathBuf,
     depot: String,
     /// Stop the runtime when the app goes away without saying Stop or Detach.
@@ -58,7 +62,14 @@ enum Event {
 }
 
 fn main() {
-    let args = match parse_args(std::env::args().skip(1).collect()) {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    match argv.first().map(String::as_str) {
+        Some("askpass") => askpass::run(argv.get(1).map_or("", String::as_str)),
+        // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
+        Some(prompt) if prompt != "connect" && std::env::var_os(wire::askpass::SOCKET_ENV).is_some() => askpass::run(prompt),
+        _ => {}
+    }
+    let args = match parse_args(argv) {
         Ok(args) => args,
         Err(e) => {
             eprintln!("{e}\n{USAGE}");
@@ -82,13 +93,15 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     if args.next().as_deref() != Some("connect") {
         return Err("expected the `connect` command".into());
     }
-    let (mut state_dir, mut julia, mut runtime, mut depot) = (None, None, None, None);
+    let (mut state_dir, mut julia, mut runtime, mut depot) = (None, None::<julia::Source>, None, None);
     let (mut quit_with_client, mut any_node) = (false, false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
             "--state-dir" => state_dir = Some(PathBuf::from(value()?)),
-            "--julia" => julia = Some(value()?),
+            "--julia" | "--julia-shell" if julia.is_some() => return Err("give one of --julia and --julia-shell".into()),
+            "--julia" => julia = Some(value().map(|v| if v == "auto" { julia::Source::Auto } else { julia::Source::Path(v) })?),
+            "--julia-shell" => julia = Some(julia::Source::Shell(value()?)),
             "--runtime" => runtime = Some(PathBuf::from(value()?)),
             "--depot" => depot = Some(value()?),
             "--quit-with-client" => quit_with_client = true,
@@ -98,7 +111,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     }
     Ok(Args {
         state_dir: state_dir.ok_or("--state-dir is required")?,
-        julia: julia.ok_or("--julia is required")?,
+        julia: julia.ok_or("--julia or --julia-shell is required")?,
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
         quit_with_client,
@@ -127,8 +140,10 @@ fn connect(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Resul
             (state, pid, exit, true)
         }
         None => {
+            let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame())))?;
+            let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
             let token = token(&args.state_dir)?;
-            let child = start(args, &token)?;
+            let child = start(args, &julia, &token)?;
             let pid = child.id() as i32;
             let exit = Exit::watch_child(child, events.clone());
             let state = boot(args, mux, pid, &exit, &rx)?;
@@ -476,7 +491,7 @@ fn token(dir: &Path) -> Result<String, String> {
 
 /// Start `boot.jl` detached from us (its own session, no terminal, stdin from
 /// /dev/null), logging to `runtime.log`.
-fn start(args: &Args, token: &str) -> Result<Child, String> {
+fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
     let ports = free_ports()?;
     let dir = &args.state_dir;
     let _ = std::fs::remove_file(dir.join("runtime.json"));
@@ -491,7 +506,7 @@ fn start(args: &Args, token: &str) -> Result<Child, String> {
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let stderr = log.try_clone().map_err(|e| e.to_string())?;
     let runtime = args.runtime.display();
-    let mut command = Command::new(&args.julia);
+    let mut command = Command::new(julia);
     command
         .arg("--color=no")
         .arg(format!("--project={runtime}"))
@@ -512,7 +527,7 @@ fn start(args: &Args, token: &str) -> Result<Child, String> {
             Ok(())
         });
     }
-    command.spawn().map_err(|e| format!("Couldn't start {}: {e}", args.julia))
+    command.spawn().map_err(|e| format!("Couldn't start {julia}: {e}"))
 }
 
 fn free_ports() -> Result<[u16; 2], String> {
@@ -607,8 +622,12 @@ mod tests {
     fn parses_connect_arguments() {
         let args = |s: &str| parse_args(s.split(' ').map(String::from).collect());
         let a = args("connect --state-dir /s --julia /j --runtime /r --depot /d: --quit-with-client").unwrap();
-        assert_eq!((a.state_dir, a.julia.as_str(), a.depot.as_str()), (PathBuf::from("/s"), "/j", "/d:"));
+        assert_eq!((a.state_dir, a.julia, a.depot.as_str()), (PathBuf::from("/s"), julia::Source::Path("/j".into()), "/d:"));
         assert!(a.quit_with_client && !a.any_node);
+        assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().julia, julia::Source::Auto);
+        let shell = parse_args(["connect", "--julia-shell", "module load julia", "--state-dir", "/s", "--runtime", "/r", "--depot", "/d"].map(String::from).to_vec());
+        assert_eq!(shell.unwrap().julia, julia::Source::Shell("module load julia".into()));
+        assert!(args("connect --state-dir /s --julia /j --julia-shell x --runtime /r --depot /d").is_err());
         assert!(args("connect --state-dir /s").is_err());
         assert!(args("serve --state-dir /s --julia /j --runtime /r --depot /d").is_err());
         assert!(args("connect --state-dir /s --julia /j --runtime /r --depot /d --bogus").is_err());

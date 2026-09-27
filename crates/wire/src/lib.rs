@@ -18,6 +18,7 @@
 //! both directions; either side may send it, and frames for an id that's
 //! already closed are dropped.
 
+pub mod askpass;
 pub mod relay;
 
 use std::io::{self, ErrorKind, Read, Write};
@@ -140,8 +141,10 @@ pub enum ToApp {
         /// The runtime was already running; this connect didn't start it.
         reattached: bool,
     },
-    /// A line of the runtime's log while it starts.
+    /// A line of the runtime's log while it starts, or of Julia's download.
     Progress { line: String },
+    /// The julia the helper starts the runtime with (sent only when it starts one).
+    FoundJulia { path: String, version: String },
     /// The runtime exited. The helper exits after sending this.
     Died { status: String, log_tail: Vec<String> },
     /// Another client took over this runtime; the helper exits.
