@@ -403,6 +403,17 @@ function stop_notebook!(session, path::AbstractString)
     return Dict{String,Any}("stopped" => true, "safe_preview" => safe_preview)
 end
 
+# New notebooks start unsaved in Pluto's scratch folder; this is the folder its
+# "Save notebook" box suggests instead (the page reads it on its next load).
+function set_folder!(session, path::AbstractString)
+    (session === nothing || isempty(path)) && return false
+    session.options.server.notebook_path_suggestion = joinpath(path, "")
+    return true
+end
+
+# How `endeavor/shutdown` ends the process; tests replace it.
+const _SHUTDOWN = Ref{Function}(() -> exit(0))
+
 function tool_new_notebook(args)
     require_standalone_session!()
     requested = get(args, "path", nothing)

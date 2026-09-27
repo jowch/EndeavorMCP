@@ -1527,7 +1527,24 @@ end
                 status_exception=false, readtimeout=5)
             @test limit.status == 200
             @test EndeavorRuntime._IDLE_LIMIT_HOURS[] == 12
+
+            app_call(method, params) = HTTP.post("http://127.0.0.1:$mcp_port/call",
+                ["Content-Type" => "application/json", "Authorization" => "Bearer s3cret-token"],
+                JSON.json(Dict("jsonrpc" => "2.0", "id" => 5, "method" => method, "params" => params));
+                status_exception=false, readtimeout=5)
+            folder = realpath(mktempdir())
+            @test app_call("endeavor/set_folder", Dict("path" => folder)).status == 200
+            @test EndeavorRuntime.standalone_session().options.server.notebook_path_suggestion == joinpath(folder, "")
+
+            # Shutdown answers first, then ends the process.
+            shut_down = Channel{Bool}(1)
+            EndeavorRuntime._SHUTDOWN[] = () -> put!(shut_down, true)
+            reply = app_call("endeavor/shutdown", Dict{String,Any}())
+            @test reply.status == 200
+            @test JSON.parse(String(reply.body))["result"] == Dict()
+            @test timedwait(() -> isready(shut_down), 5.0) == :ok
         finally
+            EndeavorRuntime._SHUTDOWN[] = () -> exit(0)
             EndeavorRuntime.stop_pluto_stack!()
             EndeavorRuntime.configure_standalone!(; token="")
             EndeavorRuntime.set_idle_limit!(48)

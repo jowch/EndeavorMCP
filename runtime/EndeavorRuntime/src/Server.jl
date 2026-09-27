@@ -221,6 +221,15 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
                 result = stop_notebook!(sess, string(get(p, "path", "")))
                 @info "Stopped notebook $(get(p, "path", "")): $(result["stopped"])"
                 Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => result)
+            elseif get(msg, "method", "") == "endeavor/set_folder"
+                path = string(get(get(msg, "params", Dict{String,Any}()), "path", ""))
+                set_folder!(sess, path)
+                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
+            elseif get(msg, "method", "") == "endeavor/shutdown"
+                # Pluto has already saved every notebook file. Exit after this reply is out.
+                @info "Shutting down at the app's request"
+                @async (sleep(0.2); _SHUTDOWN[]())
+                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
             elseif get(msg, "method", "") == "endeavor/run_preview"
                 p = get(msg, "params", Dict{String,Any}())
                 try
