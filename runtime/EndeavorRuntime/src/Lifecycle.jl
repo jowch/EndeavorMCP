@@ -1,13 +1,5 @@
-# D15 — deferred Pluto session lifecycle (standalone connect + lifecycle MCP tools).
-
-const LIFECYCLE_TOOLS = Set([
-    "pluto_session_status",
-    "open_notebook",
-    "new_notebook",
-    "allow_execution",
-])
-
-is_lifecycle_tool(name::AbstractString) = name in LIFECYCLE_TOOLS
+# The Pluto session: starting and stopping Pluto and the bridge, and what
+# Pluto's events tell the core.
 
 const _STANDALONE_SESSION = Ref{Any}(nothing)
 const _STANDALONE_HTTP_TASK = Ref{Union{Nothing,Task}}(nothing)
@@ -102,7 +94,7 @@ function _handle_pluto_event(event)::Nothing
         sess = standalone_session()
         nb = event.notebook
         if sess === nothing || !haskey(sess.notebooks, nb.notebook_id)
-            forget_notebook!(nb.notebook_id)
+            forget_topology!(nb.notebook_id)
             _notify_notebook!("notebook_shut_down", nb)
         else
             notify_state!(nb)
@@ -111,12 +103,6 @@ function _handle_pluto_event(event)::Nothing
     nothing
 end
 
-"Drop everything the runtime keeps about a notebook that has left the session."
-function forget_notebook!(notebook_id::UUID)::Nothing
-    clear_notebook_staging!(notebook_id)
-    forget_topology!(notebook_id)
-    return nothing
-end
 
 function _init_pluto_session!(; pluto_port, launch_browser, require_secret_for_access, notebook)
     opts = Pluto.Configuration.from_flat_kwargs(
@@ -264,183 +250,7 @@ function stop_pluto_stack!(; close_control_bridge::Bool = true)
     _STANDALONE_SESSION[] = nothing
     _close_standalone_pluto!()
     close_control_bridge && _close_standalone_http!()
-    reset_staging_state!()
     return session_status_dict()
-end
-
-function require_standalone_session!()
-    sess = _STANDALONE_SESSION[]
-    sess === nothing &&
-        throw(ArgumentError("pluto_not_running::Pluto is not running yet."))
-    return sess
-end
-
-function _lifecycle_get_notebook!(session, notebook_id_str)
-    nid = try
-        UUID(notebook_id_str)
-    catch
-        throw(ArgumentError("invalid_notebook_id::Invalid notebook ID: '$notebook_id_str'"))
-    end
-    nb = get(session.notebooks, nid, nothing)
-    nb === nothing &&
-        throw(KeyError("notebook_not_found::No notebook with id '$notebook_id_str' in the current session"))
-    return nb
-end
-
-function _lifecycle_notify_browser(session, notebook)
-    try
-        Pluto.send_notebook_changes!(Pluto.ClientRequest(; session, notebook))
-    catch
-    end
-end
-
-"""
-    allow_notebook_execution!(session, notebook; run_async=true, run_cells=true)
-
-Programmatic equivalent of Glass **Run notebook code** for safe-preview notebooks
-(local paths only). Mirrors Pluto `restart_process` when `run_cells=true`.
-
-When `run_cells=false`, exits safe preview without queuing a full notebook run
-(workspace starts lazily on the next `submit_changes` / `update_save_run!`).
-"""
-function allow_notebook_execution!(session, notebook; run_async::Bool=true, run_cells::Bool=true)
-    ps = notebook.process_status
-    if ps === Pluto.ProcessStatus.ready
-        return Dict{String,Any}(
-            "notebook_id"       => string(notebook.notebook_id),
-            "execution_allowed" => true,
-            "already_allowed"   => true,
-            "ran"               => false,
-            "process_status"    => string(ps),
-        )
-    end
-    if ps !== Pluto.ProcessStatus.waiting_for_permission
-        throw(ArgumentError(
-            "execution_not_gated::Notebook is not in safe preview (process_status=$ps)",
-        ))
-    end
-    if haskey(notebook.metadata, "risky_file_source")
-        throw(ArgumentError(
-            "risky_source::Cannot allow execution for risky remote sources via MCP; ask the user to run it from the notebook pane",
-        ))
-    end
-
-    notebook.process_status = Pluto.ProcessStatus.waiting_to_restart
-    session.options.evaluation.run_notebook_on_load &&
-        Pluto._report_business_cells_planned!(notebook)
-    _lifecycle_notify_browser(session, notebook)
-
-    Pluto.SessionActions.shutdown(session, notebook; keep_in_session=true, async=true, verbose=false)
-
-    if run_cells
-        notebook.process_status = Pluto.ProcessStatus.starting
-        _lifecycle_notify_browser(session, notebook)
-        # Run through _run_cells! so edits staged during safe preview (pending_run)
-        # clear once their cells complete. Non-blocking by default: sync_nbpkg +
-        # reactive run stay off the MCP thread.
-        _run_cells!(session, notebook, collect(notebook.cells); wait_for_completion=!run_async)
-        _lifecycle_notify_browser(session, notebook)
-        ran = true
-    else
-        # Exit the gate without a full run; next mutation starts the workspace.
-        notebook.process_status = Pluto.ProcessStatus.ready
-        _lifecycle_notify_browser(session, notebook)
-        ran = false
-    end
-
-    Dict{String,Any}(
-        "notebook_id"       => string(notebook.notebook_id),
-        "execution_allowed" => true,
-        "already_allowed"   => false,
-        "ran"               => ran,
-        "process_status"    => string(notebook.process_status),
-    )
-end
-
-# ---------------------------------------------------------------------------
-# Lifecycle tool implementations
-# ---------------------------------------------------------------------------
-
-function tool_pluto_session_status(_args)
-    session_status_dict()
-end
-
-function tool_open_notebook(args)
-    sess = require_standalone_session!()
-    path = get(args, "path", nothing)
-    path === nothing && throw(ArgumentError("invalid_path::path is required"))
-    path = String(path)
-    ispath(path) || throw(ArgumentError("file_not_found::No file at '$path'"))
-    run_nb = get(args, "run_notebook", false)
-
-    # SessionActions.open already queues update_save_run! when execution_allowed;
-    # do not call tool_run_all_cells again (double-run starved MCP / raced executetoken).
-    nb = try
-        Pluto.SessionActions.open(sess, path; run_async = true, execution_allowed = run_nb)
-    catch e
-        # Printing this exception walks the whole Notebook and never finishes.
-        e isa Pluto.SessionActions.NotebookIsRunningException || rethrow()
-        throw(ArgumentError("notebook_already_open::'$path' is already open as notebook_id $(e.notebook.notebook_id); use that id"))
-    end
-
-    result = Dict{String,Any}(
-        "notebook_id"         => string(nb.notebook_id),
-        "path"                => nb.path,
-        "execution_allowed"   => run_nb,
-        "ran"                 => run_nb,
-        "process_status"      => string(nb.process_status),
-    )
-    if run_nb
-        result["warnings"] = String[
-            "async_execution::open queued non-blocking notebook run; poll read_cell for completion",
-        ]
-    end
-    return result
-end
-
-"""
-    restart_notebook!(session, notebook_id)
-
-The app's "Restart notebook": what Pluto's own Restart does (a new process, then
-every cell runs). Refused in safe preview, where Run notebook starts it.
-"""
-function restart_notebook!(session, notebook_id::AbstractString)
-    notebook = _lifecycle_get_notebook!(session, notebook_id)
-    ps = notebook.process_status
-    ps === Pluto.ProcessStatus.waiting_for_permission &&
-        throw(ArgumentError("execution_blocked::The notebook is in safe preview; Run notebook starts it"))
-    ps === Pluto.ProcessStatus.waiting_to_restart && return Dict{String,Any}("restarted" => false)
-    notebook.process_status = Pluto.ProcessStatus.waiting_to_restart
-    session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(notebook)
-    _lifecycle_notify_browser(session, notebook)
-    Pluto.SessionActions.shutdown(session, notebook; keep_in_session=true, async=true, verbose=false)
-    notebook.process_status = Pluto.ProcessStatus.starting
-    _lifecycle_notify_browser(session, notebook)
-    _run_cells!(session, notebook, collect(notebook.cells); wait_for_completion=false)
-    return Dict{String,Any}("restarted" => true)
-end
-
-"""
-    move_notebook!(session, notebook_id, path)
-
-Rename or move an open notebook's file (the app's Rename… and Move to…), the way
-Pluto's own file box does. Never overwrites a file.
-"""
-function move_notebook!(session, notebook_id::AbstractString, path::AbstractString)
-    notebook = _lifecycle_get_notebook!(session, notebook_id)
-    newpath = abspath(expanduser(String(path)))
-    endswith(newpath, ".jl") || throw(ArgumentError("invalid_path::Notebook path must end in .jl: '$newpath'"))
-    ispath(newpath) && throw(ArgumentError("file_exists::'$newpath' already exists"))
-    isdir(dirname(newpath)) || throw(ArgumentError("invalid_path::Directory does not exist: '$(dirname(newpath))'"))
-    Pluto.SessionActions.move(session, notebook, newpath)
-    return Dict{String,Any}("path" => notebook.path)
-end
-
-"Whether a notebook file is there, and when it last changed (for the app, on any host)."
-function file_info(path::AbstractString)
-    p = abspath(expanduser(String(path)))
-    isfile(p) || return Dict{String,Any}("exists" => false)
-    return Dict{String,Any}("exists" => true, "modified" => mtime(p))
 end
 
 # New notebooks start unsaved in Pluto's scratch folder; this is the folder its
@@ -453,84 +263,6 @@ end
 
 # How `endeavor/shutdown` ends the process; tests replace it.
 const _SHUTDOWN = Ref{Function}(() -> exit(0))
-
-function tool_new_notebook(args)
-    require_standalone_session!()
-    requested = get(args, "path", nothing)
-    folder = session_folder(current_owner())
-    nb = if requested === nothing && folder !== nothing && isdir(folder)
-        # Pluto's own naming, like "Create a new notebook", in the session's folder.
-        Pluto.emptynotebook(Pluto.numbered_until_new(joinpath(folder, Pluto.cutename()); create_file=false))
-    elseif requested === nothing
-        Pluto.emptynotebook()
-    else
-        path = expanduser(String(requested))
-        path = abspath(isabspath(path) || folder === nothing ? path : joinpath(folder, path))
-        endswith(path, ".jl") ||
-            throw(ArgumentError("invalid_path::Notebook path must end in .jl: '$path'"))
-        ispath(path) &&
-            throw(ArgumentError("file_exists::'$path' already exists; use open_notebook to load it"))
-        isdir(dirname(path)) ||
-            throw(ArgumentError("invalid_path::Directory does not exist: '$(dirname(path))'"))
-        Pluto.emptynotebook(path)
-    end
-    # Pluto serializes the file (never a hand-written header), then the normal open
-    # path loads it. No safe preview: a notebook we just made has no code to distrust,
-    # and its runs are gated like any other.
-    Pluto.save_notebook(nb, nb.path)
-    result = tool_open_notebook(Dict{String,Any}("path" => nb.path, "run_notebook" => true))
-    delete!(result, "warnings")
-    # Pluto starts every notebook with one empty cell: edit it rather than adding around it.
-    result["cell_ids"] = [string(c.cell_id) for c in nb.cells]
-    # The caller knows these cells are empty; without a receipt the first edit is refused.
-    opened = UUID(result["notebook_id"])
-    foreach(c -> record_read!(opened, c.cell_id, c.code), nb.cells)
-    result["created"] = true
-    return result
-end
-
-function tool_allow_execution(args)
-    sess = require_standalone_session!()
-    notebook_id = get(args, "notebook_id", nothing)
-    notebook_id === nothing &&
-        throw(ArgumentError("invalid_notebook_id::notebook_id is required"))
-    nb = _lifecycle_get_notebook!(sess, String(notebook_id))
-    run_cells = get(args, "run_notebook", true)
-    # Single path: allow_notebook_execution! already queues the run when requested.
-    # A follow-up tool_run_all_cells was a double-run footgun on the stdio thread.
-    result = allow_notebook_execution!(sess, nb; run_async=true, run_cells=run_cells)
-    if get(result, "ran", false)
-        result["run_warnings"] = String[
-            "async_execution::allow_execution queued non-blocking notebook run; poll read_cell for completion",
-        ]
-    end
-    result["process_status"] = string(nb.process_status)
-    return result
-end
-
-function call_lifecycle_tool(name::AbstractString, arguments)
-    if name == "pluto_session_status"
-        tool_pluto_session_status(arguments)
-    elseif name == "open_notebook"
-        tool_open_notebook(arguments)
-    elseif name == "new_notebook"
-        tool_new_notebook(arguments)
-    elseif name == "allow_execution"
-        tool_allow_execution(arguments)
-    else
-        throw(ArgumentError("unknown_tool::Unknown lifecycle tool: '$name'"))
-    end
-end
-
-function call_tool_with_session(session, name::AbstractString, arguments)
-    if is_lifecycle_tool(name)
-        return call_lifecycle_tool(name, arguments)
-    end
-    sess = session === nothing ? standalone_session() : session
-    sess === nothing &&
-        throw(ArgumentError("pluto_not_running::Pluto is not running yet."))
-    return call_tool(sess, name, arguments)
-end
 
 """Test helper: bind an in-memory session as the standalone Pluto session."""
 function bind_standalone_session!(sess)

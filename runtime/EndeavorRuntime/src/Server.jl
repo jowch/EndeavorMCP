@@ -1,29 +1,4 @@
 # ---------------------------------------------------------------------------
-# The agent's MCP messages, from the core (`endeavor-remote core`), which
-# serves the agent's MCP connection and passes on what it doesn't answer, with
-# the caller's X-Endeavor-Session header. The reply is the JSON-RPC response
-# ("null" for a notification).
-# ---------------------------------------------------------------------------
-
-function _handle_dispatch(http::HTTP.Stream, pluto_session)
-    body = String(read(http))
-    msg  = try
-        JSON.parse(body, Dict{String,Any})
-    catch
-        HTTP.setstatus(http, 400)
-        HTTP.startwrite(http)
-        write(http, """{"error":"Invalid JSON"}""")
-        return
-    end
-    owner = HTTP.header(http.message, "X-Endeavor-Session", "")
-    resp  = _dispatch_mcp(pluto_session, msg; owner)
-    HTTP.setstatus(http, 200)
-    HTTP.setheader(http, "Content-Type" => "application/json")
-    HTTP.startwrite(http)
-    write(http, JSON.json(resp))
-end
-
-# ---------------------------------------------------------------------------
 # HTTP bridge
 # ---------------------------------------------------------------------------
 
@@ -65,67 +40,36 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
             active = standalone_session()
             _handle_adapter(http, active !== nothing ? active : pluto_session)
 
-        elseif method == "POST" && startswith(target, "/dispatch")
-            _handle_dispatch(http, pluto_session)
-
         elseif method == "POST" && startswith(target, "/call")
+            # The app's calls the core passes on (it answers the rest).
             # Must read the body before responding (HTTP.jl stream contract).
-            body = String(read(http))
-            msg  = try
-                JSON.parse(body, Dict{String,Any})
+            msg = try
+                JSON.parse(String(read(http)), Dict{String,Any})
             catch
                 HTTP.setstatus(http, 400)
                 HTTP.startwrite(http)
                 write(http, """{"error":"Invalid JSON"}""")
                 return
             end
-            active   = standalone_session()
-            sess     = active !== nothing ? active : pluto_session
-            # App-only (not reachable through the agent's MCP connection).
-            resp = if get(msg, "method", "") == "endeavor/set_session_folder"
-                p = get(msg, "params", Dict{String,Any}())
-                owner, folder = string(get(p, "owner", "")), string(something(get(p, "folder", ""), ""))
-                set_session_folder!(owner, folder)
-                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
-            elseif get(msg, "method", "") == "endeavor/set_folder"
-                path = string(get(get(msg, "params", Dict{String,Any}()), "path", ""))
-                set_folder!(sess, path)
-                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
-            elseif get(msg, "method", "") == "endeavor/shutdown"
+            active = standalone_session()
+            sess   = active !== nothing ? active : pluto_session
+            id     = get(msg, "id", nothing)
+            method_name = string(get(msg, "method", ""))
+            resp = if method_name == "endeavor/set_folder"
+                set_folder!(sess, string(get(get(msg, "params", Dict{String,Any}()), "path", "")))
+                Dict("jsonrpc" => "2.0", "id" => id, "result" => Dict{String,Any}())
+            elseif method_name == "endeavor/shutdown"
                 # Pluto has already saved every notebook file. Exit after this reply is out.
                 @info "Shutting down at the app's request"
                 @async (sleep(0.2); _SHUTDOWN[]())
-                Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => Dict{String,Any}())
-            elseif get(msg, "method", "") in ("endeavor/restart_notebook", "endeavor/move_notebook", "endeavor/file_info")
-                p = get(msg, "params", Dict{String,Any}())
-                try
-                    result = if msg["method"] == "endeavor/restart_notebook"
-                        restart_notebook!(sess, string(get(p, "notebook_id", "")))
-                    elseif msg["method"] == "endeavor/move_notebook"
-                        move_notebook!(sess, string(get(p, "notebook_id", "")), string(get(p, "path", "")))
-                    else
-                        file_info(string(get(p, "path", "")))
-                    end
-                    Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => result)
-                catch e
-                    Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "error" => Dict("code" => -32000, "message" => sprint(showerror, e)))
-                end
-            elseif get(msg, "method", "") == "endeavor/run_preview"
-                p = get(msg, "params", Dict{String,Any}())
-                try
-                    result = run_preview(sess, string(get(p, "tool", "")), get(p, "arguments", Dict{String,Any}()))
-                    Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "result" => result)
-                catch e
-                    Dict("jsonrpc" => "2.0", "id" => get(msg, "id", nothing), "error" => Dict("code" => -32000, "message" => sprint(showerror, e)))
-                end
+                Dict("jsonrpc" => "2.0", "id" => id, "result" => Dict{String,Any}())
             else
-                _dispatch_mcp(sess, msg)
+                Dict("jsonrpc" => "2.0", "id" => id, "error" => Dict("code" => -32601, "message" => "Method not found: $method_name"))
             end
-            resp_json = resp !== nothing ? JSON.json(resp) : "{}"
             HTTP.setstatus(http, 200)
             HTTP.setheader(http, "Content-Type" => "application/json")
             HTTP.startwrite(http)
-            write(http, resp_json)
+            write(http, JSON.json(resp))
 
         elseif method == "GET" && (target == "/health" || startswith(target, "/health?"))
             HTTP.setstatus(http, 200)

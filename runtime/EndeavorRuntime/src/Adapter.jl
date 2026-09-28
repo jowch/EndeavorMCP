@@ -74,6 +74,59 @@ function _handle_notifications(http::HTTP.Stream)
     end
 end
 
+function _get_notebook(session, notebook_id_str)
+    nid = try
+        UUID(notebook_id_str)
+    catch
+        throw(ArgumentError("invalid_notebook_id::Invalid notebook ID: '$notebook_id_str'"))
+    end
+    nb = get(session.notebooks, nid, nothing)
+    nb === nothing && throw(KeyError("notebook_not_found::No notebook with id '$notebook_id_str' in the current session"))
+    return nb
+end
+
+function _notify_browser(session, notebook)
+    try
+        Pluto.send_notebook_changes!(Pluto.ClientRequest(; session, notebook))
+    catch
+        # No page open is fine.
+    end
+end
+
+# Each cell in turn until it has finished, for up to `timeout` seconds each:
+# the ids that finished and those that didn't.
+function _wait_cells!(cells; timeout)
+    completed = UUID[]
+    timed_out = UUID[]
+    for cell in cells
+        t = time()
+        while (cell.running || cell.queued) && time() - t <= timeout
+            sleep(0.05)
+        end
+        push!(cell.running || cell.queued ? timed_out : completed, cell.cell_id)
+    end
+    return completed, timed_out
+end
+
+const _PLUTO_PROJECT_TOML_CELL_ID = UUID("00000000-0000-0000-0000-000000000001")
+const _PLUTO_MANIFEST_TOML_CELL_ID = UUID("00000000-0000-0000-0000-000000000002")
+
+_is_manifest_cell(cell_id::UUID) = cell_id == _PLUTO_PROJECT_TOML_CELL_ID || cell_id == _PLUTO_MANIFEST_TOML_CELL_ID
+_is_fake_bind_shim(cell) = occursin(Pluto.PlutoRunner.fake_bind, cell.code) || startswith(lstrip(cell.code), "macro bind")
+_is_markdown_cell(cell) = startswith(lstrip(cell.code), "md\"")
+
+function _parse_validation_errors(nb::Pluto.Notebook, cell::Pluto.Cell, code::String)
+    errors = Dict{String,Any}[]
+    if !Pluto.is_single_expression(code)
+        push!(errors, Dict{String,Any}("type" => "pluto_multi_expression", "message" => "Cell must contain a single expression"))
+    end
+    expr = Pluto.parse_custom(nb, Pluto.Cell(; cell_id=cell.cell_id, code=code))
+    if Meta.isexpr(expr, :toplevel, 2) && Meta.isexpr(expr.args[2], :call, 2) && expr.args[2].args[1] == :(PlutoRunner.throw_syntax_error)
+        push!(errors, Dict{String,Any}("type" => "syntax_error", "message" => string(expr.args[2].args[2])))
+    end
+    return errors
+end
+
 function _snapshot_cell(cell)
     d = Dict{String,Any}(
         "cell_id"  => string(cell.cell_id),
@@ -103,9 +156,7 @@ function snapshot(nb)
         "process_status"    => string(nb.process_status),
         "execution_allowed" => Pluto.will_run_code(nb),
         "safe_preview"      => nb.process_status === Pluto.ProcessStatus.waiting_for_permission,
-        # Staging moves to the core with the edit tools; until then it's read here.
-        "pending_run"       => [string(id) for id in pending_run_ids(nb.notebook_id, nb)],
-        "cells"             => [_snapshot_cell(nb.cells_dict[id]) for id in nb.cell_order],
+        "cells"           => [_snapshot_cell(nb.cells_dict[id]) for id in nb.cell_order],
     )
 end
 

@@ -102,15 +102,6 @@ end
 # formats rarely have a PNG form, so read_cell doesn't point agents at the tool for them.
 _is_visual(mime) = mime == MIME("image/png") || mime == MIME("image/svg+xml")
 
-"A tool result carrying a PNG, sent as an MCP image content block next to `meta`."
-struct CellImage
-    meta::Dict{String,Any}
-    png::Vector{UInt8}
-end
-
-# Claude accepts images up to ~5 MB; plots are typically tens of KB.
-const MAX_IMAGE_BYTES = 4_000_000
-
 """
     _cell_png(session, nb, cell) -> Union{Vector{UInt8}, Nothing}
 

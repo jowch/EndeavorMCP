@@ -2,7 +2,7 @@
 
 Design for moving the language-neutral half of the runtime from Julia into a
 Rust process, so Pluto, marimo and turtleR (our R notebook engine) sit
-behind one boundary. Nothing here is built yet. Endeavor's side of R support
+behind one boundary. Step 1 below is built; the rest is not yet. Endeavor's side of R support
 is in [r-notebooks.md](r-notebooks.md), turtleR's own design in its
 repository (https://github.com/jowch/turtleR); marimo in
 [marimo.md](marimo.md).
@@ -89,23 +89,24 @@ notebook when it does. The core keeps one `AdapterProcess` per engine kind;
 what differs per kind (launch command, detection, page adapter, skills) is
 the small `Backend` enum [marimo.md](marimo.md) proposes for the app.
 
-Built so far (step 5a) are `snapshot`, `graph` and `shutdown`, and all the
-notifications; the other calls come with the handlers that need them.
+All of these are built (steps 5a and 5b) but `restart`; nothing calls
+`interrupt` yet.
 
 Core → engine:
 
 | Call | Returns |
 | --- | --- |
-| `open(path, allow_run)` / `new(path?)` | notebook id, cells, whether execution is gated |
+| `open(path, run)` / `new(path? \| folder?)` | notebook id, path, process status; `new` also its cells |
 | `shutdown(nid)` | whether it was in safe preview |
-| `allow_execution(nid, run)` | — |
-| `snapshot(nid)` | path, order, process status, whether execution is allowed, whether it's in safe preview, per cell: code, folded, running, queued, errored, last run time, runtime, output summary or structured error. Without `nid`, every open notebook, in the engine's order. Pluto's also lists the staged cells (`pending_run`) until staging moves to the core |
-| `graph(nid)` | per cell: definitions, function names, references, as of the engine's last analysis (no reanalysis); topological order |
-| `apply(nid, ops)` | ops: set code, insert, delete, move, fold. The engine saves the file and updates its own UI |
-| `run(nid, cells)` | accepted, or refused because gated |
+| `allow_execution(nid, run, timeout)` | whether it was already allowed, whether it ran, process status |
+| `snapshot(nid)` | path, order, process status, whether execution is allowed, whether it's in safe preview, per cell: code, folded, running, queued, errored, last run time, runtime, output summary or structured error, whether the tools hide it (boilerplate such as Pluto's package cells) and whether it's markdown. Without `nid`, every open notebook, in the engine's order |
+| `graph(nid, fresh?, refresh?, edges?)` | per cell, in the engine's order: definitions, function names, references, as of the engine's last analysis (`fresh`: of the notebook as it is now, not kept); with `edges`, each cell's direct upstream and downstream cells; the runnable cells in run order, and the rest |
+| `apply(nid, ops)` | ops: set code (refused, before any op applies, if a cell's code isn't the `expected` code), insert at an index, delete, move to an index, fold. The engine saves the file and updates its own UI. The inserted cells' ids |
+| `run(nid, cells, wait, timeout)` | accepted, or not because gated (with the process status); waited for, which cells finished and which timed out |
 | `interrupt(nid)`, `restart(nid)` | — |
-| `render_png(nid, cell)` | image bytes or none |
-| `validate(nid, code)` | parse errors |
+| `render_png(nid, cell)` | base64 PNG or none, and the output's MIME type |
+| `validate(nid, cell, code)` | parse errors |
+| `status()` | the engine's own status (`pluto_session_status`) |
 
 Engine → core, as notifications, each naming its notebook:
 
@@ -115,7 +116,8 @@ Engine → core, as notifications, each naming its notebook:
 - `notebook_opened(nid, path)`; `notebook_shut_down(nid)`, once it has left
   the engine (a restart in place isn't one); `file_saved(nid)`;
   `execution_done(nid)`, when a run finishes; `topology_changed(nid)`, when
-  the dependency graph changed.
+  the dependency graph changed; `run_finished(nid, cells)`, the cells a run
+  the core didn't wait for finished.
 
 Notifications say when to look; the core reads a fresh `snapshot` and `graph`
 each time it tells the app anything, coalescing a burst of notifications
@@ -194,12 +196,16 @@ ending in an app that behaves as before:
      and the one-notebook-per-session binding (`endeavor/set_notebook`). It
      attributes an edit to the agent by watching `edit_cell`, `edit_cells`
      and `add_cell` pass through, reading the notebook just before.
-   - 5b: staging and read receipts, `submit_changes`, `run_preview`,
-     `run_conflict` and other-session warnings, the dependency and symbol
-     tools, and the calls they need (`open`, `new`, `allow_execution`,
-     `apply`, `run`, `interrupt`, `render_png`, `validate`). Staging joins
-     `NotebookState` beside the author tracking, and `pending_run` leaves
-     `snapshot`. What is left in Julia is then the Pluto adapter.
+   - 5b, done: every tool rule. Staging, read receipts and each cell's last
+     change join `NotebookState`; the core answers every notebook tool,
+     `tools/list`, `initialize` and `endeavor/run_preview`, carrying changes
+     out through `apply`, `run` and the other calls, and `pending_run` left
+     `snapshot`. Julia is now the Pluto adapter: Pluto's session, the
+     adapter's calls and notifications, output and error conversion, what
+     the tools hide, and its own `/call` for `endeavor/set_folder` and
+     `endeavor/shutdown`. Lists Julia kept in hash tables (`pending_run`,
+     `stale_cell_ids`, `search_code`, `upstream`, `downstream`) now come in
+     notebook order.
 
 ## Open questions
 

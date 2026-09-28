@@ -8,15 +8,8 @@ using HTTP
 using Pluto
 
 include("Output.jl")
-include("Staging.jl")
-include("Sharing.jl")
-include("Projection.jl")
-include("Tools.jl")
-include("Graph.jl")
-include("Lifecycle.jl")
-include("Policy.jl")
-include("MCP.jl")
 include("Adapter.jl")
+include("Lifecycle.jl")
 include("Server.jl")
 
 register_http_bridge!(_run_http_mcp_server)
