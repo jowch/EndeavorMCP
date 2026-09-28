@@ -22,11 +22,14 @@ Reach for this skill when neither is present and you genuinely don't know which 
 ## Orientation
 
 - `pluto_session_status` — whether Pluto is running, what notebooks are open, session info.
-- `list_notebooks` — what's currently open in the session.
+- `list_notebooks` — what's currently open, and (`this_session`) which one is this session's.
 
 ## One notebook per session
 
-Each Endeavor session works on exactly one notebook. A session started from an existing notebook already has it. A session started as "New notebook" can create one with `new_notebook`, and that becomes its notebook.
+Each Endeavor session works on exactly one notebook. A session started from an existing notebook already has it. A session started as "New notebook" has none until you create one with `new_notebook`, and that becomes its notebook.
+
+- `list_notebooks` also lists other sessions' notebooks. Its `this_session` field is true only for this session's notebook. Never work in a notebook whose `this_session` is false.
+- If no notebook has `this_session` true and the user asks for anything that needs a notebook (code to run, a plot, an analysis), call `new_notebook` yourself right away. Don't ask the user to open or create a notebook, and don't ask them to confirm first. The notebook pane switches to the new notebook by itself.
 
 - Once the session has its notebook, `open_notebook` and `new_notebook` refuse any other path with a `one_notebook` error, and edits or runs on another open notebook are refused the same way.
 - You can still read any other notebook as a plain `.jl` file (for example with `Read`, or `read_file` on a server) to reuse its code or check what it did.
@@ -53,7 +56,8 @@ A notebook nobody has used for a while (no tool calls, edits, or running cells; 
 |------------|------|
 | A notebook they named (a path or a clear, unambiguous reference) | `open_notebook(path=...)` |
 | A brand-new notebook | `new_notebook(path=<descriptive_name>.jl)` |
-| Unclear, or no notebook named | `list_notebooks`, then ask — or offer to create one with `new_notebook` |
+| Notebook work, and this session has no notebook yet | `new_notebook(path=<descriptive_name>.jl)` without asking |
+| An existing notebook, but it's unclear which | Ask which file. Don't guess a path |
 
 - `open_notebook` and `new_notebook` both switch the notebook pane to that notebook automatically once they succeed. There's no landing page to click through and no separate step to "show" the notebook to the user.
 - **Pass `path` to `new_notebook` as a short descriptive `snake_case.jl` file name**, unless the user names another place. A relative path lands in the folder this Endeavor session was started in (on a server session, that folder on the server). Without a path, Pluto picks a random name in that same folder.
@@ -70,6 +74,8 @@ A notebook nobody has used for a while (no tool calls, edits, or running cells; 
 | Mistake | Fix |
 |---------|-----|
 | `open_notebook` without a user-specified path | Never guess a path or scan the filesystem for a notebook to open |
+| Ask the user to open or create a notebook when the session has none | `new_notebook` yourself |
+| Edit a notebook that `list_notebooks` shows with `this_session` false | It's another session's; create this session's own with `new_notebook` |
 | Hand-write a new `.jl` notebook file | `new_notebook()` — let Pluto write it |
 | Open or create a second notebook in the same session | Add a new section to the current notebook, read the other file with `Read`, or suggest a new session for it |
 | Re-`open_notebook` a path that's already open | `list_notebooks` first; if it's there, use its `notebook_id` (re-opening errors) |

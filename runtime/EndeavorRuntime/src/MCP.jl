@@ -13,7 +13,7 @@ end
 const MCP_TOOLS = [
     Dict{String,Any}(
         "name"        => "list_notebooks",
-        "description" => "List all notebooks currently open in the Pluto session, with each one's run state: pending_run (ids of edited cells not yet run), running (ids of cells queued or running, in notebook order), and execution_allowed (whether Pluto will run code now: false in safe preview, and while the notebook process is stopped, restarting, or crashed). Does not count as reading any cell.",
+        "description" => "List all notebooks currently open in the Pluto session, with each one's run state: pending_run (ids of edited cells not yet run), running (ids of cells queued or running, in notebook order), and execution_allowed (whether Pluto will run code now: false in safe preview, and while the notebook process is stopped, restarting, or crashed). Other Endeavor sessions' notebooks are listed too: this_session is true only for this session's own notebook. If no notebook has this_session true, this session has no notebook yet; when the user asks for notebook work, create one with new_notebook yourself instead of asking them to open or create one, and don't use another session's notebook. Does not count as reading any cell.",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(),
@@ -327,7 +327,7 @@ const MCP_TOOLS = [
     ),
     Dict{String,Any}(
         "name"        => "new_notebook",
-        "description" => "Create a new empty notebook file (written by Pluto itself) and load it into the live Pluto session, ready to run (no safe preview: it has no code yet). It starts with one empty cell, whose id is in cell_ids: edit it for the first cell. Use this instead of writing a .jl file by hand. Omit path to get a Pluto-named file in the session's folder; an existing file is never overwritten (use open_notebook for that). Each session works on one notebook: if it already has one, this is refused. For a new analysis step, add a section to the current notebook rather than creating another.",
+        "description" => "Create a new empty notebook file (written by Pluto itself) and load it into the live Pluto session, ready to run (no safe preview: it has no code yet). It starts with one empty cell, whose id is in cell_ids: edit it for the first cell. Use this instead of writing a .jl file by hand. Omit path to get a Pluto-named file in the session's folder; an existing file is never overwritten (use open_notebook for that). Each session works on one notebook: if it already has one, this is refused. If the session has none yet and the user asks for notebook work, call this yourself; don't ask the user to open or create a notebook. For a new analysis step, add a section to the current notebook rather than creating another.",
         "inputSchema" => Dict{String,Any}(
             "type"       => "object",
             "properties" => Dict{String,Any}(

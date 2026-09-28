@@ -216,6 +216,7 @@ end
 is_running(nb, cell) = cell.running || (cell.queued && any(c -> c.running, values(nb.cells_dict)))
 
 function tool_list_notebooks(session, _args)
+    bound = bound_notebook(current_owner())
     [
         Dict{String,Any}(
             "notebook_id" => string(nb.notebook_id),
@@ -226,6 +227,7 @@ function tool_list_notebooks(session, _args)
             "pending_run"       => [string(id) for id in pending_run_ids(nb.notebook_id)],
             "running"           => [string(id) for id in nb.cell_order if is_running(nb, nb.cells_dict[id])],
             "execution_allowed" => Pluto.will_run_code(nb),
+            "this_session"      => bound !== nothing && _canonical_path(nb.path) == bound,
         )
         for nb in values(session.notebooks)
     ]

@@ -1899,6 +1899,12 @@ end
             own_cell = string(first(session.notebooks[UUID(first_id)].cell_order))
             @test err(call("fold_cell", Dict{String,Any}("notebook_id" => first_id, "cell_id" => own_cell, "folded" => true); owner="a")) === nothing
 
+            # list_notebooks tells a session which open notebook is its own, and a
+            # session with none that it has none.
+            mine(owner) = Dict(nb["notebook_id"] => nb["this_session"] for nb in body(call("list_notebooks", Dict{String,Any}(); owner)))
+            @test mine("a") == Dict(first_id => true, second_id => false)
+            @test mine("unbound") == Dict(first_id => false, second_id => false)
+
             # A binding set by the app is respected, and clearing it lifts the limit.
             EndeavorRuntime.bind_notebook!("b", second_nb)
             @test err(call("open_notebook", Dict{String,Any}("path" => first_nb); owner="b")) == "one_notebook"
