@@ -1,7 +1,10 @@
 //! The helper binary against a stand-in runtime (a `sleep` process plus two
-//! small TCP servers on loopback), so no Julia is needed: file requests before
-//! any runtime, attaching on request, relaying, one client at a time, and each
-//! way a connection ends.
+//! small TCP servers on loopback, as a runtime an older helper started would
+//! look), or the core it starts over a stand-in Julia, so no Julia is needed:
+//! file requests before any runtime, attaching on request, relaying, one
+//! client at a time, and each way a connection ends.
+
+mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -461,6 +464,47 @@ fn julia_from_a_shell_line_is_found_and_its_failure_reported() {
     let mut helper = Helper::start_with(&dir, &["--julia-shell", "true"], &[("SHELL", "/bin/sh"), ("PATH", "/usr/bin:/bin")]);
     let ToApp::StartFailed { message } = helper.start_runtime() else { panic!("expected StartFailed") };
     assert!(message.contains("`true`") && message.contains("PATH"), "{message}");
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn starts_the_core_which_starts_julia_and_stop_ends_both() {
+    let dir = state_dir("core");
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    assert!(matches!(helper.start_runtime(), ToApp::FoundJulia { .. }));
+    let ToApp::Ready { pid, token, pluto_secret, reattached, .. } = helper.after_progress() else { panic!("expected Ready") };
+    assert_eq!((token.as_str(), pluto_secret.as_str(), reattached), (TOKEN, "s3cret", false));
+    let core = pid as i32;
+    let julia = common::read_json(&dir.join("julia.json"))["pid"].as_i64().unwrap() as i32;
+    let ps = |field: &str, pid: i32| {
+        let out = Command::new("ps").args(["-o", &format!("{field}="), "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    assert!(ps("command", core).contains("endeavor-remote core"), "{}", ps("command", core));
+    assert_eq!(ps("ppid", julia), core.to_string(), "Julia is the core's child");
+    assert_eq!((ps("pgid", julia), ps("pgid", core)), (core.to_string(), core.to_string()), "one process group, the core's");
+
+    // The bridge goes through the core; Pluto straight to Julia's port.
+    let mut call = helper.connect(Target::Bridge);
+    write!(call, "POST /call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
+    let mut reply = String::new();
+    call.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 200") && reply.contains(r#""said":"POST /call HTTP/1.0""#), "{reply}");
+    let mut pluto = helper.connect(Target::Pluto);
+    pluto.write_all(b"to Pluto").unwrap();
+    let mut back = [0; 8];
+    pluto.read_exact(&mut back).unwrap();
+    assert_eq!(&back, b"to Pluto");
+
+    // Stop reaches Julia through the core, and neither is left.
+    helper.send(ToHelper::Stop);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    assert!(!common::pid_alive(core) && !common::pid_alive(julia));
+    assert!(!dir.join("runtime.json").exists() && !dir.join("julia.json").exists());
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
 }

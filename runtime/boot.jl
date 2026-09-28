@@ -1,9 +1,11 @@
-# Started by endeavor-remote, detached or as a Slurm job's script (node-start):
+# Started by `endeavor-remote core` (which the helper starts, detached or as a
+# Slurm job's script):
 #   julia --project=runtime runtime/boot.jl <pluto_port> <mcp_port>
 # with ENDEAVOR_TOKEN (the bridge's bearer token), ENDEAVOR_STATE (where to write
-# runtime.json) and ENDEAVOR_LAUNCHER in the environment. Once Pluto and the bridge
-# are up it writes runtime.json, which is how the helper learns the runtime is
-# ready; it serves until the bridge's `endeavor/shutdown` or a signal ends it.
+# its state) and ENDEAVOR_LAUNCHER in the environment. Once Pluto and the bridge
+# are up it writes that state, which is how the core learns Julia is ready (the
+# core then writes runtime.json for the helper); it serves until the bridge's
+# `endeavor/shutdown` or a signal ends it.
 
 # Our stdout and stderr are runtime.log, a file, which Julia buffers. The helper
 # reads that file for boot progress and for a crash's last lines, so flush often.

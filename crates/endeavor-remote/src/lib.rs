@@ -13,12 +13,14 @@
 //! (`endeavor-remote relay`, see `slurm`).
 
 mod askpass;
+mod core;
+mod http;
 mod julia;
 mod slurm;
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -26,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -38,6 +40,7 @@ use wire::{Frame, Target, ToApp, ToHelper};
 const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node]
        endeavor-remote relay --state-dir DIR
        endeavor-remote node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
+       endeavor-remote core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
        endeavor-remote askpass PROMPT";
 const LOG_TAIL: usize = 40;
 
@@ -62,7 +65,8 @@ enum Launcher {
     Slurm,
 }
 
-/// `runtime.json`, written by boot.jl once the runtime is ready.
+/// `runtime.json`, written by the core once the runtime is ready (by boot.jl
+/// for a runtime an older helper started, which is attached to the same way).
 struct State {
     launcher: String,
     node: String,
@@ -104,13 +108,25 @@ type Routes = Arc<RwLock<Route>>;
 /// How the helper answers the app's file requests.
 type Answer = Arc<dyn Fn(&wire::files::Request) -> wire::files::Reply + Send + Sync>;
 
+/// Arguments this program needs before the helper's own to run as the helper
+/// again (for the core): none for `endeavor-remote`, the flag for the app.
+static HELPER_ARGS: OnceLock<&'static [&'static str]> = OnceLock::new();
+
 /// The helper's main, given its arguments without the program name. Call it
 /// before the process starts any thread: it blocks SIGUSR1 for all of them.
 pub fn run(argv: Vec<String>) -> ! {
+    run_as(&[], argv)
+}
+
+/// `run` in a program that acts as the helper when started with `helper_args`
+/// before the helper's arguments (the app: `endeavor --helper …`).
+pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
+    let _ = HELPER_ARGS.set(helper_args);
     match argv.first().map(String::as_str) {
         Some("askpass") => askpass::run(argv.get(1).map_or("", String::as_str)),
         Some("relay") => slurm::relay_main(&argv[1..]),
         Some("node-start") => slurm::node_start_main(&argv[1..]),
+        Some("core") => core::main(&argv[1..]),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
         Some(prompt) if prompt != "connect" && std::env::var_os(wire::askpass::SOCKET_ENV).is_some() => askpass::run(prompt),
         _ => {}
@@ -740,7 +756,10 @@ fn existing(args: &Args) -> Result<Option<State>, String> {
 }
 
 fn read_state(dir: &Path) -> Option<State> {
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?;
+    parse_state(&serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?)
+}
+
+fn parse_state(v: &Value) -> Option<State> {
     let text = |k: &str| v[k].as_str().map(str::to_owned);
     let port = |k: &str| v[k].as_u64().and_then(|p| u16::try_from(p).ok());
     Some(State {
@@ -787,27 +806,29 @@ fn token(dir: &Path) -> Result<String, String> {
     Ok(token)
 }
 
-/// `julia boot.jl` with the environment it reads (see runtime/boot.jl).
+/// `endeavor-remote core`, which starts `julia boot.jl` (see core).
 fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str) -> Result<Command, String> {
-    let ports = free_ports()?;
     let _ = std::fs::remove_file(state_dir.join("runtime.json"));
-    let runtime = runtime.display();
-    let mut command = Command::new(julia);
+    let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
+    let mut command = Command::new(exe);
+    // Named like the helper in `ps`, not like the app it may be.
+    command.arg0("endeavor-remote").args(HELPER_ARGS.get().copied().unwrap_or_default());
     command
-        .arg("--color=no")
-        .arg(format!("--project={runtime}"))
-        .arg(format!("{runtime}/boot.jl"))
-        .args(ports.map(|p| p.to_string()))
-        .env("JULIA_DEPOT_PATH", depot)
+        .arg("core")
+        .arg("--state-dir")
+        .arg(state_dir)
+        .args(["--julia", julia])
+        .arg("--runtime")
+        .arg(runtime)
+        .args(["--depot", depot])
         // Not argv, which `ps` shows to every user.
         .env("ENDEAVOR_TOKEN", token)
-        .env("ENDEAVOR_STATE", state_dir.join("runtime.json"))
         .env("ENDEAVOR_LAUNCHER", launcher)
         .stdin(Stdio::null());
     Ok(command)
 }
 
-/// Start `boot.jl` detached from us (its own session, no terminal, stdin from
+/// Start the runtime detached from us (its own session, no terminal, stdin from
 /// /dev/null), logging to `runtime.log`.
 fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
     let dir = &args.state_dir;
@@ -830,14 +851,7 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
             Ok(())
         });
     }
-    command.spawn().map_err(|e| format!("Couldn't start {julia}: {e}"))
-}
-
-fn free_ports() -> Result<[u16; 2], String> {
-    // Both held at once so the OS can't hand out the same port twice.
-    let pluto = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let mcp = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    Ok([&pluto, &mcp].map(|l| l.local_addr().unwrap().port()))
+    command.spawn().map_err(|e| format!("Couldn't start the runtime: {e}"))
 }
 
 /// Send the runtime's log lines as `Progress` until it's ready (then what's

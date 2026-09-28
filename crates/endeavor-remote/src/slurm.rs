@@ -609,8 +609,8 @@ pub fn relay_main(argv: &[String]) -> ! {
     }
 }
 
-/// `endeavor-remote node-start …`, the job's script: become Julia running
-/// boot.jl on this node, on ports free here, logging to the job's output.
+/// `endeavor-remote node-start …`, the job's script: become the core on this
+/// node, which starts Julia, logging to the job's output.
 pub fn node_start_main(argv: &[String]) -> ! {
     let need = |name: &str| {
         flag(argv, name).unwrap_or_else(|| {
@@ -626,5 +626,5 @@ pub fn node_start_main(argv: &[String]) -> ! {
     let token = std::fs::read_to_string(dir.join("token")).unwrap_or_else(|e| fail(format!("Couldn't read the token in {}: {e}", dir.display())));
     let mut command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm").unwrap_or_else(|e| fail(e));
     let error = command.exec();
-    fail(format!("Couldn't start {julia}: {error}"))
+    fail(format!("Couldn't start the runtime: {error}"))
 }
