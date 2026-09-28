@@ -368,5 +368,4 @@ mod tests {
         assert_eq!(text("IOError: readdir(\"/a::b\"): denied"), r#"{"error":"readdir(\"/a","message":"b\"): denied"}"#);
         assert_eq!(tool_error("x")["isError"], true);
     }
-
 }
