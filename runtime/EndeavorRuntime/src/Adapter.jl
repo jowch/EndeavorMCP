@@ -163,8 +163,9 @@ end
 # Pluto's dependency data as of the last run or staged edit (no reanalysis),
 # cells in the order Pluto analysed them. `fresh` analyses the notebook as it is
 # now without keeping the result; `refresh` first updates the dependency cache
-# Pluto's page shows; `edges` adds each cell's direct upstream and downstream cells.
-function graph(nb; fresh::Bool=false, refresh::Bool=false, edges::Bool=false)
+# Pluto's page shows; `edges` adds each cell's direct upstream and downstream
+# cells; `packages` the packages each loads (`using`/`import`), sorted.
+function graph(nb; fresh::Bool=false, refresh::Bool=false, edges::Bool=false, packages::Bool=false)
     refresh && Pluto.update_dependency_cache!(nb)
     topology = fresh ? Pluto.updated_topology(nb.topology, nb, nb.cells) : nb.topology
     order = fresh ? Pluto.PlutoDependencyExplorer.topological_order(topology) : Pluto.topological_order(nb)
@@ -181,6 +182,11 @@ function graph(nb; fresh::Bool=false, refresh::Bool=false, edges::Bool=false)
         if edges
             d["upstream"] = ids(Pluto.PlutoDependencyExplorer.where_assigned(topology, node.references))
             d["downstream"] = ids(Pluto.PlutoDependencyExplorer.where_referenced(topology, c))
+        end
+        if packages
+            # A cell never analysed has the default, empty analysis.
+            usings = topology.codes[c].module_usings_imports
+            d["packages"] = sort!(string.(collect(Pluto.ExpressionExplorer.external_package_names(usings))))
         end
         return d
     end
@@ -348,7 +354,8 @@ function adapter_call(session, method::AbstractString, params)
     end
     nb = _get_notebook(session, string(id))
     method == "snapshot" && return snapshot(nb)
-    method == "graph" && return graph(nb; fresh=get(params, "fresh", false), refresh=get(params, "refresh", false), edges=get(params, "edges", false))
+    method == "graph" && return graph(nb; fresh=get(params, "fresh", false), refresh=get(params, "refresh", false),
+                                      edges=get(params, "edges", false), packages=get(params, "packages", false))
     method == "shutdown" && return shutdown_notebook!(session, nb)
     method == "apply" && return apply!(session, nb, params["ops"])
     method == "run" && return run_cells!(session, nb, [_adapter_cell(nb, c) for c in params["cells"]]; wait=params["wait"], timeout=params["timeout"])

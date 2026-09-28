@@ -79,8 +79,9 @@ impl Notebooks {
 
     /// `endeavor/run_preview`, for the app's approval card: what a run tool
     /// call would run. `cells` are the cells it targets (named by what they
-    /// define), `all` means the whole notebook, and `dependents` counts the
-    /// other cells that re-run with them.
+    /// define), `all` means the whole notebook, `dependents` counts the other
+    /// cells that re-run with them, and `packages` are those a whole-notebook
+    /// run loads, in notebook order.
     pub fn run_preview(&self, tool: &str, args: &Value) -> Result<Value, String> {
         let t = Call { nbs: self, owner: "", args };
         let nb = t.notebook()?;
@@ -100,11 +101,22 @@ impl Notebooks {
         let all = tool == "run_all_cells" || (tool == "allow_execution" && args.get("run_notebook").is_none_or(|run| *run != false));
         let down = graph.downstream_of(&targets).into_iter().filter(|id| !targets.contains(id)).count();
         let cells: Vec<Value> = targets.iter().map(|id| json!({ "id": id, "name": graph.name(id), "code": nb.cells[id].code })).collect();
+        let mut packages: Vec<String> = Vec::new();
+        if all {
+            // The cells as they are now: in safe preview some were never analysed.
+            let fresh = self.graph(&nb.id, GraphQuery { fresh: true, packages: true, ..Default::default() })?;
+            for package in nb.order.iter().filter_map(|id| fresh.node(id)).flat_map(|node| &node.packages) {
+                if !packages.contains(package) {
+                    packages.push(package.clone());
+                }
+            }
+        }
         Ok(json!({
             "all": all,
             "count": if all { nb.order.len() } else { targets.len() },
             "cells": cells,
             "dependents": if all { 0 } else { down },
+            "packages": packages,
         }))
     }
 

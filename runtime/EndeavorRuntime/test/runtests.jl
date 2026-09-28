@@ -95,6 +95,14 @@ end
         @test EndeavorRuntime._snapshot_cell(manifest)["hidden"]
     end
 
+    @testset "graph: the packages each cell loads, as the cells are now" begin
+        session, nb, cells = make_session_with_notebook("using Statistics, Dates", "import LinearAlgebra: norm", "using Dates", "x = 1")
+        graph = EndeavorRuntime.graph(nb; fresh=true, packages=true)
+        packages = Dict(c["cell_id"] => c["packages"] for c in graph["cells"])
+        @test [packages[string(c.cell_id)] for c in cells] == [["Dates", "Statistics"], ["LinearAlgebra"], ["Dates"], String[]]
+        @test !haskey(only(EndeavorRuntime.graph(make_session_with_notebook("x = 1")[2])["cells"]), "packages")
+    end
+
     @testset "render_png renders the cell's value as PNG" begin
         two_formats = """
         begin

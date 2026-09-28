@@ -281,15 +281,19 @@ struct Node {
     /// The cells this one depends on directly, and those depending on it.
     upstream: Vec<String>,
     downstream: Vec<String>,
+    /// The packages it loads, sorted.
+    packages: Vec<String>,
 }
 
 /// What to ask of `graph`: a fresh analysis of the notebook as it is now,
-/// Pluto's page's dependency cache brought up to date first, each cell's edges.
+/// Pluto's page's dependency cache brought up to date first, each cell's
+/// edges, each cell's packages.
 #[derive(Clone, Copy, Default)]
 struct GraphQuery {
     fresh: bool,
     refresh: bool,
     edges: bool,
+    packages: bool,
 }
 
 impl Graph {
@@ -303,6 +307,7 @@ impl Graph {
                 references: names(&c["references"]),
                 upstream: names(&c["upstream"]),
                 downstream: names(&c["downstream"]),
+                packages: names(&c["packages"]),
             })
         });
         Graph { cells: cells.collect(), order: names(&value["order"]), errable: names(&value["errable"]) }
@@ -489,7 +494,7 @@ impl Notebooks {
     }
 
     fn graph(&self, id: &str, query: GraphQuery) -> Result<Graph, String> {
-        let params = json!({ "notebook_id": id, "fresh": query.fresh, "refresh": query.refresh, "edges": query.edges });
+        let params = json!({ "notebook_id": id, "fresh": query.fresh, "refresh": query.refresh, "edges": query.edges, "packages": query.packages });
         Ok(Graph::parse(&self.call("graph", params)?))
     }
 

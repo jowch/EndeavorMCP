@@ -91,7 +91,14 @@ impl Engine {
         })
     }
 
-    fn graph(nb: &FakeNotebook) -> Value {
+    /// What `using A, B` loads.
+    fn packages(code: &str) -> Vec<String> {
+        let mut packages: Vec<String> = code.strip_prefix("using ").into_iter().flat_map(|names| names.split(", ")).map(str::to_owned).collect();
+        packages.sort();
+        packages
+    }
+
+    fn graph(nb: &FakeNotebook, params: &Value) -> Value {
         let analysed: Vec<_> = nb.cells.iter().map(|c| (c.id.clone(), c.analysis())).collect();
         let meets = |a: &[String], b: &[String]| a.iter().any(|x| b.contains(x));
         let cells: Vec<Value> = analysed
@@ -99,7 +106,11 @@ impl Engine {
             .map(|(id, (defs, refs))| {
                 let upstream: Vec<&String> = analysed.iter().filter(|(_, (d, _))| meets(d, refs)).map(|(id, _)| id).collect();
                 let downstream: Vec<&String> = analysed.iter().filter(|(_, (_, r))| meets(defs, r)).map(|(id, _)| id).collect();
-                json!({ "cell_id": id, "definitions": defs, "functions": [], "references": refs, "upstream": upstream, "downstream": downstream })
+                let mut node = json!({ "cell_id": id, "definitions": defs, "functions": [], "references": refs, "upstream": upstream, "downstream": downstream });
+                if params["packages"] == true {
+                    node["packages"] = json!(Engine::packages(&nb.cells.iter().find(|c| c.id == *id).unwrap().code));
+                }
+                node
             })
             .collect();
         json!({ "cells": cells, "order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(), "errable": [] })
@@ -139,7 +150,7 @@ impl Engine {
         let find = |nb: &mut FakeNotebook, cell: &Value| nb.cells.iter().position(|c| c.id == cell.as_str().unwrap()).unwrap();
         match method {
             "snapshot" => Ok(Engine::snapshot(nb)),
-            "graph" => Ok(Engine::graph(nb)),
+            "graph" => Ok(Engine::graph(nb, params)),
             "shutdown" => {
                 let nb = notebooks.remove(at);
                 self.shut_down.lock().unwrap().push(nb.id);
@@ -649,15 +660,30 @@ fn graph_tools_follow_the_engines_analysis() {
         args["notebook_id"] = json!(NB);
         s.notebooks.run_preview(tool, &args).unwrap()
     };
-    assert_eq!(preview("execute_cell", json!({ "cell_id": a })), json!({ "all": false, "count": 1, "cells": [{ "id": a, "name": "x", "code": "x = 1" }], "dependents": 2 }));
+    assert_eq!(
+        preview("execute_cell", json!({ "cell_id": a })),
+        json!({ "all": false, "count": 1, "cells": [{ "id": a, "name": "x", "code": "x = 1" }], "dependents": 2, "packages": [] })
+    );
     assert_eq!(preview("submit_changes", json!({ "cell_ids": [b] }))["dependents"], 1);
-    assert_eq!(preview("run_all_cells", json!({})), json!({ "all": true, "count": 4, "cells": [], "dependents": 0 }));
-    assert_eq!(preview("allow_execution", json!({ "run_notebook": false })), json!({ "all": false, "count": 0, "cells": [], "dependents": 0 }));
+    assert_eq!(preview("run_all_cells", json!({})), json!({ "all": true, "count": 4, "cells": [], "dependents": 0, "packages": [] }));
+    assert_eq!(preview("allow_execution", json!({ "run_notebook": false })), json!({ "all": false, "count": 0, "cells": [], "dependents": 0, "packages": [] }));
     s.read("", NB, c);
     s.edit("", NB, c, "z = y");
     assert_eq!(preview("submit_changes", json!({}))["cells"], json!([{ "id": c, "name": "z", "code": "z = y" }]));
     assert_eq!(s.notebooks.run_preview("submit_changes", &json!({ "notebook_id": NB, "cell_ids": ["bad"] })), Err("ArgumentError: Malformed UUID string: \"bad\"".into()));
     assert_eq!(s.notebooks.run_preview("execute_cell", &json!({})), Err("KeyError: key \"notebook_id\" not found".into()));
+}
+
+#[test]
+fn a_whole_notebook_run_names_the_packages_it_loads_in_notebook_order() {
+    let s = setup();
+    let (a, b, c) = ("aaaaaaaa-0000-0000-0000-00000000000a", "aaaaaaaa-0000-0000-0000-00000000000b", "aaaaaaaa-0000-0000-0000-00000000000c");
+    s.engine.open(NB, "/n/a.jl", &[(a, "using Statistics, Dates"), (b, "using LinearAlgebra"), (c, "using Dates")]);
+    s.engine.with(NB, |nb| nb.safe_preview = true);
+    let packages = |tool: &str, args: Value| s.notebooks.run_preview(tool, &args).unwrap()["packages"].clone();
+    assert_eq!(packages("allow_execution", json!({ "notebook_id": NB })), json!(["Dates", "Statistics", "LinearAlgebra"]));
+    assert_eq!(packages("run_all_cells", json!({ "notebook_id": NB })), json!(["Dates", "Statistics", "LinearAlgebra"]));
+    assert_eq!(packages("execute_cell", json!({ "notebook_id": NB, "cell_id": a })), json!([]), "only a whole-notebook run names them");
 }
 
 #[test]
