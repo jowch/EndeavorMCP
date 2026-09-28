@@ -127,6 +127,18 @@ fn invalid(message: String) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
 }
 
+/// How the agent reaches the bridge's MCP endpoint: Streamable HTTP (`/mcp`),
+/// or the deprecated SSE transport (`/sse` + `/message`) a runtime from before
+/// this transport switch still serves. `Sse` is the default so a helper from
+/// before this change, whose `Ready` carries no `mcp` field, is read as `Sse`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    #[default]
+    Sse,
+    Http,
+}
+
 /// Helper → app. The helper says `Hello` as soon as it runs; the runtime starts
 /// (or is attached to) only when the app sends `StartRuntime`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -170,6 +182,9 @@ pub enum ToApp {
         /// The cluster job it runs in.
         #[serde(default)]
         job: Option<slurm::Job>,
+        /// How the agent reaches the bridge's MCP endpoint.
+        #[serde(default)]
+        mcp: McpTransport,
     },
     /// The runtime couldn't start (no Julia, running on another node, …); the
     /// helper stays connected, so `StartRuntime` can try again.
@@ -286,12 +301,16 @@ mod tests {
             pluto_secret: "s".into(),
             reattached: true,
             job: None,
+            mcp: McpTransport::Http,
         };
         let Frame::Control(json) = ready.frame() else { panic!() };
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(value["type"], "Ready");
         assert_eq!(value["launcher"], "process");
+        assert_eq!(value["mcp"], "http");
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), ready);
+        let old_ready = r#"{"type":"Ready","launcher":"process","node":"labbox3","pid":1,"token":"t","pluto_secret":"s","reattached":true}"#;
+        assert!(matches!(serde_json::from_str::<ToApp>(old_ready).unwrap(), ToApp::Ready { mcp: McpTransport::Sse, .. }), "a helper from before Streamable HTTP");
         let files = ToHelper::Files { id: 3, request: files::Request::List { path: "~".into() } };
         let Frame::Control(json) = files.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);

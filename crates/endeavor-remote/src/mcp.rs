@@ -1,19 +1,21 @@
-//! The agent's MCP connection, MCP over SSE: `GET /sse` opens a session's
-//! stream, and each `POST /message?sessionId=…` carries one JSON-RPC message,
-//! whose reply goes out on that stream. Each agent session's messages carry
-//! `X-Endeavor-Session` (its key) and, on a server, `X-Endeavor-Host`. The
-//! notebook tools are `notebooks`'; host tools are `host_tools`'.
+//! The agent's MCP connection, MCP over Streamable HTTP (spec 2025-06-18):
+//! `POST /mcp` carries one JSON-RPC message; a request gets its reply in the
+//! same response, a notification or a response from the client gets `202
+//! Accepted` with no body. Every tool call is request and reply, so this
+//! server never needs to stream a reply back, and issues no `Mcp-Session-Id`
+//! (optional in the spec; the adapter's MCP client doesn't send one back when
+//! none is issued). Each agent session's messages carry `X-Endeavor-Session`
+//! (its key) and, on a server, `X-Endeavor-Host`. The notebook tools are
+//! `notebooks`'; host tools are `host_tools`'.
 //!
 //! Each session has a run policy the app sets ("plan" | "ask" | "auto"). In
 //! "plan" its notebook writes and runs are refused. "ask" and "auto" pass
 //! through for now: runs are still gated by the app's Claude hook.
 
 use std::collections::HashMap;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader};
 use std::net::TcpStream;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -21,8 +23,9 @@ use crate::host_tools;
 use crate::http::{self, Head};
 use crate::notebooks::{self, Julia, Notebooks, Reply};
 
-const KEEPALIVE: Duration = Duration::from_secs(15);
-
+/// The MCP protocol version this server understands: what `initialize`
+/// answers, and the only value `MCP-Protocol-Version` may name (a client that
+/// hasn't negotiated yet, before `initialize`, sends no header).
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// The notebook tools' schemas, for `tools/list`.
@@ -31,9 +34,6 @@ static NOTEBOOK_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(i
 /// `/call` methods Julia still answers: Pluto's folder for new notebooks, and
 /// ending the process.
 const JULIA_CALLS: [&str; 2] = ["endeavor/set_folder", "endeavor/shutdown"];
-
-/// Replies waiting for a session's stream; a full queue holds up the next POST.
-const QUEUE: usize = 64;
 
 /// Tools that change the notebook or run code, here or on the server.
 pub const WRITE_TOOLS: [&str; 12] = [
@@ -46,7 +46,6 @@ pub struct Bridge {
     pub julia: Arc<Julia>,
     pub notebooks: Arc<Notebooks>,
     pub token: String,
-    sessions: Mutex<HashMap<String, SyncSender<String>>>,
     /// Each agent session's run policy, by its key.
     policies: Mutex<HashMap<String, String>>,
     /// Each agent session's working folder on this machine, by its key.
@@ -86,7 +85,6 @@ impl Bridge {
             notebooks: Arc::new(Notebooks::new(julia.clone(), Box::new(clock))),
             julia,
             token,
-            sessions: Mutex::default(),
             policies: Mutex::default(),
             folders: Mutex::default(),
             shell_env,
@@ -168,44 +166,24 @@ impl Bridge {
         Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
     }
 
-    /// Serve `GET /sse`: a new session, and its stream until the client goes.
-    pub fn stream(&self, request: &Head, mut client: TcpStream) -> io::Result<()> {
-        let id = session_id()?;
-        let (tx, rx) = mpsc::sync_channel(QUEUE);
-        self.sessions.lock().unwrap().insert(id.clone(), tx);
-        let chunked = request.keeps_alive();
-        let result = client
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n{}\r\n",
-                    if chunked { "Transfer-Encoding: chunked\r\n" } else { "" }
-                )
-                .as_bytes(),
-            )
-            .and_then(|_| send_events(&mut client, chunked, &id, &rx, KEEPALIVE));
-        self.sessions.lock().unwrap().remove(&id);
-        result
-    }
-
-    /// Serve `POST /message?sessionId=…`: the reply goes out on the session's
-    /// stream before this answers 202. Whether the connection can carry another request.
-    pub fn post(&self, request: &Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> io::Result<bool> {
+    /// Serve `POST /mcp`: one JSON-RPC message in; a request gets its reply
+    /// in this response, a notification or a response from the client gets
+    /// `202 Accepted` with no body. Whether the connection can carry another request.
+    pub fn mcp(&self, request: &Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> io::Result<bool> {
         let body = http::read_body(reader, request.request_body()?)?;
         let keep_alive = request.keeps_alive();
-        let id = query_param(request.target(), "sessionId").unwrap_or_default();
-        let Some(session) = self.sessions.lock().unwrap().get(id).cloned() else {
-            http::respond(client, "404 Not Found", None, br#"{"error":"Session not found"}"#, keep_alive)?;
+        if request.header("MCP-Protocol-Version").is_some_and(|v| v != PROTOCOL_VERSION) {
+            http::respond(client, "400 Bad Request", Some("application/json"), br#"{"error":"unsupported_protocol_version"}"#, keep_alive)?;
             return Ok(keep_alive);
-        };
+        }
         let Some(message) = serde_json::from_slice::<Value>(&body).ok().filter(Value::is_object) else {
             http::respond(client, "400 Bad Request", None, br#"{"error":"Invalid JSON"}"#, keep_alive)?;
             return Ok(keep_alive);
         };
-        // A session whose stream has gone drops the reply.
-        if let Some(reply) = self.dispatch(&message, &Caller::of(request)) {
-            let _ = session.send(reply);
+        match self.dispatch(&message, &Caller::of(request)) {
+            Some(reply) => http::respond(client, "200 OK", Some("application/json"), reply.as_bytes(), keep_alive)?,
+            None => http::respond(client, "202 Accepted", None, b"", keep_alive)?,
         }
-        http::respond(client, "202 Accepted", None, b"", keep_alive)?;
         Ok(keep_alive)
     }
 
@@ -328,44 +306,6 @@ pub fn julia_string(value: &Value) -> String {
     }
 }
 
-/// Write a session's events: where to post, then each reply as it comes, with
-/// a comment line after `keepalive` of quiet so proxies keep the stream open.
-/// Returns when a write fails: the client has gone.
-fn send_events(out: &mut impl Write, chunked: bool, id: &str, replies: &Receiver<String>, keepalive: Duration) -> io::Result<()> {
-    let mut event = |text: String| -> io::Result<()> {
-        if chunked {
-            write!(out, "{:x}\r\n{text}\r\n", text.len())?;
-        } else {
-            out.write_all(text.as_bytes())?;
-        }
-        out.flush()
-    };
-    event(format!("event: endpoint\ndata: /message?sessionId={id}\n\n"))?;
-    loop {
-        match replies.recv_timeout(keepalive) {
-            Ok(reply) => event(format!("event: message\ndata: {reply}\n\n"))?,
-            Err(RecvTimeoutError::Timeout) => event(": keepalive\n\n".into())?,
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
-        }
-    }
-}
-
-/// A random (version 4) UUID.
-fn session_id() -> io::Result<String> {
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    bytes[6] = bytes[6] & 0x0f | 0x40;
-    bytes[8] = bytes[8] & 0x3f | 0x80;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
-}
-
-/// `name`'s value in a target's query, as given (not percent-decoded).
-fn query_param<'a>(target: &'a str, name: &str) -> Option<&'a str> {
-    let (_, query) = target.split_once('?')?;
-    query.split('&').filter_map(|pair| pair.split_once('=')).find(|(key, _)| *key == name).map(|(_, value)| value)
-}
-
 /// JSON the way Julia's JSON.jl writes it, byte for byte: object keys sorted
 /// by their bytes, and DEL escaped. serde_json's own key order depends on a
 /// feature another crate in the workspace turns on.
@@ -429,66 +369,4 @@ mod tests {
         assert_eq!(tool_error("x")["isError"], true);
     }
 
-    #[test]
-    fn finds_query_params() {
-        assert_eq!(query_param("/message?sessionId=abc&x=1", "sessionId"), Some("abc"));
-        assert_eq!(query_param("/message?x=1&sessionId=", "sessionId"), Some(""));
-        assert_eq!(query_param("/message", "sessionId"), None);
-    }
-
-    #[test]
-    fn session_ids_are_random_uuids() {
-        let (a, b) = (session_id().unwrap(), session_id().unwrap());
-        assert_ne!(a, b);
-        assert_eq!(a.len(), 36);
-        assert_eq!((&a[14..15], a.matches('-').count()), ("4", 4));
-    }
-
-    /// A writer the test can read back while `send_events` still holds it.
-    #[derive(Clone, Default)]
-    struct Shared(std::sync::Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Shared {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn streams_the_endpoint_replies_and_keepalives() {
-        let (tx, rx) = mpsc::sync_channel(QUEUE);
-        let out = Shared::default();
-        let mut writer = out.clone();
-        let stream = std::thread::spawn(move || send_events(&mut writer, true, "s1", &rx, Duration::from_millis(100)));
-        tx.send(r#"{"id":1}"#.into()).unwrap();
-        std::thread::sleep(Duration::from_millis(250));
-        drop(tx);
-        stream.join().unwrap().unwrap();
-        let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
-        let endpoint = "event: endpoint\ndata: /message?sessionId=s1\n\n";
-        let reply = "event: message\ndata: {\"id\":1}\n\n";
-        let expected = format!("{:x}\r\n{endpoint}\r\n{:x}\r\n{reply}\r\n", endpoint.len(), reply.len());
-        assert!(text.starts_with(&expected), "{text:?}");
-        let keepalives = text[expected.len()..].matches("d\r\n: keepalive\n\n\r\n").count();
-        assert!(keepalives >= 1, "{text:?}");
-    }
-
-    #[test]
-    fn a_failed_write_ends_the_stream() {
-        struct Gone;
-        impl Write for Gone {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-                Err(io::ErrorKind::BrokenPipe.into())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let (_tx, rx) = mpsc::sync_channel::<String>(1);
-        assert!(send_events(&mut Gone, false, "s1", &rx, Duration::from_millis(10)).is_err());
-    }
 }

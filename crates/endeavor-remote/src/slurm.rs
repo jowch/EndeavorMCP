@@ -590,6 +590,7 @@ pub fn relay_main(argv: &[String]) -> ! {
         pluto_secret: state.pluto_secret.clone(),
         reattached: true,
         job: None,
+        mcp: state.mcp,
     };
     let _ = mux.send(&ready.frame());
     loop {

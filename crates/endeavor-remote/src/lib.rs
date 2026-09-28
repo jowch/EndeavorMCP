@@ -80,6 +80,9 @@ struct State {
     pluto_secret: String,
     /// The Slurm job it runs in.
     job: Option<String>,
+    /// How the agent reaches the bridge's MCP endpoint; `Sse` for `runtime.json`
+    /// from before this core wrote `mcp`.
+    mcp: wire::McpTransport,
 }
 
 enum Event {
@@ -341,6 +344,7 @@ impl Attached {
                 How::Process(_) => None,
                 How::Slurm(job) => Some(job.info()),
             },
+            mcp: state.mcp,
         }
     }
 
@@ -774,6 +778,7 @@ fn parse_state(v: &Value) -> Option<State> {
         token: text("token")?,
         pluto_secret: text("pluto_secret")?,
         job: text("job").filter(|j| !j.is_empty()),
+        mcp: if text("mcp").as_deref() == Some("http") { wire::McpTransport::Http } else { wire::McpTransport::Sse },
     })
 }
 

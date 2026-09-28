@@ -152,6 +152,9 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, bridge_port: u16) -> Option
     }
     state["pid"] = std::process::id().into();
     state["mcp_port"] = bridge_port.into();
+    // The core serves the agent's MCP connection over Streamable HTTP, at
+    // `/mcp`; an old runtime.json without this key means SSE (parse_state).
+    state["mcp"] = "http".into();
     if let Err(e) = write_private(&state_dir.join("runtime.json"), state.to_string().as_bytes()) {
         eprintln!("endeavor-remote core: {e}");
         return None;
@@ -253,12 +256,18 @@ fn serve_client(client: TcpStream, bridge: &Bridge) -> io::Result<()> {
             return refuse(&mut client, "503 Service Unavailable", "Julia isn't ready yet");
         };
         let (method, target) = (request.method(), request.target());
-        let keep_alive = if method == "GET" && target.starts_with("/sse") {
-            return bridge.stream(&request, client);
-        } else if method == "GET" && target.starts_with("/events") {
+        let keep_alive = if method == "GET" && target.starts_with("/events") {
             return bridge.notebooks.stream_events(&request, client);
-        } else if method == "POST" && target.starts_with("/message") {
-            bridge.post(&request, &mut reader, &mut client)?
+        } else if target.starts_with("/mcp") {
+            match method {
+                "POST" => bridge.mcp(&request, &mut reader, &mut client)?,
+                // No server-initiated stream, and no session to end.
+                _ => {
+                    http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
+                    http::respond(&mut client, "405 Method Not Allowed", None, b"", request.keeps_alive())?;
+                    request.keeps_alive()
+                }
+            }
         } else if method == "POST" && target.starts_with("/call") {
             let body = http::read_body(&mut reader, request.request_body()?)?;
             match bridge.app_call(&body) {

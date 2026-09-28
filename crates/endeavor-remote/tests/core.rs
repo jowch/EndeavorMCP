@@ -292,49 +292,23 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     assert_eq!(event["cells"]["n1"][0]["author"], "user");
 
     // Tool calls the core answers are news too, and don't reach Julia.
-    let mut session = Session::open(&core);
     let keep = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"keep_notebook_alive","arguments":{"notebook_id":"aaaaaaaa-0000-0000-0000-000000000000","keep":true}}}"#;
-    post(&core, &session.id, keep, &[("X-Endeavor-Session", "7")]);
-    let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
+    let (status, body) = mcp(&core, keep, &[("X-Endeavor-Session", "7")]);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let error: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(error["message"], "No notebook with id 'aaaaaaaa-0000-0000-0000-000000000000' in the current session\" not found");
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 }
 
-/// An agent session's MCP connection: its event stream and its session id.
-struct Session {
-    events: BufReader<TcpStream>,
-    id: String,
-}
-
-impl Session {
-    fn open(core: &Core) -> Session {
-        let mut stream = core.connect();
-        write!(stream, "GET /sse HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nAccept: text/event-stream\r\n\r\n", core.port).unwrap();
-        let mut events = BufReader::new(stream);
-        let head = read_until(&mut events, "\r\n\r\n");
-        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
-        assert!(head.contains("Content-Type: text/event-stream\r\n") && head.contains("Transfer-Encoding: chunked\r\n"), "{head}");
-        let endpoint = read_until(&mut events, "\n\n");
-        let id = endpoint.split("data: /message?sessionId=").nth(1).expect(&endpoint).trim().to_owned();
-        Session { events, id }
-    }
-
-    /// The next reply on the stream, as the core wrote it.
-    fn reply(&mut self) -> String {
-        let text = read_until(&mut self.events, "\n\n");
-        let data = text.split("event: message\ndata: ").nth(1).unwrap_or_else(|| panic!("no message in {text:?}"));
-        data.trim_end().to_owned()
-    }
-}
-
-/// POST one message to a session as the agent does: its status and body.
-fn post(core: &Core, session: &str, message: &str, caller: &[(&str, &str)]) -> (String, String) {
+/// POST one JSON-RPC message to `/mcp`, as the agent's MCP client does: the
+/// response's status and body (a request's reply, or nothing for `202`).
+fn mcp(core: &Core, message: &str, caller: &[(&str, &str)]) -> (String, String) {
     let mut socket = core.connect();
     let headers: String = caller.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
     write!(
         socket,
-        "POST /message?sessionId={session} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\n\r\n{message}",
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\n\r\n{message}",
         core.port,
         message.len()
     )
@@ -344,30 +318,55 @@ fn post(core: &Core, session: &str, message: &str, caller: &[(&str, &str)]) -> (
 }
 
 #[test]
-fn serves_the_agents_mcp_sessions() {
+fn serves_the_agents_mcp_messages() {
     let dir = state_dir("core-mcp");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
-    let mut session = Session::open(&core);
     let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
 
+    // A request gets its reply in the same response.
     let message = r#"{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{}}"#;
-    assert_eq!(post(&core, &session.id, message, &caller), ("HTTP/1.1 202 Accepted".into(), String::new()));
-    assert_eq!(session.reply(), r#"{"error":{"code":-32601,"message":"Method not found: resources/list"},"id":1,"jsonrpc":"2.0"}"#);
-    assert_eq!(post(&core, &session.id, r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#, &caller).0, "HTTP/1.1 202 Accepted");
-    assert_eq!(session.reply(), r#"{"id":"p","jsonrpc":"2.0","result":{}}"#);
-    // Notifications get no reply.
-    assert_eq!(post(&core, &session.id, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &caller).0, "HTTP/1.1 202 Accepted");
-    assert_eq!(post(&core, &session.id, r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#, &[]).0, "HTTP/1.1 202 Accepted");
+    assert_eq!(mcp(&core, message, &caller), ("HTTP/1.1 200 OK".into(), r#"{"error":{"code":-32601,"message":"Method not found: resources/list"},"id":1,"jsonrpc":"2.0"}"#.into()));
+    assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#, &caller), ("HTTP/1.1 200 OK".into(), r#"{"id":"p","jsonrpc":"2.0","result":{}}"#.into()));
+    // A notification gets 202 and no body.
+    assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &caller), ("HTTP/1.1 202 Accepted".into(), String::new()));
+    let init = mcp(&core, r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#, &[]);
     assert_eq!(
-        session.reply(),
-        format!(r#"{{"id":2,"jsonrpc":"2.0","result":{{"capabilities":{{"tools":{{}}}},"protocolVersion":"2024-11-05","serverInfo":{{"name":"endeavor-runtime","version":"{}"}}}}}}"#, env!("CARGO_PKG_VERSION"))
+        init,
+        (
+            "HTTP/1.1 200 OK".into(),
+            format!(r#"{{"id":2,"jsonrpc":"2.0","result":{{"capabilities":{{"tools":{{}}}},"protocolVersion":"2024-11-05","serverInfo":{{"name":"endeavor-runtime","version":"{}"}}}}}}"#, env!("CARGO_PKG_VERSION"))
+        )
     );
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 
-    assert_eq!(post(&core, "nope", message, &caller), ("HTTP/1.1 404 Not Found".into(), r#"{"error":"Session not found"}"#.into()));
-    assert_eq!(post(&core, &session.id, "{nope", &caller), ("HTTP/1.1 400 Bad Request".into(), r#"{"error":"Invalid JSON"}"#.into()));
-    assert_eq!(post(&core, &session.id, "[1]", &caller).0, "HTTP/1.1 400 Bad Request");
+    assert_eq!(mcp(&core, "{nope", &caller), ("HTTP/1.1 400 Bad Request".into(), r#"{"error":"Invalid JSON"}"#.into()));
+    assert_eq!(mcp(&core, "[1]", &caller).0, "HTTP/1.1 400 Bad Request");
+}
+
+#[test]
+fn honors_the_mcp_protocol_version_header() {
+    let dir = state_dir("core-mcp-version");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+    assert_eq!(mcp(&core, ping, &[("MCP-Protocol-Version", "2024-11-05")]), ("HTTP/1.1 200 OK".into(), r#"{"id":1,"jsonrpc":"2.0","result":{}}"#.into()));
+    assert_eq!(mcp(&core, ping, &[]).0, "HTTP/1.1 200 OK", "no header falls back to the spec's default");
+    assert_eq!(mcp(&core, ping, &[("MCP-Protocol-Version", "2099-01-01")]).0, "HTTP/1.1 400 Bad Request");
+}
+
+#[test]
+fn only_post_is_allowed_on_mcp() {
+    let dir = state_dir("core-mcp-methods");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let ask = |request: &str| {
+        let mut socket = core.connect();
+        socket.write_all(request.as_bytes()).unwrap();
+        response(&mut BufReader::new(socket)).0
+    };
+    assert_eq!(ask(&format!("GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n")), "HTTP/1.1 405 Method Not Allowed");
+    assert_eq!(ask(&format!("DELETE /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n")), "HTTP/1.1 405 Method Not Allowed");
 }
 
 #[test]
@@ -375,30 +374,21 @@ fn keeps_concurrent_sessions_apart() {
     let dir = state_dir("core-sessions");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
-    let mut sessions = [Session::open(&core), Session::open(&core)];
-    assert_ne!(sessions[0].id, sessions[1].id);
     std::thread::scope(|scope| {
-        for (n, session) in sessions.iter().enumerate() {
+        for n in 0..2 {
             for i in 0..10 {
-                let (core, id) = (&core, session.id.clone());
+                let core = &core;
                 scope.spawn(move || {
                     let message = format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"tools/call","params":{{"name":"tool_{n}","arguments":{{}}}}}}"#);
-                    assert_eq!(post(core, &id, &message, &[("X-Endeavor-Session", &n.to_string())]).0, "HTTP/1.1 202 Accepted");
+                    let (status, body) = mcp(core, &message, &[("X-Endeavor-Session", &n.to_string())]);
+                    assert_eq!(status, "HTTP/1.1 200 OK");
+                    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    assert_eq!(reply["id"], i);
+                    assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains(&format!("tool_{n}")));
                 });
             }
         }
     });
-    for (n, session) in sessions.iter_mut().enumerate() {
-        let mut ids: Vec<i64> = (0..10)
-            .map(|_| {
-                let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
-                assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains(&format!("tool_{n}")));
-                reply["id"].as_i64().unwrap()
-            })
-            .collect();
-        ids.sort();
-        assert_eq!(ids, (0..10).collect::<Vec<_>>());
-    }
 }
 
 /// One of the app's `/call`s, as the app makes them: the reply's body.
@@ -441,7 +431,6 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let dir = state_dir("core-policy");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
-    let mut session = Session::open(&core);
     let tool = |id: u32, name: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"notebook_id":"n1"}}}}}}"#);
     // The core reads the notebooks' state after every tool call, to tell the app.
     let reads = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).count();
@@ -454,37 +443,31 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
 
     let seven = [("X-Endeavor-Session", "7")];
     let before = reads();
-    post(&core, &session.id, &tool(1, "edit_cell"), &seven);
-    assert_eq!(session.reply(), tool_error(1, "plan_mode", plan_edit));
+    assert_eq!(mcp(&core, &tool(1, "edit_cell"), &seven).1, tool_error(1, "plan_mode", plan_edit));
     assert!(reads() > before, "the app hears the notebooks' state after it");
 
     // Reads pass, and so do other sessions' writes and the app's own.
-    post(&core, &session.id, &tool(2, "read_cell"), &seven);
-    assert_eq!(session.reply(), not_a_notebook(2));
-    post(&core, &session.id, &tool(3, "edit_cell"), &[("X-Endeavor-Session", "8")]);
-    assert_eq!(session.reply(), not_a_notebook(3));
+    assert_eq!(mcp(&core, &tool(2, "read_cell"), &seven).1, not_a_notebook(2));
+    assert_eq!(mcp(&core, &tool(3, "edit_cell"), &[("X-Endeavor-Session", "8")]).1, not_a_notebook(3));
     assert_eq!(app_call(&core, &tool(4, "edit_cell")), not_a_notebook(4));
 
     // Host tools: plan mode refuses run_shell too; without a server, none run.
     let on_server = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
-    post(&core, &session.id, &tool(5, "run_shell"), &on_server);
     let plan_shell = "Plan mode is read-only: `run_shell` would run a command on the server. Finish the plan; the user switches modes to carry it out.";
-    assert_eq!(session.reply(), tool_error(5, "plan_mode", plan_shell));
+    assert_eq!(mcp(&core, &tool(5, "run_shell"), &on_server).1, tool_error(5, "plan_mode", plan_shell));
     let not_here = |tool: &str| format!("`{tool}` is only for sessions on a server. This session runs on this Mac: use your own file and shell tools.");
-    post(&core, &session.id, &tool(6, "run_shell"), &seven);
-    assert_eq!(session.reply(), tool_error(6, "host_tools", &not_here("run_shell")), "the host check comes first");
+    assert_eq!(mcp(&core, &tool(6, "run_shell"), &seven).1, tool_error(6, "host_tools", &not_here("run_shell")), "the host check comes first");
     assert_eq!(app_call(&core, &tool(7, "list_folder")), tool_error(7, "host_tools", &not_here("list_folder")));
 
-    post(&core, &session.id, r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":null}}"#, &seven);
-    assert_eq!(session.reply(), tool_error(8, "invalid_argument", "arguments must be an object"));
+    let null_args = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":null}}"#;
+    assert_eq!(mcp(&core, null_args, &seven).1, tool_error(8, "invalid_argument", "arguments must be an object"));
 
     assert_eq!(app_call(&core, &set.replace("plan", "ask")), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
-    post(&core, &session.id, &tool(9, "edit_cell"), &seven);
-    assert_eq!(session.reply(), not_a_notebook(9));
+    assert_eq!(mcp(&core, &tool(9, "edit_cell"), &seven).1, not_a_notebook(9));
 
     // Every tool says whether it only reads, for Claude Code's own plan mode.
-    post(&core, &session.id, r#"{"jsonrpc":"2.0","id":10,"method":"tools/list"}"#, &seven);
-    let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
+    let (_, body) = mcp(&core, r#"{"jsonrpc":"2.0","id":10,"method":"tools/list"}"#, &seven);
+    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let hint = |name: &str| reply["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
     assert_eq!((hint("edit_cell"), hint("read_cell"), hint("allow_execution")), (false.into(), true.into(), false.into()));
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")), "Julia answers only the adapter's calls");
@@ -499,7 +482,6 @@ fn temp_folder(name: &str) -> std::path::PathBuf {
 /// A session on a server, calling host tools.
 struct OnServer<'a> {
     core: &'a Core,
-    session: Session,
     next: u32,
 }
 
@@ -509,8 +491,9 @@ impl OnServer<'_> {
         self.next += 1;
         let message = serde_json::json!({ "jsonrpc": "2.0", "id": self.next, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
         let caller = [("X-Endeavor-Session", owner), ("X-Endeavor-Host", "gpu-box")];
-        assert_eq!(post(self.core, &self.session.id, &message.to_string(), &caller).0, "HTTP/1.1 202 Accepted");
-        let reply: serde_json::Value = serde_json::from_str(&self.session.reply()).unwrap();
+        let (status, body) = mcp(self.core, &message.to_string(), &caller);
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(reply["id"], self.next);
         let body: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         if reply["result"]["isError"] == true { Err(body) } else { Ok(body) }
@@ -526,10 +509,9 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     let dir = state_dir("core-host-list");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
-    let mut session = Session::open(&core);
     let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
-    post(&core, &session.id, list, &[("X-Endeavor-Host", "gpu-box")]);
-    let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
+    let (_, body) = mcp(&core, list, &[("X-Endeavor-Host", "gpu-box")]);
+    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let tools = reply["result"]["tools"].as_array().unwrap();
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names.len(), 29);
@@ -537,11 +519,10 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     let hints: Vec<_> = tools[26..].iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
     assert_eq!(hints, [true, true, false]);
     assert_eq!(tools[28]["inputSchema"]["required"], serde_json::json!(["command"]));
-    post(&core, &session.id, list, &[]);
-    assert!(!session.reply().contains("list_folder"), "not on this Mac");
+    assert!(!mcp(&core, list, &[]).1.contains("list_folder"), "not on this Mac");
 
     // Answered here, and the app hears the notebooks' state after each call.
-    let mut server = OnServer { core: &core, session, next: 1 };
+    let mut server = OnServer { core: &core, next: 1 };
     let reads = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).count();
     let before = reads();
     server.run(serde_json::json!({ "command": "true" }));
@@ -558,7 +539,7 @@ fn list_folder_and_read_file_read_the_server() {
     std::fs::write(home.join(".env"), "KEY=1\n").unwrap();
     std::fs::write(home.join("a.txt"), "hello\n").unwrap();
     let core = Core::start_with_home(&dir, &bridge, home.to_str().unwrap());
-    let mut server = OnServer { core: &core, session: Session::open(&core), next: 0 };
+    let mut server = OnServer { core: &core, next: 0 };
     let home_path = home.to_str().unwrap();
 
     for path in ["~", "", "  "] {
@@ -652,7 +633,7 @@ fn run_shell_runs_in_the_login_shell_and_keeps_to_its_limits() {
     let bridge = FakeBridge::start(&dir);
     let home = temp_folder("core-host-shell-home");
     let core = Core::start_with_home(&dir, &bridge, home.to_str().unwrap());
-    let mut server = OnServer { core: &core, session: Session::open(&core), next: 0 };
+    let mut server = OnServer { core: &core, next: 0 };
     let folder = temp_folder("core-host-shell-cwd");
 
     let ran = server.run(serde_json::json!({ "command": "echo out; echo err >&2; pwd; exit 3", "cwd": folder }));
@@ -711,7 +692,7 @@ fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
     // The core reads notebooks from Julia on its own; those aren't passed-on requests.
     let passed_on = || bridge.seen().iter().filter(|s| !s.line.starts_with("POST /adapter") && !s.line.starts_with("GET /notifications")).count();
     let seen_before = passed_on();
-    for route in ["GET /sse", "POST /message?sessionId=x", "POST /call", "GET /events", "POST /dispatch", "GET /nope", "GET /health"] {
+    for route in ["POST /mcp", "POST /call", "GET /events", "POST /dispatch", "GET /nope", "GET /health"] {
         let request = |headers: &str| format!("{route} HTTP/1.1\r\n{headers}Content-Length: 2\r\n\r\n{{}}");
         if route != "GET /health" {
             assert_eq!(ask(&request("Host: 127.0.0.1\r\n")), refused("401 Unauthorized", "unauthorized"), "{route}");
@@ -726,8 +707,8 @@ fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
     }
     assert_eq!(passed_on(), seen_before, "nothing refused reaches Julia");
     for host in ["localhost", "[::1]:9", "127.0.0.1:9"] {
-        let request = format!("POST /message?sessionId=x HTTP/1.1\r\nHost: {host}\r\n{auth}Content-Length: 2\r\n\r\n{{}}");
-        assert_eq!(ask(&request).0, "HTTP/1.1 404 Not Found", "{host} is loopback");
+        let request = format!("POST /mcp HTTP/1.1\r\nHost: {host}\r\n{auth}Content-Length: 2\r\n\r\n{{}}");
+        assert_eq!(ask(&request).0, "HTTP/1.1 202 Accepted", "{host} is loopback");
     }
     assert_eq!(ask(&format!("GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")), ("HTTP/1.1 200 OK".into(), "ok".into()), "no token needed");
 
