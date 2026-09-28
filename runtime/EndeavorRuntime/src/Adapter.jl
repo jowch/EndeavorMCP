@@ -1,11 +1,13 @@
 # The Pluto adapter's side of the engine interface (docs/runtime-core.md). The
-# core (`endeavor-remote core`) calls `POST /adapter` with
-#   {"method": "snapshot" | "graph" | "shutdown", "params": {"notebook_id": ...}}
-# and reads the reply's "result" or "error". What happens in Pluto reaches it as
-# notifications on `GET /notifications`, one `data: {"method", "params"}` line
-# each: notebook_opened, notebook_shut_down (it left the session), file_saved,
-# execution_done, cell_state (every cell's code and run state: Pluto's hook
-# doesn't say which cell changed) and topology_changed.
+# core (`endeavor-remote core`) calls `POST /adapter` with {"method", "params"}
+# and reads the reply's "result" or "error". The methods (see `adapter_call`):
+# status, open, new, and for a notebook_id snapshot, graph, shutdown, apply,
+# run, interrupt, allow_execution, render_png and validate. What happens in
+# Pluto reaches the core as notifications on `GET /notifications`, one
+# `data: {"method", "params"}` line each: notebook_opened, notebook_shut_down
+# (it left the session), file_saved, execution_done, cell_state (every cell's
+# code and run state: Pluto's hook doesn't say which cell changed),
+# topology_changed, and run_finished (the cells an unwaited run finished).
 
 const _NOTIFY_LOCK = ReentrantLock()
 const _NOTIFY_SUBSCRIBERS = Set{Channel{String}}()
@@ -83,6 +85,10 @@ function _snapshot_cell(cell)
         "last_run" => cell.output.last_run_timestamp,
         "runtime"  => cell.runtime,
         "output"   => _serialize_output(cell),
+        # Boilerplate the tools hide: Pluto's package cells, the `@bind` shim,
+        # and cells Pluto comments out in the file.
+        "hidden"   => _is_manifest_cell(cell.cell_id) || _is_fake_bind_shim(cell) || Pluto.must_be_commented_in_file(cell),
+        "markdown" => _is_markdown_cell(cell),
     )
     err = _cell_output_error(cell)
     err !== nothing && (d["error"] = err)
@@ -103,19 +109,35 @@ function snapshot(nb)
     )
 end
 
-# Pluto's dependency data as of the last run or staged edit: no reanalysis.
-function graph(nb)
-    node(c) = nb.topology.nodes[c]   # a default dict: an unanalysed cell is an empty node
+# Pluto's dependency data as of the last run or staged edit (no reanalysis),
+# cells in the order Pluto analysed them. `fresh` analyses the notebook as it is
+# now without keeping the result; `refresh` first updates the dependency cache
+# Pluto's page shows; `edges` adds each cell's direct upstream and downstream cells.
+function graph(nb; fresh::Bool=false, refresh::Bool=false, edges::Bool=false)
+    refresh && Pluto.update_dependency_cache!(nb)
+    topology = fresh ? Pluto.updated_topology(nb.topology, nb, nb.cells) : nb.topology
+    order = fresh ? Pluto.PlutoDependencyExplorer.topological_order(topology) : Pluto.topological_order(nb)
     names(syms) = sort!(string.(collect(syms)))
+    ids(cells) = [string(c.cell_id) for c in cells]
+    function cell(c)
+        node = topology.nodes[c]
+        d = Dict{String,Any}(
+            "cell_id"     => string(c.cell_id),
+            "definitions" => names(node.definitions),
+            "functions"   => names(node.funcdefs_without_signatures),
+            "references"  => names(node.references),
+        )
+        if edges
+            d["upstream"] = ids(Pluto.PlutoDependencyExplorer.where_assigned(topology, node.references))
+            d["downstream"] = ids(Pluto.PlutoDependencyExplorer.where_referenced(topology, c))
+        end
+        return d
+    end
     Dict{String,Any}(
         "notebook_id" => string(nb.notebook_id),
-        "cells" => [Dict{String,Any}(
-            "cell_id"     => string(id),
-            "definitions" => names(node(nb.cells_dict[id]).definitions),
-            "functions"   => names(node(nb.cells_dict[id]).funcdefs_without_signatures),
-            "references"  => names(node(nb.cells_dict[id]).references),
-        ) for id in nb.cell_order],
-        "order" => [string(c.cell_id) for c in Pluto.topological_order(nb).runnable],
+        "cells"       => [cell(c) for c in Pluto.PlutoDependencyExplorer.all_cells(topology)],
+        "order"       => ids(order.runnable),
+        "errable"     => ids(keys(order.errable)),
     )
 end
 
@@ -126,16 +148,163 @@ function shutdown_notebook!(session, nb)
     return Dict{String,Any}("safe_preview" => safe_preview)
 end
 
+_adapter_cell(nb, id) = nb.cells_dict[UUID(id)]
+
+# Change the notebook. Each op sets a cell's code, inserts a new cell at an
+# index of the new order, deletes a cell, moves one to an index, or folds one. A
+# set_code with `expected` is refused, before any op applies, if the cell's code
+# isn't that. Pluto's page diffs `cell_order` by reference, so each change
+# assigns a new vector. Cells whose code changed are analysed; the file is
+# saved and the page updated.
+function apply!(session, nb, ops)
+    for op in ops
+        if op["op"] == "set_code" && haskey(op, "expected")
+            cell = _adapter_cell(nb, op["cell_id"])
+            cell.code == op["expected"] ||
+                throw(ArgumentError("stale_read::Cell $(cell.cell_id) changed since last read; call read_cell again"))
+        end
+    end
+    changed = Pluto.Cell[]
+    inserted = String[]
+    for op in ops
+        kind = op["op"]
+        if kind == "set_code"
+            cell = _adapter_cell(nb, op["cell_id"])
+            cell.code = op["code"]
+            push!(changed, cell)
+        elseif kind == "insert"
+            cell = Pluto.Cell(; code=string(op["code"]), code_folded=op["folded"])
+            nb.cells_dict[cell.cell_id] = cell
+            order = collect(nb.cell_order)
+            insert!(order, op["index"] + 1, cell.cell_id)
+            nb.cell_order = order
+            push!(changed, cell)
+            push!(inserted, string(cell.cell_id))
+        elseif kind == "delete"
+            id = UUID(op["cell_id"])
+            nb.cell_order = filter(!=(id), nb.cell_order)
+            delete!(nb.cells_dict, id)
+        elseif kind == "move"
+            id = UUID(op["cell_id"])
+            order = filter(!=(id), nb.cell_order)
+            insert!(order, op["index"] + 1, id)
+            nb.cell_order = order
+        elseif kind == "fold"
+            _adapter_cell(nb, op["cell_id"]).code_folded = op["folded"]
+        else
+            throw(ArgumentError("unknown_op::Unknown op: '$kind'"))
+        end
+    end
+    isempty(changed) || (nb.topology = Pluto.updated_topology(nb.topology, nb, changed))
+    Pluto.save_notebook(session, nb)
+    _notify_browser(session, nb)
+    return Dict{String,Any}("inserted" => inserted)
+end
+
+# Run cells; none is Pluto's reactive cleanup after a delete. Not accepted when
+# the notebook won't run code (safe preview, a stopped process). With `wait`,
+# the reply says which cells finished within `timeout` seconds each; without, a
+# `run_finished` notification says so later.
+function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
+    accepted = Pluto.will_run_code(nb)
+    # Pluto marks cells queued only inside its (possibly async) run task, after
+    # package sync; mark them now, as its own run button does, so a caller that
+    # looks right away sees them waiting.
+    accepted && foreach(c -> c.queued = true, cells)
+    Pluto.update_save_run!(session, nb, cells; run_async=!wait, save=true)
+    result = Dict{String,Any}("accepted" => accepted, "process_status" => string(nb.process_status))
+    if accepted && wait
+        completed, timed_out = _wait_cells!(cells; timeout)
+        result["completed"] = [string(id) for id in completed]
+        result["timed_out"] = [string(id) for id in timed_out]
+    elseif accepted && !isempty(cells)
+        @async begin
+            completed, = _wait_cells!(cells; timeout)
+            notify!("run_finished", Dict{String,Any}("notebook_id" => string(nb.notebook_id), "cells" => [string(id) for id in completed]))
+        end
+    end
+    _notify_browser(session, nb)
+    return result
+end
+
+# Pluto's "Run notebook code" for a notebook in safe preview: restart its
+# process, then run every cell (`run`) or leave it to start on the next run.
+function allow_execution!(session, nb, run::Bool, timeout::Real)
+    ps = nb.process_status
+    ps === Pluto.ProcessStatus.ready &&
+        return Dict{String,Any}("already_allowed" => true, "ran" => false, "process_status" => string(ps))
+    ps !== Pluto.ProcessStatus.waiting_for_permission &&
+        throw(ArgumentError("execution_not_gated::Notebook is not in safe preview (process_status=$ps)"))
+    haskey(nb.metadata, "risky_file_source") && throw(ArgumentError(
+        "risky_source::Cannot allow execution for risky remote sources via MCP; ask the user to run it from the notebook pane",
+    ))
+    nb.process_status = Pluto.ProcessStatus.waiting_to_restart
+    session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(nb)
+    _notify_browser(session, nb)
+    Pluto.SessionActions.shutdown(session, nb; keep_in_session=true, async=true, verbose=false)
+    if run
+        nb.process_status = Pluto.ProcessStatus.starting
+        _notify_browser(session, nb)
+        run_cells!(session, nb, collect(nb.cells); wait=false, timeout)
+    else
+        nb.process_status = Pluto.ProcessStatus.ready
+        _notify_browser(session, nb)
+    end
+    return Dict{String,Any}("already_allowed" => false, "ran" => run, "process_status" => string(nb.process_status))
+end
+
+function open_notebook(session, path::AbstractString, run::Bool)
+    nb = try
+        Pluto.SessionActions.open(session, path; run_async = true, execution_allowed = run)
+    catch e
+        # Printing this exception walks the whole Notebook and never finishes.
+        e isa Pluto.SessionActions.NotebookIsRunningException || rethrow()
+        throw(ArgumentError("notebook_already_open::'$path' is already open as notebook_id $(e.notebook.notebook_id); use that id"))
+    end
+    return Dict{String,Any}("notebook_id" => string(nb.notebook_id), "path" => nb.path, "process_status" => string(nb.process_status))
+end
+
+# A new notebook at `path`, else named as Pluto names them in `folder`, else in
+# Pluto's own folder. Pluto writes the file (never a hand-written header), then
+# it opens and runs like any other; its cells come back so the caller can edit them.
+function new_notebook(session, path, folder)
+    nb = if path !== nothing
+        Pluto.emptynotebook(path)
+    elseif folder !== nothing
+        Pluto.emptynotebook(Pluto.numbered_until_new(joinpath(folder, Pluto.cutename()); create_file=false))
+    else
+        Pluto.emptynotebook()
+    end
+    Pluto.save_notebook(nb, nb.path)
+    opened = open_notebook(session, nb.path, true)
+    opened["cells"] = [Dict{String,Any}("cell_id" => string(c.cell_id), "code" => c.code) for c in nb.cells]
+    return opened
+end
+
+function render_png(session, nb, cell)
+    png = _cell_png(session, nb, cell)
+    return Dict{String,Any}("png" => png === nothing ? nothing : base64encode(png), "mime" => string(cell.output.mime))
+end
+
 function adapter_call(session, method::AbstractString, params)
     session === nothing && throw(ArgumentError("pluto_not_running::Pluto is not running yet."))
+    method == "status" && return session_status_dict()
+    method == "open" && return open_notebook(session, params["path"], params["run"])
+    method == "new" && return new_notebook(session, get(params, "path", nothing), get(params, "folder", nothing))
     id = get(params, "notebook_id", nothing)
     if method == "snapshot" && id === nothing
         return Dict{String,Any}("notebooks" => [snapshot(nb) for nb in values(session.notebooks)])
     end
     nb = _get_notebook(session, string(id))
     method == "snapshot" && return snapshot(nb)
-    method == "graph" && return graph(nb)
+    method == "graph" && return graph(nb; fresh=get(params, "fresh", false), refresh=get(params, "refresh", false), edges=get(params, "edges", false))
     method == "shutdown" && return shutdown_notebook!(session, nb)
+    method == "apply" && return apply!(session, nb, params["ops"])
+    method == "run" && return run_cells!(session, nb, [_adapter_cell(nb, c) for c in params["cells"]]; wait=params["wait"], timeout=params["timeout"])
+    method == "interrupt" && return Dict{String,Any}("interrupted" => Pluto.WorkspaceManager.interrupt_workspace((session, nb); verbose=false))
+    method == "allow_execution" && return allow_execution!(session, nb, params["run"], params["timeout"])
+    method == "render_png" && return render_png(session, nb, _adapter_cell(nb, params["cell_id"]))
+    method == "validate" && return Dict{String,Any}("errors" => _parse_validation_errors(nb, _adapter_cell(nb, params["cell_id"]), params["code"]))
     throw(ArgumentError("unknown_method::Unknown adapter method: '$method'"))
 end
 

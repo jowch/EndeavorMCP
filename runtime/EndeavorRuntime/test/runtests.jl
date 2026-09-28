@@ -1591,15 +1591,17 @@ end
             @test (snap["path"], snap["cell_order"], snap["execution_allowed"], snap["safe_preview"], snap["pending_run"]) ==
                   (abspath(fixture), [X, Y], true, false, [])
             y = snap["cells"][2]
-            @test (y["cell_id"], y["code"], y["folded"], y["running"], y["queued"], y["errored"], y["output"]) ==
-                  (Y, "y = x * 7", false, false, false, false, "42")
+            @test (y["cell_id"], y["code"], y["folded"], y["running"], y["queued"], y["errored"], y["output"], y["hidden"], y["markdown"]) ==
+                  (Y, "y = x * 7", false, false, false, false, "42", false, false)
             @test y["last_run"] > 0 && y["runtime"] isa Integer && !haskey(y, "error")
             graph = adapter("graph", Dict("notebook_id" => nid))["result"]
             @test graph["cells"] == [
                 Dict("cell_id" => X, "definitions" => ["x"], "functions" => [], "references" => []),
                 Dict("cell_id" => Y, "definitions" => ["y"], "functions" => [], "references" => ["*", "x"]),
             ]
-            @test graph["order"] == [X, Y]
+            @test (graph["order"], graph["errable"]) == ([X, Y], [])
+            edges = adapter("graph", Dict("notebook_id" => nid, "edges" => true))["result"]["cells"]
+            @test [(c["upstream"], c["downstream"]) for c in edges] == [([], [Y]), ([X], [])]
 
             # An edit through the tools: staged, its code in the next cell_state, the graph changed.
             tool("read_cell", Dict("notebook_id" => nid, "cell_id" => Y))
@@ -1631,6 +1633,12 @@ end
                   Dict("error" => "KeyError: key \"notebook_not_found::No notebook with id '$missing' in the current session\" not found")
             @test adapter("graph", Dict("notebook_id" => "nope")) == Dict("error" => "ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nope'")
             @test adapter("render", Dict("notebook_id" => nid)) == Dict("error" => "ArgumentError: unknown_method::Unknown adapter method: 'render'")
+            # Analysing the notebook as it is now, without keeping the result.
+            nb.cells_dict[UUID(X)].code = "x = 5; w = 1"
+            fresh = adapter("graph", Dict("notebook_id" => nid, "fresh" => true))["result"]
+            @test fresh["cells"][1]["definitions"] == ["w", "x"]
+            @test adapter("graph", Dict("notebook_id" => nid))["result"]["cells"][1]["definitions"] == ["x"]
+            nb.cells_dict[UUID(X)].code = "x = 5"
             @test HTTP.post("http://127.0.0.1:$mcp_port/adapter", [], "{nope"; status_exception=false).status == 400
 
             # Shutting it down: whether it was in safe preview, and its staging goes.
@@ -1642,6 +1650,115 @@ end
             previewed = tool("open_notebook", Dict("path" => fresh_fixture()))["notebook_id"]
             @test adapter("snapshot", Dict("notebook_id" => previewed))["result"]["safe_preview"]
             @test adapter("shutdown", Dict("notebook_id" => previewed)) == Dict("result" => Dict("safe_preview" => true))
+            close(sock)
+        finally
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
+    @testset "adapter: changing, running, opening and making notebooks" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        pluto_port = 1650 + rand(0:99)
+        mcp_port = 2850 + rand(0:99)
+        EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port)
+        X, Y = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+        try
+            EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
+            sock = Sockets.connect("127.0.0.1", mcp_port)
+            write(sock, "GET /notifications HTTP/1.0\r\nHost: 127.0.0.1:$mcp_port\r\n\r\n")
+            notes = Channel{Dict{String,Any}}(Inf)
+            @async for line in eachline(sock)
+                startswith(line, "data: ") && put!(notes, JSON.parse(line[7:end]))
+            end
+            function next_note(method; nid = nothing)
+                deadline = time() + 60
+                while time() < deadline
+                    timedwait(() -> isready(notes), max(0.0, deadline - time())) == :ok || break
+                    note = take!(notes)
+                    note["method"] == method && (nid === nothing || note["params"]["notebook_id"] == nid) && return note["params"]
+                end
+                error("no $method notification")
+            end
+            adapter(method, params) = JSON.parse(String(HTTP.post("http://127.0.0.1:$mcp_port/adapter", [],
+                JSON.json(Dict("method" => method, "params" => params)); readtimeout=120).body))
+            function result(method, params)
+                reply = adapter(method, params)
+                haskey(reply, "error") && error(reply["error"])
+                return reply["result"]
+            end
+            sleep(0.5)
+
+            fixture = fresh_fixture()
+            opened = result("open", Dict("path" => fixture, "run" => true))
+            nid = opened["notebook_id"]
+            @test (opened["path"], opened["process_status"]) == (abspath(fixture), "starting")
+            @test next_note("execution_done"; nid) == Dict("notebook_id" => nid)
+            @test adapter("open", Dict("path" => fixture, "run" => false)) == Dict("error" =>
+                "ArgumentError: notebook_already_open::'$fixture' is already open as notebook_id $nid; use that id")
+            nb = EndeavorRuntime.standalone_session().notebooks[UUID(nid)]
+            ops(list...) = Dict("notebook_id" => nid, "ops" => collect(list))
+
+            # A cell whose code isn't what the core expects refuses the whole change.
+            @test adapter("apply", ops(
+                Dict("op" => "fold", "cell_id" => X, "folded" => true),
+                Dict("op" => "set_code", "cell_id" => Y, "code" => "y = 0", "expected" => "y = 1"),
+            )) == Dict("error" => "ArgumentError: stale_read::Cell $Y changed since last read; call read_cell again")
+            @test !nb.cells_dict[UUID(X)].code_folded
+
+            # Set code, insert, fold: saved, analysed, and a new cell_order vector.
+            order_before = nb.cell_order
+            applied = result("apply", ops(
+                Dict("op" => "set_code", "cell_id" => Y, "code" => "y = x * 8", "expected" => "y = x * 7"),
+                Dict("op" => "insert", "code" => "z = y + 1", "folded" => true, "index" => 2),
+                Dict("op" => "fold", "cell_id" => X, "folded" => true),
+            ))
+            z = only(applied["inserted"])
+            @test nb.cell_order !== order_before
+            @test string.(nb.cell_order) == [X, Y, z]
+            @test nb.cells_dict[UUID(z)].code_folded && nb.cells_dict[UUID(X)].code_folded
+            saved = read(fixture, String)
+            @test occursin("y = x * 8", saved) && occursin(Pluto._order_delimiter_folded * X, saved)
+            graph = result("graph", Dict("notebook_id" => nid, "edges" => true))
+            @test [(c["cell_id"], c["upstream"], c["downstream"]) for c in graph["cells"]] == [(X, [], [Y]), (Y, [X], [z]), (z, [Y], [])]
+
+            # Runs: waited for, then not (a notification says when it's done).
+            @test result("run", Dict("notebook_id" => nid, "cells" => [Y, z], "wait" => true, "timeout" => 60)) ==
+                  Dict("accepted" => true, "process_status" => "ready", "completed" => [Y, z], "timed_out" => [])
+            @test nb.cells_dict[UUID(z)].output.body == "49"
+            @test result("run", Dict("notebook_id" => nid, "cells" => [X], "wait" => false, "timeout" => 60)) ==
+                  Dict("accepted" => true, "process_status" => "ready")
+            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [X])
+
+            # Move and delete, then the cleanup run that follows a delete.
+            result("apply", ops(Dict("op" => "move", "cell_id" => z, "index" => 0)))
+            @test string.(nb.cell_order) == [z, X, Y]
+            result("apply", ops(Dict("op" => "delete", "cell_id" => z)))
+            @test result("run", Dict("notebook_id" => nid, "cells" => [], "wait" => false, "timeout" => 60))["accepted"]
+            @test string.(nb.cell_order) == [X, Y] && !haskey(nb.cells_dict, UUID(z))
+
+            @test result("validate", Dict("notebook_id" => nid, "cell_id" => X, "code" => "a = 1\nb = 2"))["errors"][1]["type"] == "pluto_multi_expression"
+            @test result("validate", Dict("notebook_id" => nid, "cell_id" => X, "code" => "a = 1"))["errors"] == []
+            @test result("render_png", Dict("notebook_id" => nid, "cell_id" => X)) == Dict("png" => nothing, "mime" => "text/plain")
+            @test result("interrupt", Dict("notebook_id" => nid))["interrupted"] isa Bool
+            @test result("status", Dict())["pluto"] == "running"
+
+            # Safe preview: runs aren't accepted until execution is allowed.
+            previewed = result("open", Dict("path" => fresh_fixture(), "run" => false))["notebook_id"]
+            @test result("run", Dict("notebook_id" => previewed, "cells" => [X], "wait" => true, "timeout" => 60)) ==
+                  Dict("accepted" => false, "process_status" => "waiting_for_permission")
+            @test result("allow_execution", Dict("notebook_id" => previewed, "run" => true, "timeout" => 60)) ==
+                  Dict("already_allowed" => false, "ran" => true, "process_status" => "starting")
+            @test X in next_note("run_finished"; nid=previewed)["cells"]
+            @test result("allow_execution", Dict("notebook_id" => previewed, "run" => false, "timeout" => 60)) ==
+                  Dict("already_allowed" => true, "ran" => false, "process_status" => "ready")
+
+            # New notebooks: at a path, or named by Pluto in a folder.
+            dir = realpath(mktempdir())
+            made = result("new", Dict("path" => joinpath(dir, "made.jl")))
+            @test made["path"] == joinpath(dir, "made.jl") && isfile(made["path"])
+            @test [c["code"] for c in made["cells"]] == [""]
+            named = result("new", Dict("folder" => dir))
+            @test dirname(named["path"]) == dir && endswith(named["path"], ".jl")
             close(sock)
         finally
             EndeavorRuntime.stop_pluto_stack!()
