@@ -89,8 +89,8 @@ notebook when it does. The core keeps one `AdapterProcess` per engine kind;
 what differs per kind (launch command, detection, page adapter, skills) is
 the small `Backend` enum [marimo.md](marimo.md) proposes for the app.
 
-All of these are built (steps 5a and 5b) but `restart`; nothing calls
-`interrupt` yet.
+All of these are built (steps 5a and 5b, and `restart` and `move` for the
+app's notebook menu); nothing calls `interrupt` yet.
 
 Core → engine:
 
@@ -100,10 +100,12 @@ Core → engine:
 | `shutdown(nid)` | whether it was in safe preview |
 | `allow_execution(nid, run, timeout)` | whether it was already allowed, whether it ran, process status |
 | `snapshot(nid)` | path, order, process status, whether execution is allowed, whether it's in safe preview, per cell: code, folded, running, queued, errored, last run time, runtime, output summary or structured error, whether the tools hide it (boilerplate such as Pluto's package cells) and whether it's markdown. Without `nid`, every open notebook, in the engine's order |
-| `graph(nid, fresh?, refresh?, edges?)` | per cell, in the engine's order: definitions, function names, references, as of the engine's last analysis (`fresh`: of the notebook as it is now, not kept); with `edges`, each cell's direct upstream and downstream cells; the runnable cells in run order, and the rest |
+| `graph(nid, fresh?, refresh?, edges?, packages?)` | per cell, in the engine's order: definitions, function names, references, as of the engine's last analysis (`fresh`: of the notebook as it is now, not kept); with `edges`, each cell's direct upstream and downstream cells; with `packages`, the packages each cell loads; the runnable cells in run order, and the rest |
 | `apply(nid, ops)` | ops: set code (refused, before any op applies, if a cell's code isn't the `expected` code), insert at an index, delete, move to an index, fold. The engine saves the file and updates its own UI. The inserted cells' ids |
 | `run(nid, cells, wait, timeout)` | accepted, or not because gated (with the process status); waited for, which cells finished and which timed out |
-| `interrupt(nid)`, `restart(nid)` | — |
+| `interrupt(nid)` | — |
+| `restart(nid, timeout)` | the engine's own restart: a new process, then every cell runs (refused in safe preview) |
+| `move(nid, path)` | the file moved to `path` (checked by the core), and its new path |
 | `render_png(nid, cell)` | base64 PNG or none, and the output's MIME type |
 | `validate(nid, cell, code)` | parse errors |
 | `status()` | the engine's own status (`pluto_session_status`) |
@@ -206,6 +208,11 @@ ending in an app that behaves as before:
      `endeavor/shutdown`. Lists Julia kept in hash tables (`pending_run`,
      `stale_cell_ids`, `search_code`, `upstream`, `downstream`) now come in
      notebook order.
+   - Rebased onto `main`, the core also answers what `main` added to Julia
+     meanwhile: `list_notebooks`' `this_session`, the packages in
+     `run_preview`, and the app's `endeavor/restart_notebook`,
+     `endeavor/move_notebook`, `endeavor/file_info` and
+     `endeavor/new_notebook`.
 
 ## Open questions
 
