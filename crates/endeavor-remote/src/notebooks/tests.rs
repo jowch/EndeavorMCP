@@ -32,6 +32,9 @@ struct Engine {
     notebooks: Mutex<Vec<FakeNotebook>>,
     tool: Mutex<Option<Tool>>,
     shut_down: Mutex<Vec<String>>,
+    /// A tool call with `"hold": true` says it has started, then waits here
+    /// before the engine answers it, like an edit waiting for its run.
+    hold: Mutex<Option<(Sender<()>, Receiver<()>)>>,
 }
 
 impl Engine {
@@ -80,6 +83,11 @@ impl Upstream for Engine {
                 Err(error) => json!({ "error": error }),
             },
             _ => {
+                if message["params"]["arguments"]["hold"] == true {
+                    let (started, release) = self.hold.lock().unwrap().take().expect("a hold");
+                    started.send(()).unwrap();
+                    release.recv().unwrap();
+                }
                 let mut tool = self.tool.lock().unwrap();
                 let mut notebooks = self.notebooks.lock().unwrap();
                 let params = &message["params"];
@@ -256,6 +264,46 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     s.engine.with(NB, |nb| nb.cells[1].running = true);
     s.notebooks.publish();
     assert_eq!(next(&rx)["notebooks"][0]["running"], json!([X, Y]));
+}
+
+#[test]
+fn an_edit_waiting_for_its_run_holds_up_no_other_edit() {
+    let s = setup();
+    let (a, b) = (id(1), id(2));
+    s.engine.open(&a, "/n/a.jl", &[(X, "x = 1", &[]), (Y, "y = 1", &[])]);
+    s.engine.open(&b, "/n/b.jl", &[(X, "x = 1", &[])]);
+    s.tools(|notebooks, _, args| {
+        let notebook = notebooks.iter_mut().find(|n| n.id == args["notebook_id"].as_str().unwrap()).unwrap();
+        let cell = args["cell_id"].as_str().unwrap();
+        notebook.cells.iter_mut().find(|c| c.id == cell).unwrap().code = args["code"].as_str().unwrap().into();
+        notebook.pending.push(cell.into());
+        Ok(json!({ "cell_id": cell, "code": args["code"] }))
+    });
+    let (started_tx, started) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    *s.engine.hold.lock().unwrap() = Some((started_tx, release_rx));
+    let (s, a, b) = (&s, &a, &b);
+    std::thread::scope(|scope| {
+        let held = scope.spawn(|| s.call("7", "edit_cell", json!({ "notebook_id": a, "cell_id": X, "code": "x = 2", "run_after": true, "hold": true })));
+        started.recv_timeout(Duration::from_secs(5)).expect("the held call started");
+        let (done_tx, done) = mpsc::channel();
+        scope.spawn(move || {
+            let other_notebook = s.call("8", "edit_cell", json!({ "notebook_id": b, "cell_id": X, "code": "x = 3" }));
+            let other_cell = s.call("7", "edit_cell", json!({ "notebook_id": a, "cell_id": Y, "code": "y = 2" }));
+            done_tx.send((other_notebook, other_cell)).unwrap();
+        });
+        let while_held = done.recv_timeout(Duration::from_secs(5));
+        release.send(()).unwrap();
+        let (other_notebook, other_cell) = while_held.expect("edits while another waits");
+        assert!(other_notebook.is_ok() && other_cell.is_ok());
+        assert!(held.join().unwrap().is_ok());
+    });
+    let (first, _) = s.notebooks.subscribe().unwrap();
+    let first: Value = serde_json::from_str(&first).unwrap();
+    for (notebook, edited, before) in [(a, X, "x = 1"), (a, Y, "y = 1"), (b, X, "x = 1")] {
+        let state = cell(&first, notebook, edited);
+        assert_eq!((&state["author"], &state["before"]), (&json!("agent"), &json!(before)), "{notebook} {edited}");
+    }
 }
 
 #[test]

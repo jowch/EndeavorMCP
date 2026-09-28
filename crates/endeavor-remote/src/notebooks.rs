@@ -137,8 +137,6 @@ pub struct Notebooks {
     /// Held while reading the engine's state and telling the app, so events go out in order.
     publishing: Mutex<()>,
     events: Mutex<Events>,
-    /// Held across an edit tool call, so the code it replaced is what it replaced.
-    editing: Mutex<()>,
 }
 
 /// One notebook as the engine's `snapshot` reports it.
@@ -196,7 +194,6 @@ impl Notebooks {
             state: Mutex::new(State { notebooks: HashMap::new(), idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
-            editing: Mutex::default(),
         }
     }
 
@@ -448,9 +445,13 @@ impl Notebooks {
 
     /// Pass a tool call to the engine (`forward`), noting what the core keeps
     /// from it: the agent's edits, and the notebook a session opens first.
+    ///
+    /// The code read just before an edit is the code it replaced whenever the
+    /// edit succeeds, with nothing held across the call (a run it waits for
+    /// can take minutes): the engine refuses an edit to a cell whose code
+    /// changed since the caller read it, and the caller read it before this.
     pub fn forward_tool(&self, owner: &str, tool: &str, arguments: &Value, forward: impl FnOnce() -> io::Result<String>) -> io::Result<String> {
         let editing = EDIT_TOOLS.contains(&tool);
-        let _editing = editing.then(|| self.editing.lock().unwrap());
         let id = arguments.get("notebook_id").map(julia_string).and_then(|id| parse_uuid(&id));
         let before = id.as_deref().filter(|_| editing).and_then(|id| self.snapshot(id).ok());
         let reply = forward()?;

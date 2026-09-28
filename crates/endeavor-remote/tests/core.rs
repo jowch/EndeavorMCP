@@ -692,7 +692,9 @@ fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
     };
     let auth = format!("Authorization: Bearer {TOKEN}\r\n");
     let refused = |status: &str, error: &str| (format!("HTTP/1.1 {status}"), format!(r#"{{"error":"{error}"}}"#));
-    let seen_before = bridge.seen().len();
+    // The core reads notebooks from Julia on its own; those aren't passed-on requests.
+    let passed_on = || bridge.seen().iter().filter(|s| !s.line.starts_with("POST /adapter") && !s.line.starts_with("GET /notifications")).count();
+    let seen_before = passed_on();
     for route in ["GET /sse", "POST /message?sessionId=x", "POST /call", "GET /events", "POST /dispatch", "GET /nope", "GET /health"] {
         let request = |headers: &str| format!("{route} HTTP/1.1\r\n{headers}Content-Length: 2\r\n\r\n{{}}");
         if route != "GET /health" {
@@ -706,7 +708,7 @@ fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
         assert_eq!(ask(&request(&format!("Host: 127.0.0.1.evil.example\r\n{auth}"))), refused("403 Forbidden", "host_not_loopback"));
         assert_eq!(ask(&request(&auth)), refused("403 Forbidden", "host_not_loopback"));
     }
-    assert_eq!(bridge.seen().len(), seen_before, "nothing refused reaches Julia");
+    assert_eq!(passed_on(), seen_before, "nothing refused reaches Julia");
     for host in ["localhost", "[::1]:9", "127.0.0.1:9"] {
         let request = format!("POST /message?sessionId=x HTTP/1.1\r\nHost: {host}\r\n{auth}Content-Length: 2\r\n\r\n{{}}");
         assert_eq!(ask(&request).0, "HTTP/1.1 404 Not Found", "{host} is loopback");
