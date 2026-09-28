@@ -335,7 +335,7 @@ fn serves_the_agents_mcp_messages() {
         init,
         (
             "HTTP/1.1 200 OK".into(),
-            format!(r#"{{"id":2,"jsonrpc":"2.0","result":{{"capabilities":{{"tools":{{}}}},"protocolVersion":"2024-11-05","serverInfo":{{"name":"endeavor-runtime","version":"{}"}}}}}}"#, env!("CARGO_PKG_VERSION"))
+            format!(r#"{{"id":2,"jsonrpc":"2.0","result":{{"capabilities":{{"tools":{{}}}},"protocolVersion":"2025-06-18","serverInfo":{{"name":"endeavor-runtime","version":"{}"}}}}}}"#, env!("CARGO_PKG_VERSION"))
         )
     );
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
@@ -350,9 +350,31 @@ fn honors_the_mcp_protocol_version_header() {
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
     let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
-    assert_eq!(mcp(&core, ping, &[("MCP-Protocol-Version", "2024-11-05")]), ("HTTP/1.1 200 OK".into(), r#"{"id":1,"jsonrpc":"2.0","result":{}}"#.into()));
+    for version in ["2025-06-18", "2025-03-26", "2024-11-05"] {
+        assert_eq!(mcp(&core, ping, &[("MCP-Protocol-Version", version)]), ("HTTP/1.1 200 OK".into(), r#"{"id":1,"jsonrpc":"2.0","result":{}}"#.into()), "{version}");
+    }
     assert_eq!(mcp(&core, ping, &[]).0, "HTTP/1.1 200 OK", "no header falls back to the spec's default");
     assert_eq!(mcp(&core, ping, &[("MCP-Protocol-Version", "2099-01-01")]).0, "HTTP/1.1 400 Bad Request");
+}
+
+#[test]
+fn negotiates_the_protocol_version_on_initialize() {
+    let dir = state_dir("core-mcp-negotiate");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let version = |body: &str| {
+        let (status, reply) = mcp(&core, body, &[]);
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        reply["result"]["protocolVersion"].as_str().unwrap().to_owned()
+    };
+    // No protocolVersion in params: our latest.
+    assert_eq!(version(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#), "2025-06-18");
+    // A supported version, not the latest: echoed back.
+    assert_eq!(version(r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#), "2024-11-05");
+    assert_eq!(version(r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#), "2025-03-26");
+    // A version we don't speak: our latest, per the spec's fallback (initialize never errors on this).
+    assert_eq!(version(r#"{"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#), "2025-06-18");
 }
 
 #[test]

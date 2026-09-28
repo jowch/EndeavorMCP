@@ -23,10 +23,12 @@ use crate::host_tools;
 use crate::http::{self, Head};
 use crate::notebooks::{self, Julia, Notebooks, Reply};
 
-/// The MCP protocol version this server understands: what `initialize`
-/// answers, and the only value `MCP-Protocol-Version` may name (a client that
-/// hasn't negotiated yet, before `initialize`, sends no header).
-const PROTOCOL_VERSION: &str = "2024-11-05";
+/// Protocol versions this server understands, most recent first: `initialize`
+/// echoes the client's requested version when it's one of these, else answers
+/// the first (standard negotiation); `MCP-Protocol-Version` may name any of
+/// these (a client that hasn't negotiated yet, before `initialize`, sends no
+/// header).
+const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// The notebook tools' schemas, for `tools/list`.
 static NOTEBOOK_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!("notebook_tools.json")).expect("notebook_tools.json"));
@@ -172,7 +174,7 @@ impl Bridge {
     pub fn mcp(&self, request: &Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> io::Result<bool> {
         let body = http::read_body(reader, request.request_body()?)?;
         let keep_alive = request.keeps_alive();
-        if request.header("MCP-Protocol-Version").is_some_and(|v| v != PROTOCOL_VERSION) {
+        if request.header("MCP-Protocol-Version").is_some_and(|v| !SUPPORTED_VERSIONS.contains(&v)) {
             http::respond(client, "400 Bad Request", Some("application/json"), br#"{"error":"unsupported_protocol_version"}"#, keep_alive)?;
             return Ok(keep_alive);
         }
@@ -194,11 +196,16 @@ impl Bridge {
         let ok = |result: Value| Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result })));
         let method = message.get("method").map_or(String::new(), julia_string);
         match method.as_str() {
-            "initialize" => ok(json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") },
-            })),
+            "initialize" => {
+                // Standard negotiation: the client's version if we speak it, else our latest.
+                let requested = message["params"]["protocolVersion"].as_str();
+                let version = requested.filter(|v| SUPPORTED_VERSIONS.contains(v)).unwrap_or(SUPPORTED_VERSIONS[0]);
+                ok(json!({
+                    "protocolVersion": version,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") },
+                }))
+            }
             "ping" => ok(json!({})),
             "tools/list" => {
                 let mut tools = NOTEBOOK_TOOLS.as_array().cloned().unwrap_or_default();
