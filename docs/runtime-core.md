@@ -37,7 +37,7 @@ Classified from the current source (approximate line counts):
 
 | Class | Lines | What | Where it goes |
 | --- | --- | --- | --- |
-| A. Neutral | ~1,650 | HTTP/SSE server, bearer token, Origin/Host checks, MCP protocol and tool schemas, `/call` methods, run policy and plan mode, one notebook per session, idle timers, host tools (`list_folder`, `read_file`, `run_shell`), event subscribers and dedup, author/before/version tracking, read receipts, `search_code`, `runtime.json` | Core, unchanged behaviour |
+| A. Neutral | ~1,650 | HTTP server, bearer token, Origin/Host checks, MCP protocol and tool schemas, `/call` methods, run policy and plan mode, one notebook per session, idle timers, host tools (`list_folder`, `read_file`, `run_shell`), event subscribers and dedup, author/before/version tracking, read receipts, `search_code`, `runtime.json` | Core, unchanged behaviour |
 | B. Needs cells and graph, not Julia | ~730 | Staging and "ran since edit", `run_conflict` (upstream check), `run_preview`, dependency and symbol tools, cell-order arithmetic, `submit_changes` checks, projection order, cell names in events | Core, fed by the engine's `snapshot` and `graph` |
 | C. Pluto internals | ~850 | ServerSession and lifecycle, `on_event` hooks, safe-preview gate, mutating Pluto cells and saving, topology, output serialization and PNG rendering, `validate_cell` parsing, projection exclusions (package cells, `@bind` shim) | Pluto adapter, stays Julia |
 

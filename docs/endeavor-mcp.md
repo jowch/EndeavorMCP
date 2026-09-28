@@ -70,8 +70,7 @@ no Julia found, it says how to install one (juliaup).
 
 ## Transport: Streamable HTTP
 
-Decided: move the bridge from MCP's SSE transport to Streamable HTTP, after
-the core lands, whether or not the product happens.
+Done. The bridge moved from MCP's SSE transport to Streamable HTTP.
 
 - The MCP spec deprecated SSE in 2025; clients may drop it.
 - Endeavor's side supports it: the ACP crate has an HTTP server type
@@ -80,7 +79,27 @@ the core lands, whether or not the product happens.
 - It's simpler: the tools are request and reply, so each POST returns its
   JSON directly, with no per-session event queue or keepalive thread.
 - The app and the core ship together (servers get the helper from the app
-  bundle), so the app switches in the same change; no period with both.
+  bundle), so the app switched in the same change; no period with both.
+
+The core serves one endpoint, `POST /mcp`: a request's reply comes back in
+the same response (`200`, `application/json`); a notification or a response
+from the client gets `202` with no body. `GET /mcp` is `405` (no
+server-initiated stream); so is `DELETE`. It issues no `Mcp-Session-Id` — the
+core already tells agent sessions apart by `X-Endeavor-Session` (see
+[Session identity](#session-identity)), and the adapter's MCP client doesn't
+send one back when the server doesn't issue one. `MCP-Protocol-Version` is
+honoured: an unsupported value is `400`; a missing header (before
+`initialize`, or from a client that never sends it) falls back to what the
+server understands. The app registers the bridge as `McpServer::Http`.
+
+A runtime the helper is still attached to from before this switch — an older
+core that only spoke SSE, or (for This Mac) a Julia-only runtime from before
+the core existed at all — has no `"mcp"` key in its `runtime.json`. The core
+now writes one (`"mcp": "http"`), and passes it to the app with the rest of
+the runtime info; a missing key means SSE. The app registers `McpServer::Http`
+when the runtime says so, and the old `McpServer::Sse` registration otherwise
+— the only SSE left, to drop once no runtime older than this change can still
+be running.
 
 For the plugin, a stdio mode is a thin shim that starts or attaches to the
 long-running core (the helper's `runtime.json` and lock already do this), so
