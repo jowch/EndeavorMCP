@@ -2,7 +2,7 @@
 # core (`endeavor-remote core`) calls `POST /adapter` with {"method", "params"}
 # and reads the reply's "result" or "error". The methods (see `adapter_call`):
 # status, open, new, and for a notebook_id snapshot, graph, shutdown, apply,
-# run, interrupt, allow_execution, render_png and validate. What happens in
+# run, interrupt, restart, allow_execution, move, render_png and validate. What happens in
 # Pluto reaches the core as notifications on `GET /notifications`, one
 # `data: {"method", "params"}` line each: notebook_opened, notebook_shut_down
 # (it left the session), file_saved, execution_done, cell_state (every cell's
@@ -310,6 +310,29 @@ function allow_execution!(session, nb, run::Bool, timeout::Real)
     return Dict{String,Any}("already_allowed" => false, "ran" => run, "process_status" => string(nb.process_status))
 end
 
+# Pluto's own Restart: a new process, then every cell runs. Refused in safe
+# preview, where allow_execution starts the notebook.
+function restart!(session, nb, timeout::Real)
+    ps = nb.process_status
+    ps === Pluto.ProcessStatus.waiting_for_permission &&
+        throw(ArgumentError("execution_blocked::The notebook is in safe preview; Run notebook starts it"))
+    ps === Pluto.ProcessStatus.waiting_to_restart && return Dict{String,Any}("restarted" => false)
+    nb.process_status = Pluto.ProcessStatus.waiting_to_restart
+    session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(nb)
+    _notify_browser(session, nb)
+    Pluto.SessionActions.shutdown(session, nb; keep_in_session=true, async=true, verbose=false)
+    nb.process_status = Pluto.ProcessStatus.starting
+    _notify_browser(session, nb)
+    run_cells!(session, nb, collect(nb.cells); wait=false, timeout)
+    return Dict{String,Any}("restarted" => true)
+end
+
+# Move the notebook's file to `path` (checked by the core), as Pluto's own file box does.
+function move!(session, nb, path::AbstractString)
+    Pluto.SessionActions.move(session, nb, path)
+    return Dict{String,Any}("path" => nb.path)
+end
+
 function open_notebook(session, path::AbstractString, run::Bool)
     nb = try
         Pluto.SessionActions.open(session, path; run_async = true, execution_allowed = run)
@@ -360,7 +383,9 @@ function adapter_call(session, method::AbstractString, params)
     method == "apply" && return apply!(session, nb, params["ops"])
     method == "run" && return run_cells!(session, nb, [_adapter_cell(nb, c) for c in params["cells"]]; wait=params["wait"], timeout=params["timeout"])
     method == "interrupt" && return Dict{String,Any}("interrupted" => Pluto.WorkspaceManager.interrupt_workspace((session, nb); verbose=false))
+    method == "restart" && return restart!(session, nb, params["timeout"])
     method == "allow_execution" && return allow_execution!(session, nb, params["run"], params["timeout"])
+    method == "move" && return move!(session, nb, params["path"])
     method == "render_png" && return render_png(session, nb, _adapter_cell(nb, params["cell_id"]))
     method == "validate" && return Dict{String,Any}("errors" => _parse_validation_errors(nb, _adapter_cell(nb, params["cell_id"]), params["code"]))
     throw(ArgumentError("unknown_method::Unknown adapter method: '$method'"))

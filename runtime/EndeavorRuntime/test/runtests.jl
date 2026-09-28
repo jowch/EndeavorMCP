@@ -404,8 +404,22 @@ end
             @test result("interrupt", Dict("notebook_id" => nid))["interrupted"] isa Bool
             @test result("status", Dict())["pluto"] == "running"
 
+            # Pluto's own Restart: a new process, and every cell runs.
+            ran_before = nb.cells_dict[UUID(Y)].output.last_run_timestamp
+            @test result("restart", Dict("notebook_id" => nid, "timeout" => 60)) == Dict("restarted" => true)
+            @test Set(next_note("run_finished"; nid)["cells"]) == Set([X, Y])
+            @test nb.process_status == Pluto.ProcessStatus.ready
+            @test nb.cells_dict[UUID(Y)].output.last_run_timestamp > ran_before && nb.cells_dict[UUID(Y)].output.body == "48"
+
+            # Moving the file, as Pluto's file box does.
+            renamed = joinpath(dirname(fixture), "renamed.jl")
+            @test result("move", Dict("notebook_id" => nid, "path" => renamed)) == Dict("path" => renamed)
+            @test isfile(renamed) && !isfile(fixture) && nb.path == renamed
+
             # Safe preview: runs aren't accepted until execution is allowed.
             previewed = result("open", Dict("path" => fresh_fixture(), "run" => false))["notebook_id"]
+            @test adapter("restart", Dict("notebook_id" => previewed, "timeout" => 60)) ==
+                  Dict("error" => "ArgumentError: execution_blocked::The notebook is in safe preview; Run notebook starts it")
             @test result("run", Dict("notebook_id" => previewed, "cells" => [X], "wait" => true, "timeout" => 60)) ==
                   Dict("accepted" => false, "process_status" => "waiting_for_permission")
             @test result("allow_execution", Dict("notebook_id" => previewed, "run" => true, "timeout" => 60)) ==

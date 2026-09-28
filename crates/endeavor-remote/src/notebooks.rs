@@ -766,9 +766,80 @@ impl Notebooks {
         Ok(json!({ "stopped": true, "safe_preview": safe_preview }))
     }
 
+    /// `endeavor/restart_notebook`: Pluto's own Restart, a new process and then
+    /// every cell runs; refused in safe preview. The notebook stays open with
+    /// the same cells, so the core keeps all it knows of it; its pending cells
+    /// stop being pending as they run.
+    pub fn restart(&self, notebook_id: &str) -> Result<Value, String> {
+        let result = self.call("restart", json!({ "notebook_id": notebook_id, "timeout": tools::TIMEOUT_SECONDS }))?;
+        self.publish();
+        Ok(result)
+    }
+
+    /// `endeavor/move_notebook`: rename or move an open notebook's file (the
+    /// app's Rename… and Move to…), never over another file. Sessions bound to
+    /// it, and an `idle_stopped` entry for it, follow it to its new path.
+    pub fn move_notebook(&self, notebook_id: &str, path: &str) -> Result<Value, String> {
+        let nb = self.snapshot(notebook_id)?;
+        let target = absolute_path(path)?;
+        if !target.ends_with(".jl") {
+            return Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{target}'"));
+        }
+        if std::path::Path::new(&target).exists() {
+            return Err(format!("ArgumentError: file_exists::'{target}' already exists"));
+        }
+        let dir = match &target[..target.rfind('/').unwrap_or(0)] {
+            "" => "/",
+            dir => dir,
+        };
+        if !std::path::Path::new(dir).is_dir() {
+            return Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}'"));
+        }
+        let old = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
+        let result = self.call("move", json!({ "notebook_id": nb.id, "path": target }))?;
+        let moved = result["path"].as_str().unwrap_or(&target).to_owned();
+        let new = canonical_path(&moved).unwrap_or_else(|_| moved.clone());
+        {
+            let mut state = self.state.lock().unwrap();
+            for bound in state.bindings.values_mut().filter(|bound| **bound == old) {
+                *bound = new.clone();
+            }
+            for (key, entry) in state.idle_stopped.iter_mut().filter(|(key, _)| *key == old) {
+                *key = new.clone();
+                entry["path"] = moved.clone().into();
+            }
+            if let Some(notebook) = state.notebooks.get_mut(&nb.id) {
+                notebook.path = moved;
+            }
+        }
+        self.publish();
+        Ok(result)
+    }
+
+    /// `endeavor/new_notebook`: the app's "New notebook" for session `owner`,
+    /// a new notebook in its folder that becomes its notebook.
+    pub fn new_for(&self, owner: &str, folder: Option<&str>) -> Result<Value, String> {
+        self.bind(owner, "");
+        let Reply::Json(result) = self.tool(owner, "new_notebook", &json!({}), folder)? else {
+            unreachable!("new_notebook answers JSON")
+        };
+        self.publish();
+        Ok(result)
+    }
+
     #[cfg(test)]
     fn idle_stopped(&self) -> Vec<Value> {
         self.state.lock().unwrap().idle_stopped.iter().map(|(_, entry)| entry.clone()).collect()
+    }
+}
+
+/// `endeavor/file_info`: whether a file is at `path` on this machine, and when
+/// it last changed (Unix seconds, as Julia's `mtime` gives them).
+pub fn file_info(path: &str) -> Result<Value, String> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(absolute_path(path)?) {
+        Ok(meta) if meta.is_file() => Ok(json!({ "exists": true, "modified": meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9 })),
+        _ => Ok(json!({ "exists": false })),
     }
 }
 

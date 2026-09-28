@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::host_tools;
 use crate::http::{self, Head};
-use crate::notebooks::{Julia, Notebooks, Reply};
+use crate::notebooks::{self, Julia, Notebooks, Reply};
 
 const KEEPALIVE: Duration = Duration::from_secs(15);
 
@@ -99,6 +99,13 @@ impl Bridge {
     pub fn app_call(&self, raw: &[u8]) -> Option<String> {
         let message = serde_json::from_slice::<Value>(raw).ok().filter(Value::is_object)?;
         let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+        let answer = |result: Result<Value, String>| {
+            let id = message.get("id").cloned().unwrap_or(Value::Null);
+            to_json(&match result {
+                Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": e } }),
+            })
+        };
         let text = |key: &str, default: &str| params.get(key).map_or(default.to_owned(), julia_string);
         match message["method"].as_str().unwrap_or_default() {
             "endeavor/set_policy" => {
@@ -143,13 +150,16 @@ impl Bridge {
                 }
             }
             "endeavor/run_preview" => {
-                let id = message.get("id").cloned().unwrap_or(Value::Null);
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                let reply = match self.notebooks.run_preview(&text("tool", ""), &arguments) {
-                    Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-                    Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": e } }),
-                };
-                return Some(to_json(&reply));
+                return Some(answer(self.notebooks.run_preview(&text("tool", ""), &arguments)));
+            }
+            "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", "")))),
+            "endeavor/move_notebook" => return Some(answer(self.notebooks.move_notebook(&text("notebook_id", ""), &text("path", "")))),
+            "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
+            "endeavor/new_notebook" => {
+                let owner = text("owner", "");
+                let folder = self.folders.lock().unwrap().get(&owner).cloned();
+                return Some(answer(self.notebooks.new_for(&owner, folder.as_deref())));
             }
             method if JULIA_CALLS.contains(&method) => return None,
             _ => return Some(self.dispatch(&message, &Caller::default()).unwrap_or_else(|| "{}".into())),

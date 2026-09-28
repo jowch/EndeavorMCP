@@ -151,6 +151,20 @@ impl Engine {
         match method {
             "snapshot" => Ok(Engine::snapshot(nb)),
             "graph" => Ok(Engine::graph(nb, params)),
+            "restart" => {
+                if nb.safe_preview {
+                    return Err("ArgumentError: execution_blocked::The notebook is in safe preview; Run notebook starts it".into());
+                }
+                for cell in &mut nb.cells {
+                    cell.last_run = now;
+                }
+                Ok(json!({ "restarted": true }))
+            }
+            "move" => {
+                let _ = std::fs::rename(&nb.path, params["path"].as_str().unwrap());
+                nb.path = params["path"].as_str().unwrap().to_owned();
+                Ok(json!({ "path": nb.path }))
+            }
             "shutdown" => {
                 let nb = notebooks.remove(at);
                 self.shut_down.lock().unwrap().push(nb.id);
@@ -912,6 +926,52 @@ fn list_notebooks_says_which_notebook_is_this_sessions() {
     assert_eq!(mine("a"), HashMap::from([(first.clone(), json!(true)), (second.clone(), json!(false))]));
     assert_eq!(mine("unbound"), HashMap::from([(first.clone(), json!(false)), (second.clone(), json!(false))]));
     assert_eq!(mine(""), HashMap::from([(first, json!(false)), (second, json!(false))]), "the app has no notebook of its own");
+}
+
+#[test]
+fn the_apps_notebook_actions_restart_move_file_info_and_new_notebook() {
+    let s = setup();
+    let paths = temp_notebooks("actions", 2);
+    let dir = paths[0].rsplit_once('/').unwrap().0.to_owned();
+    s.engine.open(&id(1), &paths[0], &[(X, "x = 1"), (Y, "y = x")]);
+    s.engine.open(&id(2), &paths[1], &[]);
+    s.engine.with(&id(2), |nb| nb.safe_preview = true);
+
+    // Restart runs every cell, so edits waiting for a run stop waiting; it's refused in safe preview.
+    s.read("", &id(1), Y);
+    s.edit("", &id(1), Y, "y = x + 1");
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([Y]));
+    s.seconds(1.0);
+    assert_eq!(s.notebooks.restart(&id(1)), Ok(json!({ "restarted": true })));
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([]));
+    assert_eq!(s.notebooks.restart(&id(2)), Err("ArgumentError: execution_blocked::The notebook is in safe preview; Run notebook starts it".into()));
+    assert_eq!(s.notebooks.restart("nope"), Err("KeyError: key \"notebook_not_found::No notebook with id 'nope' in the current session\" not found".into()));
+
+    // A move takes the sessions bound to the notebook, and an idle-stopped entry for it, along.
+    s.notebooks.bind("a", &paths[0]);
+    s.notebooks.state.lock().unwrap().idle_stopped.push((paths[0].clone(), json!({ "path": &paths[0], "hours": 1, "safe_preview": false })));
+    let renamed = format!("{dir}/renamed.jl");
+    assert_eq!(s.notebooks.move_notebook(&id(1), &renamed), Ok(json!({ "path": renamed })));
+    assert_eq!(s.notebooks.bound("a"), Some(renamed.clone()));
+    assert_eq!(s.notebooks.idle_stopped(), [json!({ "path": renamed, "hours": 1, "safe_preview": false })]);
+    assert_eq!(s.notebooks.refusal("a", "edit_cell", &json!({ "notebook_id": id(1) })), None, "still its own notebook");
+    assert_eq!(s.notebooks.move_notebook(&id(1), &paths[1]), Err(format!("ArgumentError: file_exists::'{}' already exists", paths[1])));
+    assert_eq!(s.notebooks.move_notebook(&id(1), &format!("{dir}/notes.txt")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{dir}/notes.txt'")));
+    assert_eq!(s.notebooks.move_notebook(&id(1), &format!("{dir}/gone/x.jl")), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}/gone'")));
+
+    // Whether a file is there, and when it last changed, as Julia's mtime says.
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(&paths[1]).unwrap();
+    let modified = meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9;
+    assert_eq!(file_info(&paths[1]), Ok(json!({ "exists": true, "modified": modified })));
+    assert_eq!(file_info(&paths[0]), Ok(json!({ "exists": false })));
+    assert_eq!(file_info(&dir), Ok(json!({ "exists": false })), "a folder isn't a file");
+
+    // The app's New notebook for a session: in its folder, and the session's notebook from now on.
+    s.notebooks.bind("b", &renamed);
+    let made = s.notebooks.new_for("b", Some(&dir)).unwrap();
+    assert_eq!(made["path"], format!("{dir}/made.jl"));
+    assert_eq!(s.notebooks.bound("b"), Some(format!("{dir}/made.jl")));
 }
 
 /// `path` relative to `from`, through `..`s.

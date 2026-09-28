@@ -417,6 +417,26 @@ fn tool_error(id: u32, kind: &str, message: &str) -> String {
 }
 
 #[test]
+fn the_apps_notebook_calls_are_the_cores() {
+    let dir = state_dir("core-app-calls");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let file = dir.join("a.jl");
+    std::fs::write(&file, "").unwrap();
+    let info = app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/file_info","params":{{"path":"{}"}}}}"#, file.display()));
+    let info: serde_json::Value = serde_json::from_str(&info).unwrap();
+    assert_eq!((&info["id"], &info["result"]["exists"]), (&serde_json::json!(1), &serde_json::json!(true)));
+    assert!(info["result"]["modified"].as_f64().unwrap() > 1.7e9);
+    let missing = r#"{"code":-32000,"message":"KeyError: key \"notebook_not_found::No notebook with id 'n9' in the current session\" not found"}"#;
+    let restart = r#"{"jsonrpc":"2.0","id":2,"method":"endeavor/restart_notebook","params":{"notebook_id":"n9"}}"#;
+    assert_eq!(app_call(&core, restart), format!(r#"{{"error":{missing},"id":2,"jsonrpc":"2.0"}}"#));
+    let moved = r#"{"jsonrpc":"2.0","id":3,"method":"endeavor/move_notebook","params":{"notebook_id":"n9","path":"/tmp/b.jl"}}"#;
+    assert_eq!(app_call(&core, moved), format!(r#"{{"error":{missing},"id":3,"jsonrpc":"2.0"}}"#));
+    let to_julia: Vec<String> = bridge.seen().iter().filter(|s| s.line.starts_with("POST /call")).map(|s| String::from_utf8_lossy(&s.body).into_owned()).collect();
+    assert!(!to_julia.iter().any(|body| body.contains("_notebook") || body.contains("file_info")), "none reached Julia's /call: {to_julia:?}");
+}
+
+#[test]
 fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let dir = state_dir("core-policy");
     let bridge = FakeBridge::start(&dir);

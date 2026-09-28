@@ -16,7 +16,7 @@ use crate::host_tools::julia_repr;
 use crate::mcp::{WRITE_TOOLS, julia_string};
 
 /// How long a waited-for run may take, per cell.
-const TIMEOUT_SECONDS: f64 = 60.0;
+pub(super) const TIMEOUT_SECONDS: f64 = 60.0;
 /// How long another session's change to a notebook is worth a warning.
 const OTHER_SESSION_SECONDS: f64 = 120.0;
 /// Claude accepts images up to about 5 MB; plots are typically tens of KB.
