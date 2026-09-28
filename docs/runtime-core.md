@@ -126,6 +126,12 @@ each time it tells the app anything, coalescing a burst of notifications
 into one read. The code in `cell_state` also goes straight into `author`
 tracking, so an edit undone before the next read still counts as the user's.
 
+Each notification carries a `seq` that `apply` also advances and returns, and
+`snapshot` says the `seq` it read at. A snapshot or `cell_state` numbered below
+the `apply` of the agent's last edit to a cell may show the code from before
+it, so it doesn't change who last changed that cell (both come on their own
+connections, so either can reach the core after the edit's reply).
+
 Everything else (staging, receipts, `run_preview`, `before`/`author`,
 conflict warnings, event diffing) is computed in the core from these.
 

@@ -218,6 +218,7 @@ impl Call<'_> {
         self.nbs.with_state(&nb.id, |state| state.pending_run(nb))
     }
 
+    /// Carry out `ops` in the engine: its reply, with `inserted` cells and its `seq` after.
     fn apply(&self, id: &str, ops: Vec<Value>) -> Result<Value, String> {
         self.nbs.call("apply", json!({ "notebook_id": id, "ops": ops }))
     }
@@ -391,9 +392,9 @@ impl Call<'_> {
         self.require_fresh_read(&nb, &cell)?;
         let run_after = bool_arg(self.args, "run_after", false)?;
         let before = nb.cells[&cell].code.clone();
-        self.apply(&nb.id, vec![json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": before })])?;
+        let applied = self.apply(&nb.id, vec![json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": before })])?;
         let code = code.as_str().unwrap_or_default();
-        self.edited(&nb.id, &cell, &before, code);
+        self.edited(&nb.id, &applied, &cell, &before, code);
         let (warnings, ran) = self.run_or_stage(&nb, &cell, run_after)?;
         let ran = if ran { vec![cell.clone()] } else { Vec::new() };
         let (mut receipt, after) = self.receipt(&nb.id, json!({ "type": "edit_cell", "cell_id": cell }), &ran, warnings, None)?;
@@ -401,12 +402,13 @@ impl Call<'_> {
         Ok(Value::Object(receipt))
     }
 
-    /// What the core keeps of an edit the tools made: who changed the cell,
-    /// that the owner knows its new code, and the code it replaced.
-    fn edited(&self, id: &str, cell: &str, before: &str, code: &str) {
+    /// What the core keeps of an edit the tools made (`applied`, the
+    /// engine's reply): who changed the cell, that the owner knows its new
+    /// code, and the code it replaced.
+    fn edited(&self, id: &str, applied: &Value, cell: &str, before: &str, code: &str) {
         self.note_changed(id, cell);
         self.record_read(id, cell, code);
-        self.nbs.with_state(id, |state| state.agent_edited(cell, before, code));
+        self.nbs.with_state(id, |state| state.agent_edited(cell, before, code, applied["seq"].as_u64()));
     }
 
     fn edit_cells(&self) -> Result<Value, String> {
@@ -430,9 +432,9 @@ impl Call<'_> {
             let code = edit.get("code").ok_or_else(|| key_error("code"))?;
             ops.push(json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": nb.cells[cell].code }));
         }
-        self.apply(&nb.id, ops)?;
+        let applied = self.apply(&nb.id, ops)?;
         for (edit, cell) in edits.iter().zip(&cells) {
-            self.edited(&nb.id, cell, &nb.cells[cell].code, edit["code"].as_str().unwrap_or_default());
+            self.edited(&nb.id, &applied, cell, &nb.cells[cell].code, edit["code"].as_str().unwrap_or_default());
         }
         self.mark_pending(&nb.id, &cells);
         let mutation = json!({ "type": "edit_cells", "cell_ids": cells });
@@ -469,7 +471,7 @@ impl Call<'_> {
         let cell = applied["inserted"][0].as_str().ok_or("the engine didn't say which cell it added")?.to_owned();
         let added = self.nbs.snapshot(&nb.id)?;
         let code = added.cells.get(&cell).map_or(String::new(), |c| c.code.clone());
-        self.edited(&nb.id, &cell, "", &code);
+        self.edited(&nb.id, &applied, &cell, "", &code);
         let (warnings, ran) = self.run_or_stage(&added, &cell, run_after)?;
         let ran = if ran { vec![cell.clone()] } else { Vec::new() };
         let (mut receipt, after) = self.receipt(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), &ran, warnings, None)?;

@@ -57,6 +57,11 @@ struct Engine {
     /// The next `run` says it has started, then waits here before it runs,
     /// like Pluto busy with a long run.
     hold: Mutex<Option<(Sender<()>, Receiver<()>)>>,
+    /// The next read of every notebook reads them, says it has, then waits
+    /// here before it answers, like a snapshot on its way while an edit lands.
+    hold_snapshot: Mutex<Option<(Sender<()>, Receiver<()>)>>,
+    /// Advanced by each change, as the engine numbers its notifications.
+    seq: Mutex<u64>,
     calls: Mutex<Vec<String>>,
     made: Mutex<u32>,
 }
@@ -140,8 +145,15 @@ impl Engine {
             }
             _ => {}
         }
+        let seq = *self.seq.lock().unwrap();
         let Some(id) = params["notebook_id"].as_str() else {
-            return Ok(json!({ "notebooks": notebooks.iter().map(Engine::snapshot).collect::<Vec<_>>() }));
+            let all = json!({ "notebooks": notebooks.iter().map(Engine::snapshot).collect::<Vec<_>>(), "seq": seq });
+            drop(notebooks);
+            if let Some((read, release)) = self.hold_snapshot.lock().unwrap().take() {
+                read.send(()).unwrap();
+                release.recv().unwrap();
+            }
+            return Ok(all);
         };
         let Some(at) = notebooks.iter().position(|nb| nb.id == id) else {
             return Err(format!("KeyError: key \"notebook_not_found::No notebook with id '{id}' in the current session\" not found"));
@@ -149,7 +161,11 @@ impl Engine {
         let nb = &mut notebooks[at];
         let find = |nb: &mut FakeNotebook, cell: &Value| nb.cells.iter().position(|c| c.id == cell.as_str().unwrap()).unwrap();
         match method {
-            "snapshot" => Ok(Engine::snapshot(nb)),
+            "snapshot" => {
+                let mut snapshot = Engine::snapshot(nb);
+                snapshot["seq"] = json!(seq);
+                Ok(snapshot)
+            }
             "graph" => Ok(Engine::graph(nb, params)),
             "restart" => {
                 if nb.safe_preview {
@@ -209,7 +225,9 @@ impl Engine {
                         other => panic!("op {other}"),
                     }
                 }
-                Ok(json!({ "inserted": inserted }))
+                let mut seq = self.seq.lock().unwrap();
+                *seq += 1;
+                Ok(json!({ "inserted": inserted, "seq": *seq }))
             }
             "run" => {
                 if nb.safe_preview {
@@ -391,6 +409,46 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     s.engine.with(NB, |nb| nb.cells[1].running = true);
     s.notebooks.publish();
     assert_eq!(next(&rx)["notebooks"][0]["running"], json!([X, Y]));
+}
+
+#[test]
+fn a_read_of_the_notebook_from_before_an_agent_edit_doesnt_make_it_the_users() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 6"), (Y, "y = x * 7")]);
+    let (_, rx) = s.notebooks.subscribe().unwrap();
+    s.read("7", NB, X);
+
+    // The app's event is being put together from a read of the notebook taken
+    // just before the agent's edit lands.
+    let (read_tx, read) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    *s.engine.hold_snapshot.lock().unwrap() = Some((read_tx, release_rx));
+    let publishing = std::thread::spawn({
+        let notebooks = s.notebooks.clone();
+        move || notebooks.publish()
+    });
+    read.recv().unwrap();
+    s.edit("7", NB, X, "x = 7");
+    release.send(()).unwrap();
+    publishing.join().unwrap();
+    s.notebooks.publish();
+    let mut last = next(&rx);
+    while let Ok(event) = rx.try_recv() {
+        last = serde_json::from_str(&event).unwrap();
+    }
+    assert_eq!((&cell(&last, NB, X)["author"], &cell(&last, NB, X)["version"]), (&json!("agent"), &json!(format!("{:x}", hash("x = 7")))));
+
+    // A notification sent before the edit (numbered below it) says nothing
+    // new either; one after it with other code is the user's change.
+    let seq = *s.engine.seq.lock().unwrap();
+    let state = |code: &str, seq: u64| json!({ "method": "cell_state", "seq": seq, "params": { "notebook_id": NB, "cells": [{ "cell_id": X, "code": code }] } });
+    s.notebooks.notified(&state("x = 6", seq - 1));
+    s.notebooks.publish();
+    assert!(rx.try_recv().is_err(), "still the agent's");
+    s.notebooks.notified(&state("x = 8", seq + 1));
+    s.engine.with(NB, |nb| nb.cells[0].code = "x = 8".into());
+    s.notebooks.publish();
+    assert_eq!(cell(&next(&rx), NB, X)["author"], "user");
 }
 
 #[test]

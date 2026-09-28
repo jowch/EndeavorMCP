@@ -89,6 +89,9 @@ struct NotebookState {
     authors: HashMap<String, (u64, &'static str)>,
     /// Each unrun cell's code before the agent's first edit since it last ran.
     befores: HashMap<String, String>,
+    /// The engine's `seq` after the agent's last edit of each cell: a snapshot
+    /// or notification numbered below it may still show the code from before.
+    edited_at: HashMap<String, u64>,
     last_active: Option<f64>,
     kept_alive: bool,
     /// Cells edited through the tools and not run since, with when. A cell
@@ -103,8 +106,15 @@ struct NotebookState {
 }
 
 impl NotebookState {
-    /// Code that changed without the agent's tools writing it was changed by the user.
-    fn author(&mut self, cell: &str, code: &str) -> Option<&'static str> {
+    /// Code that changed without the agent's tools writing it was changed by
+    /// the user. Code the engine read (at `seq`) before the agent's last edit
+    /// of the cell says nothing new.
+    fn author(&mut self, cell: &str, code: &str, seq: Option<u64>) -> Option<&'static str> {
+        if let (Some(seq), Some(&edited)) = (seq, self.edited_at.get(cell))
+            && seq < edited
+        {
+            return self.authors.get(cell).map(|&(_, author)| author).filter(|a| !a.is_empty());
+        }
         let hash = hash(code);
         let author = match self.authors.get(cell) {
             None => "",
@@ -124,9 +134,13 @@ impl NotebookState {
         self.befores.get(cell).filter(|before| *before != code).cloned()
     }
 
-    /// The agent's tools just wrote this cell's code; `before` is what it replaced.
-    fn agent_edited(&mut self, cell: &str, before: &str, code: &str) {
+    /// The agent's tools just wrote this cell's code; `before` is what it
+    /// replaced, `seq` the engine's after the change.
+    fn agent_edited(&mut self, cell: &str, before: &str, code: &str, seq: Option<u64>) {
         self.authors.insert(cell.to_owned(), (hash(code), "agent"));
+        if let Some(seq) = seq {
+            self.edited_at.insert(cell.to_owned(), seq);
+        }
         self.befores.entry(cell.to_owned()).or_insert_with(|| before.to_owned());
     }
 
@@ -179,6 +193,8 @@ pub struct Notebooks {
 
 /// One notebook as the engine's `snapshot` reports it.
 struct Snapshot {
+    /// The engine's `seq` when it read the notebook.
+    seq: Option<u64>,
     id: String,
     path: String,
     order: Vec<String>,
@@ -235,6 +251,7 @@ impl Snapshot {
             Some((text(&c["cell_id"])?, cell))
         });
         Some(Snapshot {
+            seq: value["seq"].as_u64(),
             id: text(&value["notebook_id"])?,
             path: text(&value["path"])?,
             order: value["cell_order"].as_array()?.iter().filter_map(text).collect(),
@@ -461,7 +478,7 @@ impl Notebooks {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
                     for cell in params["cells"].as_array().into_iter().flatten() {
                         if let (Some(cell), Some(code)) = (cell["cell_id"].as_str(), cell["code"].as_str()) {
-                            notebook.author(cell, code);
+                            notebook.author(cell, code, message["seq"].as_u64());
                         }
                     }
                 }
@@ -486,7 +503,8 @@ impl Notebooks {
     /// Every open notebook, in the engine's order.
     fn snapshots(&self) -> Result<Vec<Snapshot>, String> {
         let all = self.call("snapshot", json!({}))?;
-        all["notebooks"].as_array().ok_or("snapshot has no notebooks")?.iter().map(|nb| Snapshot::parse(nb).ok_or_else(|| format!("bad snapshot {nb}"))).collect()
+        let parse = |nb: &Value| Snapshot::parse(nb).map(|nb| Snapshot { seq: all["seq"].as_u64(), ..nb }).ok_or_else(|| format!("bad snapshot {nb}"));
+        all["notebooks"].as_array().ok_or("snapshot has no notebooks")?.iter().map(parse).collect()
     }
 
     fn snapshot(&self, id: &str) -> Result<Snapshot, String> {
@@ -537,7 +555,7 @@ impl Notebooks {
                     "running": nb.is_running(c),
                     "errored": c.errored,
                     "unrun": unrun,
-                    "author": notebook.author(id, &c.code),
+                    "author": notebook.author(id, &c.code, nb.seq),
                     "before": notebook.before(id, &c.code, unrun),
                     "version": format!("{:x}", hash(&c.code)),
                     "name": graphs[&nb.id].name(id),

@@ -195,7 +195,7 @@ end
             @test HTTP.post("http://127.0.0.1:$mcp_port/adapter", [], snapshot; status_exception=false, readtimeout=5).status == 401
             @test HTTP.get("http://127.0.0.1:$mcp_port/notifications"; status_exception=false, readtimeout=5).status == 401
             adapter = HTTP.post("http://127.0.0.1:$mcp_port/adapter", ["Authorization" => "Bearer s3cret-token"], snapshot; status_exception=false, readtimeout=5)
-            @test JSON.parse(String(adapter.body)) == Dict("result" => Dict("notebooks" => []))
+            @test JSON.parse(String(adapter.body))["result"]["notebooks"] == []
 
             app_call(method, params) = HTTP.post("http://127.0.0.1:$mcp_port/call",
                 ["Content-Type" => "application/json", "Authorization" => "Bearer s3cret-token"],
@@ -231,8 +231,14 @@ end
             sock = Sockets.connect("127.0.0.1", mcp_port)
             write(sock, "GET /notifications HTTP/1.0\r\nHost: 127.0.0.1:$mcp_port\r\n\r\n")
             notes = Channel{Dict{String,Any}}(Inf)
+            last_seq = Ref(0)
             @async for line in eachline(sock)
-                startswith(line, "data: ") && put!(notes, JSON.parse(line[7:end]))
+                if startswith(line, "data: ")
+                    note = JSON.parse(line[7:end])
+                    @assert note["seq"] > last_seq[]
+                    last_seq[] = note["seq"]
+                    put!(notes, note)
+                end
             end
             # The next notification `method` names, skipping others.
             function next_note(method; nid = nothing)
@@ -251,8 +257,12 @@ end
             nid = adapter("open", Dict("path" => fixture, "run" => true))["result"]["notebook_id"]
             @test next_note("notebook_opened") == Dict("notebook_id" => nid, "path" => abspath(fixture))
             @test next_note("execution_done") == Dict("notebook_id" => nid)
-            @test adapter("snapshot", Dict())["result"]["notebooks"] == [adapter("snapshot", Dict("notebook_id" => nid))["result"]]
+            seq_now = last_seq[]
+            all = adapter("snapshot", Dict())["result"]
             snap = adapter("snapshot", Dict("notebook_id" => nid))["result"]
+            # Numbered like the notifications.
+            @test seq_now <= all["seq"] <= snap["seq"]
+            @test all["notebooks"] == [delete!(copy(snap), "seq")]
             @test (snap["path"], snap["cell_order"], snap["execution_allowed"], snap["safe_preview"]) ==
                   (abspath(fixture), [X, Y], true, false)
             y = snap["cells"][2]
@@ -269,7 +279,8 @@ end
             @test [(c["upstream"], c["downstream"]) for c in edges] == [([], [Y]), ([X], [])]
 
             # A change through the adapter: its code in the next cell_state, the graph changed.
-            adapter("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => "y = x * 8 + z")]))
+            applied = adapter("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => "y = x * 8 + z")]))
+            @test applied["result"]["seq"] > snap["seq"]
             state = next_note("cell_state")
             while only(filter(c -> c["cell_id"] == Y, state["cells"]))["code"] != "y = x * 8 + z"
                 state = next_note("cell_state")

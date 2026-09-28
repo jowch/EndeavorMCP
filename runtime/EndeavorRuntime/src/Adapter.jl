@@ -8,17 +8,27 @@
 # (it left the session), file_saved, execution_done, cell_state (every cell's
 # code and run state: Pluto's hook doesn't say which cell changed),
 # topology_changed, and run_finished (the cells an unwaited run finished).
+#
+# Each notification carries `seq`, a counter that `apply` also advances; its
+# reply and `snapshot`'s carry it too. A snapshot or notification numbered
+# below an `apply`'s `seq` may show the notebook from before that change.
 
 const _NOTIFY_LOCK = ReentrantLock()
 const _NOTIFY_SUBSCRIBERS = Set{Channel{String}}()
+const _SEQ = Ref(0)
 # Each notebook's dependency graph as last announced.
 const _TOPOLOGY_SENT = Dict{UUID,Any}()
 
 function notify!(method::AbstractString, params::AbstractDict)::Nothing
-    json = JSON.json(Dict("method" => method, "params" => params))
-    lock(() -> foreach(ch -> put!(ch, json), _NOTIFY_SUBSCRIBERS), _NOTIFY_LOCK)
+    lock(_NOTIFY_LOCK) do
+        json = JSON.json(Dict("method" => method, "params" => params, "seq" => (_SEQ[] += 1)))
+        foreach(ch -> put!(ch, json), _NOTIFY_SUBSCRIBERS)
+    end
     return nothing
 end
+
+_seq() = lock(() -> _SEQ[], _NOTIFY_LOCK)
+_next_seq!() = lock(() -> _SEQ[] += 1, _NOTIFY_LOCK)
 
 _notify_notebook!(method, nb) = notify!(method, Dict{String,Any}("notebook_id" => string(nb.notebook_id)))
 
@@ -255,7 +265,7 @@ function apply!(session, nb, ops)
     isempty(changed) || (nb.topology = Pluto.updated_topology(nb.topology, nb, changed))
     Pluto.save_notebook(session, nb)
     _notify_browser(session, nb)
-    return Dict{String,Any}("inserted" => inserted)
+    return Dict{String,Any}("inserted" => inserted, "seq" => _next_seq!())
 end
 
 # Run cells; none is Pluto's reactive cleanup after a delete. Not accepted when
@@ -373,10 +383,11 @@ function adapter_call(session, method::AbstractString, params)
     method == "new" && return new_notebook(session, get(params, "path", nothing), get(params, "folder", nothing))
     id = get(params, "notebook_id", nothing)
     if method == "snapshot" && id === nothing
-        return Dict{String,Any}("notebooks" => [snapshot(nb) for nb in values(session.notebooks)])
+        seq = _seq()
+        return Dict{String,Any}("notebooks" => [snapshot(nb) for nb in values(session.notebooks)], "seq" => seq)
     end
     nb = _get_notebook(session, string(id))
-    method == "snapshot" && return snapshot(nb)
+    method == "snapshot" && return (seq = _seq(); merge!(snapshot(nb), Dict{String,Any}("seq" => seq)))
     method == "graph" && return graph(nb; fresh=get(params, "fresh", false), refresh=get(params, "refresh", false),
                                       edges=get(params, "edges", false), packages=get(params, "packages", false))
     method == "shutdown" && return shutdown_notebook!(session, nb)
