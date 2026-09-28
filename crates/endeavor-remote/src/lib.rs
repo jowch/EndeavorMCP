@@ -188,17 +188,20 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<
     let (events, rx) = mpsc::channel();
     watch_replace_signal(replace_signal, events.clone());
     let routes: Routes = Arc::new(RwLock::new(Route::None));
+    let parts = Parts::default();
     let answer: Answer = {
-        let (dir, launcher, any_node) = (args.state_dir.clone(), args.launcher, args.any_node);
+        let (dir, launcher, any_node, parts) = (args.state_dir.clone(), args.launcher, args.any_node, parts.clone());
         Arc::new(move |request| match request {
             wire::files::Request::Runtime => wire::files::Reply::Runtime { runtime: check(&dir, launcher, any_node) },
+            wire::files::Request::Write { folder, path, offset, last, .. } => parts.track(folder, path, *offset, *last, || wire::files::answer(request)),
             other => wire::files::answer(other),
         })
     };
-    relay_stdin(mux.clone(), routes.clone(), events.clone(), answer);
+    relay_stdin(mux.clone(), routes.clone(), events.clone(), answer, parts.clone());
     let home = wire::files::home().display().to_string();
     let slurm_here = wire::slurm::has("sinfo");
-    let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: slurm_here }.frame());
+    let hello = ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: slurm_here, uploads: true };
+    let _ = mux.send(&hello.frame());
 
     let mut attached: Option<Attached> = None;
     loop {
@@ -241,7 +244,11 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<
             }
             // An explicit Detach wins over --quit-with-client: the app decides at
             // quit, and the flag only covers an app that vanishes without saying.
-            Event::App(ToHelper::Detach) | Event::Eof => std::process::exit(0),
+            Event::App(ToHelper::Detach) => {
+                parts.discard();
+                std::process::exit(0)
+            }
+            Event::Eof => std::process::exit(0),
             // Answered as they arrive (relay_stdin).
             Event::App(ToHelper::Files { .. }) => {}
             Event::Exited(pid, status) => {
@@ -626,7 +633,7 @@ fn watch_replace_signal(set: libc::sigset_t, events: Sender<Event>) {
 /// ports here, or the relay on its job's node), file requests are answered on
 /// their own threads with `answer`, other control messages and the end of input
 /// become events.
-fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Answer) {
+fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Answer, parts: Parts) {
     std::thread::spawn(move || {
         // SAFETY: fd 0 is our stdin; only this thread reads it.
         let mut stdin = BufReader::new(unsafe { File::from_raw_fd(0) });
@@ -669,8 +676,36 @@ fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Ans
             }
         }
         mux.close_all();
+        parts.discard();
         let _ = events.send(Event::Eof);
     });
+}
+
+/// The parts of files the app is sending (`wire::files::write`), so the ones
+/// it never finished go when it does.
+#[derive(Clone, Default)]
+struct Parts(Arc<Mutex<std::collections::HashSet<PathBuf>>>);
+
+impl Parts {
+    /// Answer a piece of a file with `write`, noting its part while unfinished.
+    fn track(&self, folder: &str, path: &str, offset: u64, last: bool, write: impl FnOnce() -> wire::files::Reply) -> wire::files::Reply {
+        let Ok((part, _)) = wire::files::upload_paths(&wire::files::expand(folder), path) else { return write() };
+        let mut parts = self.0.lock().unwrap();
+        if offset == 0 {
+            parts.insert(part.clone());
+        }
+        let reply = write();
+        if last || matches!(reply, wire::files::Reply::Error { .. }) {
+            parts.remove(&part);
+        }
+        reply
+    }
+
+    fn discard(&self) {
+        for part in self.0.lock().unwrap().drain() {
+            let _ = std::fs::remove_file(part);
+        }
+    }
 }
 
 fn dial(mux: &Arc<Mux>, id: u32, target: Target, ports: [u16; 2]) {
@@ -902,6 +937,30 @@ mod tests {
         let line = "│ Go to http://localhost:58250/?secret=wwD760ru in your browser";
         assert_eq!(redact_secret(line), "│ Go to http://localhost:58250/?secret=… in your browser");
         assert_eq!(redact_secret("no token here"), "no token here");
+    }
+
+    #[test]
+    fn only_unfinished_parts_are_discarded() {
+        let folder = std::env::temp_dir().join(format!("endeavor-parts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("data")).unwrap();
+        let parts = Parts::default();
+        let f = folder.display().to_string();
+        let send = |path: &str, offset: u64, bytes: &[u8], last: bool| {
+            let request = wire::files::Request::Write { folder: f.clone(), path: path.into(), offset, bytes: bytes.to_vec(), last };
+            parts.track(&f, path, offset, last, || wire::files::answer(&request))
+        };
+        assert_eq!(send("data/done.csv", 0, b"a", false), wire::files::Reply::Written);
+        assert_eq!(send("data/done.csv", 1, b"b", true), wire::files::Reply::Written);
+        assert_eq!(send("data/open.csv", 0, b"a", false), wire::files::Reply::Written);
+        assert_eq!(send("data/failed.csv", 0, b"a", false), wire::files::Reply::Written);
+        assert!(matches!(send("data/failed.csv", 5, b"b", false), wire::files::Reply::Error { .. }));
+        let open = folder.join("data/.open.csv.part");
+        assert_eq!(parts.0.lock().unwrap().iter().collect::<Vec<_>>(), [&open.canonicalize().unwrap()]);
+        parts.discard();
+        let left: Vec<_> = std::fs::read_dir(folder.join("data")).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, ["done.csv"]);
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

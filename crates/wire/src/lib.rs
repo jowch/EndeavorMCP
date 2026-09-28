@@ -140,6 +140,10 @@ pub enum ToApp {
         /// Slurm's commands are here: probably a cluster's login node.
         #[serde(default)]
         slurm: bool,
+        /// It takes `files::Request::Place` and `Write`; an older helper
+        /// doesn't say so and would ignore them.
+        #[serde(default)]
+        uploads: bool,
     },
     /// A line of the runtime's log while it starts, or of Julia's download.
     Progress { line: String },
@@ -293,5 +297,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Detach"}"#).unwrap(), ToHelper::Detach);
         assert_eq!(serde_json::from_str::<ToApp>(r#"{"type":"Replaced"}"#).unwrap(), ToApp::Replaced);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime"}"#).unwrap(), ToHelper::StartRuntime { job: None });
+        let old_hello = r#"{"type":"Hello","version":"0.1.0","node":"labbox3","home":"/home/ada"}"#;
+        assert!(matches!(serde_json::from_str::<ToApp>(old_hello).unwrap(), ToApp::Hello { slurm: false, uploads: false, .. }), "a helper from before uploads");
     }
 }

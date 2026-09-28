@@ -306,6 +306,45 @@ fn answers_file_requests_before_any_runtime() {
     assert!(!dir.join("lock").exists(), "no runtime was asked for, so no lock");
 }
 
+#[test]
+fn saves_a_sent_file_into_the_session_folder_and_drops_an_unfinished_one() {
+    let dir = state_dir("upload");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join("decay-fits")).unwrap();
+    let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[("HOME", home.to_str().unwrap())]);
+    assert!(matches!(helper.hello(), ToApp::Hello { uploads: true, .. }));
+    let ask = |id: u32, request: Request| {
+        helper.send(ToHelper::Files { id, request });
+        match helper.next() {
+            ToApp::Files { id: got, reply } if got == id => reply,
+            other => panic!("expected Files {id}, got {other:?}"),
+        }
+    };
+    let folder = "~/decay-fits".to_string();
+    // SHA-256 of "t,y\n0,1\n".
+    let sha256 = "b659e80980e7375313bf70ebf6e577f4abae7d5657bf7b563fa64c2f48a33eee".to_string();
+    let placed = ask(1, Request::Place { folder: folder.clone(), name: "decay.csv".into(), size: 8, sha256: sha256.clone() });
+    assert_eq!(placed, Reply::Place { path: "data/decay.csv".into(), have: false });
+    let piece = |offset: u64, bytes: &[u8], last| Request::Write { folder: folder.clone(), path: "data/decay.csv".into(), offset, bytes: bytes.to_vec(), last };
+    assert_eq!(ask(2, piece(0, b"t,y\n", false)), Reply::Written);
+    assert_eq!(ask(3, piece(4, b"0,1\n", true)), Reply::Written);
+    assert_eq!(std::fs::read_to_string(home.join("decay-fits/data/decay.csv")).unwrap(), "t,y\n0,1\n");
+    let again = ask(4, Request::Place { folder: folder.clone(), name: "decay.csv".into(), size: 8, sha256 });
+    assert_eq!(again, Reply::Place { path: "data/decay.csv".into(), have: true });
+    let escape = ask(5, Request::Write { folder: folder.clone(), path: "../x.csv".into(), offset: 0, bytes: b"x".to_vec(), last: true });
+    assert!(matches!(escape, Reply::Error { message } if message.contains("isn't inside")));
+    assert!(!home.join("x.csv").exists());
+
+    // The app goes mid-send: the helper deletes the part on its way out.
+    assert_eq!(ask(6, piece(0, b"t,y\n", false)), Reply::Written);
+    let part = home.join("decay-fits/data/.decay.csv.part");
+    assert!(part.exists());
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+    assert!(!part.exists(), "an unfinished part is removed when the app goes");
+    assert_eq!(std::fs::read_to_string(home.join("decay-fits/data/decay.csv")).unwrap(), "t,y\n0,1\n", "the finished file stays");
+}
+
 /// Ask the helper what runs from its state folder.
 fn check(helper: &Helper, id: u32) -> RuntimeState {
     helper.send(ToHelper::Files { id, request: Request::Runtime });

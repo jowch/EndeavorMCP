@@ -573,7 +573,7 @@ pub fn relay_main(argv: &[String]) -> ! {
     let (events, rx) = mpsc::channel();
     watch_replace_signal(replace_signal, events.clone());
     let home = wire::files::home().display().to_string();
-    let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false }.frame());
+    let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false }.frame());
     let here = hostname();
     let state = read_state(&dir).filter(|s| s.node == here && pid_alive(s.pid) && (bridge_answers(s) || bridge_answers(s)));
     let Some(state) = state else {
@@ -581,7 +581,7 @@ pub fn relay_main(argv: &[String]) -> ! {
         std::process::exit(1);
     };
     let runtime = Runtime { pid: state.pid, exit: Exit::watch_pid(state.pid, events.clone()), state_dir: dir.clone() };
-    relay_stdin(mux.clone(), Arc::new(RwLock::new(Route::Local([state.pluto_port, state.mcp_port]))), events, Arc::new(wire::files::answer));
+    relay_stdin(mux.clone(), Arc::new(RwLock::new(Route::Local([state.pluto_port, state.mcp_port]))), events, Arc::new(wire::files::answer), Parts::default());
     let ready = ToApp::Ready {
         launcher: state.launcher.clone(),
         node: state.node.clone(),
