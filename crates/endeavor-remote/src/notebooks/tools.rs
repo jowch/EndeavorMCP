@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value, json};
 
-use super::{Change, GraphQuery, Notebooks, Snapshot, absolute_path, uuid_value};
+use super::{Change, GraphQuery, Notebooks, Snapshot, absolute_path, canonical_path, uuid_value};
 use crate::host_tools::julia_repr;
 use crate::mcp::{WRITE_TOOLS, julia_string};
 
@@ -341,8 +341,10 @@ impl Call<'_> {
 
     fn list_notebooks(&self) -> Result<Value, String> {
         let snapshots = self.nbs.snapshots()?;
+        let bound = self.nbs.bound(self.owner);
+        let own = |nb: &Snapshot| bound.as_ref().is_some_and(|bound| canonical_path(&nb.path).is_ok_and(|path| path == *bound));
         let mut state = self.nbs.state.lock().unwrap();
-        Ok(snapshots.iter().map(|nb| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb))).collect())
+        Ok(snapshots.iter().map(|nb| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(nb))).collect())
     }
 
     fn read_cell(&self) -> Result<Value, String> {

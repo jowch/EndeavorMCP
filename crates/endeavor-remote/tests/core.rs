@@ -277,7 +277,10 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     bridge.notify(serde_json::json!({ "method": "notebook_opened", "params": { "notebook_id": "n1", "path": "/n/a.jl" } }));
     let event = read_until(&mut reader, "\n\n");
     let event: serde_json::Value = serde_json::from_str(event.strip_prefix("data: ").unwrap().trim_end()).unwrap();
-    assert_eq!(event["notebooks"], serde_json::json!([{ "notebook_id": "n1", "path": "/n/a.jl", "cell_count": 1, "pending_run": [], "running": [], "execution_allowed": true }]));
+    assert_eq!(
+        event["notebooks"],
+        serde_json::json!([{ "notebook_id": "n1", "path": "/n/a.jl", "cell_count": 1, "pending_run": [], "running": [], "execution_allowed": true, "this_session": false }])
+    );
     assert_eq!(event["cells"]["n1"][0]["author"], serde_json::Value::Null);
 
     // The same state again isn't news; a change the tools didn't make is the user's.

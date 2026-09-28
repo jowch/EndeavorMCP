@@ -301,7 +301,10 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 6"), (Y, "y = x * 7")]);
     s.notebooks.publish();
     let event = next(&rx);
-    assert_eq!(event["notebooks"], json!([{ "notebook_id": NB, "path": "/n/a.jl", "cell_count": 2, "pending_run": [], "running": [], "execution_allowed": true }]));
+    assert_eq!(
+        event["notebooks"],
+        json!([{ "notebook_id": NB, "path": "/n/a.jl", "cell_count": 2, "pending_run": [], "running": [], "execution_allowed": true, "this_session": false }])
+    );
     assert_eq!(
         cell(&event, NB, Y),
         &json!({ "cell_id": Y, "running": false, "errored": false, "unrun": false, "author": null, "before": null, "version": format!("{:x}", hash("y = x * 7")), "name": "y" })
@@ -868,6 +871,21 @@ fn one_notebook_per_session() {
     assert_eq!(s.notebooks.bound("c").as_ref(), Some(&paths[2]));
     assert_eq!(refused(s.call("c", "new_notebook", json!({ "path": &paths[3] }))), one);
     assert_eq!(refused(s.call("c", "open_notebook", json!({ "path": first_nb }))), one);
+}
+
+#[test]
+fn list_notebooks_says_which_notebook_is_this_sessions() {
+    let s = setup();
+    let paths = temp_notebooks("mine", 2);
+    let first = s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    let second = s.call("", "open_notebook", json!({ "path": &paths[1] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    let mine = |owner: &str| -> HashMap<String, Value> {
+        let listed = s.call(owner, "list_notebooks", json!({})).unwrap();
+        listed.as_array().unwrap().iter().map(|nb| (nb["notebook_id"].as_str().unwrap().to_owned(), nb["this_session"].clone())).collect()
+    };
+    assert_eq!(mine("a"), HashMap::from([(first.clone(), json!(true)), (second.clone(), json!(false))]));
+    assert_eq!(mine("unbound"), HashMap::from([(first.clone(), json!(false)), (second.clone(), json!(false))]));
+    assert_eq!(mine(""), HashMap::from([(first, json!(false)), (second, json!(false))]), "the app has no notebook of its own");
 }
 
 /// `path` relative to `from`, through `..`s.

@@ -251,12 +251,13 @@ impl Snapshot {
         cell.running || (cell.queued && self.cells.values().any(|c| c.running))
     }
 
-    /// What `list_notebooks` says of it.
-    fn summary(&self, pending_run: &[String]) -> Value {
+    /// What `list_notebooks` says of it; `this_session`: it's the caller's own notebook.
+    fn summary(&self, pending_run: &[String], this_session: bool) -> Value {
         let running: Vec<&String> = self.order.iter().filter(|id| self.cells.get(*id).is_some_and(|c| self.is_running(c))).collect();
         json!({
             "notebook_id": self.id, "path": self.path, "cell_count": self.order.len(),
             "pending_run": pending_run, "running": running, "execution_allowed": self.execution_allowed,
+            "this_session": this_session,
         })
     }
 }
@@ -521,7 +522,7 @@ impl Notebooks {
             notebook.path = nb.path.clone();
             let cell = |id: &String| nb.cells.get(id).ok_or_else(|| format!("no cell {id} in {}", nb.id));
             let pending = notebook.pending_run(nb);
-            list.push(nb.summary(&pending));
+            list.push(nb.summary(&pending, false));
             let mut states = Vec::new();
             for id in &nb.order {
                 let c = cell(id)?;
