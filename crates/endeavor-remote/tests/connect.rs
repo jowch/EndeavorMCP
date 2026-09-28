@@ -490,7 +490,8 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
 
     // The bridge goes through the core; Pluto straight to Julia's port.
     let mut call = helper.connect(Target::Bridge);
-    write!(call, "POST /call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_folder","params":{"path":"/n"}}"#;
+    write!(call, "POST /call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut reply = String::new();
     call.read_to_string(&mut reply).unwrap();
     assert!(reply.starts_with("HTTP/1.1 200") && reply.contains(r#""said":"POST /call HTTP/1.0""#), "{reply}");

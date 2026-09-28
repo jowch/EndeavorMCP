@@ -1,9 +1,10 @@
 //! `endeavor-remote core`: the runtime the helper starts (docs/runtime-core.md).
 //! It starts `julia boot.jl` as its child, serves the bridge port, and writes
 //! `runtime.json` once Julia is ready. It serves the agent's MCP connection
-//! itself (see `mcp`) and the app's `/events` stream (see `notebooks`), and
-//! passes every other request on the bridge port to Julia's own bridge
-//! unchanged but for its Host; the plan moves handlers here one at a time.
+//! and the app's `/call`s itself (see `mcp`), and the app's `/events` stream
+//! (see `notebooks`), driving Pluto through Julia's adapter. The few other
+//! requests on the bridge port (`endeavor/set_folder`, `endeavor/shutdown`)
+//! go to Julia's own bridge unchanged but for their Host.
 //!
 //! Julia shares the core's process group, which the helper created, so the
 //! helper's signals to the group reach both. The core exits when Julia does,
@@ -261,15 +262,11 @@ fn serve_client(client: TcpStream, bridge: &Bridge) -> io::Result<()> {
         } else if method == "POST" && target.starts_with("/call") {
             let body = http::read_body(&mut reader, request.request_body()?)?;
             match bridge.app_call(&body) {
-                Ok(Some(reply)) => {
+                Some(reply) => {
                     http::respond(&mut client, "200 OK", Some("application/json"), reply.as_bytes(), request.keeps_alive())?;
                     request.keeps_alive()
                 }
-                Ok(None) => forward(request, Body::Read(&body), &mut client, port)?,
-                Err(_) => {
-                    refuse(&mut client, "502 Bad Gateway", "Julia's bridge isn't answering")?;
-                    false
-                }
+                None => forward(request, Body::Read(&body), &mut client, port)?,
             }
         } else {
             forward(request, Body::Stream(&mut reader), &mut client, port)?

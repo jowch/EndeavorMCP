@@ -1,9 +1,8 @@
 //! The agent's MCP connection, MCP over SSE: `GET /sse` opens a session's
 //! stream, and each `POST /message?sessionId=…` carries one JSON-RPC message,
 //! whose reply goes out on that stream. Each agent session's messages carry
-//! `X-Endeavor-Session` (its key) and, on a server, `X-Endeavor-Host`. What the
-//! core doesn't answer itself goes to Julia's `/dispatch` with those headers,
-//! and what the core keeps about notebooks (see `notebooks`) hears of each call.
+//! `X-Endeavor-Session` (its key) and, on a server, `X-Endeavor-Host`. The
+//! notebook tools are `notebooks`'; host tools are `host_tools`'.
 //!
 //! Each session has a run policy the app sets ("plan" | "ask" | "auto"). In
 //! "plan" its notebook writes and runs are refused. "ask" and "auto" pass
@@ -13,16 +12,25 @@ use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::host_tools;
 use crate::http::{self, Head};
-use crate::notebooks::{Julia, Notebooks, Upstream};
+use crate::notebooks::{Julia, Notebooks, Reply};
 
 const KEEPALIVE: Duration = Duration::from_secs(15);
+
+const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// The notebook tools' schemas, for `tools/list`.
+static NOTEBOOK_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!("notebook_tools.json")).expect("notebook_tools.json"));
+
+/// `/call` methods Julia still answers: Pluto's folder for new notebooks, and
+/// ending the process.
+const JULIA_CALLS: [&str; 2] = ["endeavor/set_folder", "endeavor/shutdown"];
 
 /// Replies waiting for a session's stream; a full queue holds up the next POST.
 const QUEUE: usize = 64;
@@ -88,10 +96,8 @@ impl Bridge {
     /// The reply to one of the app's `/call`s, if the core answers it; `None`
     /// passes it to Julia's `/call`. Only the app calls this route, so its
     /// tool calls have no caller.
-    pub fn app_call(&self, raw: &[u8]) -> io::Result<Option<String>> {
-        let Some(message) = serde_json::from_slice::<Value>(raw).ok().filter(Value::is_object) else {
-            return Ok(None);
-        };
+    pub fn app_call(&self, raw: &[u8]) -> Option<String> {
+        let message = serde_json::from_slice::<Value>(raw).ok().filter(Value::is_object)?;
         let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
         let text = |key: &str, default: &str| params.get(key).map_or(default.to_owned(), julia_string);
         match message["method"].as_str().unwrap_or_default() {
@@ -125,9 +131,8 @@ impl Bridge {
                     }
                     Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": e } }),
                 };
-                return Ok(Some(to_json(&reply)));
+                return Some(to_json(&reply));
             }
-            // Julia keeps it too, for new_notebook: its reply is the app's.
             "endeavor/set_session_folder" => {
                 let (owner, folder) = (text("owner", ""), params.get("folder").filter(|f| !f.is_null()).map_or(String::new(), julia_string));
                 let mut folders = self.folders.lock().unwrap();
@@ -136,15 +141,21 @@ impl Bridge {
                 } else {
                     folders.insert(owner, folder);
                 }
-                return Ok(None);
             }
-            "tools/list" | "tools/call" => {
-                return Ok(Some(self.dispatch(&message, raw, &Caller::default())?.unwrap_or_else(|| "{}".into())));
+            "endeavor/run_preview" => {
+                let id = message.get("id").cloned().unwrap_or(Value::Null);
+                let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let reply = match self.notebooks.run_preview(&text("tool", ""), &arguments) {
+                    Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                    Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": e } }),
+                };
+                return Some(to_json(&reply));
             }
-            _ => return Ok(None),
+            method if JULIA_CALLS.contains(&method) => return None,
+            _ => return Some(self.dispatch(&message, &Caller::default()).unwrap_or_else(|| "{}".into())),
         }
         let id = message.get("id").cloned().unwrap_or(Value::Null);
-        Ok(Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }))))
+        Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
     }
 
     /// Serve `GET /sse`: a new session, and its stream until the client goes.
@@ -180,83 +191,89 @@ impl Bridge {
             http::respond(client, "400 Bad Request", None, br#"{"error":"Invalid JSON"}"#, keep_alive)?;
             return Ok(keep_alive);
         };
-        match self.dispatch(&message, &body, &Caller::of(request)) {
-            Ok(reply) => {
-                // A session whose stream has gone drops the reply.
-                if let Some(reply) = reply {
-                    let _ = session.send(reply);
-                }
-                http::respond(client, "202 Accepted", None, b"", keep_alive)?;
-                Ok(keep_alive)
-            }
-            Err(_) => {
-                let body = json!({ "error": "Julia's bridge isn't answering" }).to_string();
-                http::respond(client, "502 Bad Gateway", Some("application/json"), body.as_bytes(), false)?;
-                Ok(false)
-            }
+        // A session whose stream has gone drops the reply.
+        if let Some(reply) = self.dispatch(&message, &Caller::of(request)) {
+            let _ = session.send(reply);
         }
+        http::respond(client, "202 Accepted", None, b"", keep_alive)?;
+        Ok(keep_alive)
     }
 
-    /// The reply to one JSON-RPC message (`raw` is its text), if it gets one.
-    fn dispatch(&self, message: &Value, raw: &[u8], caller: &Caller) -> io::Result<Option<String>> {
-        // Notifications get no reply, and Julia had nothing to do for them.
-        let id = match message.get("id") {
-            None | Some(Value::Null) => return Ok(None),
-            Some(id) => id,
-        };
-        let ok = |result: Value| Ok(Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))));
-        match message["method"].as_str().unwrap_or_default() {
+    /// The reply to one JSON-RPC message, if it gets one.
+    fn dispatch(&self, message: &Value, caller: &Caller) -> Option<String> {
+        // Notifications get no reply.
+        let id = message.get("id").filter(|id| !id.is_null())?;
+        let ok = |result: Value| Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result })));
+        let method = message.get("method").map_or(String::new(), julia_string);
+        match method.as_str() {
+            "initialize" => ok(json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") },
+            })),
             "ping" => ok(json!({})),
             "tools/list" => {
-                let mut reply: Value = serde_json::from_str(&self.ask_julia("/dispatch", raw, caller)?)?;
-                if !caller.host.is_empty()
-                    && let Some(tools) = reply["result"]["tools"].as_array_mut()
-                {
+                let mut tools = NOTEBOOK_TOOLS.as_array().cloned().unwrap_or_default();
+                if !caller.host.is_empty() {
                     tools.extend(host_tools::schemas());
                 }
-                for tool in reply["result"]["tools"].as_array_mut().into_iter().flatten() {
+                for tool in &mut tools {
                     // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
                     let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name));
                     tool["annotations"] = json!({ "readOnlyHint": read_only });
                 }
-                Ok(Some(to_json(&reply)))
+                ok(json!({ "tools": tools }))
             }
             "tools/call" => {
-                let params = &message["params"];
-                let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                // Julia reads a call's arguments before anything else, and fails
-                // arguments that aren't an object its own way.
-                let Some(name) = params["name"].as_str().filter(|_| arguments.is_object()) else {
-                    let reply = self.ask_julia("/dispatch", raw, caller)?;
-                    self.notebooks.publish();
-                    return Ok(Some(reply));
-                };
-                self.notebooks.note_activity(&arguments);
-                let result = if let Some(refusal) = self.refusal(caller, name) {
-                    tool_error(&refusal)
-                } else if host_tools::NAMES.contains(&name) {
-                    let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
-                    let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
-                    match host_tools::call(name, &arguments, &host_tools::Shell { folder: folder.as_deref(), env: &env }) {
-                        Ok(result) => json!({ "content": [{ "type": "text", "text": to_json(&result) }], "isError": false }),
-                        Err(error) => tool_error(&error),
-                    }
-                } else if name == "keep_notebook_alive" {
-                    match self.notebooks.keep_alive(&arguments) {
-                        Ok(result) => json!({ "content": [{ "type": "text", "text": to_json(&result) }], "isError": false }),
-                        Err(error) => tool_error(&error),
-                    }
-                } else if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments) {
-                    tool_error(&refusal)
-                } else {
-                    let reply = self.notebooks.forward_tool(&caller.owner, name, &arguments, || self.ask_julia("/dispatch", raw, caller));
-                    self.notebooks.publish();
-                    return reply.map(Some);
-                };
+                let result = self.call_tool(&message["params"], caller);
                 self.notebooks.publish();
                 ok(result)
             }
-            _ => self.ask_julia("/dispatch", raw, caller).map(Some),
+            _ => Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }))),
+        }
+    }
+
+    /// A `tools/call`'s result.
+    fn call_tool(&self, params: &Value, caller: &Caller) -> Value {
+        let text = |result: &Value| json!({ "content": [{ "type": "text", "text": to_json(result) }], "isError": false });
+        let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        if !arguments.is_object() {
+            return tool_error("ArgumentError: invalid_argument::arguments must be an object");
+        }
+        let name = match params.get("name") {
+            None => "",
+            Some(Value::String(name)) => name.as_str(),
+            Some(other) => return tool_error(&format!("ArgumentError: unknown_tool::Unknown tool: '{}'", julia_string(other))),
+        };
+        self.notebooks.note_activity(&arguments);
+        if let Some(refusal) = self.refusal(caller, name) {
+            return tool_error(&refusal);
+        }
+        if host_tools::NAMES.contains(&name) {
+            let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
+            let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
+            return match host_tools::call(name, &arguments, &host_tools::Shell { folder: folder.as_deref(), env: &env }) {
+                Ok(result) => text(&result),
+                Err(error) => tool_error(&error),
+            };
+        }
+        if name == "keep_notebook_alive" {
+            return self.notebooks.keep_alive(&arguments).map_or_else(|e| tool_error(&e), |r| text(&r));
+        }
+        if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments) {
+            return tool_error(&refusal);
+        }
+        let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
+        match self.notebooks.tool(&caller.owner, name, &arguments, folder.as_deref()) {
+            Ok(Reply::Json(result)) => text(&result),
+            Ok(Reply::Image { meta, png_base64 }) => json!({
+                "content": [
+                    { "type": "text", "text": to_json(&meta) },
+                    { "type": "image", "data": png_base64, "mimeType": "image/png" },
+                ],
+                "isError": false,
+            }),
+            Err(error) => tool_error(&error),
         }
     }
 
@@ -275,10 +292,6 @@ impl Bridge {
             ));
         }
         None
-    }
-
-    fn ask_julia(&self, path: &str, raw: &[u8], caller: &Caller) -> io::Result<String> {
-        self.julia.ask(path, raw, caller)
     }
 }
 

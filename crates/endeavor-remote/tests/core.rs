@@ -184,7 +184,7 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
 
     // HTTP/1.0, as the helper's own calls are: the reply runs to the end of the connection.
     let mut socket = core.connect();
-    write!(socket, "POST /call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
+    write!(socket, "POST /call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut reply = String::new();
     socket.read_to_string(&mut reply).unwrap();
     let (head, body) = reply.split_once("\r\n\r\n").unwrap();
@@ -341,7 +341,7 @@ fn post(core: &Core, session: &str, message: &str, caller: &[(&str, &str)]) -> (
 }
 
 #[test]
-fn serves_the_agents_mcp_sessions_and_asks_julia_with_the_caller() {
+fn serves_the_agents_mcp_sessions() {
     let dir = state_dir("core-mcp");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
@@ -350,19 +350,17 @@ fn serves_the_agents_mcp_sessions_and_asks_julia_with_the_caller() {
 
     let message = r#"{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{}}"#;
     assert_eq!(post(&core, &session.id, message, &caller), ("HTTP/1.1 202 Accepted".into(), String::new()));
-    assert_eq!(session.reply(), r#"{"id":1,"jsonrpc":"2.0","result":{"host":"gpu-box","method":"resources/list","owner":"7"}}"#);
-    let asked: Vec<_> = bridge.seen().into_iter().filter(|s| s.line == "POST /dispatch HTTP/1.1").collect();
-    assert_eq!(asked.len(), 1);
-    assert_eq!(asked[0].body, message.as_bytes(), "the message as the agent sent it");
-    assert_eq!(asked[0].header("Authorization"), Some(format!("Bearer {TOKEN}").as_str()));
-
-    // Answered here: ping, and notifications (which get no reply).
+    assert_eq!(session.reply(), r#"{"error":{"code":-32601,"message":"Method not found: resources/list"},"id":1,"jsonrpc":"2.0"}"#);
     assert_eq!(post(&core, &session.id, r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#, &caller).0, "HTTP/1.1 202 Accepted");
     assert_eq!(session.reply(), r#"{"id":"p","jsonrpc":"2.0","result":{}}"#);
+    // Notifications get no reply.
     assert_eq!(post(&core, &session.id, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &caller).0, "HTTP/1.1 202 Accepted");
     assert_eq!(post(&core, &session.id, r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#, &[]).0, "HTTP/1.1 202 Accepted");
-    assert_eq!(session.reply(), r#"{"id":2,"jsonrpc":"2.0","result":{"host":"","method":"initialize","owner":""}}"#, "the app's own calls have no caller");
-    assert_eq!(bridge.seen().iter().filter(|s| s.line == "POST /dispatch HTTP/1.1").count(), 2);
+    assert_eq!(
+        session.reply(),
+        format!(r#"{{"id":2,"jsonrpc":"2.0","result":{{"capabilities":{{"tools":{{}}}},"protocolVersion":"2024-11-05","serverInfo":{{"name":"endeavor-runtime","version":"{}"}}}}}}"#, env!("CARGO_PKG_VERSION"))
+    );
+    assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 
     assert_eq!(post(&core, "nope", message, &caller), ("HTTP/1.1 404 Not Found".into(), r#"{"error":"Session not found"}"#.into()));
     assert_eq!(post(&core, &session.id, "{nope", &caller), ("HTTP/1.1 400 Bad Request".into(), r#"{"error":"Invalid JSON"}"#.into()));
@@ -381,7 +379,7 @@ fn keeps_concurrent_sessions_apart() {
             for i in 0..10 {
                 let (core, id) = (&core, session.id.clone());
                 scope.spawn(move || {
-                    let message = format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"tools/call"}}"#);
+                    let message = format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"tools/call","params":{{"name":"tool_{n}","arguments":{{}}}}}}"#);
                     assert_eq!(post(core, &id, &message, &[("X-Endeavor-Session", &n.to_string())]).0, "HTTP/1.1 202 Accepted");
                 });
             }
@@ -391,7 +389,7 @@ fn keeps_concurrent_sessions_apart() {
         let mut ids: Vec<i64> = (0..10)
             .map(|_| {
                 let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
-                assert_eq!(reply["result"]["owner"], n.to_string());
+                assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains(&format!("tool_{n}")));
                 reply["id"].as_i64().unwrap()
             })
             .collect();
@@ -422,10 +420,10 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let core = Core::start(&dir, &bridge);
     let mut session = Session::open(&core);
     let tool = |id: u32, name: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"notebook_id":"n1"}}}}}}"#);
-    let asked = || bridge.seen().iter().filter(|s| s.line == "POST /dispatch HTTP/1.1").count();
     // The core reads the notebooks' state after every tool call, to tell the app.
     let reads = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).count();
     let plan_edit = "Plan mode is read-only: `edit_cell` would change or run the notebook. Finish the plan; the user switches modes to carry it out.";
+    let not_a_notebook = |id| tool_error(id, "invalid_notebook_id", "Invalid notebook ID: 'n1'");
 
     let set = r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/set_policy","params":{"owner":"7","policy":"plan"}}"#;
     assert_eq!(app_call(&core, set), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
@@ -435,16 +433,14 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let before = reads();
     post(&core, &session.id, &tool(1, "edit_cell"), &seven);
     assert_eq!(session.reply(), tool_error(1, "plan_mode", plan_edit));
-    assert_eq!(asked(), 0, "refused here");
     assert!(reads() > before, "the app hears the notebooks' state after it");
 
     // Reads pass, and so do other sessions' writes and the app's own.
     post(&core, &session.id, &tool(2, "read_cell"), &seven);
-    assert!(session.reply().contains(r#""method":"tools/call","owner":"7""#));
+    assert_eq!(session.reply(), not_a_notebook(2));
     post(&core, &session.id, &tool(3, "edit_cell"), &[("X-Endeavor-Session", "8")]);
-    assert!(session.reply().contains(r#""owner":"8""#));
-    assert!(app_call(&core, &tool(4, "edit_cell")).contains(r#""method":"tools/call","owner":"""#));
-    assert_eq!(asked(), 3);
+    assert_eq!(session.reply(), not_a_notebook(3));
+    assert_eq!(app_call(&core, &tool(4, "edit_cell")), not_a_notebook(4));
 
     // Host tools: plan mode refuses run_shell too; without a server, none run.
     let on_server = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
@@ -455,23 +451,20 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     post(&core, &session.id, &tool(6, "run_shell"), &seven);
     assert_eq!(session.reply(), tool_error(6, "host_tools", &not_here("run_shell")), "the host check comes first");
     assert_eq!(app_call(&core, &tool(7, "list_folder")), tool_error(7, "host_tools", &not_here("list_folder")));
-    assert_eq!(asked(), 3);
 
-    // A call with arguments Julia can't read goes to Julia, which says so its own way.
     post(&core, &session.id, r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":null}}"#, &seven);
-    session.reply();
-    assert_eq!(asked(), 4);
+    assert_eq!(session.reply(), tool_error(8, "invalid_argument", "arguments must be an object"));
 
     assert_eq!(app_call(&core, &set.replace("plan", "ask")), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
     post(&core, &session.id, &tool(9, "edit_cell"), &seven);
-    assert!(session.reply().contains(r#""owner":"7""#));
+    assert_eq!(session.reply(), not_a_notebook(9));
 
     // Every tool says whether it only reads, for Claude Code's own plan mode.
     post(&core, &session.id, r#"{"jsonrpc":"2.0","id":10,"method":"tools/list"}"#, &seven);
-    assert_eq!(
-        session.reply(),
-        r#"{"id":10,"jsonrpc":"2.0","result":{"tools":[{"annotations":{"readOnlyHint":false},"name":"edit_cell"},{"annotations":{"readOnlyHint":true},"name":"read_cell"}]}}"#
-    );
+    let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
+    let hint = |name: &str| reply["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
+    assert_eq!((hint("edit_cell"), hint("read_cell"), hint("allow_execution")), (false.into(), true.into(), false.into()));
+    assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")), "Julia answers only the adapter's calls");
 }
 
 /// A folder of its own for a test.
@@ -516,10 +509,11 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     let reply: serde_json::Value = serde_json::from_str(&session.reply()).unwrap();
     let tools = reply["result"]["tools"].as_array().unwrap();
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["edit_cell", "read_cell", "list_folder", "read_file", "run_shell"], "Julia's tools, then the host tools");
-    let hints: Vec<_> = tools.iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
-    assert_eq!(hints, [false, true, true, true, false]);
-    assert_eq!(tools[4]["inputSchema"]["required"], serde_json::json!(["command"]));
+    assert_eq!(names.len(), 29);
+    assert_eq!((&names[..3], &names[26..]), (&["list_notebooks", "read_cell", "view_cell_output"][..], &["list_folder", "read_file", "run_shell"][..]), "the notebook tools, then the host tools");
+    let hints: Vec<_> = tools[26..].iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
+    assert_eq!(hints, [true, true, false]);
+    assert_eq!(tools[28]["inputSchema"]["required"], serde_json::json!(["command"]));
     post(&core, &session.id, list, &[]);
     assert!(!session.reply().contains("list_folder"), "not on this Mac");
 
@@ -529,7 +523,6 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     let before = reads();
     server.run(serde_json::json!({ "command": "true" }));
     assert!(reads() > before);
-    assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch") && String::from_utf8_lossy(&s.body).contains("run_shell")));
 }
 
 #[test]
@@ -645,9 +638,9 @@ fn run_shell_runs_in_the_login_shell_and_keeps_to_its_limits() {
     let env = server.run(serde_json::json!({ "command": "echo \"$JULIA_DEPOT_PATH|$ENDEAVOR_TOKEN|$ENDEAVOR_LAUNCHER\"" }));
     assert_eq!(env["stdout"], "/opt/depot:||\n", "Julia's environment, without the runtime's secrets");
 
-    // A session's own folder is where it runs by default; Julia keeps it too.
+    // A session's own folder is where it runs by default.
     let set = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_session_folder","params":{{"owner":"8","folder":"{}"}}}}"#, folder.display());
-    assert!(app_call(&core, &set).contains("set_session_folder"), "Julia's reply");
+    assert_eq!(app_call(&core, &set), r#"{"id":1,"jsonrpc":"2.0","result":{}}"#);
     assert_eq!(server.call("8", "run_shell", serde_json::json!({ "command": "pwd" })).unwrap()["stdout"], format!("{}\n", folder.display()));
     assert_eq!(server.call("8", "run_shell", serde_json::json!({ "command": "pwd", "cwd": "~" })).unwrap()["stdout"], format!("{}\n", home.display()));
     app_call(&core, &set.replace(&folder.display().to_string(), ""));

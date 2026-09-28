@@ -1,9 +1,9 @@
 //! A stand-in for Julia under `endeavor-remote core`: a script that writes the
 //! state boot.jl would and then sleeps, naming a bridge served by this test
 //! process. The bridge answers like Julia's (chunked responses to HTTP/1.1,
-//! close-delimited to HTTP/1.0, an SSE stream on `/stream`, the agent's MCP
-//! messages on `/dispatch`, the adapter's calls on `/adapter` and its
-//! notifications on `/notifications`) and records what it was sent.
+//! close-delimited to HTTP/1.0, an SSE stream on `/stream`, the adapter's
+//! calls on `/adapter` and its notifications on `/notifications`) and records
+//! what it was sent.
 
 #![allow(dead_code)]
 
@@ -185,9 +185,6 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
             }
             .to_string();
             let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len());
-        } else if target == "/dispatch" {
-            let reply = dispatch(&seen);
-            let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{reply}\r\n0\r\n\r\n", reply.len());
         } else if target == "/echo" {
             let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", seen.body.len());
             let _ = socket.write_all(&seen.body);
@@ -281,21 +278,4 @@ fn notifications(mut socket: TcpStream, shared: &Arc<Shared>) {
             return;
         }
     }
-}
-
-/// Julia's reply to an MCP message, keys sorted as Julia writes them: for
-/// `tools/list`, a few notebook tools; otherwise it names the message and its caller.
-fn dispatch(seen: &Seen) -> String {
-    let message: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
-    if message["method"] == "tools/list" {
-        return format!(r#"{{"id":{},"jsonrpc":"2.0","result":{{"tools":[{{"name":"edit_cell"}},{{"name":"read_cell"}}]}}}}"#, message["id"]);
-    }
-    let caller = |name| serde_json::Value::from(seen.header(name).unwrap_or_default());
-    format!(
-        r#"{{"id":{},"jsonrpc":"2.0","result":{{"host":{},"method":{},"owner":{}}}}}"#,
-        message["id"],
-        caller("X-Endeavor-Host"),
-        message["method"],
-        caller("X-Endeavor-Session")
-    )
 }

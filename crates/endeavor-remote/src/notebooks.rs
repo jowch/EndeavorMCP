@@ -1,11 +1,15 @@
-//! What the core keeps about each open notebook (docs/runtime-core.md): who
-//! last changed each cell and the code the agent's edits replaced, idle stop,
-//! each agent session's one notebook, and the `/events` stream the app
-//! follows. The engine's adapter (Julia's, for Pluto) answers `snapshot`,
-//! `graph` and `shutdown` on its `POST /adapter`, and says when a notebook
-//! changed on its `GET /notifications` stream; the core reads a fresh snapshot
-//! each time it tells the app anything. A notebook's state goes when it shuts
-//! down, except its entry in `idle_stopped`.
+//! What the core keeps about each open notebook (docs/runtime-core.md): the
+//! notebook tools' rules (see `tools`), staging and read receipts, who last
+//! changed each cell and the code the agent's edits replaced, idle stop, each
+//! agent session's one notebook, and the `/events` stream the app follows.
+//!
+//! The engine's adapter (Julia's, for Pluto) answers calls on its
+//! `POST /adapter` (`snapshot`, `graph`, `apply`, `run` and the rest) and says
+//! when a notebook changed on its `GET /notifications` stream; the core reads a
+//! fresh snapshot each time it tells the app anything. A notebook's state goes
+//! when it shuts down, except its entry in `idle_stopped`.
+
+mod tools;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
@@ -18,17 +22,16 @@ use serde_json::{Map, Value, json};
 
 use crate::host_tools::{home, normpath};
 use crate::http::{self, Head};
-use crate::mcp::{Caller, WRITE_TOOLS, julia_string, to_json};
+use crate::mcp::{WRITE_TOOLS, julia_string, to_json};
+
+pub use tools::Reply;
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
 
-/// Tools whose writes to a cell's code the core attributes to the agent.
-const EDIT_TOOLS: [&str; 3] = ["edit_cell", "edit_cells", "add_cell"];
-
-/// Where the core sends what it doesn't answer: the engine's bridge.
+/// The engine's adapter, once it answers.
 pub trait Upstream: Send + Sync {
-    /// The reply to a request on `path`.
-    fn ask(&self, path: &str, raw: &[u8], caller: &Caller) -> io::Result<String>;
+    /// The reply to one `POST /adapter` call.
+    fn adapter(&self, raw: &[u8]) -> io::Result<String>;
     /// The engine's notification stream, from its start.
     fn notifications(&self) -> io::Result<Box<dyn BufRead + Send>>;
 }
@@ -46,19 +49,13 @@ impl Julia {
 }
 
 impl Upstream for Julia {
-    fn ask(&self, path: &str, raw: &[u8], caller: &Caller) -> io::Result<String> {
+    fn adapter(&self, raw: &[u8]) -> io::Result<String> {
         let port = *self.port.get().ok_or(io::ErrorKind::NotConnected)?;
         let authorization = format!("Bearer {}", self.token);
-        let headers = [
-            ("Authorization", authorization.as_str()),
-            ("Content-Type", "application/json"),
-            ("X-Endeavor-Session", caller.owner.as_str()),
-            ("X-Endeavor-Host", caller.host.as_str()),
-        ];
-        let headers: Vec<_> = headers.into_iter().filter(|(_, value)| !value.is_empty()).collect();
-        let (status, body) = http::post(port, path, &headers, raw)?;
+        let headers = [("Authorization", authorization.as_str()), ("Content-Type", "application/json")];
+        let (status, body) = http::post(port, "/adapter", &headers, raw)?;
         if status != 200 {
-            return Err(io::Error::other(format!("Julia's {path} answered {status}")));
+            return Err(io::Error::other(format!("Julia's /adapter answered {status}")));
         }
         String::from_utf8(body).map_err(|_| io::ErrorKind::InvalidData.into())
     }
@@ -77,6 +74,13 @@ impl Upstream for Julia {
     }
 }
 
+/// A change to a cell through the tools.
+struct Change {
+    owner: String,
+    time: f64,
+    seq: u64,
+}
+
 #[derive(Default)]
 struct NotebookState {
     path: String,
@@ -87,6 +91,15 @@ struct NotebookState {
     befores: HashMap<String, String>,
     last_active: Option<f64>,
     kept_alive: bool,
+    /// Cells edited through the tools and not run since, with when. A cell
+    /// stops being pending once it runs, however it runs (the tools, Pluto's
+    /// own run button, a reactive re-run).
+    pending: HashMap<String, f64>,
+    /// What each agent session last read of each cell: (owner, cell) => (code,
+    /// seq). Per owner, so one session's reads and edits aren't another's.
+    reads: HashMap<(String, String), (String, u64)>,
+    /// Which session last changed each cell through the tools, and when.
+    changes: HashMap<String, Change>,
 }
 
 impl NotebookState {
@@ -110,10 +123,35 @@ impl NotebookState {
         }
         self.befores.get(cell).filter(|before| *before != code).cloned()
     }
+
+    /// The agent's tools just wrote this cell's code; `before` is what it replaced.
+    fn agent_edited(&mut self, cell: &str, before: &str, code: &str) {
+        self.authors.insert(cell.to_owned(), (hash(code), "agent"));
+        self.befores.entry(cell.to_owned()).or_insert_with(|| before.to_owned());
+    }
+
+    /// The pending cells, in notebook order, then any no longer in it (a cell
+    /// Pluto's page or a reload removed stays pending until a run prunes it).
+    /// Cells that ran since their edit stop being pending.
+    fn pending_run(&mut self, nb: &Snapshot) -> Vec<String> {
+        self.pending.retain(|id, edited| !nb.cells.get(id).is_some_and(|c| c.ran_since(*edited)));
+        let mut ids: Vec<String> = nb.order.iter().filter(|id| self.pending.contains_key(*id)).cloned().collect();
+        let mut gone: Vec<String> = self.pending.keys().filter(|id| !nb.cells.contains_key(*id)).cloned().collect();
+        gone.sort();
+        ids.extend(gone);
+        ids
+    }
+
+    /// Forget pending cells no longer in the notebook.
+    fn prune(&mut self, nb: &Snapshot) {
+        self.pending.retain(|id, _| nb.cells.contains_key(id));
+    }
 }
 
 struct State {
     notebooks: HashMap<String, NotebookState>,
+    /// Orders reads against changes; two can share a clock reading.
+    seq: u64,
     idle_limit_hours: f64,
     /// Notebooks the idle check stopped, by canonical path, until they open
     /// again: the app reads these to say why a notebook stopped.
@@ -146,17 +184,34 @@ struct Snapshot {
     order: Vec<String>,
     execution_allowed: bool,
     safe_preview: bool,
-    /// Cells edited through the tools and not run since (the engine keeps
-    /// staging until it moves to the core).
-    pending_run: Vec<Value>,
     cells: HashMap<String, Cell>,
 }
 
 struct Cell {
     code: String,
+    folded: bool,
     running: bool,
     queued: bool,
     errored: bool,
+    /// When its last run ended (Unix seconds, 0 if it never ran) and how long
+    /// it took (nanoseconds).
+    last_run: f64,
+    runtime: f64,
+    /// Its output as the tools show it, and the structured error if it errored.
+    output: String,
+    error: Option<Value>,
+    /// Boilerplate the tools don't show (Pluto's package cells and the like).
+    hidden: bool,
+    markdown: bool,
+}
+
+impl Cell {
+    /// A run that started after `edited` and has finished. The engine stamps a
+    /// run when it ends, so a run already under way at the edit (of the old
+    /// code) ends after it; its duration gives its start.
+    fn ran_since(&self, edited: f64) -> bool {
+        !(self.running || self.queued) && self.last_run > 0.0 && self.last_run - self.runtime / 1e9 >= edited
+    }
 }
 
 impl Snapshot {
@@ -164,7 +219,19 @@ impl Snapshot {
         let text = |v: &Value| v.as_str().map(str::to_owned);
         let flag = |v: &Value| v.as_bool().unwrap_or(false);
         let cells = value["cells"].as_array()?.iter().map(|c| {
-            let cell = Cell { code: text(&c["code"])?, running: flag(&c["running"]), queued: flag(&c["queued"]), errored: flag(&c["errored"]) };
+            let cell = Cell {
+                code: text(&c["code"])?,
+                folded: flag(&c["folded"]),
+                running: flag(&c["running"]),
+                queued: flag(&c["queued"]),
+                errored: flag(&c["errored"]),
+                last_run: c["last_run"].as_f64().unwrap_or(0.0),
+                runtime: c["runtime"].as_f64().unwrap_or(0.0),
+                output: text(&c["output"]).unwrap_or_default(),
+                error: c.get("error").filter(|e| !e.is_null()).cloned(),
+                hidden: flag(&c["hidden"]),
+                markdown: flag(&c["markdown"]),
+            };
             Some((text(&c["cell_id"])?, cell))
         });
         Some(Snapshot {
@@ -173,7 +240,6 @@ impl Snapshot {
             order: value["cell_order"].as_array()?.iter().filter_map(text).collect(),
             execution_allowed: flag(&value["execution_allowed"]),
             safe_preview: flag(&value["safe_preview"]),
-            pending_run: value["pending_run"].as_array().cloned().unwrap_or_default(),
             cells: cells.collect::<Option<_>>()?,
         })
     }
@@ -184,6 +250,105 @@ impl Snapshot {
     fn is_running(&self, cell: &Cell) -> bool {
         cell.running || (cell.queued && self.cells.values().any(|c| c.running))
     }
+
+    /// What `list_notebooks` says of it.
+    fn summary(&self, pending_run: &[String]) -> Value {
+        let running: Vec<&String> = self.order.iter().filter(|id| self.cells.get(*id).is_some_and(|c| self.is_running(c))).collect();
+        json!({
+            "notebook_id": self.id, "path": self.path, "cell_count": self.order.len(),
+            "pending_run": pending_run, "running": running, "execution_allowed": self.execution_allowed,
+        })
+    }
+}
+
+/// A notebook's dependency graph as the engine last analysed it.
+#[derive(Default)]
+struct Graph {
+    /// In the engine's order.
+    cells: Vec<Node>,
+    /// The cells that can run, in the order they run.
+    order: Vec<String>,
+    /// Cells that can't run: in a cycle, or defining what another cell does.
+    errable: Vec<String>,
+}
+
+struct Node {
+    id: String,
+    definitions: Vec<String>,
+    functions: Vec<String>,
+    references: Vec<String>,
+    /// The cells this one depends on directly, and those depending on it.
+    upstream: Vec<String>,
+    downstream: Vec<String>,
+}
+
+/// What to ask of `graph`: a fresh analysis of the notebook as it is now,
+/// Pluto's page's dependency cache brought up to date first, each cell's edges.
+#[derive(Clone, Copy, Default)]
+struct GraphQuery {
+    fresh: bool,
+    refresh: bool,
+    edges: bool,
+}
+
+impl Graph {
+    fn parse(value: &Value) -> Graph {
+        let names = |v: &Value| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
+        let cells = value["cells"].as_array().into_iter().flatten().filter_map(|c| {
+            Some(Node {
+                id: c["cell_id"].as_str()?.to_owned(),
+                definitions: names(&c["definitions"]),
+                functions: names(&c["functions"]),
+                references: names(&c["references"]),
+                upstream: names(&c["upstream"]),
+                downstream: names(&c["downstream"]),
+            })
+        });
+        Graph { cells: cells.collect(), order: names(&value["order"]), errable: names(&value["errable"]) }
+    }
+
+    fn node(&self, id: &str) -> Option<&Node> {
+        self.cells.iter().find(|n| n.id == id)
+    }
+
+    /// What a cell defines, as it's named to the user: up to three names.
+    fn name(&self, id: &str) -> Option<String> {
+        let node = self.node(id)?;
+        let mut defs: Vec<&str> = node.definitions.iter().chain(&node.functions).map(String::as_str).collect();
+        defs.sort_unstable();
+        defs.dedup();
+        (!defs.is_empty()).then(|| defs[..defs.len().min(3)].join(", "))
+    }
+
+    /// Every cell the given ones depend on, directly or not.
+    fn upstream_of(&self, from: &[String]) -> HashSet<String> {
+        self.closure(from, |n| &n.upstream)
+    }
+
+    /// Every cell depending on the given ones, directly or not.
+    fn downstream_of(&self, from: &[String]) -> HashSet<String> {
+        self.closure(from, |n| &n.downstream)
+    }
+
+    fn closure(&self, from: &[String], next: impl Fn(&Node) -> &Vec<String>) -> HashSet<String> {
+        let mut found = HashSet::new();
+        let mut todo: Vec<&String> = from.iter().collect();
+        while let Some(id) = todo.pop() {
+            for other in self.node(id).map(&next).into_iter().flatten() {
+                if found.insert(other.clone()) {
+                    todo.push(other);
+                }
+            }
+        }
+        found
+    }
+
+    /// The order a whole run goes in: runnable cells, then the rest.
+    fn execution_order(&self) -> Vec<String> {
+        let mut order = self.order.clone();
+        order.extend(self.errable.iter().filter(|id| !self.order.contains(id)).cloned());
+        order
+    }
 }
 
 impl Notebooks {
@@ -191,7 +356,7 @@ impl Notebooks {
         Notebooks {
             upstream,
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
         }
@@ -275,6 +440,15 @@ impl Notebooks {
                 }
                 true
             }
+            // The cells a run the tools didn't wait for finished: no longer pending.
+            "run_finished" => {
+                if let Some(notebook) = state.notebooks.get_mut(&id) {
+                    for cell in params["cells"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                        notebook.pending.remove(cell);
+                    }
+                }
+                true
+            }
             // Seen as each state comes, so an edit made and undone between two
             // events still counts as the user's.
             "cell_state" => {
@@ -295,7 +469,7 @@ impl Notebooks {
     /// One call to the engine's adapter: its result, or the error it raised.
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         let message = json!({ "method": method, "params": params });
-        let reply = self.upstream.ask("/adapter", message.to_string().as_bytes(), &Caller::default()).map_err(|e| e.to_string())?;
+        let reply = self.upstream.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;
         let mut reply: Value = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
         match reply.get("error") {
             Some(error) => Err(julia_string(error)),
@@ -313,19 +487,14 @@ impl Notebooks {
         Snapshot::parse(&self.call("snapshot", json!({ "notebook_id": id }))?).ok_or_else(|| "bad snapshot".into())
     }
 
-    /// Each cell's name: what it defines, as of the engine's last analysis.
-    fn names(&self, id: &str) -> Result<HashMap<String, String>, String> {
-        let graph = self.call("graph", json!({ "notebook_id": id }))?;
-        let mut names = HashMap::new();
-        for cell in graph["cells"].as_array().into_iter().flatten() {
-            let mut defs: Vec<&str> = ["definitions", "functions"].iter().flat_map(|k| cell[*k].as_array().into_iter().flatten()).filter_map(Value::as_str).collect();
-            defs.sort_unstable();
-            defs.dedup();
-            if let (Some(cell), false) = (cell["cell_id"].as_str(), defs.is_empty()) {
-                names.insert(cell.to_owned(), defs[..defs.len().min(3)].join(", "));
-            }
-        }
-        Ok(names)
+    fn graph(&self, id: &str, query: GraphQuery) -> Result<Graph, String> {
+        let params = json!({ "notebook_id": id, "fresh": query.fresh, "refresh": query.refresh, "edges": query.edges });
+        Ok(Graph::parse(&self.call("graph", params)?))
+    }
+
+    /// A notebook's state, made if the core hasn't seen it yet.
+    fn with_state<T>(&self, id: &str, f: impl FnOnce(&mut NotebookState) -> T) -> T {
+        f(self.state.lock().unwrap().notebooks.entry(id.to_owned()).or_default())
     }
 
     /// Every notebook's state as the app hears it, with what the core keeps
@@ -342,7 +511,7 @@ impl Notebooks {
     /// the cell defines, as of its last run (null if nothing).
     fn compose(&self) -> Result<String, String> {
         let snapshots = self.snapshots()?;
-        let names = snapshots.iter().map(|nb| Ok((nb.id.clone(), self.names(&nb.id)?))).collect::<Result<HashMap<_, _>, String>>()?;
+        let graphs = snapshots.iter().map(|nb| Ok((nb.id.clone(), self.graph(&nb.id, GraphQuery::default())?))).collect::<Result<HashMap<_, _>, String>>()?;
         let mut state = self.state.lock().unwrap();
         state.notebooks.retain(|id, _| snapshots.iter().any(|nb| nb.id == *id));
         let mut list = Vec::new();
@@ -351,21 +520,12 @@ impl Notebooks {
             let notebook = state.notebooks.entry(nb.id.clone()).or_default();
             notebook.path = nb.path.clone();
             let cell = |id: &String| nb.cells.get(id).ok_or_else(|| format!("no cell {id} in {}", nb.id));
-            let mut running = Vec::new();
-            for id in &nb.order {
-                if nb.is_running(cell(id)?) {
-                    running.push(id.clone());
-                }
-            }
-            list.push(json!({
-                "notebook_id": nb.id, "path": nb.path, "cell_count": nb.order.len(),
-                "pending_run": nb.pending_run, "running": running, "execution_allowed": nb.execution_allowed,
-            }));
-            let pending: HashSet<&str> = nb.pending_run.iter().filter_map(Value::as_str).collect();
+            let pending = notebook.pending_run(nb);
+            list.push(nb.summary(&pending));
             let mut states = Vec::new();
             for id in &nb.order {
                 let c = cell(id)?;
-                let unrun = pending.contains(id.as_str());
+                let unrun = pending.contains(id);
                 states.push(json!({
                     "cell_id": id,
                     "running": nb.is_running(c),
@@ -374,7 +534,7 @@ impl Notebooks {
                     "author": notebook.author(id, &c.code),
                     "before": notebook.before(id, &c.code, unrun),
                     "version": format!("{:x}", hash(&c.code)),
-                    "name": names[&nb.id].get(id),
+                    "name": graphs[&nb.id].name(id),
                 }));
             }
             cells.insert(nb.id.clone(), Value::Array(states));
@@ -443,65 +603,15 @@ impl Notebooks {
         }
     }
 
-    /// Pass a tool call to the engine (`forward`), noting what the core keeps
-    /// from it: the agent's edits, and the notebook a session opens first.
-    ///
-    /// The code read just before an edit is the code it replaced whenever the
-    /// edit succeeds, with nothing held across the call (a run it waits for
-    /// can take minutes): the engine refuses an edit to a cell whose code
-    /// changed since the caller read it, and the caller read it before this.
-    pub fn forward_tool(&self, owner: &str, tool: &str, arguments: &Value, forward: impl FnOnce() -> io::Result<String>) -> io::Result<String> {
-        let editing = EDIT_TOOLS.contains(&tool);
-        let id = arguments.get("notebook_id").map(julia_string).and_then(|id| parse_uuid(&id));
-        let before = id.as_deref().filter(|_| editing).and_then(|id| self.snapshot(id).ok());
-        let reply = forward()?;
-        let Some(result) = tool_result(&reply) else { return Ok(reply) };
-        let code_before = |cell: &str| before.as_ref().and_then(|nb| nb.cells.get(cell)).map_or(String::new(), |c| c.code.clone());
-        match (tool, id) {
-            ("open_notebook" | "new_notebook", _) => {
-                if let Some(path) = result["path"].as_str() {
-                    self.opened_by(owner, path);
-                }
-            }
-            ("edit_cell", Some(id)) => {
-                if let (Some(cell), Some(code)) = (result["cell_id"].as_str(), result["code"].as_str()) {
-                    self.agent_edited(&id, cell, &code_before(cell), code);
-                }
-            }
-            ("add_cell", Some(id)) => {
-                if let (Some(cell), Some(code)) = (result["cell_id"].as_str(), result["code"].as_str()) {
-                    self.agent_edited(&id, cell, "", code);
-                }
-            }
-            ("edit_cells", Some(id)) => {
-                let cells = result["mutation"]["cell_ids"].as_array().into_iter().flatten().filter_map(Value::as_str);
-                let codes = arguments["cells"].as_array().into_iter().flatten().filter_map(|edit| edit["code"].as_str());
-                for (cell, code) in cells.zip(codes) {
-                    self.agent_edited(&id, cell, &code_before(cell), code);
-                }
-            }
-            _ => {}
-        }
-        Ok(reply)
-    }
-
-    /// The agent's tools just wrote this cell's code; `before` is what it replaced.
-    fn agent_edited(&self, notebook: &str, cell: &str, before: &str, code: &str) {
-        let mut state = self.state.lock().unwrap();
-        let notebook = state.notebooks.entry(notebook.to_owned()).or_default();
-        notebook.authors.insert(cell.to_owned(), (hash(code), "agent"));
-        notebook.befores.entry(cell.to_owned()).or_insert_with(|| before.to_owned());
-    }
-
     /// `keep_notebook_alive`: exempt a notebook from idle stop, or stop exempting it.
     pub fn keep_alive(&self, arguments: &Value) -> Result<Value, String> {
         let id = self.notebook_arg(arguments.get("notebook_id").unwrap_or(&Value::String(String::new())))?;
         let keep = arguments.get("keep").and_then(Value::as_bool).ok_or("ArgumentError: invalid_keep::keep must be true or false")?;
         let now = (self.clock)();
-        let mut state = self.state.lock().unwrap();
-        let notebook = state.notebooks.entry(id.clone()).or_default();
-        notebook.kept_alive = keep;
-        notebook.last_active = Some(now);
+        self.with_state(&id, |notebook| {
+            notebook.kept_alive = keep;
+            notebook.last_active = Some(now);
+        });
         Ok(json!({ "notebook_id": id, "kept_alive": keep }))
     }
 
@@ -509,22 +619,12 @@ impl Notebooks {
     /// parsing and lookup refused it.
     fn notebook_arg(&self, value: &Value) -> Result<String, String> {
         let shown = julia_string(value);
-        let invalid = || format!("ArgumentError: invalid_notebook_id::Invalid notebook ID: '{shown}'");
-        let id = match value {
-            Value::String(s) => parse_uuid(s).ok_or_else(invalid)?,
-            Value::Bool(b) => uuid_of(*b as u128),
-            Value::Number(n) => match (n.as_u64(), n.as_f64()) {
-                (Some(n), _) => uuid_of(n as u128),
-                (None, Some(x)) if x >= 0.0 && x.fract() == 0.0 && x < 2f64.powi(128) => uuid_of(x as u128),
-                _ => return Err(invalid()),
-            },
-            _ => return Err(invalid()),
-        };
+        let id = uuid_value(value).ok_or_else(|| format!("ArgumentError: invalid_notebook_id::Invalid notebook ID: '{shown}'"))?;
         let known = self.state.lock().unwrap().notebooks.contains_key(&id);
         if known || self.snapshot(&id).is_ok() {
             return Ok(id);
         }
-        Err(format!("KeyError: key \"notebook_not_found::No notebook with id '{shown}' in the current session\" not found"))
+        Err(tools::key_error(&format!("notebook_not_found::No notebook with id '{shown}' in the current session")))
     }
 
     /// The app binds a session to its notebook; an empty path clears it.
@@ -666,15 +766,6 @@ impl Notebooks {
     }
 }
 
-/// A successful tool call's result, from the engine's JSON-RPC reply.
-fn tool_result(reply: &str) -> Option<Value> {
-    let reply: Value = serde_json::from_str(reply).ok()?;
-    if reply["result"]["isError"] != false {
-        return None;
-    }
-    serde_json::from_str(reply["result"]["content"][0]["text"].as_str()?).ok()
-}
-
 /// FNV-1a: the app only compares versions with each other.
 fn hash(code: &str) -> u64 {
     code.bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
@@ -688,6 +779,21 @@ fn parse_uuid(text: &str) -> Option<String> {
     valid.then(|| text.to_ascii_lowercase())
 }
 
+/// A JSON value as Julia's `UUID(value)` takes it: a UUID string, or a
+/// whole number (a Bool is 0 or 1).
+fn uuid_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => parse_uuid(s),
+        Value::Bool(b) => Some(uuid_of(*b as u128)),
+        Value::Number(n) => match (n.as_u64(), n.as_f64()) {
+            (Some(n), _) => Some(uuid_of(n as u128)),
+            (None, Some(x)) if x >= 0.0 && x.fract() == 0.0 && x < 2f64.powi(128) => Some(uuid_of(x as u128)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn uuid_of(value: u128) -> String {
     let hex = format!("{value:032x}");
     format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
@@ -696,18 +802,7 @@ fn uuid_of(value: u128) -> String {
 /// A notebook path as Julia's runtime compared them: absolute, `~` expanded,
 /// and resolved through symlinks as far as it exists.
 pub fn canonical_path(path: &str) -> Result<String, String> {
-    let expanded = match path.strip_prefix('~') {
-        None => path.to_owned(),
-        Some("") => home(),
-        Some(rest) if rest.starts_with('/') => format!("{}{rest}", home()),
-        Some(_) => return Err("ArgumentError: ~user tilde expansion not yet implemented".into()),
-    };
-    let absolute = if expanded.starts_with('/') {
-        normpath(&expanded)
-    } else {
-        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-        normpath(&format!("{}/{expanded}", cwd.display()))
-    };
+    let absolute = absolute_path(path)?;
     let real = |p: &str| std::fs::canonicalize(p).ok().map(|p| p.display().to_string());
     if let Some(real) = real(&absolute) {
         return Ok(real);
@@ -719,6 +814,26 @@ pub fn canonical_path(path: &str) -> Result<String, String> {
         Some(dir) => Ok(format!("{dir}/{base}")),
         None => Ok(absolute),
     }
+}
+
+/// Julia's `expanduser`.
+fn expand_user(path: &str) -> Result<String, String> {
+    match path.strip_prefix('~') {
+        None => Ok(path.to_owned()),
+        Some("") => Ok(home()),
+        Some(rest) if rest.starts_with('/') => Ok(format!("{}{rest}", home())),
+        Some(_) => Err("ArgumentError: ~user tilde expansion not yet implemented".into()),
+    }
+}
+
+/// Julia's `abspath(expanduser(path))`.
+fn absolute_path(path: &str) -> Result<String, String> {
+    let expanded = expand_user(path)?;
+    if expanded.starts_with('/') {
+        return Ok(normpath(&expanded));
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    Ok(normpath(&format!("{}/{expanded}", cwd.display())))
 }
 
 #[cfg(test)]

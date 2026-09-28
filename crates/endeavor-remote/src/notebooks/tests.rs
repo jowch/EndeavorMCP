@@ -1,103 +1,228 @@
-//! The core's notebook state against a fake engine: an adapter answering
-//! `snapshot`, `graph` and `shutdown` from notebooks the test sets up, and
-//! tool calls the test answers.
+//! The core's notebook tools and state against a fake engine: an adapter that
+//! keeps notebooks in memory, analyses `name = expression` cells, and runs a
+//! cell by stamping it with the test's clock.
 
+use super::tools::tool_json;
 use super::*;
 
 const X: &str = "11111111-1111-1111-1111-111111111111";
 const Y: &str = "22222222-2222-2222-2222-222222222222";
-const Z: &str = "33333333-3333-3333-3333-333333333333";
+const NB: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 
+#[derive(Clone)]
 struct FakeCell {
     id: String,
     code: String,
-    defines: Vec<&'static str>,
+    folded: bool,
     running: bool,
     queued: bool,
     errored: bool,
+    last_run: f64,
+    output: String,
+    hidden: bool,
+}
+
+impl FakeCell {
+    fn new(id: &str, code: &str) -> FakeCell {
+        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false }
+    }
+
+    /// What `a, b = 1, 2` defines, and the names the rest of the code uses.
+    fn analysis(&self) -> (Vec<String>, Vec<String>) {
+        let code: Vec<&str> = self.code.lines().map(|line| line.split('#').next().unwrap_or_default()).collect();
+        let code = code.join("\n");
+        let (lhs, rhs) = code.split_once(" = ").unwrap_or(("", &code));
+        let names = |text: &str| {
+            let mut names: Vec<String> = text.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| w.starts_with(|c: char| c.is_alphabetic())).map(str::to_owned).collect();
+            names.sort();
+            names.dedup();
+            names
+        };
+        (names(lhs), names(rhs))
+    }
 }
 
 struct FakeNotebook {
     id: String,
     path: String,
     cells: Vec<FakeCell>,
-    pending: Vec<String>,
     safe_preview: bool,
 }
-
-type Tool = Box<dyn FnMut(&mut Vec<FakeNotebook>, &str, &Value) -> Result<Value, String> + Send>;
 
 #[derive(Default)]
 struct Engine {
     notebooks: Mutex<Vec<FakeNotebook>>,
-    tool: Mutex<Option<Tool>>,
+    clock: Arc<Mutex<f64>>,
     shut_down: Mutex<Vec<String>>,
-    /// A tool call with `"hold": true` says it has started, then waits here
-    /// before the engine answers it, like an edit waiting for its run.
+    /// The next `run` says it has started, then waits here before it runs,
+    /// like Pluto busy with a long run.
     hold: Mutex<Option<(Sender<()>, Receiver<()>)>>,
+    calls: Mutex<Vec<String>>,
+    made: Mutex<u32>,
 }
 
 impl Engine {
-    fn open(&self, id: &str, path: &str, cells: &[(&str, &str, &[&'static str])]) {
-        let cells = cells.iter().map(|(id, code, defines)| FakeCell { id: id.to_string(), code: code.to_string(), defines: defines.to_vec(), running: false, queued: false, errored: false }).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, pending: Vec::new(), safe_preview: false });
+    fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
+        let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
         f(self.notebooks.lock().unwrap().iter_mut().find(|nb| nb.id == id).unwrap())
     }
 
+    fn code(&self, id: &str, cell: &str) -> String {
+        self.with(id, |nb| nb.cells.iter().find(|c| c.id == cell).unwrap().code.clone())
+    }
+
+    fn order(&self, id: &str) -> Vec<String> {
+        self.with(id, |nb| nb.cells.iter().map(|c| c.id.clone()).collect())
+    }
+
     fn snapshot(nb: &FakeNotebook) -> Value {
         json!({
-            "notebook_id": nb.id, "path": nb.path, "execution_allowed": !nb.safe_preview, "safe_preview": nb.safe_preview,
-            "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(), "pending_run": nb.pending,
-            "cells": nb.cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code, "running": c.running, "queued": c.queued, "errored": c.errored })).collect::<Vec<_>>(),
+            "notebook_id": nb.id, "path": nb.path, "process_status": if nb.safe_preview { "waiting_for_permission" } else { "ready" },
+            "execution_allowed": !nb.safe_preview, "safe_preview": nb.safe_preview,
+            "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+            "cells": nb.cells.iter().map(|c| json!({
+                "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
+                "last_run": c.last_run, "runtime": 0, "output": c.output, "hidden": c.hidden, "markdown": c.code.starts_with("md\""),
+            })).collect::<Vec<_>>(),
         })
     }
 
-    fn adapter(&self, method: &str, params: &Value) -> Result<Value, String> {
+    fn graph(nb: &FakeNotebook) -> Value {
+        let analysed: Vec<_> = nb.cells.iter().map(|c| (c.id.clone(), c.analysis())).collect();
+        let meets = |a: &[String], b: &[String]| a.iter().any(|x| b.contains(x));
+        let cells: Vec<Value> = analysed
+            .iter()
+            .map(|(id, (defs, refs))| {
+                let upstream: Vec<&String> = analysed.iter().filter(|(_, (d, _))| meets(d, refs)).map(|(id, _)| id).collect();
+                let downstream: Vec<&String> = analysed.iter().filter(|(_, (_, r))| meets(defs, r)).map(|(id, _)| id).collect();
+                json!({ "cell_id": id, "definitions": defs, "functions": [], "references": refs, "upstream": upstream, "downstream": downstream })
+            })
+            .collect();
+        json!({ "cells": cells, "order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(), "errable": [] })
+    }
+
+    fn adapter_call(&self, method: &str, params: &Value) -> Result<Value, String> {
+        self.calls.lock().unwrap().push(method.to_owned());
+        if method == "run"
+            && let Some((started, release)) = self.hold.lock().unwrap().take()
+        {
+            started.send(()).unwrap();
+            release.recv().unwrap();
+        }
+        let now = *self.clock.lock().unwrap();
         let mut notebooks = self.notebooks.lock().unwrap();
+        match method {
+            "status" => return Ok(json!({ "pluto": "running" })),
+            "open" | "new" => {
+                let path = params["path"].as_str().map_or_else(|| format!("{}/made.jl", params["folder"].as_str().unwrap_or("/n")), str::to_owned);
+                let mut made = self.made.lock().unwrap();
+                *made += 1;
+                let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
+                let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
+                let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false });
+                return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed }));
+            }
+            _ => {}
+        }
         let Some(id) = params["notebook_id"].as_str() else {
             return Ok(json!({ "notebooks": notebooks.iter().map(Engine::snapshot).collect::<Vec<_>>() }));
         };
-        let Some(at) = notebooks.iter().position(|nb| nb.id == id) else { return Err(format!("KeyError: no {id}")) };
+        let Some(at) = notebooks.iter().position(|nb| nb.id == id) else {
+            return Err(format!("KeyError: key \"notebook_not_found::No notebook with id '{id}' in the current session\" not found"));
+        };
+        let nb = &mut notebooks[at];
+        let find = |nb: &mut FakeNotebook, cell: &Value| nb.cells.iter().position(|c| c.id == cell.as_str().unwrap()).unwrap();
         match method {
-            "snapshot" => Ok(Engine::snapshot(&notebooks[at])),
-            "graph" => Ok(json!({ "cells": notebooks[at].cells.iter().map(|c| json!({ "cell_id": c.id, "definitions": c.defines, "functions": [] })).collect::<Vec<_>>() })),
+            "snapshot" => Ok(Engine::snapshot(nb)),
+            "graph" => Ok(Engine::graph(nb)),
             "shutdown" => {
                 let nb = notebooks.remove(at);
                 self.shut_down.lock().unwrap().push(nb.id);
                 Ok(json!({ "safe_preview": nb.safe_preview }))
             }
-            _ => Err("unknown".into()),
+            "apply" => {
+                let ops = params["ops"].as_array().unwrap();
+                for op in ops.iter().filter(|op| op["op"] == "set_code" && op.get("expected").is_some()) {
+                    let at = find(nb, &op["cell_id"]);
+                    if nb.cells[at].code != op["expected"] {
+                        return Err(format!("ArgumentError: stale_read::Cell {} changed since last read; call read_cell again", nb.cells[at].id));
+                    }
+                }
+                let mut inserted = Vec::new();
+                for op in ops {
+                    match op["op"].as_str().unwrap() {
+                        "set_code" => {
+                            let at = find(nb, &op["cell_id"]);
+                            nb.cells[at].code = op["code"].as_str().ok_or("MethodError: Cannot `convert`")?.into();
+                        }
+                        "insert" => {
+                            let mut made = self.made.lock().unwrap();
+                            *made += 1;
+                            let mut cell = FakeCell::new(&format!("bbbbbbbb-0000-0000-0000-{:012}", *made), &julia_string(&op["code"]));
+                            cell.folded = op["folded"] == true;
+                            inserted.push(cell.id.clone());
+                            nb.cells.insert(op["index"].as_u64().unwrap() as usize, cell);
+                        }
+                        "delete" => {
+                            let at = find(nb, &op["cell_id"]);
+                            nb.cells.remove(at);
+                        }
+                        "move" => {
+                            let at = find(nb, &op["cell_id"]);
+                            let cell = nb.cells.remove(at);
+                            nb.cells.insert(op["index"].as_u64().unwrap() as usize, cell);
+                        }
+                        "fold" => {
+                            let at = find(nb, &op["cell_id"]);
+                            nb.cells[at].folded = op["folded"] == true;
+                        }
+                        other => panic!("op {other}"),
+                    }
+                }
+                Ok(json!({ "inserted": inserted }))
+            }
+            "run" => {
+                if nb.safe_preview {
+                    return Ok(json!({ "accepted": false, "process_status": "waiting_for_permission" }));
+                }
+                let cells: Vec<String> = params["cells"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_owned()).collect();
+                for cell in nb.cells.iter_mut().filter(|c| cells.contains(&c.id)) {
+                    cell.last_run = now;
+                    cell.errored = cell.code.contains("error(");
+                    cell.output = if cell.errored { "boom".into() } else { format!("ran {}", cell.code) };
+                }
+                let mut reply = json!({ "accepted": true, "process_status": "ready" });
+                if params["wait"] == true {
+                    reply["completed"] = json!(cells);
+                    reply["timed_out"] = json!([]);
+                }
+                Ok(reply)
+            }
+            "allow_execution" => {
+                if !nb.safe_preview {
+                    return Ok(json!({ "already_allowed": true, "ran": false, "process_status": "ready" }));
+                }
+                nb.safe_preview = false;
+                Ok(json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } }))
+            }
+            "render_png" => Ok(json!({ "png": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("plot") } { json!("iVBORw==") } else { Value::Null }, "mime": "text/plain" })),
+            "validate" => Ok(json!({ "errors": if params["code"].as_str().unwrap().contains('\n') { json!([{ "type": "pluto_multi_expression" }]) } else { json!([]) } })),
+            other => Err(format!("ArgumentError: unknown_method::Unknown adapter method: '{other}'")),
         }
     }
 }
 
 impl Upstream for Engine {
-    fn ask(&self, path: &str, raw: &[u8], _: &Caller) -> io::Result<String> {
+    fn adapter(&self, raw: &[u8]) -> io::Result<String> {
         let message: Value = serde_json::from_slice(raw).unwrap();
-        let reply = match path {
-            "/adapter" => match self.adapter(message["method"].as_str().unwrap(), &message["params"]) {
-                Ok(result) => json!({ "result": result }),
-                Err(error) => json!({ "error": error }),
-            },
-            _ => {
-                if message["params"]["arguments"]["hold"] == true {
-                    let (started, release) = self.hold.lock().unwrap().take().expect("a hold");
-                    started.send(()).unwrap();
-                    release.recv().unwrap();
-                }
-                let mut tool = self.tool.lock().unwrap();
-                let mut notebooks = self.notebooks.lock().unwrap();
-                let params = &message["params"];
-                let result = tool.as_mut().expect("a tool")(&mut notebooks, params["name"].as_str().unwrap(), &params["arguments"]);
-                let (text, error) = match result {
-                    Ok(result) => (result.to_string(), false),
-                    Err(error) => (json!({ "error": error }).to_string(), true),
-                };
-                json!({ "id": 1, "jsonrpc": "2.0", "result": { "content": [{ "type": "text", "text": text }], "isError": error } })
-            }
+        let reply = match self.adapter_call(message["method"].as_str().unwrap(), &message["params"]) {
+            Ok(result) => json!({ "result": result }),
+            Err(error) => json!({ "error": error }),
         };
         Ok(reply.to_string())
     }
@@ -114,8 +239,8 @@ struct Setup {
 }
 
 fn setup() -> Setup {
-    let engine = Arc::new(Engine::default());
     let clock = Arc::new(Mutex::new(1.0e6));
+    let engine = Arc::new(Engine { clock: clock.clone(), ..Default::default() });
     let now = clock.clone();
     let notebooks = Arc::new(Notebooks::new(engine.clone(), Box::new(move || *now.lock().unwrap())));
     Setup { engine, notebooks, clock }
@@ -123,12 +248,11 @@ fn setup() -> Setup {
 
 impl Setup {
     fn hours(&self, hours: f64) {
-        *self.clock.lock().unwrap() += hours * 3600.0;
+        self.seconds(hours * 3600.0);
     }
 
-    /// Answer tool calls with `tool`.
-    fn tools(&self, tool: impl FnMut(&mut Vec<FakeNotebook>, &str, &Value) -> Result<Value, String> + Send + 'static) {
-        *self.engine.tool.lock().unwrap() = Some(Box::new(tool));
+    fn seconds(&self, seconds: f64) {
+        *self.clock.lock().unwrap() += seconds;
     }
 
     /// A tool call as the core makes it for `owner`: its result or error text.
@@ -140,11 +264,22 @@ impl Setup {
             return self.notebooks.keep_alive(&arguments);
         }
         self.notebooks.note_activity(&arguments);
-        let raw = json!({ "params": { "name": tool, "arguments": arguments } }).to_string();
-        let reply = self.notebooks.forward_tool(owner, tool, &arguments, || self.engine.ask("/dispatch", raw.as_bytes(), &Caller::default())).unwrap();
-        let reply: Value = serde_json::from_str(&reply).unwrap();
-        let text: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        if reply["result"]["isError"] == true { Err(text["error"].as_str().unwrap().to_owned()) } else { Ok(text) }
+        self.notebooks.tool(owner, tool, &arguments, None).map(tool_json)
+    }
+
+    /// The kind of error a call failed with (`read_required`, ...).
+    fn refused(&self, owner: &str, tool: &str, arguments: Value) -> String {
+        let error = self.call(owner, tool, arguments).expect_err("refused");
+        let text: Value = serde_json::from_str(crate::mcp::tool_error(&error)["content"][0]["text"].as_str().unwrap()).unwrap();
+        text["error"].as_str().unwrap().to_owned()
+    }
+
+    fn read(&self, owner: &str, nb: &str, cell: &str) {
+        self.call(owner, "read_cell", json!({ "notebook_id": nb, "cell_id": cell })).unwrap();
+    }
+
+    fn edit(&self, owner: &str, nb: &str, cell: &str, code: &str) -> Value {
+        self.call(owner, "edit_cell", json!({ "notebook_id": nb, "cell_id": cell, "code": code })).unwrap()
     }
 }
 
@@ -157,48 +292,13 @@ fn cell<'a>(event: &'a Value, notebook: &str, cell: &str) -> &'a Value {
     event["cells"][notebook].as_array().unwrap().iter().find(|c| c["cell_id"] == cell).unwrap()
 }
 
-/// Tools that edit the fake notebook the way Julia's do, staging each edit.
-fn editing_tools(nb: &'static str) -> impl FnMut(&mut Vec<FakeNotebook>, &str, &Value) -> Result<Value, String> + Send {
-    move |notebooks, tool, args| {
-        let notebook = notebooks.iter_mut().find(|n| n.id == nb).unwrap();
-        match tool {
-            "edit_cell" => {
-                let id = args["cell_id"].as_str().unwrap();
-                let code = args["code"].as_str().unwrap();
-                notebook.cells.iter_mut().find(|c| c.id == id).unwrap().code = code.into();
-                notebook.pending.push(id.into());
-                Ok(json!({ "cell_id": id, "code": code, "applied": true }))
-            }
-            "edit_cells" => {
-                let mut ids = Vec::new();
-                for edit in args["cells"].as_array().unwrap() {
-                    let id = edit["cell_id"].as_str().unwrap();
-                    notebook.cells.iter_mut().find(|c| c.id == id).unwrap().code = edit["code"].as_str().unwrap().into();
-                    notebook.pending.push(id.into());
-                    ids.push(id);
-                }
-                Ok(json!({ "mutation": { "type": "edit_cells", "cell_ids": ids } }))
-            }
-            "add_cell" => {
-                let code = args["code"].as_str().unwrap();
-                notebook.cells.push(FakeCell { id: Z.into(), code: code.into(), defines: vec!["z"], running: false, queued: false, errored: false });
-                notebook.pending.push(Z.into());
-                Ok(json!({ "cell_id": Z, "code": code }))
-            }
-            _ => Ok(json!({})),
-        }
-    }
-}
-
-const NB: &str = "aaaaaaaa-0000-0000-0000-000000000001";
-
 #[test]
 fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     let s = setup();
     let (first, rx) = s.notebooks.subscribe().unwrap();
     assert_eq!(first, r#"{"cells":{},"idle_stopped":[],"notebooks":[]}"#, "the current state, on connect");
 
-    s.engine.open(NB, "/n/a.jl", &[(X, "x = 6", &["x"]), (Y, "y = x * 7", &["y"])]);
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 6"), (Y, "y = x * 7")]);
     s.notebooks.publish();
     let event = next(&rx);
     assert_eq!(event["notebooks"], json!([{ "notebook_id": NB, "path": "/n/a.jl", "cell_count": 2, "pending_run": [], "running": [], "execution_allowed": true }]));
@@ -210,8 +310,8 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     assert!(rx.try_recv().is_err(), "nothing changed, nothing sent");
 
     // An agent edit: unrun, authored by the agent, with the code it replaced.
-    s.tools(editing_tools(NB));
-    s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": Y, "code": "y = x * 8" })).unwrap();
+    s.read("7", NB, Y);
+    s.edit("7", NB, Y, "y = x * 8");
     s.notebooks.publish();
     let event = next(&rx);
     assert_eq!((&cell(&event, NB, Y)["author"], &cell(&event, NB, Y)["before"], &cell(&event, NB, Y)["unrun"]), (&json!("agent"), &json!("y = x * 7"), &json!(true)));
@@ -219,14 +319,15 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     assert_eq!(event["notebooks"][0]["pending_run"], json!([Y]));
 
     // A later edit keeps the first before-text; once the cell runs it's forgotten.
-    s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": Y, "code": "y = x * 9" })).unwrap();
+    s.edit("7", NB, Y, "y = x * 9");
     s.notebooks.publish();
     assert_eq!(cell(&next(&rx), NB, Y)["before"], "y = x * 7");
-    s.engine.with(NB, |nb| nb.pending.clear());
+    s.call("7", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
     s.notebooks.publish();
     let event = next(&rx);
     assert_eq!((&cell(&event, NB, Y)["author"], &cell(&event, NB, Y)["before"], &cell(&event, NB, Y)["unrun"]), (&json!("agent"), &Value::Null, &json!(false)));
-    s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": Y, "code": "y = x * 10" })).unwrap();
+    s.seconds(1.0);
+    s.edit("7", NB, Y, "y = x * 10");
     s.notebooks.publish();
     assert_eq!(cell(&next(&rx), NB, Y)["before"], "y = x * 9", "a new before-text after the run");
 
@@ -236,9 +337,6 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     assert_eq!(cell(&next(&rx), NB, X)["author"], "user");
 
     // Seen as each state comes: an edit undone before the next event still counts.
-    s.engine.with(NB, |nb| nb.pending.clear());
-    s.notebooks.publish();
-    let _ = next(&rx);
     let cells = |code: &str| json!({ "method": "cell_state", "params": { "notebook_id": NB, "cells": [{ "cell_id": Y, "code": code }] } });
     assert!(s.notebooks.notified(&cells("y = 1")));
     assert!(s.notebooks.notified(&cells("y = x * 10")));
@@ -246,17 +344,18 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     assert_eq!(cell(&next(&rx), NB, Y)["author"], "user");
 
     // A cell the agent adds: its before-text is empty. Several edits at once.
-    s.call("7", "add_cell", json!({ "notebook_id": NB, "after_cell_id": Y, "code": "z = y + 1" })).unwrap();
+    let z = s.call("7", "add_cell", json!({ "notebook_id": NB, "after_cell_id": Y, "code": "z = y + 1" })).unwrap()["cell_id"].as_str().unwrap().to_owned();
+    s.read("7", NB, X);
     s.call("7", "edit_cells", json!({ "notebook_id": NB, "cells": [{ "cell_id": X, "code": "x = 1" }] })).unwrap();
     s.notebooks.publish();
     let event = next(&rx);
-    assert_eq!(cell(&event, NB, Z), &json!({ "cell_id": Z, "running": false, "errored": false, "unrun": true, "author": "agent", "before": "", "version": format!("{:x}", hash("z = y + 1")), "name": "z" }));
+    assert_eq!(cell(&event, NB, &z), &json!({ "cell_id": z, "running": false, "errored": false, "unrun": true, "author": "agent", "before": "", "version": format!("{:x}", hash("z = y + 1")), "name": "z" }));
     assert_eq!((&cell(&event, NB, X)["author"], &cell(&event, NB, X)["before"]), (&json!("agent"), &json!("x = 5")));
 
     // Queued cells count as running only while something runs; names join the first three definitions.
     s.engine.with(NB, |nb| {
         nb.cells[0].queued = true;
-        nb.cells[1].defines = vec!["f", "b", "a", "c"];
+        nb.cells[1].code = "f, b, a, c = 1, 2, 3, 4".into();
     });
     s.notebooks.publish();
     let event = next(&rx);
@@ -267,55 +366,427 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
 }
 
 #[test]
+fn edits_are_staged_until_they_run_however_they_run() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x")]);
+    s.read("", NB, X);
+    let receipt = s.edit("", NB, X, "x = 10");
+    assert_eq!(receipt["execution"]["status"], "staged");
+    assert_eq!((&receipt["pending_run"], &receipt["stale"], &receipt["affected_cells"]), (&json!([X]), &json!(true), &json!([])));
+    assert_eq!(receipt["mutation"], json!({ "type": "edit_cell", "cell_id": X }));
+    assert_eq!((&receipt["cell_order"], &receipt["execution_order"]), (&json!([X, Y]), &json!([X, Y])));
+    assert_eq!(s.engine.code(NB, X), "x = 10");
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([X]), "listing counts as no read");
+
+    // Nothing pending: nothing to do.
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!((&ran["affected_cells"], &ran["pending_run"], &ran["execution"]["status"]), (&json!([X]), &json!([]), &json!("completed")));
+    assert_eq!(ran["outputs"]["changed"], json!([{ "cell_id": X, "output_summary": "ran x = 10" }]));
+    let noop = s.call("", "submit_changes", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!((&noop["affected_cells"], &noop["execution"]["status"]), (&json!([]), &json!("completed")));
+
+    // Naming cells: only staged ones, unless forced.
+    assert_eq!(
+        s.call("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [Y] })),
+        Err(format!("ArgumentError: not_staged::Cell {Y} is not in pending_run; stage first or pass force=true"))
+    );
+    let forced = s.call("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [Y], "force": true, "wait_for_completion": true })).unwrap();
+    assert_eq!(forced["affected_cells"], json!([Y]));
+    assert_eq!(s.refused("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": ["bad"] })), "invalid_cell_id");
+
+    // Not waited for: running until the engine says the run finished; a run from anywhere counts.
+    s.seconds(1.0);
+    s.edit("", NB, X, "x = 11");
+    let receipt = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!(receipt["execution"]["status"], "running");
+    assert_eq!(receipt["warnings"], json!(["async_execution::cells running; pending_run clears when execution finishes"]));
+    s.seconds(1.0);
+    s.edit("", NB, X, "x = 12");
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([]));
+    s.seconds(1.0);
+    s.edit("", NB, X, "x = 13");
+    s.seconds(1.0);
+    s.engine.with(NB, |nb| nb.cells[0].last_run = 1.0e6 + 3.5);
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([]), "Pluto's own run button");
+}
+
+#[test]
+fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);
+    let edit = |code: &str| json!({ "notebook_id": NB, "cell_id": X, "code": code });
+    assert_eq!(
+        s.call("", "edit_cell", edit("x = 2")),
+        Err(format!("ArgumentError: read_required::Call read_cell or read_notebook_code before editing cell {X}"))
+    );
+    s.read("", NB, X);
+    s.call("", "edit_cell", edit("x = 2")).unwrap();
+    s.call("", "edit_cell", edit("x = 3")).unwrap();
+    s.engine.with(NB, |nb| nb.cells[0].code = "x = 99".into());
+    assert_eq!(s.call("", "edit_cell", edit("x = 4")), Err(format!("ArgumentError: stale_read::Cell {X} changed since last read; call read_cell again")));
+    s.call("", "read_notebook_code", json!({ "notebook_id": NB })).unwrap();
+    s.call("", "edit_cell", edit("x = 4")).unwrap();
+    assert_eq!(s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X })), Err("KeyError: key \"code\" not found".into()));
+    assert_eq!(s.refused("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 5", "run_after": "yes" })), "invalid_argument");
+
+    // Changed between the core's look and the engine's change: the engine refuses.
+    s.engine.with(NB, |nb| nb.cells[1].code = "y = 3".into());
+    s.read("", NB, Y);
+    let edits = json!({ "notebook_id": NB, "cells": [{ "cell_id": X, "code": "x = 10" }, { "cell_id": Y, "code": "y = 20" }] });
+    s.engine.with(NB, |nb| nb.cells[1].code = "y = 4".into());
+    assert_eq!(s.refused("", "edit_cells", edits.clone()), "stale_read");
+    assert_eq!((s.engine.code(NB, X), s.engine.code(NB, Y)), ("x = 4".into(), "y = 4".into()));
+    s.read("", NB, Y);
+    let receipt = s.call("", "edit_cells", edits).unwrap();
+    assert_eq!(receipt["mutation"], json!({ "type": "edit_cells", "cell_ids": [X, Y] }));
+    assert_eq!((&receipt["pending_run"], &receipt["execution"]["status"]), (&json!([X, Y]), &json!("staged")));
+}
+
+#[test]
+fn adding_moving_folding_and_deleting_cells() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[]);
+    let add = |args: Value| s.call("", "add_cell", args);
+    let first = add(json!({ "notebook_id": NB, "code": "a = 1" })).unwrap();
+    let a = first["cell_id"].as_str().unwrap().to_owned();
+    assert_eq!((&first["code"], &first["code_folded"], &first["pending_run"]), (&json!("a = 1"), &json!(false), &json!([a])));
+    assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a" })), "placement_required");
+    assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": "" })), "placement_required");
+    assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": a, "folded": "yes" })), "invalid_argument");
+    // The agent read the cell it added: it can add after it, and edit it at once.
+    let b = add(json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": a, "folded": true })).unwrap();
+    assert_eq!((&b["code_folded"], &b["execution"]["status"]), (&json!(true), &json!("staged")));
+    let b = b["cell_id"].as_str().unwrap().to_owned();
+    let c = add(json!({ "notebook_id": NB, "code": 42, "after_cell_id": a, "run_after": true })).unwrap();
+    assert_eq!((&c["code"], &c["affected_cells"], &c["execution"]["status"]), (&json!("42"), &json!([c["cell_id"]]), &json!("running")));
+    let c = c["cell_id"].as_str().unwrap().to_owned();
+    assert_eq!(s.engine.order(NB), [a.clone(), c.clone(), b.clone()]);
+    s.edit("", NB, &b, "b = a + 1");
+
+    let moved = s.call("", "move_cell", json!({ "notebook_id": NB, "cell_id": b, "after_cell_id": "" })).unwrap();
+    assert_eq!((&moved["mutation"]["old_index"], &moved["mutation"]["new_index"], &moved["cell_order"]), (&json!(3), &json!(1), &json!([b, a, c])));
+    s.call("", "move_cell", json!({ "notebook_id": NB, "cell_id": b, "after_cell_id": c })).unwrap();
+    assert_eq!(s.engine.order(NB), [a.clone(), c.clone(), b.clone()]);
+    assert_eq!(
+        s.call("", "move_cell", json!({ "notebook_id": NB, "cell_id": b, "after_cell_id": b })),
+        Err(format!("KeyError: key \"cell_not_found::Target cell '{b}' not found\" not found"))
+    );
+    assert_eq!(s.refused("", "move_cell", json!({ "notebook_id": NB, "cell_id": b, "after_cell_id": "bad" })), "invalid_cell_id");
+
+    let folded = s.call("", "fold_cell", json!({ "notebook_id": NB, "cell_id": a, "folded": true })).unwrap();
+    assert_eq!((&folded["mutation"], &folded["execution"]["status"]), (&json!({ "type": "fold_cell", "cell_id": a, "folded": true }), &json!("completed")));
+    assert!(s.engine.with(NB, |nb| nb.cells[0].folded));
+    for bad in [json!("true"), json!(1), Value::Null] {
+        assert_eq!(s.refused("", "fold_cell", json!({ "notebook_id": NB, "cell_id": a, "folded": bad })), "invalid_argument");
+    }
+
+    let deleted = s.call("", "delete_cell", json!({ "notebook_id": NB, "cell_id": b })).unwrap();
+    assert_eq!(deleted["warnings"], json!(["async_execution::cell deletion cleanup queued"]));
+    assert_eq!((&deleted["execution"]["status"], &deleted["pending_run"]), (&json!("completed"), &json!([a])));
+    assert_eq!(s.engine.order(NB), [a.clone(), c.clone()]);
+    assert_eq!(*s.engine.calls.lock().unwrap().iter().rev().nth(2).unwrap(), "run", "Pluto's cleanup after a delete");
+    assert_eq!(s.refused("", "delete_cell", json!({ "notebook_id": NB, "cell_id": b })), "key \"cell_not_found");
+}
+
+#[test]
+fn reading_the_notebook_as_code_hides_boilerplate_and_counts_as_reading_it() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "md\"# Title\""), ("33333333-3333-3333-3333-333333333333", " \n"), ("44444444-4444-4444-4444-444444444444", "PLUTO = 1")]);
+    s.engine.with(NB, |nb| nb.cells[3].hidden = true);
+    let read = |args: Value| s.call("", "read_notebook_code", args).unwrap();
+    let code = read(json!({ "notebook_id": NB }));
+    assert_eq!(code["cell_ids"], json!([X, "33333333-3333-3333-3333-333333333333"]));
+    assert_eq!(code["code"], format!("# ╔═╡ {X}\nx = 1\n\n# ╔═╡ 33333333-3333-3333-3333-333333333333\n# (empty)"));
+    assert_eq!(code["order"], "execution");
+    let with_markdown = read(json!({ "notebook_id": NB, "order": "visual", "include_markdown": true }));
+    assert!(with_markdown["code"].as_str().unwrap().contains(&format!("# ╔═╡ {Y}\n# md:\nmd\"# Title\"")));
+    assert_eq!(
+        s.call("", "read_notebook_code", json!({ "notebook_id": NB, "order": "bogus" })),
+        Err("ArgumentError: invalid_order::order must be 'execution' or 'visual', got 'bogus'".into())
+    );
+    assert_eq!(
+        s.call("", "read_notebook_code", json!({ "notebook_id": NB, "order": 5 })),
+        Err("TypeError: in keyword argument order, expected AbstractString, got a value of type Int64".into())
+    );
+    assert_eq!(
+        s.call("", "read_notebook_code", json!({ "notebook_id": NB, "include_markdown": "yes" })),
+        Err("TypeError: non-boolean (String) used in boolean context".into())
+    );
+    s.edit("", NB, X, "x = 2");
+    let code = read(json!({ "notebook_id": NB }));
+    assert_eq!((&code["stale_cell_ids"], &code["pending_run"]), (&json!([X]), &json!([X])));
+}
+
+#[test]
+fn safe_preview_keeps_edits_staged_until_execution_is_allowed() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + 1")]);
+    s.engine.with(NB, |nb| nb.safe_preview = true);
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 10");
+    let blocked = "execution_blocked::notebook is not running code (process_status=waiting_for_permission); pending_run kept; call allow_execution to exit safe preview";
+    for tool in ["submit_changes", "run_all_cells"] {
+        let receipt = s.call("", tool, json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+        assert_eq!((&receipt["execution"]["status"], &receipt["warnings"], &receipt["pending_run"]), (&json!("blocked"), &json!([blocked]), &json!([X])));
+        assert_eq!(receipt["outputs"]["changed"], json!([]));
+    }
+    // An edit run straight away isn't staged, even when the run is refused.
+    s.read("", NB, Y);
+    let receipt = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": Y, "code": "y = x * 2", "run_after": true })).unwrap();
+    assert_eq!((&receipt["execution"]["status"], &receipt["affected_cells"], &receipt["pending_run"]), (&json!("blocked"), &json!([Y]), &json!([X])));
+
+    assert_eq!(s.call("", "allow_execution", json!({})), Err("ArgumentError: invalid_notebook_id::notebook_id is required".into()));
+    assert_eq!(s.call("", "allow_execution", json!({ "notebook_id": NB, "run_notebook": "no" })), Err("TypeError: non-boolean (String) used in boolean context".into()));
+    let allowed = s.call("", "allow_execution", json!({ "notebook_id": NB, "run_notebook": false })).unwrap();
+    assert_eq!(allowed, json!({ "notebook_id": NB, "execution_allowed": true, "already_allowed": false, "ran": false, "process_status": "ready" }));
+    let again = s.call("", "allow_execution", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!((&again["already_allowed"], &again.get("run_warnings")), (&json!(true), &None));
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!((&ran["execution"]["status"], &ran["pending_run"]), (&json!("completed"), &json!([])));
+}
+
+#[test]
+fn a_run_forgets_staged_cells_no_longer_in_the_notebook() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);
+    s.read("", NB, X);
+    s.read("", NB, Y);
+    s.edit("", NB, X, "x = 10");
+    s.edit("", NB, Y, "y = 20");
+    // Gone the way Pluto's page or a reload removes a cell, not through the tools.
+    s.engine.with(NB, |nb| nb.cells.remove(0));
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([Y, X]), "kept until a run");
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!((&ran["affected_cells"], &ran["pending_run"]), (&json!([Y]), &json!([])));
+    assert_eq!(s.refused("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [X] })), "not_staged");
+    assert_eq!(s.refused("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [X], "force": true })), "key \"cell_not_found");
+}
+
+#[test]
+fn several_sessions_on_one_notebook() {
+    let s = setup();
+    let (a, b, c) = ("aaaaaaaa-0000-0000-0000-00000000000a", "aaaaaaaa-0000-0000-0000-00000000000b", "aaaaaaaa-0000-0000-0000-00000000000c");
+    s.engine.open(NB, "/n/a.jl", &[(a, "a = 1"), (b, "b = a + 1"), (c, "c = 10")]);
+    let call = |owner: &str, tool: &str, args: Value| {
+        let mut args = args;
+        args["notebook_id"] = json!(NB);
+        s.call(owner, tool, args)
+    };
+    let other = |result: &Value| result["warnings"].as_array().unwrap().iter().filter(|w| w.as_str().unwrap().starts_with("other_session::")).cloned().collect::<Vec<_>>();
+    for owner in ["A", "B"] {
+        call(owner, "read_notebook_code", json!({})).unwrap();
+    }
+    let edited = call("B", "edit_cell", json!({ "cell_id": a, "code": "a = 2" })).unwrap();
+    assert!(other(&edited).is_empty());
+
+    // B's edit doesn't count as A's read of the cell.
+    assert_eq!(s.refused("A", "edit_cell", json!({ "notebook_id": NB, "cell_id": a, "code": "a = 3" })), "stale_read");
+
+    s.seconds(30.0);
+    let unrelated = call("A", "edit_cell", json!({ "cell_id": c, "code": "c = 11" })).unwrap();
+    assert_eq!(other(&unrelated), [json!(format!("other_session::Another Endeavor session changed {a} in this notebook 30 s ago. Read cells before relying on them."))]);
+
+    let conflict = format!(
+        "ArgumentError: run_conflict::Another Endeavor session changed {a} since you last read them, and the cells you're running depend on them. \
+         Read them (read_cell or read_notebook_code), then run again."
+    );
+    assert_eq!(call("A", "execute_cell", json!({ "cell_id": b })), Err(conflict.clone()));
+    assert_eq!(call("A", "run_all_cells", json!({})), Err(conflict.clone()));
+    assert_eq!(call("A", "submit_changes", json!({})), Err(conflict.clone()), "pending runs include B's staged edit of a");
+    let ran = call("A", "submit_changes", json!({ "cell_ids": [c], "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["execution"]["status"], "completed");
+
+    // An edit that would run into the conflict is kept but left staged.
+    let staged = call("A", "edit_cell", json!({ "cell_id": b, "code": "b = a + 2", "run_after": true })).unwrap();
+    assert_eq!((&staged["execution"]["status"], staged["pending_run"].as_array().unwrap().contains(&json!(b))), (&json!("staged"), true));
+    let warned = format!("{} The edit is staged, not run.", conflict.strip_prefix("ArgumentError: ").unwrap());
+    assert!(staged["warnings"].as_array().unwrap().contains(&json!(warned)));
+
+    s.read("A", NB, a);
+    let cleared = call("A", "execute_cell", json!({ "cell_id": b, "wait_for_completion": true })).unwrap();
+    assert_eq!(cleared["execution"]["status"], "completed");
+
+    s.seconds(91.0);
+    let expired = call("A", "fold_cell", json!({ "cell_id": c, "folded": true })).unwrap();
+    assert!(other(&expired).is_empty());
+
+    // Calls without an owner are exempt, and their changes aren't another session's.
+    s.read("B", NB, a);
+    call("B", "edit_cell", json!({ "cell_id": a, "code": "a = 4" })).unwrap();
+    call("", "execute_cell", json!({ "cell_id": b })).unwrap();
+    s.read("", NB, a);
+    call("", "edit_cell", json!({ "cell_id": a, "code": "a = 5" })).unwrap();
+    s.seconds(200.0);
+    call("A", "execute_cell", json!({ "cell_id": b })).unwrap();
+}
+
+#[test]
+fn graph_tools_follow_the_engines_analysis() {
+    let s = setup();
+    let (a, b, c, d) = ("aaaaaaaa-0000-0000-0000-00000000000a", "aaaaaaaa-0000-0000-0000-00000000000b", "aaaaaaaa-0000-0000-0000-00000000000c", "aaaaaaaa-0000-0000-0000-00000000000d");
+    s.engine.open(NB, "/n/a.jl", &[(a, "x = 1"), (b, "y = x * 7"), (c, "z = y +\nx"), (d, "w = 2 # mentions x")]);
+    let tool = |name: &str, args: Value| {
+        let mut args = args;
+        args["notebook_id"] = json!(NB);
+        s.call("", name, args).unwrap()
+    };
+    assert_eq!(tool("get_cell_dependencies", json!({ "cell_id": c })), json!({ "upstream": [a, b], "symbols": ["x", "y"] }));
+    assert_eq!(tool("get_cell_dependencies", json!({ "cell_id": a })), json!({ "upstream": [], "symbols": [] }));
+    assert_eq!(tool("get_cell_dependents", json!({ "cell_id": a })), json!({ "downstream": [b, c] }));
+    assert_eq!(tool("find_symbol_definitions", json!({ "symbol": "x" })), json!([{ "cell_id": a, "line_hint": 1 }]));
+    assert_eq!(tool("find_symbol_references", json!({ "symbol": "x" })), json!([{ "cell_id": b, "line_hint": 1 }, { "cell_id": c, "line_hint": 2 }]));
+    assert_eq!(tool("get_cell_order", json!({})), json!({ "notebook_id": NB, "cell_ids": [a, b, c, d] }));
+    assert_eq!(tool("get_execution_order", json!({})), json!({ "notebook_id": NB, "cell_ids": [a, b, c, d] }));
+    assert_eq!(tool("validate_cell", json!({ "cell_id": a, "code": "a = 1\nb = 2" })), json!({ "valid": false, "errors": [{ "type": "pluto_multi_expression" }] }));
+    assert_eq!(s.call("", "find_symbol_references", json!({ "notebook_id": NB })), Err("KeyError: key \"symbol\" not found".into()));
+
+    let preview = |tool: &str, args: Value| {
+        let mut args = args;
+        args["notebook_id"] = json!(NB);
+        s.notebooks.run_preview(tool, &args).unwrap()
+    };
+    assert_eq!(preview("execute_cell", json!({ "cell_id": a })), json!({ "all": false, "count": 1, "cells": [{ "id": a, "name": "x", "code": "x = 1" }], "dependents": 2 }));
+    assert_eq!(preview("submit_changes", json!({ "cell_ids": [b] }))["dependents"], 1);
+    assert_eq!(preview("run_all_cells", json!({})), json!({ "all": true, "count": 4, "cells": [], "dependents": 0 }));
+    assert_eq!(preview("allow_execution", json!({ "run_notebook": false })), json!({ "all": false, "count": 0, "cells": [], "dependents": 0 }));
+    s.read("", NB, c);
+    s.edit("", NB, c, "z = y");
+    assert_eq!(preview("submit_changes", json!({}))["cells"], json!([{ "id": c, "name": "z", "code": "z = y" }]));
+    assert_eq!(s.notebooks.run_preview("submit_changes", &json!({ "notebook_id": NB, "cell_ids": ["bad"] })), Err("ArgumentError: Malformed UUID string: \"bad\"".into()));
+    assert_eq!(s.notebooks.run_preview("execute_cell", &json!({})), Err("KeyError: key \"notebook_id\" not found".into()));
+}
+
+#[test]
+fn search_code_cuts_snippets_as_julia_did() {
+    let s = setup();
+    let long = format!("{}needle{}", "a".repeat(50), "b".repeat(50));
+    let greek = "θ = 0.5 # angle θ in radians, about 28.6° — ok";
+    s.engine.open(NB, "/n/a.jl", &[(X, &long), (Y, greek)]);
+    let search = |query: &str| s.call("", "search_code", json!({ "notebook_id": NB, "query": query }));
+    assert_eq!(search("needle").unwrap(), json!([{ "cell_id": X, "snippet": format!("{}needle{}", "a".repeat(40), "b".repeat(40)) }]));
+    assert_eq!(search("θ").unwrap(), json!([{ "cell_id": Y, "snippet": "θ = 0.5 # angle θ in radians, about 28." }]));
+    assert_eq!(search("°").unwrap(), json!([{ "cell_id": Y, "snippet": "= 0.5 # angle θ in radians, about 28.6° — ok" }]));
+    assert_eq!(search("zzz").unwrap(), json!([]));
+    assert_eq!(super::tools::snippet_around(&format!("a{}", "é".repeat(30)), "a"), Err("StringIndexError: invalid index [41], valid nearby indices [40]=>'é', [42]=>'é'".into()));
+}
+
+#[test]
+fn view_cell_output_sends_the_png_the_engine_renders() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "plot(x)"), (Y, "y = 1")]);
+    let view = |cell: &str| s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": cell }), None);
+    match view(X).unwrap() {
+        Reply::Image { meta, png_base64 } => {
+            assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/plain", "png_bytes": 4 }));
+            assert_eq!(png_base64, "iVBORw==");
+        }
+        Reply::Json(_) => panic!("no image"),
+    }
+    assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y}: its output (text/plain) has no PNG rendering; read_cell shows it as text")));
+    s.engine.with(NB, |nb| nb.cells[0].errored = true);
+    assert_eq!(view(X).err(), Some(format!("ArgumentError: no_image::Cell {X} errored; read_cell shows the error")));
+}
+
+#[test]
+fn opening_and_making_notebooks() {
+    let s = setup();
+    let dir = temp_notebooks("open", 1)[0].rsplit_once('/').unwrap().0.to_owned();
+    let path = format!("{dir}/nb0.jl");
+    let opened = s.call("", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap();
+    assert_eq!(opened["warnings"], json!(["async_execution::open queued non-blocking notebook run; poll read_cell for completion"]));
+    assert_eq!((&opened["execution_allowed"], &opened["ran"], &opened["process_status"]), (&json!(true), &json!(true), &json!("starting")));
+    let previewed = s.call("", "open_notebook", json!({ "path": path })).unwrap();
+    assert_eq!((&previewed["execution_allowed"], previewed.get("warnings")), (&json!(false), None));
+    assert_eq!(s.call("", "open_notebook", json!({ "path": format!("{dir}/none.jl") })), Err(format!("ArgumentError: file_not_found::No file at '{dir}/none.jl'")));
+    assert_eq!(s.call("", "open_notebook", json!({})), Err("ArgumentError: invalid_path::path is required".into()));
+    assert_eq!(s.call("", "open_notebook", json!({ "path": path, "run_notebook": "yes" })), Err("TypeError: non-boolean (String) used in boolean context".into()));
+
+    let made = s.call("", "new_notebook", json!({ "path": format!("{dir}/./fresh.jl") })).unwrap();
+    assert_eq!((&made["path"], &made["created"], &made["ran"]), (&json!(format!("{dir}/fresh.jl")), &json!(true), &json!(true)));
+    // Its empty first cell can be edited straight away, without a read first.
+    s.edit("", made["notebook_id"].as_str().unwrap(), made["cell_ids"][0].as_str().unwrap(), "x = 1");
+    assert_eq!(s.call("", "new_notebook", json!({ "path": path })), Err(format!("ArgumentError: file_exists::'{path}' already exists; use open_notebook to load it")));
+    assert_eq!(s.refused("", "new_notebook", json!({ "path": format!("{dir}/x.txt") })), "invalid_path");
+    assert_eq!(s.call("", "new_notebook", json!({ "path": format!("{dir}/missing/y.jl") })), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}/missing'")));
+    // A session's folder takes its unnamed notebooks, and relative paths.
+    let named = s.notebooks.tool("s", "new_notebook", &json!({ "path": "named.jl" }), Some(&dir)).map(tool_json).unwrap();
+    assert_eq!(named["path"], format!("{dir}/named.jl"));
+    let unnamed = s.notebooks.tool("t", "new_notebook", &json!({}), Some(&dir)).map(tool_json).unwrap();
+    assert_eq!(unnamed["path"], format!("{dir}/made.jl"));
+}
+
+#[test]
 fn an_edit_waiting_for_its_run_holds_up_no_other_edit() {
     let s = setup();
     let (a, b) = (id(1), id(2));
-    s.engine.open(&a, "/n/a.jl", &[(X, "x = 1", &[]), (Y, "y = 1", &[])]);
-    s.engine.open(&b, "/n/b.jl", &[(X, "x = 1", &[])]);
-    s.tools(|notebooks, _, args| {
-        let notebook = notebooks.iter_mut().find(|n| n.id == args["notebook_id"].as_str().unwrap()).unwrap();
-        let cell = args["cell_id"].as_str().unwrap();
-        notebook.cells.iter_mut().find(|c| c.id == cell).unwrap().code = args["code"].as_str().unwrap().into();
-        notebook.pending.push(cell.into());
-        Ok(json!({ "cell_id": cell, "code": args["code"] }))
-    });
+    s.engine.open(&a, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 1")]);
+    s.engine.open(&b, "/n/b.jl", &[(X, "x = 1")]);
+    for (nb, cell) in [(&a, X), (&a, Y), (&b, X)] {
+        s.read("7", nb, cell);
+        s.read("8", nb, cell);
+    }
     let (started_tx, started) = mpsc::channel();
     let (release, release_rx) = mpsc::channel();
     *s.engine.hold.lock().unwrap() = Some((started_tx, release_rx));
     let (s, a, b) = (&s, &a, &b);
     std::thread::scope(|scope| {
-        let held = scope.spawn(|| s.call("7", "edit_cell", json!({ "notebook_id": a, "cell_id": X, "code": "x = 2", "run_after": true, "hold": true })));
+        let held = scope.spawn(|| s.call("7", "edit_cell", json!({ "notebook_id": a, "cell_id": X, "code": "x = 2", "run_after": true })));
         started.recv_timeout(Duration::from_secs(5)).expect("the held call started");
         let (done_tx, done) = mpsc::channel();
         scope.spawn(move || {
             let other_notebook = s.call("8", "edit_cell", json!({ "notebook_id": b, "cell_id": X, "code": "x = 3" }));
             let other_cell = s.call("7", "edit_cell", json!({ "notebook_id": a, "cell_id": Y, "code": "y = 2" }));
-            done_tx.send((other_notebook, other_cell)).unwrap();
+            let events = s.notebooks.subscribe().map(|_| ());
+            done_tx.send((other_notebook, other_cell, events)).unwrap();
         });
         let while_held = done.recv_timeout(Duration::from_secs(5));
         release.send(()).unwrap();
-        let (other_notebook, other_cell) = while_held.expect("edits while another waits");
-        assert!(other_notebook.is_ok() && other_cell.is_ok());
+        let (other_notebook, other_cell, events) = while_held.expect("edits while another waits");
+        assert!(other_notebook.is_ok() && other_cell.is_ok() && events.is_ok());
         assert!(held.join().unwrap().is_ok());
     });
     let (first, _) = s.notebooks.subscribe().unwrap();
     let first: Value = serde_json::from_str(&first).unwrap();
-    for (notebook, edited, before) in [(a, X, "x = 1"), (a, Y, "y = 1"), (b, X, "x = 1")] {
+    // The edit that ran isn't unrun, so it shows no before-text.
+    for (notebook, edited, before) in [(a, X, Value::Null), (a, Y, json!("y = 1")), (b, X, json!("x = 1"))] {
         let state = cell(&first, notebook, edited);
-        assert_eq!((&state["author"], &state["before"]), (&json!("agent"), &json!(before)), "{notebook} {edited}");
+        assert_eq!((&state["author"], &state["before"]), (&json!("agent"), &before), "{notebook} {edited}");
     }
 }
 
 #[test]
 fn a_failed_edit_is_nobodys() {
     let s = setup();
-    s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1", &[])]);
-    s.tools(|_, _, _| Err("stale_read".into()));
-    assert_eq!(s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": Y, "code": "y = 2" })), Err("stale_read".into()));
+    s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1")]);
+    assert_eq!(s.refused("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": Y, "code": "y = 2" })), "read_required");
     s.engine.with(NB, |nb| nb.cells[0].code = "y = 3".into());
     let (first, _) = s.notebooks.subscribe().unwrap();
     let first: Value = serde_json::from_str(&first).unwrap();
     assert_eq!(cell(&first, NB, Y)["author"], Value::Null);
+}
+
+#[test]
+fn arguments_are_refused_as_julia_refused_them() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);
+    let read = |args: Value| s.call("", "read_cell", args);
+    let not_found = |what: &str, shown: &str, where_: &str| Err(format!("KeyError: key \"{what}_not_found::No {what} with id '{shown}' in {where_}\" not found"));
+    assert_eq!(read(json!({ "notebook_id": "nope", "cell_id": X })), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nope'".into()));
+    assert_eq!(read(json!({ "notebook_id": Value::Null, "cell_id": X })), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nothing'".into()));
+    assert_eq!(read(json!({ "notebook_id": 123, "cell_id": X })), not_found("notebook", "123", "the current session"));
+    assert_eq!(read(json!({ "notebook_id": NB, "cell_id": "zzz" })), Err("ArgumentError: invalid_cell_id::Invalid cell ID: 'zzz'".into()));
+    assert_eq!(read(json!({ "notebook_id": NB, "cell_id": 7 })), not_found("cell", "7", "notebook"));
+    assert_eq!(read(json!({ "notebook_id": NB })), Err("KeyError: key \"cell_id\" not found".into()));
+    let cell = read(json!({ "notebook_id": NB.to_uppercase(), "cell_id": X })).unwrap();
+    assert_eq!(cell, json!({ "cell_id": X, "code": "x = 1", "output": "", "errored": false, "running": false, "queued": false, "code_folded": false, "stale": false }));
+    assert_eq!(s.call("", "no_such_tool", json!({})), Err("ArgumentError: unknown_tool::Unknown tool: 'no_such_tool'".into()));
+    // A string of cell ids is a string of characters to Julia.
+    assert_eq!(
+        s.call("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": "1" })),
+        Err("ArgumentError: not_staged::Cell 00000000-0000-0000-0000-000000000031 is not in pending_run; stage first or pass force=true".into())
+    );
+    assert!(s.call("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [X], "force": "yes" })).unwrap_err().starts_with("MethodError: no method matching !(::String)"));
 }
 
 fn temp_notebooks(name: &str, count: usize) -> Vec<String> {
@@ -341,15 +812,6 @@ fn one_notebook_per_session() {
     let s = setup();
     let paths = temp_notebooks("one", 4);
     let (first_nb, second_nb) = (&paths[0], &paths[1]);
-    s.tools(move |notebooks, tool, args| match tool {
-        "open_notebook" | "new_notebook" => {
-            let path = args["path"].as_str().unwrap().to_owned();
-            let nid = id(notebooks.len() + 1);
-            notebooks.push(FakeNotebook { id: nid.clone(), path: path.clone(), cells: Vec::new(), pending: Vec::new(), safe_preview: false });
-            Ok(json!({ "notebook_id": nid, "path": path }))
-        }
-        _ => Ok(json!({})),
-    });
     let refused = |result: Result<Value, String>| result.err().and_then(|e| e.split_once("::").map(|(kind, _)| kind.to_owned()));
     let one = Some("ArgumentError: one_notebook".to_owned());
 
@@ -388,8 +850,8 @@ fn one_notebook_per_session() {
         )
     );
     assert_eq!(refused(s.call("a", "read_notebook_code", json!({ "notebook_id": second_id }))), None);
-    assert_eq!(refused(s.call("a", "fold_cell", json!({ "notebook_id": first_id, "cell_id": X, "folded": true }))), None);
-    assert_eq!(refused(s.call("a", "run_all_cells", json!({ "notebook_id": "not-a-uuid" }))), None, "Julia says what's wrong");
+    assert_eq!(refused(s.call("a", "run_all_cells", json!({ "notebook_id": first_id }))), None);
+    assert_eq!(refused(s.call("a", "run_all_cells", json!({ "notebook_id": "not-a-uuid" }))), Some("ArgumentError: invalid_notebook_id".into()), "the tool says what's wrong");
 
     // A binding set by the app is respected, and clearing it lifts the limit.
     s.notebooks.bind("b", second_nb);
@@ -401,6 +863,7 @@ fn one_notebook_per_session() {
     assert_eq!(refused(s.call("b", "run_all_cells", json!({ "notebook_id": first_id }))), None);
 
     // A "New notebook" session: the notebook it creates becomes its notebook.
+    std::fs::remove_file(&paths[2]).unwrap();
     s.call("c", "new_notebook", json!({ "path": &paths[2] })).unwrap();
     assert_eq!(s.notebooks.bound("c").as_ref(), Some(&paths[2]));
     assert_eq!(refused(s.call("c", "new_notebook", json!({ "path": &paths[3] }))), one);
@@ -437,11 +900,10 @@ fn idle_notebooks_stop_but_running_kept_alive_and_recently_used_ones_dont() {
     let paths = temp_notebooks("idle", 4);
     let (idle, running, kept, used) = (&paths[0], &paths[1], &paths[2], &paths[3]);
     for (i, path) in paths.iter().enumerate() {
-        s.engine.open(&id(i), path, &[(X, "x = 1", &[])]);
+        s.engine.open(&id(i), path, &[(X, "x = 1")]);
         s.notebooks.notified(&json!({ "method": "notebook_opened", "params": { "notebook_id": id(i), "path": path } }));
     }
     s.engine.with(&id(0), |nb| nb.safe_preview = true);
-    s.tools(|_, _, _| Ok(json!({})));
     assert_eq!(s.call("", "keep_notebook_alive", json!({ "notebook_id": id(2), "keep": true })), Ok(json!({ "notebook_id": id(2), "kept_alive": true })));
     s.engine.with(&id(1), |nb| nb.cells[0].running = true);
     let open = || s.engine.notebooks.lock().unwrap().iter().map(|nb| nb.path.clone()).collect::<Vec<_>>();
@@ -504,17 +966,21 @@ fn idle_notebooks_stop_but_running_kept_alive_and_recently_used_ones_dont() {
 fn a_notebooks_state_goes_when_it_shuts_down_however_it_shuts_down() {
     let s = setup();
     let paths = temp_notebooks("gone", 3);
-    s.tools(editing_tools(NB));
-    s.engine.open(NB, &paths[0], &[(X, "x = 1", &[])]);
-    s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 2" })).unwrap();
+    s.engine.open(NB, &paths[0], &[(X, "x = 1")]);
+    s.read("7", NB, X);
+    s.edit("7", NB, X, "x = 2");
     s.call("", "keep_notebook_alive", json!({ "notebook_id": NB, "keep": true })).unwrap();
-    let held = || s.notebooks.state.lock().unwrap().notebooks.get(NB).map(|nb| (nb.authors.len(), nb.befores.len(), nb.kept_alive, nb.last_active.is_some()));
-    assert_eq!(held(), Some((1, 1, true, true)));
+    let held = || {
+        s.notebooks.state.lock().unwrap().notebooks.get(NB).map(|nb| {
+            (nb.authors.len(), nb.befores.len(), nb.kept_alive, nb.last_active.is_some(), nb.pending.len(), nb.reads.len(), nb.changes.len())
+        })
+    };
+    assert_eq!(held(), Some((1, 1, true, true, 1, 1, 1)));
 
     // Restarting in place (leaving safe preview) keeps it in the session, and its state.
     s.notebooks.notified(&json!({ "method": "cell_state", "params": { "notebook_id": NB, "cells": [] } }));
     s.notebooks.publish();
-    assert_eq!(held(), Some((1, 1, true, true)));
+    assert_eq!(held(), Some((1, 1, true, true, 1, 1, 1)));
 
     // Pluto shutting it down (the page's own button).
     s.engine.notebooks.lock().unwrap().clear();
@@ -522,11 +988,11 @@ fn a_notebooks_state_goes_when_it_shuts_down_however_it_shuts_down() {
     assert_eq!(held(), None);
 
     // Stopped by the app, or gone by the time the core looks.
-    s.engine.open(NB, &paths[1], &[(X, "x = 1", &[])]);
+    s.engine.open(NB, &paths[1], &[(X, "x = 1")]);
     s.call("", "keep_notebook_alive", json!({ "notebook_id": NB, "keep": true })).unwrap();
     s.notebooks.stop_notebook(&paths[1]).unwrap();
     assert_eq!(held(), None);
-    s.engine.open(NB, &paths[2], &[(X, "x = 1", &[])]);
+    s.engine.open(NB, &paths[2], &[(X, "x = 1")]);
     s.call("", "keep_notebook_alive", json!({ "notebook_id": NB, "keep": true })).unwrap();
     s.engine.notebooks.lock().unwrap().clear();
     s.notebooks.publish();

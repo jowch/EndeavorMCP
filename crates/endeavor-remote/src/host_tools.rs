@@ -198,7 +198,7 @@ fn valid_text(bytes: &[u8]) -> String {
 }
 
 /// A string as Julia's `repr` shows it, for its error messages.
-fn julia_repr(text: &str) -> String {
+pub(crate) fn julia_repr(text: &str) -> String {
     let mut out = String::from('"');
     for c in text.chars() {
         match c {
