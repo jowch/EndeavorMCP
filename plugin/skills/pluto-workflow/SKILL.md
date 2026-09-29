@@ -3,13 +3,19 @@ name: pluto-workflow
 description: >-
   Use when editing Pluto notebook cells via the notebook tools, staging changes before
   submit_changes, handling read_required/stale_read/execution_blocked
-  responses, exiting safe preview, or acting on an annotation-mode comment on
-  notebook cells.
+  responses, exiting safe preview, acting on an annotation-mode comment on
+  notebook cells, or writing a plan while in Plan mode.
 ---
 
 # Pluto workflow (cell editing)
 
 Live reactive session — not a `.jl` file to patch. See [pluto-mental-model.md](reference/pluto-mental-model.md) for Pluto semantics.
+
+## Plan mode
+
+Write the plan as a short title, then a numbered list of steps, one plain
+sentence each. Put any context, caveats or checks after the numbered list,
+not folded into a step's line. Keep the whole plan short.
 
 ## Which notebook, and where the context comes from
 
