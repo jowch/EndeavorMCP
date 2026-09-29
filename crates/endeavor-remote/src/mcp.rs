@@ -168,64 +168,18 @@ impl Bridge {
         Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
     }
 
-    /// Serve `POST /mcp`: one JSON-RPC message in; a request gets its reply
-    /// in this response, a notification or a response from the client gets
-    /// `202 Accepted` with no body. Whether the connection can carry another request.
+    /// Serve `POST /mcp`. Whether the connection can carry another request.
     pub fn mcp(&self, request: &Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> io::Result<bool> {
-        let body = http::read_body(reader, request.request_body()?)?;
-        let keep_alive = request.keeps_alive();
-        if request.header("MCP-Protocol-Version").is_some_and(|v| !SUPPORTED_VERSIONS.contains(&v)) {
-            http::respond(client, "400 Bad Request", Some("application/json"), br#"{"error":"unsupported_protocol_version"}"#, keep_alive)?;
-            return Ok(keep_alive);
-        }
-        let Some(message) = serde_json::from_slice::<Value>(&body).ok().filter(Value::is_object) else {
-            http::respond(client, "400 Bad Request", None, br#"{"error":"Invalid JSON"}"#, keep_alive)?;
-            return Ok(keep_alive);
-        };
-        match self.dispatch(&message, &Caller::of(request)) {
-            Some(reply) => http::respond(client, "200 OK", Some("application/json"), reply.as_bytes(), keep_alive)?,
-            None => http::respond(client, "202 Accepted", None, b"", keep_alive)?,
-        }
-        Ok(keep_alive)
+        post(request, reader, client, request.keeps_alive(), |message| self.dispatch(message, &Caller::of(request)))
     }
 
     /// The reply to one JSON-RPC message, if it gets one.
     fn dispatch(&self, message: &Value, caller: &Caller) -> Option<String> {
-        // Notifications get no reply.
-        let id = message.get("id").filter(|id| !id.is_null())?;
-        let ok = |result: Value| Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result })));
-        let method = message.get("method").map_or(String::new(), julia_string);
-        match method.as_str() {
-            "initialize" => {
-                // Standard negotiation: the client's version if we speak it, else our latest.
-                let requested = message["params"]["protocolVersion"].as_str();
-                let version = requested.filter(|v| SUPPORTED_VERSIONS.contains(v)).unwrap_or(SUPPORTED_VERSIONS[0]);
-                ok(json!({
-                    "protocolVersion": version,
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") },
-                }))
-            }
-            "ping" => ok(json!({})),
-            "tools/list" => {
-                let mut tools = NOTEBOOK_TOOLS.as_array().cloned().unwrap_or_default();
-                if !caller.host.is_empty() {
-                    tools.extend(host_tools::schemas());
-                }
-                for tool in &mut tools {
-                    // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
-                    let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name));
-                    tool["annotations"] = json!({ "readOnlyHint": read_only });
-                }
-                ok(json!({ "tools": tools }))
-            }
-            "tools/call" => {
-                let result = self.call_tool(&message["params"], caller);
-                self.notebooks.publish();
-                ok(result)
-            }
-            _ => Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }))),
-        }
+        answer(message, caller, |params| {
+            let result = self.call_tool(params, caller);
+            self.notebooks.publish();
+            result
+        })
     }
 
     /// A `tools/call`'s result.
@@ -288,6 +242,75 @@ impl Bridge {
         }
         None
     }
+}
+
+/// Serve one `POST /mcp`: one JSON-RPC message in; a request gets `reply`'s
+/// answer in this response, a notification or a response from the client gets
+/// `202 Accepted` with no body. Whether the connection can carry another request.
+pub(crate) fn post(
+    request: &Head,
+    reader: &mut BufReader<TcpStream>,
+    client: &mut TcpStream,
+    keep_alive: bool,
+    reply: impl FnOnce(&Value) -> Option<String>,
+) -> io::Result<bool> {
+    let body = http::read_body(reader, request.request_body()?)?;
+    if request.header("MCP-Protocol-Version").is_some_and(|v| !SUPPORTED_VERSIONS.contains(&v)) {
+        http::respond(client, "400 Bad Request", Some("application/json"), br#"{"error":"unsupported_protocol_version"}"#, keep_alive)?;
+        return Ok(keep_alive);
+    }
+    let Some(message) = serde_json::from_slice::<Value>(&body).ok().filter(Value::is_object) else {
+        http::respond(client, "400 Bad Request", None, br#"{"error":"Invalid JSON"}"#, keep_alive)?;
+        return Ok(keep_alive);
+    };
+    match reply(&message) {
+        Some(reply) => http::respond(client, "200 OK", Some("application/json"), reply.as_bytes(), keep_alive)?,
+        None => http::respond(client, "202 Accepted", None, b"", keep_alive)?,
+    }
+    Ok(keep_alive)
+}
+
+/// The reply to one JSON-RPC message, if it gets one; `call` gives a
+/// `tools/call`'s result.
+fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) -> Option<String> {
+    // Notifications get no reply.
+    let id = message.get("id").filter(|id| !id.is_null())?;
+    let ok = |result: Value| Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result })));
+    let method = message.get("method").map_or(String::new(), julia_string);
+    match method.as_str() {
+        "initialize" => {
+            // Standard negotiation: the client's version if we speak it, else our latest.
+            let requested = message["params"]["protocolVersion"].as_str();
+            let version = requested.filter(|v| SUPPORTED_VERSIONS.contains(v)).unwrap_or(SUPPORTED_VERSIONS[0]);
+            ok(json!({
+                "protocolVersion": version,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") },
+            }))
+        }
+        "ping" => ok(json!({})),
+        "tools/list" => {
+            let mut tools = NOTEBOOK_TOOLS.as_array().cloned().unwrap_or_default();
+            if !caller.host.is_empty() {
+                tools.extend(host_tools::schemas());
+            }
+            for tool in &mut tools {
+                // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
+                let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name));
+                tool["annotations"] = json!({ "readOnlyHint": read_only });
+            }
+            ok(json!({ "tools": tools }))
+        }
+        "tools/call" => ok(call(&message["params"])),
+        _ => Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }))),
+    }
+}
+
+/// The reply to a JSON-RPC message while the app can't reach the runtime:
+/// what the core would say, except that a tool call fails with `why`, plain
+/// text Claude reads before trying again.
+pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> Option<String> {
+    answer(message, &Caller::of(request), |_| json!({ "content": [{ "type": "text", "text": why }], "isError": true }))
 }
 
 /// A failed tool call's result, from the text of the error Julia raised:

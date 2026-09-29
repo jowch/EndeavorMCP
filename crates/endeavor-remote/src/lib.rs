@@ -21,6 +21,8 @@ mod mcp;
 mod notebooks;
 mod slurm;
 
+pub use core::serve_unreachable;
+
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};

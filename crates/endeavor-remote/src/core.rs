@@ -287,6 +287,25 @@ fn serve_client(client: TcpStream, bridge: &Bridge) -> io::Result<()> {
     Ok(())
 }
 
+/// Answer one request on the app's bridge listener while the app can't reach
+/// the runtime (`token` its bearer token), then close. The agent's MCP client
+/// gets an answer instead of a reset, which Claude Code counts toward giving
+/// up on the server for good: a tool call fails with `why`, and the rest is
+/// answered as the core would. Any other request is closed unanswered.
+pub fn serve_unreachable(client: TcpStream, token: &str, why: &str) -> io::Result<()> {
+    let mut reader = BufReader::new(client.try_clone()?);
+    let mut client = client;
+    let Some(request) = Head::read(&mut reader)? else { return Ok(()) };
+    if let Some((status, error)) = refusal(&request, token) {
+        let body = serde_json::json!({ "error": error }).to_string();
+        return http::respond(&mut client, status, Some("application/json"), body.as_bytes(), false);
+    }
+    if request.method() == "POST" && request.target().starts_with("/mcp") {
+        crate::mcp::post(&request, &mut reader, &mut client, false, |message| crate::mcp::answer_unreachable(message, &request, why))?;
+    }
+    Ok(())
+}
+
 /// Why the bridge won't serve a request: a status and an error code. It's a
 /// loopback control bridge, never a web API: any request with an Origin header
 /// came from a browser page (cross-site fetches and preflights always send one;
