@@ -405,10 +405,12 @@ impl Notebooks {
         });
         let notebooks = self.clone();
         std::thread::spawn(move || notebooks.handle_notifications(rx));
+        // ENDEAVOR_IDLE_CHECK_SECS: tests look more often than every five minutes.
+        let every = std::env::var("ENDEAVOR_IDLE_CHECK_SECS").ok().and_then(|s| s.parse().ok()).map_or(IDLE_CHECK, Duration::from_secs_f64);
         let notebooks = self.clone();
         std::thread::spawn(move || {
             loop {
-                std::thread::sleep(IDLE_CHECK);
+                std::thread::sleep(every);
                 notebooks.stop_idle();
             }
         });

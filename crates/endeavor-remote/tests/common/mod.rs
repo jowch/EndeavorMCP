@@ -3,9 +3,11 @@
 //! process. The bridge answers like Julia's (chunked responses to HTTP/1.1,
 //! close-delimited to HTTP/1.0, an SSE stream on `/stream`, the adapter's
 //! calls on `/adapter` and its notifications on `/notifications`) and records
-//! what it was sent.
+//! what it was sent. `helper` drives `endeavor-remote connect` as the app does.
 
 #![allow(dead_code)]
+
+pub mod helper;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
