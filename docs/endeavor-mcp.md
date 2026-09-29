@@ -29,8 +29,8 @@ cards, ssh, Slurm and the relay, sign-in and session management. The
 notebook page is Pluto's own, served by Julia, so standalone users can open it
 in a browser; the product needs a tool or command that gives its address.
 
-The Pluto adapter, the marimo adapter and turtleR's adapter live with the
-product, since each implements its interface. turtleR itself stays its own
+The Pluto adapter, the marimo adapter and Ember's adapter live with the
+product, since each implements its interface. Ember itself stays its own
 package.
 
 ## Deployment: a plugin

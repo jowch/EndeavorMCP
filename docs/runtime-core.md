@@ -1,10 +1,10 @@
 # Runtime core
 
 Design for moving the language-neutral half of the runtime from Julia into a
-Rust process, so Pluto, marimo and turtleR (our R notebook engine) sit
+Rust process, so Pluto, marimo and Ember (our R notebook engine) sit
 behind one boundary. Step 1 below is built; the rest is not yet. Endeavor's side of R support
-is in [r-notebooks.md](r-notebooks.md), turtleR's own design in its
-repository (https://github.com/jowch/turtleR); marimo in
+is in [r-notebooks.md](r-notebooks.md), Ember's own design in its
+repository (https://github.com/jowch/Ember); marimo in
 [marimo.md](marimo.md).
 
 _Drafted 2026-09-26_
@@ -26,9 +26,9 @@ language and running in the engine's process:
 | --- | --- | --- |
 | Pluto | Julia | `runtime/` (what is left of `EndeavorRuntime`) |
 | marimo | Python | `runtime-py/` ([marimo.md](marimo.md)) |
-| turtleR ([r-notebooks.md](r-notebooks.md)) | R | `runtime-r/` |
+| Ember ([r-notebooks.md](r-notebooks.md)) | R | `runtime-r/` |
 
-turtleR is a standalone R package in its own repository, usable without
+Ember is a standalone R package in its own repository, usable without
 Endeavor. Endeavor treats it exactly like Pluto and marimo.
 
 ## How much moves to Rust
@@ -61,7 +61,7 @@ Two side effects:
 app ── ssh/stdio frames ── endeavor-remote ── core (Rust, bridge port)
                                                ├─ julia: Pluto + adapter (Pluto UI port) ── Pluto workers
                                                ├─ python: marimo + adapter (marimo UI port)
-                                               └─ R: turtleR + adapter (turtleR UI port) ── R workers
+                                               └─ R: Ember + adapter (Ember UI port) ── R workers
 ```
 
 - The core may be a subcommand of the helper (`endeavor-remote core`), so
@@ -142,14 +142,14 @@ rule of our tools, so it moves to the core and applies to every engine:
 
 - **Running a cell runs its unrun ancestors first.** The core reads the
   graph and passes the full list to `run`.
-- **Cell identity across reloads.** Pluto and turtleR store cell IDs in
+- **Cell identity across reloads.** Pluto and Ember store cell IDs in
   the file. marimo doesn't; for it the core matches old IDs to new cells by
   code and reports unmatched ones as "cell no longer found".
 - **Staged edits from outside** (marimo's `--watch`, a user editing the file)
   show as `unrun`, the same state Pluto's staged edits produce.
 - **Opening a notebook** follows each engine's own default, so existing
   notebooks behave the way their users know: Pluto runs every cell; marimo
-  (`auto_instantiate = false` by default) and turtleR open without
+  (`auto_instantiate = false` by default) and Ember open without
   running, and cells run on request, ancestors first.
 
 What stays in each adapter: calls into the engine's API or internals, output and
@@ -168,7 +168,7 @@ adapter: steps 1 and 2 of "The Python runtime" and `marimo_api.py` stay;
    the app). The existing Julia test suite is the reference: the same
    scenarios must pass through the core. Each step below ends in a working
    app.
-2. **turtleR and its adapter** ([r-notebooks.md](r-notebooks.md) build
+2. **Ember and its adapter** ([r-notebooks.md](r-notebooks.md) build
    order).
 3. **marimo adapter** ([marimo.md](marimo.md) steps 2 onward, minus what the
    core now provides).
@@ -223,7 +223,7 @@ ending in an app that behaves as before:
 ## Open questions
 
 - **Transport to adapters:** settled in step 5a as loopback HTTP (see "The
-  engine interface"). A marimo or turtleR adapter whose engine keeps stdout
+  engine interface"). A marimo or Ember adapter whose engine keeps stdout
   clean could use stdio instead; the core would need a second
   `Upstream` for it.
 - **Is step 1 worth doing before R?** The alternative is building the core
