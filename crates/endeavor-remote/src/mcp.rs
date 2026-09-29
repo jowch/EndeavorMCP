@@ -316,6 +316,8 @@ pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> 
 /// A failed tool call's result, from the text of the error Julia raised:
 /// `ArgumentError: kind::message` names its kind; anything else is a `tool_error`.
 pub(crate) fn tool_error(raw: &str) -> Value {
+    let unwrapped = unwrap_key_error(raw);
+    let raw = unwrapped.as_deref().unwrap_or(raw);
     let (kind, message) = match raw.split_once("::") {
         Some((kind, message)) => {
             let kind = kind.trim();
@@ -325,6 +327,39 @@ pub(crate) fn tool_error(raw: &str) -> Value {
     };
     let text = to_json(&json!({ "error": kind, "message": message }));
     json!({ "content": [{ "type": "text", "text": text }], "isError": true })
+}
+
+/// A notebook or cell not found looks like a native Julia `KeyError`
+/// (`notebooks::notebook_not_found`, `tools::key_error`), which wraps its own
+/// `kind::message` inside the quoted key so the byte-for-byte error still
+/// reads like Julia's: `KeyError: key "notebook_not_found::No notebook with
+/// id '…'…" not found`. Splitting that whole thing on its first `::` lands
+/// inside the wrapper, before the key's quote even closes. Unwrap the key
+/// first, so the split lands on the `kind::message` it actually holds.
+fn unwrap_key_error(raw: &str) -> Option<String> {
+    let inner = raw.strip_prefix("KeyError: key \"")?.strip_suffix("\" not found")?;
+    let unescaped = unescape_julia_repr(inner);
+    unescaped.contains("::").then_some(unescaped)
+}
+
+/// The inverse of `host_tools::julia_repr`'s escaping, for the text it quoted.
+fn unescape_julia_repr(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some(escaped) => out.push(escaped), // `\"`, `\\`, `\$`: the character itself
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// A JSON value as Julia's `string` shows it.
@@ -397,5 +432,16 @@ mod tests {
         assert_eq!(text("SystemError: opening file \"/x\": Permission denied"), r#"{"error":"tool_error","message":"SystemError: opening file \"/x\": Permission denied"}"#);
         assert_eq!(text("IOError: readdir(\"/a::b\"): denied"), r#"{"error":"readdir(\"/a","message":"b\"): denied"}"#);
         assert_eq!(tool_error("x")["isError"], true);
+    }
+
+    #[test]
+    fn a_wrapped_key_error_unwraps_to_its_own_kind_and_message() {
+        let text = |raw: &str| tool_error(raw)["content"][0]["text"].as_str().unwrap().to_owned();
+        assert_eq!(
+            text("KeyError: key \"notebook_not_found::No notebook with id 'x' in the current session. Run list_notebooks to see what's open.\" not found"),
+            r#"{"error":"notebook_not_found","message":"No notebook with id 'x' in the current session. Run list_notebooks to see what's open."}"#
+        );
+        // A quoted key with no kind::message of its own reads as a plain KeyError.
+        assert_eq!(text("KeyError: key \"code\" not found"), r#"{"error":"tool_error","message":"KeyError: key \"code\" not found"}"#);
     }
 }

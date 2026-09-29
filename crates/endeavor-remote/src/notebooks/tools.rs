@@ -161,9 +161,7 @@ impl Call<'_> {
         let value = self.arg("notebook_id")?;
         let shown = julia_string(value);
         let id = uuid_value(value).ok_or_else(|| argument_error(&format!("invalid_notebook_id::Invalid notebook ID: '{shown}'")))?;
-        self.nbs.snapshot(&id).map_err(|e| {
-            if e.contains("notebook_not_found::") { key_error(&format!("notebook_not_found::No notebook with id '{shown}' in the current session")) } else { e }
-        })
+        self.nbs.snapshot(&id).map_err(|e| if e.contains("notebook_not_found::") { notebook_not_found(&shown) } else { e })
     }
 
     /// The cell `cell_id` names.
@@ -845,6 +843,13 @@ pub fn argument_error(message: &str) -> String {
 /// Julia's `KeyError` for a missing key, as it shows it.
 pub fn key_error(key: &str) -> String {
     format!("KeyError: key {} not found", julia_repr(key))
+}
+
+/// No notebook with `shown`'s id: the error `notebook()` and `notebook_arg`
+/// both raise. `mcp::tool_error` unwraps this back to `notebook_not_found`
+/// with this message.
+pub fn notebook_not_found(shown: &str) -> String {
+    key_error(&format!("notebook_not_found::No notebook with id '{shown}' in the current session. Run list_notebooks to see what's open."))
 }
 
 /// Julia's error for `UUID(s)` on a string that isn't one.

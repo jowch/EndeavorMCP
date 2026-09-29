@@ -650,7 +650,7 @@ impl Notebooks {
         if known || self.snapshot(&id).is_ok() {
             return Ok(id);
         }
-        Err(tools::key_error(&format!("notebook_not_found::No notebook with id '{shown}' in the current session")))
+        Err(tools::notebook_not_found(&shown))
     }
 
     /// The app binds a session to its notebook; an empty path clears it.

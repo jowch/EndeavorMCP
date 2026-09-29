@@ -297,7 +297,11 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     assert_eq!(status, "HTTP/1.1 200 OK");
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let error: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(error["message"], "No notebook with id 'aaaaaaaa-0000-0000-0000-000000000000' in the current session\" not found");
+    assert_eq!(error["error"], "notebook_not_found");
+    assert_eq!(
+        error["message"],
+        "No notebook with id 'aaaaaaaa-0000-0000-0000-000000000000' in the current session. Run list_notebooks to see what's open."
+    );
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 }
 

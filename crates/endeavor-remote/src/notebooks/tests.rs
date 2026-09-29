@@ -572,7 +572,7 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!((&deleted["execution"]["status"], &deleted["pending_run"]), (&json!("completed"), &json!([a])));
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone()]);
     assert_eq!(*s.engine.calls.lock().unwrap().iter().rev().nth(2).unwrap(), "run", "Pluto's cleanup after a delete");
-    assert_eq!(s.refused("", "delete_cell", json!({ "notebook_id": NB, "cell_id": b })), "key \"cell_not_found");
+    assert_eq!(s.refused("", "delete_cell", json!({ "notebook_id": NB, "cell_id": b })), "cell_not_found");
 }
 
 #[test]
@@ -646,7 +646,7 @@ fn a_run_forgets_staged_cells_no_longer_in_the_notebook() {
     let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
     assert_eq!((&ran["affected_cells"], &ran["pending_run"]), (&json!([Y]), &json!([])));
     assert_eq!(s.refused("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [X] })), "not_staged");
-    assert_eq!(s.refused("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [X], "force": true })), "key \"cell_not_found");
+    assert_eq!(s.refused("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [X], "force": true })), "cell_not_found");
 }
 
 #[test]
@@ -875,7 +875,10 @@ fn arguments_are_refused_as_julia_refused_them() {
     let not_found = |what: &str, shown: &str, where_: &str| Err(format!("KeyError: key \"{what}_not_found::No {what} with id '{shown}' in {where_}\" not found"));
     assert_eq!(read(json!({ "notebook_id": "nope", "cell_id": X })), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nope'".into()));
     assert_eq!(read(json!({ "notebook_id": Value::Null, "cell_id": X })), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nothing'".into()));
-    assert_eq!(read(json!({ "notebook_id": 123, "cell_id": X })), not_found("notebook", "123", "the current session"));
+    assert_eq!(
+        read(json!({ "notebook_id": 123, "cell_id": X })),
+        Err("KeyError: key \"notebook_not_found::No notebook with id '123' in the current session. Run list_notebooks to see what's open.\" not found".into())
+    );
     assert_eq!(read(json!({ "notebook_id": NB, "cell_id": "zzz" })), Err("ArgumentError: invalid_cell_id::Invalid cell ID: 'zzz'".into()));
     assert_eq!(read(json!({ "notebook_id": NB, "cell_id": 7 })), not_found("cell", "7", "notebook"));
     assert_eq!(read(json!({ "notebook_id": NB })), Err("KeyError: key \"cell_id\" not found".into()));
@@ -1170,7 +1173,8 @@ fn keep_notebook_alive_checks_its_arguments_as_julia_did() {
     assert_eq!(keep(json!("nope"), json!(true)), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nope'".into()));
     assert_eq!(keep(Value::Null, json!(true)), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nothing'".into()));
     assert_eq!(keep(json!(-1), json!(true)), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: '-1'".into()));
-    let not_found = |shown: &str| Err(format!("KeyError: key \"notebook_not_found::No notebook with id '{shown}' in the current session\" not found"));
+    let not_found =
+        |shown: &str| Err(format!("KeyError: key \"notebook_not_found::No notebook with id '{shown}' in the current session. Run list_notebooks to see what's open.\" not found"));
     assert_eq!(keep(json!(missing), json!(true)), not_found(missing));
     assert_eq!(keep(json!(123), json!(true)), not_found("123"));
     assert_eq!(s.notebooks.keep_alive(&json!({ "keep": true })), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: ''".into()));
@@ -1179,7 +1183,7 @@ fn keep_notebook_alive_checks_its_arguments_as_julia_did() {
     let text = |raw: &str| crate::mcp::tool_error(raw)["content"][0]["text"].as_str().unwrap().to_owned();
     assert_eq!(
         text(&keep(json!(missing), json!(true)).unwrap_err()),
-        format!(r#"{{"error":"key \"notebook_not_found","message":"No notebook with id '{missing}' in the current session\" not found"}}"#)
+        format!(r#"{{"error":"notebook_not_found","message":"No notebook with id '{missing}' in the current session. Run list_notebooks to see what's open."}}"#)
     );
 }
 
