@@ -18,7 +18,7 @@ What's left depends on how far the product goes:
 | Separate crate, same repo | Move the core's modules (`core`, `http`, `mcp`, `host_tools`, `notebooks`) into an `endeavor-mcp` crate and binary; the helper and app depend on it | ~1 week |
 | Usable by other MCP clients | Setup from the server itself, a standard transport, session identity without the app, approval, a public control API, the skills (below) | +3–5 weeks |
 | Own repository and releases | CI, signed macOS and Linux binaries, versioning, the app pinning a version | +1–2 weeks |
-| Windows | The core uses Unix processes and signals throughout | several more weeks |
+| Windows | The core uses Unix processes and signals throughout; see [windows.md](windows.md) | 1–1.5 weeks for the core; 6–8 weeks for the whole app |
 
 Estimates, not measurements.
 
