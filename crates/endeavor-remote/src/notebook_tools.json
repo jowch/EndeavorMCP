@@ -9,7 +9,7 @@
     "name": "list_notebooks"
   },
   {
-    "description": "Return the code, output, stale flag, and structured error (when errored) of a single cell. Errored cells include an error object with kind, hint, and fixes when Pluto recognizes the failure (e.g. pluto_multi_expression).",
+    "description": "Return the code, output, stale flag, and structured error (when errored) of a single cell. When Pluto shows the output as something other than text (HTML, tables, arrays, dicts, Markdown, plots), output only names its type and output_text has the value as Julia prints it as text (a DataFrame as a table with its numbers), cut at 16 KB; read the numbers from output_text rather than changing the cell to print them. Errored cells include an error object with kind, hint, and fixes when Pluto recognizes the failure (e.g. pluto_multi_expression).",
     "inputSchema": {
       "properties": {
         "cell_id": {

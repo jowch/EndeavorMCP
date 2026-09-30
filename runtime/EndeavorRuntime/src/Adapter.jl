@@ -376,6 +376,8 @@ function render_png(session, nb, cell)
     return Dict{String,Any}("png" => png === nothing ? nothing : base64encode(png), "mime" => string(cell.output.mime))
 end
 
+render_text(session, nb, cell) = Dict{String,Any}("text" => _cell_text(session, nb, cell))
+
 function adapter_call(session, method::AbstractString, params)
     session === nothing && throw(ArgumentError("pluto_not_running::Pluto is not running yet."))
     method == "status" && return session_status_dict()
@@ -397,6 +399,7 @@ function adapter_call(session, method::AbstractString, params)
     method == "restart" && return restart!(session, nb, params["timeout"])
     method == "allow_execution" && return allow_execution!(session, nb, params["run"], params["timeout"])
     method == "move" && return move!(session, nb, params["path"])
+    method == "render_text" && return render_text(session, nb, _adapter_cell(nb, params["cell_id"]))
     method == "render_png" && return render_png(session, nb, _adapter_cell(nb, params["cell_id"]))
     method == "validate" && return Dict{String,Any}("errors" => _parse_validation_errors(nb, _adapter_cell(nb, params["cell_id"]), params["code"]))
     throw(ArgumentError("unknown_method::Unknown adapter method: '$method'"))

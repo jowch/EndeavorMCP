@@ -127,6 +127,64 @@ function _cell_png(session, nb, cell)
     end)
 end
 
+# ---------------------------------------------------------------------------
+# Text form of rich outputs (read_cell)
+# ---------------------------------------------------------------------------
+
+const _TEXT_MAX = 16_000
+
+function _cap_text(text::AbstractString)
+    sizeof(text) <= _TEXT_MAX && return String(text)
+    cut = prevind(text, _TEXT_MAX + 1)
+    return text[1:cut] * "\n… (cut at $(_TEXT_MAX) bytes of $(sizeof(text)))"
+end
+
+const _HTML_ENTITIES = ["&nbsp;" => " ", "&lt;" => "<", "&gt;" => ">", "&quot;" => "\"", "&#39;" => "'", "&amp;" => "&"]
+
+"Readable text from an HTML string: rows and blocks on their own lines, table cells tab-separated."
+function _html_text(html::AbstractString)
+    s = replace(html, r"<(script|style)\b.*?</\1>"is => "")
+    s = replace(s, r"</t[dh]>\s*"i => "\t", r"<br\s*/?>"i => "\n", r"</(tr|p|div|li|h[1-6]|pre|table|thead|tbody)>"i => "\n")
+    s = replace(s, r"<[^>]*>"s => "")
+    s = replace(s, _HTML_ENTITIES...)
+    s = replace(s, r"[ \t]+\n" => "\n", r"\n{3,}" => "\n\n")
+    return strip(s)
+end
+
+"""
+    _cell_text(session, nb, cell) -> Union{String, Nothing}
+
+Text form of a cell's output when Pluto shows it as something other than text
+(HTML, tables, trees, images): the value's `text/plain` display, rendered by the
+notebook's worker. `nothing` when the output already is text, or is empty or an error.
+While cells are running the worker isn't asked, since it would wait for them; stored
+HTML is stripped to text instead.
+"""
+function _cell_text(session, nb, cell)
+    cell.errored && return nothing
+    body = cell.output.body
+    (body === nothing || cell.output.mime == MIME("text/plain")) && return nothing
+    busy = any(c -> c.running || c.queued, values(nb.cells_dict))
+    workspace = busy ? nothing : Pluto.WorkspaceManager.get_workspace((session, nb); allow_creation=false)
+    if workspace !== nothing
+        cell_id = cell.cell_id
+        html = cell.output.mime == MIME("text/html")
+        # A value that shows as HTML but has only the generic text/plain `show`
+        # (`HTML(...)`, most widgets) prints as a struct dump; its stripped HTML reads better.
+        text = Pluto.WorkspaceManager.Malt.remote_eval_fetch(workspace.worker, quote
+            let value = get(PlutoRunner.cell_results, $cell_id, nothing)
+                generic = $html && which(show, Tuple{IO, MIME"text/plain", typeof(value)}).module === Base.Multimedia
+                value === nothing || generic ? nothing : sprint(show, MIME"text/plain"(), value;
+                    context = (:limit => true, :displaysize => (60, 160)))
+            end
+        end)
+        text !== nothing && return _cap_text(text)
+    end
+    cell.output.mime == MIME("text/html") && body isa AbstractString && return _cap_text(_html_text(body))
+    busy && return "(cells are running; read this cell again when they finish to see its output as text)"
+    return nothing
+end
+
 function _cell_output_error(cell)
     cell.errored || return nothing
     return _structure_error(cell.output.body)

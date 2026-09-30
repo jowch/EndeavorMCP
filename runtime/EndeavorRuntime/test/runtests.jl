@@ -135,6 +135,33 @@ end
         @test startswith(err, "no_image::") && occursin("safe preview", err)                   # an SVG needs the worker
     end
 
+    @testset "render_text shows rich outputs as text" begin
+        session, nb, cells = make_session_with_notebook(
+            "Dict(\"mean\" => 2.5)",
+            "md\"# Rates\"",
+            "HTML(\"<table><tr><th>n</th><th>mean</th></tr><tr><td>3</td><td>2.5 &amp; up</td></tr></table>\")",
+            "1 + 1",
+        )
+        Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
+        text(c) = EndeavorRuntime.render_text(session, nb, c)["text"]
+        @test cells[1].output.mime != MIME("text/plain")
+        @test text(cells[1]) == "Dict{String, Float64} with 1 entry:\n  \"mean\" => 2.5"
+        @test strip(text(cells[2])) == "Rates\n  ≡≡≡≡≡"
+        @test text(cells[3]) == "n\tmean\n3\t2.5 & up"      # HTML(...) has no text form of its own
+        @test text(cells[4]) === nothing                       # already text
+    end
+
+    @testset "render_text without a worker strips stored HTML" begin
+        session, nb, cells = make_session_with_notebook("t", "x")
+        cells[1].output = Pluto.CellOutput(; body="<p>a<br>b</p><script>x()</script>", mime=MIME("text/html"))
+        cells[2].output = Pluto.CellOutput(; body="<svg/>", mime=MIME("image/svg+xml"))
+        @test EndeavorRuntime.render_text(session, nb, cells[1])["text"] == "a\nb"
+        @test EndeavorRuntime.render_text(session, nb, cells[2])["text"] === nothing
+        cells[2].running = true
+        @test startswith(EndeavorRuntime.render_text(session, nb, cells[2])["text"], "(cells are running")
+        @test length(EndeavorRuntime._cap_text("é" ^ 20_000)) < 9_000
+    end
+
     @testset "validation parses as Pluto does" begin
         session, nb, cells = make_session_with_notebook("x = 1")
         errors = EndeavorRuntime._parse_validation_errors(nb, cells[1], "a = 1\nb = 2")

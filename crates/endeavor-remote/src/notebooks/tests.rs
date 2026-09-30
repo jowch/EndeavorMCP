@@ -253,6 +253,7 @@ impl Engine {
                 nb.safe_preview = false;
                 Ok(json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } }))
             }
+            "render_text" => Ok(json!({ "text": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("table") } { json!("n\tmean\n3\t2.5") } else { Value::Null } })),
             "render_png" => Ok(json!({ "png": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("plot") } { json!("iVBORw==") } else { Value::Null }, "mime": "text/plain" })),
             "validate" => Ok(json!({ "errors": if params["code"].as_str().unwrap().contains('\n') { json!([{ "type": "pluto_multi_expression" }]) } else { json!([]) } })),
             other => Err(format!("ArgumentError: unknown_method::Unknown adapter method: '{other}'")),
@@ -787,6 +788,21 @@ fn view_cell_output_sends_the_png_the_engine_renders() {
     assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y}: its output (text/plain) has no PNG rendering; read_cell shows it as text")));
     s.engine.with(NB, |nb| nb.cells[0].errored = true);
     assert_eq!(view(X).err(), Some(format!("ArgumentError: no_image::Cell {X} errored; read_cell shows the error")));
+}
+
+#[test]
+fn read_cell_adds_the_text_form_of_rich_outputs() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "table"), (Y, "y = 1")]);
+    s.engine.with(NB, |nb| {
+        nb.cells[0].output = "[text/html output, 90 bytes]".into();
+        nb.cells[1].output = "1".into();
+    });
+    let read = |cell: &str| s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": cell })).unwrap();
+    assert_eq!((&read(X)["output"], &read(X)["output_text"]), (&json!("[text/html output, 90 bytes]"), &json!("n\tmean\n3\t2.5")));
+    assert_eq!(read(Y).get("output_text"), None);
+    s.engine.with(NB, |nb| nb.cells[0].errored = true);
+    assert_eq!(read(X).get("output_text"), None);
 }
 
 #[test]

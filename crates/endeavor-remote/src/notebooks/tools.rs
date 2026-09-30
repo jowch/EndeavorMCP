@@ -362,7 +362,14 @@ impl Call<'_> {
         let nb = self.notebook()?;
         let cell = self.cell(&nb)?;
         self.record_read(&nb.id, &cell, &nb.cells[&cell].code);
-        Ok(Value::Object(self.cell_json(&nb, &cell)))
+        let mut out = self.cell_json(&nb, &cell);
+        if !nb.cells[&cell].errored && !nb.cells[&cell].output.is_empty() {
+            let rendered = self.nbs.call("render_text", json!({ "notebook_id": nb.id, "cell_id": cell }))?;
+            if let Some(text) = rendered["text"].as_str() {
+                out.insert("output_text".into(), json!(text));
+            }
+        }
+        Ok(Value::Object(out))
     }
 
     fn view_cell_output(&self) -> Result<Reply, String> {
