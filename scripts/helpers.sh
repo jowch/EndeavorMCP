@@ -3,9 +3,11 @@
 # aarch64) in target/helpers/<platform>/, where the app and scripts/bundle.sh
 # look, built from this checkout's helper source.
 #
-#   scripts/helpers.sh        keep what's there if it matches, else download
-#                             it, else build it
-#   scripts/helpers.sh --key  print the helper source key
+#   scripts/helpers.sh               keep what's there if it matches, else
+#                                    download it, else build it
+#   scripts/helpers.sh --fetch-only  keep or download, never build (the git
+#                                    hooks in .githooks run this)
+#   scripts/helpers.sh --key         print the helper source key
 #
 # Downloads come from the "helpers" release on GitHub, which the Helpers
 # workflow (.github/workflows/helpers.yml) fills for every change to the
@@ -16,24 +18,54 @@
 set -eu
 cd "$(dirname "$0")/.."
 out=target/helpers
-paths="crates/endeavor-remote crates/wire Cargo.lock rust-toolchain.toml"
+paths="crates/endeavor-remote crates/wire rust-toolchain.toml"
 platforms="linux-x86_64 linux-aarch64"
 
-# The committed helper source plus the version it reports, hashed.
+# The crates the helper is built from, as "name version" lines, read from a
+# Cargo.lock on stdin: only the helper's own dependencies, so a change to the
+# app's dependencies doesn't change the key.
+closure() {
+  awk -v start=endeavor-remote '
+    /^\[\[package\]\]/ { flush(); name = ""; ver = ""; deps = ""; indeps = 0; next }
+    /^name = / { gsub(/"/, "", $3); name = $3; next }
+    /^version = / { gsub(/"/, "", $3); ver = $3; next }
+    /^dependencies = \[/ { indeps = 1; next }
+    indeps && /^\]/ { indeps = 0; next }
+    indeps { line = $0; gsub(/[",]/, "", line); sub(/^ +/, "", line); deps = deps line "|"; next }
+    function flush() { if (name != "") { pkg[name " " ver] = deps; one[name] = name " " ver } }
+    END {
+      flush()
+      queue[1] = one[start]; seen[one[start]] = 1; head = 1; tail = 1
+      while (head <= tail) {
+        p = queue[head++]; print p
+        k = split(pkg[p], d, "|")
+        for (i = 1; i <= k; i++) {
+          if (d[i] == "") continue
+          m = split(d[i], f, " ")
+          q = (m == 1) ? one[f[1]] : f[1] " " f[2]
+          if (!(q in seen)) { seen[q] = 1; queue[++tail] = q }
+        }
+      }
+    }' | LC_ALL=C sort
+}
+
+# The committed helper source, its dependencies and the version it reports, hashed.
 key() {
   {
     for p in $paths; do git rev-parse "HEAD:$p"; done
-    sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1
+    git show HEAD:Cargo.lock | closure
+    git show HEAD:Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1
   } | shasum -a 256 | cut -c1-12
 }
 
-if [ "${1:-}" = "--key" ]; then
-  key
-  exit 0
-fi
+fetch_only=
+case "${1:-}" in
+  --key) key; exit 0 ;;
+  --fetch-only) fetch_only=1 ;;
+esac
 
 key=$(key)
-if [ -n "$(git status --porcelain -- $paths)" ]; then
+if [ -n "$(git status --porcelain -- $paths)" ] || [ "$(closure < Cargo.lock)" != "$(git show HEAD:Cargo.lock | closure)" ]; then
   key="$key-dirty"
 fi
 
@@ -73,6 +105,10 @@ if [ "${key%-dirty}" = "$key" ] && sums=$(curl -fsSL "$base/endeavor-remote-$key
   exit 0
 fi
 
+if [ -n "$fetch_only" ]; then
+  echo "Server helpers for this checkout aren't on GitHub yet (key $key); run scripts/helpers.sh to build them, or pull again later." >&2
+  exit 1
+fi
 if [ "${key%-dirty}" != "$key" ]; then
   echo "The helper source has uncommitted changes; building it here." >&2
 else
