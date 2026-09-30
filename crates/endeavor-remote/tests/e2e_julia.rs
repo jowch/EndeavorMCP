@@ -287,7 +287,8 @@ fn the_runtime_end_to_end() {
         assert_eq!((&read["code"], &read["output"], &read["errored"]), (&json!("x = 21 * 2"), &json!("42"), &json!(false)), "{read}");
         let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "[1.5, 2.5]", "after_cell_id": cell }));
         let rich = added["cell_id"].as_str().unwrap().to_owned();
-        rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": rich, "wait_for_completion": true }));
+        let ran = rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": rich, "wait_for_completion": true }));
+        assert_eq!(ran["outputs"]["changed"][0]["output_text"], json!("2-element Vector{Float64}:\n 1.5\n 2.5"), "a run's receipt: {ran}");
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": rich }));
         assert_eq!(read["output_text"], json!("2-element Vector{Float64}:\n 1.5\n 2.5"), "a tree output read as text: {read}");
         (notebook, path, cell)

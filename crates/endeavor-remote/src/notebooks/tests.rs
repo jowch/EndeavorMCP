@@ -806,6 +806,16 @@ fn read_cell_adds_the_text_form_of_rich_outputs() {
 }
 
 #[test]
+fn a_run_receipt_has_the_text_form_of_rich_outputs() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "table")]);
+    s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["outputs"]["changed"], json!([{ "cell_id": X, "output_summary": "ran table", "output_text": "n\tmean\n3\t2.5" }]));
+    assert_eq!(super::tools::cut("abcé", 4), "abc\n… (cut; read_cell shows more)");
+}
+
+#[test]
 fn opening_and_making_notebooks() {
     let s = setup();
     let dir = temp_notebooks("open", 1)[0].rsplit_once('/').unwrap().0.to_owned();

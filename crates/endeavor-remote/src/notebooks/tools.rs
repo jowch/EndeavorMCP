@@ -23,6 +23,9 @@ const OTHER_SESSION_SECONDS: f64 = 120.0;
 const MAX_IMAGE_BYTES: usize = 4_000_000;
 /// How `read_notebook_code` starts each cell, as Pluto's file does.
 const CELL_MARKER: &str = "# ╔═╡ ";
+/// How much of each output's text a change's receipt carries; `read_cell` has
+/// the rest.
+const RECEIPT_TEXT_MAX: usize = 2_000;
 
 /// A tool's result: JSON, or a PNG with JSON describing it.
 pub enum Reply {
@@ -316,9 +319,12 @@ impl Call<'_> {
                 if let Some(error) = &cell.error {
                     entry["error"] = error.clone();
                 }
-                entry
+                if let Some(text) = self.output_text(&nb, id)? {
+                    entry["output_text"] = json!(cut(&text, RECEIPT_TEXT_MAX));
+                }
+                Ok(entry)
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
         let pending = self.pending_run(&nb);
         let receipt = json!({
             "applied": true,
@@ -333,6 +339,18 @@ impl Call<'_> {
         });
         let Value::Object(receipt) = receipt else { unreachable!() };
         Ok((receipt, nb))
+    }
+
+    /// The text form of a cell's output when Pluto shows it as something else
+    /// (HTML, a table, a tree), rendered by the runtime; none for text, errors
+    /// and empty outputs.
+    fn output_text(&self, nb: &Snapshot, id: &str) -> Result<Option<String>, String> {
+        let cell = &nb.cells[id];
+        if cell.errored || cell.output.is_empty() {
+            return Ok(None);
+        }
+        let rendered = self.nbs.call("render_text", json!({ "notebook_id": nb.id, "cell_id": id }))?;
+        Ok(rendered["text"].as_str().map(str::to_owned))
     }
 
     /// A cell as `read_cell` shows it.
@@ -363,11 +381,8 @@ impl Call<'_> {
         let cell = self.cell(&nb)?;
         self.record_read(&nb.id, &cell, &nb.cells[&cell].code);
         let mut out = self.cell_json(&nb, &cell);
-        if !nb.cells[&cell].errored && !nb.cells[&cell].output.is_empty() {
-            let rendered = self.nbs.call("render_text", json!({ "notebook_id": nb.id, "cell_id": cell }))?;
-            if let Some(text) = rendered["text"].as_str() {
-                out.insert("output_text".into(), json!(text));
-            }
+        if let Some(text) = self.output_text(&nb, &cell)? {
+            out.insert("output_text".into(), json!(text));
         }
         Ok(Value::Object(out))
     }
@@ -939,6 +954,15 @@ fn string_index_error(text: &str, index: usize) -> String {
 }
 
 /// The length of what a base64 text decodes to.
+/// `text` cut to at most `max` bytes at a character boundary, saying so.
+pub(super) fn cut(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let end = (0..=max).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+    format!("{}\n… (cut; read_cell shows more)", &text[..end])
+}
+
 fn base64_len(text: &str) -> usize {
     let padding = text.bytes().rev().take_while(|b| *b == b'=').count();
     text.len() / 4 * 3 - padding

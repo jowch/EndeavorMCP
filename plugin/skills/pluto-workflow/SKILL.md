@@ -40,7 +40,7 @@ The notebook tools enforce read-before-edit themselves: editing a cell you haven
 
 **Running code needs the user's approval.** `execute_cell`, `submit_changes`, `run_all_cells`, `allow_execution`, `delete_cell` (it re-runs dependents), and `add_cell` / `edit_cell` with `run_after=true` each show the user an approval prompt (they may choose to stop being asked). Staging edits never asks. Batch your edits and run once rather than asking repeatedly. If a run is denied, don't retry or look for another way to run it: say what you'd run and why, and continue with what you can do without running.
 
-**Reading rich output:** for tables, arrays, dicts, HTML and Markdown, `read_cell`'s `output` only names the type; its `output_text` holds the value as Julia prints it as text, numbers included. Read that instead of editing the cell to print the value.
+**Reading rich output:** for tables, arrays, dicts, HTML and Markdown, `read_cell`'s `output` only names the type; its `output_text` holds the value as Julia prints it as text, numbers included. After a run, each changed cell in `outputs.changed` has the first 2 KB of it too. Read that instead of editing the cell to print the value.
 
 **Checking visual output:** `read_cell` only describes plots (e.g. `[image/svg+xml output, … bytes; call view_cell_output to see it]`). After making or changing a plot, call `view_cell_output(notebook_id, cell_id)` to actually look at it (axes, labels, whether the data looks right) before telling the user it's done. It needs the notebook to be running (not safe preview).
 
