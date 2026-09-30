@@ -70,12 +70,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           key=$(scripts/helpers.sh --key)
-          mkdir -p assets
+          mkdir -p publish
           for dir in dist/*/; do
             platform=$(basename "$dir")
-            cp "$dir/endeavor-remote" "assets/endeavor-remote-$key-$platform"
+            cp "$dir/endeavor-remote" "publish/endeavor-remote-$key-$platform"
           done
-          (cd assets && sha256sum endeavor-remote-* > "endeavor-remote-$key.sha256")
+          (cd publish && sha256sum endeavor-remote-* > "endeavor-remote-$key.sha256")
           gh release view helpers >/dev/null 2>&1 || gh release create helpers --prerelease --target "$GITHUB_SHA" \
             --title "Server helpers" --notes "Runtime helpers for Linux servers, published by the Helpers workflow for each change to the helper's source. scripts/helpers.sh downloads the ones matching your checkout."
-          gh release upload helpers assets/* --clobber
+          gh release upload helpers publish/* --clobber
