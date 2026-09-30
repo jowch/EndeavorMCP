@@ -38,7 +38,7 @@ Each Endeavor session works on exactly one notebook. A session started from an e
 
 ## Sessions on a server
 
-When the notebook runs on a server, the notebook and its files live on that server, not on the user's Mac. Your own file and shell tools (`Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) are turned off because they would see the Mac. Use these instead; they run on the server:
+When the notebook runs on a server, the notebook and its files live on that server, not on the user's computer. Your own file and shell tools (`Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) are turned off because they would see the Mac. Use these instead; they run on the server:
 
 - `list_folder(path)` — what's in a folder.
 - `read_file(path, offset, limit)` — read a text file (numbered lines; continue with `offset=end_line+1`).

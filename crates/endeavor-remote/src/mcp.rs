@@ -230,7 +230,7 @@ impl Bridge {
     fn refusal(&self, caller: &Caller, tool: &str) -> Option<String> {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(format!(
-                "ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on this Mac: use your own file and shell tools."
+                "ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on the user's computer: use your own file and shell tools."
             ));
         }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p == "plan");

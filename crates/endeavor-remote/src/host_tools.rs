@@ -1,6 +1,6 @@
 //! Tools that act on the machine the runtime runs on. Only sessions on a server
 //! get them (their MCP connection carries `X-Endeavor-Host`): there, Claude's
-//! own file and shell tools would see the user's Mac instead of the server.
+//! own file and shell tools would see the user's computer instead of the server.
 //!
 //! Results and errors are what the Julia runtime gave before, to the byte:
 //! paths normalized as Julia's `normpath` does, invalid UTF-8 replaced one
@@ -31,7 +31,7 @@ pub fn schemas() -> Vec<Value> {
     vec![
         json!({
             "name": "list_folder",
-            "description": "List a folder on the server this session works on (your own file tools see the user's Mac, not the server). Returns entries with name, kind (dir, file, or link), size in bytes (files only), and modified (Unix time in seconds), folders first, hidden entries included. At most 1000 entries; truncated=true when there are more (total gives the count).",
+            "description": "List a folder on the server this session works on (your own file tools see the user's computer, not the server). Returns entries with name, kind (dir, file, or link), size in bytes (files only), and modified (Unix time in seconds), folders first, hidden entries included. At most 1000 entries; truncated=true when there are more (total gives the count).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

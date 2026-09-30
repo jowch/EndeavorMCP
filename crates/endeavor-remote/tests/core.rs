@@ -481,7 +481,7 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let on_server = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
     let plan_shell = "Plan mode is read-only: `run_shell` would run a command on the server. Finish the plan; the user switches modes to carry it out.";
     assert_eq!(mcp(&core, &tool(5, "run_shell"), &on_server).1, tool_error(5, "plan_mode", plan_shell));
-    let not_here = |tool: &str| format!("`{tool}` is only for sessions on a server. This session runs on this Mac: use your own file and shell tools.");
+    let not_here = |tool: &str| format!("`{tool}` is only for sessions on a server. This session runs on the user's computer: use your own file and shell tools.");
     assert_eq!(mcp(&core, &tool(6, "run_shell"), &seven).1, tool_error(6, "host_tools", &not_here("run_shell")), "the host check comes first");
     assert_eq!(app_call(&core, &tool(7, "list_folder")), tool_error(7, "host_tools", &not_here("list_folder")));
 
