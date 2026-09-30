@@ -1,0 +1,54 @@
+# Builds the runtime helper (endeavor-remote) that the app installs on servers,
+# one artifact per platform, named like target/helpers/<platform>/.
+# scripts/fetch-helpers.sh downloads them for the commit you have checked out.
+name: Helpers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/endeavor-remote/**
+      - crates/wire/**
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/helpers.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          # Off for now: Macs other than the one building the app.
+          # - platform: darwin-x86_64
+          #   runner: macos-15
+          #   target: x86_64-apple-darwin
+          # - platform: darwin-aarch64
+          #   runner: macos-15
+          #   target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p endeavor-remote --target ${{ matrix.target }}
+      - name: Stage
+        run: |
+          mkdir -p out
+          cp target/${{ matrix.target }}/release/endeavor-remote out/
+          file out/endeavor-remote || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: out/endeavor-remote
+          if-no-files-found: error
