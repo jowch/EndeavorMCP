@@ -102,7 +102,7 @@ impl Notebooks {
         };
         // allow_execution with run_notebook=false only lifts safe preview.
         let all = tool == "run_all_cells" || (tool == "allow_execution" && args.get("run_notebook").is_none_or(|run| *run != false));
-        let down = graph.downstream_of(&targets).into_iter().filter(|id| !targets.contains(id)).count();
+        let down: Vec<String> = graph.downstream_of(&targets).into_iter().filter(|id| !targets.contains(id)).collect();
         let cells: Vec<Value> = targets.iter().map(|id| json!({ "id": id, "name": graph.name(id), "code": nb.cells[id].code })).collect();
         let mut packages: Vec<String> = Vec::new();
         if all {
@@ -118,7 +118,8 @@ impl Notebooks {
             "all": all,
             "count": if all { nb.order.len() } else { targets.len() },
             "cells": cells,
-            "dependents": if all { 0 } else { down },
+            "dependents": if all { 0 } else { down.len() },
+            "dependent_ids": if all { Vec::new() } else { down },
             "packages": packages,
         }))
     }
