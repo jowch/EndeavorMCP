@@ -386,7 +386,7 @@ fn the_runtime_end_to_end() {
         other_path
     });
 
-    step("a notebook in safe preview runs once allowed", || {
+    let previewed = step("a notebook in safe preview runs once allowed", || {
         let list = rt.app_tool("list_notebooks", json!({}));
         let previewed = list.as_array().unwrap().iter().find(|nb| nb["path"] == other_path.as_str()).unwrap()["notebook_id"].as_str().unwrap().to_owned();
         rt.call("endeavor/set_notebook", json!({ "owner": "2", "notebook": other_path })).unwrap();
@@ -399,6 +399,35 @@ fn the_runtime_end_to_end() {
         assert_eq!(allowed["execution_allowed"], true, "{allowed}");
         let ran = rt.ok(SERVER, "execute_cell", run);
         assert_eq!(ran["execution"]["status"], "completed", "{ran}");
+        previewed
+    });
+
+    step("a notebook's own Julia ending by itself ends the run waiting for it", || {
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "worker = getpid()", "after_cell_id": last }));
+        let pid_cell = added["cell_id"].clone();
+        rt.ok(SERVER, "execute_cell", json!({ "notebook_id": previewed, "cell_id": pid_cell, "wait_for_completion": true }));
+        let worker: i32 = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": pid_cell }))["output"].as_str().unwrap().parse().unwrap();
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "rates = (sleep(600); 1)", "after_cell_id": pid_cell }));
+        let rates = added["cell_id"].as_str().unwrap().to_owned();
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            // SAFETY: plain syscall.
+            unsafe { libc::kill(worker, libc::SIGKILL) };
+        });
+        let ended = rt.tool(SERVER, "execute_cell", json!({ "notebook_id": previewed, "cell_id": rates, "wait_for_completion": true }));
+        killer.join().unwrap();
+        assert_eq!(
+            ended,
+            Err(json!({
+                "error": "process_exited",
+                "message": "Julia stopped unexpectedly while running `rates`. The notebook file is saved; its outputs are gone until the cells run again."
+            }))
+        );
+        let listed = rt.notebooks(SERVER).into_iter().find(|nb| nb["notebook_id"] == previewed.as_str()).unwrap();
+        assert_eq!((&listed["exited"], &listed["running"], &listed["execution_allowed"]), (&json!({ "running": [rates] }), &json!([]), &json!(false)), "{listed}");
     });
 
     step("idle stop with a short limit", || {

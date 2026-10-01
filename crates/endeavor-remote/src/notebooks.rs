@@ -200,6 +200,9 @@ struct Snapshot {
     order: Vec<String>,
     execution_allowed: bool,
     safe_preview: bool,
+    /// Its own Julia process ended by itself (not stopped by Pluto or the
+    /// app) and hasn't been restarted: the cells that were running then.
+    exited: Option<Vec<String>>,
     cells: HashMap<String, Cell>,
 }
 
@@ -257,6 +260,7 @@ impl Snapshot {
             order: value["cell_order"].as_array()?.iter().filter_map(text).collect(),
             execution_allowed: flag(&value["execution_allowed"]),
             safe_preview: flag(&value["safe_preview"]),
+            exited: value["exited"].as_array().map(|ids| ids.iter().filter_map(text).collect()),
             cells: cells.collect::<Option<_>>()?,
         })
     }
@@ -268,14 +272,19 @@ impl Snapshot {
         cell.running || (cell.queued && self.cells.values().any(|c| c.running))
     }
 
-    /// What `list_notebooks` says of it; `this_session`: it's the caller's own notebook.
+    /// What `list_notebooks` says of it; `this_session`: it's the caller's
+    /// own notebook. `exited` only while its own Julia has ended by itself.
     fn summary(&self, pending_run: &[String], this_session: bool) -> Value {
         let running: Vec<&String> = self.order.iter().filter(|id| self.cells.get(*id).is_some_and(|c| self.is_running(c))).collect();
-        json!({
+        let mut summary = json!({
             "notebook_id": self.id, "path": self.path, "cell_count": self.order.len(),
             "pending_run": pending_run, "running": running, "execution_allowed": self.execution_allowed,
             "this_session": this_session,
-        })
+        });
+        if let Some(exited) = &self.exited {
+            summary["exited"] = json!({ "running": exited });
+        }
+        summary
     }
 }
 
@@ -486,7 +495,7 @@ impl Notebooks {
                 }
                 true
             }
-            "topology_changed" | "resync" => true,
+            "topology_changed" | "process_exited" | "resync" => true,
             _ => false,
         }
     }

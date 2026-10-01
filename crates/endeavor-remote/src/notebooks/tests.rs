@@ -47,6 +47,8 @@ struct FakeNotebook {
     path: String,
     cells: Vec<FakeCell>,
     safe_preview: bool,
+    /// Its process ended by itself, while these cells ran.
+    exited: Option<Vec<String>>,
 }
 
 #[derive(Default)]
@@ -69,7 +71,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -86,8 +88,9 @@ impl Engine {
 
     fn snapshot(nb: &FakeNotebook) -> Value {
         json!({
-            "notebook_id": nb.id, "path": nb.path, "process_status": if nb.safe_preview { "waiting_for_permission" } else { "ready" },
-            "execution_allowed": !nb.safe_preview, "safe_preview": nb.safe_preview,
+            "notebook_id": nb.id, "path": nb.path,
+            "process_status": if nb.safe_preview { "waiting_for_permission" } else if nb.exited.is_some() { "no_process" } else { "ready" },
+            "execution_allowed": !nb.safe_preview && nb.exited.is_none(), "safe_preview": nb.safe_preview, "exited": nb.exited,
             "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
@@ -140,7 +143,7 @@ impl Engine {
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
                 let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed }));
             }
             _ => {}
@@ -233,7 +236,19 @@ impl Engine {
                 if nb.safe_preview {
                     return Ok(json!({ "accepted": false, "process_status": "waiting_for_permission" }));
                 }
+                if nb.exited.is_some() {
+                    return Ok(json!({ "accepted": false, "process_status": "no_process" }));
+                }
                 let cells: Vec<String> = params["cells"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_owned()).collect();
+                // `crash()` takes the notebook's process down while it runs.
+                if let Some(cell) = nb.cells.iter().find(|c| cells.contains(&c.id) && c.code.contains("crash()")) {
+                    nb.exited = Some(vec![cell.id.clone()]);
+                    let mut reply = json!({ "accepted": true, "process_status": "ready" });
+                    if params["wait"] == true {
+                        reply = json!({ "accepted": true, "process_status": "no_process", "completed": cells, "timed_out": [], "exited": [cell.id] });
+                    }
+                    return Ok(reply);
+                }
                 for cell in nb.cells.iter_mut().filter(|c| cells.contains(&c.id)) {
                     cell.last_run = now;
                     cell.errored = cell.code.contains("error(");
@@ -1229,4 +1244,49 @@ fn parses_ids_and_paths_as_julia_did() {
     if let Ok(real) = std::fs::canonicalize("/tmp") {
         assert_eq!(canonical_path("/tmp/endeavor-no-such.jl").unwrap(), format!("{}/endeavor-no-such.jl", real.display()));
     }
+}
+
+#[test]
+fn a_notebooks_own_julia_ending_by_itself_ends_the_run_claude_waits_for() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 6"), (Y, "rates = crash()")]);
+    let (_, rx) = s.notebooks.subscribe().unwrap();
+
+    let error = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).expect_err("the run ended");
+    let shown: Value = serde_json::from_str(crate::mcp::tool_error(&error)["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        shown,
+        json!({
+            "error": "process_exited",
+            "message": "Julia stopped unexpectedly while running `rates`. The notebook file is saved; its outputs are gone until the cells run again."
+        })
+    );
+
+    // The app hears which cell was running; nothing runs any more.
+    assert!(s.notebooks.notified(&json!({ "method": "process_exited", "params": { "notebook_id": NB, "running": [Y] } })));
+    s.notebooks.publish();
+    let event = next(&rx);
+    assert_eq!(
+        event["notebooks"][0],
+        json!({ "notebook_id": NB, "path": "/n/a.jl", "cell_count": 2, "pending_run": [], "running": [], "execution_allowed": false,
+                "this_session": false, "exited": { "running": [Y] } })
+    );
+    assert_eq!(s.call("7", "list_notebooks", json!({})).unwrap()[0]["exited"], json!({ "running": [Y] }));
+    assert_eq!(
+        s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap()["execution"]["status"],
+        "blocked",
+        "a run after it is refused as before"
+    );
+
+    // Restarted: no longer said.
+    s.engine.with(NB, |nb| nb.exited = None);
+    s.notebooks.publish();
+    assert_eq!(next(&rx)["notebooks"][0].get("exited"), None);
+
+    // A cell that defines nothing is named by its id; a run not waited for just runs.
+    s.engine.with(NB, |nb| nb.cells[1].code = "crash()".into());
+    let error = s.call("7", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).expect_err("the run ended");
+    assert!(error.ends_with(&format!("process_exited::Julia stopped unexpectedly while running `{Y}`. The notebook file is saved; its outputs are gone until the cells run again.")), "{error}");
+    s.engine.with(NB, |nb| nb.exited = None);
+    assert_eq!(s.call("7", "run_all_cells", json!({ "notebook_id": NB })).unwrap()["execution"]["status"], "running");
 }

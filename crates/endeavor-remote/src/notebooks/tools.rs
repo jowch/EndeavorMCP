@@ -266,6 +266,11 @@ impl Call<'_> {
         self.nbs.with_state(&nb.id, |state| state.prune(nb));
         let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": TIMEOUT_SECONDS }))?;
         let ids = |key: &str| reply[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
+        if reply.get("exited").is_some() {
+            let graph = self.nbs.graph(&nb.id, GraphQuery::default()).ok();
+            let cell = ids("exited").first().map(|id| graph.and_then(|g| g.name(id)).unwrap_or_else(|| id.clone()));
+            return Err(argument_error(&format!("process_exited::{}", exited_message(cell.as_deref()))));
+        }
         let mut warnings = Vec::new();
         if reply["accepted"] != true {
             let status = reply["process_status"].as_str().unwrap_or_default();
@@ -836,6 +841,16 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
         }
     };
     status.to_owned()
+}
+
+/// What Claude hears when a notebook's own Julia ends during a run it waits
+/// for, in the words of the app's crash page.
+fn exited_message(cell: Option<&str>) -> String {
+    let stopped = match cell {
+        Some(cell) => format!("Julia stopped unexpectedly while running `{cell}`."),
+        None => "Julia stopped unexpectedly.".to_owned(),
+    };
+    format!("{stopped} The notebook file is saved; its outputs are gone until the cells run again.")
 }
 
 /// A flag argument: a Bool, or refused.
