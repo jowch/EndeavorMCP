@@ -82,9 +82,11 @@ impl Notebooks {
 
     /// `endeavor/run_preview`, for the app's approval card: what a run tool
     /// call would run. `cells` are the cells it targets (named by what they
-    /// define), `all` means the whole notebook, `dependents` counts the other
-    /// cells that re-run with them, and `packages` are those a whole-notebook
-    /// run loads, in notebook order.
+    /// define), `all` means the whole notebook, `needed_ids` the cells they
+    /// depend on that never ran and so run first, `dependents` counts the
+    /// other cells that re-run with them, and `packages` are those a
+    /// whole-notebook run loads, in notebook order. For `allow_execution`,
+    /// `count` is the notebook's size whether or not it runs.
     pub fn run_preview(&self, tool: &str, args: &Value) -> Result<Value, String> {
         let t = Call { nbs: self, owner: "", args };
         let nb = t.notebook()?;
@@ -102,11 +104,13 @@ impl Notebooks {
         };
         // allow_execution with run_notebook=false only lifts safe preview.
         let all = tool == "run_all_cells" || (tool == "allow_execution" && args.get("run_notebook").is_none_or(|run| *run != false));
+        let whole = all || tool == "allow_execution";
+        let needed = if all { Vec::new() } else { self.never_run_upstream(&nb, &targets)? };
         let downstream = graph.downstream_of(&targets);
         let down: Vec<String> = nb.order.iter().filter(|id| downstream.contains(*id) && !targets.contains(id)).cloned().collect();
         let cells: Vec<Value> = targets.iter().map(|id| json!({ "id": id, "name": graph.name(id), "code": nb.cells[id].code })).collect();
         let mut packages: Vec<String> = Vec::new();
-        if all {
+        if whole {
             // The cells as they are now: in safe preview some were never analysed.
             let fresh = self.graph(&nb.id, GraphQuery { fresh: true, packages: true, ..Default::default() })?;
             for package in nb.order.iter().filter_map(|id| fresh.node(id)).flat_map(|node| &node.packages) {
@@ -117,12 +121,31 @@ impl Notebooks {
         }
         Ok(json!({
             "all": all,
-            "count": if all { nb.order.len() } else { targets.len() },
+            "count": if whole { nb.order.len() } else { targets.len() },
             "cells": cells,
+            "needed_ids": needed,
             "dependents": if all { 0 } else { down.len() },
             "dependent_ids": if all { Vec::new() } else { down },
             "packages": packages,
         }))
+    }
+
+    /// The cells `targets` depend on, directly or not, that have never run
+    /// (as after leaving safe preview without a run), in notebook order. A
+    /// run of the targets runs these too, so they don't fail on names those
+    /// cells define. None while the notebook isn't running code.
+    fn never_run_upstream(&self, nb: &Snapshot, targets: &[String]) -> Result<Vec<String>, String> {
+        if targets.is_empty() || !nb.execution_allowed {
+            return Ok(Vec::new());
+        }
+        let upstream = self.graph(&nb.id, GraphQuery { fresh: true, edges: true, ..Default::default() })?.upstream_of(targets);
+        Ok(nb
+            .order
+            .iter()
+            .filter(|id| upstream.contains(*id) && !targets.contains(id))
+            .filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c)))
+            .cloned()
+            .collect())
     }
 
     /// Another session's changes to the notebook in the last two minutes, if any.
@@ -263,9 +286,12 @@ impl Call<'_> {
         }
     }
 
-    /// Run cells, waiting for them or not; the warnings for the receipt.
-    fn run(&self, nb: &Snapshot, cells: &[String], wait: bool) -> Result<Vec<String>, String> {
+    /// Run cells, and the cells they need that never ran, waiting for them
+    /// or not: the warnings for the receipt, and the cells it ran.
+    fn run(&self, nb: &Snapshot, targets: &[String], wait: bool) -> Result<(Vec<String>, Vec<String>), String> {
         self.nbs.with_state(&nb.id, |state| state.prune(nb));
+        let needed = self.nbs.never_run_upstream(nb, targets)?;
+        let cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
         let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": TIMEOUT_SECONDS }))?;
         let ids = |key: &str| reply[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
         if reply.get("exited").is_some() {
@@ -293,21 +319,24 @@ impl Call<'_> {
         } else {
             warnings.push("async_execution::cells running; pending_run clears when execution finishes".into());
         }
-        Ok(warnings)
+        if reply["accepted"] == true && !needed.is_empty() {
+            warnings.push(format!("also_ran::Also ran {}: cells this run needs that had never run.", needed.join(", ")));
+        }
+        Ok((warnings, cells))
     }
 
     /// An edit's run_after: the edit stands either way, but a run that
     /// conflicts with another session's unread changes is left staged. The
-    /// warnings, and whether it ran.
-    fn run_or_stage(&self, nb: &Snapshot, cell: &str, run_after: bool) -> Result<(Vec<String>, bool), String> {
+    /// warnings, and the cells it ran.
+    fn run_or_stage(&self, nb: &Snapshot, cell: &str, run_after: bool) -> Result<(Vec<String>, Vec<String>), String> {
         let cells = [cell.to_owned()];
         let conflict = if run_after { self.run_conflict(nb, &cells)? } else { None };
         if run_after && conflict.is_none() {
             // Not waited for: a long run would hold up the agent's other calls.
-            return Ok((self.run(nb, &cells, false)?, true));
+            return self.run(nb, &cells, false);
         }
         self.mark_pending(&nb.id, &cells);
-        Ok((conflict.map(|c| vec![format!("{c} The edit is staged, not run.")]).unwrap_or_default(), false))
+        Ok((conflict.map(|c| vec![format!("{c} The edit is staged, not run.")]).unwrap_or_default(), Vec::new()))
     }
 
     /// What every change reports: the notebook's order and run state after it.
@@ -423,7 +452,6 @@ impl Call<'_> {
         let code = code.as_str().unwrap_or_default();
         self.edited(&nb.id, &applied, &cell, &before, code);
         let (warnings, ran) = self.run_or_stage(&nb, &cell, run_after)?;
-        let ran = if ran { vec![cell.clone()] } else { Vec::new() };
         let (mut receipt, after) = self.receipt(&nb.id, json!({ "type": "edit_cell", "cell_id": cell }), &ran, warnings, None)?;
         receipt.extend(self.cell_json(&after, &cell));
         Ok(Value::Object(receipt))
@@ -500,7 +528,6 @@ impl Call<'_> {
         let code = added.cells.get(&cell).map_or(String::new(), |c| c.code.clone());
         self.edited(&nb.id, &applied, &cell, "", &code);
         let (warnings, ran) = self.run_or_stage(&added, &cell, run_after)?;
-        let ran = if ran { vec![cell.clone()] } else { Vec::new() };
         let (mut receipt, after) = self.receipt(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), &ran, warnings, None)?;
         receipt.extend(self.cell_json(&after, &cell));
         Ok(Value::Object(receipt))
@@ -527,8 +554,8 @@ impl Call<'_> {
         let cells = [cell.clone()];
         self.require_no_run_conflict(&nb, &cells)?;
         let wait = bool_arg(self.args, "wait_for_completion", false)?;
-        let warnings = self.run(&nb, &cells, wait)?;
-        Ok(Value::Object(self.receipt(&nb.id, json!({ "type": "execute_cell", "cell_id": cell }), &cells, warnings, None)?.0))
+        let (warnings, ran) = self.run(&nb, &cells, wait)?;
+        Ok(Value::Object(self.receipt(&nb.id, json!({ "type": "execute_cell", "cell_id": cell }), &ran, warnings, None)?.0))
     }
 
     fn submit_changes(&self) -> Result<Value, String> {
@@ -564,8 +591,8 @@ impl Call<'_> {
         }
         self.require_no_run_conflict(&nb, &targets)?;
         let Value::Bool(wait) = wait else { return Err(argument_error("invalid_argument::wait_for_completion must be a boolean")) };
-        let warnings = self.run(&nb, &targets, wait)?;
-        Ok(Value::Object(self.receipt(&nb.id, mutation, &targets, warnings, None)?.0))
+        let (warnings, ran) = self.run(&nb, &targets, wait)?;
+        Ok(Value::Object(self.receipt(&nb.id, mutation, &ran, warnings, None)?.0))
     }
 
     fn run_all_cells(&self) -> Result<Value, String> {
@@ -573,7 +600,7 @@ impl Call<'_> {
         let wait = self.args.get("wait_for_completion").cloned().unwrap_or(json!(false));
         self.require_no_run_conflict(&nb, &nb.order)?;
         let Value::Bool(wait) = wait else { return Err(argument_error("invalid_argument::wait_for_completion must be a boolean")) };
-        let warnings = self.run(&nb, &nb.order, wait)?;
+        let (warnings, _) = self.run(&nb, &nb.order, wait)?;
         Ok(Value::Object(self.receipt(&nb.id, json!({ "type": "run_all_cells" }), &nb.order, warnings, None)?.0))
     }
 

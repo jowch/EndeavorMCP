@@ -556,7 +556,7 @@
     "name": "new_notebook"
   },
   {
-    "description": "Exit safe preview on an open notebook (same as the user clicking \"Run notebook code\" in the pane). Use when the user explicitly asks to run the notebook. Default run_notebook=true queues a single non-blocking full run (poll read_cell for completion). run_notebook=false exits the gate without queuing a run.",
+    "description": "Exit safe preview on an open notebook (same as the user clicking \"Run notebook code\" in the pane). Use when the user explicitly asks to run the notebook. Default run_notebook=true queues a single non-blocking full run (poll read_cell for completion). run_notebook=false exits the gate without queuing a run; later runs also run any cells they depend on that have never run.",
     "inputSchema": {
       "properties": {
         "notebook_id": {

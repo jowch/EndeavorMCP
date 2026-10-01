@@ -28,6 +28,7 @@ use wire::{Target, ToApp, ToHelper};
 /// Sessions as the agent's MCP config names them: one on This Mac, one on a server.
 const MAC: &[(&str, &str)] = &[("X-Endeavor-Session", "1")];
 const SERVER: &[(&str, &str)] = &[("X-Endeavor-Session", "2"), ("X-Endeavor-Host", "lab")];
+const THIRD: &[(&str, &str)] = &[("X-Endeavor-Session", "3")];
 
 /// The julia to test with, and the app's folder when it's the app's.
 fn find_julia() -> Option<(PathBuf, Option<PathBuf>)> {
@@ -267,7 +268,7 @@ fn the_runtime_end_to_end() {
         assert!(!on_mac.contains(&"run_shell".to_owned()) && on_server.contains(&"run_shell".to_owned()), "host tools only for a server session");
     });
 
-    for (owner, folder) in [("1", &mac), ("2", &lab)] {
+    for (owner, folder) in [("1", &mac), ("2", &lab), ("3", &mac)] {
         rt.call("endeavor/set_session_folder", json!({ "owner": owner, "folder": folder })).unwrap();
         rt.call("endeavor/set_policy", json!({ "owner": owner, "policy": "ask" })).unwrap();
     }
@@ -400,6 +401,44 @@ fn the_runtime_end_to_end() {
         let ran = rt.ok(SERVER, "execute_cell", run);
         assert_eq!(ran["execution"]["status"], "completed", "{ran}");
         previewed
+    });
+
+    step("out of safe preview without a run, a cell's never-run upstream cells run with it", || {
+        let ids = ["5a1e0001-bbeb-11f1-8e5f-a5a8320edb60", "5a1e0002-bbeb-11f1-8e5f-a5a8320edb60", "5a1e0003-bbeb-11f1-8e5f-a5a8320edb60", "5a1e0004-bbeb-11f1-8e5f-a5a8320edb60"];
+        let codes = ["a = 5", "b = a + 1", "c = b * 3", "e = c * 2"];
+        let mut text = String::from("### A Pluto.jl notebook ###\n# v1.0.3\n\nusing Markdown\nusing InteractiveUtils\n\n");
+        for (id, code) in ids.iter().zip(codes) {
+            text.push_str(&format!("# ╔═╡ {id}\n{code}\n\n"));
+        }
+        text.push_str("# ╔═╡ Cell order:\n");
+        for id in ids {
+            text.push_str(&format!("# ╠═{id}\n"));
+        }
+        let cards = mac.join("cards.jl");
+        std::fs::write(&cards, text).unwrap();
+        let cards = cards.to_str().unwrap().to_owned();
+        let opened = rt.app_tool("open_notebook", json!({ "path": cards, "run_notebook": false }));
+        let id = opened["notebook_id"].as_str().unwrap().to_owned();
+        rt.call("endeavor/set_notebook", json!({ "owner": "3", "notebook": cards })).unwrap();
+
+        let preview = rt.call("endeavor/run_preview", json!({ "tool": "allow_execution", "arguments": { "notebook_id": id, "run_notebook": false } })).unwrap();
+        assert_eq!((&preview["all"], &preview["count"]), (&json!(false), &json!(4)), "the card counts the notebook's cells: {preview}");
+
+        rt.ok(THIRD, "allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
+        let run = json!({ "notebook_id": id, "cell_id": ids[1], "wait_for_completion": true });
+        let preview = rt.call("endeavor/run_preview", json!({ "tool": "execute_cell", "arguments": run })).unwrap();
+        assert_eq!((&preview["count"], &preview["needed_ids"], &preview["dependent_ids"]), (&json!(1), &json!([ids[0]]), &json!([ids[2], ids[3]])), "b needs a: {preview}");
+        let ran = rt.ok(THIRD, "execute_cell", run);
+        assert_eq!(ran["execution"]["status"], "completed", "{ran}");
+        let read = |rt: &mut Runtime, cell: &str| {
+            let read = rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+            (read["output"].clone(), read["errored"].clone())
+        };
+        assert_eq!(read(&mut rt, ids[0]), (json!("5"), json!(false)));
+        assert_eq!(read(&mut rt, ids[1]), (json!("6"), json!(false)), "b ran after a");
+        let preview = rt.call("endeavor/run_preview", json!({ "tool": "execute_cell", "arguments": { "notebook_id": id, "cell_id": ids[1] } })).unwrap();
+        assert_eq!(preview["needed_ids"], json!([]), "a has run now: {preview}");
+        rt.call("endeavor/stop_notebook", json!({ "path": cards })).unwrap();
     });
 
     step("a notebook's own Julia ending by itself ends the run waiting for it", || {

@@ -649,6 +649,25 @@ fn safe_preview_keeps_edits_staged_until_execution_is_allowed() {
 }
 
 #[test]
+fn a_run_also_runs_the_cells_it_needs_that_never_ran() {
+    let s = setup();
+    let z = "33333333-3333-3333-3333-333333333333";
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + 1"), (z, "z = y * 3")]);
+    s.engine.with(NB, |nb| nb.safe_preview = true);
+    let preview = s.notebooks.run_preview("allow_execution", &json!({ "notebook_id": NB, "run_notebook": false })).unwrap();
+    assert_eq!(preview["count"], 3, "the card counts the notebook whether or not it runs");
+    s.call("", "allow_execution", json!({ "notebook_id": NB, "run_notebook": false })).unwrap();
+
+    let run = json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true });
+    let preview = s.notebooks.run_preview("execute_cell", &run).unwrap();
+    assert_eq!((&preview["needed_ids"], &preview["dependent_ids"]), (&json!([X]), &json!([z])));
+    let ran = s.call("", "execute_cell", run.clone()).unwrap();
+    assert_eq!((&ran["affected_cells"], &ran["execution"]["status"]), (&json!([X, Y]), &json!("completed")));
+    assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {X}: cells this run needs that had never run.")]));
+    assert_eq!(s.notebooks.run_preview("execute_cell", &run).unwrap()["needed_ids"], json!([]), "x has run now");
+}
+
+#[test]
 fn a_run_forgets_staged_cells_no_longer_in_the_notebook() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);
@@ -750,11 +769,11 @@ fn graph_tools_follow_the_engines_analysis() {
     };
     assert_eq!(
         preview("execute_cell", json!({ "cell_id": a })),
-        json!({ "all": false, "count": 1, "cells": [{ "id": a, "name": "x", "code": "x = 1" }], "dependents": 2, "dependent_ids": [b, c], "packages": [] })
+        json!({ "all": false, "count": 1, "cells": [{ "id": a, "name": "x", "code": "x = 1" }], "needed_ids": [], "dependents": 2, "dependent_ids": [b, c], "packages": [] })
     );
     assert_eq!(preview("submit_changes", json!({ "cell_ids": [b] }))["dependents"], 1);
-    assert_eq!(preview("run_all_cells", json!({})), json!({ "all": true, "count": 4, "cells": [], "dependents": 0, "dependent_ids": [], "packages": [] }));
-    assert_eq!(preview("allow_execution", json!({ "run_notebook": false })), json!({ "all": false, "count": 0, "cells": [], "dependents": 0, "dependent_ids": [], "packages": [] }));
+    assert_eq!(preview("run_all_cells", json!({})), json!({ "all": true, "count": 4, "cells": [], "needed_ids": [], "dependents": 0, "dependent_ids": [], "packages": [] }));
+    assert_eq!(preview("allow_execution", json!({ "run_notebook": false })), json!({ "all": false, "count": 4, "cells": [], "needed_ids": [], "dependents": 0, "dependent_ids": [], "packages": [] }));
     s.read("", NB, c);
     s.edit("", NB, c, "z = y");
     assert_eq!(preview("submit_changes", json!({}))["cells"], json!([{ "id": c, "name": "z", "code": "z = y" }]));

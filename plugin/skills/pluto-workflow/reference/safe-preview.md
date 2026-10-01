@@ -13,7 +13,7 @@ There are exactly two ways out:
 | Click "Run notebook code" in the notebook pane | **The user** | The default path — always available, no agent action needed |
 | `allow_execution(notebook_id=…)` | **The agent** | Only when the user explicitly asks you to run the notebook or cells |
 
-`allow_execution` defaults to `run_notebook=true` (queues one non-blocking full run). Pass `run_notebook=false` to exit the gate without a full run — useful when you only need your own staged cells to run: exit with `run_notebook=false`, then `submit_changes(wait_for_completion=false)` / `execute_cell` for those cells.
+`allow_execution` defaults to `run_notebook=true` (queues one non-blocking full run). Pass `run_notebook=false` to exit the gate without a full run — useful when you only need your own staged cells to run: exit with `run_notebook=false`, then `submit_changes(wait_for_completion=false)` / `execute_cell` for those cells. Each such run also runs the cells it depends on that have never run (the receipt's `also_ran::` warning names them).
 
 `run_all_cells` / `execute_cell` do **not** bypass safe preview on their own — the gate must be exited first, by one of the two paths above.
 
