@@ -83,6 +83,8 @@ function _handle_pluto_event(event)::Nothing
     elseif event isa Pluto.FileSaveEvent
         _notify_notebook!("file_saved", event.notebook)
     elseif event isa Pluto.StateChangeEvent
+        sess = standalone_session()
+        sess === nothing || watch_worker!(sess, event.notebook)
         notify_state!(event.notebook)
     elseif event isa Pluto.NotebookExecutionDoneEvent
         _notify_notebook!("execution_done", event.notebook)
@@ -95,12 +97,67 @@ function _handle_pluto_event(event)::Nothing
         nb = event.notebook
         if sess === nothing || !haskey(sess.notebooks, nb.notebook_id)
             forget_topology!(nb.notebook_id)
+            lock(() -> (delete!(_WATCHED, nb.notebook_id); delete!(_EXITED, nb.notebook_id)), _NOTIFY_LOCK)
             _notify_notebook!("notebook_shut_down", nb)
         else
             notify_state!(nb)
         end
     end
     nothing
+end
+
+# A notebook's own process (Pluto's Malt worker) ending by itself. Pluto only
+# notices when a call into it fails, so a process killed while idle, or by the
+# OS while it runs, would leave the notebook "ready" and its cells running.
+const _WATCHED = Dict{UUID,Any}()
+# The cells that were running when a notebook's process ended by itself, until
+# it gets a new one.
+const _EXITED = Dict{UUID,Vector{String}}()
+
+"Watch the notebook's process, once it has one and if no one watches it yet."
+function watch_worker!(session, nb)::Nothing
+    task = get(Pluto.WorkspaceManager.active_workspaces, nb.notebook_id, nothing)
+    (task === nothing || !istaskdone(task) || istaskfailed(task)) && return
+    workspace = fetch(task)
+    worker = workspace.worker
+    worker isa Pluto.Malt.Worker || return
+    new = lock(_NOTIFY_LOCK) do
+        get(_WATCHED, nb.notebook_id, nothing) === worker && return false
+        _WATCHED[nb.notebook_id] = worker
+        delete!(_EXITED, nb.notebook_id)
+        true
+    end
+    # Not the logger of whichever Pluto task saw it first (a package
+    # operation's tees into its own log).
+    new && @async Base.CoreLogging.with_logger(Base.CoreLogging.global_logger()) do
+        wait(worker.proc)
+        worker_exited!(session, nb, workspace)
+    end
+    return nothing
+end
+
+"The cells that were running when the notebook's process ended by itself; nothing while it has one."
+function exited_cells(nb)
+    nb.process_status === Pluto.ProcessStatus.no_process || return nothing
+    lock(() -> get(_EXITED, nb.notebook_id, nothing), _NOTIFY_LOCK)
+end
+
+function worker_exited!(session, nb, workspace)::Nothing
+    # Pluto marks a process it stops (shutdown, restart) discarded first.
+    workspace.discarded && return
+    get(session.notebooks, nb.notebook_id, nothing) === nb || return
+    running = [string(id) for id in nb.cell_order if nb.cells_dict[id].running]
+    lock(() -> _EXITED[nb.notebook_id] = running, _NOTIFY_LOCK)
+    nb.process_status = Pluto.ProcessStatus.no_process
+    for cell in nb.cells
+        cell.running = false
+        cell.queued = false
+    end
+    @warn "A notebook's Julia process ended by itself" nb.path running
+    notify!("process_exited", Dict{String,Any}("notebook_id" => string(nb.notebook_id), "running" => running))
+    _notify_browser(session, nb)
+    notify_state!(nb)
+    return nothing
 end
 
 

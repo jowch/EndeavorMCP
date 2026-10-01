@@ -7,7 +7,8 @@
 # `data: {"method", "params"}` line each: notebook_opened, notebook_shut_down
 # (it left the session), file_saved, execution_done, cell_state (every cell's
 # code and run state: Pluto's hook doesn't say which cell changed),
-# topology_changed, and run_finished (the cells an unwaited run finished).
+# topology_changed, run_finished (the cells an unwaited run finished), and
+# process_exited (its own process ended by itself; the cells that were running).
 #
 # Each notification carries `seq`, a counter that `apply` also advances; its
 # reply and `snapshot`'s carry it too. A snapshot or notification numbered
@@ -166,6 +167,7 @@ function snapshot(nb)
         "process_status"    => string(nb.process_status),
         "execution_allowed" => Pluto.will_run_code(nb),
         "safe_preview"      => nb.process_status === Pluto.ProcessStatus.waiting_for_permission,
+        "exited"            => exited_cells(nb),
         "cells"           => [_snapshot_cell(nb.cells_dict[id]) for id in nb.cell_order],
     )
 end
@@ -270,8 +272,9 @@ end
 
 # Run cells; none is Pluto's reactive cleanup after a delete. Not accepted when
 # the notebook won't run code (safe preview, a stopped process). With `wait`,
-# the reply says which cells finished within `timeout` seconds each; without, a
-# `run_finished` notification says so later.
+# the reply says which cells finished within `timeout` seconds each, and
+# `exited` the cells that were running if its process ended by itself
+# meanwhile; without, a `run_finished` notification says so later.
 function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
     accepted = Pluto.will_run_code(nb)
     # Pluto marks cells queued only inside its (possibly async) run task, after
@@ -284,6 +287,8 @@ function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
         completed, timed_out = _wait_cells!(cells; timeout)
         result["completed"] = [string(id) for id in completed]
         result["timed_out"] = [string(id) for id in timed_out]
+        exited = exited_cells(nb)
+        exited === nothing || (result["exited"] = exited)
     elseif accepted && !isempty(cells)
         @async begin
             completed, = _wait_cells!(cells; timeout)

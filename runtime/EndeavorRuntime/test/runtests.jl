@@ -479,4 +479,87 @@ end
         end
     end
 
+    @testset "adapter: a notebook's own process ending by itself" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        pluto_port = 1850 + rand(0:99)
+        mcp_port = 3050 + rand(0:99)
+        EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port)
+        X, Y = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+        try
+            EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
+            sock = Sockets.connect("127.0.0.1", mcp_port)
+            write(sock, "GET /notifications HTTP/1.0\r\nHost: 127.0.0.1:$mcp_port\r\n\r\n")
+            notes = Channel{Dict{String,Any}}(Inf)
+            @async for line in eachline(sock)
+                startswith(line, "data: ") && put!(notes, JSON.parse(line[7:end]))
+            end
+            exits() = [n["params"] for n in collect_notes() if n["method"] == "process_exited"]
+            function collect_notes()
+                got = Dict{String,Any}[]
+                while isready(notes)
+                    push!(got, take!(notes))
+                end
+                got
+            end
+            function next_note(method; nid = nothing)
+                deadline = time() + 60
+                while time() < deadline
+                    timedwait(() -> isready(notes), max(0.0, deadline - time())) == :ok || break
+                    note = take!(notes)
+                    note["method"] == method && (nid === nothing || note["params"]["notebook_id"] == nid) && return note["params"]
+                end
+                error("no $method notification")
+            end
+            adapter(method, params) = JSON.parse(String(HTTP.post("http://127.0.0.1:$mcp_port/adapter", [],
+                JSON.json(Dict("method" => method, "params" => params)); readtimeout=120).body))
+            result(method, params) = (reply = adapter(method, params); haskey(reply, "error") ? error(reply["error"]) : reply["result"])
+            worker_pid(nid) = Pluto.WorkspaceManager.get_workspace((EndeavorRuntime.standalone_session(), EndeavorRuntime.standalone_session().notebooks[UUID(nid)])).worker.proc_pid
+            sleep(0.5)
+
+            nid = result("open", Dict("path" => fresh_fixture(), "run" => true))["notebook_id"]
+            next_note("execution_done"; nid)
+            nb = EndeavorRuntime.standalone_session().notebooks[UUID(nid)]
+            result("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => "y = (sleep(600); x)")]))
+
+            # Killed during a run the caller waits for: the run ends, saying which cell was running.
+            waited = @async result("run", Dict("notebook_id" => nid, "cells" => [Y], "wait" => true, "timeout" => 600))
+            @test timedwait(() -> nb.cells_dict[UUID(Y)].running, 60) == :ok
+            collect_notes()
+            run(`kill -9 $(worker_pid(nid))`)
+            @test timedwait(() -> istaskdone(waited), 10) == :ok
+            @test fetch(waited) == Dict("accepted" => true, "process_status" => "no_process", "completed" => [Y], "timed_out" => [], "exited" => [Y])
+            @test next_note("process_exited"; nid) == Dict("notebook_id" => nid, "running" => [Y])
+            snap = result("snapshot", Dict("notebook_id" => nid))
+            @test (snap["process_status"], snap["execution_allowed"], snap["exited"]) == ("no_process", false, [Y])
+            @test !any(c -> c["running"] || c["queued"], snap["cells"])
+            @test exits() == []   # said once
+
+            # Restart is Endeavor's own stop: a new process, and nothing said to have ended by itself.
+            result("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => "y = x * 7")]))
+            result("restart", Dict("notebook_id" => nid, "timeout" => 60))
+            next_note("run_finished"; nid)
+            @test nb.process_status == Pluto.ProcessStatus.ready
+            @test result("snapshot", Dict("notebook_id" => nid))["exited"] === nothing
+            @test exits() == []
+
+            # Killed while idle: noticed too, with nothing running.
+            run(`kill -9 $(worker_pid(nid))`)
+            @test next_note("process_exited"; nid) == Dict("notebook_id" => nid, "running" => [])
+            @test result("snapshot", Dict("notebook_id" => nid))["exited"] == []
+            @test result("run", Dict("notebook_id" => nid, "cells" => [X], "wait" => true, "timeout" => 60)) ==
+                  Dict("accepted" => false, "process_status" => "no_process")
+
+            # A shutdown stops the process on purpose.
+            result("restart", Dict("notebook_id" => nid, "timeout" => 60))
+            next_note("run_finished"; nid)
+            result("shutdown", Dict("notebook_id" => nid))
+            next_note("notebook_shut_down"; nid)
+            sleep(2)
+            @test exits() == []
+            close(sock)
+        finally
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
 end
