@@ -102,7 +102,8 @@ impl Notebooks {
         };
         // allow_execution with run_notebook=false only lifts safe preview.
         let all = tool == "run_all_cells" || (tool == "allow_execution" && args.get("run_notebook").is_none_or(|run| *run != false));
-        let down: Vec<String> = graph.downstream_of(&targets).into_iter().filter(|id| !targets.contains(id)).collect();
+        let downstream = graph.downstream_of(&targets);
+        let down: Vec<String> = nb.order.iter().filter(|id| downstream.contains(*id) && !targets.contains(id)).cloned().collect();
         let cells: Vec<Value> = targets.iter().map(|id| json!({ "id": id, "name": graph.name(id), "code": nb.cells[id].code })).collect();
         let mut packages: Vec<String> = Vec::new();
         if all {

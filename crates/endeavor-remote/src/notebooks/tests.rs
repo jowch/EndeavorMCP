@@ -750,11 +750,11 @@ fn graph_tools_follow_the_engines_analysis() {
     };
     assert_eq!(
         preview("execute_cell", json!({ "cell_id": a })),
-        json!({ "all": false, "count": 1, "cells": [{ "id": a, "name": "x", "code": "x = 1" }], "dependents": 2, "packages": [] })
+        json!({ "all": false, "count": 1, "cells": [{ "id": a, "name": "x", "code": "x = 1" }], "dependents": 2, "dependent_ids": [b, c], "packages": [] })
     );
     assert_eq!(preview("submit_changes", json!({ "cell_ids": [b] }))["dependents"], 1);
-    assert_eq!(preview("run_all_cells", json!({})), json!({ "all": true, "count": 4, "cells": [], "dependents": 0, "packages": [] }));
-    assert_eq!(preview("allow_execution", json!({ "run_notebook": false })), json!({ "all": false, "count": 0, "cells": [], "dependents": 0, "packages": [] }));
+    assert_eq!(preview("run_all_cells", json!({})), json!({ "all": true, "count": 4, "cells": [], "dependents": 0, "dependent_ids": [], "packages": [] }));
+    assert_eq!(preview("allow_execution", json!({ "run_notebook": false })), json!({ "all": false, "count": 0, "cells": [], "dependents": 0, "dependent_ids": [], "packages": [] }));
     s.read("", NB, c);
     s.edit("", NB, c, "z = y");
     assert_eq!(preview("submit_changes", json!({}))["cells"], json!([{ "id": c, "name": "z", "code": "z = y" }]));
