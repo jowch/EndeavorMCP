@@ -514,6 +514,75 @@ fn edits_are_staged_until_they_run_however_they_run() {
 }
 
 #[test]
+fn an_approved_run_of_cells_the_users_run_already_reached_runs_nothing_again() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x")]);
+    let runs = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "run").count();
+    // The user's run (Pluto's, after their own change) reaches what the agent staged.
+    let users_run = |s: &Setup| {
+        s.seconds(1.0);
+        let now = *s.clock.lock().unwrap();
+        s.engine.with(NB, |nb| nb.cells.iter_mut().for_each(|c| c.last_run = now));
+    };
+    s.read("", NB, Y);
+    s.edit("", NB, Y, "y = x + 1");
+    users_run(&s);
+    let before = runs();
+    let receipt = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    assert_eq!(runs(), before, "not run again");
+    assert_eq!((&receipt["affected_cells"], &receipt["execution"]["status"]), (&json!([Y]), &json!("completed")));
+    assert_eq!(receipt["warnings"], json!([format!("already_ran::{Y} already ran after the user's change; not run again, so it ran once.")]));
+    assert_eq!(receipt["mutation"], json!({ "type": "execute_cell", "cell_id": Y }));
+
+    // Asked again, it runs: the agent means it.
+    s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    assert_eq!(runs(), before + 1);
+    // A cell the tools didn't change runs as asked, ran or not.
+    s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!(runs(), before + 2);
+
+    // submit_changes, naming the cell or not.
+    s.edit("", NB, Y, "y = x + 2");
+    users_run(&s);
+    let named = s.call("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [Y] })).unwrap();
+    assert_eq!((&named["affected_cells"], runs()), (&json!([Y]), before + 2));
+    s.edit("", NB, Y, "y = x + 3");
+    users_run(&s);
+    let all = s.call("", "submit_changes", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!((&all["affected_cells"], runs()), (&json!([Y]), before + 2));
+    assert!(all["warnings"][0].as_str().unwrap().starts_with("already_ran::"));
+    let noop = s.call("", "submit_changes", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!((&noop["affected_cells"], &noop["warnings"]), (&json!([]), &json!([])), "said once");
+
+    // Only when every cell ran: one still unrun, and both run.
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 2");
+    s.edit("", NB, Y, "y = x + 4");
+    users_run(&s);
+    s.seconds(1.0);
+    s.edit("", NB, X, "x = 3");
+    s.call("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [X, Y], "force": true })).unwrap();
+    assert_eq!(runs(), before + 3);
+
+    // The user's run still under way is waited for.
+    s.edit("", NB, Y, "y = x + 5");
+    s.seconds(1.0);
+    s.engine.with(NB, |nb| nb.cells[1].queued = true);
+    let engine = s.engine.clone();
+    let now = *s.clock.lock().unwrap();
+    let finish = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        engine.with(NB, |nb| {
+            nb.cells[1].queued = false;
+            nb.cells[1].last_run = now;
+        });
+    });
+    let waited = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    finish.join().unwrap();
+    assert_eq!((&waited["affected_cells"], runs()), (&json!([Y]), before + 3));
+}
+
+#[test]
 fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);

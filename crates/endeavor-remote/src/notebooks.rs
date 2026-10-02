@@ -98,6 +98,10 @@ struct NotebookState {
     /// stops being pending once it runs, however it runs (the tools, Pluto's
     /// own run button, a reactive re-run).
     pending: HashMap<String, f64>,
+    /// When the tools last changed each cell, kept until the tools run it. A
+    /// cell here that has run since ran the agent's code some other way (the
+    /// user's run reached it), so an approved run of it needn't run it again.
+    tool_edits: HashMap<String, f64>,
     /// What each agent session last read of each cell: (owner, cell) => (code,
     /// seq). Per owner, so one session's reads and edits aren't another's.
     reads: HashMap<(String, String), (String, u64)>,

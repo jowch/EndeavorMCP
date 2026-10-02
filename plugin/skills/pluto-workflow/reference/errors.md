@@ -42,6 +42,7 @@ Cells that don't depend on the other session's changes run normally.
 | `error.fixes` | `wrap_begin_end` first, then `split_cells` |
 | `pending_run` | Cells staged and awaiting execution |
 | `execution_blocked` warning | Notebook is in safe preview — the edit is staged, it just hasn't run yet |
+| `already_ran` warning (from `execute_cell` / `submit_changes`) | While your run waited for approval, the user's own run reached the cells you changed, so they already ran with your code; they weren't run again. The receipt's outputs are from that run |
 
 ## Error kinds
 

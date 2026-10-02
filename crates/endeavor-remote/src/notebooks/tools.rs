@@ -8,6 +8,7 @@
 //! names its kind (see `mcp::tool_error`).
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
@@ -319,6 +320,13 @@ impl Call<'_> {
         } else {
             warnings.push("async_execution::cells running; pending_run clears when execution finishes".into());
         }
+        if reply["accepted"] == true {
+            self.nbs.with_state(&nb.id, |state| {
+                for cell in &cells {
+                    state.tool_edits.remove(cell);
+                }
+            });
+        }
         if reply["accepted"] == true && !needed.is_empty() {
             warnings.push(format!("also_ran::Also ran {}: cells this run needs that had never run.", needed.join(", ")));
         }
@@ -337,6 +345,46 @@ impl Call<'_> {
         }
         self.mark_pending(&nb.id, &cells);
         Ok((conflict.map(|c| vec![format!("{c} The edit is staged, not run.")]).unwrap_or_default(), Vec::new()))
+    }
+
+    /// Whether `targets` are cells the tools changed and haven't run since,
+    /// all of which have run since anyway: the user's run after a change of
+    /// their own reached them (while the agent's approval card waited). A run
+    /// of them still under way is waited for, as long as a waited run may take.
+    fn ran_after_user(&self, nb: &Snapshot, targets: &[String]) -> Result<bool, String> {
+        let edits: Option<Vec<f64>> = self.nbs.with_state(&nb.id, |state| targets.iter().map(|c| state.tool_edits.get(c).copied()).collect());
+        let Some(edits) = edits.filter(|_| !targets.is_empty()) else { return Ok(false) };
+        let deadline = Instant::now() + Duration::from_secs_f64(TIMEOUT_SECONDS);
+        loop {
+            let now = self.nbs.snapshot(&nb.id)?;
+            let Some(cells) = targets.iter().map(|c| now.cells.get(c)).collect::<Option<Vec<_>>>() else { return Ok(false) };
+            if cells.iter().zip(&edits).all(|(cell, edited)| cell.ran_since(*edited)) {
+                return Ok(true);
+            }
+            if !cells.iter().any(|c| c.running || c.queued) || Instant::now() > deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// The cells the tools changed that have run since, though not by the
+    /// tools, in notebook order.
+    fn ran_since_tool_edit(&self, nb: &Snapshot) -> Vec<String> {
+        self.nbs.with_state(&nb.id, |state| nb.order.iter().filter(|id| state.tool_edits.get(*id).is_some_and(|edited| nb.cells[*id].ran_since(*edited))).cloned().collect())
+    }
+
+    /// A run left out because its cells already ran after the user's change:
+    /// the usual receipt, for those cells, saying so.
+    fn already_ran(&self, id: &str, mutation: Value, cells: &[String]) -> Result<Map<String, Value>, String> {
+        self.nbs.with_state(id, |state| {
+            for cell in cells {
+                state.tool_edits.remove(cell);
+            }
+        });
+        let them = if cells.len() == 1 { "it" } else { "them" };
+        let warning = format!("already_ran::{} already ran after the user's change; not run again, so {them} ran once.", cells.join(", "));
+        Ok(self.receipt(id, mutation, cells, vec![warning], None)?.0)
     }
 
     /// What every change reports: the notebook's order and run state after it.
@@ -463,6 +511,8 @@ impl Call<'_> {
     fn edited(&self, id: &str, applied: &Value, cell: &str, before: &str, code: &str) {
         self.note_changed(id, cell);
         self.record_read(id, cell, code);
+        let now = self.now();
+        self.nbs.with_state(id, |state| state.tool_edits.insert(cell.to_owned(), now));
         self.nbs.with_state(id, |state| state.agent_edited(cell, before, code, applied["seq"].as_u64()));
     }
 
@@ -554,14 +604,19 @@ impl Call<'_> {
         let cells = [cell.clone()];
         self.require_no_run_conflict(&nb, &cells)?;
         let wait = bool_arg(self.args, "wait_for_completion", false)?;
+        let mutation = json!({ "type": "execute_cell", "cell_id": cell });
+        if self.ran_after_user(&nb, &cells)? {
+            return Ok(Value::Object(self.already_ran(&nb.id, mutation, &cells)?));
+        }
         let (warnings, ran) = self.run(&nb, &cells, wait)?;
-        Ok(Value::Object(self.receipt(&nb.id, json!({ "type": "execute_cell", "cell_id": cell }), &ran, warnings, None)?.0))
+        Ok(Value::Object(self.receipt(&nb.id, mutation, &ran, warnings, None)?.0))
     }
 
     fn submit_changes(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         let wait = self.args.get("wait_for_completion").cloned().unwrap_or(json!(false));
         self.nbs.with_state(&nb.id, |state| state.prune(&nb));
+        let mutation = json!({ "type": "submit_changes" });
         let targets = match self.args.get("cell_ids") {
             Some(ids) => {
                 let ids = julia_iterate(ids)?
@@ -572,6 +627,9 @@ impl Call<'_> {
                     Value::Bool(force) => *force,
                     other => return Err(no_method_not(other)),
                 };
+                if self.ran_after_user(&nb, &ids)? {
+                    return Ok(Value::Object(self.already_ran(&nb.id, mutation, &ids)?));
+                }
                 if !force {
                     let pending = self.pending_run(&nb);
                     if let Some(id) = ids.iter().find(|id| !pending.contains(id)) {
@@ -582,7 +640,12 @@ impl Call<'_> {
             }
             None => self.pending_run(&nb),
         };
-        let mutation = json!({ "type": "submit_changes" });
+        if self.args.get("cell_ids").is_none() {
+            let ran = if targets.is_empty() { self.ran_since_tool_edit(&nb) } else { targets.clone() };
+            if !ran.is_empty() && self.ran_after_user(&nb, &ran)? {
+                return Ok(Value::Object(self.already_ran(&nb.id, mutation, &ran)?));
+            }
+        }
         if targets.is_empty() {
             return Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?.0));
         }
