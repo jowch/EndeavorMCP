@@ -99,6 +99,18 @@ pub fn home() -> PathBuf {
     std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// `path` resolved through links, as Julia's `realpath` gives it: on Windows
+/// as `C:\…`, where `fs::canonicalize` gives `\\?\C:\…`.
+#[cfg(not(windows))]
+pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize()
+}
+
+#[cfg(windows)]
+pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
+    dunce::canonicalize(path)
+}
+
 /// `~` and `~/…` as the home folder; anything relative is taken from there.
 pub fn expand(path: &str) -> PathBuf {
     match path.strip_prefix('~') {
@@ -120,7 +132,7 @@ fn list(dir: &Path) -> Result<Reply, String> {
         })
         .collect();
     entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
-    let path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let path = real_path(dir).unwrap_or_else(|_| dir.to_path_buf());
     Ok(Reply::List { path, entries })
 }
 
@@ -327,7 +339,7 @@ mod tests {
             std::fs::write(dir.join(file), "").unwrap();
         }
         let Reply::List { path, entries } = answer(&Request::List { path: dir.display().to_string() }) else { panic!() };
-        assert_eq!(path, dir.canonicalize().unwrap());
+        assert_eq!(path, real_path(&dir).unwrap());
         let names: Vec<(&str, bool)> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
         assert_eq!(names, [("A-figures", true), ("b-data", true), ("Analysis.jl", false), ("fit.jl", false)]);
         let missing = answer(&Request::List { path: dir.join("nope").display().to_string() });

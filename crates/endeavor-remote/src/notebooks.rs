@@ -974,15 +974,13 @@ pub fn canonical_path(path: &str) -> Result<String, String> {
     }
 }
 
-/// The same on Windows, where `fs::canonicalize` gives `\\?\C:\…` and
-/// Julia's `realpath` gives `C:\…`.
 #[cfg(windows)]
 pub fn canonical_path(path: &str) -> Result<String, String> {
     let absolute = std::path::PathBuf::from(absolute_path(path)?);
-    if let Ok(real) = dunce::canonicalize(&absolute) {
+    if let Ok(real) = wire::files::real_path(&absolute) {
         return Ok(real.display().to_string());
     }
-    let real_dir = absolute.parent().filter(|dir| dir.is_dir()).and_then(|dir| dunce::canonicalize(dir).ok());
+    let real_dir = absolute.parent().filter(|dir| dir.is_dir()).and_then(|dir| wire::files::real_path(dir).ok());
     match (real_dir, absolute.file_name()) {
         (Some(dir), Some(base)) => Ok(dir.join(base).display().to_string()),
         _ => Ok(absolute.display().to_string()),

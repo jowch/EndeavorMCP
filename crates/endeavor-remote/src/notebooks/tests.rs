@@ -1086,7 +1086,7 @@ fn temp_notebooks(name: &str, count: usize) -> Vec<String> {
     let dir = std::env::temp_dir().join(format!("endeavor-notebooks-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = real_path(&dir);
+    let dir = wire::files::real_path(&dir).unwrap();
     (0..count)
         .map(|i| {
             let path = dir.join(format!("nb{i}.jl"));
@@ -1094,14 +1094,6 @@ fn temp_notebooks(name: &str, count: usize) -> Vec<String> {
             path.display().to_string()
         })
         .collect()
-}
-
-/// `path` resolved as `canonical_path` resolves it.
-fn real_path(path: &std::path::Path) -> std::path::PathBuf {
-    #[cfg(windows)]
-    return dunce::canonicalize(path).unwrap();
-    #[cfg(unix)]
-    return path.canonicalize().unwrap();
 }
 
 fn id(i: usize) -> String {
@@ -1133,7 +1125,7 @@ fn one_notebook_per_session() {
     // Its own notebook isn't refused, however it's written.
     let roundabout = format!("{first_nb}{SEP}..{SEP}{}", first_nb.rsplit(SEP).next().unwrap());
     assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": roundabout })), None);
-    if let Some(relative) = pathdiff(first_nb, &real_path(&std::env::current_dir().unwrap()).display().to_string()) {
+    if let Some(relative) = pathdiff(first_nb, &wire::files::real_path(&std::env::current_dir().unwrap()).unwrap().display().to_string()) {
         assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": relative })), None);
     }
     // Julia's expanduser leaves paths alone on Windows.
