@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wire::relay::Mux;
-use wire::{Target, ToApp, ToHelper};
+use wire::{ToApp, ToHelper};
 
 /// A running `endeavor-remote connect`, and the app's end of its channel.
 pub struct Helper {
@@ -43,7 +43,7 @@ impl Helper {
         let stdout = process.stdout.take().unwrap();
         let m = mux.clone();
         std::thread::spawn(move || {
-            let _ = m.run(stdout, |_, _, _| {}, |json| drop(tx.send(serde_json::from_slice(json).unwrap())));
+            let _ = m.run(stdout, |_, _| {}, |json| drop(tx.send(serde_json::from_slice(json).unwrap())));
         });
         Helper { process, stdin, mux, control }
     }
@@ -91,11 +91,11 @@ impl Helper {
         }
     }
 
-    /// A local connection relayed to `target`.
-    pub fn connect(&self, target: Target) -> TcpStream {
+    /// A local connection relayed to the runtime's port.
+    pub fn connect(&self) -> TcpStream {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        self.mux.open(target, listener.accept().unwrap().0).unwrap();
+        self.mux.open(listener.accept().unwrap().0).unwrap();
         client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         client
     }

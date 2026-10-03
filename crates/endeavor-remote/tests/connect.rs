@@ -1,8 +1,8 @@
-//! The helper binary against a stand-in runtime (a `sleep` process plus two
-//! small TCP servers on loopback, as a runtime an older helper started would
-//! look), or the core it starts over a stand-in Julia, so no Julia is needed:
-//! file requests before any runtime, attaching on request, relaying, one
-//! client at a time, and each way a connection ends.
+//! The helper binary against a stand-in runtime (a `sleep` process plus a
+//! small server on its one loopback port), or the core it starts over a
+//! stand-in Julia, so no Julia is needed: file requests before any runtime,
+//! attaching on request, relaying, one client at a time, a runtime from
+//! before one port per runtime, and each way a connection ends.
 
 #![cfg(unix)]
 
@@ -10,7 +10,7 @@ mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
@@ -18,12 +18,13 @@ use std::time::Duration;
 
 use common::helper::Helper;
 use wire::files::{Reply, Request, RuntimeState};
-use wire::{Target, ToApp, ToHelper};
+use wire::{ToApp, ToHelper};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// A runtime as the helper sees one: a live pid, a Pluto port (echo here) and a
-/// bridge that checks the token and exits the "runtime" on `endeavor/shutdown`.
+/// A runtime as the helper sees one: a live pid and one port, whose calls
+/// check the token and exit the "runtime" on `endeavor/shutdown`, and whose
+/// other paths stand for Pluto's WebSocket: switched, then echoed.
 struct FakeRuntime {
     process: Arc<Mutex<Child>>,
     pid: u32,
@@ -43,15 +44,9 @@ impl FakeRuntime {
         let process = Command::new("sleep").arg("600").process_group(0).spawn().unwrap();
         let pid = process.id();
         let process = Arc::new(Mutex::new(process));
-        let pluto = serve(|mut socket| {
-            let mut reader = socket.try_clone().unwrap();
-            let _ = std::io::copy(&mut reader, &mut socket);
-        });
         let p = process.clone();
-        let bridge = serve(move |socket| bridge(socket, &p));
-        let fields = serde_json::json!({
-            "node": node, "pid": pid, "pluto_port": pluto, "mcp_port": bridge, "token": TOKEN, "pluto_secret": "s3cret",
-        });
+        let port = serve(move |socket| one_port(socket, &p));
+        let fields = serde_json::json!({ "node": node, "pid": pid, "port": port, "token": TOKEN });
         state.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
         FakeRuntime { process, pid }
@@ -87,7 +82,7 @@ fn serve(handle: impl Fn(TcpStream) + Send + Sync + 'static) -> u16 {
     port
 }
 
-fn bridge(mut socket: TcpStream, process: &Mutex<Child>) {
+fn one_port(mut socket: TcpStream, process: &Mutex<Child>) {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let (mut request, mut auth, mut length) = (String::new(), String::new(), 0);
     reader.read_line(&mut request).unwrap();
@@ -107,6 +102,11 @@ fn bridge(mut socket: TcpStream, process: &Mutex<Child>) {
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body).unwrap();
+    if !request.starts_with("POST /endeavor/call ") {
+        let _ = socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n");
+        let _ = std::io::copy(&mut reader, &mut socket);
+        return;
+    }
     if auth != format!("Bearer {TOKEN}") {
         let _ = socket.write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n");
         return;
@@ -141,6 +141,20 @@ impl Helper {
     }
 }
 
+/// A relayed connection to Pluto's WebSocket, switched and ready to echo.
+fn websocket(helper: &Helper) -> TcpStream {
+    let mut socket = helper.connect();
+    write!(socket, "GET /channels HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        socket.read_exact(&mut byte).unwrap();
+        head.push(byte[0]);
+    }
+    assert!(head.starts_with(b"HTTP/1.1 101 "), "{}", String::from_utf8_lossy(&head));
+    socket
+}
+
 fn state_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("endeavor-remote-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -153,21 +167,21 @@ fn attaches_relays_hands_over_and_stops() {
     let dir = state_dir("attach");
     let runtime = FakeRuntime::start(&dir, "labbox3");
     let mut first = Helper::start(&dir, &["--any-node"]);
-    let ToApp::Ready { launcher, node, pid, token, pluto_secret, reattached, .. } = first.start_runtime() else { unreachable!() };
+    let ToApp::Ready { launcher, node, pid, token, reattached, .. } = first.start_runtime() else { unreachable!() };
     assert_eq!((launcher.as_str(), node.as_str(), pid), ("process", "labbox3", runtime.pid));
-    assert_eq!((token.as_str(), pluto_secret.as_str(), reattached), (TOKEN, "s3cret", true));
+    assert_eq!((token.as_str(), reattached), (TOKEN, true));
 
-    // Pluto's port echoes; the bridge answers HTTP and closes.
-    let mut pluto = first.connect(Target::Pluto);
+    // Both Pluto's WebSocket and the app's calls go to the runtime's one port.
+    let mut pluto = websocket(&first);
     pluto.write_all(b"over the relay").unwrap();
     let mut back = [0; 14];
     pluto.read_exact(&mut back).unwrap();
     assert_eq!(&back, b"over the relay");
-    let mut call = first.connect(Target::Bridge);
-    write!(call, "POST /call HTTP/1.0\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
+    let mut call = first.connect();
+    write!(call, "POST /endeavor/call HTTP/1.0\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
     let mut reply = String::new();
     call.read_to_string(&mut reply).unwrap();
-    assert!(reply.starts_with("HTTP/1.1 200") && reply.ends_with("{\"said\":\"POST /call HTTP/1.0\"}"), "{reply}");
+    assert!(reply.starts_with("HTTP/1.1 200") && reply.ends_with("{\"said\":\"POST /endeavor/call HTTP/1.0\"}"), "{reply}");
 
     // A second client only connecting takes nothing; asking for the runtime takes
     // it over: the first hears why and exits, its streams closed.
@@ -342,6 +356,33 @@ fn a_runtime_recorded_on_another_node_is_not_replaced() {
 }
 
 #[test]
+fn a_runtime_from_before_one_port_is_not_attached_and_stop_ends_it() {
+    let dir = state_dir("older");
+    let older = Command::new("sleep").arg("600").process_group(0).spawn().unwrap();
+    let pid = older.id();
+    let ended = std::thread::spawn(move || {
+        let mut older = older;
+        older.wait().unwrap()
+    });
+    let state = serde_json::json!({
+        "launcher": "process", "node": "labbox3", "pid": pid, "pluto_port": 1, "mcp_port": 2,
+        "token": TOKEN, "pluto_secret": "s3cret", "job": "", "mcp": "http",
+    });
+    std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
+    let mut helper = Helper::start(&dir, &["--any-node"]);
+    let ToApp::StartFailed { message } = helper.start_runtime() else { panic!("expected StartFailed") };
+    assert_eq!(message, "Julia here was started by an older version of Endeavor, which this version can't connect to. Restart Julia to use it.");
+    assert_eq!(check(&helper, 1), RuntimeState::Running { node: "labbox3".into(), notebooks: None, job: None }, "it still shows as running");
+    assert!(!ended.is_finished(), "nothing stopped it yet");
+    helper.send(ToHelper::Stop);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    assert!(ended.join().unwrap().signal().is_some(), "Stop ended it");
+    assert!(!dir.join("runtime.json").exists());
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
 fn a_runtime_that_cant_start_is_an_error() {
     let dir = state_dir("nojulia");
     let mut helper = Helper::start(&dir, &[]);
@@ -389,8 +430,8 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
     std::fs::write(dir.join("token"), TOKEN).unwrap();
     let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
     assert!(matches!(helper.start_runtime(), ToApp::FoundJulia { .. }));
-    let ToApp::Ready { pid, token, pluto_secret, reattached, .. } = helper.after_progress() else { panic!("expected Ready") };
-    assert_eq!((token.as_str(), pluto_secret.as_str(), reattached), (TOKEN, "s3cret", false));
+    let ToApp::Ready { pid, token, reattached, .. } = helper.after_progress() else { panic!("expected Ready") };
+    assert_eq!((token.as_str(), reattached), (TOKEN, false));
     let core = pid as i32;
     let julia = common::read_json(&dir.join("julia.json"))["pid"].as_i64().unwrap() as i32;
     let ps = |field: &str, pid: i32| {
@@ -401,14 +442,14 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
     assert_eq!(ps("ppid", julia), core.to_string(), "Julia is the core's child");
     assert_eq!((ps("pgid", julia), ps("pgid", core)), (core.to_string(), core.to_string()), "one process group, the core's");
 
-    // The bridge goes through the core; Pluto straight to Julia's port.
-    let mut call = helper.connect(Target::Bridge);
+    // Both go to the core: the call on to Julia's bridge, the WebSocket to Pluto.
+    let mut call = helper.connect();
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_folder","params":{"path":"/n"}}"#;
-    write!(call, "POST /call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    write!(call, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut reply = String::new();
     call.read_to_string(&mut reply).unwrap();
     assert!(reply.starts_with("HTTP/1.1 200") && reply.contains(r#""said":"POST /call HTTP/1.0""#), "{reply}");
-    let mut pluto = helper.connect(Target::Pluto);
+    let mut pluto = websocket(&helper);
     pluto.write_all(b"to Pluto").unwrap();
     let mut back = [0; 8];
     pluto.read_exact(&mut back).unwrap();
@@ -525,7 +566,7 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     assert!(!dir.join("job.json").exists(), "a running job's record is runtime.json");
 
     // Streams go through both helpers.
-    let mut pluto = helper.connect(Target::Pluto);
+    let mut pluto = websocket(&helper);
     pluto.write_all(b"via the node").unwrap();
     let mut back = [0; 12];
     pluto.read_exact(&mut back).unwrap();
@@ -542,7 +583,7 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     let ToApp::Ready { reattached, job: Some(job), .. } = helper.after_progress() else { panic!("expected Ready") };
     assert!(reattached && job.id == "42");
     assert_eq!(slurm.read("sbatch.args").lines().count(), 1, "no second job");
-    let mut pluto = helper.connect(Target::Pluto);
+    let mut pluto = websocket(&helper);
     pluto.write_all(b"again").unwrap();
     let mut back = [0; 5];
     pluto.read_exact(&mut back).unwrap();

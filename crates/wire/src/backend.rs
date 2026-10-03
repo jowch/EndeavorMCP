@@ -29,7 +29,7 @@ impl Backend {
         (read && first == PLUTO_HEADER.as_bytes()).then_some(Backend::Pluto)
     }
 
-    /// The page for notebook `id`, from the server's root URL (`http://host:port/?secret=…`).
+    /// The page for notebook `id`, from the runtime's root URL (`http://host:port/?token=…`).
     pub fn notebook_url(self, root: &str, id: &str) -> String {
         match self {
             Backend::Pluto => root.replacen("/?", &format!("/edit?id={id}&"), 1),
@@ -56,9 +56,10 @@ mod tests {
 
     #[test]
     fn pluto_notebook_urls() {
-        let url = Backend::Pluto.notebook_url("http://127.0.0.1:1234/?secret=s3cr3t", "abc");
-        assert_eq!(url, "http://127.0.0.1:1234/edit?id=abc&secret=s3cr3t");
+        let url = Backend::Pluto.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc");
+        assert_eq!(url, "http://127.0.0.1:1234/edit?id=abc&token=t0k3n");
         assert_eq!(Backend::Pluto.notebook_id(&url), Some("abc"));
-        assert_eq!(Backend::Pluto.notebook_id("http://127.0.0.1:1234/?secret=s3cr3t"), None);
+        assert_eq!(Backend::Pluto.notebook_id("http://127.0.0.1:1234/edit?id=abc"), Some("abc"), "once the token has gone from the URL");
+        assert_eq!(Backend::Pluto.notebook_id("http://127.0.0.1:1234/?token=t0k3n"), None);
     }
 }

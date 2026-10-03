@@ -105,9 +105,9 @@ pub struct Link {
 }
 
 impl Link {
-    pub fn open(&self, id: u32, target: Target) -> std::io::Result<()> {
+    pub fn open(&self, id: u32) -> std::io::Result<()> {
         self.forwarded.lock().unwrap().insert(id);
-        Frame::Open { id, target }.write_to(&mut *self.stdin.lock().unwrap())
+        Frame::Open { id }.write_to(&mut *self.stdin.lock().unwrap())
     }
 
     pub fn forward(&self, frame: Frame) {
@@ -149,6 +149,7 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &
         && let Some(job) = state.job.clone()
     {
         match squeue(&job).map_err(failed)? {
+            Some(_) if state.port.is_none() => return Err(failed(OLDER_RUNTIME.into())),
             Some(q) if q.running() => {
                 let ends_at = ends_at(&q);
                 let (link, route) = connect_node(&job, &state.node, dir, mux, events).map_err(failed)?;
@@ -578,22 +579,20 @@ pub fn relay_main(argv: &[String]) -> ! {
     let home = wire::files::home().display().to_string();
     let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false }.frame());
     let here = hostname();
-    let state = read_state(&dir).filter(|s| s.node == here && pid_alive(s.pid, s.started) && (bridge_answers(s) || bridge_answers(s)));
-    let Some(state) = state else {
+    let state = read_state(&dir).filter(|s| s.node == here && alive(s)).and_then(|s| Some((s.port?, s)));
+    let Some((port, state)) = state else {
         let _ = mux.send(&ToApp::StartFailed { message: format!("Julia isn't running on {here}.") }.frame());
         std::process::exit(1);
     };
     let runtime = Runtime::recorded(&state, &dir, &events);
-    relay_stdin(mux.clone(), Arc::new(RwLock::new(Route::Local([state.pluto_port, state.mcp_port]))), events, Arc::new(wire::files::answer), Parts::default());
+    relay_stdin(mux.clone(), Arc::new(RwLock::new(Route::Local(port))), events, Arc::new(wire::files::answer), Parts::default());
     let ready = ToApp::Ready {
         launcher: state.launcher.clone(),
         node: state.node.clone(),
         pid: state.pid as u32,
         token: state.token.clone(),
-        pluto_secret: state.pluto_secret.clone(),
         reattached: true,
         job: None,
-        mcp: state.mcp,
     };
     let _ = mux.send(&ready.frame());
     loop {

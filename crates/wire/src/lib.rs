@@ -1,6 +1,6 @@
 //! What the app and `endeavor-remote` say to each other over the helper's
-//! stdin/stdout: TCP streams to the runtime's two ports, multiplexed byte for
-//! byte, plus JSON control messages.
+//! stdin/stdout: TCP streams to the runtime's port, multiplexed byte for byte,
+//! plus JSON control messages.
 //!
 //! # Frame layout
 //!
@@ -9,7 +9,7 @@
 //!
 //! | kind | frame     | body                                          |
 //! |------|-----------|-----------------------------------------------|
-//! | 0    | `Open`    | stream id (u32 BE), target (0 Pluto, 1 Bridge) |
+//! | 0    | `Open`    | stream id (u32 BE)                            |
 //! | 1    | `Data`    | stream id (u32 BE), the bytes                 |
 //! | 2    | `Close`   | stream id (u32 BE)                            |
 //! | 3    | `Control` | one JSON message ([`ToApp`] or [`ToHelper`])  |
@@ -32,15 +32,9 @@ use serde::{Deserialize, Serialize};
 /// A frame larger than this is corrupt input, not a message.
 pub const MAX_FRAME: usize = 16 << 20;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Target {
-    Pluto,
-    Bridge,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
-    Open { id: u32, target: Target },
+    Open { id: u32 },
     Data { id: u32, bytes: Vec<u8> },
     Close { id: u32 },
     Control(Vec<u8>),
@@ -50,13 +44,9 @@ impl Frame {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = vec![0; 4];
         match self {
-            Frame::Open { id, target } => {
+            Frame::Open { id } => {
                 out.push(0);
                 out.extend(id.to_be_bytes());
-                out.push(match target {
-                    Target::Pluto => 0,
-                    Target::Bridge => 1,
-                });
             }
             Frame::Data { id, bytes } => {
                 out.push(1);
@@ -106,14 +96,7 @@ impl Frame {
             Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
         };
         let frame = match body[0] {
-            0 => Frame::Open {
-                id: id()?,
-                target: match body.get(5) {
-                    Some(0) => Target::Pluto,
-                    Some(1) => Target::Bridge,
-                    other => return Err(invalid(format!("unknown target {other:?}"))),
-                },
-            },
+            0 => Frame::Open { id: id()? },
             1 => Frame::Data { id: id()?, bytes: body[5..].to_vec() },
             2 => Frame::Close { id: id()? },
             3 => Frame::Control(body[1..].to_vec()),
@@ -125,18 +108,6 @@ impl Frame {
 
 fn invalid(message: String) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
-}
-
-/// How the agent reaches the bridge's MCP endpoint: Streamable HTTP (`/mcp`),
-/// or the deprecated SSE transport (`/sse` + `/message`) a runtime from before
-/// this transport switch still serves. `Sse` is the default so a helper from
-/// before this change, whose `Ready` carries no `mcp` field, is read as `Sse`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpTransport {
-    #[default]
-    Sse,
-    Http,
 }
 
 /// Helper → app. The helper says `Hello` as soon as it runs; the runtime starts
@@ -174,17 +145,13 @@ pub enum ToApp {
         /// The machine the runtime runs on.
         node: String,
         pid: u32,
-        /// The bridge's bearer token.
+        /// The runtime's token, for every path on its port.
         token: String,
-        pluto_secret: String,
         /// The runtime was already running; this connect didn't start it.
         reattached: bool,
         /// The cluster job it runs in.
         #[serde(default)]
         job: Option<slurm::Job>,
-        /// How the agent reaches the bridge's MCP endpoint.
-        #[serde(default)]
-        mcp: McpTransport,
     },
     /// The runtime couldn't start (no Julia, running on another node, …); the
     /// helper stays connected, so `StartRuntime` can try again.
@@ -252,8 +219,8 @@ mod tests {
 
     fn samples() -> Vec<Frame> {
         vec![
-            Frame::Open { id: 1, target: Target::Pluto },
-            Frame::Open { id: u32::MAX, target: Target::Bridge },
+            Frame::Open { id: 1 },
+            Frame::Open { id: u32::MAX },
             Frame::Data { id: 7, bytes: b"GET / HTTP/1.1\r\n\r\n".to_vec() },
             Frame::Data { id: 7, bytes: Vec::new() },
             Frame::Data { id: 8, bytes: (0..=255).cycle().take(70_000).collect() },
@@ -287,7 +254,6 @@ mod tests {
         let bad = |b: &[u8]| Frame::read_from(&mut &b[..]).unwrap_err().kind();
         assert_eq!(bad(&[0, 0, 0, 1, 9]), ErrorKind::InvalidData, "unknown kind");
         assert_eq!(bad(&[0, 0, 0, 2, 1, 0]), ErrorKind::InvalidData, "no stream id");
-        assert_eq!(bad(&[0, 0, 0, 6, 0, 0, 0, 0, 1, 5]), ErrorKind::InvalidData, "unknown target");
         assert_eq!(bad(&[0xff, 0, 0, 0]), ErrorKind::InvalidData, "too long");
     }
 
@@ -298,19 +264,14 @@ mod tests {
             node: "labbox3".into(),
             pid: 81234,
             token: "t".into(),
-            pluto_secret: "s".into(),
             reattached: true,
             job: None,
-            mcp: McpTransport::Http,
         };
         let Frame::Control(json) = ready.frame() else { panic!() };
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(value["type"], "Ready");
         assert_eq!(value["launcher"], "process");
-        assert_eq!(value["mcp"], "http");
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), ready);
-        let old_ready = r#"{"type":"Ready","launcher":"process","node":"labbox3","pid":1,"token":"t","pluto_secret":"s","reattached":true}"#;
-        assert!(matches!(serde_json::from_str::<ToApp>(old_ready).unwrap(), ToApp::Ready { mcp: McpTransport::Sse, .. }), "a helper from before Streamable HTTP");
         let files = ToHelper::Files { id: 3, request: files::Request::List { path: "~".into() } };
         let Frame::Control(json) = files.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::{Frame, Target};
+use crate::Frame;
 
 /// The most a `Data` frame carries.
 pub const CHUNK: usize = 64 * 1024;
@@ -43,13 +43,13 @@ impl Mux {
         frame.write_to(&mut *self.out.lock().unwrap())
     }
 
-    /// Relay a connection the app accepted to `target` on the other end.
-    pub fn open(self: &Arc<Self>, target: Target, socket: TcpStream) -> io::Result<()> {
+    /// Relay a connection the app accepted to the runtime's port on the other end.
+    pub fn open(self: &Arc<Self>, socket: TcpStream) -> io::Result<()> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         // Registered before `Open` goes out so the first reply finds it; the
         // reader starts after, so no `Data` precedes the `Open`.
         let queue = self.register(id);
-        if let Err(e) = self.send(&Frame::Open { id, target }) {
+        if let Err(e) = self.send(&Frame::Open { id }) {
             self.closed_here(id, false);
             return Err(e);
         }
@@ -68,14 +68,14 @@ impl Mux {
     pub fn run(
         self: &Arc<Self>,
         mut input: impl Read,
-        mut on_open: impl FnMut(&Arc<Mux>, u32, Target),
+        mut on_open: impl FnMut(&Arc<Mux>, u32),
         mut on_control: impl FnMut(&[u8]),
     ) -> io::Result<()> {
         let result = loop {
             match Frame::read_from(&mut input) {
                 Ok(None) => break Ok(()),
                 Err(e) => break Err(e),
-                Ok(Some(Frame::Open { id, target })) => on_open(self, id, target),
+                Ok(Some(Frame::Open { id })) => on_open(self, id),
                 Ok(Some(Frame::Data { id, bytes })) => self.deliver(id, bytes),
                 Ok(Some(Frame::Close { id })) => self.closed_there(id),
                 Ok(Some(Frame::Control(json))) => on_control(&json),
@@ -270,8 +270,8 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     /// An app end and a helper end joined like the helper's stdin/stdout; the
-    /// helper dials `ports` (Pluto, Bridge) for each `Open`.
-    fn channel(ports: [u16; 2], stall: Duration) -> (Arc<Mux>, Arc<Mux>) {
+    /// helper dials `port` for each `Open`.
+    fn channel(port: u16, stall: Duration) -> (Arc<Mux>, Arc<Mux>) {
         let (a, b) = UnixStream::pair().unwrap();
         let app = Mux::with_stall(a.try_clone().unwrap(), stall);
         let helper = Mux::with_stall(b.try_clone().unwrap(), stall);
@@ -279,8 +279,7 @@ mod tests {
         std::thread::spawn(move || {
             h.run(
                 b,
-                |mux, id, target| {
-                    let port = ports[if target == Target::Pluto { 0 } else { 1 }];
+                |mux, id| {
                     match TcpStream::connect(("127.0.0.1", port)) {
                         Ok(socket) => mux.attach(id, socket).unwrap(),
                         Err(_) => mux.send(&Frame::Close { id }).unwrap(),
@@ -290,15 +289,15 @@ mod tests {
             )
         });
         let a2 = app.clone();
-        std::thread::spawn(move || a2.run(a, |_, _, _| {}, |_| {}));
+        std::thread::spawn(move || a2.run(a, |_, _| {}, |_| {}));
         (app, helper)
     }
 
-    /// A client socket whose other end the app relays to `target`.
-    fn connect(app: &Arc<Mux>, target: Target) -> TcpStream {
+    /// A client socket whose other end the app relays to the helper's port.
+    fn connect(app: &Arc<Mux>) -> TcpStream {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        app.open(target, listener.accept().unwrap().0).unwrap();
+        app.open(listener.accept().unwrap().0).unwrap();
         client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         client
     }
@@ -333,6 +332,32 @@ mod tests {
         while socket.write_all(&chunk).is_ok() {}
     }
 
+    const SLOW: u8 = 1;
+    const FLOOD: u8 = 2;
+
+    /// What the runtime's one port does in these tests: `slow` or `flood` when
+    /// the first byte asks for it, else `echo`.
+    fn mixed(mut socket: TcpStream) {
+        let mut first = [0];
+        if socket.read_exact(&mut first).is_err() {
+            return;
+        }
+        match first[0] {
+            SLOW => slow(socket),
+            FLOOD => flood(socket),
+            byte => {
+                let _ = socket.write_all(&[byte]);
+                echo(socket);
+            }
+        }
+    }
+
+    fn connect_to(app: &Arc<Mux>, what: u8) -> TcpStream {
+        let mut client = connect(app);
+        client.write_all(&[what]).unwrap();
+        client
+    }
+
     fn round_trip(client: &mut TcpStream, message: &[u8]) -> Duration {
         let start = Instant::now();
         client.write_all(message).unwrap();
@@ -352,10 +377,10 @@ mod tests {
 
     #[test]
     fn streams_carry_bytes_both_ways_at_once() {
-        let (app, helper) = channel([server(echo), server(echo)], STALL);
+        let (app, helper) = channel(server(echo), STALL);
         let clients: Vec<_> = (0..8u8)
             .map(|n| {
-                let mut client = connect(&app, if n % 2 == 0 { Target::Pluto } else { Target::Bridge });
+                let mut client = connect(&app);
                 std::thread::spawn(move || {
                     let data: Vec<u8> = (0..1_000_000u32).map(|i| (i as u8).wrapping_mul(n + 1)).collect();
                     let mut writer = client.try_clone().unwrap();
@@ -376,9 +401,9 @@ mod tests {
 
     #[test]
     fn a_slow_stream_holds_up_no_other_and_ends_after_its_last_byte() {
-        let (app, _helper) = channel([server(slow), server(echo)], STALL);
-        let slow = connect(&app, Target::Pluto);
-        let mut quick = connect(&app, Target::Bridge);
+        let (app, _helper) = channel(server(mixed), STALL);
+        let slow = connect_to(&app, SLOW);
+        let mut quick = connect(&app);
         for _ in 0..20 {
             assert!(round_trip(&mut quick, b"ping") < Duration::from_millis(500));
         }
@@ -390,9 +415,9 @@ mod tests {
     #[test]
     fn a_socket_that_stops_reading_is_closed_and_the_rest_carry_on() {
         let stall = Duration::from_millis(300);
-        let (app, _helper) = channel([server(flood), server(echo)], stall);
-        let mut stuck = connect(&app, Target::Pluto);
-        let mut quick = connect(&app, Target::Bridge);
+        let (app, _helper) = channel(server(mixed), stall);
+        let mut stuck = connect_to(&app, FLOOD);
+        let mut quick = connect(&app);
         eventually("the stuck stream closed", || app.open_streams() == 1);
         for _ in 0..20 {
             assert!(round_trip(&mut quick, b"still here") < stall + Duration::from_millis(500));
@@ -407,8 +432,8 @@ mod tests {
     #[test]
     fn a_target_that_refuses_ends_the_stream() {
         let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let (app, _helper) = channel([closed, closed], STALL);
-        let mut client = connect(&app, Target::Pluto);
+        let (app, _helper) = channel(closed, STALL);
+        let mut client = connect(&app);
         let mut buf = [0; 1];
         assert_eq!(client.read(&mut buf).unwrap(), 0);
         eventually("the refused stream closed", || app.open_streams() == 0);
@@ -419,11 +444,11 @@ mod tests {
         let (a, mut b) = UnixStream::pair().unwrap();
         let app = Mux::new(a.try_clone().unwrap());
         let a2 = app.clone();
-        let run = std::thread::spawn(move || a2.run(a, |_, _, _| {}, |_| {}));
-        let mut client = connect(&app, Target::Bridge);
+        let run = std::thread::spawn(move || a2.run(a, |_, _| {}, |_| {}));
+        let mut client = connect(&app);
         // Linux resets a Unix socket whose peer closes with bytes unread, so the
         // other end reads what it was sent before it goes, as a helper does.
-        assert_eq!(Frame::read_from(&mut b).unwrap(), Some(Frame::Open { id: 1, target: Target::Bridge }));
+        assert_eq!(Frame::read_from(&mut b).unwrap(), Some(Frame::Open { id: 1 }));
         drop(b);
         run.join().unwrap().unwrap();
         let mut buf = [0; 1];

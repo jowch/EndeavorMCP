@@ -2,7 +2,7 @@
 //! about the machine's files at once, and when the app asks, becomes the one
 //! client of its Julia runtime (Pluto plus EndeavorRuntime): it attaches to the
 //! runtime recorded in the state folder or starts one, then relays the app's
-//! streams to the runtime's loopback ports over its own stdin/stdout
+//! streams to the runtime's one loopback port over its own stdin/stdout
 //! (docs/remote-sessions.md). It runs over `ssh` on a server as the
 //! `endeavor-remote` binary; on This Mac the app runs itself as the helper
 //! (`endeavor --helper connect …`, calling `run`), so its helper can't go
@@ -51,7 +51,7 @@ use serde_json::{Value, json};
 use wire::relay::Mux;
 use wire::files::RuntimeState;
 use wire::slurm::JobRequest;
-use wire::{Frame, Target, ToApp, ToHelper};
+use wire::{Frame, ToApp, ToHelper};
 
 const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--build BUILD]
        endeavor-remote relay --state-dir DIR
@@ -84,8 +84,7 @@ enum Launcher {
     Slurm,
 }
 
-/// `runtime.json`, written by the core once the runtime is ready (by boot.jl
-/// for a runtime an older helper started, which is attached to the same way).
+/// `runtime.json`, written by the core once the runtime is ready.
 struct State {
     launcher: String,
     node: String,
@@ -93,16 +92,16 @@ struct State {
     /// When that process started (Windows: its creation time, which tells it
     /// from a later process given the same pid); none on Unix.
     started: Option<u64>,
-    pluto_port: u16,
-    mcp_port: u16,
+    /// The runtime's one port (the core's). None for a runtime from a build
+    /// before one port per runtime, which this helper can stop but not relay to.
+    port: Option<u16>,
     token: String,
-    pluto_secret: String,
     /// The Slurm job it runs in.
     job: Option<String>,
-    /// How the agent reaches the bridge's MCP endpoint; `Sse` for `runtime.json`
-    /// from before this core wrote `mcp`.
-    mcp: wire::McpTransport,
 }
+
+/// Why a runtime from a build before one port per runtime can't be used.
+const OLDER_RUNTIME: &str = "Julia here was started by an older version of Endeavor, which this version can't connect to. Restart Julia to use it.";
 
 enum Event {
     App(ToHelper),
@@ -123,8 +122,8 @@ enum Event {
 #[derive(Clone)]
 enum Route {
     None,
-    /// The runtime's two loopback ports here (Pluto, bridge).
-    Local([u16; 2]),
+    /// The runtime's loopback port here.
+    Local(u16),
     /// On to the relay on the job's node.
     Node(Arc<slurm::Link>),
 }
@@ -318,9 +317,9 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: ReplaceSignal) -> Result<s
             // Answered as they arrive (relay_stdin).
             Event::App(ToHelper::Files { .. }) => {}
             Event::Exited(pid, status) => {
-                if attached.as_ref().is_some_and(|a| matches!(&a.how, How::Process(r) if r.pid == pid)) {
+                if attached.as_ref().is_some_and(|a| matches!(&a.how, How::Process(r, _) if r.pid == pid)) {
                     *routes.write().unwrap() = Route::None;
-                    let Some(How::Process(runtime)) = attached.take().map(|a| a.how) else { unreachable!() };
+                    let Some(How::Process(runtime, _)) = attached.take().map(|a| a.how) else { unreachable!() };
                     let _ = mux.send(&runtime.died(status).frame());
                 }
             }
@@ -370,7 +369,8 @@ struct Attached {
 }
 
 enum How {
-    Process(Runtime),
+    /// A process here, and its port.
+    Process(Runtime, u16),
     Slurm(slurm::Running),
 }
 
@@ -382,26 +382,24 @@ impl Attached {
             node: state.node.clone(),
             pid: state.pid as u32,
             token: state.token.clone(),
-            pluto_secret: state.pluto_secret.clone(),
             reattached,
             job: match &self.how {
-                How::Process(_) => None,
+                How::Process(..) => None,
                 How::Slurm(job) => Some(job.info()),
             },
-            mcp: state.mcp,
         }
     }
 
     fn route(&self) -> Route {
         match &self.how {
-            How::Process(_) => Route::Local([self.state.pluto_port, self.state.mcp_port]),
+            How::Process(_, port) => Route::Local(*port),
             How::Slurm(job) => Route::Node(job.link()),
         }
     }
 
     fn stop(self, rx: &mpsc::Receiver<Event>) {
         match self.how {
-            How::Process(runtime) => runtime.stop(Some(&self.state)),
+            How::Process(runtime, _) => runtime.stop(Some(&self.state)),
             How::Slurm(job) => job.stop(rx),
         }
     }
@@ -413,8 +411,9 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     let failed = |message: String| ToApp::StartFailed { message };
     let lock = lock(&args.state_dir).map_err(failed)?;
     if let Some(state) = existing(args).map_err(failed)? {
+        let port = state.port.ok_or_else(|| failed(OLDER_RUNTIME.into()))?;
         let runtime = Runtime::recorded(&state, &args.state_dir, events);
-        return Ok(Attached { how: How::Process(runtime), state, reattached: true, _lock: lock });
+        return Ok(Attached { how: How::Process(runtime, port), state, reattached: true, _lock: lock });
     }
     let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(failed)?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
@@ -422,8 +421,8 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     let child = start(args, &julia, &token).map_err(failed)?;
     let (pid, started) = (child.id() as i32, child_started(&child));
     let runtime = Runtime { pid, started, exit: Exit::watch_child(child, pid, events.clone()), state_dir: args.state_dir.clone() };
-    let state = boot(args, mux, &runtime, rx)?;
-    Ok(Attached { how: How::Process(runtime), state, reattached: false, _lock: lock })
+    let (state, port) = boot(args, mux, &runtime, rx)?;
+    Ok(Attached { how: How::Process(runtime, port), state, reattached: false, _lock: lock })
 }
 
 /// Stop the runtime recorded in the state folder without attaching to it (on
@@ -457,17 +456,17 @@ fn check(dir: &Path, launcher: Launcher, any_node: bool) -> RuntimeState {
     if state.node != hostname() && !any_node {
         return RuntimeState::Running { node: state.node, notebooks: None, job: None };
     }
-    if !pid_alive(state.pid, state.started) || !(bridge_answers(&state) || bridge_answers(&state)) {
+    if !alive(&state) {
         return RuntimeState::NotRunning;
     }
-    let notebooks = open_notebooks(&state);
+    let notebooks = state.port.and_then(|port| open_notebooks(port, &state.token));
     RuntimeState::Running { node: state.node, notebooks, job: None }
 }
 
 /// How many notebooks the runtime has open, from its `list_notebooks` tool.
-fn open_notebooks(state: &State) -> Option<u32> {
+fn open_notebooks(port: u16, token: &str) -> Option<u32> {
     let params = json!({ "name": "list_notebooks", "arguments": {} });
-    let reply = bridge_rpc(state.mcp_port, &state.token, "tools/call", params).ok()?;
+    let reply = bridge_rpc(port, token, "tools/call", params).ok()?;
     let text = reply["result"]["content"][0]["text"].as_str()?;
     let list: Value = serde_json::from_str(text).ok()?;
     list.as_array().map(|a| a.len() as u32)
@@ -475,7 +474,7 @@ fn open_notebooks(state: &State) -> Option<u32> {
 
 /// Wait for a runtime we just started to write its state and answer. A runtime
 /// that isn't ready is never left behind: anything but its readiness stops it.
-fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, rx: &mpsc::Receiver<Event>) -> Result<State, ToApp> {
+fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, rx: &mpsc::Receiver<Event>) -> Result<(State, u16), ToApp> {
     let ready = Arc::new(AtomicBool::new(false));
     let log = follow_log(args.state_dir.join("runtime.log"), mux.clone(), ready.clone(), runtime.exit.clone());
     let result = loop {
@@ -499,9 +498,10 @@ fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, rx: &mpsc::Receiver<Even
             Err(RecvTimeoutError::Timeout) => {
                 if let Some(state) = read_state(&args.state_dir)
                     && state.pid == runtime.pid
-                    && bridge_answers(&state)
+                    && let Some(port) = state.port
+                    && answers(port, &state.token)
                 {
-                    break Ok(state);
+                    break Ok((state, port));
                 }
             }
         }
@@ -537,10 +537,12 @@ impl Runtime {
         ToApp::Died { status, log_tail }
     }
 
-    /// Ask the runtime to shut down (when its bridge is up), then insist.
+    /// Ask the runtime to shut down (when it's up and from this build), then insist.
     fn stop(&self, state: Option<&State>) {
-        if let Some(state) = state {
-            let _ = bridge_call(state.mcp_port, &state.token, "endeavor/shutdown");
+        if let Some(state) = state
+            && let Some(port) = state.port
+        {
+            let _ = bridge_call(port, CALL, &state.token, "endeavor/shutdown");
             self.exit.wait(Duration::from_secs(10));
         }
         self.kill();
@@ -817,12 +819,12 @@ fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Ans
                     Ok(message) => drop(events.send(Event::App(message))),
                     Err(e) => eprintln!("endeavor-remote: ignoring control message: {e}"),
                 },
-                Frame::Open { id, target } => {
+                Frame::Open { id } => {
                     let route = routes.read().unwrap().clone();
                     match route {
-                        Route::Local(ports) => dial(&mux, id, target, ports),
+                        Route::Local(port) => dial(&mux, id, port),
                         Route::Node(link) => {
-                            if link.open(id, target).is_err() {
+                            if link.open(id).is_err() {
                                 let _ = mux.send(&Frame::Close { id });
                             }
                         }
@@ -869,8 +871,7 @@ impl Parts {
     }
 }
 
-fn dial(mux: &Arc<Mux>, id: u32, target: Target, ports: [u16; 2]) {
-    let port = if target == Target::Pluto { ports[0] } else { ports[1] };
+fn dial(mux: &Arc<Mux>, id: u32, port: u16) {
     match TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)) {
         Ok(socket) => {
             let _ = socket.set_nodelay(true);
@@ -892,8 +893,7 @@ fn existing(args: &Args) -> Result<Option<State>, String> {
             state.node, state.node
         ));
     }
-    // Twice: a busy runtime can be slow to answer once.
-    if pid_alive(state.pid, state.started) && (bridge_answers(&state) || bridge_answers(&state)) {
+    if alive(&state) {
         return Ok(Some(state));
     }
     eprintln!("endeavor-remote: the recorded runtime (pid {}) isn't answering; starting a new one", state.pid);
@@ -906,18 +906,14 @@ fn read_state(dir: &Path) -> Option<State> {
 
 fn parse_state(v: &Value) -> Option<State> {
     let text = |k: &str| v[k].as_str().map(str::to_owned);
-    let port = |k: &str| v[k].as_u64().and_then(|p| u16::try_from(p).ok());
     Some(State {
         launcher: text("launcher")?,
         node: text("node")?,
         pid: v["pid"].as_i64().and_then(|p| i32::try_from(p).ok())?,
         started: v["started"].as_u64(),
-        pluto_port: port("pluto_port")?,
-        mcp_port: port("mcp_port")?,
+        port: v["port"].as_u64().and_then(|p| u16::try_from(p).ok()),
         token: text("token")?,
-        pluto_secret: text("pluto_secret")?,
         job: text("job").filter(|j| !j.is_empty()),
-        mcp: if text("mcp").as_deref() == Some("http") { wire::McpTransport::Http } else { wire::McpTransport::Sse },
     })
 }
 
@@ -1093,11 +1089,23 @@ fn hostname() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 
-fn bridge_answers(state: &State) -> bool {
-    bridge_call(state.mcp_port, &state.token, "ping").is_ok_and(|status| status == 200)
+/// The app's calls on the runtime's port.
+const CALL: &str = "/endeavor/call";
+
+/// Whether the runtime recorded in `state` is running: its process is, and
+/// it answers on its port. A runtime from before one port per runtime is
+/// taken at its process's word.
+fn alive(state: &State) -> bool {
+    // Twice: a busy runtime can be slow to answer once.
+    pid_alive(state.pid, state.started) && state.port.is_none_or(|port| answers(port, &state.token) || answers(port, &state.token))
 }
 
-/// POST one JSON-RPC call to the bridge's `/call`; its reply.
+/// Whether the runtime on `port` answers its calls.
+fn answers(port: u16, token: &str) -> bool {
+    bridge_call(port, CALL, token, "ping").is_ok_and(|status| status == 200)
+}
+
+/// POST one JSON-RPC call to the runtime's calls; its reply.
 fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::Result<Value> {
     let mut socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(2))?;
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1105,7 +1113,7 @@ fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::R
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string();
     write!(
         socket,
-        "POST /call HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST {CALL} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )?;
     // HTTP/1.0: the body runs to the end of the connection.
@@ -1115,15 +1123,15 @@ fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::R
     serde_json::from_str(payload).map_err(|_| std::io::ErrorKind::InvalidData.into())
 }
 
-/// POST one JSON-RPC call to the bridge's `/call`; its HTTP status.
-fn bridge_call(port: u16, token: &str, method: &str) -> std::io::Result<u16> {
+/// POST one JSON-RPC call to `path` on the loopback server at `port`; its HTTP status.
+fn bridge_call(port: u16, path: &str, token: &str, method: &str) -> std::io::Result<u16> {
     let mut socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(2))?;
     socket.set_read_timeout(Some(Duration::from_secs(3)))?;
     socket.set_write_timeout(Some(Duration::from_secs(3)))?;
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} }).to_string();
     write!(
         socket,
-        "POST /call HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )?;
     let mut status = String::new();
