@@ -1,0 +1,83 @@
+# Builds the runtime helper (endeavor-remote) that the app installs on servers
+# and publishes it to the "helpers" release as endeavor-remote-<key>-<platform>,
+# with endeavor-remote-<key>.sha256; <key> is scripts/helpers.sh --key, a hash
+# of the helper's source. scripts/helpers.sh downloads them from there.
+name: Helpers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/endeavor-remote/**
+      - crates/wire/**
+      - plugin/skills/**
+      - runtime/**
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/helpers.yml
+      - scripts/helpers.sh
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          # Off for now: Macs other than the one building the app.
+          # - platform: darwin-x86_64
+          #   runner: macos-15
+          #   target: x86_64-apple-darwin
+          # - platform: darwin-aarch64
+          #   runner: macos-15
+          #   target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p endeavor-remote --target ${{ matrix.target }}
+      - name: Stage
+        run: |
+          mkdir -p out
+          cp target/${{ matrix.target }}/release/endeavor-remote out/
+          file out/endeavor-remote || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: out/endeavor-remote
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          key=$(scripts/helpers.sh --key)
+          mkdir -p publish
+          for dir in dist/*/; do
+            platform=$(basename "$dir")
+            cp "$dir/endeavor-remote" "publish/endeavor-remote-$key-$platform"
+          done
+          (cd publish && sha256sum endeavor-remote-* > "endeavor-remote-$key.sha256")
+          gh release view helpers >/dev/null 2>&1 || gh release create helpers --prerelease --target "$GITHUB_SHA" \
+            --title "Server helpers" --notes "Runtime helpers for Linux servers, published by the Helpers workflow for each change to the helper's source. scripts/helpers.sh downloads the ones matching your checkout."
+          gh release upload helpers publish/* --clobber
