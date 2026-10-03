@@ -13,6 +13,7 @@
 //! (`endeavor-remote relay`, see `slurm`).
 
 mod askpass;
+mod asks;
 mod core;
 mod guard;
 mod guide;

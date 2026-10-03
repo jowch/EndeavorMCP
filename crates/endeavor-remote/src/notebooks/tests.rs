@@ -355,7 +355,7 @@ fn cell<'a>(event: &'a Value, notebook: &str, cell: &str) -> &'a Value {
 fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     let s = setup();
     let (first, rx) = s.notebooks.subscribe().unwrap();
-    assert_eq!(first, r#"{"cells":{},"idle_stopped":[],"notebooks":[]}"#, "the current state, on connect");
+    assert_eq!(first, r#"{"asks":[],"cells":{},"idle_stopped":[],"notebooks":[]}"#, "the current state, on connect");
 
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 6"), (Y, "y = x * 7")]);
     s.notebooks.publish();
@@ -511,6 +511,26 @@ fn edits_are_staged_until_they_run_however_they_run() {
     s.seconds(1.0);
     s.engine.with(NB, |nb| nb.cells[0].last_run = 1.0e6 + 3.5);
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([]), "Pluto's own run button");
+}
+
+#[test]
+fn an_edit_the_user_didnt_let_run_is_kept_staged() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);
+    let runs = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "run").count();
+    s.read("7", NB, X);
+    let before = runs();
+    let edit = json!({ "notebook_id": NB, "cell_id": X, "code": "x = 2", "run_after": true });
+    let receipt = tool_json(s.notebooks.tool_unrun("7", "edit_cell", &edit, None).unwrap());
+    assert_eq!(s.engine.code(NB, X), "x = 2", "the edit is made");
+    assert_eq!(runs(), before, "and not run");
+    assert_eq!((&receipt["execution"]["status"], &receipt["pending_run"]), (&json!("staged"), &json!([X])));
+    assert_eq!(receipt["warnings"], json!(["not_approved::The user chose not to run this yet. The edit is kept, staged and not run."]));
+
+    let add = json!({ "notebook_id": NB, "after_cell_id": X, "code": "y = x", "run_after": true });
+    let receipt = tool_json(s.notebooks.tool_unrun("7", "add_cell", &add, None).unwrap());
+    assert_eq!((runs(), s.engine.order(NB).len()), (before, 2));
+    assert_eq!(receipt["warnings"][0], "not_approved::The user chose not to run this yet. The edit is kept, staged and not run.");
 }
 
 #[test]

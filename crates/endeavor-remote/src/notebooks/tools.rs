@@ -81,6 +81,20 @@ impl Notebooks {
         Ok(Reply::Json(result))
     }
 
+    /// An edit that was to run after (`run_after`), when the user chose not
+    /// to run it: the edit is made, staged and not run, and its receipt says why.
+    pub fn tool_unrun(&self, owner: &str, name: &str, args: &Value, folder: Option<&str>) -> Result<Reply, String> {
+        let mut args = args.clone();
+        args["run_after"] = false.into();
+        let mut reply = self.tool(owner, name, &args, folder)?;
+        if let Reply::Json(Value::Object(receipt)) = &mut reply
+            && let Some(Value::Array(warnings)) = receipt.get_mut("warnings")
+        {
+            warnings.push("not_approved::The user chose not to run this yet. The edit is kept, staged and not run.".into());
+        }
+        Ok(reply)
+    }
+
     /// `endeavor/run_preview`, for the app's approval card: what a run tool
     /// call would run. `cells` are the cells it targets (named by what they
     /// define), `all` means the whole notebook, `needed_ids` the cells they

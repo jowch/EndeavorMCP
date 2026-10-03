@@ -271,7 +271,7 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     write!(socket, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     let head = read_until(&mut reader, "\r\n\r\n");
     assert!(head.starts_with("HTTP/1.1 200 OK\r\n") && head.contains("Content-Type: text/event-stream\r\n") && !head.contains("chunked"), "{head}");
-    assert_eq!(read_until(&mut reader, "\n\n"), "data: {\"build\":\"1.0.0-abc\",\"cells\":{},\"idle_stopped\":[],\"notebooks\":[]}\n\n", "the state now, and the build it came from");
+    assert_eq!(read_until(&mut reader, "\n\n"), "data: {\"asks\":[],\"build\":\"1.0.0-abc\",\"cells\":{},\"idle_stopped\":[],\"notebooks\":[]}\n\n", "the state now, and the build it came from");
 
     // Julia says a notebook changed: the core reads it and tells the app.
     bridge.set_notebooks(vec![notebook("n1", "x = 1")]);
@@ -482,6 +482,81 @@ fn the_app_looks_up_a_sessions_tool_results() {
     assert_eq!(found["result"]["isError"], true);
     assert_eq!(look_up(by_arguments), r#"{"id":9,"jsonrpc":"2.0","result":null}"#, "both calls were looked up");
     assert_eq!(look_up(r#"{"owner":"8","tool":"keep_notebook_alive","arguments":{}}"#), r#"{"id":9,"jsonrpc":"2.0","result":null}"#);
+}
+
+/// Follow the app's `/events` stream until `done` holds for an event; that event.
+fn event_where(reader: &mut impl BufRead, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    loop {
+        let event = read_until(reader, "\n\n");
+        let event: serde_json::Value = serde_json::from_str(event.trim_start_matches(|c| c != 'd').strip_prefix("data: ").unwrap().trim_end()).unwrap();
+        if done(&event) {
+            return event;
+        }
+    }
+}
+
+#[test]
+fn in_ask_to_run_a_run_waits_for_the_users_answer() {
+    let dir = state_dir("core-asks");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
+    let shell = |id: u32| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"run_shell","arguments":{{"command":"echo ran"}},"_meta":{{"claudecode/toolUseId":"toolu_{id}"}}}}}}"#);
+    let text = |body: &str| {
+        let reply: serde_json::Value = serde_json::from_str(body).unwrap();
+        let text: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        text
+    };
+    let policy = |policy: &str, asks: bool| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"7","policy":"{policy}","asks":{asks}}}}}"#));
+
+    // An app from before runtime asks never turns them on: the run goes ahead.
+    policy("ask", false);
+    assert_eq!(text(&mcp(&core, &shell(1), &caller).1)["stdout"], "ran\n");
+    // On, with no app following to ask: it fails at once.
+    policy("ask", true);
+    assert_eq!(text(&mcp(&core, &shell(2), &caller).1)["error"], "no_app");
+
+    let mut events = core.connect();
+    let mut reader = BufReader::new(events.try_clone().unwrap());
+    write!(events, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    event_where(&mut reader, |_| true);
+    let answer = |id: &serde_json::Value, allow: bool| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"endeavor/answer_run","params":{{"id":{id},"allow":{allow},"user_ran":[]}}}}"#));
+    std::thread::scope(|scope| {
+        // Allowed: it runs once the user says so.
+        let call = scope.spawn(|| mcp(&core, &shell(3), &caller).1);
+        let ask = event_where(&mut reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()))["asks"][0].clone();
+        assert_eq!((&ask["owner"], &ask["call_id"], &ask["tool"], &ask["arguments"]), (&"7".into(), &"toolu_3".into(), &"run_shell".into(), &serde_json::json!({ "command": "echo ran" })));
+        assert!(!call.is_finished(), "waits");
+        assert_eq!(answer(&ask["id"], true), r#"{"id":2,"jsonrpc":"2.0","result":{}}"#);
+        assert_eq!(text(&call.join().unwrap())["stdout"], "ran\n");
+        event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
+        assert!(answer(&ask["id"], true).contains("no_ask"), "answered once");
+
+        // Denied: it doesn't run, and the agent hears why.
+        let call = scope.spawn(|| mcp(&core, &shell(4), &caller).1);
+        let ask = event_where(&mut reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()))["asks"][0].clone();
+        answer(&ask["id"], false);
+        assert_eq!(text(&call.join().unwrap()), serde_json::json!({ "error": "not_approved", "message": "The user chose not to run this." }));
+
+        // Cancelled by the agent: the ask goes.
+        let call = scope.spawn(|| mcp(&core, &shell(5), &caller).1);
+        event_where(&mut reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()));
+        assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}"#, &caller).0, "HTTP/1.1 202 Accepted");
+        assert_eq!(text(&call.join().unwrap())["error"], "cancelled");
+        event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
+
+        // The agent hangs up: the ask goes.
+        let mut socket = core.connect();
+        let message = shell(6);
+        write!(socket, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nX-Endeavor-Session: 7\r\nX-Endeavor-Host: gpu-box\r\nContent-Length: {}\r\n\r\n{message}", message.len()).unwrap();
+        event_where(&mut reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()));
+        drop(socket);
+        event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
+    });
+
+    // Auto runs without asking; so does a call that runs nothing.
+    policy("auto", true);
+    assert_eq!(text(&mcp(&core, &shell(7), &caller).1)["stdout"], "ran\n");
 }
 
 #[test]

@@ -9,16 +9,19 @@
 //! `notebooks`'; host tools are `host_tools`'; the guide to both is `guide`'s.
 //!
 //! Each session has a run policy the app sets ("plan" | "ask" | "auto"). In
-//! "plan" its notebook writes and runs are refused. "ask" and "auto" pass
-//! through for now: runs are still gated by the app's Claude hook.
+//! "plan" its notebook writes and runs are refused. In "ask", when the app
+//! says it answers runs (`asks`), a call that runs code waits for the user's
+//! answer (see `asks`); "auto" runs it.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader};
 use std::net::TcpStream;
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json::{Value, json};
 
+use crate::asks::{Answer, Ask, Outcome};
 use crate::guide;
 use crate::host_tools;
 use crate::http::{self, Head};
@@ -68,8 +71,9 @@ pub struct Bridge {
     pub julia: Arc<Julia>,
     pub notebooks: Arc<Notebooks>,
     pub token: String,
-    /// Each agent session's run policy, by its key.
-    policies: Mutex<HashMap<String, String>>,
+    /// Each agent session's run policy, by its key, and whether the app
+    /// answers its runs (an app from before runtime asks doesn't).
+    policies: Mutex<HashMap<String, (String, bool)>>,
     /// Each agent session's working folder on this machine, by its key.
     folders: Mutex<HashMap<String, String>>,
     /// Each agent session's last tool results, for the app to look up.
@@ -137,8 +141,14 @@ impl Bridge {
         match message["method"].as_str().unwrap_or_default() {
             "endeavor/set_policy" => {
                 let (owner, policy) = (text("owner", ""), text("policy", "ask"));
-                eprintln!("[ Info: Session {owner} policy: {policy}");
-                self.policies.lock().unwrap().insert(owner, policy);
+                let asks = params["asks"] == true;
+                eprintln!("[ Info: Session {owner} policy: {policy}{}", if asks { ", runs ask first" } else { "" });
+                self.policies.lock().unwrap().insert(owner, (policy, asks));
+            }
+            "endeavor/answer_run" => {
+                let given = Answer { allow: params["allow"] == true, user_ran: params.get("user_ran").cloned().unwrap_or_else(|| json!([])) };
+                let id = params["id"].as_u64().ok_or_else(|| "ArgumentError: invalid_argument::id must be a number".to_owned());
+                return Some(answer(id.and_then(|id| self.notebooks.asks.answer(id, given)).map(|()| json!({}))));
             }
             "endeavor/set_notebook" => {
                 let (owner, notebook) = (text("owner", ""), params.get("notebook").filter(|n| !n.is_null()).map_or(String::new(), julia_string));
@@ -195,7 +205,7 @@ impl Bridge {
                 return Some(answer(self.notebooks.new_for(&owner, folder.as_deref())));
             }
             method if JULIA_CALLS.contains(&method) => return None,
-            _ => return Some(self.dispatch(&message, &Caller::default()).unwrap_or_else(|| "{}".into())),
+            _ => return Some(self.dispatch(&message, &Caller::default(), &|| false).unwrap_or_else(|| "{}".into())),
         }
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
@@ -203,17 +213,23 @@ impl Bridge {
 
     /// Serve `POST /mcp`. Whether the connection can carry another request.
     pub fn mcp(&self, request: &Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> io::Result<bool> {
-        post(request, reader, client, request.keeps_alive(), |message| self.dispatch(message, &Caller::of(request)))
+        let socket = client.try_clone()?;
+        let gone = move || closed(&socket);
+        post(request, reader, client, request.keeps_alive(), |message| self.dispatch(message, &Caller::of(request), &gone))
     }
 
-    /// The reply to one JSON-RPC message, if it gets one.
-    fn dispatch(&self, message: &Value, caller: &Caller) -> Option<String> {
+    /// The reply to one JSON-RPC message, if it gets one. `gone`: whether the
+    /// client hung up, for a call that waits on the user.
+    fn dispatch(&self, message: &Value, caller: &Caller, gone: &dyn Fn() -> bool) -> Option<String> {
+        if message["method"] == "notifications/cancelled" && self.notebooks.asks.cancel(&caller.owner, &message["params"]["requestId"]) {
+            self.notebooks.publish();
+        }
         answer(message, caller, |params| {
-            let result = self.call_tool(params, caller);
+            let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone };
+            let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
-                let call_id = params["_meta"]["claudecode/toolUseId"].as_str();
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);
-                self.results.record(&caller.owner, call_id, params["name"].as_str().unwrap_or_default(), arguments, &result);
+                self.results.record(&caller.owner, call.call_id, params["name"].as_str().unwrap_or_default(), arguments, &result);
             }
             self.notebooks.publish();
             result
@@ -221,7 +237,8 @@ impl Bridge {
     }
 
     /// A `tools/call`'s result.
-    fn call_tool(&self, params: &Value, caller: &Caller) -> Value {
+    fn call_tool(&self, params: &Value, call: &Call) -> Value {
+        let caller = call.caller;
         let text = |result: &Value| json!({ "content": [{ "type": "text", "text": to_json(result) }], "isError": false });
         let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
         // Whether a notebook-tool error is worth pointing at the guide: only an
@@ -248,6 +265,9 @@ impl Bridge {
             };
         }
         if host_tools::NAMES.contains(&name) {
+            if let Err(result) = self.ask_first(call, name, &arguments) {
+                return result;
+            }
             let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
             let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
             return match host_tools::call(name, &arguments, &host_tools::Shell { folder: folder.as_deref(), env: &env }) {
@@ -261,8 +281,17 @@ impl Bridge {
         if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments) {
             return tool_error(&refusal, help);
         }
+        let run = match self.ask_first(call, name, &arguments) {
+            Ok(run) => run,
+            Err(result) => return result,
+        };
         let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
-        match self.notebooks.tool(&caller.owner, name, &arguments, folder.as_deref()) {
+        let reply = if run {
+            self.notebooks.tool(&caller.owner, name, &arguments, folder.as_deref())
+        } else {
+            self.notebooks.tool_unrun(&caller.owner, name, &arguments, folder.as_deref())
+        };
+        match reply {
             Ok(Reply::Json(result)) => text(&result),
             Ok(Reply::Image { meta, png_base64 }) => json!({
                 "content": [
@@ -275,6 +304,39 @@ impl Bridge {
         }
     }
 
+    /// In Ask to run, wait for the user's answer to a call that runs code.
+    /// Whether it runs as asked; false for an edit the user didn't let run,
+    /// which is made but not run. Otherwise the call's result: refused,
+    /// cancelled, or with no app to ask.
+    fn ask_first(&self, call: &Call, tool: &str, arguments: &Value) -> Result<bool, Value> {
+        let owner = &call.caller.owner;
+        let asks = self.policies.lock().unwrap().get(owner).is_some_and(|(policy, asks)| policy == "ask" && *asks);
+        if owner.is_empty() || !asks || !runs_code(tool, arguments) {
+            return Ok(true);
+        }
+        if !self.notebooks.followed() {
+            return Err(tool_error("ArgumentError: no_app::Endeavor isn't connected to ask the user before this runs. Try again once Endeavor is open.", false));
+        }
+        let ask = Ask { owner, call_id: call.call_id, request: call.request, tool, arguments, since: self.notebooks.now() };
+        let id = self.notebooks.asks.add(ask);
+        eprintln!("[ Info: Session {owner} asks before {tool} (ask {id}, call {})", call.call_id.unwrap_or("?"));
+        self.notebooks.publish();
+        let outcome = self.notebooks.asks.wait(id, call.gone);
+        self.notebooks.publish();
+        match outcome {
+            Outcome::Answered(Answer { allow: true, user_ran }) => {
+                let notebook = arguments.get("notebook_id").map(julia_string).unwrap_or_default();
+                if user_ran.as_array().is_some_and(|cells| !cells.is_empty()) {
+                    let _ = self.notebooks.run_anyway(&notebook, &user_ran);
+                }
+                Ok(true)
+            }
+            Outcome::Answered(_) if matches!(tool, "edit_cell" | "add_cell") => Ok(false),
+            Outcome::Answered(_) => Err(tool_error("ArgumentError: not_approved::The user chose not to run this.", false)),
+            Outcome::Cancelled | Outcome::Gone => Err(tool_error("ArgumentError: cancelled::The call was cancelled before the user answered.", false)),
+        }
+    }
+
     /// Why a session may not call `tool`, as the error Julia raised for it.
     fn refusal(&self, caller: &Caller, tool: &str) -> Option<String> {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
@@ -282,7 +344,7 @@ impl Bridge {
                 "ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on the user's computer: use your own file and shell tools."
             ));
         }
-        let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p == "plan");
+        let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|(policy, _)| policy == "plan");
         if plan && WRITE_TOOLS.contains(&tool) {
             let what = if tool == "run_shell" { "run a command on the server" } else { "change or run the notebook" };
             return Some(format!(
@@ -291,6 +353,24 @@ impl Bridge {
         }
         None
     }
+}
+
+/// One tool call: who made it, its JSON-RPC id, the id the agent's client
+/// gave it (Claude Code's `_meta["claudecode/toolUseId"]`), and whether the
+/// client has hung up.
+struct Call<'a> {
+    caller: &'a Caller,
+    request: &'a Value,
+    call_id: Option<&'a str>,
+    gone: &'a dyn Fn() -> bool,
+}
+
+/// Whether the other end of `socket` has closed it, without reading from it.
+fn closed(socket: &TcpStream) -> bool {
+    let mut byte = 0u8;
+    // SAFETY: a one-byte peek into a local buffer; MSG_DONTWAIT keeps it from blocking.
+    let n = unsafe { libc::recv(socket.as_raw_fd(), (&mut byte as *mut u8).cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+    n == 0 || (n < 0 && !matches!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted))
 }
 
 /// Serve one `POST /mcp`: one JSON-RPC message in; a request gets `reply`'s

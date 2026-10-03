@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use crate::asks::Asks;
 use crate::host_tools::{home, normpath};
 use crate::http::{self, Head};
 use crate::mcp::{WRITE_TOOLS, julia_string, to_json};
@@ -200,6 +201,8 @@ pub struct Notebooks {
     events: Mutex<Events>,
     /// The app build this runtime came from, which the app compares with its own.
     pub build: OnceLock<String>,
+    /// Runs waiting for the user's answer.
+    pub asks: Asks,
 }
 
 /// One notebook as the engine's `snapshot` reports it.
@@ -399,6 +402,7 @@ impl Graph {
 impl Notebooks {
     pub fn new(upstream: Arc<dyn Upstream>, clock: Box<dyn Fn() -> f64 + Send + Sync>) -> Notebooks {
         Notebooks {
+            asks: Asks::new(clock()),
             upstream,
             clock,
             state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new() }),
@@ -551,6 +555,7 @@ impl Notebooks {
     ///   {"notebooks": [the list_notebooks summary],
     ///    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before, version, name}, ...]},
     ///    "idle_stopped": [{path, hours, safe_preview}, ...],
+    ///    "asks": [{id, owner, call_id, tool, arguments, since}, ...],
     ///    "build": the app build this runtime came from, if it was told}
     /// with cells in notebook order. `unrun`: edited by the agent and not run
     /// since. `author`: who last changed the cell's code ("agent", "user", or
@@ -590,7 +595,7 @@ impl Notebooks {
             cells.insert(nb.id.clone(), Value::Array(states));
         }
         let idle_stopped: Vec<Value> = state.idle_stopped.iter().map(|(_, entry)| entry.clone()).collect();
-        let mut event = json!({ "notebooks": list, "cells": cells, "idle_stopped": idle_stopped });
+        let mut event = json!({ "notebooks": list, "cells": cells, "idle_stopped": idle_stopped, "asks": self.asks.list() });
         if let Some(build) = self.build.get() {
             event["build"] = build.clone().into();
         }
@@ -609,6 +614,11 @@ impl Notebooks {
             events.last = json.clone();
             events.subscribers.retain(|subscriber| subscriber.send(json.clone()).is_ok());
         }
+    }
+
+    /// Whether the app follows the notebooks' state, so it can ask the user.
+    pub fn followed(&self) -> bool {
+        !self.events.lock().unwrap().subscribers.is_empty()
     }
 
     /// A new `/events` subscriber: the state now, then each change.
@@ -646,6 +656,11 @@ impl Notebooks {
             client.flush()?;
         }
         Ok(())
+    }
+
+    /// The time by the core's clock (Unix seconds).
+    pub fn now(&self) -> f64 {
+        (self.clock)()
     }
 
     /// A tool call names the notebook it works on: that counts as activity.
@@ -814,9 +829,9 @@ impl Notebooks {
         Ok(json!({ "stopped": true, "safe_preview": safe_preview }))
     }
 
-    /// `endeavor/run_anyway`: the user's run reached `cells` (each with its
-    /// `last_run` from before that run), which an agent's waiting card asks to
-    /// run, and the app is about to approve that card.
+    /// The user's run reached `cells` (each with its `last_run` from before
+    /// that run) while a call asking to run them waited, and the user then
+    /// allowed it (`endeavor/answer_run`'s `user_ran`).
     pub fn run_anyway(&self, notebook_id: &str, cells: &Value) -> Result<Value, String> {
         let cells: Vec<(String, f64)> = cells
             .as_array()
