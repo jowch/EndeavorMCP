@@ -406,6 +406,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn uploads_stay_inside_the_session_folder() {
         let dir = session("inside");
         let folder = dir.join("session");
