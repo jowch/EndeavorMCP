@@ -102,6 +102,11 @@ struct NotebookState {
     /// cell here that has run since ran the agent's code some other way (the
     /// user's run reached it), so an approved run of it needn't run it again.
     tool_edits: HashMap<String, f64>,
+    /// Cells the user's run reached after the page asked first (Run anyway),
+    /// with their `last_run` before it and when the app said so: an approved
+    /// run of them that comes right after needn't run them again, edited by
+    /// the tools or not.
+    user_runs: HashMap<String, (f64, f64)>,
     /// What each agent session last read of each cell: (owner, cell) => (code,
     /// seq). Per owner, so one session's reads and edits aren't another's.
     reads: HashMap<(String, String), (String, u64)>,
@@ -797,6 +802,25 @@ impl Notebooks {
         let safe_preview = self.shutdown(&nb.id)?;
         self.publish();
         Ok(json!({ "stopped": true, "safe_preview": safe_preview }))
+    }
+
+    /// `endeavor/run_anyway`: the user's run reached `cells` (each with its
+    /// `last_run` from before that run), which an agent's waiting card asks to
+    /// run, and the app is about to approve that card.
+    pub fn run_anyway(&self, notebook_id: &str, cells: &Value) -> Result<Value, String> {
+        let cells: Vec<(String, f64)> = cells
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| Some((c["cell_id"].as_str()?.to_owned(), c["last_run"].as_f64().unwrap_or(0.0))))
+            .collect();
+        let now = (self.clock)();
+        self.with_state(notebook_id, |state| {
+            for (cell, last_run) in cells {
+                state.user_runs.insert(cell, (last_run, now));
+            }
+        });
+        Ok(json!({}))
     }
 
     /// `endeavor/restart_notebook`: Pluto's own Restart, a new process and then

@@ -583,6 +583,44 @@ fn an_approved_run_of_cells_the_users_run_already_reached_runs_nothing_again() {
 }
 
 #[test]
+fn an_approved_run_after_run_anyway_runs_nothing_again_edited_or_not() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x")]);
+    let runs = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "run").count();
+    let last_run = |s: &Setup| s.engine.with(NB, |nb| nb.cells[1].last_run);
+    let users_run = |s: &Setup| {
+        s.seconds(1.0);
+        let now = *s.clock.lock().unwrap();
+        s.engine.with(NB, |nb| nb.cells.iter_mut().for_each(|c| c.last_run = now));
+    };
+    let run_anyway = |s: &Setup, before: f64| s.notebooks.run_anyway(NB, &json!([{ "cell_id": Y, "last_run": before }])).unwrap();
+    let before = runs();
+
+    // Y, which the tools never changed, ran in the user's run: not again.
+    let was = last_run(&s);
+    users_run(&s);
+    run_anyway(&s, was);
+    let receipt = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    assert_eq!(runs(), before, "not run again");
+    assert_eq!(receipt["warnings"], json!([format!("already_ran::{Y} already ran after the user's change; not run again, so it ran once.")]));
+    s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    assert_eq!(runs(), before + 1, "asked again, it runs");
+
+    // The user's run never reached it: it runs.
+    run_anyway(&s, last_run(&s));
+    s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    assert_eq!(runs(), before + 2);
+
+    // Said long before the call: it runs.
+    let was = last_run(&s);
+    run_anyway(&s, was);
+    users_run(&s);
+    s.seconds(120.0);
+    s.call("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [Y], "force": true })).unwrap();
+    assert_eq!(runs(), before + 3);
+}
+
+#[test]
 fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);

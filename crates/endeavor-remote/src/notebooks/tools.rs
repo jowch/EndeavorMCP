@@ -324,6 +324,7 @@ impl Call<'_> {
             self.nbs.with_state(&nb.id, |state| {
                 for cell in &cells {
                     state.tool_edits.remove(cell);
+                    state.user_runs.remove(cell);
                 }
             });
         }
@@ -347,18 +348,31 @@ impl Call<'_> {
         Ok((conflict.map(|c| vec![format!("{c} The edit is staged, not run.")]).unwrap_or_default(), Vec::new()))
     }
 
-    /// Whether `targets` are cells the tools changed and haven't run since,
-    /// all of which have run since anyway: the user's run after a change of
-    /// their own reached them (while the agent's approval card waited). A run
-    /// of them still under way is waited for, as long as a waited run may take.
+    /// Whether `targets` have all run since the user's run reached them
+    /// while the agent's approval card waited: cells the tools changed and
+    /// haven't run since that have run since anyway, or cells the app just
+    /// said the user ran anyway (`endeavor/run_anyway`). A run of them still
+    /// under way is waited for, as long as a waited run may take.
     fn ran_after_user(&self, nb: &Snapshot, targets: &[String]) -> Result<bool, String> {
-        let edits: Option<Vec<f64>> = self.nbs.with_state(&nb.id, |state| targets.iter().map(|c| state.tool_edits.get(c).copied()).collect());
-        let Some(edits) = edits.filter(|_| !targets.is_empty()) else { return Ok(false) };
+        let now = self.now();
+        let marks: Option<Vec<(Option<f64>, Option<f64>)>> = self.nbs.with_state(&nb.id, |state| {
+            state.user_runs.retain(|_, (_, at)| now - *at <= TIMEOUT_SECONDS);
+            let marks = targets.iter().map(|c| {
+                let edited = state.tool_edits.get(c).copied();
+                let before = state.user_runs.remove(c).map(|(last_run, _)| last_run);
+                (edited.is_some() || before.is_some()).then_some((edited, before))
+            });
+            marks.collect()
+        });
+        let Some(marks) = marks.filter(|_| !targets.is_empty()) else { return Ok(false) };
+        let ran = |cell: &super::Cell, (edited, before): &(Option<f64>, Option<f64>)| {
+            edited.is_some_and(|edited| cell.ran_since(edited)) || before.is_some_and(|before| !(cell.running || cell.queued) && cell.last_run > before)
+        };
         let deadline = Instant::now() + Duration::from_secs_f64(TIMEOUT_SECONDS);
         loop {
             let now = self.nbs.snapshot(&nb.id)?;
             let Some(cells) = targets.iter().map(|c| now.cells.get(c)).collect::<Option<Vec<_>>>() else { return Ok(false) };
-            if cells.iter().zip(&edits).all(|(cell, edited)| cell.ran_since(*edited)) {
+            if cells.iter().zip(&marks).all(|(cell, mark)| ran(cell, mark)) {
                 return Ok(true);
             }
             if !cells.iter().any(|c| c.running || c.queued) || Instant::now() > deadline {
