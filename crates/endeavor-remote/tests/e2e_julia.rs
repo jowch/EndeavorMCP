@@ -13,6 +13,8 @@
 //! behind a depot of the test's own in the target folder, which keeps what
 //! Julia compiles between runs.
 
+#![cfg(unix)]
+
 mod common;
 
 use std::io::{Read, Write};

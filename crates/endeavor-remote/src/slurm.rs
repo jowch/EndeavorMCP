@@ -128,6 +128,7 @@ impl Link {
         }
         // SIGTERM first: srun then ends its step on the node.
         // SAFETY: plain syscall on our own child.
+        #[cfg(unix)]
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
         let deadline = Instant::now() + Duration::from_secs(3);
         while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
@@ -247,10 +248,11 @@ fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, S
     );
     let script_path = dir.join("job.sh");
     std::fs::write(&script_path, script).map_err(|e| format!("Couldn't write {}: {e}", script_path.display()))?;
+    #[cfg(unix)]
     std::fs::set_permissions(&script_path, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|e| e.to_string())?;
     let log = dir.join("runtime.log");
     // The log shows Pluto's secret URL.
-    OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&log).map_err(|e| format!("Couldn't open {}: {e}", log.display()))?;
+    owner_only(OpenOptions::new().write(true).create(true).truncate(true)).open(&log).map_err(|e| format!("Couldn't open {}: {e}", log.display()))?;
     let _ = std::fs::remove_file(dir.join("runtime.json"));
 
     let output = Command::new("sbatch")
@@ -626,7 +628,18 @@ pub fn node_start_main(argv: &[String]) -> ! {
         std::process::exit(1);
     };
     let token = std::fs::read_to_string(dir.join("token")).unwrap_or_else(|e| fail(format!("Couldn't read the token in {}: {e}", dir.display())));
-    let mut command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm", flag(argv, "--build").as_deref()).unwrap_or_else(|e| fail(e));
-    let error = command.exec();
+    let command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm", flag(argv, "--build").as_deref()).unwrap_or_else(|e| fail(e));
+    let error = exec(command);
     fail(format!("Couldn't start the runtime: {error}"))
+}
+
+#[cfg(unix)]
+fn exec(mut command: Command) -> std::io::Error {
+    command.exec()
+}
+
+/// A cluster's nodes run Linux, so a job never runs this on Windows.
+#[cfg(windows)]
+fn exec(_command: Command) -> std::io::Error {
+    std::io::ErrorKind::Unsupported.into()
 }

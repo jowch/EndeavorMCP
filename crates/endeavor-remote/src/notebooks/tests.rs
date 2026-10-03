@@ -1208,10 +1208,13 @@ fn the_apps_notebook_actions_restart_move_file_info_and_new_notebook() {
     assert_eq!(s.notebooks.move_notebook(&id(1), &format!("{dir}/gone/x.jl")), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}/gone'")));
 
     // Whether a file is there, and when it last changed, as Julia's mtime says.
-    use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(&paths[1]).unwrap();
-    let modified = meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9;
-    assert_eq!(file_info(&paths[1]), Ok(json!({ "exists": true, "modified": modified })));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(&paths[1]).unwrap();
+        let modified = meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9;
+        assert_eq!(file_info(&paths[1]), Ok(json!({ "exists": true, "modified": modified })));
+    }
     assert_eq!(file_info(&paths[0]), Ok(json!({ "exists": false })));
     assert_eq!(file_info(&dir), Ok(json!({ "exists": false })), "a folder isn't a file");
 

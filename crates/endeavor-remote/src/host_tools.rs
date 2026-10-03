@@ -6,12 +6,17 @@
 //! paths normalized as Julia's `normpath` does, invalid UTF-8 replaced one
 //! Julia `Char` at a time, and Julia's own wording for system errors.
 
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::{self, BufRead, BufReader, Read};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -23,7 +28,9 @@ pub const NAMES: [&str; 3] = ["list_folder", "read_file", "run_shell"];
 const LIST_FOLDER_MAX_ENTRIES: usize = 1000;
 const READ_FILE_MAX_BYTES: usize = 256 * 1024;
 const READ_FILE_MAX_LINE: usize = 2000;
+#[cfg(any(unix, test))]
 const SHELL_KEEP_HALF: usize = 15_000;
+#[cfg(unix)]
 const SHELL_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// The tools' schemas, for `tools/list`.
@@ -70,6 +77,7 @@ pub fn schemas() -> Vec<Value> {
 }
 
 /// Where and how `run_shell` runs commands.
+#[cfg_attr(windows, allow(dead_code))]
 pub struct Shell<'a> {
     /// The session's working folder: where commands run unless told otherwise.
     pub folder: Option<&'a str>,
@@ -119,6 +127,7 @@ fn int_arg(args: &Value, name: &str, default: i64) -> Result<i64, String> {
     }
 }
 
+#[cfg(unix)]
 pub fn home() -> String {
     if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
         return home.to_string_lossy().into_owned();
@@ -130,6 +139,26 @@ pub fn home() -> String {
             return "/".into();
         }
         std::ffi::CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(windows)]
+pub fn home() -> String {
+    std::env::home_dir().map(|home| home.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// When the file last changed, in Unix seconds as Julia's `mtime` gives them.
+#[cfg(unix)]
+pub(crate) fn mtime(meta: &Metadata) -> f64 {
+    meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9
+}
+
+#[cfg(windows)]
+pub(crate) fn mtime(meta: &Metadata) -> f64 {
+    match meta.modified().map(|t| t.duration_since(std::time::UNIX_EPOCH)) {
+        Ok(Ok(since)) => since.as_secs_f64(),
+        Ok(Err(before)) => -before.duration().as_secs_f64(),
+        Err(_) => 0.0,
     }
 }
 
@@ -269,10 +298,10 @@ fn list_folder(args: &Value) -> Result<Value, String> {
         } else {
             "file"
         };
-        let modified = (meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9).round_ties_even() as i64;
+        let modified = mtime(&meta).round_ties_even() as i64;
         let mut entry = json!({ "name": name, "kind": kind, "modified": modified });
         if kind == "file" {
-            entry["size"] = meta.size().into();
+            entry["size"] = meta.len().into();
         }
         entries.push((kind != "dir", name, entry));
     }
@@ -348,6 +377,7 @@ fn read_file(args: &Value) -> Result<Value, String> {
 }
 
 /// The first and last SHELL_KEEP_HALF bytes of a stream.
+#[cfg(any(unix, test))]
 #[derive(Default)]
 struct Captured {
     head: Vec<u8>,
@@ -355,6 +385,7 @@ struct Captured {
     total: usize,
 }
 
+#[cfg(any(unix, test))]
 impl Captured {
     fn add(&mut self, bytes: &[u8]) {
         self.total += bytes.len();
@@ -377,6 +408,7 @@ impl Captured {
 }
 
 /// The user's login shell running `command`, as Julia's runtime ran it.
+#[cfg(unix)]
 fn shell_command(command: &str) -> Command {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let executable = !shell.is_empty() && std::fs::metadata(&shell).is_ok_and(|m| m.is_file()) && {
@@ -398,6 +430,13 @@ fn shell_command(command: &str) -> Command {
     sh
 }
 
+/// Only sessions on a server get host tools, and a Windows server is out of scope.
+#[cfg(windows)]
+fn run_shell(_args: &Value, _shell: &Shell) -> Result<Value, String> {
+    Err(argument_error("unsupported::run_shell runs only on Linux and macOS"))
+}
+
+#[cfg(unix)]
 fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
     let command = string_arg(args, "command")?;
     if command.trim().is_empty() {
@@ -463,11 +502,14 @@ fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
     }))
 }
 
+#[cfg(unix)]
 trait ReadFd: Read + AsRawFd {}
+#[cfg(unix)]
 impl<T: Read + AsRawFd> ReadFd for T {}
 
 /// Wait up to `wait` for output on the open pipes and take what has come;
 /// a pipe at its end is dropped.
+#[cfg(unix)]
 fn read_ready(pipes: &mut [Option<Box<dyn ReadFd>>; 2], captured: &mut [Captured; 2], wait: Duration) {
     let mut fds: Vec<libc::pollfd> = pipes.iter().flatten().map(|p| libc::pollfd { fd: p.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
     // SAFETY: `fds` holds valid pollfds for pipes we own; with none, poll only waits.

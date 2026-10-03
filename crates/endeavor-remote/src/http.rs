@@ -6,6 +6,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 
 /// Longest request or response head accepted.
@@ -353,12 +354,21 @@ pub fn relay_body(upstream: &mut BufReader<TcpStream>, client: &mut TcpStream, f
     Ok(())
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 enum Readable {
     Upstream,
     ClientClosed,
     ClientSent,
 }
 
+/// Not ported: Windows needs WSAPoll. Until then a client that hangs up is
+/// noticed only when a write to it fails.
+#[cfg(windows)]
+fn wait_readable(_upstream: &TcpStream, _client: &TcpStream, _watch_client: bool) -> io::Result<Readable> {
+    Ok(Readable::Upstream)
+}
+
+#[cfg(unix)]
 fn wait_readable(upstream: &TcpStream, client: &TcpStream, watch_client: bool) -> io::Result<Readable> {
     let mut fds = [
         libc::pollfd { fd: upstream.as_raw_fd(), events: libc::POLLIN, revents: 0 },

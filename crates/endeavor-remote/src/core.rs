@@ -13,7 +13,7 @@
 use std::fs::OpenOptions;
 use std::io::{self, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -24,11 +24,12 @@ use serde_json::Value;
 
 use crate::http::{self, Head};
 use crate::mcp::Bridge;
-use crate::{USAGE, bridge_answers, parse_state, remove_state};
+use crate::{USAGE, bridge_answers, owner_only, parse_state, remove_state};
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
 
+#[cfg(unix)]
 const STOP_SIGNALS: [i32; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
 
 struct Args {
@@ -73,12 +74,14 @@ pub fn main(argv: &[String]) -> ! {
     };
     let token = std::env::var("ENDEAVOR_TOKEN").unwrap_or_else(|_| fail("ENDEAVOR_TOKEN is not set".into()));
     let launcher = std::env::var("ENDEAVOR_LAUNCHER").unwrap_or_else(|_| "process".into());
+    #[cfg(unix)]
     let (stop_signals, inherited_mask) = block_stop_signals();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| fail(format!("Couldn't open the bridge port: {e}")));
     let julia_state = args.state_dir.join(JULIA_STATE);
     let _ = std::fs::remove_file(&julia_state);
     let mut command = julia_command(&args, &token, &launcher, &julia_state).unwrap_or_else(|e| fail(e));
     // SAFETY: only async-signal-safe calls between fork and exec.
+    #[cfg(unix)]
     unsafe {
         command.pre_exec(move || {
             libc::pthread_sigmask(libc::SIG_SETMASK, &inherited_mask, std::ptr::null_mut());
@@ -88,8 +91,9 @@ pub fn main(argv: &[String]) -> ! {
         });
     }
     let mut julia = command.spawn().unwrap_or_else(|e| fail(format!("Couldn't start {}: {e}", args.julia)));
-    let julia_pid = julia.id() as i32;
-    pass_on_stop_signals(stop_signals, julia_pid);
+    // Not ported: on Windows nothing yet ties Julia's life to the core's (a Job Object).
+    #[cfg(unix)]
+    pass_on_stop_signals(stop_signals, julia.id() as i32);
 
     let bridge = Arc::new(Bridge::new(token, &args.depot));
     if let Ok(build) = std::env::var("ENDEAVOR_BUILD") {
@@ -171,10 +175,7 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, bridge_port: u16) -> Option
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     let _ = std::fs::remove_file(&tmp);
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
+    owner_only(OpenOptions::new().write(true).create_new(true))
         .open(&tmp)
         .and_then(|mut f| f.write_all(bytes))
         .and_then(|_| std::fs::rename(&tmp, path))
@@ -183,6 +184,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Exit the way Julia did, so the helper reports the same status.
 fn exit_like(status: ExitStatus) -> ! {
+    #[cfg(unix)]
     if let Some(signal) = status.signal() {
         // SAFETY: plain syscalls; the default action of `signal` ends this process.
         unsafe {
@@ -199,6 +201,7 @@ fn exit_like(status: ExitStatus) -> ! {
 
 /// Block the stop signals (for `pass_on_stop_signals` to take) before any
 /// thread starts; the mask we had, for Julia.
+#[cfg(unix)]
 fn block_stop_signals() -> (libc::sigset_t, libc::sigset_t) {
     // SAFETY: initializing and applying signal sets on this (still only) thread.
     unsafe {
@@ -214,6 +217,7 @@ fn block_stop_signals() -> (libc::sigset_t, libc::sigset_t) {
 }
 
 /// A stop signal sent to the core goes to Julia; the core exits when Julia does.
+#[cfg(unix)]
 fn pass_on_stop_signals(set: libc::sigset_t, julia_pid: i32) {
     std::thread::spawn(move || {
         loop {

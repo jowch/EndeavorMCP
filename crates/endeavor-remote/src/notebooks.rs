@@ -918,9 +918,8 @@ impl Notebooks {
 /// `endeavor/file_info`: whether a file is at `path` on this machine, and when
 /// it last changed (Unix seconds, as Julia's `mtime` gives them).
 pub fn file_info(path: &str) -> Result<Value, String> {
-    use std::os::unix::fs::MetadataExt;
     match std::fs::metadata(absolute_path(path)?) {
-        Ok(meta) if meta.is_file() => Ok(json!({ "exists": true, "modified": meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9 })),
+        Ok(meta) if meta.is_file() => Ok(json!({ "exists": true, "modified": crate::host_tools::mtime(&meta) })),
         _ => Ok(json!({ "exists": false })),
     }
 }

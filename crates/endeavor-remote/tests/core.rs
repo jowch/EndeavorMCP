@@ -3,6 +3,8 @@
 //! port it doesn't answer through, streams as they're written, and lives and
 //! dies with it.
 
+#![cfg(unix)]
+
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};

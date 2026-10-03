@@ -4,6 +4,8 @@
 //! file requests before any runtime, attaching on request, relaying, one
 //! client at a time, and each way a connection ends.
 
+#![cfg(unix)]
+
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};

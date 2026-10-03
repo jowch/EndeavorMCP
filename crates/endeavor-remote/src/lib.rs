@@ -32,8 +32,11 @@ pub use mcp::{asks_first, changes_notebook, is_tool, runs_code};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -103,6 +106,7 @@ enum Event {
     /// The runtime with this pid exited, with this status.
     Exited(i32, String),
     /// Another helper wants the runtime.
+    #[cfg_attr(windows, allow(dead_code))]
     Replaced,
     /// A control message from the relay on a job's node (`slurm::Link`).
     Node(u64, ToApp),
@@ -164,10 +168,20 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
     std::process::exit(1);
 }
 
+#[cfg(unix)]
 fn stdout_mux() -> Arc<Mux> {
     // SAFETY: fd 1 is our stdout and stays open for the life of the process;
     // frames are binary, so skip std's line-buffered Stdout.
     let stdout = unsafe { File::from_raw_fd(1) };
+    Mux::new(stdout)
+}
+
+#[cfg(windows)]
+fn stdout_mux() -> Arc<Mux> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    // SAFETY: our stdout handle stays open for the life of the process;
+    // frames are binary, so skip std's line-buffered Stdout.
+    let stdout = unsafe { File::from_raw_handle(std::io::stdout().as_raw_handle()) };
     Mux::new(stdout)
 }
 
@@ -213,12 +227,24 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
 }
 
 fn make_state_dir(dir: &Path) -> Result<(), String> {
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))
+}
+
+/// `options` for a file only this user may read. On Windows the state folder
+/// is under the user's own %LOCALAPPDATA%, whose permissions already do that.
+fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
 }
 
 /// Say hello, then serve the app until it detaches or goes away, starting,
 /// stopping and relaying to the runtime as it asks. Returns only on failure.
-fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: libc::sigset_t) -> Result<std::convert::Infallible, String> {
+fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: ReplaceSignal) -> Result<std::convert::Infallible, String> {
     make_state_dir(&args.state_dir)?;
     let (events, rx) = mpsc::channel();
     watch_replace_signal(replace_signal, events.clone());
@@ -507,6 +533,7 @@ impl Runtime {
         self.kill();
     }
 
+    #[cfg(unix)]
     fn kill(&self) {
         for signal in [libc::SIGTERM, libc::SIGKILL] {
             if self.exit.status().is_some() {
@@ -518,9 +545,16 @@ impl Runtime {
         stop_workers(self.pid);
         remove_state(&self.state_dir, self.pid);
     }
+
+    /// Not ported: `start` refuses on Windows, so there is no runtime to stop.
+    #[cfg(windows)]
+    fn kill(&self) {
+        eprintln!("endeavor-remote: stopping a runtime isn't supported on Windows yet (pid {})", self.pid);
+    }
 }
 
 /// The runtime was started with setsid, so its pid is also its process group's.
+#[cfg(unix)]
 fn signal_group(pid: i32, signal: i32) {
     // SAFETY: plain syscalls; a group or process that's gone only returns ESRCH.
     unsafe {
@@ -532,10 +566,15 @@ fn signal_group(pid: i32, signal: i32) {
 /// Notebook workers left behind by a runtime that exited without taking them
 /// along. Only the group: once the runtime is reaped its pid may be reused, but
 /// a group id isn't while any member is left.
+#[cfg(unix)]
 fn stop_workers(pid: i32) {
     // SAFETY: plain syscall.
     unsafe { libc::kill(-pid, libc::SIGTERM) };
 }
+
+/// Not ported: Windows needs the runtime's processes in a Job Object.
+#[cfg(windows)]
+fn stop_workers(_pid: i32) {}
 
 /// Whether and how the runtime exited.
 #[derive(Default)]
@@ -584,9 +623,17 @@ impl Exit {
     }
 }
 
+#[cfg(unix)]
 fn pid_alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
+/// Not ported: Windows needs OpenProcess and the process's start time, as it
+/// reuses pids quickly. Until then no recorded runtime counts as alive.
+#[cfg(windows)]
+fn pid_alive(_pid: i32) -> bool {
+    false
 }
 
 /// Take `DIR/lock`: one client per runtime. A helper already holding it on
@@ -595,15 +642,9 @@ fn pid_alive(pid: i32) -> bool {
 /// login nodes, and a pid means nothing on another one.
 fn lock(dir: &Path) -> Result<File, String> {
     let path = dir.join("lock");
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
+    let mut file = owner_only(OpenOptions::new().read(true).write(true).create(true).truncate(false))
         .open(&path)
         .map_err(|e| format!("Couldn't open {}: {e}", path.display()))?;
-    let try_lock = |file: &File| unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
     if !try_lock(&file) {
         let here = hostname();
         let mut tries = 0;
@@ -621,8 +662,7 @@ fn lock(dir: &Path) -> Result<File, String> {
                     && host == here
                     && pid != std::process::id() as i32
                 {
-                    // SAFETY: plain syscall.
-                    unsafe { libc::kill(pid, libc::SIGUSR1) };
+                    ask_to_hand_over(pid);
                 }
             }
             tries += 1;
@@ -642,6 +682,35 @@ fn lock(dir: &Path) -> Result<File, String> {
     Ok(file)
 }
 
+#[cfg(unix)]
+fn try_lock(file: &File) -> bool {
+    // SAFETY: plain syscall on a file we hold open.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+#[cfg(windows)]
+fn try_lock(file: &File) -> bool {
+    file.try_lock().is_ok()
+}
+
+/// Ask the helper `pid` on this machine to hand its runtime over (see `watch_replace_signal`).
+#[cfg(unix)]
+fn ask_to_hand_over(pid: i32) {
+    // SAFETY: plain syscall.
+    unsafe { libc::kill(pid, libc::SIGUSR1) };
+}
+
+/// Not ported: Windows needs a named event or a call on a loopback port, so a
+/// second client waits for the lock and then fails.
+#[cfg(windows)]
+fn ask_to_hand_over(_pid: i32) {}
+
+#[cfg(unix)]
+type ReplaceSignal = libc::sigset_t;
+#[cfg(windows)]
+type ReplaceSignal = ();
+
+#[cfg(unix)]
 fn block_sigusr1() -> libc::sigset_t {
     // SAFETY: initializing and applying a signal set on this (still only) thread.
     unsafe {
@@ -653,6 +722,10 @@ fn block_sigusr1() -> libc::sigset_t {
     }
 }
 
+#[cfg(windows)]
+fn block_sigusr1() -> ReplaceSignal {}
+
+#[cfg(unix)]
 fn watch_replace_signal(set: libc::sigset_t, events: Sender<Event>) {
     std::thread::spawn(move || {
         loop {
@@ -665,6 +738,10 @@ fn watch_replace_signal(set: libc::sigset_t, events: Sender<Event>) {
     });
 }
 
+/// Not ported (see `ask_to_hand_over`).
+#[cfg(windows)]
+fn watch_replace_signal(_set: ReplaceSignal, _events: Sender<Event>) {}
+
 /// Read frames from the app: streams go where the attached runtime is (its
 /// ports here, or the relay on its job's node), file requests are answered on
 /// their own threads with `answer`, other control messages and the end of input
@@ -672,7 +749,12 @@ fn watch_replace_signal(set: libc::sigset_t, events: Sender<Event>) {
 fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Answer, parts: Parts) {
     std::thread::spawn(move || {
         // SAFETY: fd 0 is our stdin; only this thread reads it.
-        let mut stdin = BufReader::new(unsafe { File::from_raw_fd(0) });
+        #[cfg(unix)]
+        let stdin = unsafe { File::from_raw_fd(0) };
+        // SAFETY: our stdin handle; only this thread reads it.
+        #[cfg(windows)]
+        let stdin: File = unsafe { std::os::windows::io::FromRawHandle::from_raw_handle(std::os::windows::io::AsRawHandle::as_raw_handle(&std::io::stdin())) };
+        let mut stdin = BufReader::new(stdin);
         loop {
             let frame = match Frame::read_from(&mut stdin) {
                 Ok(Some(frame)) => frame,
@@ -814,13 +896,12 @@ fn token(dir: &Path) -> Result<String, String> {
         return Ok(token.trim().to_owned());
     }
     let mut bytes = [0u8; 32];
+    #[cfg(unix)]
     File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).map_err(|e| format!("/dev/urandom: {e}"))?;
+    #[cfg(windows)]
+    getrandom::fill(&mut bytes).map_err(|e| format!("Couldn't make a token: {e}"))?;
     let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
+    let mut file = owner_only(OpenOptions::new().write(true).create(true).truncate(true))
         .open(&path)
         .map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
     file.write_all(token.as_bytes()).map_err(|e| e.to_string())?;
@@ -833,7 +914,9 @@ fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     let mut command = Command::new(exe);
     // Named like the helper in `ps`, not like the app it may be.
-    command.arg0("endeavor-remote").args(HELPER_ARGS.get().copied().unwrap_or_default());
+    #[cfg(unix)]
+    command.arg0("endeavor-remote");
+    command.args(HELPER_ARGS.get().copied().unwrap_or_default());
     command
         .arg("core")
         .arg("--state-dir")
@@ -854,14 +937,12 @@ fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_
 
 /// Start the runtime detached from us (its own session, no terminal, stdin from
 /// /dev/null), logging to `runtime.log`.
+#[cfg(unix)]
 fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
     let dir = &args.state_dir;
     let log_path = dir.join("runtime.log");
     // The log shows Pluto's secret URL.
-    let log = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
+    let log = owner_only(OpenOptions::new().append(true).create(true))
         .open(&log_path)
         .and_then(|f| f.set_len(0).map(|_| f))
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
@@ -876,6 +957,13 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
         });
     }
     command.spawn().map_err(|e| format!("Couldn't start the runtime: {e}"))
+}
+
+/// Not ported: on Windows the runtime needs starting detached, with Julia and
+/// its workers in a Job Object, before anything can stop it.
+#[cfg(windows)]
+fn start(_args: &Args, _julia: &str, _token: &str) -> Result<Child, String> {
+    Err("Running Julia on Windows isn't supported yet.".into())
 }
 
 /// Send the runtime's log lines as `Progress` until it's ready (then what's
@@ -920,12 +1008,18 @@ fn redact_secret(line: &str) -> String {
     format!("{}…{}", &line[..start], &line[end..])
 }
 
+#[cfg(unix)]
 fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: gethostname writes at most `len` bytes into `buf`.
     unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[cfg(windows)]
+fn hostname() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 
 fn bridge_answers(state: &State) -> bool {

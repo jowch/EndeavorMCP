@@ -19,6 +19,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -399,11 +400,19 @@ struct Call<'a> {
 }
 
 /// Whether the other end of `socket` has closed it, without reading from it.
+#[cfg(unix)]
 fn closed(socket: &TcpStream) -> bool {
     let mut byte = 0u8;
     // SAFETY: a one-byte peek into a local buffer; MSG_DONTWAIT keeps it from blocking.
     let n = unsafe { libc::recv(socket.as_raw_fd(), (&mut byte as *mut u8).cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
     n == 0 || (n < 0 && !matches!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted))
+}
+
+/// Not ported: Windows needs a non-blocking peek with winsock's `recv`. Until
+/// then a call goes on after its client hangs up.
+#[cfg(windows)]
+fn closed(_socket: &TcpStream) -> bool {
+    false
 }
 
 /// Serve one `POST /mcp`: one JSON-RPC message in; a request gets `reply`'s
