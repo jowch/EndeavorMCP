@@ -18,7 +18,7 @@ What's left depends on how far the product goes:
 | Separate crate, same repo | Move the core's modules (`core`, `http`, `mcp`, `host_tools`, `notebooks`) into an `endeavor-mcp` crate and binary; the helper and app depend on it | ~1 week |
 | Usable by other MCP clients | Setup from the server itself, a standard transport, session identity without the app, approval, a public control API, the skills (below) | +3–5 weeks |
 | Own repository and releases | CI, signed macOS and Linux binaries, versioning, the app pinning a version | +1–2 weeks |
-| Windows | The core uses Unix processes and signals throughout; see [windows.md](windows.md) | 1–1.5 weeks for the core; 6–8 weeks for the whole app |
+| Windows | The core's process control has Windows code, untried on a real machine, and a few stubs; see [windows.md](windows.md) | see [windows.md](windows.md) |
 
 Estimates, not measurements.
 
@@ -70,7 +70,7 @@ no Julia found, it says how to install one (juliaup).
 
 ## Transport: Streamable HTTP
 
-Done. The bridge moved from MCP's SSE transport to Streamable HTTP.
+The bridge speaks MCP's Streamable HTTP transport, not SSE:
 
 - The MCP spec deprecated SSE in 2025; clients may drop it.
 - Endeavor's side supports it: the ACP crate has an HTTP server type
@@ -78,8 +78,6 @@ Done. The bridge moved from MCP's SSE transport to Streamable HTTP.
   `mcpCapabilities: { http: true }`.
 - It's simpler: the tools are request and reply, so each POST returns its
   JSON directly, with no per-session event queue or keepalive thread.
-- The app and the core ship together (servers get the helper from the app
-  bundle), so the app switched in the same change; no period with both.
 
 The core serves one endpoint, `POST /mcp`: a request's reply comes back in
 the same response (`200`, `application/json`); a notification or a response
@@ -99,11 +97,11 @@ honoured: an unsupported value is `400`; a missing header (before
 `initialize`, or from a client that never sends it) falls back to what the
 server understands. The app registers the bridge as `McpServer::Http`.
 
-A runtime the helper is still attached to from before this switch — an older
-core that only spoke SSE, or (for This Mac) a Julia-only runtime from before
-the core existed at all — has no `"mcp"` key in its `runtime.json`. The core
-now writes one (`"mcp": "http"`), and passes it to the app with the rest of
-the runtime info; a missing key means SSE. The app registers `McpServer::Http`
+A runtime from before the switch to Streamable HTTP (an older core that only
+spoke SSE, or for This Mac a Julia-only runtime from before the core) can
+still be running, since runtimes outlive the app. The core writes `"mcp":
+"http"` in its `runtime.json` and passes it to the app with the rest of the
+runtime info; a missing key means SSE. The app registers `McpServer::Http`
 when the runtime says so, and the old `McpServer::Sse` registration otherwise
 — the only SSE left, to drop once no runtime older than this change can still
 be running.
