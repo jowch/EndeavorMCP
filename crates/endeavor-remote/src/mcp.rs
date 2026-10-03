@@ -195,7 +195,6 @@ impl Bridge {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                 return Some(answer(self.notebooks.run_preview(&text("tool", ""), &arguments)));
             }
-            "endeavor/run_anyway" => return Some(answer(self.notebooks.run_anyway(&text("notebook_id", ""), params.get("cells").unwrap_or(&Value::Null)))),
             "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", "")))),
             "endeavor/move_notebook" => return Some(answer(self.notebooks.move_notebook(&text("notebook_id", ""), &text("path", "")))),
             "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
