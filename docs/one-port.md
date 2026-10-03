@@ -156,17 +156,24 @@ Built on top, once the above works:
 
 ## To check
 
-Checked live on 2026-10-03, on This Mac and on the OrbStack server: the web
-view takes the cookie from the `303`; WebKit's `Origin` and `Sec-Fetch-Site`
-pass; Pluto's page loads in safe preview, and Run notebook runs its cells
-over the WebSocket; Claude's notebook tools answer through `/mcp`. Still to
-check:
+Checked live on 2026-10-03 in a test copy of the app:
 
-- The Slurm VM: the same, through the relay on the job's node.
-- A runtime from before this change: the app shows the "older version"
-  message, and Restart Julia (or Stop) from there ends it and starts a new one.
-- Pluto's "lost authentication" alert when a runtime restarts (see
-  `close_page`) still behaves with the cookie in front.
+- This Mac, the OrbStack server and a Slurm job on the VM: the web view
+  takes the cookie from the `303`; WebKit's `Origin` and `Sec-Fetch-Site`
+  pass; Pluto's page loads in safe preview, Run notebook runs its cells over
+  the WebSocket, and Claude's notebook tools answer through `/mcp`.
+- Restart Julia on This Mac: the page reloads with no "lost authentication"
+  alert and runs cells.
+- A runtime from before this change (started on the VM from an older cached
+  helper): the session shows "Julia here was started by an older version of
+  Endeavor … Restart Julia to use it." Settings → Where notebooks run → Stop
+  ends it, and Start then brings up a new runtime.
+
+Still open:
+
+- The notebook pane in that older-runtime state offers only "Start on
+  <host>", which fails again with the same message. It should offer a
+  restart (stop the old runtime, then start) instead.
 - Pluto's page in a browser through an `ssh -L` forward (step 5).
 
 ## Order
@@ -175,5 +182,5 @@ check:
    tests against a real Pluto. Built.
 2. Wire and helper: one port, `Target` removed; relay and Slurm relay. Built.
 3. App: one listener port, page URL, bridge URL, guard. Built.
-4. Live check: This Mac and the OrbStack server done; the Slurm VM left.
+4. Live check: done (This Mac, the OrbStack server, the Slurm VM).
 5. `endeavor serve` and the stdio form.
