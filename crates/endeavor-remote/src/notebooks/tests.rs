@@ -329,7 +329,7 @@ impl Setup {
     /// The kind of error a call failed with (`read_required`, ...).
     fn refused(&self, owner: &str, tool: &str, arguments: Value) -> String {
         let error = self.call(owner, tool, arguments).expect_err("refused");
-        let text: Value = serde_json::from_str(crate::mcp::tool_error(&error)["content"][0]["text"].as_str().unwrap()).unwrap();
+        let text: Value = serde_json::from_str(crate::mcp::tool_error(&error, false)["content"][0]["text"].as_str().unwrap()).unwrap();
         text["error"].as_str().unwrap().to_owned()
     }
 
@@ -1347,7 +1347,7 @@ fn keep_notebook_alive_checks_its_arguments_as_julia_did() {
     assert_eq!(s.notebooks.keep_alive(&json!({ "keep": true })), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: ''".into()));
     assert_eq!(keep(json!(NB), json!("yes")), Err("ArgumentError: invalid_keep::keep must be true or false".into()));
     assert_eq!(keep(json!(NB.to_uppercase()), json!(false)), Ok(json!({ "notebook_id": NB, "kept_alive": false })));
-    let text = |raw: &str| crate::mcp::tool_error(raw)["content"][0]["text"].as_str().unwrap().to_owned();
+    let text = |raw: &str| crate::mcp::tool_error(raw, false)["content"][0]["text"].as_str().unwrap().to_owned();
     assert_eq!(
         text(&keep(json!(missing), json!(true)).unwrap_err()),
         format!(r#"{{"error":"notebook_not_found","message":"No notebook with id '{missing}' in the current session. Run list_notebooks to see what's open."}}"#)
@@ -1379,7 +1379,7 @@ fn a_notebooks_own_julia_ending_by_itself_ends_the_run_claude_waits_for() {
     let (_, rx) = s.notebooks.subscribe().unwrap();
 
     let error = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).expect_err("the run ended");
-    let shown: Value = serde_json::from_str(crate::mcp::tool_error(&error)["content"][0]["text"].as_str().unwrap()).unwrap();
+    let shown: Value = serde_json::from_str(crate::mcp::tool_error(&error, false)["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(
         shown,
         json!({

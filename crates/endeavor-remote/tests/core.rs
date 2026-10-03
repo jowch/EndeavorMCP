@@ -300,7 +300,8 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     assert_eq!(error["error"], "notebook_not_found");
     assert_eq!(
         error["message"],
-        "No notebook with id 'aaaaaaaa-0000-0000-0000-000000000000' in the current session. Run list_notebooks to see what's open."
+        "No notebook with id 'aaaaaaaa-0000-0000-0000-000000000000' in the current session. Run list_notebooks to see what's open.\n\
+         See `notebook_guide` for how to use these tools."
     );
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 }
@@ -468,7 +469,7 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     // The core reads the notebooks' state after every tool call, to tell the app.
     let reads = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).count();
     let plan_edit = "Plan mode is read-only: `edit_cell` would change or run the notebook. Finish the plan; the user switches modes to carry it out.";
-    let not_a_notebook = |id| tool_error(id, "invalid_notebook_id", "Invalid notebook ID: 'n1'");
+    let not_a_notebook = |id| tool_error(id, "invalid_notebook_id", "Invalid notebook ID: 'n1'\nSee `notebook_guide` for how to use these tools.");
 
     let set = r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/set_policy","params":{"owner":"7","policy":"plan"}}"#;
     assert_eq!(app_call(&core, set), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
@@ -493,7 +494,7 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     assert_eq!(app_call(&core, &tool(7, "list_folder")), tool_error(7, "host_tools", &not_here("list_folder")));
 
     let null_args = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":null}}"#;
-    assert_eq!(mcp(&core, null_args, &seven).1, tool_error(8, "invalid_argument", "arguments must be an object"));
+    assert_eq!(mcp(&core, null_args, &seven).1, tool_error(8, "invalid_argument", "arguments must be an object\nSee `notebook_guide` for how to use these tools."));
 
     assert_eq!(app_call(&core, &set.replace("plan", "ask")), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
     assert_eq!(mcp(&core, &tool(9, "edit_cell"), &seven).1, not_a_notebook(9));

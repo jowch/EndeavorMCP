@@ -196,22 +196,27 @@ impl Bridge {
     fn call_tool(&self, params: &Value, caller: &Caller) -> Value {
         let text = |result: &Value| json!({ "content": [{ "type": "text", "text": to_json(result) }], "isError": false });
         let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        // Whether a notebook-tool error is worth pointing at the guide: only an
+        // agent without it to begin with, and only for a call it could retry
+        // differently, not a host-tool mistake (its own tools, not these) or a
+        // refusal that already says exactly what to do.
+        let help = !caller.has_skills;
         if !arguments.is_object() {
-            return tool_error("ArgumentError: invalid_argument::arguments must be an object");
+            return tool_error("ArgumentError: invalid_argument::arguments must be an object", help);
         }
         let name = match params.get("name") {
             None => "",
             Some(Value::String(name)) => name.as_str(),
-            Some(other) => return tool_error(&format!("ArgumentError: unknown_tool::Unknown tool: '{}'", julia_string(other))),
+            Some(other) => return tool_error(&format!("ArgumentError: unknown_tool::Unknown tool: '{}'", julia_string(other)), help),
         };
         self.notebooks.note_activity(&arguments);
         if let Some(refusal) = self.refusal(caller, name) {
-            return tool_error(&refusal);
+            return tool_error(&refusal, false);
         }
         if name == guide::TOOL {
             return match guide::read(&arguments) {
                 Ok(guide) => json!({ "content": [{ "type": "text", "text": guide }], "isError": false }),
-                Err(error) => tool_error(&error),
+                Err(error) => tool_error(&error, false),
             };
         }
         if host_tools::NAMES.contains(&name) {
@@ -219,14 +224,14 @@ impl Bridge {
             let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
             return match host_tools::call(name, &arguments, &host_tools::Shell { folder: folder.as_deref(), env: &env }) {
                 Ok(result) => text(&result),
-                Err(error) => tool_error(&error),
+                Err(error) => tool_error(&error, false),
             };
         }
         if name == "keep_notebook_alive" {
-            return self.notebooks.keep_alive(&arguments).map_or_else(|e| tool_error(&e), |r| text(&r));
+            return self.notebooks.keep_alive(&arguments).map_or_else(|e| tool_error(&e, help), |r| text(&r));
         }
         if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments) {
-            return tool_error(&refusal);
+            return tool_error(&refusal, help);
         }
         let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
         match self.notebooks.tool(&caller.owner, name, &arguments, folder.as_deref()) {
@@ -238,7 +243,7 @@ impl Bridge {
                 ],
                 "isError": false,
             }),
-            Err(error) => tool_error(&error),
+            Err(error) => tool_error(&error, help),
         }
     }
 
@@ -336,9 +341,24 @@ pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> 
     answer(message, &Caller::of(request), |_| json!({ "content": [{ "type": "text", "text": why }], "isError": true }))
 }
 
+/// Kinds that mean the agent called a notebook tool the wrong way (a bad
+/// argument, an unknown tool or cell, skipping the read-before-edit guard,
+/// editing outside the session's one notebook) rather than hitting a runtime
+/// problem in the user's Julia code, the Julia process, or the session's
+/// policy. `notebook_guide` explains all of these.
+const MISUSE_KINDS: [&str; 14] = [
+    "invalid_argument", "unknown_tool", "cell_not_found", "notebook_not_found",
+    "invalid_cell_id", "invalid_notebook_id", "invalid_order", "invalid_path",
+    "read_required", "stale_read", "placement_required", "not_staged", "one_notebook", "run_conflict",
+];
+
 /// A failed tool call's result, from the text of the error Julia raised:
-/// `ArgumentError: kind::message` names its kind; anything else is a `tool_error`.
-pub(crate) fn tool_error(raw: &str) -> Value {
+/// `ArgumentError: kind::message` names its kind; anything else is a
+/// `tool_error`. `help`: whether to point a misuse kind at `notebook_guide`,
+/// true only when the caller has no other way to learn it (no plugin) and
+/// the call site is a notebook tool's own mistake, not a host tool's or a
+/// refusal that already says what to do instead.
+pub(crate) fn tool_error(raw: &str, help: bool) -> Value {
     let unwrapped = unwrap_key_error(raw);
     let raw = unwrapped.as_deref().unwrap_or(raw);
     let (kind, message) = match raw.split_once("::") {
@@ -347,6 +367,11 @@ pub(crate) fn tool_error(raw: &str) -> Value {
             (kind.rsplit(':').next().unwrap_or_default().trim(), message)
         }
         None => ("tool_error", raw),
+    };
+    let message = if help && MISUSE_KINDS.contains(&kind) {
+        format!("{message}\nSee `notebook_guide` for how to use these tools.")
+    } else {
+        message.to_owned()
     };
     let text = to_json(&json!({ "error": kind, "message": message }));
     json!({ "content": [{ "type": "text", "text": text }], "isError": true })
@@ -467,21 +492,41 @@ mod tests {
 
     #[test]
     fn reads_errors_as_julia_did() {
-        let text = |raw: &str| tool_error(raw)["content"][0]["text"].as_str().unwrap().to_owned();
+        let text = |raw: &str| tool_error(raw, false)["content"][0]["text"].as_str().unwrap().to_owned();
         assert_eq!(text("ArgumentError: not_found::No folder at /x::y"), r#"{"error":"not_found","message":"No folder at /x::y"}"#);
         assert_eq!(text("SystemError: opening file \"/x\": Permission denied"), r#"{"error":"tool_error","message":"SystemError: opening file \"/x\": Permission denied"}"#);
         assert_eq!(text("IOError: readdir(\"/a::b\"): denied"), r#"{"error":"readdir(\"/a","message":"b\"): denied"}"#);
-        assert_eq!(tool_error("x")["isError"], true);
+        assert_eq!(tool_error("x", false)["isError"], true);
     }
 
     #[test]
     fn a_wrapped_key_error_unwraps_to_its_own_kind_and_message() {
-        let text = |raw: &str| tool_error(raw)["content"][0]["text"].as_str().unwrap().to_owned();
+        let text = |raw: &str| tool_error(raw, false)["content"][0]["text"].as_str().unwrap().to_owned();
         assert_eq!(
             text("KeyError: key \"notebook_not_found::No notebook with id 'x' in the current session. Run list_notebooks to see what's open.\" not found"),
             r#"{"error":"notebook_not_found","message":"No notebook with id 'x' in the current session. Run list_notebooks to see what's open."}"#
         );
         // A quoted key with no kind::message of its own reads as a plain KeyError.
         assert_eq!(text("KeyError: key \"code\" not found"), r#"{"error":"tool_error","message":"KeyError: key \"code\" not found"}"#);
+    }
+
+    #[test]
+    fn a_misuse_error_points_to_the_guide_only_when_asked_to_help() {
+        let text = |raw: &str, help: bool| tool_error(raw, help)["content"][0]["text"].as_str().unwrap().to_owned();
+        let notebook_not_found = "ArgumentError: notebook_not_found::No notebook with id 'x' in the current session.";
+        assert_eq!(
+            text(notebook_not_found, true),
+            r#"{"error":"notebook_not_found","message":"No notebook with id 'x' in the current session.\nSee `notebook_guide` for how to use these tools."}"#,
+            "an agent without the plugin, on a kind the guide explains"
+        );
+        assert_eq!(
+            text(notebook_not_found, false),
+            r#"{"error":"notebook_not_found","message":"No notebook with id 'x' in the current session."}"#,
+            "an agent with its own skills gets no pointer to this server's guide"
+        );
+        // A Julia process crash isn't something the guide explains, whether asked to help or not.
+        let crashed = "ArgumentError: process_exited::The notebook's Julia process exited while running a cell";
+        assert_eq!(text(crashed, true), text(crashed, false), "not an agent misuse kind");
+        assert!(!text(crashed, true).contains("notebook_guide"));
     }
 }
