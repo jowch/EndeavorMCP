@@ -415,9 +415,13 @@ fn julia_from_a_shell_line_is_found_and_its_failure_reported() {
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
 
-    let mut helper = Helper::start_with(&dir, &["--julia-shell", "true"], &[("SHELL", "/bin/sh"), ("PATH", "/usr/bin:/bin")]);
+    // A login shell's profile can put a julia back on PATH (GitHub's Ubuntu image has one), so the line empties it.
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let line = format!("PATH={}", empty.display());
+    let mut helper = Helper::start_with(&dir, &["--julia-shell", &line], &[("SHELL", "/bin/sh")]);
     let ToApp::StartFailed { message } = helper.start_runtime() else { panic!("expected StartFailed") };
-    assert!(message.contains("`true`") && message.contains("PATH"), "{message}");
+    assert!(message.contains(&format!("`{line}`")) && message.contains("PATH"), "{message}");
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
 }
