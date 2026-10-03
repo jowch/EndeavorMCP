@@ -24,6 +24,8 @@ mod mcp;
 mod notebooks;
 mod results;
 mod slurm;
+#[cfg(windows)]
+mod winproc;
 
 pub use core::serve_unreachable;
 pub use guard::serve_guarded;
@@ -88,6 +90,9 @@ struct State {
     launcher: String,
     node: String,
     pid: i32,
+    /// When that process started (Windows: its creation time, which tells it
+    /// from a later process given the same pid); none on Unix.
+    started: Option<u64>,
     pluto_port: u16,
     mcp_port: u16,
     token: String,
@@ -408,15 +413,15 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     let failed = |message: String| ToApp::StartFailed { message };
     let lock = lock(&args.state_dir).map_err(failed)?;
     if let Some(state) = existing(args).map_err(failed)? {
-        let runtime = Runtime { pid: state.pid, exit: Exit::watch_pid(state.pid, events.clone()), state_dir: args.state_dir.clone() };
+        let runtime = Runtime::recorded(&state, &args.state_dir, events);
         return Ok(Attached { how: How::Process(runtime), state, reattached: true, _lock: lock });
     }
     let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(failed)?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
     let token = token(&args.state_dir).map_err(failed)?;
     let child = start(args, &julia, &token).map_err(failed)?;
-    let pid = child.id() as i32;
-    let runtime = Runtime { pid, exit: Exit::watch_child(child, pid, events.clone()), state_dir: args.state_dir.clone() };
+    let (pid, started) = (child.id() as i32, child_started(&child));
+    let runtime = Runtime { pid, started, exit: Exit::watch_child(child, pid, events.clone()), state_dir: args.state_dir.clone() };
     let state = boot(args, mux, &runtime, rx)?;
     Ok(Attached { how: How::Process(runtime), state, reattached: false, _lock: lock })
 }
@@ -433,7 +438,7 @@ fn stop_recorded(args: &Args, events: &Sender<Event>) {
     match args.launcher {
         Launcher::Process => match existing(args) {
             Ok(Some(state)) => {
-                let runtime = Runtime { pid: state.pid, exit: Exit::watch_pid(state.pid, events.clone()), state_dir: args.state_dir.clone() };
+                let runtime = Runtime::recorded(&state, &args.state_dir, events);
                 runtime.stop(Some(&state));
             }
             Ok(None) => {}
@@ -452,7 +457,7 @@ fn check(dir: &Path, launcher: Launcher, any_node: bool) -> RuntimeState {
     if state.node != hostname() && !any_node {
         return RuntimeState::Running { node: state.node, notebooks: None, job: None };
     }
-    if !pid_alive(state.pid) || !(bridge_answers(&state) || bridge_answers(&state)) {
+    if !pid_alive(state.pid, state.started) || !(bridge_answers(&state) || bridge_answers(&state)) {
         return RuntimeState::NotRunning;
     }
     let notebooks = open_notebooks(&state);
@@ -510,11 +515,19 @@ fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, rx: &mpsc::Receiver<Even
 /// A runtime process this helper watches.
 struct Runtime {
     pid: i32,
+    /// As in `State`.
+    started: Option<u64>,
     exit: Arc<Exit>,
     state_dir: PathBuf,
 }
 
 impl Runtime {
+    /// The runtime `state` records, which some earlier helper started.
+    fn recorded(state: &State, state_dir: &Path, events: &Sender<Event>) -> Runtime {
+        let exit = Exit::watch_pid(state.pid, state.started, events.clone());
+        Runtime { pid: state.pid, started: state.started, exit, state_dir: state_dir.to_path_buf() }
+    }
+
     /// It exited: clean up after it and say so.
     fn died(&self, status: String) -> ToApp {
         let log_tail = log_tail(&self.state_dir.join("runtime.log"));
@@ -546,10 +559,17 @@ impl Runtime {
         remove_state(&self.state_dir, self.pid);
     }
 
-    /// Not ported: `start` refuses on Windows, so there is no runtime to stop.
+    /// End the core, which ends its Job Object, and with it Julia and its workers.
     #[cfg(windows)]
     fn kill(&self) {
-        eprintln!("endeavor-remote: stopping a runtime isn't supported on Windows yet (pid {})", self.pid);
+        if self.exit.status().is_none() {
+            match winproc::Process::open(self.pid, self.started) {
+                Some(core) => core.terminate(),
+                None => eprintln!("endeavor-remote: the runtime (pid {}) is gone or isn't the one recorded; not stopping it", self.pid),
+            }
+            self.exit.wait(Duration::from_secs(5));
+        }
+        remove_state(&self.state_dir, self.pid);
     }
 }
 
@@ -572,7 +592,8 @@ fn stop_workers(pid: i32) {
     unsafe { libc::kill(-pid, libc::SIGTERM) };
 }
 
-/// Not ported: Windows needs the runtime's processes in a Job Object.
+/// Nothing to do on Windows: the core's Job Object ends Julia's workers when
+/// the core ends.
 #[cfg(windows)]
 fn stop_workers(_pid: i32) {}
 
@@ -595,11 +616,11 @@ impl Exit {
     }
 
     /// A runtime some earlier helper started isn't our child: poll it.
-    fn watch_pid(pid: i32, events: Sender<Event>) -> Arc<Exit> {
+    fn watch_pid(pid: i32, started: Option<u64>, events: Sender<Event>) -> Arc<Exit> {
         let exit = Arc::new(Exit::default());
         let e = exit.clone();
         std::thread::spawn(move || {
-            while pid_alive(pid) {
+            while pid_alive(pid, started) {
                 std::thread::sleep(Duration::from_millis(500));
             }
             e.set(pid, "exited".into(), &events);
@@ -624,16 +645,38 @@ impl Exit {
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
+fn pid_alive(pid: i32, _started: Option<u64>) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
-/// Not ported: Windows needs OpenProcess and the process's start time, as it
-/// reuses pids quickly. Until then no recorded runtime counts as alive.
+/// Windows reuses pids quickly, so the process must also have started when
+/// the record says.
 #[cfg(windows)]
-fn pid_alive(_pid: i32) -> bool {
-    false
+fn pid_alive(pid: i32, started: Option<u64>) -> bool {
+    winproc::Process::open(pid, started).is_some_and(|process| process.alive())
+}
+
+/// When a child we started began, to record with its pid (Windows only).
+#[cfg(unix)]
+fn child_started(_child: &Child) -> Option<u64> {
+    None
+}
+
+#[cfg(windows)]
+fn child_started(child: &Child) -> Option<u64> {
+    winproc::start_time(std::os::windows::io::AsRawHandle::as_raw_handle(child))
+}
+
+/// End the runtime recorded with `pid` and `started` (runtime.json), with
+/// Julia and its workers, unless that pid now belongs to another process: the
+/// app's Repair runtime, where Unix ends the process group instead.
+#[cfg(windows)]
+pub fn end_recorded_runtime(pid: i32, started: Option<u64>) {
+    if let Some(core) = winproc::Process::open(pid, started) {
+        core.terminate();
+        core.wait(5_000);
+    }
 }
 
 /// Take `DIR/lock`: one client per runtime. A helper already holding it on
@@ -850,7 +893,7 @@ fn existing(args: &Args) -> Result<Option<State>, String> {
         ));
     }
     // Twice: a busy runtime can be slow to answer once.
-    if pid_alive(state.pid) && (bridge_answers(&state) || bridge_answers(&state)) {
+    if pid_alive(state.pid, state.started) && (bridge_answers(&state) || bridge_answers(&state)) {
         return Ok(Some(state));
     }
     eprintln!("endeavor-remote: the recorded runtime (pid {}) isn't answering; starting a new one", state.pid);
@@ -868,6 +911,7 @@ fn parse_state(v: &Value) -> Option<State> {
         launcher: text("launcher")?,
         node: text("node")?,
         pid: v["pid"].as_i64().and_then(|p| i32::try_from(p).ok())?,
+        started: v["started"].as_u64(),
         pluto_port: port("pluto_port")?,
         mcp_port: port("mcp_port")?,
         token: text("token")?,
@@ -959,11 +1003,38 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
     command.spawn().map_err(|e| format!("Couldn't start the runtime: {e}"))
 }
 
-/// Not ported: on Windows the runtime needs starting detached, with Julia and
-/// its workers in a Job Object, before anything can stop it.
+/// Start the runtime detached from us (its own process group, a console of its
+/// own with no window, stdin from NUL), logging to `runtime.log`. The core
+/// then puts itself in a Job Object that takes Julia and its workers along
+/// when it ends (see core).
 #[cfg(windows)]
-fn start(_args: &Args, _julia: &str, _token: &str) -> Result<Child, String> {
-    Err("Running Julia on Windows isn't supported yet.".into())
+fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+    let dir = &args.state_dir;
+    let log_path = dir.join("runtime.log");
+    let log = owner_only(OpenOptions::new().append(true).create(true))
+        .open(&log_path)
+        .and_then(|f| f.set_len(0).map(|_| f))
+        .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
+    let stderr = log.try_clone().map_err(|e| e.to_string())?;
+    let mut command = runtime_command(julia, &args.runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
+    command.stdout(log).stderr(stderr);
+    // Julia and Pluto's workers are console programs: with no console to
+    // share, each would open a console window. CREATE_NO_WINDOW gives the core
+    // one without a window, which they inherit. Breaking away from a job the
+    // app runs in lets the runtime outlive the app, as it does on Unix; a job
+    // that doesn't allow that refuses it, and then the runtime ends with the app.
+    let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    match command.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB).spawn() {
+        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            eprintln!("endeavor-remote: the runtime can't leave the job this helper runs in, so it ends with the app");
+            command.creation_flags(flags).spawn()
+        }
+        result => result,
+    }
+    .map_err(|e| format!("Couldn't start the runtime: {e}"))
 }
 
 /// Send the runtime's log lines as `Progress` until it's ready (then what's

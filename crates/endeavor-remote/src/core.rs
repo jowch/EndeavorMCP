@@ -8,7 +8,9 @@
 //!
 //! Julia shares the core's process group, which the helper created, so the
 //! helper's signals to the group reach both. The core exits when Julia does,
-//! the same way, and passes a stop signal sent to it alone on to Julia.
+//! the same way, and passes a stop signal sent to it alone on to Julia. On
+//! Windows the core puts itself in a Job Object before starting Julia, so
+//! Julia and its workers end when the core does.
 
 use std::fs::OpenOptions;
 use std::io::{self, BufReader, Write};
@@ -80,6 +82,9 @@ pub fn main(argv: &[String]) -> ! {
     let julia_state = args.state_dir.join(JULIA_STATE);
     let _ = std::fs::remove_file(&julia_state);
     let mut command = julia_command(&args, &token, &launcher, &julia_state).unwrap_or_else(|e| fail(e));
+    // Kept, unused, until the process exits: closing it ends the job.
+    #[cfg(windows)]
+    let _job = crate::winproc::job_ending_with_this_process().unwrap_or_else(|e| fail(format!("Couldn't keep Julia's processes together with this one (Job Object): {e}")));
     // SAFETY: only async-signal-safe calls between fork and exec.
     #[cfg(unix)]
     unsafe {
@@ -91,7 +96,6 @@ pub fn main(argv: &[String]) -> ! {
         });
     }
     let mut julia = command.spawn().unwrap_or_else(|e| fail(format!("Couldn't start {}: {e}", args.julia)));
-    // Not ported: on Windows nothing yet ties Julia's life to the core's (a Job Object).
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, julia.id() as i32);
 
@@ -159,6 +163,11 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, bridge_port: u16) -> Option
         return None;
     }
     state["pid"] = std::process::id().into();
+    // With the pid, what tells the core from a later process given its pid.
+    #[cfg(windows)]
+    if let Some(started) = crate::winproc::own_start_time() {
+        state["started"] = started.into();
+    }
     state["mcp_port"] = bridge_port.into();
     // The core serves the agent's MCP connection over Streamable HTTP, at
     // `/mcp`; an old runtime.json without this key means SSE (parse_state).

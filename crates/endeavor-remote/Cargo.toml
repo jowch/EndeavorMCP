@@ -13,3 +13,5 @@ libc = "0.2"
 getrandom = "0.3"
 # Paths as Julia's realpath gives them, without std's \\?\ prefix.
 dunce = "1"
+# The runtime's processes: a Job Object, and pids checked against start times.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
