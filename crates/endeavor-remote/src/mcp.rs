@@ -50,6 +50,19 @@ pub const WRITE_TOOLS: [&str; 12] = [
     "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell",
 ];
 
+/// Whether a call to `tool` with `arguments` runs code: the calls Ask to run
+/// asks about first.
+pub fn runs_code(tool: &str, arguments: &Value) -> bool {
+    match tool {
+        // delete_cell re-runs the deleted cell's dependents (and can't be undone).
+        "execute_cell" | "submit_changes" | "run_all_cells" | "allow_execution" | "delete_cell" => true,
+        // A shell command on a session's server.
+        "run_shell" => true,
+        "add_cell" | "edit_cell" => arguments["run_after"].as_bool() == Some(true),
+        _ => false,
+    }
+}
+
 /// What every client connection shares.
 pub struct Bridge {
     pub julia: Arc<Julia>,
@@ -92,6 +105,7 @@ impl Bridge {
             ("ENDEAVOR_TOKEN", None),
             ("ENDEAVOR_STATE", None),
             ("ENDEAVOR_LAUNCHER", None),
+            ("ENDEAVOR_BUILD", None),
         ];
         let julia = Arc::new(Julia::new(token.clone()));
         let clock = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
@@ -502,6 +516,21 @@ mod tests {
         assert!(ask("initialize", true).get("instructions").is_none(), "Claude Code has the plugin's skills");
         assert!(!names(ask("tools/list", true)).contains(&"notebook_guide".to_owned()));
         assert!(is_tool("notebook_guide") && is_tool("edit_cell") && is_tool("run_shell") && !is_tool("edit"));
+    }
+
+    #[test]
+    fn only_calls_that_run_code_count_as_runs() {
+        let runs = |tool: &str, arguments: Value| runs_code(tool, &arguments);
+        for tool in ["execute_cell", "submit_changes", "run_all_cells", "allow_execution", "delete_cell", "run_shell"] {
+            assert!(runs(tool, json!({})), "{tool}");
+        }
+        assert!(runs("add_cell", json!({ "code": "1", "run_after": true })));
+        assert!(runs("edit_cell", json!({ "code": "1", "run_after": true })));
+        assert!(!runs("add_cell", json!({ "code": "1" })));
+        assert!(!runs("edit_cell", json!({ "code": "1", "run_after": false })));
+        assert!(!runs("edit_cells", json!({ "cells": [] })));
+        assert!(!runs("read_cell", json!({})));
+        assert!(!runs("read_file", json!({ "path": "/tmp/x" })));
     }
 
     #[test]

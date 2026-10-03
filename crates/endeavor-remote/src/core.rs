@@ -60,7 +60,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 }
 
 /// `endeavor-remote core …`, with ENDEAVOR_TOKEN and ENDEAVOR_LAUNCHER in the
-/// environment. Its stdout and stderr are the runtime's log, which Julia shares.
+/// environment, and ENDEAVOR_BUILD, the app build it came from, which it
+/// reports to the app. Its stdout and stderr are the runtime's log, which Julia shares.
 pub fn main(argv: &[String]) -> ! {
     let args = parse_args(argv).unwrap_or_else(|e| {
         eprintln!("{e}\n{USAGE}");
@@ -91,6 +92,9 @@ pub fn main(argv: &[String]) -> ! {
     pass_on_stop_signals(stop_signals, julia_pid);
 
     let bridge = Arc::new(Bridge::new(token, &args.depot));
+    if let Ok(build) = std::env::var("ENDEAVOR_BUILD") {
+        let _ = bridge.notebooks.build.set(build);
+    }
     let bridge_port = listener.local_addr().unwrap().port();
     accept(listener, bridge.clone());
 

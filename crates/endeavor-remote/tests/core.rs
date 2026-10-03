@@ -39,6 +39,7 @@ impl Core {
             .args(["--runtime", "/opt/runtime", "--depot", "/opt/depot:"])
             .env("ENDEAVOR_TOKEN", TOKEN)
             .env("ENDEAVOR_LAUNCHER", "process")
+            .env("ENDEAVOR_BUILD", "1.0.0-abc")
             .stdin(Stdio::null())
             .spawn()
             .unwrap();
@@ -270,7 +271,7 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     write!(socket, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     let head = read_until(&mut reader, "\r\n\r\n");
     assert!(head.starts_with("HTTP/1.1 200 OK\r\n") && head.contains("Content-Type: text/event-stream\r\n") && !head.contains("chunked"), "{head}");
-    assert_eq!(read_until(&mut reader, "\n\n"), "data: {\"cells\":{},\"idle_stopped\":[],\"notebooks\":[]}\n\n", "the state now");
+    assert_eq!(read_until(&mut reader, "\n\n"), "data: {\"build\":\"1.0.0-abc\",\"cells\":{},\"idle_stopped\":[],\"notebooks\":[]}\n\n", "the state now, and the build it came from");
 
     // Julia says a notebook changed: the core reads it and tells the app.
     bridge.set_notebooks(vec![notebook("n1", "x = 1")]);
@@ -696,7 +697,7 @@ fn run_shell_runs_in_the_login_shell_and_keeps_to_its_limits() {
     let ran = server.run(serde_json::json!({ "command": "echo out; echo err >&2; pwd; exit 3", "cwd": folder }));
     assert_eq!(ran, serde_json::json!({ "exit_code": 3, "stdout": format!("out\n{}\n", folder.display()), "stderr": "err\n", "timed_out": false, "cwd": folder }));
     assert_eq!(server.run(serde_json::json!({ "command": "pwd" }))["stdout"], format!("{}\n", home.display()), "home by default");
-    let env = server.run(serde_json::json!({ "command": "echo \"$JULIA_DEPOT_PATH|$ENDEAVOR_TOKEN|$ENDEAVOR_LAUNCHER\"" }));
+    let env = server.run(serde_json::json!({ "command": "echo \"$JULIA_DEPOT_PATH|$ENDEAVOR_TOKEN|$ENDEAVOR_LAUNCHER$ENDEAVOR_BUILD\"" }));
     assert_eq!(env["stdout"], "/opt/depot:||\n", "Julia's environment, without the runtime's secrets");
 
     // A session's own folder is where it runs by default.

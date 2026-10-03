@@ -236,8 +236,9 @@ fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, S
         },
     };
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
+    let build = args.build.as_deref().map_or(String::new(), |build| format!(" --build {}", quote(build)));
     let script = format!(
-        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor-remote.\nexec {} node-start --state-dir {} --julia {} --runtime {} --depot {}\n",
+        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor-remote.\nexec {} node-start --state-dir {} --julia {} --runtime {} --depot {}{build}\n",
         quote(&exe.display().to_string()),
         quote(&dir.display().to_string()),
         quote(&julia),
@@ -625,7 +626,7 @@ pub fn node_start_main(argv: &[String]) -> ! {
         std::process::exit(1);
     };
     let token = std::fs::read_to_string(dir.join("token")).unwrap_or_else(|e| fail(format!("Couldn't read the token in {}: {e}", dir.display())));
-    let mut command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm").unwrap_or_else(|e| fail(e));
+    let mut command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm", flag(argv, "--build").as_deref()).unwrap_or_else(|e| fail(e));
     let error = command.exec();
     fail(format!("Couldn't start the runtime: {error}"))
 }

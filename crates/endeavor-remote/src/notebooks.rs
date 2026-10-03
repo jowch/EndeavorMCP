@@ -198,6 +198,8 @@ pub struct Notebooks {
     /// Held while reading the engine's state and telling the app, so events go out in order.
     publishing: Mutex<()>,
     events: Mutex<Events>,
+    /// The app build this runtime came from, which the app compares with its own.
+    pub build: OnceLock<String>,
 }
 
 /// One notebook as the engine's `snapshot` reports it.
@@ -402,6 +404,7 @@ impl Notebooks {
             state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
+            build: OnceLock::new(),
         }
     }
 
@@ -547,7 +550,8 @@ impl Notebooks {
     /// brought up to date:
     ///   {"notebooks": [the list_notebooks summary],
     ///    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before, version, name}, ...]},
-    ///    "idle_stopped": [{path, hours, safe_preview}, ...]}
+    ///    "idle_stopped": [{path, hours, safe_preview}, ...],
+    ///    "build": the app build this runtime came from, if it was told}
     /// with cells in notebook order. `unrun`: edited by the agent and not run
     /// since. `author`: who last changed the cell's code ("agent", "user", or
     /// null if unchanged since the core first saw it). `before`: an unrun
@@ -586,7 +590,11 @@ impl Notebooks {
             cells.insert(nb.id.clone(), Value::Array(states));
         }
         let idle_stopped: Vec<Value> = state.idle_stopped.iter().map(|(_, entry)| entry.clone()).collect();
-        Ok(to_json(&json!({ "notebooks": list, "cells": cells, "idle_stopped": idle_stopped })))
+        let mut event = json!({ "notebooks": list, "cells": cells, "idle_stopped": idle_stopped });
+        if let Some(build) = self.build.get() {
+            event["build"] = build.clone().into();
+        }
+        Ok(to_json(&event))
     }
 
     /// Tell the app the notebooks' state if it changed since the last time.

@@ -14,6 +14,7 @@
 
 mod askpass;
 mod core;
+mod guard;
 mod guide;
 mod host_tools;
 mod http;
@@ -24,7 +25,8 @@ mod results;
 mod slurm;
 
 pub use core::serve_unreachable;
-pub use mcp::is_tool;
+pub use guard::serve_guarded;
+pub use mcp::{is_tool, runs_code};
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -45,9 +47,9 @@ use wire::files::RuntimeState;
 use wire::slurm::JobRequest;
 use wire::{Frame, Target, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node]
+const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--build BUILD]
        endeavor-remote relay --state-dir DIR
-       endeavor-remote node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
+       endeavor-remote node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
        endeavor-remote core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
        endeavor-remote askpass PROMPT";
 const LOG_TAIL: usize = 40;
@@ -63,6 +65,9 @@ struct Args {
     /// The state folder belongs to this one machine, so a different node name
     /// only means the machine was renamed.
     any_node: bool,
+    /// The app build this helper and its runtime came from, which a runtime it
+    /// starts reports to the app.
+    build: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,7 +176,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         return Err("expected the `connect` command".into());
     }
     let (mut state_dir, mut julia, mut runtime, mut depot) = (None, None::<julia::Source>, None, None);
-    let (mut quit_with_client, mut any_node, mut launcher) = (false, false, Launcher::Process);
+    let (mut quit_with_client, mut any_node, mut launcher, mut build) = (false, false, Launcher::Process, None);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -190,6 +195,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             }
             "--quit-with-client" => quit_with_client = true,
             "--any-node" => any_node = true,
+            "--build" => build = Some(value()?),
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
@@ -201,6 +207,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         launcher,
         quit_with_client,
         any_node,
+        build,
     })
 }
 
@@ -820,7 +827,7 @@ fn token(dir: &Path) -> Result<String, String> {
 }
 
 /// `endeavor-remote core`, which starts `julia boot.jl` (see core).
-fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str) -> Result<Command, String> {
+fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str, build: Option<&str>) -> Result<Command, String> {
     let _ = std::fs::remove_file(state_dir.join("runtime.json"));
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     let mut command = Command::new(exe);
@@ -838,6 +845,9 @@ fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_
         .env("ENDEAVOR_TOKEN", token)
         .env("ENDEAVOR_LAUNCHER", launcher)
         .stdin(Stdio::null());
+    if let Some(build) = build {
+        command.env("ENDEAVOR_BUILD", build);
+    }
     Ok(command)
 }
 
@@ -855,7 +865,7 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
         .and_then(|f| f.set_len(0).map(|_| f))
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let stderr = log.try_clone().map_err(|e| e.to_string())?;
-    let mut command = runtime_command(julia, &args.runtime, &args.depot, token, dir, "process")?;
+    let mut command = runtime_command(julia, &args.runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
     command.stdout(log).stderr(stderr);
     // SAFETY: setsid is async-signal-safe.
     unsafe {

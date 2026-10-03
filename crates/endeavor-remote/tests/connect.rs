@@ -474,7 +474,7 @@ impl FakeSlurm {
             ("ENDEAVOR_SLURM_POLL_MS", "100"),
             ("SCRATCH", "/scratch/jc"),
         ];
-        Helper::start_with(state_dir, &["--launcher", "slurm", "--julia", julia.to_str().unwrap()], &env)
+        Helper::start_with(state_dir, &["--launcher", "slurm", "--julia", julia.to_str().unwrap(), "--build", "1.0.0-abc"], &env)
     }
 }
 
@@ -504,7 +504,7 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     assert!(sbatch.contains("--account=lab --partition=short --cpus-per-task=2 --mem=8G --time=30"), "{sbatch}");
     assert!(sbatch.contains(&format!("--output={}", dir.join("runtime.log").display())), "{sbatch}");
     let script = slurm.read("job.sh");
-    assert!(script.contains("node-start") && script.contains("--depot '/scratch/jc/endeavor/depot:'"), "{script}");
+    assert!(script.contains("node-start") && script.contains("--depot '/scratch/jc/endeavor/depot:' --build '1.0.0-abc'"), "{script}");
     assert!(dir.join("job.json").exists());
 
     // Still queued, for another reason; then it runs and its runtime comes up.
