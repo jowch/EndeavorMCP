@@ -10,8 +10,8 @@ Ember's repository (https://github.com/jowch/Ember); marimo in
 ## Summary
 
 The core is a long-lived Rust process per host (`endeavor-remote core`),
-started by the `endeavor-remote` helper. It owns the bridge port and all tool
-semantics. Each notebook kind is an **engine** that owns its own dependency
+started by the `endeavor-remote` helper. It owns the runtime's one port
+([one-port.md](one-port.md)) and all tool semantics. Each notebook kind is an **engine** that owns its own dependency
 graph, file and UI, driven by the core through a small **adapter** written in
 the engine's language and running in the engine's process:
 
@@ -28,7 +28,7 @@ Endeavor. Endeavor treats it exactly like Pluto and marimo.
 
 | Part | What | Where |
 | --- | --- | --- |
-| Neutral | HTTP server, bearer token, Origin/Host checks, MCP protocol and tool schemas, `/call` methods, run policy and plan mode, one notebook per session, idle timers, host tools (`list_folder`, `read_file`, `run_shell`), event subscribers and dedup, author/before/version tracking, read receipts, `search_code`, `runtime.json` | Core |
+| Neutral | HTTP server on the runtime's one port, bearer token and Pluto's cookie, Origin/Host checks, passing Pluto's page and WebSocket through, MCP protocol and tool schemas, `/endeavor/call` methods, run policy and plan mode, one notebook per session, idle timers, host tools (`list_folder`, `read_file`, `run_shell`), event subscribers and dedup, author/before/version tracking, read receipts, `search_code`, `runtime.json` | Core |
 | Needs cells and graph, not the engine's language | Staging and "ran since edit", `run_conflict` (upstream check), `run_preview`, dependency and symbol tools, cell-order arithmetic, `submit_changes` checks, projection order, cell names in events | Core, fed by the engine's `snapshot` and `graph` |
 | Engine internals | For Pluto: ServerSession and lifecycle, `on_event` hooks, safe-preview gate, mutating cells and saving, topology, output serialization and PNG rendering, `validate_cell` parsing, projection exclusions (package cells, `@bind` shim) | Adapter |
 
@@ -40,10 +40,10 @@ real Pluto adapter (`crates/endeavor-remote/tests/e2e_julia.rs`).
 ## Processes
 
 ```
-app ── ssh/stdio frames ── endeavor-remote ── core (Rust, bridge port)
-                                               ├─ julia: Pluto + adapter (Pluto UI port) ── Pluto workers
-                                               ├─ python: marimo + adapter (marimo UI port)
-                                               └─ R: Ember + adapter (Ember UI port) ── R workers
+app ── ssh/stdio frames ── endeavor-remote ── core (Rust, the runtime's one port)
+                                               ├─ julia: Pluto + adapter (private UI and bridge ports) ── Pluto workers
+                                               ├─ python: marimo + adapter (private ports)
+                                               └─ R: Ember + adapter (private ports) ── R workers
 ```
 
 - The core may be a subcommand of the helper (`endeavor-remote core`), so
@@ -51,9 +51,11 @@ app ── ssh/stdio frames ── endeavor-remote ── core (Rust, bridge por
 - Adapters are to start lazily, when a notebook of their kind is opened, as
   [marimo.md](marimo.md) proposes. A user who only uses R never
   downloads Julia.
-- With more than one engine, `crates/wire`'s `Target::{Pluto, Bridge}`
-  becomes `Target::{Bridge, NotebookUi(backend)}`, and `runtime.json` lists
-  each engine's UI port as it starts.
+- Each relayed connection goes to the core's one port. The core passes
+  `/mcp` and `/endeavor/…` to itself and every other path to Pluto's private
+  port, adding Pluto's secret. With more than one engine, each later engine
+  gets a path prefix of its own (`/marimo/…`, `/ember/…`) and Pluto stays at
+  `/`.
 
 ## The engine interface
 
@@ -141,7 +143,7 @@ the engine's own package handling.
 
 Under this split `runtime-py/` in [marimo.md](marimo.md) is only the
 adapter: steps 1 and 2 of "The Python runtime" and `marimo_api.py`;
-`/events`, tool serving and host tools come from the core.
+`/endeavor/events`, tool serving and host tools come from the core.
 
 ## What else the core does
 
@@ -152,14 +154,14 @@ and 3), and for the app:
   `endeavor/tool_result`, for agents whose own result says only "success".
 - It holds a call that runs code while the session's policy is "ask" and the
   app turned this on (`endeavor/set_policy` with `asks: true`). The held call
-  is listed under `asks` in `/events` until the app answers with
+  is listed under `asks` in `/endeavor/events` until the app answers with
   `endeavor/answer_run`, the agent cancels, or its connection closes. While
   it waits, its reply is an event stream that has already begun (see
   [endeavor-mcp.md](endeavor-mcp.md), "Transport"), so the agent's client
   doesn't time out waiting for a response to start. In Manual the app adds
   `edits: true`, and the core holds a call that changes the notebook the same
   way, whatever the run policy.
-- It reports in `/events` the app build it was started by (`build`), so the
+- It reports in `/endeavor/events` the app build it was started by (`build`), so the
   app can tell a runtime from an older build and hold back what that runtime
   can't do.
 

@@ -79,7 +79,8 @@ The bridge speaks MCP's Streamable HTTP transport, not SSE:
 - It's simpler: the tools are request and reply, so each POST returns its
   JSON directly, with no per-session event queue or keepalive thread.
 
-The core serves one endpoint, `POST /mcp`: a request's reply comes back in
+The core serves one endpoint, `POST /mcp` on the runtime's one port
+([one-port.md](one-port.md)): a request's reply comes back in
 the same response (`200`, `application/json`); a notification or a response
 from the client gets `202` with no body. A call the runtime holds for the
 user's answer is the exception: Claude Code gives up on a POST whose
@@ -97,14 +98,10 @@ honoured: an unsupported value is `400`; a missing header (before
 `initialize`, or from a client that never sends it) falls back to what the
 server understands. The app registers the bridge as `McpServer::Http`.
 
-A runtime from before the switch to Streamable HTTP (an older core that only
-spoke SSE, or for This Mac a Julia-only runtime from before the core) can
-still be running, since runtimes outlive the app. The core writes `"mcp":
-"http"` in its `runtime.json` and passes it to the app with the rest of the
-runtime info; a missing key means SSE. The app registers `McpServer::Http`
-when the runtime says so, and the old `McpServer::Sse` registration otherwise
-— the only SSE left, to drop once no runtime older than this change can still
-be running.
+A runtime from before the switch to Streamable HTTP also predates one port
+per runtime, which the helper doesn't attach to (it asks for a restart of
+Julia instead), so the app no longer registers `McpServer::Sse` for any
+runtime.
 
 For the plugin, a stdio mode is a thin shim that starts or attaches to the
 long-running core (the helper's `runtime.json` and lock already do this), so
@@ -123,7 +120,7 @@ A small change, about 1–2 days.
 - **In the app**, nothing changes. The core already decides which calls run
   code (`runs_code` in `crates/endeavor-remote`), and in Manual the calls
   that change the notebook (`asks_first`), and holds them until the app's
-  card is answered (`asks` in `/events`, `endeavor/answer_run`).
+  card is answered (`asks` in `/endeavor/events`, `endeavor/answer_run`).
 - **Standalone**, nothing in the core asks the user: a client without the
   app uses its own per-tool approval, guided by the core's read-only markers.
   Claude Code asks in its own permission prompt for any tool not allowed.
@@ -138,8 +135,8 @@ list); that's the app's interface.
 - **Component or product.** A component the app depends on is about a week.
   A product other people install is mostly the setup, transport and public
   API work, about a month.
-- **The control API.** The app-only calls (`/call` `endeavor/*`, and
-  `/events` with authorship and previous code) are an internal protocol
+- **The control API.** The app-only calls (`/endeavor/call` `endeavor/*`, and
+  `/endeavor/events` with authorship and previous code) are an internal protocol
   today, changed alongside the app. Either document and version them, or keep
   them as an Endeavor extension the product carries without promising
   stability.

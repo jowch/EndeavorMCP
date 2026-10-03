@@ -1,6 +1,7 @@
 # One port per runtime
 
-Planned (2026-10-03), not built. Each runtime exposes one port to clients
+Steps 1–3 built (2026-10-03); the live checks (step 4) and `endeavor serve`
+(step 5) are not done yet. Each runtime exposes one port to clients
 instead of two. The runtime core answers it, passes Pluto's page through
 at `/`, and serves Endeavor's own endpoints under a reserved prefix. The
 app's relay, listener and state then carry one route instead of two. A
@@ -12,7 +13,7 @@ There are no users to move over, so there is no two-port fallback. An app
 that meets an older runtime treats it as an older build (the build check)
 and asks for a restart of Julia.
 
-## Today
+## Before this change
 
 - Julia's Pluto server listens on `pluto_port`. The core listens on
   `mcp_port` (the bridge: MCP, `/events`, `/call`, `endeavor/*`). Both are
@@ -37,7 +38,8 @@ and asks for a restart of Julia.
 | Path | Goes to | Auth |
 |---|---|---|
 | `/mcp` | the core's MCP endpoint | bearer token header |
-| `/endeavor/…` (events, call, set_policy, answer_run, …) | the core | bearer token header |
+| `/endeavor/events`, `/endeavor/call` (JSON-RPC: `endeavor/set_policy`, `endeavor/answer_run`, …, `ping`, `tools/call`) | the core; the calls Julia answers (`endeavor/set_folder`, `endeavor/shutdown`) go on to Julia's `/call` | bearer token header |
+| any other `/endeavor/…` | `404` | bearer token header |
 | everything else (`/`, `/edit`, `/open`, `/static`, Pluto's WebSocket, …) | Pluto's private port, unchanged | token header, or the cookie |
 
 Later engines get a prefix each (`/marimo/…`, `/ember/…`); Pluto stays at
@@ -84,6 +86,54 @@ Version 1 serves Pluto's page as is.
 - Docs: runtime-core (processes and the per-engine ports), remote-sessions,
   endeavor-mcp.
 
+## As built
+
+What came out differently from the design above, or wasn't settled by it:
+
+- **Paths.** The app's calls stay JSON-RPC methods posted to one path,
+  `/endeavor/call`; the event stream is `/endeavor/events`. `/health` is gone
+  from the public port (nothing used it); Julia's own bridge still has one.
+- **The cookie.** `?token=` on any of Pluto's paths answers `303 See Other`
+  to the same URL without `token`, with `Set-Cookie: endeavor-<id>=<token>;
+  Path=/; HttpOnly; SameSite=Strict`. `<id>` is the first 12 hex digits of
+  the token's SHA-256, so each runtime has its own cookie: cookies ignore
+  ports, so runtimes on 127.0.0.1 (several hosts in the app, several
+  forwarded runtimes) share one cookie jar.
+- **The cookie counts only from the page itself.** Since 127.0.0.1 with
+  another port is the same site, another runtime's page could reach this
+  port with this runtime's cookie (an `<img>`, a `fetch`, a WebSocket). So
+  on Pluto's paths an `Origin` must be `http://<Host>`, and a
+  `Sec-Fetch-Site` must be `same-origin` or `none`; anything else is `403`.
+  Endeavor's own paths refuse any `Origin` and never take the cookie.
+- **Pluto's secret** goes to Pluto as `Cookie: secret=…`, which Pluto
+  accepts on plain requests and on the WebSocket upgrade alike. The core
+  drops the client's `Cookie` and `Authorization` headers first, and drops
+  Pluto's `Set-Cookie: secret=…` from what comes back, so the secret never
+  reaches the browser. Requests keep the client's `Host`.
+- **WebSocket.** After Pluto's `101` the core (`http::tunnel`) copies bytes
+  both ways and closes both ends when either side closes. The app's guard
+  (`guard.rs`, for a runtime from another build) does the same, and now sees
+  every connection, Pluto's included; each request on a connection is still
+  checked, and an upgraded connection was checked at its upgrade.
+- **`runtime.json`** is `{launcher, node, pid, started, port, token, job}`.
+  Pluto's port and secret and Julia's bridge port stay in `julia.json`,
+  between the core and Julia. Julia's side needed no change: it already ran
+  Pluto and its bridge on ports the core picked.
+- **A runtime from before this change** (`runtime.json` without `port`) is
+  not attached to. `StartRuntime` fails with "Julia here was started by an
+  older version of Endeavor, which this version can't connect to. Restart
+  Julia to use it."; the host's check still shows it running; Stop ends it by
+  its pid (on a cluster, cancels its job). There is no other fallback.
+- **SSE is gone.** A runtime from before Streamable HTTP is also from before
+  one port, so `McpTransport` and the app's `McpServer::Sse` registration
+  went with the two ports.
+- **The app.** One listener port per host. The web view loads
+  `http://127.0.0.1:PORT/?token=…` (a notebook's page adds `/edit?id=…`);
+  the agent's MCP URL is `http://127.0.0.1:PORT/mcp`; exports go with the
+  bearer header. The URLs and token are the same for a host's next runtime,
+  so the app tells runtimes apart by the core's pid. While a runtime is
+  away, an MCP request is answered as before and anything else is closed.
+
 ## The standalone command
 
 Built on top, once the above works:
@@ -106,6 +156,14 @@ Built on top, once the above works:
 
 ## To check
 
+These need the app (step 4): This Mac, the OrbStack server, the Slurm VM.
+
+- The web view takes the cookie from the `303` and sends it back: a
+  `SameSite=Strict` cookie on `127.0.0.1`, and WebKit's `Sec-Fetch-Site`
+  and `Origin` on the page's own requests and WebSocket are what the core
+  allows.
+- A runtime from before this change: the app shows the "older version"
+  message, and Restart Julia (or Stop) from there ends it and starts a new one.
 - Every request Pluto's page makes stays under paths the core passes
   through untouched (no absolute URLs to another host or port). Expected,
   since Pluto runs behind proxies; a real notebook in the web view and in a
@@ -118,8 +176,8 @@ Built on top, once the above works:
 ## Order
 
 1. Core: routes, WebSocket pass-through, private Pluto port and secret;
-   tests against a real Pluto.
-2. Wire and helper: one port, `Target` removed; relay and Slurm relay.
-3. App: one listener port, page URL, bridge URL, guard.
+   tests against a real Pluto. Built.
+2. Wire and helper: one port, `Target` removed; relay and Slurm relay. Built.
+3. App: one listener port, page URL, bridge URL, guard. Built.
 4. Live check: This Mac, the OrbStack server, the Slurm VM.
 5. `endeavor serve` and the stdio form.
