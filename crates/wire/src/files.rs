@@ -93,9 +93,10 @@ pub fn answer(request: &Request) -> Reply {
     result.unwrap_or_else(|message| Reply::Error { message })
 }
 
-/// This machine's home folder.
+/// This machine's home folder. `$HOME` on Unix; on Windows, the user profile
+/// folder (not an env var: `HOME` is usually unset there).
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// `~` and `~/…` as the home folder; anything relative is taken from there.
