@@ -30,9 +30,13 @@ impl Core {
     }
 
     fn start_with_home(dir: &Path, bridge: &FakeBridge, home: &str) -> Core {
+        Core::start_with_env(dir, bridge, &[("HOME", home)])
+    }
+
+    fn start_with_env(dir: &Path, bridge: &FakeBridge, env: &[(&str, &str)]) -> Core {
         let julia = serving_julia(dir, bridge);
         let process = Command::new(env!("CARGO_BIN_EXE_endeavor-remote"))
-            .env("HOME", home)
+            .envs(env.iter().copied())
             .arg("core")
             .arg("--state-dir")
             .arg(dir)
@@ -814,6 +818,33 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     let before = reads();
     server.run(serde_json::json!({ "command": "true" }));
     assert!(reads() > before);
+}
+
+#[test]
+fn a_standalone_runtime_has_a_folder_a_fixed_port_and_host_tools_for_every_session() {
+    let dir = state_dir("core-standalone");
+    let bridge = FakeBridge::start(&dir);
+    let folder = temp_folder("core-standalone-folder");
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let env = [("ENDEAVOR_FOLDER", folder.to_str().unwrap()), ("ENDEAVOR_PORT", &port.to_string()), ("ENDEAVOR_HOST_TOOLS", "lab3")];
+    let core = Core::start_with_env(&dir, &bridge, &env);
+    assert_eq!(core.port, port);
+    assert_eq!(read_json(&dir.join("runtime.json"))["folder"], folder.to_str().unwrap());
+    let set_folder = bridge.seen().into_iter().find(|s| String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")).expect("Pluto hears the folder");
+    assert!(String::from_utf8_lossy(&set_folder.body).contains(&format!(r#""path":"{}""#, folder.display())));
+
+    let (_, body) = mcp(&core, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#, &[("X-Endeavor-Skills", "plugin")]);
+    assert!(body.contains("the user watches them in a web browser"), "{body}");
+    let (_, body) = mcp(&core, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, &[]);
+    assert!(body.contains(r#""name":"run_shell""#), "host tools without X-Endeavor-Host");
+    let ran = |command: &str| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "run_shell", "arguments": { "command": command } } });
+        let (_, body) = mcp(&core, &message.to_string(), &[]);
+        let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+        serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()["stdout"].clone()
+    };
+    assert_eq!(ran("pwd"), format!("{}\n", folder.display()), "in the runtime's folder");
+    assert_eq!(ran("echo \"$ENDEAVOR_FOLDER|$ENDEAVOR_PORT|$ENDEAVOR_HOST_TOOLS\""), "||\n", "none of the runtime's settings");
 }
 
 #[test]

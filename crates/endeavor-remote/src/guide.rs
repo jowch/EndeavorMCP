@@ -30,6 +30,25 @@ pub const INSTRUCTIONS: &str = "These tools edit and run a live Pluto (Julia) no
 Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
 how to find this session's notebook, the read-edit-run loop, when the user must approve a run, and how to lay out cells.";
 
+/// What a runtime without the app (`endeavor-remote serve` or `mcp`) adds:
+/// the guide describes the app, and the agent needs to know where it differs.
+pub const STANDALONE: &str = "Here the notebooks run without the Endeavor app: the user watches them in a web browser. \
+There is no notebook pane, no approval card and no annotation mode, so skip what the guide says about those; \
+your own permission prompts are how the user approves runs. \
+`new_notebook`, `open_notebook` and `pluto_session_status` return `browser_url`: give it to the user so they can watch the notebook. \
+If no notebook in `list_notebooks` has `this_session` true, work in the notebook the user names or one you create.";
+
+/// The server's MCP `instructions` for an agent with the plugin's skills or
+/// without (`has_skills`), on a runtime with the app or without (`standalone`).
+pub fn instructions(standalone: bool, has_skills: bool) -> Option<String> {
+    match (standalone, has_skills) {
+        (false, true) => None,
+        (false, false) => Some(INSTRUCTIONS.to_owned()),
+        (true, true) => Some(STANDALONE.to_owned()),
+        (true, false) => Some(format!("{INSTRUCTIONS}\n\n{STANDALONE}")),
+    }
+}
+
 /// `tools/list`'s entry for the guide.
 pub fn schema() -> Value {
     json!({

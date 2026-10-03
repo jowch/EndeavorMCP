@@ -31,6 +31,12 @@ pub use tools::Reply;
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
 
+/// How often to look for idle notebooks. ENDEAVOR_IDLE_CHECK_SECS: tests look
+/// more often than every five minutes.
+pub fn idle_check() -> Duration {
+    std::env::var("ENDEAVOR_IDLE_CHECK_SECS").ok().and_then(|s| s.parse().ok()).map_or(IDLE_CHECK, Duration::from_secs_f64)
+}
+
 /// The engine's adapter, once it answers.
 pub trait Upstream: Send + Sync {
     /// The reply to one `POST /adapter` call.
@@ -434,8 +440,7 @@ impl Notebooks {
         });
         let notebooks = self.clone();
         std::thread::spawn(move || notebooks.handle_notifications(rx));
-        // ENDEAVOR_IDLE_CHECK_SECS: tests look more often than every five minutes.
-        let every = std::env::var("ENDEAVOR_IDLE_CHECK_SECS").ok().and_then(|s| s.parse().ok()).map_or(IDLE_CHECK, Duration::from_secs_f64);
+        let every = idle_check();
         let notebooks = self.clone();
         std::thread::spawn(move || {
             loop {
@@ -764,6 +769,15 @@ impl Notebooks {
     /// `endeavor/set_idle_limit`: stop notebooks idle this long; 0 never stops them.
     pub fn set_idle_limit(&self, hours: f64) {
         self.state.lock().unwrap().idle_limit_hours = hours;
+    }
+
+    pub fn idle_limit_hours(&self) -> f64 {
+        self.state.lock().unwrap().idle_limit_hours
+    }
+
+    /// How many notebooks the engine has open, if it answers.
+    pub fn open_count(&self) -> Option<usize> {
+        self.snapshots().ok().map(|snapshots| snapshots.len())
     }
 
     /// Stop every notebook idle longer than the limit (no tool call on it, no

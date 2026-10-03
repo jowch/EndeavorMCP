@@ -68,6 +68,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 /// `endeavor-remote core …`, with ENDEAVOR_TOKEN and ENDEAVOR_LAUNCHER in the
 /// environment, and ENDEAVOR_BUILD, the app build it came from, which it
 /// reports to the app. Its stdout and stderr are the runtime's log, which Julia shares.
+///
+/// Started without the app (`standalone`), the environment also has
+/// ENDEAVOR_FOLDER, the notebooks' folder, which makes it a standalone
+/// runtime; ENDEAVOR_PORT, a fixed port; ENDEAVOR_HOST_TOOLS, the host name
+/// under which every session gets the host tools; ENDEAVOR_IDLE_HOURS, the
+/// idle stop; and ENDEAVOR_EXIT_IDLE, to end the runtime once no notebook has
+/// been open for that long.
 pub fn main(argv: &[String]) -> ! {
     let args = parse_args(argv).unwrap_or_else(|e| {
         eprintln!("{e}\n{USAGE}");
@@ -81,7 +88,16 @@ pub fn main(argv: &[String]) -> ! {
     let launcher = std::env::var("ENDEAVOR_LAUNCHER").unwrap_or_else(|_| "process".into());
     #[cfg(unix)]
     let (stop_signals, inherited_mask) = block_stop_signals();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| fail(format!("Couldn't open the runtime's port: {e}")));
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let fixed_port: u16 = env("ENDEAVOR_PORT").and_then(|p| p.parse().ok()).unwrap_or(0);
+    let folder = env("ENDEAVOR_FOLDER");
+    if let Some(folder) = &folder {
+        // Relative paths in the tools, and Julia's, start in the notebooks' folder.
+        std::env::set_current_dir(folder).unwrap_or_else(|e| fail(format!("Couldn't use {folder} as the notebooks' folder: {e}")));
+    }
+    let idle_hours = env("ENDEAVOR_IDLE_HOURS").and_then(|h| h.parse::<f64>().ok());
+    let exit_idle = env("ENDEAVOR_EXIT_IDLE").is_some();
+    let listener = TcpListener::bind(("127.0.0.1", fixed_port)).unwrap_or_else(|e| fail(format!("Couldn't open the runtime's port {fixed_port}: {e}")));
     let julia_state = args.state_dir.join(JULIA_STATE);
     let _ = std::fs::remove_file(&julia_state);
     let mut command = julia_command(&args, &token, &launcher, &julia_state).unwrap_or_else(|e| fail(e));
@@ -103,21 +119,31 @@ pub fn main(argv: &[String]) -> ! {
     pass_on_stop_signals(stop_signals, julia.id() as i32);
 
     let cookie = cookie_name(&token);
-    let bridge = Bridge::new(token, &args.depot);
+    let port = listener.local_addr().unwrap().port();
+    let mut bridge = Bridge::new(token, &args.depot);
+    bridge.standalone = folder.map(|folder| crate::mcp::Standalone { port, folder, host: env("ENDEAVOR_HOST_TOOLS") });
     if let Ok(build) = std::env::var("ENDEAVOR_BUILD") {
         let _ = bridge.notebooks.build.set(build);
     }
     let served = Arc::new(Served { bridge, pluto: OnceLock::new(), cookie });
-    let port = listener.local_addr().unwrap().port();
     accept(listener, served.clone());
 
     let status = loop {
         if let Some(status) = julia.try_wait().unwrap_or(None) {
             break status;
         }
-        if let Some(ready) = julia_ready(&julia_state, &args.state_dir, port, &served.bridge.token) {
+        if let Some(ready) = julia_ready(&julia_state, &args.state_dir, port, &served.bridge) {
             let _ = served.pluto.set(ready.pluto);
             let _ = served.bridge.julia.port.set(ready.bridge_port);
+            if let Some(hours) = idle_hours {
+                served.bridge.notebooks.set_idle_limit(hours);
+            }
+            if let Some(standalone) = &served.bridge.standalone {
+                set_pluto_folder(ready.bridge_port, &served.bridge.token, &standalone.folder);
+                if exit_idle {
+                    exit_when_idle(served.clone(), ready.bridge_port);
+                }
+            }
             served.bridge.notebooks.start();
             break julia.wait().unwrap_or_else(|e| fail(format!("waiting for Julia: {e}")));
         }
@@ -146,6 +172,9 @@ fn julia_command(args: &Args, token: &str, launcher: &str, julia_state: &Path) -
         .env("ENDEAVOR_STATE", julia_state)
         .env("ENDEAVOR_LAUNCHER", launcher)
         .stdin(Stdio::null());
+    for name in ["ENDEAVOR_PORT", "ENDEAVOR_FOLDER", "ENDEAVOR_HOST_TOOLS", "ENDEAVOR_IDLE_HOURS", "ENDEAVOR_EXIT_IDLE"] {
+        command.env_remove(name);
+    }
     Ok(command)
 }
 
@@ -172,7 +201,8 @@ struct JuliaReady {
 /// Once Julia has written its state and its bridge answers, write
 /// `runtime.json` for the helper: the core's pid and its one `port`, and
 /// Julia's launcher, node and job. Pluto's port and secret stay out of it.
-fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, token: &str) -> Option<JuliaReady> {
+fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge) -> Option<JuliaReady> {
+    let token = &bridge.token;
     let julia: Value = serde_json::from_str(&std::fs::read_to_string(julia_state).ok()?).ok()?;
     let port_of = |key: &str| julia[key].as_u64().and_then(|p| u16::try_from(p).ok());
     let ready = JuliaReady {
@@ -187,15 +217,50 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, token: &str) -> 
     let started = crate::winproc::own_start_time();
     #[cfg(unix)]
     let started: Option<u64> = None;
-    let state = json!({
+    let mut state = json!({
         "launcher": julia["launcher"], "node": julia["node"], "job": julia["job"],
         "pid": std::process::id(), "started": started, "port": port, "token": token,
     });
+    if let Some(standalone) = &bridge.standalone {
+        state["folder"] = standalone.folder.clone().into();
+    }
     if let Err(e) = write_private(&state_dir.join("runtime.json"), state.to_string().as_bytes()) {
         eprintln!("endeavor-remote core: {e}");
         return None;
     }
     Some(ready)
+}
+
+/// Have Pluto's page suggest the notebooks' folder for new notebooks, as the
+/// app does for its session's folder.
+fn set_pluto_folder(julia_port: u16, token: &str, folder: &str) {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_folder", "params": { "path": folder } }).to_string();
+    let bearer = format!("Bearer {token}");
+    let headers = [("Authorization", bearer.as_str()), ("Content-Type", "application/json")];
+    if let Err(e) = http::post(julia_port, "/call", &headers, body.as_bytes()) {
+        eprintln!("endeavor-remote core: couldn't give Pluto the notebooks' folder: {e}");
+    }
+}
+
+/// End the runtime once no notebook has been open for the idle limit (none
+/// when it's 0): a runtime the stdio form started in the background has no
+/// one to stop it.
+fn exit_when_idle(served: Arc<Served>, julia_port: u16) {
+    std::thread::spawn(move || {
+        let notebooks = &served.bridge.notebooks;
+        let mut empty_since = std::time::Instant::now();
+        loop {
+            std::thread::sleep(crate::notebooks::idle_check());
+            let hours = notebooks.idle_limit_hours();
+            if notebooks.open_count() != Some(0) || hours <= 0.0 {
+                empty_since = std::time::Instant::now();
+            } else if empty_since.elapsed().as_secs_f64() >= hours * 3600.0 {
+                eprintln!("[ Info: No notebook open for {hours} hours; stopping");
+                let _ = bridge_call(julia_port, "/call", &served.bridge.token, "endeavor/shutdown");
+                return;
+            }
+        }
+    });
 }
 
 /// Write `path` whole and readable only by us, so a reader never sees half of

@@ -93,6 +93,27 @@ struct Policy {
     edits: bool,
 }
 
+/// A runtime started by `endeavor-remote serve` or `mcp`, without the app
+/// (see `standalone`).
+pub struct Standalone {
+    /// The runtime's one port, which the user's browser reaches as
+    /// `localhost` (here, or through `ssh -L` with the same port).
+    pub port: u16,
+    /// Where notebooks go for a session the app gave no folder.
+    pub folder: String,
+    /// Host tools for every session, as on this host (`--host-tools`), for an
+    /// agent on another machine.
+    pub host: Option<String>,
+}
+
+impl Standalone {
+    /// A link to `target` on Pluto's page that lets a browser in.
+    pub fn link(&self, token: &str, target: &str) -> String {
+        let join = if target.contains('?') { '&' } else { '?' };
+        format!("http://localhost:{}{target}{join}token={token}", self.port)
+    }
+}
+
 /// What every client connection shares.
 pub struct Bridge {
     pub julia: Arc<Julia>,
@@ -107,6 +128,8 @@ pub struct Bridge {
     /// `run_shell`'s environment, changed from ours as Julia's was: its
     /// depot, and none of what the helper passes the runtime.
     shell_env: Vec<(&'static str, Option<String>)>,
+    /// Set when the runtime runs without the app.
+    pub standalone: Option<Standalone>,
 }
 
 /// Who sent a message: the agent session's key and the server it works on,
@@ -136,6 +159,11 @@ impl Bridge {
             ("ENDEAVOR_STATE", None),
             ("ENDEAVOR_LAUNCHER", None),
             ("ENDEAVOR_BUILD", None),
+            ("ENDEAVOR_PORT", None),
+            ("ENDEAVOR_FOLDER", None),
+            ("ENDEAVOR_HOST_TOOLS", None),
+            ("ENDEAVOR_IDLE_HOURS", None),
+            ("ENDEAVOR_EXIT_IDLE", None),
         ];
         let julia = Arc::new(Julia::new(token.clone()));
         let clock = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
@@ -147,7 +175,14 @@ impl Bridge {
             folders: Mutex::default(),
             results: Results::default(),
             shell_env,
+            standalone: None,
         }
+    }
+
+    /// A session's working folder: the one the app gave, else the standalone runtime's.
+    fn folder(&self, owner: &str) -> Option<String> {
+        let given = self.folders.lock().unwrap().get(owner).cloned();
+        given.or_else(|| self.standalone.as_ref().map(|s| s.folder.clone()))
     }
 
     /// The reply to one of the app's `/call`s, if the core answers it; `None`
@@ -232,7 +267,7 @@ impl Bridge {
             "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
             "endeavor/new_notebook" => {
                 let owner = text("owner", "");
-                let folder = self.folders.lock().unwrap().get(&owner).cloned();
+                let folder = self.folder(&owner);
                 return Some(answer(self.notebooks.new_for(&owner, folder.as_deref())));
             }
             method if JULIA_CALLS.contains(&method) => return None,
@@ -244,7 +279,13 @@ impl Bridge {
 
     /// Serve `POST /mcp`. Whether the connection can carry another request.
     pub fn mcp(&self, request: &Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> io::Result<bool> {
-        post(request, reader, client, request.keeps_alive(), |message, gone| self.dispatch(message, &Caller::of(request), gone))
+        let mut caller = Caller::of(request);
+        if caller.host.is_empty()
+            && let Some(host) = self.standalone.as_ref().and_then(|s| s.host.clone())
+        {
+            caller.host = host;
+        }
+        post(request, reader, client, request.keeps_alive(), |message, gone| self.dispatch(message, &caller, gone))
     }
 
     /// The reply to one JSON-RPC message, if it gets one. `gone`, called
@@ -253,7 +294,7 @@ impl Bridge {
         if message["method"] == "notifications/cancelled" && self.notebooks.asks.cancel(&caller.owner, &message["params"]["requestId"]) {
             self.notebooks.publish();
         }
-        answer(message, caller, |params| {
+        answer(message, caller, self.standalone.is_some(), |params| {
             let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone };
             let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
@@ -297,7 +338,7 @@ impl Bridge {
             if let Err(result) = self.ask_first(call, name, &arguments) {
                 return result;
             }
-            let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
+            let folder = self.folder(&caller.owner);
             let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
             return match host_tools::call(name, &arguments, &host_tools::Shell { folder: folder.as_deref(), env: &env }) {
                 Ok(result) => text(&result),
@@ -314,14 +355,17 @@ impl Bridge {
             Ok(run) => run,
             Err(result) => return result,
         };
-        let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
+        let folder = self.folder(&caller.owner);
         let reply = if run {
             self.notebooks.tool(&caller.owner, name, &arguments, folder.as_deref())
         } else {
             self.notebooks.tool_unrun(&caller.owner, name, &arguments, folder.as_deref())
         };
         match reply {
-            Ok(Reply::Json(result)) => text(&result),
+            Ok(Reply::Json(mut result)) => {
+                self.add_browser_url(name, &mut result);
+                text(&result)
+            }
             Ok(Reply::Image { meta, png_base64 }) => json!({
                 "content": [
                     { "type": "text", "text": to_json(&meta) },
@@ -331,6 +375,21 @@ impl Bridge {
             }),
             Err(error) => tool_error(&error, help),
         }
+    }
+
+    /// Without the app, the user watches notebooks in a browser: the results
+    /// that name a notebook, or the session, carry the link to it.
+    fn add_browser_url(&self, tool: &str, result: &mut Value) {
+        let (Some(standalone), Value::Object(fields)) = (&self.standalone, result) else { return };
+        let target = match tool {
+            "new_notebook" | "open_notebook" => match fields.get("notebook_id").and_then(Value::as_str) {
+                Some(id) => format!("/edit?id={id}"),
+                None => return,
+            },
+            "pluto_session_status" => "/".to_owned(),
+            _ => return,
+        };
+        fields.insert("browser_url".into(), standalone.link(&self.token, &target).into());
     }
 
     /// Wait for the user's answer to a call the session's policy holds
@@ -515,7 +574,7 @@ impl Held {
 
 /// The reply to one JSON-RPC message, if it gets one; `call` gives a
 /// `tools/call`'s result.
-fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) -> Option<String> {
+fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(&Value) -> Value) -> Option<String> {
     // Notifications get no reply.
     let id = message.get("id").filter(|id| !id.is_null())?;
     let ok = |result: Value| Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result })));
@@ -530,8 +589,8 @@ fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) 
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") },
             });
-            if !caller.has_skills {
-                result["instructions"] = guide::INSTRUCTIONS.into();
+            if let Some(instructions) = guide::instructions(standalone, caller.has_skills) {
+                result["instructions"] = instructions.into();
             }
             ok(result)
         }
@@ -560,7 +619,16 @@ fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) 
 /// what the core would say, except that a tool call fails with `why`, plain
 /// text Claude reads before trying again.
 pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> Option<String> {
-    answer(message, &Caller::of(request), |_| json!({ "content": [{ "type": "text", "text": why }], "isError": true }))
+    answer(message, &Caller::of(request), false, |_| json!({ "content": [{ "type": "text", "text": why }], "isError": true }))
+}
+
+/// The reply to a message a standalone runtime's stdio relay answers itself
+/// (`initialize`, `ping`, `tools/list`), as the runtime would to an agent
+/// with the plugin's skills or without (`has_skills`). None for anything else.
+pub(crate) fn answer_locally(message: &Value, has_skills: bool) -> Option<String> {
+    let local = matches!(message["method"].as_str(), Some("initialize" | "ping" | "tools/list"));
+    let caller = Caller { has_skills, ..Caller::default() };
+    local.then(|| answer(message, &caller, true, |_| unreachable!("tools/call isn't answered locally"))).flatten()
 }
 
 /// Kinds that mean the agent called a notebook tool the wrong way (a bad
@@ -699,7 +767,7 @@ mod tests {
     fn an_agent_without_the_plugin_is_told_to_read_the_guide() {
         let ask = |method: &str, has_skills: bool| {
             let caller = Caller { has_skills, ..Caller::default() };
-            let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} }), &caller, |_| json!(null)).unwrap();
+            let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} }), &caller, false, |_| json!(null)).unwrap();
             serde_json::from_str::<Value>(&reply).unwrap()["result"].clone()
         };
         let names = |result: Value| result["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();

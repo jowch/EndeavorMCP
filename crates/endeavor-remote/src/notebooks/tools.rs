@@ -37,7 +37,7 @@ pub enum Reply {
 impl Notebooks {
     /// A notebook tool call by `owner` ("" for the app): its result, or the
     /// error Julia raised for it. `folder` is the session's working folder,
-    /// where `new_notebook` puts notebooks.
+    /// where `new_notebook` puts notebooks and relative paths start.
     pub fn tool(&self, owner: &str, name: &str, args: &Value, folder: Option<&str>) -> Result<Reply, String> {
         let t = Call { nbs: self, owner, args };
         let mut result = match name {
@@ -63,7 +63,7 @@ impl Notebooks {
             "validate_cell" => t.validate_cell(),
             "search_code" => t.search_code(),
             "pluto_session_status" => self.call("status", json!({})),
-            "open_notebook" => t.open_notebook(),
+            "open_notebook" => t.open_notebook(folder),
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
@@ -838,11 +838,15 @@ impl Call<'_> {
         Ok(Value::Array(found))
     }
 
-    fn open_notebook(&self) -> Result<Value, String> {
+    fn open_notebook(&self, folder: Option<&str>) -> Result<Value, String> {
         let path = match self.args.get("path") {
             None | Some(Value::Null) => return Err(argument_error("invalid_path::path is required")),
             Some(Value::String(path)) => path,
             Some(_) => return Err(argument_error("invalid_path::path must be a string")),
+        };
+        let path = &match folder {
+            Some(folder) if !super::is_absolute(&super::expand_user(path)?) => absolute_path(&format!("{folder}/{path}"))?,
+            _ => path.clone(),
         };
         if !std::path::Path::new(path).exists() {
             return Err(argument_error(&format!("file_not_found::No file at '{path}'")));
