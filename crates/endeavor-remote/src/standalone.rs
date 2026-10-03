@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::http::Head;
+use crate::mcp::to_json;
 use crate::{Args, Exit, Launcher, Runtime, State, julia};
 
 mod embedded {
@@ -392,7 +393,7 @@ pub(crate) fn connection_text(c: &Connection) -> String {
     let Connection { port, token, node, folder, .. } = c;
     let url = format!("http://localhost:{port}/mcp");
     let bearer = format!("Bearer {token}");
-    let json = json!({ "mcpServers": { "endeavor": { "type": "http", "url": url, "headers": { "Authorization": bearer } } } });
+    let json = to_json(&json!({ "mcpServers": { "endeavor": { "type": "http", "url": url, "headers": { "Authorization": bearer } } } }));
     let mut ssh = format!("    ssh -L {port}:localhost:{port} {node}\n");
     if let Some(login) = c.login.filter(|login| login != node) {
         ssh = format!("    ssh -J {login} -L {port}:localhost:{port} {node}\n(This is a cluster's compute node: the jump goes through the login node, {login}; use the name you ssh to.)\n");
@@ -425,7 +426,7 @@ Other agents (JSON):
 
 The token lets anyone who has it run code as you. Keep it to yourself.
 ",
-        gemini = json!({ "mcpServers": { "endeavor": { "httpUrl": url, "headers": { "Authorization": bearer } } } }),
+        gemini = to_json(&json!({ "mcpServers": { "endeavor": { "httpUrl": url, "headers": { "Authorization": bearer } } } })),
     )
 }
 
@@ -619,7 +620,7 @@ impl Relay {
     /// sessions: the runtime may have been started from another folder.
     fn tell_folder(&self, port: u16, token: &str) {
         let params = json!({ "owner": self.session, "folder": self.options.folder.display().to_string() });
-        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": params }).to_string();
+        let body = to_json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": params }));
         let bearer = format!("Bearer {token}");
         let headers = [("Authorization", bearer.as_str()), ("Content-Type", "application/json")];
         if let Err(e) = crate::http::post(port, crate::CALL, &headers, body.as_bytes()) {
@@ -670,7 +671,7 @@ impl Relay {
 
     fn handle(self: &Arc<Self>, line: &str) {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
-            return self.write(&json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } }).to_string());
+            return self.write(&to_json(&json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } })));
         };
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
         if let Some(reply) = crate::mcp::answer_locally(&message, self.options.skills_plugin) {
@@ -773,15 +774,15 @@ enum Sent {
 /// for a tool call, a failed result the agent reads; else a JSON-RPC error.
 fn tool_failure(id: &Value, message: &Value, why: &str) -> String {
     if message["method"] == "tools/call" {
-        return json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": why }], "isError": true } }).to_string();
+        return to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": why }], "isError": true } }));
     }
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": why } }).to_string()
+    to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": why } }))
 }
 
 /// A JSON-RPC message as one line, which stdio's framing needs.
 fn one_line(text: &str) -> String {
     match serde_json::from_str::<Value>(text) {
-        Ok(value) => value.to_string(),
+        Ok(value) => to_json(&value),
         Err(_) => text.replace(['\r', '\n'], " "),
     }
 }
