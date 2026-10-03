@@ -156,22 +156,18 @@ Built on top, once the above works:
 
 ## To check
 
-These need the app (step 4): This Mac, the OrbStack server, the Slurm VM.
+Checked live on 2026-10-03, on This Mac and on the OrbStack server: the web
+view takes the cookie from the `303`; WebKit's `Origin` and `Sec-Fetch-Site`
+pass; Pluto's page loads in safe preview, and Run notebook runs its cells
+over the WebSocket; Claude's notebook tools answer through `/mcp`. Still to
+check:
 
-- The web view takes the cookie from the `303` and sends it back: a
-  `SameSite=Strict` cookie on `127.0.0.1`, and WebKit's `Sec-Fetch-Site`
-  and `Origin` on the page's own requests and WebSocket are what the core
-  allows.
+- The Slurm VM: the same, through the relay on the job's node.
 - A runtime from before this change: the app shows the "older version"
   message, and Restart Julia (or Stop) from there ends it and starts a new one.
-- Every request Pluto's page makes stays under paths the core passes
-  through untouched (no absolute URLs to another host or port). Expected,
-  since Pluto runs behind proxies; a real notebook in the web view and in a
-  browser settles it.
-- The web view keeps working when the page and the bridge share one origin
-  (cookies, the page's own secret in `annotate.rs`).
 - Pluto's "lost authentication" alert when a runtime restarts (see
   `close_page`) still behaves with the cookie in front.
+- Pluto's page in a browser through an `ssh -L` forward (step 5).
 
 ## Order
 
@@ -179,5 +175,5 @@ These need the app (step 4): This Mac, the OrbStack server, the Slurm VM.
    tests against a real Pluto. Built.
 2. Wire and helper: one port, `Target` removed; relay and Slurm relay. Built.
 3. App: one listener port, page URL, bridge URL, guard. Built.
-4. Live check: This Mac, the OrbStack server, the Slurm VM.
+4. Live check: This Mac and the OrbStack server done; the Slurm VM left.
 5. `endeavor serve` and the stdio form.
