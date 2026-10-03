@@ -131,7 +131,8 @@ mod tests {
                 if path.is_dir() {
                     folders.push(path);
                 } else if path.extension().is_some_and(|e| e == "md") {
-                    on_disk.push(path.strip_prefix(root).unwrap().to_string_lossy().into_owned());
+                    let parts: Vec<String> = path.strip_prefix(root).unwrap().components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                    on_disk.push(parts.join("/"));
                 }
             }
         }

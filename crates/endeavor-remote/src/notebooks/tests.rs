@@ -977,6 +977,7 @@ fn a_run_receipt_has_the_text_form_of_rich_outputs() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn opening_and_making_notebooks() {
     let s = setup();
     let dir = temp_notebooks("open", 1)[0].rsplit_once('/').unwrap().0.to_owned();
@@ -1099,6 +1100,7 @@ fn id(i: usize) -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn one_notebook_per_session() {
     let s = setup();
     let paths = temp_notebooks("one", 4);
@@ -1162,6 +1164,7 @@ fn one_notebook_per_session() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn list_notebooks_says_which_notebook_is_this_sessions() {
     let s = setup();
     let paths = temp_notebooks("mine", 2);
@@ -1177,6 +1180,7 @@ fn list_notebooks_says_which_notebook_is_this_sessions() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn the_apps_notebook_actions_restart_move_file_info_and_new_notebook() {
     let s = setup();
     let paths = temp_notebooks("actions", 2);
@@ -1235,6 +1239,7 @@ fn pathdiff(path: &str, from: &str) -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn stop_notebook_shuts_it_down_and_says_if_it_was_in_safe_preview() {
     let s = setup();
     let paths = temp_notebooks("stop", 2);
@@ -1250,6 +1255,7 @@ fn stop_notebook_shuts_it_down_and_says_if_it_was_in_safe_preview() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn idle_notebooks_stop_but_running_kept_alive_and_recently_used_ones_dont() {
     let s = setup();
     let paths = temp_notebooks("idle", 4);
@@ -1318,6 +1324,7 @@ fn idle_notebooks_stop_but_running_kept_alive_and_recently_used_ones_dont() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn a_notebooks_state_goes_when_it_shuts_down_however_it_shuts_down() {
     let s = setup();
     let paths = temp_notebooks("gone", 3);
@@ -1378,6 +1385,7 @@ fn keep_notebook_alive_checks_its_arguments_as_julia_did() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn parses_ids_and_paths_as_julia_did() {
     assert_eq!(parse_uuid("AAAAAAAA-1111-1111-1111-111111111111").as_deref(), Some("aaaaaaaa-1111-1111-1111-111111111111"));
     for bad in ["11111111111111111111111111111111", "{11111111-1111-1111-1111-111111111111}", " 11111111-1111-1111-1111-111111111111", "x", ""] {

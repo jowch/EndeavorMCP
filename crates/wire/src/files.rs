@@ -477,6 +477,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "the home folder isn't ported to Windows yet (docs/windows.md)")]
     fn home_relative_paths() {
         assert_eq!(expand("~"), home());
         assert_eq!(expand("~/decay-fits"), home().join("decay-fits"));

@@ -211,6 +211,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(windows, ignore = "the home folder isn't ported to Windows yet (docs/windows.md)")]
     fn versions_and_home_paths() {
         assert_eq!(parse_version("1.12.6"), Some((1, 12)));
         assert!(parse_version("1.10.4").unwrap() < MIN_JULIA);
