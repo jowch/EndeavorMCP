@@ -24,6 +24,7 @@ mod mcp;
 mod notebooks;
 mod results;
 mod slurm;
+mod standalone;
 #[cfg(windows)]
 mod winproc;
 
@@ -57,7 +58,8 @@ const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR (--julia JUL
        endeavor-remote relay --state-dir DIR
        endeavor-remote node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
        endeavor-remote core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
-       endeavor-remote askpass PROMPT";
+       endeavor-remote askpass PROMPT
+       endeavor-remote serve|mcp|stop [OPTIONS]   (without the app; `endeavor-remote serve --help`)";
 const LOG_TAIL: usize = 40;
 
 struct Args {
@@ -74,6 +76,8 @@ struct Args {
     /// The app build this helper and its runtime came from, which a runtime it
     /// starts reports to the app.
     build: Option<String>,
+    /// More of the core's environment: a standalone runtime's settings (see `core::main`).
+    core_env: Vec<(&'static str, String)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,6 +156,7 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some("relay") => slurm::relay_main(&argv[1..]),
         Some("node-start") => slurm::node_start_main(&argv[1..]),
         Some("core") => core::main(&argv[1..]),
+        Some("serve" | "mcp" | "stop") => standalone::main(&argv),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
         Some(prompt) if prompt != "connect" && std::env::var_os(wire::askpass::SOCKET_ENV).is_some() => askpass::run(prompt),
         _ => {}
@@ -227,6 +232,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         quit_with_client,
         any_node,
         build,
+        core_env: Vec::new(),
     })
 }
 
@@ -988,11 +994,15 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let stderr = log.try_clone().map_err(|e| e.to_string())?;
     let mut command = runtime_command(julia, &args.runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
-    command.stdout(log).stderr(stderr);
-    // SAFETY: setsid is async-signal-safe.
+    command.stdout(log).stderr(stderr).envs(args.core_env.iter().map(|(k, v)| (k, v)));
+    // SAFETY: setsid and sigprocmask are async-signal-safe.
     unsafe {
         command.pre_exec(|| {
             libc::setsid();
+            // Not the signals the starting process blocked for itself (`standalone` blocks Ctrl-C's).
+            let mut none: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut none);
+            libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
             Ok(())
         });
     }
@@ -1016,7 +1026,7 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let stderr = log.try_clone().map_err(|e| e.to_string())?;
     let mut command = runtime_command(julia, &args.runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
-    command.stdout(log).stderr(stderr);
+    command.stdout(log).stderr(stderr).envs(args.core_env.iter().map(|(k, v)| (k, v)));
     // Julia and Pluto's workers are console programs: with no console to
     // share, each would open a console window. CREATE_NO_WINDOW gives the core
     // one without a window, which they inherit. Breaking away from a job the

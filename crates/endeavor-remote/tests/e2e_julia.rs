@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use common::find_julia;
 use common::helper::Helper;
 use serde_json::{Value, json};
 use wire::files::{Reply, Request};
@@ -32,30 +33,6 @@ use wire::{ToApp, ToHelper};
 const MAC: &[(&str, &str)] = &[("X-Endeavor-Session", "1")];
 const SERVER: &[(&str, &str)] = &[("X-Endeavor-Session", "2"), ("X-Endeavor-Host", "lab")];
 const THIRD: &[(&str, &str)] = &[("X-Endeavor-Session", "3")];
-
-/// The julia to test with, and the app's folder when it's the app's.
-fn find_julia() -> Option<(PathBuf, Option<PathBuf>)> {
-    if let Some(julia) = std::env::var_os("ENDEAVOR_E2E_JULIA") {
-        return Some((julia.into(), None));
-    }
-    let app = PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/endeavor");
-    let mut installed: Vec<PathBuf> = std::fs::read_dir(&app)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("julia-")))
-        .map(|p| p.join("bin/julia"))
-        .filter(|p| p.is_file())
-        .collect();
-    installed.sort();
-    if let Some(julia) = installed.pop() {
-        return Some((julia, Some(app)));
-    }
-    let found = Command::new("/bin/sh").args(["-lc", "command -v julia"]).output().ok()?;
-    let path = String::from_utf8(found.stdout).ok()?.lines().last()?.trim().to_owned();
-    path.starts_with('/').then(|| (PathBuf::from(path), None))
-}
 
 /// A folder of the test's own, emptied.
 fn fresh(path: PathBuf) -> PathBuf {

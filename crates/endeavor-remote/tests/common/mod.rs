@@ -22,6 +22,30 @@ pub const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456
 /// The secret the fake Pluto requires.
 pub const PLUTO_SECRET: &str = "s3cret";
 
+/// For the end-to-end tests, the julia to test with, and the app's folder when it's the app's.
+pub fn find_julia() -> Option<(PathBuf, Option<PathBuf>)> {
+    if let Some(julia) = std::env::var_os("ENDEAVOR_E2E_JULIA") {
+        return Some((julia.into(), None));
+    }
+    let app = PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/endeavor");
+    let mut installed: Vec<PathBuf> = std::fs::read_dir(&app)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("julia-")))
+        .map(|p| p.join("bin/julia"))
+        .filter(|p| p.is_file())
+        .collect();
+    installed.sort();
+    if let Some(julia) = installed.pop() {
+        return Some((julia, Some(app)));
+    }
+    let found = std::process::Command::new("/bin/sh").args(["-lc", "command -v julia"]).output().ok()?;
+    let path = String::from_utf8(found.stdout).ok()?.lines().last()?.trim().to_owned();
+    path.starts_with('/').then(|| (PathBuf::from(path), None))
+}
+
 /// A julia that says it's 1.12, records its arguments, writes its state for the
 /// core naming `bridge`'s ports, and sleeps as its own pid.
 pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
