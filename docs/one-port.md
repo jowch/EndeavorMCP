@@ -1,7 +1,7 @@
 # One port per runtime
 
-Steps 1–3 built (2026-10-03); the live checks (step 4) and `endeavor serve`
-(step 5) are not done yet. Each runtime exposes one port to clients
+Steps 1–5 built and checked (2026-10-03). Step 5, the standalone command, is
+`endeavor-remote serve` (user guide: [standalone.md](standalone.md)). Each runtime exposes one port to clients
 instead of two. The runtime core answers it, passes Pluto's page through
 at `/`, and serves Endeavor's own endpoints under a reserved prefix. The
 app's relay, listener and state then carry one route instead of two. A
@@ -136,7 +136,7 @@ What came out differently from the design above, or wasn't settled by it:
 
 ## The standalone command
 
-Built on top, once the above works:
+Planned as follows; what was built is under "As built" below.
 
 - `endeavor serve` on a server or workstation starts or reuses the runtime
   in its state folder and prints the link (`http://localhost:PORT/?token=…`),
@@ -153,6 +153,86 @@ Built on top, once the above works:
   running on a laptop against a server's notebook.
 - Packaging: the runtime binary, `runtime/` and the skills; Julia found as
   `julia.rs` does now, or downloaded.
+
+### As built
+
+User guide: [standalone.md](standalone.md). The binary is still
+`endeavor-remote`; it may be renamed.
+
+- **Commands.** `endeavor-remote serve` starts the runtime in the foreground,
+  or uses the one running from its state folder, and prints the browser link,
+  the MCP URL and header, configs for Claude Code, Codex, Gemini and generic
+  JSON, and the `ssh -L` line (with `-J <SLURM_SUBMIT_HOST>` inside a Slurm
+  job). Ctrl-C, SIGTERM or SIGHUP stops a runtime it started; one it reused
+  keeps running. `endeavor-remote mcp` is the stdio form. `endeavor-remote
+  stop` ends the runtime in the state folder. Code: `standalone.rs`.
+- **No `--detach`.** A detached runtime needs a way to find and stop it, and
+  `mcp` and `stop` already give that. For a terminal you leave, `tmux` or a
+  batch job does what `--detach` would. Keeping `serve` in the foreground
+  keeps one rule: the terminal that started Julia owns it.
+- **Flags.** `--folder`, `--port`, `--julia`/`--julia-shell`, `--depot`,
+  `--idle-stop`, `--host-tools` (serve only), `--skills plugin` (mcp only),
+  `--state-dir`. Dropped: `--no-browser-hint` (the printout is the point) and
+  `--detach` (above).
+- **Defaults.** State in `~/.local/state/endeavor/serve/<host name>`
+  (`$XDG_STATE_HOME`), per machine because cluster nodes share a home folder,
+  and apart from the app's `~/.cache/endeavor/state`. The depot is the app's
+  server depot, `~/.cache/endeavor/depot:` or `$SCRATCH/endeavor/depot:`, so
+  packages are shared. Idle stop 48 hours, the app's default.
+- **The runtime inside the binary.** `crates/endeavor-remote/build.rs` embeds
+  `runtime/` and names it `<package version>-<FNV hash of its files>`, the
+  same walk and hash the app uses for server installs (`wire::tree`, shared by
+  the build script through `#[path]`). It unpacks to
+  `~/.cache/endeavor/serve/<version>/` (`$XDG_CACHE_HOME`): written to a
+  `.part` folder, then renamed, so a folder by that name is complete and a
+  second run leaves it alone. `scripts/helpers.sh`, `build-helpers.sh` and the
+  Helpers workflow now count `runtime/` as helper source.
+- **The core without the app.** The helper passes the settings in the core's
+  environment (`ENDEAVOR_FOLDER`, `ENDEAVOR_PORT`, `ENDEAVOR_HOST_TOOLS`,
+  `ENDEAVOR_IDLE_HOURS`, `ENDEAVOR_EXIT_IDLE`); none reach Julia or
+  `run_shell`. With a folder the core is standalone (`mcp::Standalone`): it
+  works in that folder, gives it to Pluto's page (`endeavor/set_folder`), uses
+  it for any session the app gave no folder, records it in `runtime.json`,
+  adds `browser_url` to `new_notebook`, `open_notebook` and
+  `pluto_session_status`, and adds to its MCP instructions what differs
+  without the app (`guide::STANDALONE`). `open_notebook` now resolves a
+  relative path against the session's folder, in the app too.
+- **No holds.** Policies come only from the app's `endeavor/set_policy`; a
+  session without one never waits, so `no_app` can't happen standalone.
+- **Sessions.** An agent over HTTP sends no `X-Endeavor-Session`: it has no
+  one-notebook rule and `this_session` is false for every notebook. The stdio
+  form sends its own session key and, once the runtime answers,
+  `endeavor/set_session_folder` with its `--folder`, so agents in different
+  projects share one runtime with their own folders.
+- **The stdio relay.** It answers `initialize`, `ping` and `tools/list`
+  itself, from the same code the core uses, so the handshake doesn't wait for
+  Julia. Everything else goes to `/mcp`, one thread per message: a JSON
+  answer is written as one line, an event stream event by event, a `202`
+  not at all; `Mcp-Session-Id` and `MCP-Protocol-Version` are passed back. A
+  call waits up to 45 seconds for a starting runtime, then fails with "still
+  starting". A refused connection starts or finds the runtime again once.
+- **Browser link for the agent.** In the tool results above rather than a
+  new tool: the agent gets it at the moment it has something to show, without
+  being told to ask. `mcp` also writes it to stderr.
+- **Idle.** `--idle-stop` sets the notebooks' idle stop. A runtime `mcp`
+  started also ends itself once no notebook has been open that long
+  (`core::exit_when_idle`); one `serve` started stays until Ctrl-C.
+- **Opening a notebook from disk** runs nothing, from the tools or from
+  Pluto's start page (checked in `tests/e2e_serve.rs`); Pluto's
+  **Run notebook code** runs it.
+- **Packaging.** `claude-plugin/` is the Claude Code plugin: a link to
+  `plugin/skills` and an `.mcp.json` running `endeavor-remote mcp --skills
+  plugin --folder ${CLAUDE_PROJECT_DIR}`. `.claude-plugin/marketplace.json`
+  makes the repository its marketplace. The app still loads `plugin/` alone,
+  so it doesn't start that server. `cargo install --git
+  https://github.com/jowch/Endeavor endeavor-remote` builds it (tried from a
+  local clone of the branch).
+- **Planned: `endeavor-remote update`** (or `endeavor update`). Open: where it
+  gets new versions (the Helpers release `scripts/helpers.sh` uses, or a
+  tagged release); how it checks the download (checksum or signature);
+  replacing its own binary while it runs; what happens to a runtime running
+  from the older build (the build check and Restart Julia cover the app's
+  case); how a `cargo install` user updates instead.
 
 ## To check
 
@@ -171,9 +251,29 @@ Checked live on 2026-10-03 in a test copy of the app:
   "Restart Julia on <host>", which after a confirmation stops the old
   runtime and starts a new one.
 
+Checked for step 5 on 2026-10-03:
+
+- `tests/e2e_serve.rs` with real Julia on This Mac: `serve` in a temporary
+  state folder and project folder, the agent over HTTP with only the bearer
+  header, a new notebook in the folder, a cell run and read, a notebook from
+  disk in safe preview through the tools and through Pluto's `/open`, the
+  browser link's cookie and Pluto's page, Ctrl-C ending the core and Julia's
+  process group; then `mcp` over stdio starting a runtime in the background,
+  a second `mcp` with another folder sharing it, and `stop`.
+- The OrbStack VM, a Linux binary from `scripts/build-helpers.sh --via
+  endeavor-linux`: `serve --port 8456` found Endeavor's own Julia, and from
+  this Mac through `ssh -L 18456:localhost:8456 endeavor-linux` (OrbStack
+  already forwards 8456 itself) `initialize`, `new_notebook`, `add_cell`,
+  `execute_cell`, `read_cell` (`55`), the `303` with the cookie and Pluto's
+  page all worked; Ctrl-C left no process in Julia's group. Inside `sbatch`
+  it printed the `-J` line, and `scancel` stopped Julia.
+
 Still open:
 
-- Pluto's page in a browser through an `ssh -L` forward (step 5).
+- A browser on Pluto's WebSocket through `ssh -L` (curl reached the page; the
+  WebSocket is covered by `e2e_julia` on loopback).
+- The Claude Code plugin installed from the marketplace, and Codex and Gemini
+  against `serve` and `mcp`: configs written from their documentation, not run.
 
 ## Order
 
@@ -182,4 +282,4 @@ Still open:
 2. Wire and helper: one port, `Target` removed; relay and Slurm relay. Built.
 3. App: one listener port, page URL, bridge URL, guard. Built.
 4. Live check: done (This Mac, the OrbStack server, the Slurm VM).
-5. `endeavor serve` and the stdio form.
+5. `endeavor-remote serve`, `mcp` and `stop`. Built and checked.
