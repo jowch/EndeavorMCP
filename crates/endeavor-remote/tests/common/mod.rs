@@ -1,9 +1,11 @@
 //! A stand-in for Julia under `endeavor-remote core`: a script that writes the
-//! state boot.jl would and then sleeps, naming a bridge served by this test
-//! process. The bridge answers like Julia's (chunked responses to HTTP/1.1,
-//! close-delimited to HTTP/1.0, an SSE stream on `/stream`, the adapter's
-//! calls on `/adapter` and its notifications on `/notifications`) and records
-//! what it was sent. `helper` drives `endeavor-remote connect` as the app does.
+//! state boot.jl would and then sleeps, naming a bridge and a Pluto served by
+//! this test process. The bridge answers like Julia's (chunked responses to
+//! HTTP/1.1, close-delimited to HTTP/1.0, the adapter's calls on `/adapter` and
+//! its notifications on `/notifications`); Pluto wants its secret in a cookie,
+//! echoes bodies on `/echo`, streams events on `/stream` and echoes a
+//! WebSocket's bytes after an upgrade. Both record what they were sent.
+//! `helper` drives `endeavor-remote connect` as the app does.
 
 #![allow(dead_code)]
 
@@ -17,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// The secret the fake Pluto requires.
+pub const PLUTO_SECRET: &str = "s3cret";
 
 /// A julia that says it's 1.12, records its arguments, writes its state for the
 /// core naming `bridge`'s ports, and sleeps as its own pid.
@@ -29,7 +33,7 @@ pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
 [ "$1" = --version ] && {{ echo 'julia version 1.12.0'; exit 0; }}
 echo "$@" > "{dir}/julia.args"
 echo "booting"
-printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"token":"%s","pluto_secret":"s3cret","job":""}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$ENDEAVOR_TOKEN" > "$ENDEAVOR_STATE.tmp"
+printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"token":"%s","pluto_secret":"{PLUTO_SECRET}","job":""}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$ENDEAVOR_TOKEN" > "$ENDEAVOR_STATE.tmp"
 mv "$ENDEAVOR_STATE.tmp" "$ENDEAVOR_STATE"
 exec sleep 600
 "#,
@@ -83,6 +87,10 @@ impl Seen {
 #[derive(Default)]
 struct Shared {
     seen: Mutex<Vec<Seen>>,
+    /// What Pluto was sent.
+    pluto_seen: Mutex<Vec<Seen>>,
+    /// Said when Pluto's end of a WebSocket closes.
+    socket_closed: Mutex<Option<Sender<()>>>,
     /// The open `/stream` stream: events to write, or `None` to end it abruptly.
     events: Mutex<Option<Sender<Option<String>>>>,
     /// Said when the core closes the `/stream` stream's upstream connection.
@@ -98,6 +106,7 @@ pub struct FakeBridge {
     pub pluto_port: u16,
     shared: Arc<Shared>,
     closed: Receiver<()>,
+    socket_closed: Receiver<()>,
     /// The state folder, where the core keeps Julia's pid (`endeavor/shutdown` ends it).
     dir: PathBuf,
 }
@@ -105,7 +114,8 @@ pub struct FakeBridge {
 impl FakeBridge {
     pub fn start(dir: &Path) -> FakeBridge {
         let (closed_tx, closed) = mpsc::channel();
-        let shared = Arc::new(Shared { closed: Mutex::new(Some(closed_tx)), ..Default::default() });
+        let (socket_closed_tx, socket_closed) = mpsc::channel();
+        let shared = Arc::new(Shared { closed: Mutex::new(Some(closed_tx)), socket_closed: Mutex::new(Some(socket_closed_tx)), ..Default::default() });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (s, d) = (shared.clone(), dir.to_path_buf());
@@ -117,17 +127,27 @@ impl FakeBridge {
         });
         let pluto = TcpListener::bind("127.0.0.1:0").unwrap();
         let pluto_port = pluto.local_addr().unwrap().port();
+        let s = shared.clone();
         std::thread::spawn(move || {
-            for mut socket in pluto.incoming().map_while(Result::ok) {
-                let mut reader = socket.try_clone().unwrap();
-                std::thread::spawn(move || drop(std::io::copy(&mut reader, &mut socket)));
+            for socket in pluto.incoming().map_while(Result::ok) {
+                let s = s.clone();
+                std::thread::spawn(move || pluto_serve(socket, &s));
             }
         });
-        FakeBridge { port, pluto_port, shared, closed, dir: dir.to_path_buf() }
+        FakeBridge { port, pluto_port, shared, closed, socket_closed, dir: dir.to_path_buf() }
     }
 
     pub fn seen(&self) -> Vec<Seen> {
         self.shared.seen.lock().unwrap().clone()
+    }
+
+    pub fn pluto_seen(&self) -> Vec<Seen> {
+        self.shared.pluto_seen.lock().unwrap().clone()
+    }
+
+    /// Wait for Pluto's end of a WebSocket to close.
+    pub fn socket_closed(&self) -> bool {
+        self.socket_closed.recv_timeout(Duration::from_secs(5)).is_ok()
     }
 
     /// Write an event on the open `/stream` stream, waiting for one to open.
@@ -170,8 +190,6 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
             let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         } else if !authorized {
             let _ = socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
-        } else if target == "/stream" {
-            return events(socket, shared);
         } else if target == "/notifications" {
             return notifications(socket, shared);
         } else if target == "/adapter" {
@@ -187,9 +205,6 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
             }
             .to_string();
             let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len());
-        } else if target == "/echo" {
-            let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", seen.body.len());
-            let _ = socket.write_all(&seen.body);
         } else if target == "/call" {
             let body = String::from_utf8_lossy(&seen.body).into_owned();
             let reply = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": { "said": seen.line, "body": body } }).to_string();
@@ -207,6 +222,40 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
             let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
         }
         if http10 {
+            return;
+        }
+    }
+}
+
+/// Pluto, which wants its secret in a cookie and sets it again on its reply,
+/// as Pluto does.
+fn pluto_serve(socket: TcpStream, shared: &Arc<Shared>) {
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    let mut socket = socket;
+    while let Some(seen) = read_request(&mut reader) {
+        shared.pluto_seen.lock().unwrap().push(seen.clone());
+        let target = seen.line.split(' ').nth(1).unwrap_or_default().to_owned();
+        if seen.header("Cookie") != Some(&format!("secret={PLUTO_SECRET}")) {
+            let _ = socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\n\r\nForbidden");
+        } else if seen.header("Upgrade") == Some("websocket") {
+            let _ = socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+            let _ = std::io::copy(&mut reader, &mut socket);
+            let _ = shared.socket_closed.lock().unwrap().as_ref().unwrap().send(());
+            return;
+        } else if target == "/stream" {
+            return events(socket, shared);
+        } else if target == "/echo" {
+            let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", seen.body.len());
+            let _ = socket.write_all(&seen.body);
+        } else {
+            let body = format!("Pluto: {}", seen.line);
+            let _ = write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nSet-Cookie: secret={PLUTO_SECRET}; SameSite=Strict; HttpOnly\r\nSet-Cookie: theme=dark\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+        }
+        if seen.line.ends_with("HTTP/1.0") {
             return;
         }
     }

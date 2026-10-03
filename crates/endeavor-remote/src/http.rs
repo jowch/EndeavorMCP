@@ -1,8 +1,9 @@
-//! Just enough HTTP/1.1 for the core to pass requests through to Julia's bridge
-//! one at a time: request and response heads, and bodies relayed as they arrive
-//! in whatever framing the sender used (a length, chunks, or until the
-//! connection closes), so a stream of events reaches the client as it's written;
-//! and whole requests and responses, for what the core answers itself and asks Julia.
+//! Just enough HTTP/1.1 for the core to pass requests through to Pluto and
+//! Julia's bridge one at a time: request and response heads, and bodies relayed
+//! as they arrive in whatever framing the sender used (a length, chunks, or
+//! until the connection closes), so a stream of events reaches the client as
+//! it's written; a WebSocket's bytes after its upgrade; and whole requests and
+//! responses, for what the core answers itself and asks Julia.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -71,6 +72,16 @@ impl Head {
     /// A request's target: its path and query.
     pub fn target(&self) -> &str {
         self.line.split(' ').nth(1).unwrap_or_default()
+    }
+
+    /// A request's path, without its query.
+    pub fn path(&self) -> &str {
+        self.target().split('?').next().unwrap_or_default()
+    }
+
+    /// Point a request at `target` instead.
+    pub fn set_target(&mut self, target: &str) {
+        self.line = format!("{} {target} {}", self.method(), self.version());
     }
 
     /// A response's status code.
@@ -351,6 +362,59 @@ pub fn relay_body(upstream: &mut BufReader<TcpStream>, client: &mut TcpStream, f
         client.write_all(&bytes[..n])?;
         upstream.consume(n);
     }
+    Ok(())
+}
+
+/// Pass `upstream`'s response to `request` on to the client as it comes,
+/// each head through `edit` first, and after a `101 Switching Protocols` the
+/// connection itself (`tunnel`). Whether the client connection can carry
+/// another request.
+pub fn relay_response(
+    request: &Head,
+    client: &mut BufReader<TcpStream>,
+    upstream: &mut BufReader<TcpStream>,
+    edit: &dyn Fn(&mut Head),
+) -> io::Result<bool> {
+    let mut to_client = client.get_ref().try_clone()?;
+    let response = loop {
+        let mut response = Head::read(upstream)?.ok_or(io::ErrorKind::UnexpectedEof)?;
+        edit(&mut response);
+        response.write_to(&mut to_client)?;
+        if response.status() == 101 {
+            tunnel(client, upstream)?;
+            return Ok(false);
+        }
+        // `100 Continue` comes before the real response.
+        if !(100..200).contains(&response.status()) {
+            break response;
+        }
+    };
+    let mut framing = response.response_body(request.method())?;
+    relay_body(upstream, &mut to_client, &mut framing)?;
+    Ok(request.keeps_alive() && response.keeps_alive() && framing != Framing::UntilClose)
+}
+
+/// Copy bytes both ways between a client and an upstream server until either
+/// side closes, then close both: the connection after a `101 Switching
+/// Protocols` (a WebSocket). What either reader already holds goes first.
+pub fn tunnel(client: &mut BufReader<TcpStream>, upstream: &mut BufReader<TcpStream>) -> io::Result<()> {
+    let (mut to_client, mut to_upstream) = (client.get_ref().try_clone()?, upstream.get_ref().try_clone()?);
+    to_client.write_all(upstream.buffer())?;
+    upstream.consume(upstream.buffer().len());
+    to_upstream.write_all(client.buffer())?;
+    client.consume(client.buffer().len());
+    let (mut from_client, mut from_upstream) = (client.get_ref().try_clone()?, upstream.get_ref().try_clone()?);
+    let end = |a: &TcpStream, b: &TcpStream| {
+        let _ = a.shutdown(std::net::Shutdown::Both);
+        let _ = b.shutdown(std::net::Shutdown::Both);
+    };
+    let upward = std::thread::spawn(move || {
+        let _ = io::copy(&mut from_client, &mut to_upstream);
+        end(&from_client, &to_upstream);
+    });
+    let _ = io::copy(&mut from_upstream, &mut to_client);
+    end(&from_upstream, &to_client);
+    let _ = upward.join();
     Ok(())
 }
 

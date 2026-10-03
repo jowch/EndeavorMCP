@@ -2,9 +2,11 @@
 # Slurm job's script):
 #   julia --project=runtime runtime/boot.jl <pluto_port> <mcp_port>
 # with ENDEAVOR_TOKEN (the bridge's bearer token), ENDEAVOR_STATE (where to write
-# its state) and ENDEAVOR_LAUNCHER in the environment. Once Pluto and the bridge
-# are up it writes that state, which is how the core learns Julia is ready (the
-# core then writes runtime.json for the helper); it serves until the bridge's
+# its state) and ENDEAVOR_LAUNCHER in the environment. Both ports are private to
+# the core, which serves the runtime's one port in front of them and adds Pluto's
+# secret to what it passes on (docs/one-port.md). Once Pluto and the bridge are up
+# it writes that state, which is how the core learns Julia is ready (the core then
+# writes runtime.json for the helper); it serves until the bridge's
 # `endeavor/shutdown` or a signal ends it.
 
 # Our stdout and stderr are runtime.log, a file, which Julia buffers. The helper

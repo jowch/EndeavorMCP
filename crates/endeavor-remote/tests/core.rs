@@ -1,7 +1,7 @@
 //! `endeavor-remote core` with a stand-in Julia (see `common`): it starts it,
-//! writes `runtime.json` once it's ready, passes the requests on its bridge
-//! port it doesn't answer through, streams as they're written, and lives and
-//! dies with it.
+//! writes `runtime.json` once it's ready, passes the requests on its port it
+//! doesn't answer through to Pluto or Julia's bridge, streams as they're
+//! written, lets a browser in with its cookie, and lives and dies with it.
 
 #![cfg(unix)]
 
@@ -48,7 +48,7 @@ impl Core {
         wait_for("runtime.json", || dir.join("runtime.json").exists());
         let state = read_json(&dir.join("runtime.json"));
         let julia_pid = read_json(&dir.join("julia.json"))["pid"].as_i64().unwrap() as i32;
-        Core { port: state["mcp_port"].as_u64().unwrap() as u16, process, julia_pid }
+        Core { port: state["port"].as_u64().unwrap() as u16, process, julia_pid }
     }
 
     fn connect(&self) -> TcpStream {
@@ -128,9 +128,11 @@ fn starts_julia_and_writes_its_own_runtime_json() {
     let core = Core::start(&dir, &bridge);
     let state = read_json(&dir.join("runtime.json"));
     assert_eq!(state["pid"].as_i64(), Some(core.process.id() as i64), "the core's pid");
-    assert_ne!(core.port, bridge.port, "the core's own bridge port");
-    assert_eq!(state["pluto_port"].as_u64(), Some(bridge.pluto_port as u64), "Pluto is still Julia's");
-    assert_eq!((state["token"].as_str(), state["pluto_secret"].as_str(), state["launcher"].as_str()), (Some(TOKEN), Some("s3cret"), Some("process")));
+    assert!(core.port != bridge.port && core.port != bridge.pluto_port, "the core's own port");
+    let mut keys: Vec<&str> = state.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["job", "launcher", "node", "pid", "port", "started", "token"], "nothing of Pluto's");
+    assert_eq!((state["token"].as_str(), state["launcher"].as_str()), (Some(TOKEN), Some("process")));
     let mode = std::fs::metadata(dir.join("runtime.json")).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
 
@@ -154,7 +156,7 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     let body = r#"{"jsonrpc":"2.0","id":7,"method":"endeavor/set_folder","params":{"path":"/n"}}"#;
     write!(
         socket,
-        "POST /call HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nX-Endeavor-Host: labbox3\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nX-Endeavor-Host: labbox3\r\nContent-Length: {}\r\n\r\n{body}",
         core.port,
         body.len()
     )
@@ -165,14 +167,14 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
     assert_eq!(reply["result"]["body"].as_str(), Some(body));
 
-    let seen = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1").unwrap();
+    let seen = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1").expect("Julia's `/call`");
     assert_eq!(seen.header("Host"), Some(format!("127.0.0.1:{}", bridge.port).as_str()));
     assert_eq!(seen.header("Authorization"), Some(format!("Bearer {TOKEN}").as_str()));
     assert_eq!(seen.header("Content-Type"), Some("application/json"));
     assert_eq!(seen.header("X-Endeavor-Host"), Some("labbox3"));
 
     // A chunked call, which the core reads whole to see its method, reaches Julia whole.
-    write!(socket, "POST /call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+    write!(socket, "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
     write!(socket, "{:x}\r\n{}\r\n", 20, &body[..20]).unwrap();
     std::thread::sleep(Duration::from_millis(50));
     write!(socket, "{:x}\r\n{}\r\n0\r\n\r\n", body.len() - 20, &body[20..]).unwrap();
@@ -180,14 +182,14 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     assert_eq!(reply["result"]["body"].as_str(), Some(body));
 
     // The same connection carries the next request.
-    write!(socket, "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", core.port).unwrap();
-    assert_eq!(response(&mut reader), ("HTTP/1.1 200 OK".into(), vec![("content-length".into(), "2".into())], "ok".into()));
-    write!(socket, "GET /nope HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    write!(socket, "GET /endeavor/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     assert_eq!(response(&mut reader).0, "HTTP/1.1 404 Not Found");
+    write!(socket, "GET /edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    assert_eq!(response(&mut reader).2, "Pluto: GET /edit?id=1 HTTP/1.1");
 
     // HTTP/1.0, as the helper's own calls are: the reply runs to the end of the connection.
     let mut socket = core.connect();
-    write!(socket, "POST /call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    write!(socket, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut reply = String::new();
     socket.read_to_string(&mut reply).unwrap();
     let (head, body) = reply.split_once("\r\n\r\n").unwrap();
@@ -216,6 +218,8 @@ fn passes_request_bodies_intact() {
     let mut back = vec![0; body.len()];
     reader.read_exact(&mut back).unwrap();
     assert!(back == body, "a 1 MB body comes back unchanged");
+    let seen = bridge.pluto_seen().pop().unwrap();
+    assert_eq!((seen.header("Cookie"), seen.header("Authorization")), (Some("secret=s3cret"), None), "Pluto gets its secret, not the token");
 
     // A chunked body, sent in pieces.
     write!(socket, "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
@@ -270,7 +274,7 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     // HTTP/1.0, as the app asks: the stream runs to the end of the connection.
-    write!(socket, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    write!(socket, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     let head = read_until(&mut reader, "\r\n\r\n");
     assert!(head.starts_with("HTTP/1.1 200 OK\r\n") && head.contains("Content-Type: text/event-stream\r\n") && !head.contains("chunked"), "{head}");
     assert_eq!(read_until(&mut reader, "\n\n"), "data: {\"asks\":[],\"build\":\"1.0.0-abc\",\"cells\":{},\"idle_stopped\":[],\"notebooks\":[]}\n\n", "the state now, and the build it came from");
@@ -431,7 +435,7 @@ fn keeps_concurrent_sessions_apart() {
 /// One of the app's `/call`s, as the app makes them: the reply's body.
 fn app_call(core: &Core, body: &str) -> String {
     let mut socket = core.connect();
-    write!(socket, "POST /call HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", core.port, body.len()).unwrap();
+    write!(socket, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", core.port, body.len()).unwrap();
     let (status, _, reply) = response(&mut BufReader::new(socket));
     assert_eq!(status, "HTTP/1.1 200 OK");
     reply
@@ -486,7 +490,7 @@ fn the_app_looks_up_a_sessions_tool_results() {
     assert_eq!(look_up(r#"{"owner":"8","tool":"keep_notebook_alive","arguments":{}}"#), r#"{"id":9,"jsonrpc":"2.0","result":null}"#);
 }
 
-/// Follow the app's `/events` stream until `done` holds for an event; that event.
+/// Follow the app's `/endeavor/events` stream until `done` holds for an event; that event.
 fn event_where(reader: &mut impl BufRead, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
     loop {
         let event = read_until(reader, "\n\n");
@@ -520,7 +524,7 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
 
     let mut events = core.connect();
     let mut reader = BufReader::new(events.try_clone().unwrap());
-    write!(events, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    write!(events, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     event_where(&mut reader, |_| true);
     let answer = |id: &serde_json::Value, allow: bool| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"endeavor/answer_run","params":{{"id":{id},"allow":{allow},"user_ran":[]}}}}"#));
     std::thread::scope(|scope| {
@@ -569,7 +573,7 @@ fn a_held_call_answers_as_an_event_stream_at_once() {
     app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{"owner":"7","policy":"ask","asks":true}}"#);
     let mut events = core.connect();
     let mut events_reader = BufReader::new(events.try_clone().unwrap());
-    write!(events, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    write!(events, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     event_where(&mut events_reader, |_| true);
 
     let post = |socket: &mut TcpStream, message: &str| {
@@ -649,7 +653,7 @@ fn in_manual_an_edit_waits_for_the_users_answer() {
 
     let mut events = core.connect();
     let mut reader = BufReader::new(events.try_clone().unwrap());
-    write!(events, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    write!(events, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     event_where(&mut reader, |_| true);
     let answer = |id: &serde_json::Value, allow: bool| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"endeavor/answer_run","params":{{"id":{id},"allow":{allow},"user_ran":[]}}}}"#));
     let waiting = |e: &serde_json::Value| e["asks"].as_array().is_some_and(|a| !a.is_empty());
@@ -973,35 +977,111 @@ fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
     let auth = format!("Authorization: Bearer {TOKEN}\r\n");
     let refused = |status: &str, error: &str| (format!("HTTP/1.1 {status}"), format!(r#"{{"error":"{error}"}}"#));
     // The core reads notebooks from Julia on its own; those aren't passed-on requests.
-    let passed_on = || bridge.seen().iter().filter(|s| !s.line.starts_with("POST /adapter") && !s.line.starts_with("GET /notifications")).count();
+    let passed_on = || bridge.seen().iter().filter(|s| !s.line.starts_with("POST /adapter") && !s.line.starts_with("GET /notifications")).count() + bridge.pluto_seen().len();
     let seen_before = passed_on();
-    for route in ["POST /mcp", "POST /call", "GET /events", "POST /dispatch", "GET /nope", "GET /health"] {
+    for route in ["POST /mcp", "POST /endeavor/call", "GET /endeavor/events", "POST /endeavor/dispatch", "GET /nope", "GET /edit?id=1"] {
         let request = |headers: &str| format!("{route} HTTP/1.1\r\n{headers}Content-Length: 2\r\n\r\n{{}}");
-        if route != "GET /health" {
-            assert_eq!(ask(&request("Host: 127.0.0.1\r\n")), refused("401 Unauthorized", "unauthorized"), "{route}");
-            assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace('0', "1")))), refused("401 Unauthorized", "unauthorized"));
-            assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace("\r\n", "0\r\n")))), refused("401 Unauthorized", "unauthorized"));
-        }
+        assert_eq!(ask(&request("Host: 127.0.0.1\r\n")), refused("401 Unauthorized", "unauthorized"), "{route}");
+        assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace('0', "1")))), refused("401 Unauthorized", "unauthorized"));
+        assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\n{}", auth.replace("\r\n", "0\r\n")))), refused("401 Unauthorized", "unauthorized"));
         assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\nOrigin: https://example.com\r\n{auth}"))), refused("403 Forbidden", "browser_origin_refused"));
         assert_eq!(ask(&request(&format!("Host: 127.0.0.1\r\nOrigin: null\r\n{auth}"))), refused("403 Forbidden", "browser_origin_refused"));
         assert_eq!(ask(&request(&format!("Host: evil.example:80\r\n{auth}"))), refused("403 Forbidden", "host_not_loopback"), "{route}");
         assert_eq!(ask(&request(&format!("Host: 127.0.0.1.evil.example\r\n{auth}"))), refused("403 Forbidden", "host_not_loopback"));
         assert_eq!(ask(&request(&auth)), refused("403 Forbidden", "host_not_loopback"));
     }
-    assert_eq!(passed_on(), seen_before, "nothing refused reaches Julia");
+    assert_eq!(passed_on(), seen_before, "nothing refused reaches Julia or Pluto");
     for host in ["localhost", "[::1]:9", "127.0.0.1:9"] {
         let request = format!("POST /mcp HTTP/1.1\r\nHost: {host}\r\n{auth}Content-Length: 2\r\n\r\n{{}}");
         assert_eq!(ask(&request).0, "HTTP/1.1 202 Accepted", "{host} is loopback");
     }
-    assert_eq!(ask(&format!("GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")), ("HTTP/1.1 200 OK".into(), "ok".into()), "no token needed");
 
     // A refused request leaves the connection for the next one.
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
-    write!(socket, "POST /call HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
+    write!(socket, "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
     assert_eq!(response(&mut reader).0, "HTTP/1.1 401 Unauthorized");
-    write!(socket, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
-    assert_eq!(response(&mut reader).2, "ok");
+    write!(socket, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}\r\n").unwrap();
+    assert_eq!(response(&mut reader).2, "Pluto: GET / HTTP/1.1");
+}
+
+#[test]
+fn a_browser_gets_in_with_its_link_and_then_reaches_only_plutos_page() {
+    let dir = state_dir("core-browser");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let ask = |request: &str| {
+        let mut socket = core.connect();
+        socket.write_all(request.as_bytes()).unwrap();
+        response(&mut BufReader::new(socket))
+    };
+    let host = format!("Host: 127.0.0.1:{}\r\n", core.port);
+    let (status, headers, _) = ask(&format!("GET /edit?id=n1&token={TOKEN} HTTP/1.1\r\n{host}\r\n"));
+    assert_eq!(status, "HTTP/1.1 303 See Other");
+    let header = |name: &str| headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
+    assert_eq!(header("location"), Some("/edit?id=n1"), "the same page, without the token");
+    let set = header("set-cookie").unwrap();
+    assert!(set.ends_with(&format!("={TOKEN}; Path=/; HttpOnly; SameSite=Strict")), "{set}");
+    let cookie = format!("Cookie: {}\r\n", set.split(';').next().unwrap());
+    assert!(bridge.pluto_seen().is_empty(), "the visit with the token never reached Pluto");
+
+    let (status, headers, body) = ask(&format!("GET /edit?id=n1 HTTP/1.1\r\n{host}Cookie: theme=dark\r\n{cookie}Sec-Fetch-Site: none\r\n\r\n"));
+    assert_eq!((status.as_str(), body.as_str()), ("HTTP/1.1 200 OK", "Pluto: GET /edit?id=n1 HTTP/1.1"));
+    let cookies: Vec<&str> = headers.iter().filter(|(n, _)| n == "set-cookie").map(|(_, v)| v.as_str()).collect();
+    assert_eq!(cookies, ["theme=dark"], "Pluto's own secret never reaches the browser");
+    assert_eq!(bridge.pluto_seen()[0].header("Cookie"), Some("secret=s3cret"), "only Pluto's secret reaches Pluto");
+
+    let refused = |status: &str, error: &str| (format!("HTTP/1.1 {status}"), format!(r#"{{"error":"{error}"}}"#));
+    let ask = |request: &str| {
+        let (status, _, body) = ask(request);
+        (status, body)
+    };
+    for route in ["POST /mcp", "POST /endeavor/call", "GET /endeavor/events"] {
+        assert_eq!(ask(&format!("{route} HTTP/1.1\r\n{host}{cookie}Content-Length: 2\r\n\r\n{{}}")), refused("401 Unauthorized", "unauthorized"), "{route}");
+    }
+    let origin = format!("Origin: http://127.0.0.1:{}\r\n", core.port + 1);
+    assert_eq!(ask(&format!("GET /edit?id=n1 HTTP/1.1\r\n{host}{origin}{cookie}\r\n")), refused("403 Forbidden", "browser_origin_refused"), "another runtime's page");
+    assert_eq!(ask(&format!("GET /?token=nope HTTP/1.1\r\n{host}\r\n")), refused("401 Unauthorized", "unauthorized"));
+    assert_eq!(bridge.pluto_seen().len(), 1);
+}
+
+#[test]
+fn passes_a_websocket_through_both_ways_until_either_side_closes() {
+    let dir = state_dir("core-websocket");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let mut socket = core.connect();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    let (_, headers, _) = {
+        let mut visit = core.connect();
+        write!(visit, "GET /?token={TOKEN} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", core.port).unwrap();
+        response(&mut BufReader::new(visit))
+    };
+    let cookie = headers.iter().find(|(n, _)| n == "set-cookie").unwrap().1.split(';').next().unwrap().to_owned();
+    write!(
+        socket,
+        "GET /channels HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: {cookie}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        port = core.port
+    )
+    .unwrap();
+    let head = read_until(&mut reader, "\r\n\r\n");
+    assert!(head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"), "{head}");
+    assert_eq!(bridge.pluto_seen()[0].header("Cookie"), Some("secret=s3cret"));
+    for message in ["first frame\n", "second\n"] {
+        socket.write_all(message.as_bytes()).unwrap();
+        assert_eq!(read_until(&mut reader, "\n"), message, "back from Pluto");
+    }
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let mut writer = socket.try_clone().unwrap();
+    let sent = big.clone();
+    let send = std::thread::spawn(move || writer.write_all(&sent).unwrap());
+    let mut back = vec![0; big.len()];
+    reader.read_exact(&mut back).unwrap();
+    send.join().unwrap();
+    assert!(back == big, "300 KB both ways at once");
+
+    socket.shutdown(std::net::Shutdown::Both).unwrap();
+    assert!(bridge.socket_closed(), "the client closing closes Pluto's end");
 }
 
 #[test]

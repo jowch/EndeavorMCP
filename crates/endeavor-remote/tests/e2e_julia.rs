@@ -1,6 +1,7 @@
 //! The runtime end to end, with real Julia: the helper and core started as the
 //! app starts This Mac's, the agent's MCP calls over `POST /mcp` with its
-//! session headers, the app's `/call`s, and the helper's file requests.
+//! session headers, the app's `/endeavor/call`s, Pluto's page and WebSocket as
+//! a browser reaches them, and the helper's file requests.
 //!
 //! Julia takes a while to start, so one test starts it once and walks through
 //! the steps in order. It's ignored by default:
@@ -25,7 +26,7 @@ use std::time::{Duration, Instant};
 use common::helper::Helper;
 use serde_json::{Value, json};
 use wire::files::{Reply, Request};
-use wire::{Target, ToApp, ToHelper};
+use wire::{ToApp, ToHelper};
 
 /// Sessions as the agent's MCP config names them: one on This Mac, one on a server.
 const MAC: &[(&str, &str)] = &[("X-Endeavor-Session", "1")];
@@ -115,10 +116,10 @@ impl Runtime {
         }
     }
 
-    /// POST `body` to `path` on the bridge, relayed through the helper as the
-    /// app's and the agent's connections are: the status line and the body.
+    /// POST `body` to `path` on the runtime's port, relayed through the helper
+    /// as the app's and the agent's connections are: the status line and the body.
     fn post(&self, path: &str, headers: &[(&str, &str)], body: &str) -> (String, String) {
-        let mut socket = self.helper.connect(Target::Bridge);
+        let mut socket = self.helper.connect();
         socket.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
         let extra: String = headers.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
         write!(
@@ -132,6 +133,19 @@ impl Runtime {
         socket.read_to_string(&mut reply).unwrap();
         let (head, body) = reply.split_once("\r\n\r\n").unwrap_or((&reply, ""));
         (head.lines().next().unwrap_or_default().to_owned(), body.to_owned())
+    }
+
+    /// GET `target` on the runtime's port with `headers` and no token, as a
+    /// browser does: the status line, the whole head, and the body.
+    fn get(&self, target: &str, headers: &str) -> (String, String, String) {
+        let mut socket = self.helper.connect();
+        socket.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+        write!(socket, "GET {target} HTTP/1.0\r\nHost: 127.0.0.1\r\n{headers}\r\n").unwrap();
+        let mut reply = Vec::new();
+        socket.read_to_end(&mut reply).unwrap();
+        let reply = String::from_utf8_lossy(&reply).into_owned();
+        let (head, body) = reply.split_once("\r\n\r\n").unwrap_or((&reply, ""));
+        (head.lines().next().unwrap_or_default().to_owned(), head.to_owned(), body.to_owned())
     }
 
     fn id(&mut self) -> u64 {
@@ -163,10 +177,10 @@ impl Runtime {
         self.tool(caller, name, arguments.clone()).unwrap_or_else(|e| panic!("{name}({arguments}) failed: {e}"))
     }
 
-    /// One of the app's `/call`s: its result.
+    /// One of the app's `/endeavor/call`s: its result.
     fn call(&mut self, method: &str, params: Value) -> Result<Value, Value> {
         let id = self.id();
-        let (status, body) = self.post("/call", &[], &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string());
+        let (status, body) = self.post("/endeavor/call", &[], &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string());
         assert_eq!(status, "HTTP/1.1 200 OK", "{method}: {body}");
         let reply: Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("{method}: {body}"));
         match reply.get("error") {
@@ -175,7 +189,7 @@ impl Runtime {
         }
     }
 
-    /// A notebook tool the app calls itself, through `/call`: its JSON answer.
+    /// A notebook tool the app calls itself, through `/endeavor/call`: its JSON answer.
     fn app_tool(&mut self, name: &str, arguments: Value) -> Value {
         let result = self.call("tools/call", json!({ "name": name, "arguments": arguments })).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(result["isError"], false, "{name}: {result}");
@@ -295,6 +309,46 @@ fn the_runtime_end_to_end() {
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": rich }));
         assert_eq!(read["output_text"], json!("2-element Vector{Float64}:\n 1.5\n 2.5"), "a tree output read as text: {read}");
         (notebook, path, cell)
+    });
+
+    step("Pluto's page and WebSocket, as a browser reaches them", || {
+        let token = rt.token.clone();
+        let (status, head, _) = rt.get(&format!("/edit?id={notebook}&token={token}"), "");
+        assert_eq!(status, "HTTP/1.1 303 See Other", "{head}");
+        assert!(head.contains(&format!("\r\nLocation: /edit?id={notebook}\r\n")), "{head}");
+        let set = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap_or_else(|| panic!("no cookie: {head}"));
+        let cookie = format!("Cookie: {}\r\n", set.split(';').next().unwrap());
+        let (status, head, page) = rt.get(&format!("/edit?id={notebook}"), &format!("{cookie}Sec-Fetch-Site: none\r\n"));
+        assert_eq!(status, "HTTP/1.1 200 OK", "{head}");
+        assert!(page.contains("<html") && page.contains("Pluto"), "Pluto's page: {}", &page[..page.len().min(300)]);
+        assert!(!head.to_ascii_lowercase().contains("set-cookie: secret="), "Pluto's secret stays in the core: {head}");
+        assert!(rt.get("/", "").0.starts_with("HTTP/1.1 401"), "nothing without the token or the cookie");
+        assert!(rt.get("/", &format!("{cookie}Origin: http://127.0.0.1:1\r\n")).0.starts_with("HTTP/1.1 403"), "another page's request");
+
+        let mut socket = rt.helper.connect();
+        socket.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        write!(
+            socket,
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1\r\n{cookie}Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        )
+        .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+        // A masked ping with the payload "hi"; Pluto's server answers with a pong.
+        let mask = [1u8, 2, 3, 4];
+        let mut ping = vec![0x89, 0x80 | 2];
+        ping.extend(mask);
+        ping.extend(b"hi".iter().zip(mask).map(|(b, m)| b ^ m));
+        socket.write_all(&ping).unwrap();
+        let mut pong = [0u8; 4];
+        socket.read_exact(&mut pong).unwrap();
+        assert_eq!(pong, [0x8A, 2, b'h', b'i'], "a pong through the core, both ways");
     });
 
     step("list_notebooks and one notebook per session", || {
@@ -472,9 +526,9 @@ fn the_runtime_end_to_end() {
     });
 
     step("idle stop with a short limit", || {
-        let mut events = rt.helper.connect(Target::Bridge);
+        let mut events = rt.helper.connect();
         events.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
-        write!(events, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\n\r\n", rt.token).unwrap();
+        write!(events, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\n\r\n", rt.token).unwrap();
         // About two seconds.
         rt.call("endeavor/set_idle_limit", json!({ "hours": 0.0005 })).unwrap();
         let mut seen = String::new();
