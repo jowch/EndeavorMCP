@@ -1,8 +1,6 @@
 #!/bin/sh
 # Build the runtime helper (endeavor-remote) for Linux servers into
-# target/helpers/<os>-<arch>/, where Endeavor looks in a source checkout and
-# which its scripts/bundle.sh copies into Endeavor.app. Endeavor can't connect
-# to a server whose platform has no helper there.
+# target/helpers/<os>-<arch>/, or into $HELPERS_OUT (an absolute path).
 #
 #   scripts/build-helpers.sh             cross-build x86_64 and aarch64 (musl) with cargo-zigbuild
 #   scripts/build-helpers.sh --via HOST  build on HOST, a Linux machine reachable by ssh, for its
@@ -12,7 +10,7 @@
 # C compiler, with sudo) on HOST if they're missing.
 set -eu
 cd "$(dirname "$0")/.."
-out=target/helpers
+out=${HELPERS_OUT:-target/helpers}
 
 if [ "${1:-}" = "--via" ]; then
   host=${2:?usage: scripts/build-helpers.sh --via HOST}

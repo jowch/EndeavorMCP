@@ -1,7 +1,6 @@
-//! A folder's files as Endeavor installs them (`runtime/`), and the hash that
-//! names an install. The app reads `runtime/` from its resources and sends it to
-//! servers; `endeavor-remote`'s build script includes this file to embed the
-//! same folder in the binary, so it uses only `std`.
+//! A folder's files as Endeavor installs them (`runtime/`, `plugin/`), and the
+//! hash that names an install. `endeavor-remote`'s build script includes this
+//! file to embed those folders in the binary, so it uses only `std`.
 
 use std::path::Path;
 

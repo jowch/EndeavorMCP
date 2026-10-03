@@ -129,15 +129,15 @@ fn scratch(name: &str) -> PathBuf {
 fn the_runtime_unpacks_once_per_version() {
     let cache = scratch("unpack");
     let files: &[(&str, &[u8])] = &[("runtime/boot.jl", b"boot"), ("runtime/EndeavorRuntime/src/A.jl", b"a")];
-    let first = unpack(&cache, "0.1.0-aaaa", files).unwrap();
+    let first = unpack(&cache, "0.1.0-aaaa", files).unwrap().join("runtime");
     assert_eq!(first, cache.join("0.1.0-aaaa/runtime"));
     assert_eq!(std::fs::read(first.join("EndeavorRuntime/src/A.jl")).unwrap(), b"a");
     // A second run leaves the folder as it is (Julia may have written to it).
     std::fs::write(first.join("boot.jl"), "changed").unwrap();
-    assert_eq!(unpack(&cache, "0.1.0-aaaa", files).unwrap(), first);
+    assert_eq!(unpack(&cache, "0.1.0-aaaa", files).unwrap().join("runtime"), first);
     assert_eq!(std::fs::read_to_string(first.join("boot.jl")).unwrap(), "changed");
     // Another version gets its own folder, next to the first.
-    let second = unpack(&cache, "0.1.0-bbbb", files).unwrap();
+    let second = unpack(&cache, "0.1.0-bbbb", files).unwrap().join("runtime");
     assert_eq!(std::fs::read_to_string(second.join("boot.jl")).unwrap(), "boot");
     let mut names: Vec<_> = std::fs::read_dir(&cache).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     names.sort();
@@ -153,8 +153,20 @@ fn the_binary_carries_runtime_folder() {
     for path in ["boot.jl", "Project.toml", "Manifest.toml", "EndeavorRuntime/src/EndeavorRuntime.jl"] {
         assert_eq!(std::fs::read(runtime.join(path)).unwrap(), std::fs::read(source.join(path)).unwrap(), "{path}");
     }
-    assert!(embedded::VERSION.starts_with(concat!(env!("CARGO_PKG_VERSION"), "-")), "{}", embedded::VERSION);
-    assert_eq!(runtime, cache.join(embedded::VERSION).join("runtime"));
+    assert!(embedded::RUNTIME_VERSION.starts_with(concat!(env!("CARGO_PKG_VERSION"), "-")), "{}", embedded::RUNTIME_VERSION);
+    assert_eq!(runtime, cache.join(embedded::RUNTIME_VERSION).join("runtime"));
+    std::fs::remove_dir_all(&cache).unwrap();
+}
+
+#[test]
+fn the_binary_carries_plugin_folder() {
+    let cache = scratch("plugin");
+    let plugin = unpack(&cache, embedded::PLUGIN_VERSION, embedded::PLUGIN_FILES).unwrap().join("plugin");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin");
+    for path in [".claude-plugin/plugin.json", "skills/pluto-session/SKILL.md", "skills/pluto-semantics/reference/grammar.md"] {
+        assert_eq!(std::fs::read(plugin.join(path)).unwrap(), std::fs::read(source.join(path)).unwrap(), "{path}");
+    }
+    assert_ne!(embedded::PLUGIN_VERSION, embedded::RUNTIME_VERSION);
     std::fs::remove_dir_all(&cache).unwrap();
 }
 

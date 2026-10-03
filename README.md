@@ -8,7 +8,7 @@ the browser.
 
 These are the notebook tools of [Endeavor](https://github.com/jowch/Endeavor),
 a macOS app with a Claude Code agent beside a live Pluto notebook. The app
-uses this repository as a submodule and installs the same binary on servers.
+depends on these crates and installs the same binary on servers.
 
 Logging in, ssh, tunnels and Slurm allocations stay with you or your agent.
 Endeavor doesn't do them for you here.
@@ -321,7 +321,8 @@ after a rename), is planned and not built. Open questions:
 - `runtime/`: the Julia side (`boot.jl` and the `EndeavorRuntime` package),
   built into the binary.
 - `plugin/`: the Pluto skills. Endeavor loads this folder as its Claude Code
-  plugin, and the binary serves the same files through `notebook_guide`.
+  plugin (unpacked from the crate, like `runtime/`), and the binary serves the
+  same files through `notebook_guide`.
 - `claude-plugin/` and `.claude-plugin/marketplace.json`: the standalone
   Claude Code plugin, which runs `endeavor-remote mcp` with the skills.
 - `scripts/helpers.sh` and `scripts/build-helpers.sh`: get or build the Linux

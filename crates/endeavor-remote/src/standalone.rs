@@ -26,11 +26,7 @@ use serde_json::{Value, json};
 
 use crate::http::Head;
 use crate::mcp::to_json;
-use crate::{Args, Exit, Launcher, Runtime, State, julia};
-
-mod embedded {
-    include!(concat!(env!("OUT_DIR"), "/runtime.rs"));
-}
+use crate::{Args, Exit, Launcher, Runtime, State, embedded, julia};
 
 const USAGE: &str = "usage: endeavor-remote serve [OPTIONS]   run Julia here and print how to connect (Ctrl-C stops it)
        endeavor-remote mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
@@ -234,15 +230,16 @@ pub fn main(argv: &[String]) -> ! {
 
 /// Unpack the runtime built into this binary, once per version. The folder.
 pub(crate) fn unpack_runtime(cache: &Path) -> Result<PathBuf, String> {
-    unpack(cache, embedded::VERSION, embedded::FILES)
+    Ok(unpack(cache, embedded::RUNTIME_VERSION, embedded::RUNTIME_FILES)?.join("runtime"))
 }
 
 /// `files` in `cache/version/`, put there whole: written to a folder of
 /// their own, then moved into place, so a folder by that name is complete.
-fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<PathBuf, String> {
+/// That folder.
+pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<PathBuf, String> {
     let dir = cache.join(version);
     if dir.is_dir() {
-        return Ok(dir.join("runtime"));
+        return Ok(dir);
     }
     let failed = |e: io::Error| format!("Couldn't unpack Endeavor's runtime into {}: {e}", cache.display());
     let part = cache.join(format!("{version}.part.{}", std::process::id()));
@@ -253,11 +250,11 @@ fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<PathBu
         std::fs::write(&file, contents).map_err(failed)?;
     }
     match std::fs::rename(&part, &dir) {
-        Ok(()) => Ok(dir.join("runtime")),
+        Ok(()) => Ok(dir),
         // Another process unpacked the same version first.
         Err(_) if dir.is_dir() => {
             let _ = std::fs::remove_dir_all(&part);
-            Ok(dir.join("runtime"))
+            Ok(dir)
         }
         Err(e) => {
             let _ = std::fs::remove_dir_all(&part);
@@ -288,7 +285,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         launcher: Launcher::Process,
         quit_with_client: false,
         any_node: false,
-        build: Some(embedded::VERSION.into()),
+        build: Some(embedded::RUNTIME_VERSION.into()),
         core_env: core_env(options, exit_idle),
     };
     if let Some(state) = crate::existing(&args)? {

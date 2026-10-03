@@ -1,8 +1,9 @@
 #!/bin/sh
 # Put the runtime helpers for Linux servers (endeavor-remote, x86_64 and
-# aarch64) in target/helpers/<platform>/, built from this checkout's source.
-# Endeavor, which has this repository as its mcp/ submodule, looks there
-# (mcp/target/helpers) and copies them into Endeavor.app.
+# aarch64) in target/helpers/<platform>/, or in $HELPERS_OUT, built from this
+# checkout's source. Endeavor's scripts/helpers.sh runs this in a checkout of
+# the commit Endeavor's Cargo.lock pins, with HELPERS_OUT set to its own
+# target/helpers.
 #
 #   scripts/helpers.sh               keep what's there if it matches, else
 #                                    download it, else build it
@@ -18,7 +19,7 @@
 # ENDEAVOR_HELPER_HOST (scripts/build-helpers.sh --via, its architecture only).
 set -eu
 cd "$(dirname "$0")/.."
-out=target/helpers
+out=${HELPERS_OUT:-target/helpers}
 paths="crates/endeavor-remote crates/wire plugin/skills runtime rust-toolchain.toml"
 platforms="linux-x86_64 linux-aarch64"
 

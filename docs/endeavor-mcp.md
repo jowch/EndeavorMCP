@@ -8,9 +8,11 @@ here is decided or built except where marked. It builds on the core in
 _Drafted 2026-09-28_
 
 _2026-10-03: the core, the helper, the runtime and the skills now live in this
-repository, and Endeavor pins a commit of it as its `mcp/` submodule. The
-Helpers release (Linux binaries) comes from here; signed macOS binaries and
-version tags don't exist yet._
+repository. Endeavor depends on its crates as a Cargo git dependency, pinned
+to a commit by Endeavor's Cargo.lock, and takes `runtime/` and the skills
+from the crate (`endeavor_remote::embedded`). The Helpers release (Linux
+binaries) comes from here; signed macOS binaries and version tags don't exist
+yet._
 
 ## Summary
 

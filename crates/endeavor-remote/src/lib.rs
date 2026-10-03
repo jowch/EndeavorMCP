@@ -30,7 +30,15 @@ mod winproc;
 
 pub use core::serve_unreachable;
 pub use guard::serve_guarded;
-pub use mcp::{asks_first, changes_notebook, is_tool, runs_code};
+pub use mcp::{NOTEBOOK_TOOLS_JSON, asks_first, changes_notebook, is_tool, runs_code};
+pub use standalone::unpack;
+
+/// `runtime/` (the Julia side, which Endeavor installs on servers and runs on
+/// This Mac) and `plugin/` (the skills Endeavor loads as its Claude Code
+/// plugin), built into the binary (build.rs).
+pub mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
+}
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};

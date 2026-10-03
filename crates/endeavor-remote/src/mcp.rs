@@ -41,7 +41,8 @@ use crate::results::Results;
 const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// The notebook tools' schemas, for `tools/list`.
-static NOTEBOOK_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!("notebook_tools.json")).expect("notebook_tools.json"));
+pub const NOTEBOOK_TOOLS_JSON: &str = include_str!("notebook_tools.json");
+static NOTEBOOK_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(NOTEBOOK_TOOLS_JSON).expect("notebook_tools.json"));
 
 /// `/call` methods Julia still answers: Pluto's folder for new notebooks, and
 /// ending the process.
