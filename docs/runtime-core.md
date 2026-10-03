@@ -5,7 +5,7 @@ per notebook engine, so Pluto, marimo and Ember (our R notebook engine) sit
 behind one boundary. The core and the Pluto adapter are built; the marimo and
 Ember adapters are not. R support, Endeavor's side included, is designed in
 Ember's repository (https://github.com/jowch/Ember); marimo in
-[marimo.md](marimo.md).
+[marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md).
 
 ## Summary
 
@@ -18,7 +18,7 @@ the engine's language and running in the engine's process:
 | Engine | Language | Adapter |
 | --- | --- | --- |
 | Pluto | Julia | `runtime/` (`EndeavorRuntime`), built |
-| marimo | Python | `runtime-py/` ([marimo.md](marimo.md)), not built |
+| marimo | Python | `runtime-py/` ([marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md)), not built |
 | Ember (https://github.com/jowch/Ember) | R | `runtime-r/`, not built |
 
 Ember is a standalone R package in its own repository, usable without
@@ -49,7 +49,7 @@ app ── ssh/stdio frames ── endeavor-remote ── core (Rust, the runtim
 - The core may be a subcommand of the helper (`endeavor-remote core`), so
   there is still one binary to ship and pin per host.
 - Adapters are to start lazily, when a notebook of their kind is opened, as
-  [marimo.md](marimo.md) proposes. A user who only uses R never
+  [marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md) proposes. A user who only uses R never
   downloads Julia.
 - Each relayed connection goes to the core's one port. The core passes
   `/mcp` and `/endeavor/…` to itself and every other path to Pluto's private
@@ -132,7 +132,7 @@ holds it and it applies to every engine:
 - **Opening a notebook** from disk runs nothing. Pluto would run every cell,
   so Endeavor opens it in safe preview (execution not allowed) until the user
   runs it; notebooks Endeavor or Claude create skip safe preview (see
-  [ui-spec.md](ui-spec.md), "Safe preview"). marimo (`auto_instantiate =
+  [ui-spec.md](https://github.com/jowch/Endeavor/blob/main/docs/ui-spec.md), "Safe preview"). marimo (`auto_instantiate =
   false` by default) and Ember open without running. Cells run on request,
   ancestors first.
 
@@ -141,13 +141,13 @@ error conversion, hiding boilerplate in `read_notebook_code` (Pluto's
 package cells and `@bind` shim, marimo's decorators and `return` lines), and
 the engine's own package handling.
 
-Under this split `runtime-py/` in [marimo.md](marimo.md) is only the
+Under this split `runtime-py/` in [marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md) is only the
 adapter: steps 1 and 2 of "The Python runtime" and `marimo_api.py`;
 `/endeavor/events`, tool serving and host tools come from the core.
 
 ## What else the core does
 
-For agents other than Claude Code ([other-agents.md](other-agents.md) items 2
+For agents other than Claude Code ([other-agents.md](https://github.com/jowch/Endeavor/blob/main/docs/other-agents.md) items 2
 and 3), and for the app:
 
 - It keeps each session's last 64 tool results and answers
@@ -168,7 +168,7 @@ and 3), and for the app:
 ## Next
 
 1. **Ember and its adapter** (the build order in Ember's repository).
-2. **marimo adapter** ([marimo.md](marimo.md) steps 2 onward, minus what the
+2. **marimo adapter** ([marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md) steps 2 onward, minus what the
    core provides).
 
 ## Open questions

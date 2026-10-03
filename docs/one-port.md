@@ -1,7 +1,7 @@
 # One port per runtime
 
 Steps 1–5 built and checked (2026-10-03). Step 5, the standalone command, is
-`endeavor-remote serve` (user guide: [standalone.md](standalone.md)). Each runtime exposes one port to clients
+`endeavor-remote serve` (user guide: [README.md](../README.md)). Each runtime exposes one port to clients
 instead of two. The runtime core answers it, passes Pluto's page through
 at `/`, and serves Endeavor's own endpoints under a reserved prefix. The
 app's relay, listener and state then carry one route instead of two. A
@@ -156,7 +156,7 @@ Planned as follows; what was built is under "As built" below.
 
 ### As built
 
-User guide: [standalone.md](standalone.md). The binary is still
+User guide: [README.md](../README.md). The binary is still
 `endeavor-remote`; it may be renamed.
 
 - **Commands.** `endeavor-remote serve` starts the runtime in the foreground,

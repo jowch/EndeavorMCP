@@ -1,14 +1,19 @@
-# Use Endeavor's notebook tools without the app
+# EndeavorMCP
 
-You can run Endeavor's notebook tools on a workstation, a lab server or a
-cluster node, and point any MCP agent and a web browser at them. You start
-them yourself, the way you start Pluto or Jupyter. Your agent edits and runs a
-live Pluto notebook, and you watch it in the browser.
+Live Pluto (Julia) notebooks for AI agents. Run the notebook tools on a
+workstation, a lab server or a cluster node, and point any MCP agent and a
+web browser at them. You start them yourself, the way you start Pluto or
+Jupyter. Your agent edits and runs a live Pluto notebook, and you watch it in
+the browser.
+
+These are the notebook tools of [Endeavor](https://github.com/jowch/Endeavor),
+a macOS app with a Claude Code agent beside a live Pluto notebook. The app
+uses this repository as a submodule and installs the same binary on servers.
 
 Logging in, ssh, tunnels and Slurm allocations stay with you or your agent.
 Endeavor doesn't do them for you here.
 
-The command is `endeavor-remote`, the same binary the app installs on
+The command is `endeavor-remote`, the same binary Endeavor installs on
 servers. It may be renamed later.
 
 ## Install it
@@ -20,7 +25,7 @@ shell's `PATH`, Endeavor downloads its own pinned Julia (1.12.6) into
 To build from source, install Rust 1.89 or newer, then run:
 
 ```
-cargo install --git https://github.com/jowch/Endeavor endeavor-remote
+cargo install --git https://github.com/jowch/EndeavorMCP endeavor-remote
 ```
 
 The binary carries Endeavor's Julia code (`runtime/`) and the skills, so it is
@@ -28,14 +33,14 @@ all you install. On first use it unpacks the Julia code into
 `~/.cache/endeavor/serve/<version>/`.
 
 For Linux (x86_64 and aarch64) there are prebuilt binaries on the
-[Helpers release](https://github.com/jowch/Endeavor/releases/tag/helpers),
+[Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers),
 built by the Helpers workflow for each change to the helper's source. Each
 file is named `endeavor-remote-<key>-<platform>`, and `endeavor-remote-<key>.sha256`
 holds the checksums for that key. Take the newest key and check the download:
 
 ```
 key=<newest key on the release page>
-base=https://github.com/jowch/Endeavor/releases/download/helpers
+base=https://github.com/jowch/EndeavorMCP/releases/download/helpers
 curl -fLO $base/endeavor-remote-$key-linux-x86_64
 curl -fLO $base/endeavor-remote-$key.sha256
 sha256sum -c --ignore-missing endeavor-remote-$key.sha256
@@ -158,13 +163,13 @@ starting waits up to 45 seconds, then says Julia is still starting, so the
 agent can try again. The first start installs packages and takes a few
 minutes.
 
-**Claude Code plugin.** The repository is a plugin marketplace. Its
+**Claude Code plugin.** This repository is a plugin marketplace. Its
 `endeavor` plugin (`claude-plugin/`) carries the skills and runs
 `endeavor-remote mcp --skills plugin --folder ${CLAUDE_PROJECT_DIR}`. Put
 `endeavor-remote` on your `PATH`, then:
 
 ```
-claude plugin marketplace add jowch/Endeavor
+claude plugin marketplace add jowch/EndeavorMCP
 claude plugin install endeavor@endeavor
 ```
 
@@ -306,3 +311,24 @@ after a rename), is planned and not built. Open questions:
   build check and its Restart Julia path handle this case today; `serve`
   would need its own message.
 - How a `cargo install` user updates instead: probably `cargo install` again.
+
+## What's in this repository
+
+- `crates/endeavor-remote`: the `endeavor-remote` binary. It is the runtime
+  core, the MCP server, `serve`, `mcp` and `stop`, and the helper Endeavor
+  runs on servers.
+- `crates/wire`: the protocol between Endeavor and the helper.
+- `runtime/`: the Julia side (`boot.jl` and the `EndeavorRuntime` package),
+  built into the binary.
+- `plugin/`: the Pluto skills. Endeavor loads this folder as its Claude Code
+  plugin, and the binary serves the same files through `notebook_guide`.
+- `claude-plugin/` and `.claude-plugin/marketplace.json`: the standalone
+  Claude Code plugin, which runs `endeavor-remote mcp` with the skills.
+- `scripts/helpers.sh` and `scripts/build-helpers.sh`: get or build the Linux
+  binaries. The Helpers workflow publishes them to the
+  [Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers).
+- `docs/`: how the runtime is built ([runtime-core.md](docs/runtime-core.md),
+  [one-port.md](docs/one-port.md), [endeavor-mcp.md](docs/endeavor-mcp.md))
+  and how to test it ([testing.md](docs/testing.md)).
+
+Build and test with `cargo build` and `cargo test`.

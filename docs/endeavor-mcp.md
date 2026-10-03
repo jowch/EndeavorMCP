@@ -7,6 +7,11 @@ here is decided or built except where marked. It builds on the core in
 
 _Drafted 2026-09-28_
 
+_2026-10-03: the core, the helper, the runtime and the skills now live in this
+repository, and Endeavor pins a commit of it as its `mcp/` submodule. The
+Helpers release (Linux binaries) comes from here; signed macOS binaries and
+version tags don't exist yet._
+
 ## Summary
 
 The core refactor did the hard part: the core is a self-contained Rust
@@ -18,7 +23,7 @@ What's left depends on how far the product goes:
 | Separate crate, same repo | Move the core's modules (`core`, `http`, `mcp`, `host_tools`, `notebooks`) into an `endeavor-mcp` crate and binary; the helper and app depend on it | ~1 week |
 | Usable by other MCP clients | Setup from the server itself, a standard transport, session identity without the app, approval, a public control API, the skills (below) | +3–5 weeks |
 | Own repository and releases | CI, signed macOS and Linux binaries, versioning, the app pinning a version | +1–2 weeks |
-| Windows | The core's process control has Windows code, untried on a real machine, and a few stubs; see [windows.md](windows.md) | see [windows.md](windows.md) |
+| Windows | The core's process control has Windows code, untried on a real machine, and a few stubs; see [windows.md](https://github.com/jowch/Endeavor/blob/main/docs/windows.md) | see [windows.md](https://github.com/jowch/Endeavor/blob/main/docs/windows.md) |
 
 Estimates, not measurements.
 

@@ -2,7 +2,7 @@
   "name": "endeavor",
   "description": "Live Pluto (Julia) notebooks your agent edits and runs, which you watch in a browser. Needs endeavor-remote on the PATH.",
   "version": "0.1.0",
-  "homepage": "https://github.com/jowch/Endeavor",
+  "homepage": "https://github.com/jowch/EndeavorMCP",
   "license": "MIT",
   "author": {
     "name": "Jonathan Chen"
