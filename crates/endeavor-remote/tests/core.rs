@@ -560,6 +560,66 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
 }
 
 #[test]
+fn a_held_call_answers_as_an_event_stream_at_once() {
+    let dir = state_dir("core-held-stream");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{"owner":"7","policy":"ask","asks":true}}"#);
+    let mut events = core.connect();
+    let mut events_reader = BufReader::new(events.try_clone().unwrap());
+    write!(events, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    event_where(&mut events_reader, |_| true);
+
+    let post = |socket: &mut TcpStream, message: &str| {
+        write!(
+            socket,
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nAccept: application/json, text/event-stream\r\n\
+             X-Endeavor-Session: 7\r\nX-Endeavor-Host: gpu-box\r\nContent-Length: {}\r\n\r\n{message}",
+            message.len()
+        )
+        .unwrap();
+    };
+    let shell = |id: u32, meta: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"run_shell","arguments":{{"command":"echo ran"}},"_meta":{{{meta}}}}}}}"#);
+    let mut socket = core.connect();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+
+    // A call that asked for progress: the stream begins while it waits, with a progress notification.
+    post(&mut socket, &shell(1, r#""progressToken":"p1""#));
+    let head = read_until(&mut reader, "\r\n\r\n");
+    assert!(head.starts_with("HTTP/1.1 200 OK\r\n") && head.contains("Content-Type: text/event-stream\r\n") && head.contains("Transfer-Encoding: chunked\r\n"), "{head}");
+    let waiting = read_until(&mut reader, "\n\n");
+    let ask = event_where(&mut events_reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()))["asks"][0].clone();
+    assert!(
+        waiting.ends_with(concat!(r#"data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"message":"Waiting for the user's answer","progress":1,"progressToken":"p1"}}"#, "\n\n")),
+        "{waiting:?}"
+    );
+    app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"endeavor/answer_run","params":{{"id":{},"allow":true,"user_ran":[]}}}}"#, ask["id"]));
+    // The reply is the stream's last event, and the chunked body ends after it.
+    let rest = read_until(&mut reader, "0\r\n\r\n");
+    let reply = rest.split("data: ").nth(1).unwrap().split("\n\n").next().unwrap();
+    let reply: serde_json::Value = serde_json::from_str(reply).unwrap();
+    assert_eq!(reply["id"], 1);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()["stdout"], "ran\n");
+    assert!(rest.contains("event: message\n") && rest.ends_with("\r\n0\r\n\r\n"), "{rest:?}");
+    event_where(&mut events_reader, |e| e["asks"] == serde_json::json!([]));
+
+    // The same connection carries the next call; without a progress token it waits with an SSE comment.
+    post(&mut socket, &shell(2, ""));
+    read_until(&mut reader, "\r\n\r\n");
+    assert!(read_until(&mut reader, "\n\n").ends_with(": waiting for the user's answer\n\n"));
+    let ask = event_where(&mut events_reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()))["asks"][0].clone();
+    app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":3,"method":"endeavor/answer_run","params":{{"id":{},"allow":false,"user_ran":[]}}}}"#, ask["id"]));
+    assert!(read_until(&mut reader, "0\r\n\r\n").contains(r#"\"error\":\"not_approved\""#));
+
+    // A call that isn't held still gets plain JSON.
+    let read = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_folder","arguments":{"path":"/"}}}"#;
+    post(&mut socket, read);
+    let (status, headers, _) = response(&mut reader);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(headers.contains(&("content-type".into(), "application/json".into())));
+}
+
+#[test]
 fn in_manual_an_edit_waits_for_the_users_answer() {
     let dir = state_dir("core-manual");
     let bridge = FakeBridge::start(&dir);

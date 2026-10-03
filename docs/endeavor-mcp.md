@@ -83,7 +83,14 @@ Done. The bridge moved from MCP's SSE transport to Streamable HTTP.
 
 The core serves one endpoint, `POST /mcp`: a request's reply comes back in
 the same response (`200`, `application/json`); a notification or a response
-from the client gets `202` with no body. `GET /mcp` is `405` (no
+from the client gets `202` with no body. A call the runtime holds for the
+user's answer is the exception: Claude Code gives up on a POST whose
+response hasn't begun within 60 seconds, so once a call waits, its response
+begins at once as an event stream (`text/event-stream`, which the spec
+allows for a client that accepts it). Every 15 seconds the stream says the
+call is still waiting: a `notifications/progress` when the request carried
+`_meta.progressToken`, else an SSE comment. The reply is the stream's last
+event. `GET /mcp` is `405` (no
 server-initiated stream); so is `DELETE`. It issues no `Mcp-Session-Id` — the
 core already tells agent sessions apart by `X-Endeavor-Session` (see
 [Session identity](#session-identity)), and the adapter's MCP client doesn't

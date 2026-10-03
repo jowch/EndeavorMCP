@@ -1,8 +1,8 @@
 //! The agent's MCP connection, MCP over Streamable HTTP (spec 2025-06-18):
 //! `POST /mcp` carries one JSON-RPC message; a request gets its reply in the
 //! same response, a notification or a response from the client gets `202
-//! Accepted` with no body. Every tool call is request and reply, so this
-//! server never needs to stream a reply back, and issues no `Mcp-Session-Id`
+//! Accepted` with no body. A call that waits on the user gets its reply as an
+//! event stream instead (see `Held`). This server issues no `Mcp-Session-Id`
 //! (optional in the spec; the adapter's MCP client doesn't send one back when
 //! none is issued). Each agent session's messages carry `X-Endeavor-Session`
 //! (its key) and, on a server, `X-Endeavor-Host`. The notebook tools are
@@ -15,11 +15,13 @@
 //! then a call that changes the notebook waits for the user's answer too,
 //! whatever the policy says about runs.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -241,13 +243,11 @@ impl Bridge {
 
     /// Serve `POST /mcp`. Whether the connection can carry another request.
     pub fn mcp(&self, request: &Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> io::Result<bool> {
-        let socket = client.try_clone()?;
-        let gone = move || closed(&socket);
-        post(request, reader, client, request.keeps_alive(), |message| self.dispatch(message, &Caller::of(request), &gone))
+        post(request, reader, client, request.keeps_alive(), |message, gone| self.dispatch(message, &Caller::of(request), gone))
     }
 
-    /// The reply to one JSON-RPC message, if it gets one. `gone`: whether the
-    /// client hung up, for a call that waits on the user.
+    /// The reply to one JSON-RPC message, if it gets one. `gone`, called
+    /// while a call waits on the user: whether the client hung up.
     fn dispatch(&self, message: &Value, caller: &Caller, gone: &dyn Fn() -> bool) -> Option<String> {
         if message["method"] == "notifications/cancelled" && self.notebooks.asks.cancel(&caller.owner, &message["params"]["requestId"]) {
             self.notebooks.publish();
@@ -408,13 +408,15 @@ fn closed(socket: &TcpStream) -> bool {
 
 /// Serve one `POST /mcp`: one JSON-RPC message in; a request gets `reply`'s
 /// answer in this response, a notification or a response from the client gets
-/// `202 Accepted` with no body. Whether the connection can carry another request.
+/// `202 Accepted` with no body. `reply` is given the message and a check to
+/// call while its answer waits on the user (`Held::waiting`). Whether the
+/// connection can carry another request.
 pub(crate) fn post(
     request: &Head,
     reader: &mut BufReader<TcpStream>,
     client: &mut TcpStream,
     keep_alive: bool,
-    reply: impl FnOnce(&Value) -> Option<String>,
+    reply: impl FnOnce(&Value, &dyn Fn() -> bool) -> Option<String>,
 ) -> io::Result<bool> {
     let body = http::read_body(reader, request.request_body()?)?;
     if request.header("MCP-Protocol-Version").is_some_and(|v| !SUPPORTED_VERSIONS.contains(&v)) {
@@ -425,11 +427,81 @@ pub(crate) fn post(
         http::respond(client, "400 Bad Request", None, br#"{"error":"Invalid JSON"}"#, keep_alive)?;
         return Ok(keep_alive);
     };
-    match reply(&message) {
+    let held = Held::new(client.try_clone()?, request, &message, keep_alive);
+    let reply = reply(&message, &|| held.waiting());
+    if held.streaming() {
+        if let Some(reply) = reply {
+            http::write_chunk(client, format!("event: message\ndata: {reply}\n\n").as_bytes())?;
+        }
+        http::write_chunk(client, b"")?;
+        return Ok(keep_alive);
+    }
+    match reply {
         Some(reply) => http::respond(client, "200 OK", Some("application/json"), reply.as_bytes(), keep_alive)?,
         None => http::respond(client, "202 Accepted", None, b"", keep_alive)?,
     }
     Ok(keep_alive)
+}
+
+/// How often a held call's stream says it's still waiting.
+const KEEP_WAITING: Duration = Duration::from_secs(15);
+
+/// The response to a request whose reply may wait on the user. Claude Code
+/// gives up on a POST whose response hasn't begun within 60 seconds (its MCP
+/// client's first-byte budget), whatever its tool timeouts say. So once a call
+/// waits, its response begins at once as an event stream, which Streamable
+/// HTTP allows for a client that accepts one, says every `KEEP_WAITING` that
+/// the call is still waiting (a progress notification when the request asked
+/// for progress, else an SSE comment), and ends with the reply as its last event.
+struct Held {
+    socket: TcpStream,
+    /// The client accepts an event stream over HTTP/1.1 (chunked).
+    streams: bool,
+    keep_alive: bool,
+    progress_token: Option<Value>,
+    /// Since the stream began: notifications sent, and when the last one went.
+    sent: RefCell<Option<(u64, Instant)>>,
+}
+
+impl Held {
+    fn new(socket: TcpStream, request: &Head, message: &Value, keep_alive: bool) -> Held {
+        let streams = request.version() == "HTTP/1.1" && request.header("Accept").is_some_and(|accept| accept.contains("text/event-stream"));
+        let progress_token = message["params"]["_meta"].get("progressToken").filter(|t| t.is_string() || t.is_number()).cloned();
+        Held { socket, streams, keep_alive, progress_token, sent: RefCell::new(None) }
+    }
+
+    fn streaming(&self) -> bool {
+        self.sent.borrow().is_some()
+    }
+
+    /// Called while the reply waits: begin or keep up the stream. Whether the
+    /// client hung up.
+    fn waiting(&self) -> bool {
+        let due = self.sent.borrow().is_none_or(|(_, last)| last.elapsed() >= KEEP_WAITING);
+        if self.streams && due && self.keep_waiting().is_err() {
+            return true;
+        }
+        closed(&self.socket)
+    }
+
+    fn keep_waiting(&self) -> io::Result<()> {
+        let mut out = &self.socket;
+        let mut sent = self.sent.borrow_mut();
+        if sent.is_none() {
+            let close = if self.keep_alive { "" } else { "Connection: close\r\n" };
+            write!(out, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n{close}\r\n")?;
+        }
+        let count = sent.map_or(0, |(count, _)| count) + 1;
+        let event = match &self.progress_token {
+            Some(token) => {
+                let params = json!({ "progressToken": token, "progress": count, "message": "Waiting for the user's answer" });
+                format!("event: message\ndata: {}\n\n", to_json(&json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": params })))
+            }
+            None => ": waiting for the user's answer\n\n".to_owned(),
+        };
+        *sent = Some((count, Instant::now()));
+        http::write_chunk(&mut out, event.as_bytes())
+    }
 }
 
 /// The reply to one JSON-RPC message, if it gets one; `call` gives a

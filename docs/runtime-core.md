@@ -226,7 +226,10 @@ ending in an app that behaves as before:
        the app turned this on (`endeavor/set_policy` with `asks: true`). The
        held call is listed under `asks` in `/events` until the app answers
        with `endeavor/answer_run`, the agent cancels, or its connection
-       closes. This replaced Claude Code's `PreToolUse` hook. In Manual the
+       closes. While it waits, its reply is an event stream that has
+       already begun (see [endeavor-mcp.md](endeavor-mcp.md), "Transport"),
+       so the agent's client doesn't time out waiting for a response to
+       start. This replaced Claude Code's `PreToolUse` hook. In Manual the
        app adds `edits: true`, and the core holds a call that changes the
        notebook the same way, whatever the run policy;
      - reports in `/events` the app build it was started by (`build`), so

@@ -77,7 +77,7 @@ impl Head {
         self.line.split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0)
     }
 
-    fn version(&self) -> &str {
+    pub fn version(&self) -> &str {
         if self.line.starts_with("HTTP/") { self.line.split(' ').next() } else { self.line.rsplit(' ').next() }.unwrap_or_default()
     }
 
@@ -287,6 +287,13 @@ pub fn respond(out: &mut impl Write, status: &str, content_type: Option<&str>, b
     head.push_str("\r\n");
     out.write_all(head.as_bytes())?;
     out.write_all(body)
+}
+
+/// Write one chunk of a chunked body; an empty one ends the body.
+pub fn write_chunk(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+    write!(out, "{:x}\r\n", bytes.len())?;
+    out.write_all(bytes)?;
+    out.write_all(b"\r\n")
 }
 
 /// POST `body` to `path` on the loopback server at `port`: the response's
