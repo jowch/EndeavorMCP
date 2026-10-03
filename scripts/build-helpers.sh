@@ -23,7 +23,7 @@ if [ "${1:-}" = "--via" ]; then
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
   mkdir -p "$stage/src/crates"
-  cp -R crates/wire crates/endeavor-remote "$stage/src/crates/"
+  cp -R crates/wire crates/endeavor-mcp "$stage/src/crates/"
   cp -R plugin runtime "$stage/src/"
   rm -rf "$stage/src/crates/"*/target
   cp Cargo.toml Cargo.lock "$stage/src/"

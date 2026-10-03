@@ -8,7 +8,7 @@ the app, are in
 
 ## Runtime tests against real Julia
 
-`crates/endeavor-remote/tests/e2e_julia.rs` starts the helper and the core
+`crates/endeavor-mcp/tests/e2e_julia.rs` starts the helper and the core
 with the real Julia adapter, the way the app starts This Mac's runtime. The
 test then talks to the runtime the way Claude Code and the app do. It sends MCP
 over `POST /mcp` with the `X-Endeavor-Session` and `X-Endeavor-Host` headers,
@@ -61,7 +61,7 @@ folder.
 
 ## `serve` and `mcp` against real Julia
 
-`crates/endeavor-remote/tests/e2e_serve.rs` runs `endeavor-remote serve` and
+`crates/endeavor-mcp/tests/e2e_serve.rs` runs `endeavor-remote serve` and
 `mcp` as a user without the app runs them. It finds Julia the same way as
 `e2e_julia`, and keeps its state and project folders under `target/tmp/e2e-serve`.
 To run it:

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wire", "crates/endeavor-remote"]
+members = ["crates/wire", "crates/endeavor-mcp"]
 resolver = "3"
 
 [workspace.package]

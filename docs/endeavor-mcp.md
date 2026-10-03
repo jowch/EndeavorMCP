@@ -60,7 +60,7 @@ The product uses the user's Julia and packages instead of managing its own.
 Most of this exists: the helper looks for a path the user gave, a setup line
 of theirs (`module load julia`), then `julia` on the login shell's PATH
 (juliaup installs), and only then downloads its pinned Julia
-(`crates/endeavor-remote/src/julia.rs`). The product drops the download: with
+(`crates/endeavor-mcp/src/julia.rs`). The product drops the download: with
 no Julia found, it says how to install one (juliaup).
 
 - **Packages.** The runtime already uses its own package store first, with the
@@ -125,7 +125,7 @@ Standalone, the default is one session per connection.
 A small change, about 1–2 days.
 
 - **In the app**, nothing changes. The core already decides which calls run
-  code (`runs_code` in `crates/endeavor-remote`), and in Manual the calls
+  code (`runs_code` in `crates/endeavor-mcp`), and in Manual the calls
   that change the notebook (`asks_first`), and holds them until the app's
   card is answered (`asks` in `/endeavor/events`, `endeavor/answer_run`).
 - **Standalone**, nothing in the core asks the user: a client without the

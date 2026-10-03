@@ -34,8 +34,8 @@ Endeavor. Endeavor treats it exactly like Pluto and marimo.
 
 The core keeps one `NotebookState` per notebook, dropped when the notebook
 shuts down. Tool semantics are tested in Rust against a fake engine
-(`crates/endeavor-remote/src/notebooks/tests.rs`), and end to end against the
-real Pluto adapter (`crates/endeavor-remote/tests/e2e_julia.rs`).
+(`crates/endeavor-mcp/src/notebooks/tests.rs`), and end to end against the
+real Pluto adapter (`crates/endeavor-mcp/tests/e2e_julia.rs`).
 
 ## Processes
 

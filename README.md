@@ -314,7 +314,7 @@ after a rename), is planned and not built. Open questions:
 
 ## What's in this repository
 
-- `crates/endeavor-remote`: the `endeavor-remote` binary. It is the runtime
+- `crates/endeavor-mcp`: the `endeavor-remote` binary. It is the runtime
   core, the MCP server, `serve`, `mcp` and `stop`, and the helper Endeavor
   runs on servers.
 - `crates/wire`: the protocol between Endeavor and the helper.

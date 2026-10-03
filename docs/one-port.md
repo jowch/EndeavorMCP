@@ -179,7 +179,7 @@ User guide: [README.md](../README.md). The binary is still
   and apart from the app's `~/.cache/endeavor/state`. The depot is the app's
   server depot, `~/.cache/endeavor/depot:` or `$SCRATCH/endeavor/depot:`, so
   packages are shared. Idle stop 48 hours, the app's default.
-- **The runtime inside the binary.** `crates/endeavor-remote/build.rs` embeds
+- **The runtime inside the binary.** `crates/endeavor-mcp/build.rs` embeds
   `runtime/` and names it `<package version>-<FNV hash of its files>`, the
   same walk and hash the app uses for server installs (`wire::tree`, shared by
   the build script through `#[path]`). It unpacks to

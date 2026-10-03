@@ -20,7 +20,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 out=${HELPERS_OUT:-target/helpers}
-paths="crates/endeavor-remote crates/wire plugin runtime rust-toolchain.toml"
+paths="crates/endeavor-mcp crates/wire plugin runtime rust-toolchain.toml"
 platforms="linux-x86_64 linux-aarch64"
 
 # The crates the helper is built from, as "name version" lines, read from a
