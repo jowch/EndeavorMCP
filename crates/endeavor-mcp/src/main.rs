@@ -1,3 +1,3 @@
 fn main() {
-    endeavor_remote::run(std::env::args().skip(1).collect())
+    endeavor_mcp::run(std::env::args().skip(1).collect())
 }

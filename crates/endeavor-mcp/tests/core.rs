@@ -1,4 +1,4 @@
-//! `endeavor-remote core` with a stand-in Julia (see `common`): it starts it,
+//! `endeavor core` with a stand-in Julia (see `common`): it starts it,
 //! writes `runtime.json` once it's ready, passes the requests on its port it
 //! doesn't answer through to Pluto or Julia's bridge, streams as they're
 //! written, lets a browser in with its cookie, and lives and dies with it.
@@ -35,7 +35,7 @@ impl Core {
 
     fn start_with_env(dir: &Path, bridge: &FakeBridge, env: &[(&str, &str)]) -> Core {
         let julia = serving_julia(dir, bridge);
-        let process = Command::new(env!("CARGO_BIN_EXE_endeavor-remote"))
+        let process = Command::new(env!("CARGO_BIN_EXE_endeavor"))
             .envs(env.iter().copied())
             .arg("core")
             .arg("--state-dir")

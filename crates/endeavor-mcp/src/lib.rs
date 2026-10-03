@@ -1,16 +1,16 @@
-//! `endeavor-remote connect`: the app's end on a machine. It answers questions
+//! `endeavor connect`: the app's end on a machine. It answers questions
 //! about the machine's files at once, and when the app asks, becomes the one
 //! client of its Julia runtime (Pluto plus EndeavorRuntime): it attaches to the
 //! runtime recorded in the state folder or starts one, then relays the app's
 //! streams to the runtime's one loopback port over its own stdin/stdout
 //! (docs/remote-sessions.md). It runs over `ssh` on a server as the
-//! `endeavor-remote` binary; on This Mac the app runs itself as the helper
+//! `endeavor` binary; on This Mac the app runs itself as the helper
 //! (`endeavor --helper connect …`, calling `run`), so its helper can't go
 //! missing or be from another build. It is also ssh's askpass program (see `askpass`).
 //!
 //! On a cluster (`--launcher slurm`) the runtime runs in a Slurm job instead,
 //! and the streams go on through a second helper on the job's node
-//! (`endeavor-remote relay`, see `slurm`).
+//! (`endeavor relay`, see `slurm`).
 
 mod askpass;
 mod asks;
@@ -62,12 +62,12 @@ use wire::files::RuntimeState;
 use wire::slurm::JobRequest;
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor-remote connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--build BUILD]
-       endeavor-remote relay --state-dir DIR
-       endeavor-remote node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
-       endeavor-remote core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
-       endeavor-remote askpass PROMPT
-       endeavor-remote serve|mcp|stop [OPTIONS]   (without the app; `endeavor-remote serve --help`)";
+const USAGE: &str = "usage: endeavor connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--build BUILD]
+       endeavor relay --state-dir DIR
+       endeavor node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
+       endeavor core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
+       endeavor askpass PROMPT
+       endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)";
 const LOG_TAIL: usize = 40;
 
 struct Args {
@@ -146,7 +146,7 @@ type Routes = Arc<RwLock<Route>>;
 type Answer = Arc<dyn Fn(&wire::files::Request) -> wire::files::Reply + Send + Sync>;
 
 /// Arguments this program needs before the helper's own to run as the helper
-/// again (for the core): none for `endeavor-remote`, the flag for the app.
+/// again (for the core): none for the `endeavor` binary, the flag for the app.
 static HELPER_ARGS: OnceLock<&'static [&'static str]> = OnceLock::new();
 
 /// The helper's main, given its arguments without the program name. Call it
@@ -180,7 +180,7 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
     let replace_signal = block_sigusr1();
     let mux = stdout_mux();
     let Err(message) = serve(&args, &mux, replace_signal);
-    eprintln!("endeavor-remote: {message}");
+    eprintln!("endeavor: {message}");
     let _ = mux.send(&ToApp::Error { message }.frame());
     std::process::exit(1);
 }
@@ -446,7 +446,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
 fn stop_recorded(args: &Args, events: &Sender<Event>) {
     let _lock = match lock(&args.state_dir) {
         Ok(lock) => lock,
-        Err(e) => return eprintln!("endeavor-remote: not stopping: {e}"),
+        Err(e) => return eprintln!("endeavor: not stopping: {e}"),
     };
     match args.launcher {
         Launcher::Process => match existing(args) {
@@ -455,7 +455,7 @@ fn stop_recorded(args: &Args, events: &Sender<Event>) {
                 runtime.stop(Some(&state));
             }
             Ok(None) => {}
-            Err(e) => eprintln!("endeavor-remote: not stopping: {e}"),
+            Err(e) => eprintln!("endeavor: not stopping: {e}"),
         },
         Launcher::Slurm => slurm::cancel_recorded(&args.state_dir),
     }
@@ -581,7 +581,7 @@ impl Runtime {
         if self.exit.status().is_none() {
             match winproc::Process::open(self.pid, self.started) {
                 Some(core) => core.terminate(),
-                None => eprintln!("endeavor-remote: the runtime (pid {}) is gone or isn't the one recorded; not stopping it", self.pid),
+                None => eprintln!("endeavor: the runtime (pid {}) is gone or isn't the one recorded; not stopping it", self.pid),
             }
             self.exit.wait(Duration::from_secs(5));
         }
@@ -819,7 +819,7 @@ fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Ans
                 Ok(Some(frame)) => frame,
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!("endeavor-remote: reading from the app: {e}");
+                    eprintln!("endeavor: reading from the app: {e}");
                     break;
                 }
             };
@@ -831,7 +831,7 @@ fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Ans
                         std::thread::spawn(move || drop(mux.send(&ToApp::Files { id, reply: answer(&request) }.frame())));
                     }
                     Ok(message) => drop(events.send(Event::App(message))),
-                    Err(e) => eprintln!("endeavor-remote: ignoring control message: {e}"),
+                    Err(e) => eprintln!("endeavor: ignoring control message: {e}"),
                 },
                 Frame::Open { id } => {
                     let route = routes.read().unwrap().clone();
@@ -910,7 +910,7 @@ fn existing(args: &Args) -> Result<Option<State>, String> {
     if alive(&state) {
         return Ok(Some(state));
     }
-    eprintln!("endeavor-remote: the recorded runtime (pid {}) isn't answering; starting a new one", state.pid);
+    eprintln!("endeavor: the recorded runtime (pid {}) isn't answering; starting a new one", state.pid);
     Ok(None)
 }
 
@@ -962,14 +962,14 @@ fn token(dir: &Path) -> Result<String, String> {
     Ok(token)
 }
 
-/// `endeavor-remote core`, which starts `julia boot.jl` (see core).
+/// `endeavor core`, which starts `julia boot.jl` (see core).
 fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str, build: Option<&str>) -> Result<Command, String> {
     let _ = std::fs::remove_file(state_dir.join("runtime.json"));
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     let mut command = Command::new(exe);
-    // Named like the helper in `ps`, not like the app it may be.
+    // `ps` shows `endeavor core` (`endeavor --helper core` from the app), not the binary's path.
     #[cfg(unix)]
-    command.arg0("endeavor-remote");
+    command.arg0("endeavor");
     command.args(HELPER_ARGS.get().copied().unwrap_or_default());
     command
         .arg("core")
@@ -1043,7 +1043,7 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
     let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
     match command.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB).spawn() {
         Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
-            eprintln!("endeavor-remote: the runtime can't leave the job this helper runs in, so it ends with the app");
+            eprintln!("endeavor: the runtime can't leave the job this helper runs in, so it ends with the app");
             command.creation_flags(flags).spawn()
         }
         result => result,

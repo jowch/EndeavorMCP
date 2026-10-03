@@ -28,9 +28,9 @@ use crate::http::Head;
 use crate::mcp::to_json;
 use crate::{Args, Exit, Launcher, Runtime, State, embedded, julia};
 
-const USAGE: &str = "usage: endeavor-remote serve [OPTIONS]   run Julia here and print how to connect (Ctrl-C stops it)
-       endeavor-remote mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
-       endeavor-remote stop              stop the Julia that serve or mcp started
+const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Julia here and print how to connect (Ctrl-C stops it)
+       endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
+       endeavor stop              stop the Julia that serve or mcp started
 
 options:
   --folder DIR         where new notebooks go (default: the current folder)
@@ -211,7 +211,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     }
 }
 
-/// `endeavor-remote serve|mcp|stop …`.
+/// `endeavor serve|mcp|stop …`.
 pub fn main(argv: &[String]) -> ! {
     if argv.iter().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
@@ -289,7 +289,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         core_env: core_env(options, exit_idle),
     };
     if let Some(state) = crate::existing(&args)? {
-        let port = state.port.ok_or("The Julia running here was started by an older version of Endeavor. Stop it with `endeavor-remote stop`, then try again.")?;
+        let port = state.port.ok_or("The Julia running here was started by an older version of Endeavor. Stop it with `endeavor stop`, then try again.")?;
         return Ok(Up { state, port, started: None });
     }
     args.runtime = unpack_runtime(&options.cache)?;
@@ -461,7 +461,7 @@ fn catch_stop_signals() {
 }
 
 /// Not ported: on Windows Ctrl-C ends `serve` at once, and the runtime, in a
-/// process group of its own, keeps running until `endeavor-remote stop`.
+/// process group of its own, keeps running until `endeavor stop`.
 #[cfg(windows)]
 fn catch_stop_signals() {}
 
@@ -469,7 +469,7 @@ fn serve(options: Options) -> ! {
     catch_stop_signals();
     let stopping = || STOP.load(Ordering::SeqCst);
     let up = start_or_reuse(&options, false, &|line| eprintln!("{line}"), &stopping).unwrap_or_else(|e| {
-        eprintln!("endeavor-remote: {e}");
+        eprintln!("endeavor: {e}");
         std::process::exit(1)
     });
     let dir = &options.state_dir;
@@ -477,7 +477,7 @@ fn serve(options: Options) -> ! {
     if up.started.is_none() {
         eprintln!("Julia was already running from {} (pid {}); using it as it was started.", dir.display(), up.state.pid);
         if options.port != 0 && options.port != up.port {
-            eprintln!("It listens on port {}, not {}. To change that, stop it first (`endeavor-remote stop`).", up.port, options.port);
+            eprintln!("It listens on port {}, not {}. To change that, stop it first (`endeavor stop`).", up.port, options.port);
         }
         if folder != options.folder.display().to_string() {
             eprintln!("Its notebooks folder is {folder}.");
@@ -488,7 +488,7 @@ fn serve(options: Options) -> ! {
     print!("\n{}", connection_text(&Connection { port: up.port, token: &up.state.token, node: &node, folder: &folder, login: login.as_deref() }));
     match &up.started {
         Some(_) => println!("Press Ctrl-C to stop Julia."),
-        None => println!("Ctrl-C leaves this Julia running; `endeavor-remote stop` ends it."),
+        None => println!("Ctrl-C leaves this Julia running; `endeavor stop` ends it."),
     }
     let _ = io::stdout().flush();
     while !stopping() {
@@ -604,7 +604,7 @@ impl Relay {
                     Status::Ready { port: up.port, token: up.state.token }
                 }
                 Err(e) => {
-                    eprintln!("endeavor-remote: {e}");
+                    eprintln!("endeavor: {e}");
                     Status::Failed(e)
                 }
             };
@@ -621,7 +621,7 @@ impl Relay {
         let bearer = format!("Bearer {token}");
         let headers = [("Authorization", bearer.as_str()), ("Content-Type", "application/json")];
         if let Err(e) = crate::http::post(port, crate::CALL, &headers, body.as_bytes()) {
-            eprintln!("endeavor-remote: couldn't give the runtime this session's folder: {e}");
+            eprintln!("endeavor: couldn't give the runtime this session's folder: {e}");
         }
     }
 
@@ -695,7 +695,7 @@ impl Relay {
             match self.post(port, &token, line) {
                 Ok(()) => return,
                 Err(Sent::NotConnected(e)) if attempt == 0 => {
-                    eprintln!("endeavor-remote: the runtime isn't answering ({e}); starting it again");
+                    eprintln!("endeavor: the runtime isn't answering ({e}); starting it again");
                     self.lost();
                 }
                 Err(Sent::NotConnected(e) | Sent::Failed(e)) => return failed(format!("Endeavor's Julia didn't answer: {e}")),

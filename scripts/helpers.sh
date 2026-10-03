@@ -1,5 +1,5 @@
 #!/bin/sh
-# Put the runtime helpers for Linux servers (endeavor-remote, x86_64 and
+# Put the runtime helpers for Linux servers (endeavor, x86_64 and
 # aarch64) in target/helpers/<platform>/, or in $HELPERS_OUT, built from this
 # checkout's source. Endeavor's scripts/helpers.sh runs this in a checkout of
 # the commit Endeavor's Cargo.lock pins, with HELPERS_OUT set to its own
@@ -26,7 +26,7 @@ platforms="linux-x86_64 linux-aarch64"
 # The crates the helper is built from, as "name version" lines, read from a
 # Cargo.lock on stdin: only the helper's own dependencies.
 closure() {
-  awk -v start=endeavor-remote '
+  awk -v start=endeavor-mcp '
     /^\[\[package\]\]/ { flush(); name = ""; ver = ""; deps = ""; indeps = 0; next }
     /^name = / { gsub(/"/, "", $3); name = $3; next }
     /^version = / { gsub(/"/, "", $3); ver = $3; next }
@@ -73,8 +73,8 @@ fi
 missing=
 for platform in $platforms; do
   stamp="$out/$platform/SOURCE"
-  if [ -x "$out/$platform/endeavor-remote" ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$key" ] && [ "${key%-dirty}" = "$key" ]; then
-    echo "$out/$platform/endeavor-remote (up to date)"
+  if [ -x "$out/$platform/endeavor" ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$key" ] && [ "${key%-dirty}" = "$key" ]; then
+    echo "$out/$platform/endeavor (up to date)"
   else
     missing="$missing $platform"
   fi
@@ -85,11 +85,11 @@ done
 repo=$(git remote get-url origin | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##')
 base="https://github.com/$repo/releases/download/helpers"
 
-if [ "${key%-dirty}" = "$key" ] && sums=$(curl -fsSL "$base/endeavor-remote-$key.sha256" 2>/dev/null); then
+if [ "${key%-dirty}" = "$key" ] && sums=$(curl -fsSL "$base/endeavor-$key.sha256" 2>/dev/null); then
   for platform in $missing; do
-    name="endeavor-remote-$key-$platform"
+    name="endeavor-$key-$platform"
     mkdir -p "$out/$platform"
-    part="$out/$platform/endeavor-remote.part"
+    part="$out/$platform/endeavor.part"
     curl -fsSL -o "$part" "$base/$name"
     want=$(printf '%s\n' "$sums" | awk -v n="$name" '$2 == n { print $1 }')
     have=$(shasum -a 256 "$part" | cut -d' ' -f1)
@@ -99,9 +99,9 @@ if [ "${key%-dirty}" = "$key" ] && sums=$(curl -fsSL "$base/endeavor-remote-$key
       exit 1
     fi
     chmod 755 "$part"
-    mv "$part" "$out/$platform/endeavor-remote"
+    mv "$part" "$out/$platform/endeavor"
     echo "$key" > "$out/$platform/SOURCE"
-    echo "$out/$platform/endeavor-remote (downloaded)"
+    echo "$out/$platform/endeavor (downloaded)"
   done
   exit 0
 fi

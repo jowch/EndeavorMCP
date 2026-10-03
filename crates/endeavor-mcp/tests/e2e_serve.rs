@@ -1,11 +1,11 @@
-//! `endeavor-remote serve` and `mcp` end to end, with real Julia, as a user
+//! `endeavor serve` and `mcp` end to end, with real Julia, as a user
 //! without the app runs them: serve in a terminal, the agent over HTTP with
 //! the printed token, the browser through the printed link, then Ctrl-C; and
 //! the stdio form for an agent on the same machine, then `stop`.
 //!
 //! Ignored by default, like e2e_julia (which says where Julia comes from):
 //!
-//!     cargo test -p endeavor-remote --test e2e_serve -- --ignored --nocapture
+//!     cargo test -p endeavor-mcp --test e2e_serve -- --ignored --nocapture
 
 #![cfg(unix)]
 
@@ -51,9 +51,9 @@ impl Drop for Cleanup {
     }
 }
 
-/// `endeavor-remote ARGS` with the test's own state, cache, depot and julia.
+/// `endeavor ARGS` with the test's own state, cache, depot and julia.
 fn command(args: &[&str], work: &Path, julia: &Path, depot: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor-remote"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command
         .args(args)
         .arg("--state-dir")
@@ -139,7 +139,7 @@ fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
 }
 
 #[test]
-#[ignore = "starts real Julia twice, about a minute: cargo test -p endeavor-remote --test e2e_serve -- --ignored"]
+#[ignore = "starts real Julia twice, about a minute: cargo test -p endeavor-mcp --test e2e_serve -- --ignored"]
 fn serve_and_mcp_without_the_app() {
     let Some((julia, app)) = find_julia() else {
         eprintln!("SKIPPED: no Julia. Set ENDEAVOR_E2E_JULIA, install Endeavor's own, or put julia on the PATH.");

@@ -130,7 +130,7 @@ impl Helper {
     }
 
     fn start_with(dir: &Path, flags: &[&str], env: &[(&str, &str)]) -> Helper {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor-remote"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
         command
             .args(["connect", "--state-dir"])
             .arg(dir)
@@ -156,7 +156,7 @@ fn websocket(helper: &Helper) -> TcpStream {
 }
 
 fn state_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("endeavor-remote-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("endeavor-mcp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -442,7 +442,7 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
         let out = Command::new("ps").args(["-o", &format!("{field}="), "-p", &pid.to_string()]).output().unwrap();
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
     };
-    assert!(ps("command", core).contains("endeavor-remote core"), "{}", ps("command", core));
+    assert!(ps("command", core).contains("endeavor core"), "{}", ps("command", core));
     assert_eq!(ps("ppid", julia), core.to_string(), "Julia is the core's child");
     assert_eq!((ps("pgid", julia), ps("pgid", core)), (core.to_string(), core.to_string()), "one process group, the core's");
 

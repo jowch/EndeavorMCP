@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 
 # `Authorization: Bearer <token>` matches the configured token, compared in
-# constant time. Only the core (`endeavor-remote core`) calls this port, and it
+# constant time. Only the core (`endeavor core`) calls this port, and it
 # checks each request's Origin and Host first; but loopback isn't private on a
 # shared machine: any local user can reach the port, so the token is what keeps
 # them out.

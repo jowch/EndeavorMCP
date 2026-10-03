@@ -1,4 +1,4 @@
-//! A running `endeavor-remote connect`, driven over its stdin and stdout as
+//! A running `endeavor connect`, driven over its stdin and stdout as
 //! the app drives it: control messages both ways, and relayed connections.
 
 use std::io::Write;
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use wire::relay::Mux;
 use wire::{ToApp, ToHelper};
 
-/// A running `endeavor-remote connect`, and the app's end of its channel.
+/// A running `endeavor connect`, and the app's end of its channel.
 pub struct Helper {
     pub process: Child,
     pub stdin: Stdin,
@@ -34,7 +34,7 @@ impl Write for Stdin {
 }
 
 impl Helper {
-    /// Run `command` (an `endeavor-remote connect …`) with its stdin and stdout as the channel.
+    /// Run `command` (an `endeavor connect …`) with its stdin and stdout as the channel.
     pub fn spawn(mut command: Command) -> Helper {
         let mut process = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdin = Stdin(Arc::new(Mutex::new(process.stdin.take())));

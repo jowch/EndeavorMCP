@@ -1,4 +1,4 @@
-# Started by `endeavor-remote core` (which the helper starts, detached or as a
+# Started by `endeavor core` (which the helper starts, detached or as a
 # Slurm job's script):
 #   julia --project=runtime runtime/boot.jl <pluto_port> <mcp_port>
 # with ENDEAVOR_TOKEN (the bridge's bearer token), ENDEAVOR_STATE (where to write
@@ -21,9 +21,9 @@ pluto_port, mcp_port = parse.(Int, ARGS[1:2])
 # Taken from the environment (not argv, which `ps` shows to every user) and dropped
 # so notebook worker processes don't inherit them.
 token = get(ENV, "ENDEAVOR_TOKEN", "")
-isempty(token) && error("ENDEAVOR_TOKEN is not set; endeavor-remote starts this script with one.")
+isempty(token) && error("ENDEAVOR_TOKEN is not set; endeavor starts this script with one.")
 state = get(ENV, "ENDEAVOR_STATE", "")
-isempty(state) && error("ENDEAVOR_STATE is not set; endeavor-remote starts this script with one.")
+isempty(state) && error("ENDEAVOR_STATE is not set; endeavor starts this script with one.")
 launcher = get(ENV, "ENDEAVOR_LAUNCHER", "process")
 # A Slurm job's id, so a reconnect can find the job with squeue.
 job = launcher == "slurm" ? get(ENV, "SLURM_JOB_ID", "") : ""

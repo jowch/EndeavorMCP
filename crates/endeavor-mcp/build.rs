@@ -1,5 +1,5 @@
 //! Embeds `runtime/` (the Julia side of the runtime) and `plugin/` (the Pluto
-//! skills as a Claude Code plugin) in the binary, so `endeavor-remote serve`
+//! skills as a Claude Code plugin) in the binary, so `endeavor serve`
 //! and `mcp` work from the one file (see `standalone`) and Endeavor takes both
 //! from this crate (`embedded`). Each one's version names the folder it's
 //! unpacked to: the package version and a hash of the files.

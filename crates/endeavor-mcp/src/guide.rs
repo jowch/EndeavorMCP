@@ -30,7 +30,7 @@ pub const INSTRUCTIONS: &str = "These tools edit and run a live Pluto (Julia) no
 Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
 how to find this session's notebook, the read-edit-run loop, when the user must approve a run, and how to lay out cells.";
 
-/// What a runtime without the app (`endeavor-remote serve` or `mcp`) adds:
+/// What a runtime without the app (`endeavor serve` or `mcp`) adds:
 /// the guide describes the app, and the agent needs to know where it differs.
 pub const STANDALONE: &str = "Here the notebooks run without the Endeavor app: the user watches them in a web browser. \
 There is no notebook pane, no approval card and no annotation mode, so skip what the guide says about those; \

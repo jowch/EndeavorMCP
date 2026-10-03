@@ -27,7 +27,7 @@ pub fn run(prompt: &str) -> ! {
         }
         Ok(None) => std::process::exit(1),
         Err(e) => {
-            eprintln!("endeavor-remote askpass: {e}");
+            eprintln!("endeavor askpass: {e}");
             std::process::exit(1);
         }
     }

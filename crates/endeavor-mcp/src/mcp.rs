@@ -94,7 +94,7 @@ struct Policy {
     edits: bool,
 }
 
-/// A runtime started by `endeavor-remote serve` or `mcp`, without the app
+/// A runtime started by `endeavor serve` or `mcp`, without the app
 /// (see `standalone`).
 pub struct Standalone {
     /// The runtime's one port, which the user's browser reaches as

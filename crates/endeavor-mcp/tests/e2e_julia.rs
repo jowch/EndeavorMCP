@@ -6,7 +6,7 @@
 //! Julia takes a while to start, so one test starts it once and walks through
 //! the steps in order. It's ignored by default:
 //!
-//!     cargo test -p endeavor-remote --test e2e_julia -- --ignored --nocapture
+//!     cargo test -p endeavor-mcp --test e2e_julia -- --ignored --nocapture
 //!
 //! Julia is `ENDEAVOR_E2E_JULIA` if set, else the app's own under
 //! ~/Library/Application Support/endeavor/julia-*, else `julia` on the PATH.
@@ -206,7 +206,7 @@ fn modified(runtime: &mut Runtime, path: &str) -> f64 {
 }
 
 #[test]
-#[ignore = "starts real Julia, about 40 s: cargo test -p endeavor-remote --test e2e_julia -- --ignored"]
+#[ignore = "starts real Julia, about 40 s: cargo test -p endeavor-mcp --test e2e_julia -- --ignored"]
 fn the_runtime_end_to_end() {
     let Some((julia, app)) = find_julia() else {
         eprintln!("SKIPPED: no Julia. Set ENDEAVOR_E2E_JULIA, install Endeavor's own, or put julia on the PATH.");
@@ -228,7 +228,7 @@ fn the_runtime_end_to_end() {
     let lab = fresh(work.join("lab"));
     let runtime_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime").canonicalize().unwrap();
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor-remote"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command
         .args(["connect", "--state-dir"])
         .arg(&state)

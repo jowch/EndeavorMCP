@@ -1,5 +1,5 @@
 //! `ssh` asking for a password, a two-factor code or a yes/no, through the
-//! helper's askpass mode: ssh runs Endeavor (or `endeavor-remote`) as `SSH_ASKPASS`, which
+//! helper's askpass mode: ssh runs the app (or the `endeavor` helper) as `SSH_ASKPASS`, which
 //! sends one [`Ask`] line to the app's Unix socket (path in [`SOCKET_ENV`]) and
 //! prints the [`Answer`] for ssh.
 

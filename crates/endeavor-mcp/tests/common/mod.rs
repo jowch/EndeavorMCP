@@ -1,11 +1,11 @@
-//! A stand-in for Julia under `endeavor-remote core`: a script that writes the
+//! A stand-in for Julia under `endeavor core`: a script that writes the
 //! state boot.jl would and then sleeps, naming a bridge and a Pluto served by
 //! this test process. The bridge answers like Julia's (chunked responses to
 //! HTTP/1.1, close-delimited to HTTP/1.0, the adapter's calls on `/adapter` and
 //! its notifications on `/notifications`); Pluto wants its secret in a cookie,
 //! echoes bodies on `/echo`, streams events on `/stream` and echoes a
 //! WebSocket's bytes after an upgrade. Both record what they were sent.
-//! `helper` drives `endeavor-remote connect` as the app does.
+//! `helper` drives `endeavor connect` as the app does.
 
 #![allow(dead_code)]
 
@@ -71,7 +71,7 @@ exec sleep 600
 }
 
 pub fn state_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("endeavor-remote-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("endeavor-mcp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

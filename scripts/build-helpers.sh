@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the runtime helper (endeavor-remote) for Linux servers into
+# Build the runtime helper (endeavor) for Linux servers into
 # target/helpers/<os>-<arch>/, or into $HELPERS_OUT (an absolute path).
 #
 #   scripts/build-helpers.sh             cross-build x86_64 and aarch64 (musl) with cargo-zigbuild
@@ -34,11 +34,11 @@ if [ "${1:-}" = "--via" ]; then
     command -v cc >/dev/null || sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc </dev/null >/dev/null
     [ -x "$HOME/.cargo/bin/rustup" ] || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --default-toolchain none >/dev/null
     d="$HOME/endeavor-helper-build"; rm -rf "$d/crates" "$d/plugin" "$d/runtime"; mkdir -p "$d"; tar -C "$d" -xf -'
-  ssh "$host" "cd ~/endeavor-helper-build && ~/.cargo/bin/cargo build -q --release -p endeavor-remote --target $target" >&2
+  ssh "$host" "cd ~/endeavor-helper-build && ~/.cargo/bin/cargo build -q --release -p endeavor-mcp --target $target" >&2
   mkdir -p "$out/linux-$arch"
-  ssh "$host" "cat ~/endeavor-helper-build/target/$target/release/endeavor-remote" > "$out/linux-$arch/endeavor-remote"
-  chmod 755 "$out/linux-$arch/endeavor-remote"
-  echo "$out/linux-$arch/endeavor-remote"
+  ssh "$host" "cat ~/endeavor-helper-build/target/$target/release/endeavor" > "$out/linux-$arch/endeavor"
+  chmod 755 "$out/linux-$arch/endeavor"
+  echo "$out/linux-$arch/endeavor"
   exit 0
 fi
 
@@ -48,8 +48,8 @@ if ! command -v cargo-zigbuild >/dev/null; then
 fi
 for arch in x86_64 aarch64; do
   target=$arch-unknown-linux-musl
-  cargo zigbuild --release -p endeavor-remote --target "$target"
+  cargo zigbuild --release -p endeavor-mcp --target "$target"
   mkdir -p "$out/linux-$arch"
-  cp "target/$target/release/endeavor-remote" "$out/linux-$arch/"
-  echo "$out/linux-$arch/endeavor-remote"
+  cp "target/$target/release/endeavor" "$out/linux-$arch/"
+  echo "$out/linux-$arch/endeavor"
 done

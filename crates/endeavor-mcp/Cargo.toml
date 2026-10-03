@@ -1,7 +1,12 @@
 [package]
-name = "endeavor-remote"
+name = "endeavor-mcp"
 version.workspace = true
 edition = "2024"
+
+# The package can't be named `endeavor`: Endeavor's app package is, and it depends on this one.
+[[bin]]
+name = "endeavor"
+path = "src/main.rs"
 
 [dependencies]
 wire = { path = "../wire" }

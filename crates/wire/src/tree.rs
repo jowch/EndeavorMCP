@@ -1,5 +1,5 @@
 //! A folder's files as Endeavor installs them (`runtime/`, `plugin/`), and the
-//! hash that names an install. `endeavor-remote`'s build script includes this
+//! hash that names an install. `endeavor-mcp`'s build script includes this
 //! file to embed those folders in the binary, so it uses only `std`.
 
 use std::path::Path;

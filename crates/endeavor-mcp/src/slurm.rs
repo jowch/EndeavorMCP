@@ -1,9 +1,9 @@
 //! The Slurm launcher. On the login node, `connect --launcher slurm` submits
-//! a batch job whose script is `endeavor-remote node-start`, which starts the
+//! a batch job whose script is `endeavor node-start`, which starts the
 //! runtime on the compute node and writes `runtime.json` (with the job id) to
 //! the state folder, shared with the login node. While the job waits in the
 //! queue the app hears its state; once the runtime is up, the login helper
-//! starts `endeavor-remote relay` on the node, through `srun --overlap` inside
+//! starts `endeavor relay` on the node, through `srun --overlap` inside
 //! the job or else `ssh` to the node, and passes the app's streams through its
 //! stdin and stdout. The runtime stays on the node's loopback.
 //!
@@ -240,7 +240,7 @@ fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, S
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     let build = args.build.as_deref().map_or(String::new(), |build| format!(" --build {}", quote(build)));
     let script = format!(
-        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor-remote.\nexec {} node-start --state-dir {} --julia {} --runtime {} --depot {}{build}\n",
+        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {} --runtime {} --depot {}{build}\n",
         quote(&exe.display().to_string()),
         quote(&dir.display().to_string()),
         quote(&julia),
@@ -306,7 +306,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
         let q = match squeue(job) {
             Ok(q) => q,
             Err(e) => {
-                eprintln!("endeavor-remote: squeue: {e}");
+                eprintln!("endeavor: squeue: {e}");
                 continue;
             }
         };
@@ -564,7 +564,7 @@ fn flag(argv: &[String], name: &str) -> Option<String> {
     argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1)).cloned()
 }
 
-/// `endeavor-remote relay --state-dir DIR`, on a job's node: attach to the
+/// `endeavor relay --state-dir DIR`, on a job's node: attach to the
 /// runtime recorded there and relay stdin/stdout to its ports, until the
 /// runtime goes, the login helper stops it, or its input ends.
 pub fn relay_main(argv: &[String]) -> ! {
@@ -612,7 +612,7 @@ pub fn relay_main(argv: &[String]) -> ! {
     }
 }
 
-/// `endeavor-remote node-start …`, the job's script: become the core on this
+/// `endeavor node-start …`, the job's script: become the core on this
 /// node, which starts Julia, logging to the job's output.
 pub fn node_start_main(argv: &[String]) -> ! {
     let need = |name: &str| {
@@ -623,7 +623,7 @@ pub fn node_start_main(argv: &[String]) -> ! {
     };
     let (dir, julia, runtime, depot) = (PathBuf::from(need("--state-dir")), need("--julia"), PathBuf::from(need("--runtime")), need("--depot"));
     let fail = |message: String| -> ! {
-        eprintln!("endeavor-remote: {message}");
+        eprintln!("endeavor: {message}");
         std::process::exit(1);
     };
     let token = std::fs::read_to_string(dir.join("token")).unwrap_or_else(|e| fail(format!("Couldn't read the token in {}: {e}", dir.display())));

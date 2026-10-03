@@ -1,5 +1,5 @@
 # The Pluto adapter's side of the engine interface (docs/runtime-core.md). The
-# core (`endeavor-remote core`) calls `POST /adapter` with {"method", "params"}
+# core (`endeavor core`) calls `POST /adapter` with {"method", "params"}
 # and reads the reply's "result" or "error". The methods (see `adapter_call`):
 # status, open, new, and for a notebook_id snapshot, graph, shutdown, apply,
 # run, interrupt, restart, allow_execution, move, render_png and validate. What happens in

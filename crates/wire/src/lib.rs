@@ -1,4 +1,4 @@
-//! What the app and `endeavor-remote` say to each other over the helper's
+//! What the app and its helper (`endeavor`) say to each other over the helper's
 //! stdin/stdout: TCP streams to the runtime's port, multiplexed byte for byte,
 //! plus JSON control messages.
 //!

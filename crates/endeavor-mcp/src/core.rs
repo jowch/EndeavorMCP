@@ -1,4 +1,4 @@
-//! `endeavor-remote core`: the runtime the helper starts (docs/runtime-core.md).
+//! `endeavor core`: the runtime the helper starts (docs/runtime-core.md).
 //! It starts `julia boot.jl` as its child, serves the runtime's one port, and
 //! writes `runtime.json` once Julia is ready. On that port it serves the
 //! agent's MCP connection at `/mcp` and the app's `/endeavor/call`s itself (see
@@ -65,7 +65,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     })
 }
 
-/// `endeavor-remote core …`, with ENDEAVOR_TOKEN and ENDEAVOR_LAUNCHER in the
+/// `endeavor core …`, with ENDEAVOR_TOKEN and ENDEAVOR_LAUNCHER in the
 /// environment, and ENDEAVOR_BUILD, the app build it came from, which it
 /// reports to the app. Its stdout and stderr are the runtime's log, which Julia shares.
 ///
@@ -81,7 +81,7 @@ pub fn main(argv: &[String]) -> ! {
         std::process::exit(2);
     });
     let fail = |message: String| -> ! {
-        eprintln!("endeavor-remote core: {message}");
+        eprintln!("endeavor core: {message}");
         std::process::exit(1);
     };
     let token = std::env::var("ENDEAVOR_TOKEN").unwrap_or_else(|_| fail("ENDEAVOR_TOKEN is not set".into()));
@@ -225,7 +225,7 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge)
         state["folder"] = standalone.folder.clone().into();
     }
     if let Err(e) = write_private(&state_dir.join("runtime.json"), state.to_string().as_bytes()) {
-        eprintln!("endeavor-remote core: {e}");
+        eprintln!("endeavor core: {e}");
         return None;
     }
     Some(ready)
@@ -238,7 +238,7 @@ fn set_pluto_folder(julia_port: u16, token: &str, folder: &str) {
     let bearer = format!("Bearer {token}");
     let headers = [("Authorization", bearer.as_str()), ("Content-Type", "application/json")];
     if let Err(e) = http::post(julia_port, "/call", &headers, body.as_bytes()) {
-        eprintln!("endeavor-remote core: couldn't give Pluto the notebooks' folder: {e}");
+        eprintln!("endeavor core: couldn't give Pluto the notebooks' folder: {e}");
     }
 }
 
