@@ -43,6 +43,7 @@ Cells that don't depend on the other session's changes run normally.
 | `pending_run` | Cells staged and awaiting execution |
 | `execution_blocked` warning | Notebook is in safe preview — the edit is staged, it just hasn't run yet |
 | `already_ran` warning (from `execute_cell` / `submit_changes`) | While your run waited for approval, the user's own run reached the cells you changed, so they already ran with your code; they weren't run again. The receipt's outputs are from that run |
+| `not_approved` warning (from `edit_cell` / `add_cell` with `run_after`) | The user chose not to run it yet. Your edit was made and staged, not run. Don't run it again on your own |
 
 ## Error kinds
 
@@ -50,6 +51,15 @@ Cells that don't depend on the other session's changes run normally.
 |--------------|-----------------|
 | `pluto_multi_expression` | `edit_cell` with `begin`/`end`, then `submit_changes(wait_for_completion=false)` |
 | `runtime` | Read `error.msg`, fix the code, re-submit |
+
+## Refused runs
+
+| `error` | Meaning | Action |
+|---------|---------|--------|
+| `not_approved` | The user denied this run | Don't retry or run it another way. Say what you'd run and why |
+| `cancelled` | The call was cancelled before the user answered | Ask the user before trying again |
+| `no_app` | Endeavor isn't open to ask the user | Tell the user; try again once Endeavor is open |
+| `older_runtime` | This notebook's Julia is from an older Endeavor and can't ask the user before a run | Don't run code. Tell the user to restart Julia, or to switch to Auto |
 
 ## Common mistakes
 
