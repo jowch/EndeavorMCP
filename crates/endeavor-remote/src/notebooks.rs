@@ -334,11 +334,13 @@ struct GraphQuery {
 impl Graph {
     fn parse(value: &Value) -> Graph {
         let names = |v: &Value| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
+        // Pluto's analysis names each anonymous function `__ExprExpl_anon__<random>`.
+        let defined = |v: &Value| names(v).into_iter().filter(|n| !n.starts_with("__ExprExpl_anon__")).collect::<Vec<_>>();
         let cells = value["cells"].as_array().into_iter().flatten().filter_map(|c| {
             Some(Node {
                 id: c["cell_id"].as_str()?.to_owned(),
-                definitions: names(&c["definitions"]),
-                functions: names(&c["functions"]),
+                definitions: defined(&c["definitions"]),
+                functions: defined(&c["functions"]),
                 references: names(&c["references"]),
                 upstream: names(&c["upstream"]),
                 downstream: names(&c["downstream"]),

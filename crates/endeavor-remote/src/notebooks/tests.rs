@@ -1416,3 +1416,12 @@ fn a_notebooks_own_julia_ending_by_itself_ends_the_run_claude_waits_for() {
     s.engine.with(NB, |nb| nb.exited = None);
     assert_eq!(s.call("7", "run_all_cells", json!({ "notebook_id": NB })).unwrap()["execution"]["status"], "running");
 }
+
+#[test]
+fn a_cell_is_never_named_after_its_anonymous_functions() {
+    let graph = Graph::parse(&json!({ "cells": [
+        { "cell_id": X, "definitions": ["c"], "functions": ["__ExprExpl_anon__7243518869190234"], "references": [] },
+        { "cell_id": Y, "definitions": [], "functions": ["__ExprExpl_anon__11"], "references": ["c"] },
+    ] }));
+    assert_eq!((graph.name(X), graph.name(Y)), (Some("c".to_owned()), None));
+}
