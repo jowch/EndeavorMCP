@@ -1247,7 +1247,7 @@ fn pathdiff(path: &str, from: &str) -> Option<String> {
     }
     let mut parts = vec![".."; from.len() - common];
     parts.extend(&path[common..]);
-    Some(parts.join(&SEP.to_string()))
+    Some(parts.join(std::path::MAIN_SEPARATOR_STR))
 }
 
 #[test]
