@@ -103,7 +103,7 @@ pub fn home() -> PathBuf {
 pub fn expand(path: &str) -> PathBuf {
     match path.strip_prefix('~') {
         Some("") => home(),
-        Some(rest) if rest.starts_with('/') => home().join(&rest[1..]),
+        Some(rest) if rest.starts_with('/') || cfg!(windows) && rest.starts_with('\\') => home().join(&rest[1..]),
         _ => home().join(path),
     }
 }
@@ -478,12 +478,15 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "the home folder isn't ported to Windows yet (docs/windows.md)")]
     fn home_relative_paths() {
         assert_eq!(expand("~"), home());
         assert_eq!(expand("~/decay-fits"), home().join("decay-fits"));
         assert_eq!(expand("decay-fits"), home().join("decay-fits"));
-        assert_eq!(expand("/srv/data"), PathBuf::from("/srv/data"));
+        let absolute = if cfg!(windows) { r"D:\srv\data" } else { "/srv/data" };
+        assert_eq!(expand(absolute), PathBuf::from(absolute));
+        if cfg!(windows) {
+            assert_eq!(expand(r"~\decay-fits"), home().join("decay-fits"));
+        }
     }
 
     #[test]

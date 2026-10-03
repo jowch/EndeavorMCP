@@ -84,8 +84,8 @@ pub fn find(source: &Source, progress: &dyn Fn(String)) -> Result<(String, Strin
 }
 
 fn expand_home(path: &str) -> String {
-    match (path.strip_prefix("~/"), std::env::var("HOME")) {
-        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
+    match (path.strip_prefix("~/"), std::env::home_dir()) {
+        (Some(rest), Some(home)) => format!("{}/{rest}", home.display()),
         _ => path.to_owned(),
     }
 }
@@ -211,13 +211,12 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg_attr(windows, ignore = "the home folder isn't ported to Windows yet (docs/windows.md)")]
     fn versions_and_home_paths() {
         assert_eq!(parse_version("1.12.6"), Some((1, 12)));
         assert!(parse_version("1.10.4").unwrap() < MIN_JULIA);
         assert_eq!(parse_version("garbage"), None);
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(expand_home("~/julia/bin/julia"), format!("{home}/julia/bin/julia"));
+        let home = std::env::home_dir().unwrap();
+        assert_eq!(expand_home("~/julia/bin/julia"), format!("{}/julia/bin/julia", home.display()));
         assert_eq!(expand_home("/opt/julia"), "/opt/julia");
     }
 }
