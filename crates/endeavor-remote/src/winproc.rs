@@ -105,16 +105,15 @@ pub fn job_ending_with_this_process() -> io::Result<OwnedHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::BufRead;
     use std::process::{Command, Stdio};
 
     const ROLE: &str = "ENDEAVOR_JOB_TEST_ROLE";
-    const PID_LINE: &str = "endeavor-test-pid ";
+    const PIDS: &str = "ENDEAVOR_JOB_TEST_PIDS";
 
     /// This test binary again, running only `test` as `role`.
     fn rerun(test: &str, role: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", test, "--nocapture", "--test-threads=1"]).env(ROLE, role).stdin(Stdio::null());
+        command.args(["--exact", test, "--nocapture", "--test-threads=1"]).env(ROLE, role).stdin(Stdio::null()).stdout(Stdio::null());
         command
     }
 
@@ -128,27 +127,31 @@ mod tests {
                 let _ = rerun(TEST, "worker").spawn().unwrap().wait();
                 return;
             }
-            // About a minute, unless the job ends it.
+            // About a minute, unless the job ends it. Its pids go to a file:
+            // a test's own output may be captured whatever the flags say.
             Ok("worker") => {
                 let mut ping = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
-                println!("{PID_LINE}{}", std::process::id());
-                println!("{PID_LINE}{}", ping.id());
+                let path = std::env::var(PIDS).unwrap();
+                std::fs::write(format!("{path}.part"), format!("{} {}", std::process::id(), ping.id())).unwrap();
+                std::fs::rename(format!("{path}.part"), &path).unwrap();
                 let _ = ping.wait();
                 return;
             }
             _ => {}
         }
-        let mut core = rerun(TEST, "core").stdout(Stdio::piped()).spawn().unwrap();
+        let file = std::env::temp_dir().join(format!("endeavor-job-test-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let mut core = rerun(TEST, "core").env(PIDS, &file).spawn().unwrap();
         let mut pids = Vec::new();
-        for line in std::io::BufReader::new(core.stdout.take().unwrap()).lines() {
-            if let Some(pid) = line.unwrap().strip_prefix(PID_LINE) {
-                pids.push(pid.trim().parse::<u32>().unwrap());
-                if pids.len() == 2 {
-                    break;
-                }
+        for _ in 0..300 {
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                pids = text.split_whitespace().map(|p| p.parse::<u32>().unwrap()).collect();
+                break;
             }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert_eq!(pids.len(), 2, "the worker said its pid and its child's");
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(pids.len(), 2, "the worker wrote its pid and its child's");
         let started: Vec<Process> = pids.iter().map(|&pid| Process::open_pid(pid).expect("the worker and its child run")).collect();
         assert!(started.iter().all(Process::alive));
         core.kill().unwrap();
