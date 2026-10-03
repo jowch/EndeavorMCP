@@ -1,0 +1,4 @@
+target
+
+# Resolved by Pkg.test() for the runtime package; the runtime uses runtime/Manifest.toml
+runtime/EndeavorRuntime/Manifest.toml
