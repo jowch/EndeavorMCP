@@ -116,8 +116,9 @@ Standalone, the default is one session per connection.
 A small change, about 1–2 days.
 
 - **In the app**, nothing changes. The core already decides which calls run
-  code (`runs_code` in `crates/endeavor-remote`) and holds them until the
-  app's run card is answered (`asks` in `/events`, `endeavor/answer_run`).
+  code (`runs_code` in `crates/endeavor-remote`), and in Manual the calls
+  that change the notebook (`asks_first`), and holds them until the app's
+  card is answered (`asks` in `/events`, `endeavor/answer_run`).
 - **Standalone**, nothing in the core asks the user: a client without the
   app uses its own per-tool approval, guided by the core's read-only markers.
   Claude Code asks in its own permission prompt for any tool not allowed.

@@ -52,11 +52,11 @@ Cells that don't depend on the other session's changes run normally.
 | `pluto_multi_expression` | `edit_cell` with `begin`/`end`, then `submit_changes(wait_for_completion=false)` |
 | `runtime` | Read `error.msg`, fix the code, re-submit |
 
-## Refused runs
+## Refused runs and changes
 
 | `error` | Meaning | Action |
 |---------|---------|--------|
-| `not_approved` | The user denied this run | Don't retry or run it another way. Say what you'd run and why |
+| `not_approved` | The user denied this run, or (in Manual) this change; a denied change isn't made | Don't retry or do it another way. Say what you'd do and why |
 | `cancelled` | The call was cancelled before the user answered | Ask the user before trying again |
 | `no_app` | Endeavor isn't open to ask the user | Tell the user; try again once Endeavor is open |
 | `older_runtime` | This notebook's Julia is from an older Endeavor and can't ask the user before a run | Don't run code. Tell the user to restart Julia, or to switch to Auto |

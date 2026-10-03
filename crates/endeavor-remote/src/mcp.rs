@@ -11,7 +11,9 @@
 //! Each session has a run policy the app sets ("plan" | "ask" | "auto"). In
 //! "plan" its notebook writes and runs are refused. In "ask", when the app
 //! says it answers runs (`asks`), a call that runs code waits for the user's
-//! answer (see `asks`); "auto" runs it.
+//! answer (see `asks`); "auto" runs it. In Manual the app also says `edits`:
+//! then a call that changes the notebook waits for the user's answer too,
+//! whatever the policy says about runs.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader};
@@ -66,14 +68,35 @@ pub fn runs_code(tool: &str, arguments: &Value) -> bool {
     }
 }
 
+/// Whether a call to `tool` changes the notebook: what Manual asks about
+/// even when runs don't ask.
+pub fn changes_notebook(tool: &str) -> bool {
+    matches!(tool, "edit_cell" | "edit_cells" | "add_cell" | "delete_cell" | "move_cell" | "fold_cell" | "new_notebook")
+}
+
+/// Whether the runtime holds a call to `tool` with `arguments` for the
+/// user's answer, in a session whose policy is `policy` and whose edits ask
+/// (`edits`, Manual). Nothing is held in "plan", which refuses writes.
+pub fn asks_first(tool: &str, arguments: &Value, policy: &str, edits: bool) -> bool {
+    policy != "plan" && ((policy == "ask" && runs_code(tool, arguments)) || (edits && changes_notebook(tool)))
+}
+
+/// A session's policy as the app set it.
+struct Policy {
+    policy: String,
+    /// The app answers what the runtime holds (an app from before runtime asks doesn't).
+    asks: bool,
+    /// Calls that change the notebook ask too (Manual).
+    edits: bool,
+}
+
 /// What every client connection shares.
 pub struct Bridge {
     pub julia: Arc<Julia>,
     pub notebooks: Arc<Notebooks>,
     pub token: String,
-    /// Each agent session's run policy, by its key, and whether the app
-    /// answers its runs (an app from before runtime asks doesn't).
-    policies: Mutex<HashMap<String, (String, bool)>>,
+    /// Each agent session's policy, by its key.
+    policies: Mutex<HashMap<String, Policy>>,
     /// Each agent session's working folder on this machine, by its key.
     folders: Mutex<HashMap<String, String>>,
     /// Each agent session's last tool results, for the app to look up.
@@ -141,9 +164,15 @@ impl Bridge {
         match message["method"].as_str().unwrap_or_default() {
             "endeavor/set_policy" => {
                 let (owner, policy) = (text("owner", ""), text("policy", "ask"));
-                let asks = params["asks"] == true;
-                eprintln!("[ Info: Session {owner} policy: {policy}{}", if asks { ", runs ask first" } else { "" });
-                self.policies.lock().unwrap().insert(owner, (policy, asks));
+                let (asks, edits) = (params["asks"] == true, params["edits"] == true);
+                let what = match (asks, edits) {
+                    _ if policy == "plan" => "",
+                    (true, true) => ", runs and edits ask first",
+                    (true, false) => ", runs ask first",
+                    _ => "",
+                };
+                eprintln!("[ Info: Session {owner} policy: {policy}{what}");
+                self.policies.lock().unwrap().insert(owner, Policy { policy, asks, edits });
             }
             "endeavor/answer_run" => {
                 let given = Answer { allow: params["allow"] == true, user_ran: params.get("user_ran").cloned().unwrap_or_else(|| json!([])) };
@@ -303,18 +332,21 @@ impl Bridge {
         }
     }
 
-    /// In Ask to run, wait for the user's answer to a call that runs code.
-    /// Whether it runs as asked; false for an edit the user didn't let run,
-    /// which is made but not run. Otherwise the call's result: refused,
-    /// cancelled, or with no app to ask.
+    /// Wait for the user's answer to a call the session's policy holds
+    /// (`asks_first`). Whether it runs as asked; false for an edit the user
+    /// didn't let run in Ask to run, which is made but not run. Otherwise the
+    /// call's result: refused, cancelled, or with no app to ask.
     fn ask_first(&self, call: &Call, tool: &str, arguments: &Value) -> Result<bool, Value> {
         let owner = &call.caller.owner;
-        let asks = self.policies.lock().unwrap().get(owner).is_some_and(|(policy, asks)| policy == "ask" && *asks);
-        if owner.is_empty() || !asks || !runs_code(tool, arguments) {
+        let (held, edits) = match self.policies.lock().unwrap().get(owner) {
+            Some(p) if p.asks => (asks_first(tool, arguments, &p.policy, p.edits), p.edits),
+            _ => (false, false),
+        };
+        if owner.is_empty() || !held {
             return Ok(true);
         }
         if !self.notebooks.followed() {
-            return Err(tool_error("ArgumentError: no_app::Endeavor isn't connected to ask the user before this runs. Try again once Endeavor is open.", false));
+            return Err(tool_error("ArgumentError: no_app::Endeavor isn't connected to ask the user about this. Try again once Endeavor is open.", false));
         }
         let ask = Ask { owner, call_id: call.call_id, request: call.request, tool, arguments, since: self.notebooks.now() };
         let id = self.notebooks.asks.add(ask);
@@ -330,6 +362,8 @@ impl Bridge {
                 }
                 Ok(true)
             }
+            // In Manual a denied change isn't made, even one that was to run after.
+            Outcome::Answered(_) if edits && changes_notebook(tool) => Err(tool_error("ArgumentError: not_approved::The user chose not to make this change.", false)),
             Outcome::Answered(_) if matches!(tool, "edit_cell" | "add_cell") => Ok(false),
             Outcome::Answered(_) => Err(tool_error("ArgumentError: not_approved::The user chose not to run this.", false)),
             Outcome::Cancelled | Outcome::Gone => Err(tool_error("ArgumentError: cancelled::The call was cancelled before the user answered.", false)),
@@ -343,7 +377,7 @@ impl Bridge {
                 "ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on the user's computer: use your own file and shell tools."
             ));
         }
-        let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|(policy, _)| policy == "plan");
+        let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
         if plan && WRITE_TOOLS.contains(&tool) {
             let what = if tool == "run_shell" { "run a command on the server" } else { "change or run the notebook" };
             return Some(format!(
@@ -610,6 +644,21 @@ mod tests {
         assert!(!runs("edit_cells", json!({ "cells": [] })));
         assert!(!runs("read_cell", json!({})));
         assert!(!runs("read_file", json!({ "path": "/tmp/x" })));
+    }
+
+    #[test]
+    fn manual_holds_every_write_and_no_read() {
+        let held = |tool: &str, policy: &str, edits: bool| asks_first(tool, &json!({ "cell_id": "a", "code": "1" }), policy, edits);
+        for tool in WRITE_TOOLS {
+            assert!(held(tool, "ask", true), "{tool} in Manual");
+        }
+        for tool in ["read_cell", "read_notebook_code", "list_notebooks", "view_cell_output", "search_code", "open_notebook", "keep_notebook_alive", "read_file"] {
+            assert!(!held(tool, "ask", true) && !held(tool, "auto", true), "{tool} only reads");
+        }
+        assert!(!held("edit_cell", "ask", false), "Ask to run doesn't hold an edit that doesn't run");
+        assert!(held("execute_cell", "ask", false));
+        assert!(held("move_cell", "auto", true) && !held("execute_cell", "auto", true), "Manual with runs allowed still asks before changes");
+        assert!(!held("edit_cell", "plan", true), "plan refuses it instead");
     }
 
     #[test]

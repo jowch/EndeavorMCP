@@ -27,7 +27,7 @@ mod slurm;
 
 pub use core::serve_unreachable;
 pub use guard::serve_guarded;
-pub use mcp::{is_tool, runs_code};
+pub use mcp::{asks_first, changes_notebook, is_tool, runs_code};
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};

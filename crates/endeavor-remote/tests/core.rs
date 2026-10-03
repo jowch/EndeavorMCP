@@ -560,6 +560,94 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
 }
 
 #[test]
+fn in_manual_an_edit_waits_for_the_users_answer() {
+    let dir = state_dir("core-manual");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    const NB: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const CELL: &str = "cccccccc-0000-0000-0000-000000000001";
+    bridge.set_notebooks(vec![serde_json::json!({
+        "notebook_id": NB, "path": "/n/a.jl", "cell_order": [CELL], "execution_allowed": true, "safe_preview": false, "pending_run": [],
+        "cells": [{ "cell_id": CELL, "code": "x = 1", "running": false, "queued": false, "errored": false }],
+    })]);
+    let caller = [("X-Endeavor-Session", "7")];
+    let tool = |id: u32, name: &str, arguments: serde_json::Value| {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } }).to_string()
+    };
+    let edit = |id: u32| tool(id, "edit_cell", serde_json::json!({ "notebook_id": NB, "cell_id": CELL, "code": "x = 2" }));
+    let text = |body: &str| {
+        let reply: serde_json::Value = serde_json::from_str(body).unwrap();
+        let text: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        text
+    };
+    let applied = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter") && String::from_utf8_lossy(&s.body).contains(r#""method":"apply""#)).count();
+    let policy = |policy: &str, edits: bool| {
+        app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"7","policy":"{policy}","asks":true,"edits":{edits}}}}}"#))
+    };
+
+    let mut events = core.connect();
+    let mut reader = BufReader::new(events.try_clone().unwrap());
+    write!(events, "GET /events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    event_where(&mut reader, |_| true);
+    let answer = |id: &serde_json::Value, allow: bool| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"endeavor/answer_run","params":{{"id":{id},"allow":{allow},"user_ran":[]}}}}"#));
+    let waiting = |e: &serde_json::Value| e["asks"].as_array().is_some_and(|a| !a.is_empty());
+
+    policy("ask", true);
+    // Reads never wait.
+    assert_eq!(text(&mcp(&core, &tool(1, "read_cell", serde_json::json!({ "notebook_id": NB, "cell_id": CELL })), &caller).1)["code"], "x = 1");
+    std::thread::scope(|scope| {
+        // Denied: nothing reaches the notebook, and the agent hears why.
+        let call = scope.spawn(|| mcp(&core, &edit(2), &caller).1);
+        let ask = event_where(&mut reader, waiting)["asks"][0].clone();
+        assert_eq!((&ask["tool"], &ask["arguments"]["code"]), (&"edit_cell".into(), &"x = 2".into()));
+        assert!(!call.is_finished(), "waits");
+        answer(&ask["id"], false);
+        assert_eq!(text(&call.join().unwrap()), serde_json::json!({ "error": "not_approved", "message": "The user chose not to make this change." }));
+        assert_eq!(applied(), 0, "the notebook is unchanged");
+        event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
+
+        // An edit that was to run after isn't made either.
+        let run_after = tool(3, "edit_cell", serde_json::json!({ "notebook_id": NB, "cell_id": CELL, "code": "x = 2", "run_after": true }));
+        let (on, from) = (&core, &caller);
+        let call = scope.spawn(move || mcp(on, &run_after, from).1);
+        let ask = event_where(&mut reader, waiting)["asks"][0].clone();
+        answer(&ask["id"], false);
+        assert_eq!(text(&call.join().unwrap())["error"], "not_approved");
+        assert_eq!(applied(), 0, "the notebook is unchanged");
+        event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
+
+        // Allowed: the edit goes ahead only once the user says so.
+        let call = scope.spawn(|| mcp(&core, &edit(4), &caller).1);
+        let ask = event_where(&mut reader, waiting)["asks"][0].clone();
+        assert_eq!(applied(), 0, "not before the answer");
+        answer(&ask["id"], true);
+        call.join().unwrap();
+        assert_eq!(applied(), 1, "made once allowed");
+        event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
+
+        // Runs allowed for the session (policy "auto"): Manual still asks before an edit.
+        policy("auto", true);
+        let call = scope.spawn(|| mcp(&core, &edit(5), &caller).1);
+        let ask = event_where(&mut reader, waiting)["asks"][0].clone();
+        answer(&ask["id"], true);
+        call.join().unwrap();
+        assert_eq!(applied(), 2);
+        event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
+    });
+
+    // Ask to run holds runs, not edits; neither does an app that doesn't say `edits`.
+    policy("ask", false);
+    mcp(&core, &edit(6), &caller);
+    assert_eq!(applied(), 3, "made without asking");
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{"owner":"7","policy":"ask","asks":true}}"#);
+    mcp(&core, &edit(7), &caller);
+    assert_eq!(applied(), 4, "made without asking");
+    // Plan refuses edits rather than holding them.
+    policy("plan", true);
+    assert_eq!(text(&mcp(&core, &edit(8), &caller).1)["error"], "plan_mode");
+}
+
+#[test]
 fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let dir = state_dir("core-policy");
     let bridge = FakeBridge::start(&dir);
