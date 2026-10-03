@@ -127,10 +127,12 @@ holds it and it applies to every engine:
   code and reports unmatched ones as "cell no longer found".
 - **Staged edits from outside** (marimo's `--watch`, a user editing the file)
   show as `unrun`, the same state Pluto's staged edits produce.
-- **Opening a notebook** follows each engine's own default, so existing
-  notebooks behave the way their users know: Pluto runs every cell; marimo
-  (`auto_instantiate = false` by default) and Ember open without
-  running, and cells run on request, ancestors first.
+- **Opening a notebook** from disk runs nothing. Pluto would run every cell,
+  so Endeavor opens it in safe preview (execution not allowed) until the user
+  runs it; notebooks Endeavor or Claude create skip safe preview (see
+  [ui-spec.md](ui-spec.md), "Safe preview"). marimo (`auto_instantiate =
+  false` by default) and Ember open without running. Cells run on request,
+  ancestors first.
 
 What stays in each adapter: calls into the engine's API or internals, output and
 error conversion, hiding boilerplate in `read_notebook_code` (Pluto's
