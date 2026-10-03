@@ -1,0 +1,14 @@
+{
+  "name": "endeavor",
+  "owner": {
+    "name": "Jonathan Chen"
+  },
+  "description": "Endeavor's notebook tools for agents: live Pluto (Julia) notebooks on your workstation or cluster.",
+  "plugins": [
+    {
+      "name": "endeavor",
+      "source": "./claude-plugin",
+      "description": "Live Pluto (Julia) notebooks your agent edits and runs, which you watch in a browser."
+    }
+  ]
+}
