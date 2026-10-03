@@ -1,7 +1,8 @@
-# Builds the runtime helper (endeavor-remote) that the app installs on servers
-# and publishes it to the "helpers" release as endeavor-remote-<key>-<platform>,
-# with endeavor-remote-<key>.sha256; <key> is scripts/helpers.sh --key, a hash
-# of the helper's source. scripts/helpers.sh downloads them from there.
+# Builds endeavor-remote for Linux (the helper Endeavor installs on servers, and
+# the standalone binary) and publishes it to the "helpers" release as
+# endeavor-remote-<key>-<platform>, with endeavor-remote-<key>.sha256; <key> is
+# scripts/helpers.sh --key, a hash of the helper's source. scripts/helpers.sh
+# downloads them from there.
 name: Helpers
 
 on:

@@ -1,12 +1,13 @@
 #!/bin/sh
 # Put the runtime helpers for Linux servers (endeavor-remote, x86_64 and
-# aarch64) in target/helpers/<platform>/, where the app and scripts/bundle.sh
-# look, built from this checkout's helper source.
+# aarch64) in target/helpers/<platform>/, built from this checkout's source.
+# Endeavor, which has this repository as its mcp/ submodule, looks there
+# (mcp/target/helpers) and copies them into Endeavor.app.
 #
 #   scripts/helpers.sh               keep what's there if it matches, else
 #                                    download it, else build it
-#   scripts/helpers.sh --fetch-only  keep or download, never build (the git
-#                                    hooks in .githooks run this)
+#   scripts/helpers.sh --fetch-only  keep or download, never build (Endeavor's
+#                                    git hooks run this)
 #   scripts/helpers.sh --key         print the helper source key
 #
 # Downloads come from the "helpers" release on GitHub, which the Helpers
@@ -22,8 +23,7 @@ paths="crates/endeavor-remote crates/wire plugin/skills runtime rust-toolchain.t
 platforms="linux-x86_64 linux-aarch64"
 
 # The crates the helper is built from, as "name version" lines, read from a
-# Cargo.lock on stdin: only the helper's own dependencies, so a change to the
-# app's dependencies doesn't change the key.
+# Cargo.lock on stdin: only the helper's own dependencies.
 closure() {
   awk -v start=endeavor-remote '
     /^\[\[package\]\]/ { flush(); name = ""; ver = ""; deps = ""; indeps = 0; next }

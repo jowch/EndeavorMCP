@@ -1,8 +1,8 @@
 #!/bin/sh
 # Build the runtime helper (endeavor-remote) for Linux servers into
-# target/helpers/<os>-<arch>/, where the app looks in a source checkout and
-# which scripts/bundle.sh copies into Endeavor.app. A server whose platform has
-# no helper there can't be connected to.
+# target/helpers/<os>-<arch>/, where Endeavor looks in a source checkout and
+# which its scripts/bundle.sh copies into Endeavor.app. Endeavor can't connect
+# to a server whose platform has no helper there.
 #
 #   scripts/build-helpers.sh             cross-build x86_64 and aarch64 (musl) with cargo-zigbuild
 #   scripts/build-helpers.sh --via HOST  build on HOST, a Linux machine reachable by ssh, for its
@@ -19,10 +19,9 @@ if [ "${1:-}" = "--via" ]; then
   [ "$(ssh "$host" uname -s)" = Linux ] || { echo "$host isn't running Linux" >&2; exit 1; }
   arch=$(ssh "$host" uname -m)
   target=$arch-unknown-linux-musl
-  version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
   toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
-  # Just the helper and its protocol crate, as a workspace of their own, the
-  # skills its guide tool serves, and runtime/, which it carries for `serve`.
+  # The workspace, the skills its guide tool serves, and runtime/, which it
+  # carries for `serve`.
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
   mkdir -p "$stage/src/crates" "$stage/src/plugin"
@@ -30,8 +29,7 @@ if [ "${1:-}" = "--via" ]; then
   cp -R plugin/skills "$stage/src/plugin/"
   cp -R runtime "$stage/src/"
   rm -rf "$stage/src/crates/"*/target
-  cp Cargo.lock "$stage/src/"
-  printf '[workspace]\nmembers = ["crates/wire", "crates/endeavor-remote"]\nresolver = "3"\n\n[workspace.package]\nversion = "%s"\n' "$version" > "$stage/src/Cargo.toml"
+  cp Cargo.toml Cargo.lock "$stage/src/"
   printf '[toolchain]\nchannel = "%s"\ntargets = ["%s"]\n' "$toolchain" "$target" > "$stage/src/rust-toolchain.toml"
   COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage/src" -cf - . | ssh "$host" '
     set -e
