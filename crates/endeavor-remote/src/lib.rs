@@ -20,6 +20,7 @@ mod http;
 mod julia;
 mod mcp;
 mod notebooks;
+mod results;
 mod slurm;
 
 pub use core::serve_unreachable;

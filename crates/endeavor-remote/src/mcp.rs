@@ -23,6 +23,7 @@ use crate::guide;
 use crate::host_tools;
 use crate::http::{self, Head};
 use crate::notebooks::{self, Julia, Notebooks, Reply};
+use crate::results::Results;
 
 /// Protocol versions this server understands, most recent first: `initialize`
 /// echoes the client's requested version when it's one of these, else answers
@@ -58,6 +59,8 @@ pub struct Bridge {
     policies: Mutex<HashMap<String, String>>,
     /// Each agent session's working folder on this machine, by its key.
     folders: Mutex<HashMap<String, String>>,
+    /// Each agent session's last tool results, for the app to look up.
+    results: Results,
     /// `run_shell`'s environment, changed from ours as Julia's was: its
     /// depot, and none of what the helper passes the runtime.
     shell_env: Vec<(&'static str, Option<String>)>,
@@ -98,6 +101,7 @@ impl Bridge {
             token,
             policies: Mutex::default(),
             folders: Mutex::default(),
+            results: Results::default(),
             shell_env,
         }
     }
@@ -158,6 +162,11 @@ impl Bridge {
                     folders.insert(owner, folder);
                 }
             }
+            "endeavor/tool_result" => {
+                let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let call_id = params.get("call_id").and_then(Value::as_str);
+                return Some(answer(Ok(self.results.find(&text("owner", ""), call_id, &text("tool", ""), &arguments))));
+            }
             "endeavor/run_preview" => {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                 return Some(answer(self.notebooks.run_preview(&text("tool", ""), &arguments)));
@@ -187,6 +196,11 @@ impl Bridge {
     fn dispatch(&self, message: &Value, caller: &Caller) -> Option<String> {
         answer(message, caller, |params| {
             let result = self.call_tool(params, caller);
+            if !caller.owner.is_empty() {
+                let call_id = params["_meta"]["claudecode/toolUseId"].as_str();
+                let arguments = params.get("arguments").unwrap_or(&Value::Null);
+                self.results.record(&caller.owner, call_id, params["name"].as_str().unwrap_or_default(), arguments, &result);
+            }
             self.notebooks.publish();
             result
         })

@@ -461,6 +461,29 @@ fn the_apps_notebook_calls_are_the_cores() {
 }
 
 #[test]
+fn the_app_looks_up_a_sessions_tool_results() {
+    let dir = state_dir("core-results");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let keep = |id: u32, meta: &str| {
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"keep_notebook_alive","arguments":{{"keep":true,"notebook_id":"aaaaaaaa-0000-0000-0000-000000000000"}}{meta}}}}}"#)
+    };
+    let (_, said) = mcp(&core, &keep(1, r#","_meta":{"claudecode/toolUseId":"toolu_01"}"#), &[("X-Endeavor-Session", "7")]);
+    mcp(&core, &keep(2, ""), &[("X-Endeavor-Session", "7")]);
+    let said: serde_json::Value = serde_json::from_str(&said).unwrap();
+
+    let look_up = |params: &str| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":9,"method":"endeavor/tool_result","params":{params}}}"#));
+    let found: serde_json::Value = serde_json::from_str(&look_up(r#"{"owner":"7","call_id":"toolu_01","tool":"keep_notebook_alive","arguments":{}}"#)).unwrap();
+    assert_eq!(found["result"], serde_json::json!({ "content": said["result"]["content"], "isError": true }), "by the id Claude Code sends");
+    // An agent whose call ids the runtime never saw: by tool and arguments, oldest first, each once.
+    let by_arguments = r#"{"owner":"7","call_id":"cursor-1","tool":"keep_notebook_alive","arguments":{"notebook_id":"aaaaaaaa-0000-0000-0000-000000000000","keep":true}}"#;
+    let found: serde_json::Value = serde_json::from_str(&look_up(by_arguments)).unwrap();
+    assert_eq!(found["result"]["isError"], true);
+    assert_eq!(look_up(by_arguments), r#"{"id":9,"jsonrpc":"2.0","result":null}"#, "both calls were looked up");
+    assert_eq!(look_up(r#"{"owner":"8","tool":"keep_notebook_alive","arguments":{}}"#), r#"{"id":9,"jsonrpc":"2.0","result":null}"#);
+}
+
+#[test]
 fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let dir = state_dir("core-policy");
     let bridge = FakeBridge::start(&dir);
