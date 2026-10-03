@@ -18,14 +18,13 @@ if [ "${1:-}" = "--via" ]; then
   arch=$(ssh "$host" uname -m)
   target=$arch-unknown-linux-musl
   toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
-  # The workspace, the skills its guide tool serves, and runtime/, which it
-  # carries for `serve`.
+  # The workspace, and the folders the binary carries: plugin/ (the skills)
+  # and runtime/.
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
-  mkdir -p "$stage/src/crates" "$stage/src/plugin"
+  mkdir -p "$stage/src/crates"
   cp -R crates/wire crates/endeavor-remote "$stage/src/crates/"
-  cp -R plugin/skills "$stage/src/plugin/"
-  cp -R runtime "$stage/src/"
+  cp -R plugin runtime "$stage/src/"
   rm -rf "$stage/src/crates/"*/target
   cp Cargo.toml Cargo.lock "$stage/src/"
   printf '[toolchain]\nchannel = "%s"\ntargets = ["%s"]\n' "$toolchain" "$target" > "$stage/src/rust-toolchain.toml"

@@ -11,7 +11,7 @@ on:
     paths:
       - crates/endeavor-remote/**
       - crates/wire/**
-      - plugin/skills/**
+      - plugin/**
       - runtime/**
       - Cargo.lock
       - Cargo.toml
