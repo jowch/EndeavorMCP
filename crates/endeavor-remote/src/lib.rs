@@ -101,7 +101,7 @@ struct State {
 }
 
 /// Why a runtime from a build before one port per runtime can't be used.
-const OLDER_RUNTIME: &str = "Julia here was started by an older version of Endeavor, which this version can't connect to. Restart Julia to use it.";
+pub const OLDER_RUNTIME: &str = "Julia here was started by an older version of Endeavor, which this version can't connect to. Restart Julia to use it.";
 
 enum Event {
     App(ToHelper),

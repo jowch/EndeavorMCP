@@ -167,13 +167,12 @@ Checked live on 2026-10-03 in a test copy of the app:
 - A runtime from before this change (started on the VM from an older cached
   helper): the session shows "Julia here was started by an older version of
   Endeavor … Restart Julia to use it." Settings → Where notebooks run → Stop
-  ends it, and Start then brings up a new runtime.
+  ends it, and Start then brings up a new runtime. The notebook pane offers
+  "Restart Julia on <host>", which after a confirmation stops the old
+  runtime and starts a new one.
 
 Still open:
 
-- The notebook pane in that older-runtime state offers only "Start on
-  <host>", which fails again with the same message. It should offer a
-  restart (stop the old runtime, then start) instead.
 - Pluto's page in a browser through an `ssh -L` forward (step 5).
 
 ## Order
