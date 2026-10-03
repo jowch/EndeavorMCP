@@ -3,7 +3,7 @@
 //! answers the agent's tool calls the app won't let that runtime carry out,
 //! passing everything else through unchanged.
 
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
 
 use serde_json::{Value, json};
@@ -12,11 +12,12 @@ use crate::http::{self, Head};
 use crate::mcp::{to_json, tool_error};
 
 /// Serve `client`'s requests through `upstream`, a connection to the runtime's
-/// bridge. An agent's MCP tool call that `refuse` refuses, given the session's
-/// key (its `X-Endeavor-Session`), the tool and its arguments, fails here with
-/// that text as its error. The first request that isn't the agent's MCP
-/// message (the app's own calls and event stream) and everything after it pass
-/// through as they are.
+/// bridge, one at a time. An agent's MCP tool call that `refuse` refuses,
+/// given the session's key (its `X-Endeavor-Session`), the tool and its
+/// arguments, fails here with that text as its error. Every other request (the
+/// app's own calls and event stream, and the agent's other messages) passes
+/// through as it is, and the requests after it on the same connection are
+/// checked the same way.
 pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&str, &str, &Value) -> Option<String>) -> io::Result<()> {
     let mut reader = BufReader::new(client.try_clone()?);
     let mut client = client;
@@ -28,33 +29,34 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
         let streamable = target.starts_with("/mcp");
         if request.method() != "POST" || !(streamable || target.starts_with("/message")) {
             request.write_to(&mut to_runtime)?;
-            return pass_through(reader, client, from_runtime, to_runtime);
-        }
-        let body = http::read_body(&mut reader, request.request_body()?)?;
-        let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        let session = request.header("X-Endeavor-Session").unwrap_or_default().to_owned();
-        let params = &message["params"];
-        let refusal = (message["method"] == "tools/call" && !message["id"].is_null())
-            .then(|| refuse(&session, params["name"].as_str().unwrap_or_default(), params.get("arguments").unwrap_or(&Value::Null)))
-            .flatten();
-        if let Some(why) = refusal {
-            if streamable {
-                let reply = json!({ "jsonrpc": "2.0", "id": message["id"], "result": tool_error(&why, false) });
-                http::respond(&mut client, "200 OK", Some("application/json"), to_json(&reply).as_bytes(), request.keeps_alive())?;
-            } else {
-                // Its reply would go out on the SSE stream; failing the post fails the call.
-                let said = why.split_once("::").map_or(why.as_str(), |(_, message)| message);
-                http::respond(&mut client, "403 Forbidden", Some("text/plain"), said.as_bytes(), request.keeps_alive())?;
+            http::copy_body(&mut reader, &mut to_runtime, &mut request.request_body()?)?;
+        } else {
+            let body = http::read_body(&mut reader, request.request_body()?)?;
+            let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let session = request.header("X-Endeavor-Session").unwrap_or_default().to_owned();
+            let params = &message["params"];
+            let refusal = (message["method"] == "tools/call" && !message["id"].is_null())
+                .then(|| refuse(&session, params["name"].as_str().unwrap_or_default(), params.get("arguments").unwrap_or(&Value::Null)))
+                .flatten();
+            if let Some(why) = refusal {
+                if streamable {
+                    let reply = json!({ "jsonrpc": "2.0", "id": message["id"], "result": tool_error(&why, false) });
+                    http::respond(&mut client, "200 OK", Some("application/json"), to_json(&reply).as_bytes(), request.keeps_alive())?;
+                } else {
+                    // Its reply would go out on the SSE stream; failing the post fails the call.
+                    let said = why.split_once("::").map_or(why.as_str(), |(_, message)| message);
+                    http::respond(&mut client, "403 Forbidden", Some("text/plain"), said.as_bytes(), request.keeps_alive())?;
+                }
+                if !request.keeps_alive() {
+                    return Ok(());
+                }
+                continue;
             }
-            if !request.keeps_alive() {
-                return Ok(());
-            }
-            continue;
+            request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Transfer-Encoding") && !name.eq_ignore_ascii_case("Content-Length"));
+            request.headers.push(("Content-Length".into(), body.len().to_string()));
+            request.write_to(&mut to_runtime)?;
+            to_runtime.write_all(&body)?;
         }
-        request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Transfer-Encoding") && !name.eq_ignore_ascii_case("Content-Length"));
-        request.headers.push(("Content-Length".into(), body.len().to_string()));
-        request.write_to(&mut to_runtime)?;
-        to_runtime.write_all(&body)?;
         let response = loop {
             let response = Head::read(&mut from_runtime)?.ok_or(io::ErrorKind::UnexpectedEof)?;
             response.write_to(&mut client)?;
@@ -62,31 +64,12 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
                 break response;
             }
         };
-        let mut framing = response.response_body("POST")?;
+        let mut framing = response.response_body(request.method())?;
         http::relay_body(&mut from_runtime, &mut client, &mut framing)?;
         if !(request.keeps_alive() && response.keeps_alive()) || framing == http::Framing::UntilClose {
             return Ok(());
         }
     }
-    Ok(())
-}
-
-/// Copy both ways until either side closes, starting with what is already read.
-fn pass_through(mut reader: BufReader<TcpStream>, mut client: TcpStream, mut from_runtime: BufReader<TcpStream>, mut to_runtime: TcpStream) -> io::Result<()> {
-    let up = std::thread::spawn(move || {
-        let _ = io::copy(&mut reader, &mut to_runtime);
-        let _ = to_runtime.shutdown(std::net::Shutdown::Write);
-    });
-    let mut buffer = [0; 16 * 1024];
-    loop {
-        let n = from_runtime.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        client.write_all(&buffer[..n])?;
-    }
-    let _ = client.shutdown(std::net::Shutdown::Both);
-    let _ = up.join();
     Ok(())
 }
 
@@ -146,5 +129,27 @@ mod tests {
         assert_eq!(post(&mut client, "/mcp", "8", run), format!("200 POST /mcp HTTP/1.1 {run}"), "another session's");
         assert_eq!(post(&mut client, "/message?sessionId=s", "7", run), "403 No runs.", "the older SSE transport");
         assert_eq!(post(&mut client, "/call", "", run), format!("200 POST /call HTTP/1.1 {run}"), "the app's own calls pass");
+    }
+
+    #[test]
+    fn a_call_after_another_request_on_the_connection_is_still_checked() {
+        let (mut client, seen) = guarded();
+        write!(client, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Endeavor-Session: 7\r\n\r\n").unwrap();
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let head = Head::read(&mut reader).unwrap().unwrap();
+        let body = http::read_body(&mut reader, head.response_body("GET").unwrap()).unwrap();
+        assert_eq!(String::from_utf8(body).unwrap(), "GET /mcp HTTP/1.1 ", "the GET reached the runtime");
+        assert_eq!(seen.try_recv().unwrap(), "GET /mcp HTTP/1.1 ");
+        let run = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"execute_cell","arguments":{}}}"#;
+        assert_eq!(
+            post(&mut client, "/mcp", "7", run),
+            r#"200 {"id":3,"jsonrpc":"2.0","result":{"content":[{"text":"{\"error\":\"older_runtime\",\"message\":\"No runs.\"}","type":"text"}],"isError":true}}"#
+        );
+        assert!(seen.try_recv().is_err(), "the runtime never saw the run");
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/answer_run"}"#;
+        assert_eq!(post(&mut client, "/call", "", body), format!("200 POST /call HTTP/1.1 {body}"), "a request with a body passes whole");
+        assert_eq!(post(&mut client, "/mcp", "7", run).split(' ').next(), Some("200"));
+        assert!(seen.recv().unwrap().starts_with("POST /call"));
+        assert!(seen.try_recv().is_err(), "nor the second");
     }
 }
