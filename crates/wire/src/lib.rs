@@ -24,6 +24,7 @@ pub mod files;
 pub mod notebooks;
 pub mod relay;
 pub mod slurm;
+pub mod tree;
 
 use std::io::{self, ErrorKind, Read, Write};
 
