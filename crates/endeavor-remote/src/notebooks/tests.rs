@@ -2,6 +2,8 @@
 //! keeps notebooks in memory, analyses `name = expression` cells, and runs a
 //! cell by stamping it with the test's clock.
 
+use std::path::MAIN_SEPARATOR as SEP;
+
 use super::tools::tool_json;
 use super::*;
 
@@ -137,7 +139,7 @@ impl Engine {
         match method {
             "status" => return Ok(json!({ "pluto": "running" })),
             "open" | "new" => {
-                let path = params["path"].as_str().map_or_else(|| format!("{}/made.jl", params["folder"].as_str().unwrap_or("/n")), str::to_owned);
+                let path = params["path"].as_str().map_or_else(|| format!("{}{SEP}made.jl", params["folder"].as_str().unwrap_or("/n")), str::to_owned);
                 let mut made = self.made.lock().unwrap();
                 *made += 1;
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
@@ -977,32 +979,31 @@ fn a_run_receipt_has_the_text_form_of_rich_outputs() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn opening_and_making_notebooks() {
     let s = setup();
-    let dir = temp_notebooks("open", 1)[0].rsplit_once('/').unwrap().0.to_owned();
-    let path = format!("{dir}/nb0.jl");
+    let dir = temp_notebooks("open", 1)[0].rsplit_once(SEP).unwrap().0.to_owned();
+    let path = format!("{dir}{SEP}nb0.jl");
     let opened = s.call("", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap();
     assert_eq!(opened["warnings"], json!(["async_execution::open queued non-blocking notebook run; poll read_cell for completion"]));
     assert_eq!((&opened["execution_allowed"], &opened["ran"], &opened["process_status"]), (&json!(true), &json!(true), &json!("starting")));
     let previewed = s.call("", "open_notebook", json!({ "path": path })).unwrap();
     assert_eq!((&previewed["execution_allowed"], previewed.get("warnings")), (&json!(false), None));
-    assert_eq!(s.call("", "open_notebook", json!({ "path": format!("{dir}/none.jl") })), Err(format!("ArgumentError: file_not_found::No file at '{dir}/none.jl'")));
+    assert_eq!(s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}none.jl") })), Err(format!("ArgumentError: file_not_found::No file at '{dir}{SEP}none.jl'")));
     assert_eq!(s.call("", "open_notebook", json!({})), Err("ArgumentError: invalid_path::path is required".into()));
     assert_eq!(s.call("", "open_notebook", json!({ "path": path, "run_notebook": "yes" })), Err("TypeError: non-boolean (String) used in boolean context".into()));
 
-    let made = s.call("", "new_notebook", json!({ "path": format!("{dir}/./fresh.jl") })).unwrap();
-    assert_eq!((&made["path"], &made["created"], &made["ran"]), (&json!(format!("{dir}/fresh.jl")), &json!(true), &json!(true)));
+    let made = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}.{SEP}fresh.jl") })).unwrap();
+    assert_eq!((&made["path"], &made["created"], &made["ran"]), (&json!(format!("{dir}{SEP}fresh.jl")), &json!(true), &json!(true)));
     // Its empty first cell can be edited straight away, without a read first.
     s.edit("", made["notebook_id"].as_str().unwrap(), made["cell_ids"][0].as_str().unwrap(), "x = 1");
     assert_eq!(s.call("", "new_notebook", json!({ "path": path })), Err(format!("ArgumentError: file_exists::'{path}' already exists; use open_notebook to load it")));
-    assert_eq!(s.refused("", "new_notebook", json!({ "path": format!("{dir}/x.txt") })), "invalid_path");
-    assert_eq!(s.call("", "new_notebook", json!({ "path": format!("{dir}/missing/y.jl") })), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}/missing'")));
+    assert_eq!(s.refused("", "new_notebook", json!({ "path": format!("{dir}{SEP}x.txt") })), "invalid_path");
+    assert_eq!(s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}missing{SEP}y.jl") })), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}{SEP}missing'")));
     // A session's folder takes its unnamed notebooks, and relative paths.
     let named = s.notebooks.tool("s", "new_notebook", &json!({ "path": "named.jl" }), Some(&dir)).map(tool_json).unwrap();
-    assert_eq!(named["path"], format!("{dir}/named.jl"));
+    assert_eq!(named["path"], format!("{dir}{SEP}named.jl"));
     let unnamed = s.notebooks.tool("t", "new_notebook", &json!({}), Some(&dir)).map(tool_json).unwrap();
-    assert_eq!(unnamed["path"], format!("{dir}/made.jl"));
+    assert_eq!(unnamed["path"], format!("{dir}{SEP}made.jl"));
 }
 
 #[test]
@@ -1085,7 +1086,7 @@ fn temp_notebooks(name: &str, count: usize) -> Vec<String> {
     let dir = std::env::temp_dir().join(format!("endeavor-notebooks-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = real_path(&dir);
     (0..count)
         .map(|i| {
             let path = dir.join(format!("nb{i}.jl"));
@@ -1095,12 +1096,19 @@ fn temp_notebooks(name: &str, count: usize) -> Vec<String> {
         .collect()
 }
 
+/// `path` resolved as `canonical_path` resolves it.
+fn real_path(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    return dunce::canonicalize(path).unwrap();
+    #[cfg(unix)]
+    return path.canonicalize().unwrap();
+}
+
 fn id(i: usize) -> String {
     format!("aaaaaaaa-0000-0000-0000-00000000000{i}")
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn one_notebook_per_session() {
     let s = setup();
     let paths = temp_notebooks("one", 4);
@@ -1123,10 +1131,13 @@ fn one_notebook_per_session() {
     assert!(s.call("a", "new_notebook", json!({ "path": "/elsewhere/other.jl" })).unwrap_err().contains("so it can't create /elsewhere/other.jl."));
     assert!(s.call("a", "open_notebook", json!({})).unwrap_err().contains("so it can't create another notebook."), "as Julia said it");
     // Its own notebook isn't refused, however it's written.
-    let roundabout = format!("{first_nb}/../{}", first_nb.rsplit('/').next().unwrap());
+    let roundabout = format!("{first_nb}{SEP}..{SEP}{}", first_nb.rsplit(SEP).next().unwrap());
     assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": roundabout })), None);
-    let relative = pathdiff(first_nb, &std::env::current_dir().unwrap().canonicalize().unwrap().display().to_string());
-    assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": relative })), None);
+    if let Some(relative) = pathdiff(first_nb, &real_path(&std::env::current_dir().unwrap()).display().to_string()) {
+        assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": relative })), None);
+    }
+    // Julia's expanduser leaves paths alone on Windows.
+    #[cfg(unix)]
     assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": "~bob/x.jl" })), Some("ArgumentError: ~user tilde expansion not yet implemented".into()));
 
     // Calls without an owner (the app, tests) are unrestricted.
@@ -1164,7 +1175,6 @@ fn one_notebook_per_session() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn list_notebooks_says_which_notebook_is_this_sessions() {
     let s = setup();
     let paths = temp_notebooks("mine", 2);
@@ -1180,11 +1190,10 @@ fn list_notebooks_says_which_notebook_is_this_sessions() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn the_apps_notebook_actions_restart_move_file_info_and_new_notebook() {
     let s = setup();
     let paths = temp_notebooks("actions", 2);
-    let dir = paths[0].rsplit_once('/').unwrap().0.to_owned();
+    let dir = paths[0].rsplit_once(SEP).unwrap().0.to_owned();
     s.engine.open(&id(1), &paths[0], &[(X, "x = 1"), (Y, "y = x")]);
     s.engine.open(&id(2), &paths[1], &[]);
     s.engine.with(&id(2), |nb| nb.safe_preview = true);
@@ -1202,14 +1211,14 @@ fn the_apps_notebook_actions_restart_move_file_info_and_new_notebook() {
     // A move takes the sessions bound to the notebook, and an idle-stopped entry for it, along.
     s.notebooks.bind("a", &paths[0]);
     s.notebooks.state.lock().unwrap().idle_stopped.push((paths[0].clone(), json!({ "path": &paths[0], "hours": 1, "safe_preview": false })));
-    let renamed = format!("{dir}/renamed.jl");
+    let renamed = format!("{dir}{SEP}renamed.jl");
     assert_eq!(s.notebooks.move_notebook(&id(1), &renamed), Ok(json!({ "path": renamed })));
     assert_eq!(s.notebooks.bound("a"), Some(renamed.clone()));
     assert_eq!(s.notebooks.idle_stopped(), [json!({ "path": renamed, "hours": 1, "safe_preview": false })]);
     assert_eq!(s.notebooks.refusal("a", "edit_cell", &json!({ "notebook_id": id(1) })), None, "still its own notebook");
     assert_eq!(s.notebooks.move_notebook(&id(1), &paths[1]), Err(format!("ArgumentError: file_exists::'{}' already exists", paths[1])));
-    assert_eq!(s.notebooks.move_notebook(&id(1), &format!("{dir}/notes.txt")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{dir}/notes.txt'")));
-    assert_eq!(s.notebooks.move_notebook(&id(1), &format!("{dir}/gone/x.jl")), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}/gone'")));
+    assert_eq!(s.notebooks.move_notebook(&id(1), &format!("{dir}{SEP}notes.txt")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{dir}{SEP}notes.txt'")));
+    assert_eq!(s.notebooks.move_notebook(&id(1), &format!("{dir}{SEP}gone{SEP}x.jl")), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}{SEP}gone'")));
 
     // Whether a file is there, and when it last changed, as Julia's mtime says.
     #[cfg(unix)]
@@ -1225,27 +1234,29 @@ fn the_apps_notebook_actions_restart_move_file_info_and_new_notebook() {
     // The app's New notebook for a session: in its folder, and the session's notebook from now on.
     s.notebooks.bind("b", &renamed);
     let made = s.notebooks.new_for("b", Some(&dir)).unwrap();
-    assert_eq!(made["path"], format!("{dir}/made.jl"));
-    assert_eq!(s.notebooks.bound("b"), Some(format!("{dir}/made.jl")));
+    assert_eq!(made["path"], format!("{dir}{SEP}made.jl"));
+    assert_eq!(s.notebooks.bound("b"), Some(format!("{dir}{SEP}made.jl")));
 }
 
-/// `path` relative to `from`, through `..`s.
-fn pathdiff(path: &str, from: &str) -> String {
-    let (path, from): (Vec<_>, Vec<_>) = (path.split('/').filter(|p| !p.is_empty()).collect(), from.split('/').filter(|p| !p.is_empty()).collect());
+/// `path` relative to `from`, through `..`s; none on Windows across drives.
+fn pathdiff(path: &str, from: &str) -> Option<String> {
+    let (path, from): (Vec<_>, Vec<_>) = (path.split(SEP).filter(|p| !p.is_empty()).collect(), from.split(SEP).filter(|p| !p.is_empty()).collect());
     let common = path.iter().zip(&from).take_while(|(a, b)| a == b).count();
+    if cfg!(windows) && common == 0 {
+        return None;
+    }
     let mut parts = vec![".."; from.len() - common];
     parts.extend(&path[common..]);
-    parts.join("/")
+    Some(parts.join(&SEP.to_string()))
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn stop_notebook_shuts_it_down_and_says_if_it_was_in_safe_preview() {
     let s = setup();
     let paths = temp_notebooks("stop", 2);
     s.engine.open(&id(1), &paths[0], &[]);
     s.engine.with(&id(1), |nb| nb.safe_preview = true);
-    s.engine.open(&id(2), &format!("{}/../{}", paths[1].rsplit_once('/').unwrap().0, "nb1.jl"), &[]);
+    s.engine.open(&id(2), &format!("{}{SEP}..{SEP}{}", paths[1].rsplit_once(SEP).unwrap().0, "nb1.jl"), &[]);
     assert_eq!(s.notebooks.stop_notebook(&paths[0]), Ok(json!({ "stopped": true, "safe_preview": true })));
     assert_eq!(s.notebooks.stop_notebook(&paths[0]), Ok(json!({ "stopped": false })));
     assert_eq!(s.notebooks.stop_notebook(&paths[1]), Ok(json!({ "stopped": false })), "a path that only looks like it");
@@ -1255,7 +1266,6 @@ fn stop_notebook_shuts_it_down_and_says_if_it_was_in_safe_preview() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn idle_notebooks_stop_but_running_kept_alive_and_recently_used_ones_dont() {
     let s = setup();
     let paths = temp_notebooks("idle", 4);
@@ -1324,7 +1334,6 @@ fn idle_notebooks_stop_but_running_kept_alive_and_recently_used_ones_dont() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn a_notebooks_state_goes_when_it_shuts_down_however_it_shuts_down() {
     let s = setup();
     let paths = temp_notebooks("gone", 3);
@@ -1385,21 +1394,30 @@ fn keep_notebook_alive_checks_its_arguments_as_julia_did() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "notebook paths aren't ported to Windows yet (docs/windows.md)")]
 fn parses_ids_and_paths_as_julia_did() {
     assert_eq!(parse_uuid("AAAAAAAA-1111-1111-1111-111111111111").as_deref(), Some("aaaaaaaa-1111-1111-1111-111111111111"));
     for bad in ["11111111111111111111111111111111", "{11111111-1111-1111-1111-111111111111}", " 11111111-1111-1111-1111-111111111111", "x", ""] {
         assert_eq!(parse_uuid(bad), None, "{bad}");
     }
     assert_eq!(uuid_of(123), "00000000-0000-0000-0000-00000000007b");
-    let dir = temp_notebooks("paths", 1)[0].rsplit_once('/').unwrap().0.to_owned();
-    assert_eq!(canonical_path(&format!("{dir}/./nb0.jl")).unwrap(), format!("{dir}/nb0.jl"));
-    assert_eq!(canonical_path(&format!("{dir}/new.jl")).unwrap(), format!("{dir}/new.jl"), "a file yet to be made");
-    assert_eq!(canonical_path("/no/such/dir/../x.jl").unwrap(), "/no/such/x.jl");
-    assert_eq!(canonical_path("~").unwrap(), std::fs::canonicalize(home()).unwrap().display().to_string());
-    // /tmp is a symlink on macOS: paths resolve through it.
-    if let Ok(real) = std::fs::canonicalize("/tmp") {
-        assert_eq!(canonical_path("/tmp/endeavor-no-such.jl").unwrap(), format!("{}/endeavor-no-such.jl", real.display()));
+    let dir = temp_notebooks("paths", 1)[0].rsplit_once(SEP).unwrap().0.to_owned();
+    assert_eq!(canonical_path(&format!("{dir}{SEP}.{SEP}nb0.jl")).unwrap(), format!("{dir}{SEP}nb0.jl"));
+    assert_eq!(canonical_path(&format!("{dir}{SEP}new.jl")).unwrap(), format!("{dir}{SEP}new.jl"), "a file yet to be made");
+    assert_eq!(canonical_path(&format!("{dir}/./nb0.jl")).unwrap(), format!("{dir}{SEP}nb0.jl"), "either slash on Windows");
+    #[cfg(unix)]
+    {
+        assert_eq!(canonical_path("/no/such/dir/../x.jl").unwrap(), "/no/such/x.jl");
+        assert_eq!(canonical_path("~").unwrap(), std::fs::canonicalize(home()).unwrap().display().to_string());
+        // /tmp is a symlink on macOS: paths resolve through it.
+        if let Ok(real) = std::fs::canonicalize("/tmp") {
+            assert_eq!(canonical_path("/tmp/endeavor-no-such.jl").unwrap(), format!("{}/endeavor-no-such.jl", real.display()));
+        }
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(canonical_path(r"Q:\no\such\dir\..\x.jl").unwrap(), r"Q:\no\such\x.jl");
+        assert_eq!(canonical_path("Q:/no/such/x.jl").unwrap(), r"Q:\no\such\x.jl");
+        assert!(is_absolute(r"C:\x") && is_absolute("C:/x") && is_absolute(r"\x") && !is_absolute(r"x\y") && !is_absolute("C:x"));
     }
 }
 

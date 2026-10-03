@@ -871,7 +871,7 @@ impl Call<'_> {
             Some(Value::String(requested)) => {
                 let expanded = super::expand_user(requested)?;
                 let path = match folder {
-                    Some(folder) if !expanded.starts_with('/') => absolute_path(&format!("{folder}/{expanded}"))?,
+                    Some(folder) if !super::is_absolute(&expanded) => absolute_path(&format!("{folder}/{expanded}"))?,
                     _ => absolute_path(&expanded)?,
                 };
                 if !path.ends_with(".jl") {
@@ -880,9 +880,8 @@ impl Call<'_> {
                 if std::path::Path::new(&path).exists() {
                     return Err(argument_error(&format!("file_exists::'{path}' already exists; use open_notebook to load it")));
                 }
-                let dir = &path[..path.rfind('/').unwrap_or(0)];
-                let dir = if dir.is_empty() { "/" } else { dir };
-                if !std::path::Path::new(dir).is_dir() {
+                let dir = super::parent_dir(&path);
+                if !std::path::Path::new(&dir).is_dir() {
                     return Err(argument_error(&format!("invalid_path::Directory does not exist: '{dir}'")));
                 }
                 json!({ "path": path })

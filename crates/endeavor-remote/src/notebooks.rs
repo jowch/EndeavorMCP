@@ -21,7 +21,9 @@ use std::time::Duration;
 use serde_json::{Map, Value, json};
 
 use crate::asks::Asks;
-use crate::host_tools::{home, normpath};
+use crate::host_tools::home;
+#[cfg(unix)]
+use crate::host_tools::normpath;
 use crate::http::{self, Head};
 use crate::mcp::{WRITE_TOOLS, julia_string, to_json};
 
@@ -870,11 +872,8 @@ impl Notebooks {
         if std::path::Path::new(&target).exists() {
             return Err(format!("ArgumentError: file_exists::'{target}' already exists"));
         }
-        let dir = match &target[..target.rfind('/').unwrap_or(0)] {
-            "" => "/",
-            dir => dir,
-        };
-        if !std::path::Path::new(dir).is_dir() {
+        let dir = parent_dir(&target);
+        if !std::path::Path::new(&dir).is_dir() {
             return Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}'"));
         }
         let old = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
@@ -959,6 +958,7 @@ fn uuid_of(value: u128) -> String {
 
 /// A notebook path as Julia's runtime compared them: absolute, `~` expanded,
 /// and resolved through symlinks as far as it exists.
+#[cfg(unix)]
 pub fn canonical_path(path: &str) -> Result<String, String> {
     let absolute = absolute_path(path)?;
     let real = |p: &str| std::fs::canonicalize(p).ok().map(|p| p.display().to_string());
@@ -974,8 +974,26 @@ pub fn canonical_path(path: &str) -> Result<String, String> {
     }
 }
 
-/// Julia's `expanduser`.
+/// The same on Windows, where `fs::canonicalize` gives `\\?\C:\…` and
+/// Julia's `realpath` gives `C:\…`.
+#[cfg(windows)]
+pub fn canonical_path(path: &str) -> Result<String, String> {
+    let absolute = std::path::PathBuf::from(absolute_path(path)?);
+    if let Ok(real) = dunce::canonicalize(&absolute) {
+        return Ok(real.display().to_string());
+    }
+    let real_dir = absolute.parent().filter(|dir| dir.is_dir()).and_then(|dir| dunce::canonicalize(dir).ok());
+    match (real_dir, absolute.file_name()) {
+        (Some(dir), Some(base)) => Ok(dir.join(base).display().to_string()),
+        _ => Ok(absolute.display().to_string()),
+    }
+}
+
+/// Julia's `expanduser`, which leaves paths alone on Windows.
 fn expand_user(path: &str) -> Result<String, String> {
+    if cfg!(windows) {
+        return Ok(path.to_owned());
+    }
     match path.strip_prefix('~') {
         None => Ok(path.to_owned()),
         Some("") => Ok(home()),
@@ -985,6 +1003,7 @@ fn expand_user(path: &str) -> Result<String, String> {
 }
 
 /// Julia's `abspath(expanduser(path))`.
+#[cfg(unix)]
 fn absolute_path(path: &str) -> Result<String, String> {
     let expanded = expand_user(path)?;
     if expanded.starts_with('/') {
@@ -992,6 +1011,32 @@ fn absolute_path(path: &str) -> Result<String, String> {
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     Ok(normpath(&format!("{}/{expanded}", cwd.display())))
+}
+
+#[cfg(windows)]
+fn absolute_path(path: &str) -> Result<String, String> {
+    std::path::absolute(expand_user(path)?).map(|p| p.display().to_string()).map_err(|e| e.to_string())
+}
+
+/// Julia's `isabspath`: on Windows, `\x`, `C:\x` and `C:/x`.
+fn is_absolute(path: &str) -> bool {
+    if cfg!(windows) {
+        let drive = path.find(':').filter(|&colon| colon > 0 && path[..colon].bytes().all(|b| b.is_ascii_alphabetic())).map_or(0, |colon| colon + 1);
+        return path[drive..].starts_with(['/', '\\']);
+    }
+    path.starts_with('/')
+}
+
+/// The folder an absolute, normalized path is in.
+fn parent_dir(path: &str) -> String {
+    #[cfg(windows)]
+    if let Some(dir) = std::path::Path::new(path).parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        return dir.display().to_string();
+    }
+    match &path[..path.rfind('/').unwrap_or(0)] {
+        "" => "/".into(),
+        dir => dir.into(),
+    }
 }
 
 #[cfg(test)]
