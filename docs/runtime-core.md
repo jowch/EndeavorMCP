@@ -9,8 +9,8 @@ Ember's repository (https://github.com/jowch/Ember); marimo in
 
 ## Summary
 
-The core is a long-lived Rust process per host (`endeavor-remote core`),
-started by the `endeavor-remote` helper. It owns the runtime's one port
+The core is a long-lived Rust process per host (`endeavor core`),
+started by the `endeavor` helper. It owns the runtime's one port
 ([one-port.md](one-port.md)) and all tool semantics. Each notebook kind is an **engine** that owns its own dependency
 graph, file and UI, driven by the core through a small **adapter** written in
 the engine's language and running in the engine's process:
@@ -40,13 +40,13 @@ real Pluto adapter (`crates/endeavor-mcp/tests/e2e_julia.rs`).
 ## Processes
 
 ```
-app ── ssh/stdio frames ── endeavor-remote ── core (Rust, the runtime's one port)
+app ── ssh/stdio frames ── endeavor ── core (Rust, the runtime's one port)
                                                ├─ julia: Pluto + adapter (private UI and bridge ports) ── Pluto workers
                                                ├─ python: marimo + adapter (private ports)
                                                └─ R: Ember + adapter (private ports) ── R workers
 ```
 
-- The core may be a subcommand of the helper (`endeavor-remote core`), so
+- The core may be a subcommand of the helper (`endeavor core`), so
   there is still one binary to ship and pin per host.
 - Adapters are to start lazily, when a notebook of their kind is opened, as
   [marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md) proposes. A user who only uses R never

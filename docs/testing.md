@@ -17,7 +17,7 @@ browser does, and sends the helper's file requests. Plain
 `cargo test` skips it. To run it:
 
 ```sh
-cargo test -p endeavor-remote --test e2e_julia -- --ignored --nocapture
+cargo test -p endeavor-mcp --test e2e_julia -- --ignored --nocapture
 ```
 
 It takes about 40 s and prints how long each step took. Julia starts once, and
@@ -61,13 +61,13 @@ folder.
 
 ## `serve` and `mcp` against real Julia
 
-`crates/endeavor-mcp/tests/e2e_serve.rs` runs `endeavor-remote serve` and
+`crates/endeavor-mcp/tests/e2e_serve.rs` runs `endeavor serve` and
 `mcp` as a user without the app runs them. It finds Julia the same way as
 `e2e_julia`, and keeps its state and project folders under `target/tmp/e2e-serve`.
 To run it:
 
 ```sh
-cargo test -p endeavor-remote --test e2e_serve -- --ignored --nocapture
+cargo test -p endeavor-mcp --test e2e_serve -- --ignored --nocapture
 ```
 
 It takes about a minute and starts Julia twice:

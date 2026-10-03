@@ -1,7 +1,7 @@
 # One port per runtime
 
 Steps 1–5 built and checked (2026-10-03). Step 5, the standalone command, is
-`endeavor-remote serve` (user guide: [README.md](../README.md)). Each runtime exposes one port to clients
+`endeavor serve` (user guide: [README.md](../README.md)). Each runtime exposes one port to clients
 instead of two. The runtime core answers it, passes Pluto's page through
 at `/`, and serves Endeavor's own endpoints under a reserved prefix. The
 app's relay, listener and state then carry one route instead of two. A
@@ -19,14 +19,14 @@ and asks for a restart of Julia.
   `mcp_port` (the bridge: MCP, `/events`, `/call`, `endeavor/*`). Both are
   in `runtime.json`.
 - `crates/wire`'s `Target::{Pluto, Bridge}` picks one of the two for every
-  relayed connection (`wire/src/relay.rs`, `endeavor-remote/src/lib.rs`
+  relayed connection (`wire/src/relay.rs`, `endeavor-mcp/src/lib.rs`
   `Route::Local([pluto_port, mcp_port])`, `slurm.rs`).
 - The app's host listener has two loopback ports per host
   (`src/runtime.rs`). The web view loads `pluto_url` with Pluto's
   `?secret=`; the agent and the app use the bridge with the bearer token.
 - The app adds Endeavor's page script (Point, cards, status) to the web view
   itself (`with_initialization_script` in `src/main.rs`).
-- The core's HTTP code (`endeavor-remote/src/http.rs`) relays one request
+- The core's HTTP code (`endeavor-mcp/src/http.rs`) relays one request
   at a time. It has no WebSocket pass-through.
 - [runtime-core.md](runtime-core.md) plans one more UI port per engine
   (`Target::NotebookUi(backend)`) for marimo and Ember.
@@ -76,8 +76,8 @@ Version 1 serves Pluto's page as is.
 - `runtime/boot.jl` and `EndeavorRuntime` `Lifecycle.jl`: Pluto on a private
   port the core picks; `runtime.json` records one public `port` (plus the
   private one for the core).
-- `endeavor-remote` core: route by path, WebSocket pass-through, the cookie,
-  Pluto's secret added on the way through.
+- The core (`crates/endeavor-mcp`): route by path, WebSocket pass-through,
+  the cookie, Pluto's secret added on the way through.
 - `crates/wire`: `Target` goes away (one route per connection); the frame
   format, relay and Slurm relay carry one port.
 - App: one loopback port per host in the listener; the web view's URL,
@@ -156,15 +156,15 @@ Planned as follows; what was built is under "As built" below.
 
 ### As built
 
-User guide: [README.md](../README.md). The binary is still
-`endeavor-remote`; it may be renamed.
+User guide: [README.md](../README.md). The binary is `endeavor`, in the
+package `endeavor-mcp`; it was `endeavor-remote` until the rename.
 
-- **Commands.** `endeavor-remote serve` starts the runtime in the foreground,
+- **Commands.** `endeavor serve` starts the runtime in the foreground,
   or uses the one running from its state folder, and prints the browser link,
   the MCP URL and header, configs for Claude Code, Codex, Gemini and generic
   JSON, and the `ssh -L` line (with `-J <SLURM_SUBMIT_HOST>` inside a Slurm
   job). Ctrl-C, SIGTERM or SIGHUP stops a runtime it started; one it reused
-  keeps running. `endeavor-remote mcp` is the stdio form. `endeavor-remote
+  keeps running. `endeavor mcp` is the stdio form. `endeavor
   stop` ends the runtime in the state folder. Code: `standalone.rs`.
 - **No `--detach`.** A detached runtime needs a way to find and stop it, and
   `mcp` and `stop` already give that. For a terminal you leave, `tmux` or a
@@ -221,13 +221,13 @@ User guide: [README.md](../README.md). The binary is still
   Pluto's start page (checked in `tests/e2e_serve.rs`); Pluto's
   **Run notebook code** runs it.
 - **Packaging.** `claude-plugin/` is the Claude Code plugin: a link to
-  `plugin/skills` and an `.mcp.json` running `endeavor-remote mcp --skills
+  `plugin/skills` and an `.mcp.json` running `endeavor mcp --skills
   plugin --folder ${CLAUDE_PROJECT_DIR}`. `.claude-plugin/marketplace.json`
   makes the repository its marketplace. The app still loads `plugin/` alone,
   so it doesn't start that server. `cargo install --git
-  https://github.com/jowch/Endeavor endeavor-remote` builds it (tried from a
+  https://github.com/jowch/EndeavorMCP endeavor-mcp` builds it (tried from a
   local clone of the branch).
-- **Planned: `endeavor-remote update`** (or `endeavor update`). Open: where it
+- **Planned: `endeavor update`**. Open: where it
   gets new versions (the Helpers release `scripts/helpers.sh` uses, or a
   tagged release); how it checks the download (checksum or signature);
   replacing its own binary while it runs; what happens to a runtime running
@@ -282,4 +282,4 @@ Still open:
 2. Wire and helper: one port, `Target` removed; relay and Slurm relay. Built.
 3. App: one listener port, page URL, bridge URL, guard. Built.
 4. Live check: done (This Mac, the OrbStack server, the Slurm VM).
-5. `endeavor-remote serve`, `mcp` and `stop`. Built and checked.
+5. `endeavor serve`, `mcp` and `stop`. Built and checked.

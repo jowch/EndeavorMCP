@@ -13,8 +13,9 @@ depends on these crates and installs the same binary on servers.
 Logging in, ssh, tunnels and Slurm allocations stay with you or your agent.
 Endeavor doesn't do them for you here.
 
-The command is `endeavor-remote`, the same binary Endeavor installs on
-servers. It may be renamed later.
+The command is `endeavor`, the same binary Endeavor installs on servers.
+It used to be called `endeavor-remote`; if you installed that, delete it
+once `endeavor` is on your `PATH`.
 
 ## Install it
 
@@ -25,7 +26,7 @@ shell's `PATH`, Endeavor downloads its own pinned Julia (1.12.6) into
 To build from source, install Rust 1.89 or newer, then run:
 
 ```
-cargo install --git https://github.com/jowch/EndeavorMCP endeavor-remote
+cargo install --git https://github.com/jowch/EndeavorMCP endeavor-mcp
 ```
 
 The binary carries Endeavor's Julia code (`runtime/`) and the skills, so it is
@@ -35,28 +36,28 @@ all you install. On first use it unpacks the Julia code into
 For Linux (x86_64 and aarch64) there are prebuilt binaries on the
 [Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers),
 built by the Helpers workflow for each change to the helper's source. Each
-file is named `endeavor-remote-<key>-<platform>`, and `endeavor-remote-<key>.sha256`
+file is named `endeavor-<key>-<platform>`, and `endeavor-<key>.sha256`
 holds the checksums for that key. Take the newest key and check the download:
 
 ```
 key=<newest key on the release page>
 base=https://github.com/jowch/EndeavorMCP/releases/download/helpers
-curl -fLO $base/endeavor-remote-$key-linux-x86_64
-curl -fLO $base/endeavor-remote-$key.sha256
-sha256sum -c --ignore-missing endeavor-remote-$key.sha256
-chmod +x endeavor-remote-$key-linux-x86_64
-mv endeavor-remote-$key-linux-x86_64 ~/.local/bin/endeavor-remote
+curl -fLO $base/endeavor-$key-linux-x86_64
+curl -fLO $base/endeavor-$key.sha256
+sha256sum -c --ignore-missing endeavor-$key.sha256
+chmod +x endeavor-$key-linux-x86_64
+mv endeavor-$key-linux-x86_64 ~/.local/bin/endeavor
 ```
 
 Binaries from before `serve` was added don't have it. Run
-`endeavor-remote serve --help` to check.
+`endeavor serve --help` to check.
 
 ## Start it
 
 In the folder where you want your notebooks, run:
 
 ```
-endeavor-remote serve
+endeavor serve
 ```
 
 The first start installs Pluto into Endeavor's package folder, which takes a
@@ -91,7 +92,7 @@ ends.
 
 If Julia is already running from the same state folder, `serve` uses it
 instead of starting another, prints the same details, and leaves it running
-when you press Ctrl-C. Stop that runtime with `endeavor-remote stop`.
+when you press Ctrl-C. Stop that runtime with `endeavor stop`.
 
 ### Options
 
@@ -147,12 +148,12 @@ folder. The port stays the same only if you fix it with `--port`.
 ### On the same machine: the stdio form
 
 When the agent runs on the same machine as Julia, it can start Endeavor
-itself with `endeavor-remote mcp`, which speaks MCP over stdin and stdout.
+itself with `endeavor mcp`, which speaks MCP over stdin and stdout.
 `mcp` starts Julia in the background, or uses the one already running from
 the state folder, and relays the agent's messages to it. Julia keeps running
 after the agent exits, so the next session finds the notebook still open. It
 stops itself once no notebook has been open for the `--idle-stop` time, and
-`endeavor-remote stop` stops it at once.
+`endeavor stop` stops it at once.
 
 `mcp` takes the options above except `--host-tools`, plus `--skills plugin`
 for an agent that loads Endeavor's skills from a plugin. Each agent session
@@ -165,8 +166,8 @@ minutes.
 
 **Claude Code plugin.** This repository is a plugin marketplace. Its
 `endeavor` plugin (`claude-plugin/`) carries the skills and runs
-`endeavor-remote mcp --skills plugin --folder ${CLAUDE_PROJECT_DIR}`. Put
-`endeavor-remote` on your `PATH`, then:
+`endeavor mcp --skills plugin --folder ${CLAUDE_PROJECT_DIR}`. Put
+`endeavor` on your `PATH`, then:
 
 ```
 claude plugin marketplace add jowch/EndeavorMCP
@@ -177,14 +178,14 @@ claude plugin install endeavor@endeavor
 
 ```toml
 [mcp_servers.endeavor]
-command = "endeavor-remote"
+command = "endeavor"
 args = ["mcp"]
 ```
 
 **Gemini CLI**, in `~/.gemini/settings.json`:
 
 ```json
-{ "mcpServers": { "endeavor": { "command": "endeavor-remote", "args": ["mcp"] } } }
+{ "mcpServers": { "endeavor": { "command": "endeavor", "args": ["mcp"] } } }
 ```
 
 `mcp` puts new notebooks in the folder it starts in. If your agent starts MCP
@@ -231,13 +232,13 @@ Interactively:
 
 ```
 salloc -c 8 --mem 32G -t 8:00:00
-srun --pty endeavor-remote serve --port 41873 --julia-shell 'module load julia/1.12'
+srun --pty endeavor serve --port 41873 --julia-shell 'module load julia/1.12'
 ```
 
 As a batch job, with the details in the job's output file:
 
 ```
-sbatch -c 8 --mem 32G -t 8:00:00 -o serve-%j.out --wrap "endeavor-remote serve --port 41873"
+sbatch -c 8 --mem 32G -t 8:00:00 -o serve-%j.out --wrap "endeavor serve --port 41873"
 ```
 
 Inside a job, `serve` prints a tunnel line that jumps through the login node
@@ -295,12 +296,12 @@ recent notebook starts it and runs it.
   The stdio form gives each agent session one notebook, as the app does.
 - The idle stop is a flag, not a setting, and applies to the whole runtime.
 - On Windows, `serve` is untried. Ctrl-C ends `serve` but leaves Julia
-  running; use `endeavor-remote stop`.
+  running; use `endeavor stop`.
 
 ## Planned: an update command
 
-A command to update the binary, `endeavor-remote update` (or `endeavor update`
-after a rename), is planned and not built. Open questions:
+A command to update the binary, `endeavor update`, is planned and not
+built. Open questions:
 
 - Where it gets new versions: the Helpers release assets that
   `scripts/helpers.sh` downloads, or a tagged release.
@@ -314,9 +315,9 @@ after a rename), is planned and not built. Open questions:
 
 ## What's in this repository
 
-- `crates/endeavor-mcp`: the `endeavor-remote` binary. It is the runtime
-  core, the MCP server, `serve`, `mcp` and `stop`, and the helper Endeavor
-  runs on servers.
+- `crates/endeavor-mcp`: the `endeavor` binary (package `endeavor-mcp`). It
+  is the runtime core, the MCP server, `serve`, `mcp` and `stop`, and the
+  helper Endeavor runs on servers.
 - `crates/wire`: the protocol between Endeavor and the helper.
 - `runtime/`: the Julia side (`boot.jl` and the `EndeavorRuntime` package),
   built into the binary.
@@ -324,7 +325,7 @@ after a rename), is planned and not built. Open questions:
   plugin (unpacked from the crate, like `runtime/`), and the binary serves the
   same files through `notebook_guide`.
 - `claude-plugin/` and `.claude-plugin/marketplace.json`: the standalone
-  Claude Code plugin, which runs `endeavor-remote mcp` with the skills.
+  Claude Code plugin, which runs `endeavor mcp` with the skills.
 - `scripts/helpers.sh` and `scripts/build-helpers.sh`: get or build the Linux
   binaries. The Helpers workflow publishes them to the
   [Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers).
