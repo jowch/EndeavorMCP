@@ -11,6 +11,7 @@ on:
       - crates/endeavor-remote/**
       - crates/wire/**
       - plugin/skills/**
+      - runtime/**
       - Cargo.lock
       - Cargo.toml
       - rust-toolchain.toml

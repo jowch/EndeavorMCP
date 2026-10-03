@@ -21,13 +21,14 @@ if [ "${1:-}" = "--via" ]; then
   target=$arch-unknown-linux-musl
   version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
   toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
-  # Just the helper and its protocol crate, as a workspace of their own, and
-  # the skills its guide tool serves.
+  # Just the helper and its protocol crate, as a workspace of their own, the
+  # skills its guide tool serves, and runtime/, which it carries for `serve`.
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
   mkdir -p "$stage/src/crates" "$stage/src/plugin"
   cp -R crates/wire crates/endeavor-remote "$stage/src/crates/"
   cp -R plugin/skills "$stage/src/plugin/"
+  cp -R runtime "$stage/src/"
   rm -rf "$stage/src/crates/"*/target
   cp Cargo.lock "$stage/src/"
   printf '[workspace]\nmembers = ["crates/wire", "crates/endeavor-remote"]\nresolver = "3"\n\n[workspace.package]\nversion = "%s"\n' "$version" > "$stage/src/Cargo.toml"
@@ -37,7 +38,7 @@ if [ "${1:-}" = "--via" ]; then
     # Neither may read stdin: it carries the source.
     command -v cc >/dev/null || sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc </dev/null >/dev/null
     [ -x "$HOME/.cargo/bin/rustup" ] || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --default-toolchain none >/dev/null
-    d="$HOME/endeavor-helper-build"; rm -rf "$d/crates" "$d/plugin"; mkdir -p "$d"; tar -C "$d" -xf -'
+    d="$HOME/endeavor-helper-build"; rm -rf "$d/crates" "$d/plugin" "$d/runtime"; mkdir -p "$d"; tar -C "$d" -xf -'
   ssh "$host" "cd ~/endeavor-helper-build && ~/.cargo/bin/cargo build -q --release -p endeavor-remote --target $target" >&2
   mkdir -p "$out/linux-$arch"
   ssh "$host" "cat ~/endeavor-helper-build/target/$target/release/endeavor-remote" > "$out/linux-$arch/endeavor-remote"
