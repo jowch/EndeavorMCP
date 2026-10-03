@@ -2,10 +2,9 @@
 
 Design for moving the language-neutral half of the runtime from Julia into a
 Rust process, so Pluto, marimo and Ember (our R notebook engine) sit
-behind one boundary. Step 1 below is built; the rest is not yet. Endeavor's side of R support
-is in [r-notebooks.md](r-notebooks.md), Ember's own design in its
-repository (https://github.com/jowch/Ember); marimo in
-[marimo.md](marimo.md).
+behind one boundary. Step 1 below is built; the rest is not yet. R support, Endeavor's side
+included, is designed in Ember's repository (https://github.com/jowch/Ember);
+marimo in [marimo.md](marimo.md).
 
 _Drafted 2026-09-26_
 
@@ -26,7 +25,7 @@ language and running in the engine's process:
 | --- | --- | --- |
 | Pluto | Julia | `runtime/` (what is left of `EndeavorRuntime`) |
 | marimo | Python | `runtime-py/` ([marimo.md](marimo.md)) |
-| Ember ([r-notebooks.md](r-notebooks.md)) | R | `runtime-r/` |
+| Ember (https://github.com/jowch/Ember) | R | `runtime-r/` |
 
 Ember is a standalone R package in its own repository, usable without
 Endeavor. Endeavor treats it exactly like Pluto and marimo.
@@ -168,8 +167,7 @@ adapter: steps 1 and 2 of "The Python runtime" and `marimo_api.py` stay;
    the app). The existing Julia test suite is the reference: the same
    scenarios must pass through the core. Each step below ends in a working
    app.
-2. **Ember and its adapter** ([r-notebooks.md](r-notebooks.md) build
-   order).
+2. **Ember and its adapter** (the build order in Ember's repository).
 3. **marimo adapter** ([marimo.md](marimo.md) steps 2 onward, minus what the
    core now provides).
 
@@ -219,6 +217,19 @@ ending in an app that behaves as before:
      `run_preview`, and the app's `endeavor/restart_notebook`,
      `endeavor/move_notebook`, `endeavor/file_info` and
      `endeavor/new_notebook`.
+   - Since then, for agents other than Claude Code
+     ([other-agents.md](other-agents.md) items 2 and 3), the core also:
+     - keeps each session's last 64 tool results and answers
+       `endeavor/tool_result`, for agents whose own result says only
+       "success";
+     - holds a call that runs code while the session's policy is "ask" and
+       the app turned this on (`endeavor/set_policy` with `asks: true`). The
+       held call is listed under `asks` in `/events` until the app answers
+       with `endeavor/answer_run`, the agent cancels, or its connection
+       closes. This replaced Claude Code's `PreToolUse` hook;
+     - reports in `/events` the app build it was started by (`build`), so
+       the app can tell a runtime from an older build and hold back what
+       that runtime can't do.
 
 ## Open questions
 

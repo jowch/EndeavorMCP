@@ -36,8 +36,8 @@ package.
 ## Deployment: a plugin
 
 EndeavorMCP ships most likely as a Claude Code plugin: the MCP server entry,
-the skills (today's `plugin/skills/`) and hooks (see
-[Approval](#approval)).
+the skills (today's `plugin/skills/`), and nothing for approval: the core
+asks before runs itself (see [Approval](#approval)).
 
 - **The binary.** Plugins are git repositories, so a per-platform Rust
   binary needs a launcher that downloads the right prebuilt `endeavor-mcp` on
@@ -115,14 +115,12 @@ Standalone, the default is one session per connection.
 
 A small change, about 1–2 days.
 
-- **In the app**, nothing changes: its hook and run cards stay.
-- **Claude Code with the plugin**: the plugin ships the same `PreToolUse`
-  hook. The decision of which calls run code (`runs_code`, today in
-  `src/gate.rs`) moves into the core binary (`endeavor-mcp hook-pretool`), so
-  Claude Code asks before notebook code runs, in its own permission prompt.
-  The hook's message can carry the run preview ("this reruns 3 cells").
-- **Other clients** use their own per-tool approval, guided by the core's
-  read-only markers.
+- **In the app**, nothing changes. The core already decides which calls run
+  code (`runs_code` in `crates/endeavor-remote`) and holds them until the
+  app's run card is answered (`asks` in `/events`, `endeavor/answer_run`).
+- **Standalone**, nothing in the core asks the user: a client without the
+  app uses its own per-tool approval, guided by the core's read-only markers.
+  Claude Code asks in its own permission prompt for any tool not allowed.
 - **Plan / ask / auto** gets a default from config or an environment
   variable, not only the app-only call.
 
