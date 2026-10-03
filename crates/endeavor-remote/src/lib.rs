@@ -14,6 +14,7 @@
 
 mod askpass;
 mod core;
+mod guide;
 mod host_tools;
 mod http;
 mod julia;
@@ -22,6 +23,7 @@ mod notebooks;
 mod slurm;
 
 pub use core::serve_unreachable;
+pub use mcp::is_tool;
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};

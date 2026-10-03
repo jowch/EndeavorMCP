@@ -18,7 +18,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 out=target/helpers
-paths="crates/endeavor-remote crates/wire rust-toolchain.toml"
+paths="crates/endeavor-remote crates/wire plugin/skills rust-toolchain.toml"
 platforms="linux-x86_64 linux-aarch64"
 
 # The crates the helper is built from, as "name version" lines, read from a

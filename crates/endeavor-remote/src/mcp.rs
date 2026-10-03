@@ -6,7 +6,7 @@
 //! (optional in the spec; the adapter's MCP client doesn't send one back when
 //! none is issued). Each agent session's messages carry `X-Endeavor-Session`
 //! (its key) and, on a server, `X-Endeavor-Host`. The notebook tools are
-//! `notebooks`'; host tools are `host_tools`'.
+//! `notebooks`'; host tools are `host_tools`'; the guide to both is `guide`'s.
 //!
 //! Each session has a run policy the app sets ("plan" | "ask" | "auto"). In
 //! "plan" its notebook writes and runs are refused. "ask" and "auto" pass
@@ -19,6 +19,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json::{Value, json};
 
+use crate::guide;
 use crate::host_tools;
 use crate::http::{self, Head};
 use crate::notebooks::{self, Julia, Notebooks, Reply};
@@ -36,6 +37,11 @@ static NOTEBOOK_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(i
 /// `/call` methods Julia still answers: Pluto's folder for new notebooks, and
 /// ending the process.
 const JULIA_CALLS: [&str; 2] = ["endeavor/set_folder", "endeavor/shutdown"];
+
+/// Whether this server offers a tool by this name, to some session.
+pub fn is_tool(name: &str) -> bool {
+    name == guide::TOOL || host_tools::NAMES.contains(&name) || NOTEBOOK_TOOLS.as_array().is_some_and(|tools| tools.iter().any(|t| t["name"] == name))
+}
 
 /// Tools that change the notebook or run code, here or on the server.
 pub const WRITE_TOOLS: [&str; 12] = [
@@ -63,12 +69,15 @@ pub struct Bridge {
 pub struct Caller {
     pub owner: String,
     pub host: String,
+    /// The agent loads Endeavor's skills itself (Claude Code's plugin), so it
+    /// gets no guide.
+    pub has_skills: bool,
 }
 
 impl Caller {
     fn of(request: &Head) -> Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
-        Caller { owner: header("X-Endeavor-Session"), host: header("X-Endeavor-Host") }
+        Caller { owner: header("X-Endeavor-Session"), host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin" }
     }
 }
 
@@ -198,6 +207,12 @@ impl Bridge {
         if let Some(refusal) = self.refusal(caller, name) {
             return tool_error(&refusal);
         }
+        if name == guide::TOOL {
+            return match guide::read(&arguments) {
+                Ok(guide) => json!({ "content": [{ "type": "text", "text": guide }], "isError": false }),
+                Err(error) => tool_error(&error),
+            };
+        }
         if host_tools::NAMES.contains(&name) {
             let folder = self.folders.lock().unwrap().get(&caller.owner).cloned();
             let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
@@ -282,15 +297,22 @@ fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) 
             // Standard negotiation: the client's version if we speak it, else our latest.
             let requested = message["params"]["protocolVersion"].as_str();
             let version = requested.filter(|v| SUPPORTED_VERSIONS.contains(v)).unwrap_or(SUPPORTED_VERSIONS[0]);
-            ok(json!({
+            let mut result = json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") },
-            }))
+            });
+            if !caller.has_skills {
+                result["instructions"] = guide::INSTRUCTIONS.into();
+            }
+            ok(result)
         }
         "ping" => ok(json!({})),
         "tools/list" => {
             let mut tools = NOTEBOOK_TOOLS.as_array().cloned().unwrap_or_default();
+            if !caller.has_skills {
+                tools.insert(0, guide::schema());
+            }
             if !caller.host.is_empty() {
                 tools.extend(host_tools::schemas());
             }
@@ -423,6 +445,23 @@ mod tests {
     fn writes_json_as_julia_does() {
         let value = json!({ "b": 1, "A": [true, null, 2.5], "a": { "z": "x\u{7f}\u{1}/\"é", "_": {} }, "aa": [] });
         assert_eq!(to_json(&value), r#"{"A":[true,null,2.5],"a":{"_":{},"z":"x\u007f\u0001/\"é"},"aa":[],"b":1}"#);
+    }
+
+    #[test]
+    fn an_agent_without_the_plugin_is_told_to_read_the_guide() {
+        let ask = |method: &str, has_skills: bool| {
+            let caller = Caller { has_skills, ..Caller::default() };
+            let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} }), &caller, |_| json!(null)).unwrap();
+            serde_json::from_str::<Value>(&reply).unwrap()["result"].clone()
+        };
+        let names = |result: Value| result["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(ask("initialize", false)["instructions"], guide::INSTRUCTIONS);
+        assert_eq!(names(ask("tools/list", false))[0], "notebook_guide");
+        assert_eq!(ask("tools/list", false)["tools"][0]["annotations"]["readOnlyHint"], true);
+
+        assert!(ask("initialize", true).get("instructions").is_none(), "Claude Code has the plugin's skills");
+        assert!(!names(ask("tools/list", true)).contains(&"notebook_guide".to_owned()));
+        assert!(is_tool("notebook_guide") && is_tool("edit_cell") && is_tool("run_shell") && !is_tool("edit"));
     }
 
     #[test]

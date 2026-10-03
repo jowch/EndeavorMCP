@@ -10,6 +10,7 @@ on:
     paths:
       - crates/endeavor-remote/**
       - crates/wire/**
+      - plugin/skills/**
       - Cargo.lock
       - Cargo.toml
       - rust-toolchain.toml

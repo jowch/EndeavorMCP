@@ -334,7 +334,7 @@ fn serves_the_agents_mcp_messages() {
     assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#, &caller), ("HTTP/1.1 200 OK".into(), r#"{"id":"p","jsonrpc":"2.0","result":{}}"#.into()));
     // A notification gets 202 and no body.
     assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &caller), ("HTTP/1.1 202 Accepted".into(), String::new()));
-    let init = mcp(&core, r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#, &[]);
+    let init = mcp(&core, r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#, &[("X-Endeavor-Skills", "plugin")]);
     assert_eq!(
         init,
         (
@@ -342,6 +342,13 @@ fn serves_the_agents_mcp_messages() {
             format!(r#"{{"id":2,"jsonrpc":"2.0","result":{{"capabilities":{{"tools":{{}}}},"protocolVersion":"2025-06-18","serverInfo":{{"name":"endeavor-runtime","version":"{}"}}}}}}"#, env!("CARGO_PKG_VERSION"))
         )
     );
+    // An agent without Endeavor's plugin is told to read the guide, and can.
+    let init: serde_json::Value = serde_json::from_str(&mcp(&core, r#"{"jsonrpc":"2.0","id":3,"method":"initialize"}"#, &[]).1).unwrap();
+    assert!(init["result"]["instructions"].as_str().unwrap().contains("call `notebook_guide` once"));
+    let guide = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"notebook_guide","arguments":{}}}"#;
+    let guide: serde_json::Value = serde_json::from_str(&mcp(&core, guide, &caller).1).unwrap();
+    assert_eq!(guide["result"]["isError"], false);
+    assert!(guide["result"]["content"][0]["text"].as_str().unwrap().contains("# Pluto workflow (cell editing)"));
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 
     assert_eq!(mcp(&core, "{nope", &caller), ("HTTP/1.1 400 Bad Request".into(), r#"{"error":"Invalid JSON"}"#.into()));
@@ -536,7 +543,7 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
     let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
-    let (_, body) = mcp(&core, list, &[("X-Endeavor-Host", "gpu-box")]);
+    let (_, body) = mcp(&core, list, &[("X-Endeavor-Host", "gpu-box"), ("X-Endeavor-Skills", "plugin")]);
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let tools = reply["result"]["tools"].as_array().unwrap();
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
