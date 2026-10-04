@@ -2,7 +2,8 @@
 # the standalone binary) and publishes it to the "helpers" release as
 # endeavor-<key>-<platform>, with endeavor-<key>.sha256; <key> is
 # scripts/helpers.sh --key, a hash of the helper's source. scripts/helpers.sh
-# downloads them from there.
+# downloads them from there. LATEST, uploaded after them, holds the newest key,
+# for people installing by hand and for `endeavor update`.
 name: Helpers
 
 on:
@@ -82,3 +83,8 @@ jobs:
           gh release view helpers >/dev/null 2>&1 || gh release create helpers --prerelease --target "$GITHUB_SHA" \
             --title "Server helpers" --notes "Runtime helpers for Linux servers, published by the Helpers workflow for each change to the helper's source. scripts/helpers.sh downloads the ones matching your checkout."
           gh release upload helpers publish/* --clobber
+          # A manual run on another branch builds that branch's helpers but doesn't make them the newest.
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            echo "$key" > LATEST
+            gh release upload helpers LATEST --clobber
+          fi
