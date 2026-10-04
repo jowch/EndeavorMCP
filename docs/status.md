@@ -63,10 +63,12 @@ Checked live on 2026-10-03:
 
 Not yet checked:
 
-- `endeavor update` against the real Helpers release: `LATEST` appears
-  there only after this is pushed and the Helpers workflow runs. Tested
-  against a local server, and on the Linux VM against the real release's
-  files served locally.
+- `endeavor update` replacing a binary with a newer build from the real
+  Helpers release. The first build with `update` is the newest one, so
+  nothing older can update yet. On 2026-10-04 the README's install steps
+  fetched build `14eb0a67bda7` through `LATEST` in the Linux VM, the
+  checksum passed, and `endeavor update` said it is up to date. The replace
+  step is tested against a local server.
 - The message when `serve` or `mcp` reuse a Julia from another build, with a
   real Julia (unit-tested only).
 - Codex and Gemini against `endeavor serve` and `endeavor mcp`. Their config
