@@ -42,14 +42,14 @@ Not yet checked:
 - Pluto's page in a browser through an `ssh -L` tunnel. curl reached the
   page; the WebSocket is only tested on loopback (`e2e_julia`).
 - The app sending the bundled macOS helper to a real macOS server.
+- An agent following the skills without the app. They mark which parts
+  hold in the app and which without it, and `guide::STANDALONE` only names
+  the setting; no agent session has run against that text yet.
 
 Known gaps:
 
 - `endeavor update` is planned, not built (README, "Planned: an update
   command").
-- The skills still describe the app's pane and approval cards. The
-  standalone MCP instructions (`guide::STANDALONE`) tell the agent to skip
-  those parts; the skills themselves aren't adapted.
 - Over plain HTTP (no `X-Endeavor-Session`), `this_session` is false for
   every notebook.
 - On Windows, `endeavor serve` doesn't catch Ctrl-C, so Julia keeps running
