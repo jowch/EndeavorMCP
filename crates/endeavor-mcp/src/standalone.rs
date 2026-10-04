@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 
 use crate::http::Head;
 use crate::mcp::to_json;
-use crate::{Args, Exit, Launcher, Runtime, State, embedded, julia};
+use crate::{Args, Launcher, Runtime, State, embedded, julia};
 
 const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Julia here and print how to connect (Ctrl-C stops it)
        endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
@@ -297,9 +297,8 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
     progress(&format!("Starting Julia {version} ({julia})"));
     let token = crate::token(dir)?;
     let child = crate::start(&args, &julia, &token)?;
-    let (pid, started) = (child.id() as i32, crate::child_started(&child));
     let (events, _) = mpsc::channel();
-    let runtime = Runtime { pid, started, exit: Exit::watch_child(child, pid, events), state_dir: dir.clone() };
+    let runtime = Runtime::child(child, dir, &events);
     match wait_ready(&runtime, progress, cancelled) {
         Ok((state, port)) => Ok(Up { state, port, started: Some(runtime) }),
         Err(e) => {

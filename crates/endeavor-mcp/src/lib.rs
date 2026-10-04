@@ -433,8 +433,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
     let token = token(&args.state_dir).map_err(failed)?;
     let child = start(args, &julia, &token).map_err(failed)?;
-    let (pid, started) = (child.id() as i32, child_started(&child));
-    let runtime = Runtime { pid, started, exit: Exit::watch_child(child, pid, events.clone()), state_dir: args.state_dir.clone() };
+    let runtime = Runtime::child(child, &args.state_dir, events);
     let (state, port) = boot(args, mux, &runtime, rx)?;
     Ok(Attached { how: How::Process(runtime, port), state, reattached: false, _lock: lock })
 }
@@ -529,17 +528,38 @@ fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, rx: &mpsc::Receiver<Even
 /// A runtime process this helper watches.
 struct Runtime {
     pid: i32,
-    /// As in `State`.
+    /// As in `State`: what `kill` checks the pid against before ending it.
+    #[cfg(windows)]
     started: Option<u64>,
     exit: Arc<Exit>,
     state_dir: PathBuf,
 }
 
 impl Runtime {
+    /// The runtime this helper just started as `child`.
+    fn child(child: Child, state_dir: &Path, events: &Sender<Event>) -> Runtime {
+        let pid = child.id() as i32;
+        #[cfg(windows)]
+        let started = winproc::start_time(std::os::windows::io::AsRawHandle::as_raw_handle(&child));
+        Runtime {
+            pid,
+            #[cfg(windows)]
+            started,
+            exit: Exit::watch_child(child, pid, events.clone()),
+            state_dir: state_dir.to_path_buf(),
+        }
+    }
+
     /// The runtime `state` records, which some earlier helper started.
     fn recorded(state: &State, state_dir: &Path, events: &Sender<Event>) -> Runtime {
         let exit = Exit::watch_pid(state.pid, state.started, events.clone());
-        Runtime { pid: state.pid, started: state.started, exit, state_dir: state_dir.to_path_buf() }
+        Runtime {
+            pid: state.pid,
+            #[cfg(windows)]
+            started: state.started,
+            exit,
+            state_dir: state_dir.to_path_buf(),
+        }
     }
 
     /// It exited: clean up after it and say so.
@@ -671,17 +691,6 @@ fn pid_alive(pid: i32, _started: Option<u64>) -> bool {
 #[cfg(windows)]
 fn pid_alive(pid: i32, started: Option<u64>) -> bool {
     winproc::Process::open(pid, started).is_some_and(|process| process.alive())
-}
-
-/// When a child we started began, to record with its pid (Windows only).
-#[cfg(unix)]
-fn child_started(_child: &Child) -> Option<u64> {
-    None
-}
-
-#[cfg(windows)]
-fn child_started(child: &Child) -> Option<u64> {
-    winproc::start_time(std::os::windows::io::AsRawHandle::as_raw_handle(child))
 }
 
 /// End the runtime recorded with `pid` and `started` (runtime.json), with
