@@ -187,6 +187,10 @@ fn serve_and_mcp_without_the_app() {
     assert!(text.contains(&format!("claude mcp add --transport http endeavor http://localhost:{port}/mcp --header \"Authorization: Bearer {token}\"")), "{text}");
     assert!(text.contains(&format!("    ssh -L {port}:localhost:{port} ")), "{text}");
     let core = recorded_pid(&state).expect("runtime.json names the core");
+    let marker = work.join("cache/endeavor/serve").join(endeavor_mcp::embedded::RUNTIME_VERSION).join("in-use");
+    let marker = std::fs::OpenOptions::new().write(true).open(&marker).unwrap();
+    assert!(marker.try_lock().is_err(), "the core holds a lease on its runtime's folder, which another version's unpack then keeps");
+    drop(marker);
 
     let mut agent = Agent { port, token: token.clone(), id: 0 };
     step("an agent with only the bearer token: no session, no app", || {

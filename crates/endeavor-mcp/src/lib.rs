@@ -31,7 +31,7 @@ mod winproc;
 pub use core::serve_unreachable;
 pub use guard::serve_guarded;
 pub use mcp::{NOTEBOOK_TOOLS_JSON, asks_first, changes_notebook, is_tool, runs_code};
-pub use standalone::unpack;
+pub use standalone::{Lease, lease, unpack};
 
 /// `runtime/` (the Julia side, which Endeavor installs on servers and runs on
 /// This Mac) and `plugin/` (the skills Endeavor loads as its Claude Code

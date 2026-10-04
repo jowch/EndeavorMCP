@@ -20,7 +20,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 
@@ -235,22 +235,27 @@ pub(crate) fn unpack_runtime(cache: &Path) -> Result<PathBuf, String> {
 
 /// `files` in `cache/version/`, put there whole: written to a folder of
 /// their own, then moved into place, so a folder by that name is complete.
-/// That folder.
+/// A new version's folder replaces the older ones nothing uses any more
+/// (`remove_unused`). That folder.
 pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<PathBuf, String> {
     let dir = cache.join(version);
     if dir.is_dir() {
+        let _ = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(dir.join(IN_USE)).and_then(|f| f.set_modified(SystemTime::now()));
         return Ok(dir);
     }
     let failed = |e: io::Error| format!("Couldn't unpack Endeavor's runtime into {}: {e}", cache.display());
     let part = cache.join(format!("{version}.part.{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&part);
-    for (path, contents) in files {
+    for (path, contents) in files.iter().chain([&(IN_USE, &b""[..])]) {
         let file = part.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).map_err(failed)?;
         std::fs::write(&file, contents).map_err(failed)?;
     }
     match std::fs::rename(&part, &dir) {
-        Ok(()) => Ok(dir),
+        Ok(()) => {
+            remove_unused(cache, version);
+            Ok(dir)
+        }
         // Another process unpacked the same version first.
         Err(_) if dir.is_dir() => {
             let _ = std::fs::remove_dir_all(&part);
@@ -261,6 +266,71 @@ pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<Pa
             Err(failed(e))
         }
     }
+}
+
+/// In each unpacked folder: whoever uses the folder holds a shared lock on
+/// it (`Lease`), and its time is when the folder was last unpacked or used.
+const IN_USE: &str = "in-use";
+
+/// How long an unused folder is kept after its last use. The lock alone may
+/// not show: a cache in a home folder shared by a cluster's nodes may have
+/// locks that only its own node sees.
+const KEEP_UNUSED: Duration = Duration::from_secs(24 * 3600);
+
+/// How often a `Lease` marks its folder as used.
+const LEASE_TOUCH: Duration = Duration::from_secs(3600);
+
+/// Remove the folders in `cache` other than `keep`'s that no one holds a
+/// `Lease` on and no one has unpacked or used for `KEEP_UNUSED`. A folder
+/// with no `IN_USE` is left alone: a build from before leases unpacked it,
+/// and a runtime it started may still run from it.
+fn remove_unused(cache: &Path, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(cache) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if name.contains(".removing.") {
+            let _ = std::fs::remove_dir_all(&path);
+            continue;
+        }
+        if name == keep || name.contains(".part.") || !path.is_dir() {
+            continue;
+        }
+        let Ok(marker) = std::fs::OpenOptions::new().read(true).write(true).open(path.join(IN_USE)) else { continue };
+        let used = marker.metadata().and_then(|m| m.modified()).ok();
+        if used.is_none_or(|used| used.elapsed().unwrap_or_default() < KEEP_UNUSED) || marker.try_lock().is_err() {
+            continue;
+        }
+        drop(marker);
+        let trash = cache.join(format!("{name}.removing.{}", std::process::id()));
+        if std::fs::rename(&path, &trash).is_ok() {
+            let _ = std::fs::remove_dir_all(&trash);
+        }
+    }
+}
+
+/// A shared lock on an unpacked folder (`unpack`) that keeps another
+/// version's `unpack` from removing it, for as long as this lives.
+pub struct Lease {
+    _marker: Arc<std::fs::File>,
+}
+
+/// Hold `dir`, a folder `unpack` returned, while it is used. None if it
+/// wasn't unpacked by `unpack` (such as a server's runtime the app installs).
+pub fn lease(dir: &Path) -> Option<Lease> {
+    let marker = std::fs::OpenOptions::new().read(true).write(true).open(dir.join(IN_USE)).ok()?;
+    marker.try_lock_shared().ok()?;
+    let marker = Arc::new(marker);
+    let _ = marker.set_modified(SystemTime::now());
+    let held = Arc::downgrade(&marker);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(LEASE_TOUCH);
+            let Some(marker) = held.upgrade() else { return };
+            let _ = marker.set_modified(SystemTime::now());
+        }
+    });
+    Some(Lease { _marker: marker })
 }
 
 /// A runtime this process can reach: its state, and the process if this one started it.

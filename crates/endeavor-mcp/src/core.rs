@@ -88,6 +88,8 @@ pub fn main(argv: &[String]) -> ! {
     let launcher = std::env::var("ENDEAVOR_LAUNCHER").unwrap_or_else(|_| "process".into());
     #[cfg(unix)]
     let (stop_signals, inherited_mask) = block_stop_signals();
+    // The runtime is the `runtime/` inside the folder `unpack` made.
+    let _lease = args.runtime.parent().and_then(crate::lease);
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let fixed_port: u16 = env("ENDEAVOR_PORT").and_then(|p| p.parse().ok()).unwrap_or(0);
     let folder = env("ENDEAVOR_FOLDER");

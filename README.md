@@ -31,7 +31,9 @@ cargo install --git https://github.com/jowch/EndeavorMCP endeavor-mcp
 
 The binary carries Endeavor's Julia code (`runtime/`) and the skills, so it is
 all you install. On first use it unpacks the Julia code into
-`~/.cache/endeavor/serve/<version>/`.
+`~/.cache/endeavor/serve/<version>/`. A new version removes the older
+versions' folders once no running Julia uses them and none has been used for
+a day.
 
 For Linux (x86_64 and aarch64) there are prebuilt binaries on the
 [Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers),

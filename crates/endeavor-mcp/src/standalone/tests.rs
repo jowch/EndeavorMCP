@@ -139,9 +139,54 @@ fn the_runtime_unpacks_once_per_version() {
     // Another version gets its own folder, next to the first.
     let second = unpack(&cache, "0.1.0-bbbb", files).unwrap().join("runtime");
     assert_eq!(std::fs::read_to_string(second.join("boot.jl")).unwrap(), "boot");
-    let mut names: Vec<_> = std::fs::read_dir(&cache).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    assert_eq!(names(&cache), ["0.1.0-aaaa", "0.1.0-bbbb"]);
+    std::fs::remove_dir_all(&cache).unwrap();
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     names.sort();
-    assert_eq!(names, ["0.1.0-aaaa", "0.1.0-bbbb"]);
+    names
+}
+
+/// As if `version`'s folder was last unpacked or used two days ago.
+fn last_used_two_days_ago(cache: &Path, version: &str) {
+    let marker = std::fs::OpenOptions::new().write(true).open(cache.join(version).join("in-use")).unwrap();
+    marker.set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 3600)).unwrap();
+}
+
+#[test]
+fn a_new_version_removes_older_folders_no_runtime_uses() {
+    let cache = scratch("cleanup");
+    let files: &[(&str, &[u8])] = &[("runtime/boot.jl", b"boot")];
+    unpack(&cache, "0.1.0-aaaa", files).unwrap();
+    let running = lease(&unpack(&cache, "0.1.0-bbbb", files).unwrap()).expect("an unpacked folder can be leased");
+    unpack(&cache, "0.1.0-cccc", files).unwrap();
+    // Unpacked by a build from before leases.
+    std::fs::create_dir_all(cache.join("0.0.9-legacy/runtime")).unwrap();
+    assert!(lease(&cache.join("0.0.9-legacy")).is_none());
+    last_used_two_days_ago(&cache, "0.1.0-aaaa");
+    last_used_two_days_ago(&cache, "0.1.0-bbbb");
+
+    unpack(&cache, "0.1.0-dddd", files).unwrap();
+    assert_eq!(names(&cache), ["0.0.9-legacy", "0.1.0-bbbb", "0.1.0-cccc", "0.1.0-dddd"]);
+
+    // The runtime from bbbb stopped.
+    drop(running);
+    unpack(&cache, "0.1.0-eeee", files).unwrap();
+    assert_eq!(names(&cache), ["0.0.9-legacy", "0.1.0-cccc", "0.1.0-dddd", "0.1.0-eeee"]);
+    std::fs::remove_dir_all(&cache).unwrap();
+}
+
+#[test]
+fn unpacking_a_version_again_counts_as_using_it() {
+    let cache = scratch("reuse");
+    let files: &[(&str, &[u8])] = &[("plugin/skill.md", b"skill")];
+    unpack(&cache, "0.1.0-aaaa", files).unwrap();
+    last_used_two_days_ago(&cache, "0.1.0-aaaa");
+    unpack(&cache, "0.1.0-aaaa", files).unwrap();
+    unpack(&cache, "0.1.0-bbbb", files).unwrap();
+    assert_eq!(names(&cache), ["0.1.0-aaaa", "0.1.0-bbbb"]);
     std::fs::remove_dir_all(&cache).unwrap();
 }
 
