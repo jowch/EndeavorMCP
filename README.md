@@ -288,9 +288,8 @@ recent notebook starts it and runs it.
   approval. There is no Plan, Ask or Manual mode and no run card.
 - There is no notebook pane, no annotation mode and no "Point to the chat".
   Pluto's page in the browser is the view.
-- The skills still describe the app in places, such as the notebook pane and
-  the approval card. The server's instructions tell the agent to skip those
-  parts.
+- The skills mark which parts hold in the app and which without it. The
+  server's instructions tell the agent that it is working without the app.
 - An agent connected over HTTP has no session of its own: it isn't held to
   one notebook, and `list_notebooks` shows `this_session` false everywhere.
   The stdio form gives each agent session one notebook, as the app does.
