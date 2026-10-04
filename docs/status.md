@@ -70,15 +70,12 @@ Known gaps:
   command").
 - Over plain HTTP (no `X-Endeavor-Session`), `this_session` is false for
   every notebook.
-- `endeavor stop` from another terminal ends a `serve` that started Julia
-  with status 1 and "Julia stopped. Its log is …", the same as when Julia
-  crashes.
-- On Windows, `endeavor serve` doesn't catch Ctrl-C, so Julia keeps running
-  until `endeavor stop`.
-- Unpacked runtime and plugin folders (`serve`'s cache, the app's
-  `runtime-files/` and `plugin/`) are kept per version and never removed.
-- The warning "field `started` is never read" in `lib.rs` (read only on
-  Windows).
+- `serve` on Windows stops Julia on Ctrl-C and when its console closes, but
+  only `cargo check` and clippy for the Windows target have seen that code.
+- Unpacking a new version removes older folders that no runtime holds and
+  nobody has used for a day (`unpack`, `lease`). Folders unpacked before this
+  have no `in-use` file and stay. The app still has to hold a `lease` on its
+  plugin folder while Claude Code runs from it.
 
 Next:
 
