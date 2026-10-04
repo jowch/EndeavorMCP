@@ -226,6 +226,9 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge)
     if let Some(standalone) = &bridge.standalone {
         state["folder"] = standalone.folder.clone().into();
     }
+    if let Some(build) = bridge.notebooks.build.get() {
+        state["build"] = build.clone().into();
+    }
     if let Err(e) = write_private(&state_dir.join("runtime.json"), state.to_string().as_bytes()) {
         eprintln!("endeavor core: {e}");
         return None;

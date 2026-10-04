@@ -126,6 +126,22 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 #[test]
+fn a_runtime_from_another_build_is_named() {
+    let dir = scratch("other-build");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(other_build(&dir), None, "nothing recorded");
+    let write = |state: Value| std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
+    write(json!({ "pid": 1, "build": embedded::BUILD_VERSION }));
+    assert_eq!(other_build(&dir), None, "this build");
+    write(json!({ "pid": 1, "build": "0.1.0-0000000000000000" }));
+    let message = other_build(&dir).unwrap();
+    assert!(message.contains("(build 0.1.0-0000000000000000; this is build ") && message.contains("run `endeavor stop`, then start it again"), "{message}");
+    write(json!({ "pid": 1 }));
+    assert!(other_build(&dir).unwrap().contains("(an earlier build; this is build "));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_runtime_unpacks_once_per_version() {
     let cache = scratch("unpack");
     let files: &[(&str, &[u8])] = &[("runtime/boot.jl", b"boot"), ("runtime/EndeavorRuntime/src/A.jl", b"a")];

@@ -355,7 +355,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         launcher: Launcher::Process,
         quit_with_client: false,
         any_node: false,
-        build: Some(embedded::RUNTIME_VERSION.into()),
+        build: Some(embedded::BUILD_VERSION.into()),
         core_env: core_env(options, exit_idle),
     };
     if let Some(state) = crate::existing(&args)? {
@@ -503,6 +503,24 @@ fn recorded_folder(dir: &Path) -> Option<String> {
     state["folder"].as_str().map(str::to_owned)
 }
 
+/// What to tell the user when the runtime recorded in `dir` came from
+/// another build than this binary (`embedded::BUILD_VERSION`); none when it's
+/// this build's, or nothing is recorded. The runtime keeps working as it was
+/// started: stopping it is the user's call.
+pub(crate) fn other_build(dir: &Path) -> Option<String> {
+    let state: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?;
+    let this = embedded::BUILD_VERSION;
+    let which = match state["build"].as_str() {
+        Some(build) if build == this => return None,
+        Some(build) => format!("build {build}"),
+        None => "an earlier build".to_owned(),
+    };
+    Some(format!(
+        "The Julia running from {} was started by another version of endeavor ({which}; this is build {this}). It keeps working as it was started. To use this version, run `endeavor stop`, then start it again.",
+        dir.display()
+    ))
+}
+
 static STOP: AtomicBool = AtomicBool::new(false);
 
 /// In the state folder: the pid of the runtime `endeavor stop` ended, so a
@@ -589,6 +607,9 @@ fn serve(options: Options) -> ! {
         }
         if folder != options.folder.display().to_string() {
             eprintln!("Its notebooks folder is {folder}.");
+        }
+        if let Some(message) = other_build(dir) {
+            eprintln!("{message}");
         }
     }
     let login = std::env::var("SLURM_SUBMIT_HOST").ok().filter(|_| std::env::var_os("SLURM_JOB_ID").is_some());
@@ -718,6 +739,9 @@ impl Relay {
                 Ok(up) => {
                     relay.tell_folder(up.port, &up.state.token);
                     eprintln!("Endeavor's notebooks: http://localhost:{}/?token={}", up.port, up.state.token);
+                    if let Some(message) = up.started.is_none().then(|| other_build(&relay.options.state_dir)).flatten() {
+                        eprintln!("endeavor: {message}");
+                    }
                     Status::Ready { port: up.port, token: up.state.token }
                 }
                 Err(e) => {
