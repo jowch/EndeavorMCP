@@ -5,7 +5,7 @@
 //! - `serve` starts the runtime in the foreground (or uses the one already
 //!   running from its state folder) and prints how to connect: the browser
 //!   link, the MCP URL and token, agent configs and the `ssh -L` line.
-//!   Ctrl-C stops a runtime it started.
+//!   Ctrl-C (and on Windows, closing the console) stops a runtime it started.
 //! - `mcp` is the stdio form for an agent on the same machine (plugin
 //!   installs): it starts or reuses the runtime in the background, where it
 //!   outlives the agent and ends itself after the idle stop, and relays MCP
@@ -459,10 +459,44 @@ fn catch_stop_signals() {
     });
 }
 
-/// Not ported: on Windows Ctrl-C ends `serve` at once, and the runtime, in a
-/// process group of its own, keeps running until `endeavor stop`.
+/// The console window was closed (or the user is logging off): Windows ends
+/// the process a few seconds after it says so, too soon to ask Julia to shut down.
 #[cfg(windows)]
-fn catch_stop_signals() {}
+static CLOSING: AtomicBool = AtomicBool::new(false);
+
+/// Take Ctrl-C, Ctrl-Break and the console closing as a request to stop. The
+/// runtime has a console of its own (`crate::start`), so none of them reach it.
+#[cfg(windows)]
+fn catch_stop_signals() {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
+    unsafe extern "system" fn on_console_event(event: u32) -> windows_sys::core::BOOL {
+        let closing = event != CTRL_C_EVENT && event != CTRL_BREAK_EVENT;
+        // Before STOP, so `serve` sees it when it stops.
+        CLOSING.fetch_or(closing, Ordering::SeqCst);
+        STOP.store(true, Ordering::SeqCst);
+        if closing {
+            // Windows ends the process once this returns; `serve` exits when Julia is stopped.
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        1
+    }
+    // SAFETY: a handler that only touches atomics and sleeps, for the life of the process.
+    if unsafe { SetConsoleCtrlHandler(Some(on_console_event), 1) } == 0 {
+        eprintln!("endeavor: couldn't take Ctrl-C ({}); `endeavor stop` stops Julia", io::Error::last_os_error());
+    }
+}
+
+#[cfg(windows)]
+fn closing() -> bool {
+    CLOSING.load(Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+fn closing() -> bool {
+    false
+}
 
 fn serve(options: Options) -> ! {
     catch_stop_signals();
@@ -499,7 +533,11 @@ fn serve(options: Options) -> ! {
     }
     if let Some(runtime) = &up.started {
         eprintln!("Stopping Julia…");
-        runtime.stop(Some(&up.state));
+        if closing() {
+            runtime.kill();
+        } else {
+            runtime.stop(Some(&up.state));
+        }
         eprintln!("Stopped.");
     }
     std::process::exit(0)

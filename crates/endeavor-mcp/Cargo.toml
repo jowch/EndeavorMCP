@@ -19,4 +19,4 @@ sha2 = "0.10"
 # The bridge token's random bytes (Unix reads /dev/urandom).
 getrandom = "0.3"
 # The runtime's processes: a Job Object, and pids checked against start times.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }

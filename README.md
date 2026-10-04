@@ -88,7 +88,7 @@ the same URL and header.
 
 To stop Julia, press Ctrl-C in that terminal. `serve` also stops Julia when
 it gets SIGTERM or SIGHUP, such as when the terminal closes or a Slurm job
-ends.
+ends. On Windows, closing the console window stops Julia too.
 
 If Julia is already running from the same state folder, `serve` uses it
 instead of starting another, prints the same details, and leaves it running
@@ -294,8 +294,7 @@ recent notebook starts it and runs it.
   one notebook, and `list_notebooks` shows `this_session` false everywhere.
   The stdio form gives each agent session one notebook, as the app does.
 - The idle stop is a flag, not a setting, and applies to the whole runtime.
-- On Windows, `serve` is untried. Ctrl-C ends `serve` but leaves Julia
-  running; use `endeavor stop`.
+- On Windows, `serve` is untried.
 
 ## Planned: an update command
 
