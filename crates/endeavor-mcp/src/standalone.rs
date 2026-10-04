@@ -497,6 +497,11 @@ The token lets anyone who has it run code as you. Keep it to yourself.
     )
 }
 
+/// The state folder `serve`, `mcp` and `stop` use when not given one.
+pub(crate) fn default_state_dir() -> PathBuf {
+    Env::here().state_dir()
+}
+
 /// The folder a running standalone runtime recorded for its notebooks.
 fn recorded_folder(dir: &Path) -> Option<String> {
     let state: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?;
@@ -508,8 +513,12 @@ fn recorded_folder(dir: &Path) -> Option<String> {
 /// this build's, or nothing is recorded. The runtime keeps working as it was
 /// started: stopping it is the user's call.
 pub(crate) fn other_build(dir: &Path) -> Option<String> {
+    other_build_than(dir, embedded::BUILD_VERSION)
+}
+
+/// `other_build`, against build `this`.
+pub(crate) fn other_build_than(dir: &Path, this: &str) -> Option<String> {
     let state: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?;
-    let this = embedded::BUILD_VERSION;
     let which = match state["build"].as_str() {
         Some(build) if build == this => return None,
         Some(build) => format!("build {build}"),
