@@ -321,6 +321,12 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
 /// POST one JSON-RPC message to `/mcp`, as the agent's MCP client does: the
 /// response's status and body (a request's reply, or nothing for `202`).
 fn mcp(core: &Core, message: &str, caller: &[(&str, &str)]) -> (String, String) {
+    let (status, _, body) = mcp_response(core, message, caller);
+    (status, body)
+}
+
+/// `mcp`, with the response's headers (names in lower case).
+fn mcp_response(core: &Core, message: &str, caller: &[(&str, &str)]) -> (String, Vec<(String, String)>, String) {
     let mut socket = core.connect();
     let headers: String = caller.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
     write!(
@@ -330,8 +336,72 @@ fn mcp(core: &Core, message: &str, caller: &[(&str, &str)]) -> (String, String) 
         message.len()
     )
     .unwrap();
-    let (status, _, body) = response(&mut BufReader::new(socket));
-    (status, body)
+    response(&mut BufReader::new(socket))
+}
+
+#[test]
+fn an_agent_without_the_session_header_is_told_apart_by_its_mcp_session_id() {
+    let dir = state_dir("core-mcp-session");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let folder = temp_folder("core-mcp-session-notebooks");
+    let (a, b) = (folder.join("a.jl").display().to_string(), folder.join("b.jl").display().to_string());
+    for path in [&a, &b] {
+        std::fs::write(path, "### A Pluto.jl notebook ###").unwrap();
+    }
+    let at = |id: &str, path: &str| {
+        let mut nb = notebook(id, "x = 1");
+        nb["path"] = path.into();
+        nb
+    };
+    bridge.set_notebooks(vec![at("aaaaaaaa-0000-0000-0000-000000000001", &a), at("aaaaaaaa-0000-0000-0000-000000000002", &b)]);
+
+    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#;
+    let session_of = |caller: &[(&str, &str)]| {
+        let (status, headers, _) = mcp_response(&core, initialize, caller);
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        headers.into_iter().find(|(name, _)| name == "mcp-session-id").map(|(_, id)| id)
+    };
+    let first = session_of(&[]).expect("a client without X-Endeavor-Session gets a session id");
+    let second = session_of(&[]).unwrap();
+    assert!(first.starts_with("mcp-") && first.len() == 36 && first[4..].chars().all(|c| c.is_ascii_hexdigit()), "{first}");
+    assert_ne!(first, second, "each initialize starts its own session");
+    assert_eq!(session_of(&[("X-Endeavor-Session", "7")]), None, "the app's sessions have a key already");
+    assert_eq!(session_of(&[("Mcp-Session-Id", &first)]), None, "nor does a client that has one");
+    let (_, headers, _) = mcp_response(&core, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, &[]);
+    assert!(!headers.iter().any(|(name, _)| name == "mcp-session-id"), "only initialize issues one: {headers:?}");
+
+    let call = |caller: &[(&str, &str)], name: &str, arguments: serde_json::Value| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), caller).1).unwrap();
+        serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let marked = |caller: &[(&str, &str)]| -> Vec<(String, bool)> {
+        let listed = call(caller, "list_notebooks", serde_json::json!({}));
+        listed.as_array().unwrap().iter().map(|nb| (nb["path"].as_str().unwrap().to_owned(), nb["this_session"] == true)).collect()
+    };
+    let one = [("Mcp-Session-Id", first.as_str())];
+    let two = [("Mcp-Session-Id", second.as_str())];
+
+    assert_eq!(marked(&one), vec![(a.clone(), false), (b.clone(), false)], "notebooks it didn't open are someone else's");
+    assert_eq!(call(&one, "open_notebook", serde_json::json!({ "path": a }))["path"], serde_json::json!(a));
+    assert_eq!(marked(&one), vec![(a.clone(), true), (b.clone(), false)], "the notebook it opened is this session's");
+    assert_eq!(marked(&two), vec![(a.clone(), false), (b.clone(), false)], "another session's isn't");
+    assert_eq!(marked(&[]), vec![(a.clone(), false), (b.clone(), false)], "nor a client's with no session at all");
+    assert_eq!(marked(&[("X-Endeavor-Session", "7")]), vec![(a.clone(), false), (b.clone(), false)], "nor an app session's");
+
+    let refused = call(&one, "open_notebook", serde_json::json!({ "path": b }));
+    assert_eq!(refused["error"], "one_notebook");
+    assert_eq!(
+        refused["message"],
+        format!(
+            "This session works on one notebook, {a}, so it can't open {b}. You can still read other notebooks as plain .jl files. \
+             To work on another notebook, suggest the user start a new session with it.\n\
+             See `notebook_guide` for how to use these tools."
+        )
+    );
+    assert_eq!(call(&two, "open_notebook", serde_json::json!({ "path": b }))["path"], serde_json::json!(b), "the other session may");
+    assert_eq!(marked(&two), vec![(a.clone(), false), (b.clone(), true)]);
 }
 
 #[test]

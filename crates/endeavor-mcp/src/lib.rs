@@ -963,17 +963,22 @@ fn token(dir: &Path) -> Result<String, String> {
     {
         return Ok(token.trim().to_owned());
     }
-    let mut bytes = [0u8; 32];
-    #[cfg(unix)]
-    File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).map_err(|e| format!("/dev/urandom: {e}"))?;
-    #[cfg(windows)]
-    getrandom::fill(&mut bytes).map_err(|e| format!("Couldn't make a token: {e}"))?;
-    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let token = random_hex::<32>()?;
     let mut file = owner_only(OpenOptions::new().write(true).create(true).truncate(true))
         .open(&path)
         .map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
     file.write_all(token.as_bytes()).map_err(|e| e.to_string())?;
     Ok(token)
+}
+
+/// `N` random bytes, in hex.
+pub(crate) fn random_hex<const N: usize>() -> Result<String, String> {
+    let mut bytes = [0u8; N];
+    #[cfg(unix)]
+    File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).map_err(|e| format!("/dev/urandom: {e}"))?;
+    #[cfg(windows)]
+    getrandom::fill(&mut bytes).map_err(|e| format!("Couldn't get random bytes: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// `endeavor core`, which starts `julia boot.jl` (see core).

@@ -172,7 +172,9 @@ http_headers = { Authorization = "Bearer 9780…" }
 ```
 
 **Other agents.** Use the URL and the `Authorization` header. The server
-speaks MCP's Streamable HTTP transport.
+speaks MCP's Streamable HTTP transport. The agent's MCP client must send back
+the `Mcp-Session-Id` it gets from `initialize`, as Streamable HTTP clients do;
+that id is what gives the agent a notebook of its own.
 
 The token stays the same across restarts, because it's kept in the state
 folder. The port stays the same only if you fix it with `--port`.
@@ -322,9 +324,12 @@ recent notebook starts it and runs it.
   Pluto's page in the browser is the view.
 - The skills mark which parts hold in the app and which without it. The
   server's instructions tell the agent that it is working without the app.
-- An agent connected over HTTP has no session of its own: it isn't held to
-  one notebook, and `list_notebooks` shows `this_session` false everywhere.
-  The stdio form gives each agent session one notebook, as the app does.
+- Each agent connection is one session with one notebook, as in the app:
+  the first notebook it creates or opens. Over HTTP the session is the
+  `Mcp-Session-Id` that `initialize` gives the agent's MCP client; the stdio
+  form makes one for each run. A notebook another session made, or one you
+  opened in the browser, shows `this_session` false
+  ([docs/endeavor-mcp.md](docs/endeavor-mcp.md#session-identity)).
 - The idle stop is a flag, not a setting, and applies to the whole runtime.
 - On Windows, `serve` is untried.
 

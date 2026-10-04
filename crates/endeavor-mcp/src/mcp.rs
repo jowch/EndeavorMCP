@@ -2,10 +2,12 @@
 //! `POST /mcp` carries one JSON-RPC message; a request gets its reply in the
 //! same response, a notification or a response from the client gets `202
 //! Accepted` with no body. A call that waits on the user gets its reply as an
-//! event stream instead (see `Held`). This server issues no `Mcp-Session-Id`
-//! (optional in the spec; the adapter's MCP client doesn't send one back when
-//! none is issued). Each agent session's messages carry `X-Endeavor-Session`
-//! (its key) and, on a server, `X-Endeavor-Host`. The notebook tools are
+//! event stream instead (see `Held`). Each of the app's agent sessions
+//! sends `X-Endeavor-Session` (its key) and, on a server, `X-Endeavor-Host`;
+//! so does the stdio relay (`standalone`). A client without that header gets
+//! an `Mcp-Session-Id` from `initialize`, and that is its key: one agent
+//! connection, one session, as in the app. The app's sessions get no
+//! `Mcp-Session-Id`, since they have a key. The notebook tools are
 //! `notebooks`'; host tools are `host_tools`'; the guide to both is `guide`'s.
 //!
 //! Each session has a run policy the app sets ("plan" | "ask" | "auto"). In
@@ -134,7 +136,9 @@ pub struct Bridge {
 }
 
 /// Who sent a message: the agent session's key and the server it works on,
-/// both empty for the app.
+/// both empty for the app. The key is `X-Endeavor-Session`, else the
+/// `Mcp-Session-Id` this server issued; a client that sends neither is
+/// treated as the app is (no notebook of its own).
 #[derive(Default)]
 pub struct Caller {
     pub owner: String,
@@ -147,7 +151,8 @@ pub struct Caller {
 impl Caller {
     fn of(request: &Head) -> Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
-        Caller { owner: header("X-Endeavor-Session"), host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin" }
+        let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin" }
     }
 }
 
@@ -286,7 +291,8 @@ impl Bridge {
         {
             caller.host = host;
         }
-        post(request, reader, client, request.keeps_alive(), |message, gone| self.dispatch(message, &caller, gone))
+        let issue_session = caller.owner.is_empty();
+        post(request, reader, client, request.keeps_alive(), issue_session, |message, gone| self.dispatch(message, &caller, gone))
     }
 
     /// The reply to one JSON-RPC message, if it gets one. `gone`, called
@@ -478,13 +484,15 @@ fn closed(_socket: &TcpStream) -> bool {
 /// Serve one `POST /mcp`: one JSON-RPC message in; a request gets `reply`'s
 /// answer in this response, a notification or a response from the client gets
 /// `202 Accepted` with no body. `reply` is given the message and a check to
-/// call while its answer waits on the user (`Held::waiting`). Whether the
-/// connection can carry another request.
+/// call while its answer waits on the user (`Held::waiting`). With
+/// `issue_session`, the reply to `initialize` gives the client a new
+/// `Mcp-Session-Id`. Whether the connection can carry another request.
 pub(crate) fn post(
     request: &Head,
     reader: &mut BufReader<TcpStream>,
     client: &mut TcpStream,
     keep_alive: bool,
+    issue_session: bool,
     reply: impl FnOnce(&Value, &dyn Fn() -> bool) -> Option<String>,
 ) -> io::Result<bool> {
     let body = http::read_body(reader, request.request_body()?)?;
@@ -505,11 +513,24 @@ pub(crate) fn post(
         http::write_chunk(client, b"")?;
         return Ok(keep_alive);
     }
+    let session = (issue_session && message["method"] == "initialize").then(new_session_id).flatten();
+    let headers: Vec<(&str, &str)> = session.iter().map(|id| ("Mcp-Session-Id", id.as_str())).collect();
     match reply {
-        Some(reply) => http::respond(client, "200 OK", Some("application/json"), reply.as_bytes(), keep_alive)?,
+        Some(reply) => http::respond_with(client, "200 OK", Some("application/json"), &headers, reply.as_bytes(), keep_alive)?,
         None => http::respond(client, "202 Accepted", None, b"", keep_alive)?,
     }
     Ok(keep_alive)
+}
+
+/// A new `Mcp-Session-Id`: visible ASCII, as the spec asks, and unguessable.
+fn new_session_id() -> Option<String> {
+    match crate::random_hex::<16>() {
+        Ok(hex) => Some(format!("mcp-{hex}")),
+        Err(e) => {
+            eprintln!("┌ Warning: No MCP session id for a client without X-Endeavor-Session: {e}");
+            None
+        }
+    }
 }
 
 /// How often a held call's stream says it's still waiting.

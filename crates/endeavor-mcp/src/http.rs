@@ -288,9 +288,17 @@ pub fn read_body(from: &mut impl BufRead, framing: Framing) -> io::Result<Vec<u8
 
 /// Write a whole response with a body of known length.
 pub fn respond(out: &mut impl Write, status: &str, content_type: Option<&str>, body: &[u8], keep_alive: bool) -> io::Result<()> {
+    respond_with(out, status, content_type, &[], body, keep_alive)
+}
+
+/// `respond`, with more headers.
+pub fn respond_with(out: &mut impl Write, status: &str, content_type: Option<&str>, headers: &[(&str, &str)], body: &[u8], keep_alive: bool) -> io::Result<()> {
     let mut head = format!("HTTP/1.1 {status}\r\n");
     if let Some(content_type) = content_type {
         head.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str(&format!("Content-Length: {}\r\n", body.len()));
     if !keep_alive {

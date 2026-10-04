@@ -97,10 +97,11 @@ allows for a client that accepts it). Every 15 seconds the stream says the
 call is still waiting: a `notifications/progress` when the request carried
 `_meta.progressToken`, else an SSE comment. The reply is the stream's last
 event. `GET /mcp` is `405` (no
-server-initiated stream); so is `DELETE`. It issues no `Mcp-Session-Id` — the
-core already tells agent sessions apart by `X-Endeavor-Session` (see
-[Session identity](#session-identity)), and the adapter's MCP client doesn't
-send one back when the server doesn't issue one. `MCP-Protocol-Version` is
+server-initiated stream); so is `DELETE`, since a session lasts as long as the
+runtime. The reply to `initialize` carries an `Mcp-Session-Id` only for a
+client without `X-Endeavor-Session` (see
+[Session identity](#session-identity)); the app's sessions get none, as
+before. `MCP-Protocol-Version` is
 honoured: an unsupported value is `400`; a missing header (before
 `initialize`, or from a client that never sends it) falls back to what the
 server understands. The app registers the bridge as `McpServer::Http`.
@@ -116,9 +117,55 @@ notebooks keep running between client sessions.
 
 ## Session identity
 
-The core tells agent sessions apart by the `X-Endeavor-Session` and
-`X-Endeavor-Host` headers the app puts in each session's MCP config.
-Standalone, the default is one session per connection.
+_Built 2026-10-03._
+
+The core tells agent sessions apart by a key. Each session works on one
+notebook (the first it opens or creates, or the one the app gives it), and
+`list_notebooks` marks that notebook `this_session`. Where the key comes from:
+
+- **The app's sessions** send `X-Endeavor-Session` (and, on a server,
+  `X-Endeavor-Host`) from their MCP config. Nothing else is involved.
+- **The stdio form** (`endeavor mcp`) makes a key for each run
+  (`stdio-<pid>-<millis>`) and sends it as `X-Endeavor-Session`, so each
+  agent that starts it is one session.
+- **A client over plain HTTP** (`endeavor serve`, with only the bearer token)
+  gets an `Mcp-Session-Id` in the reply to its `initialize`
+  (`mcp-` and 32 random hex digits). Streamable HTTP clients send it back on
+  every request after, and the core uses it as the key. The core doesn't keep
+  a list of the ids it issued: an id it doesn't know (after a restart of the
+  runtime, say) starts a new session under that id rather than a `404`.
+- **A request with neither header** is treated as the app's own calls are:
+  no notebook of its own, so it is held to none and `this_session` is false
+  everywhere. Only a client that skips the handshake (curl, a script) lands
+  here.
+
+So in every form, one agent connection is one session, and the skills'
+rules hold as written: a notebook the agent created or opened is
+`this_session` true; one another session created, or the user opened from
+Pluto's page in the browser, is false.
+
+Why the MCP session id and not something else:
+
+- It is the transport's own way to name a session: the spec requires a
+  client to send it back once issued, so the user configures nothing beyond
+  the URL and the token. (Not yet checked live with Claude Code, Codex or
+  Gemini CLI; `e2e_serve` sends it back as the spec says.)
+- Issuing it only when `X-Endeavor-Session` is missing leaves the app's
+  sessions exactly as they were.
+- One key for every header-less client (all of them one session) was
+  rejected: two agents on one runtime would share a notebook, and an agent
+  would stay bound to an old notebook after it restarts.
+- The TCP connection was rejected: clients open new connections freely
+  (`serve`'s own tests use one per request).
+- Marking every notebook `this_session` for a header-less client was
+  rejected: it would tell the agent that the user's and other sessions'
+  notebooks are its own.
+
+Not done: a notebook the user already opened in the browser can't become an
+agent's notebook, because `open_notebook` on an open path is an error
+(`notebook_already_open`) and binds nothing. The standalone instructions
+(`guide::STANDALONE`) tell the agent it may still work in a notebook the user
+names.
 
 ## Approval
 

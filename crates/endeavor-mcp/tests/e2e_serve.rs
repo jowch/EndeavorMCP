@@ -79,22 +79,24 @@ fn lines(stream: impl Read + Send + 'static) -> mpsc::Receiver<String> {
     rx
 }
 
-/// POST a JSON-RPC message to `/mcp` with the bearer token only, as an agent
-/// configured from serve's output does: the status line and the body.
-fn post(port: u16, token: &str, message: &Value) -> (String, String) {
+/// POST a JSON-RPC message to `/mcp` with the bearer token and, once it has
+/// one, the session id, as an agent configured from serve's output does: the
+/// response's head and body.
+fn post(port: u16, token: &str, session: Option<&str>, message: &Value) -> (String, String) {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
     let body = message.to_string();
+    let session = session.map_or(String::new(), |id| format!("Mcp-Session-Id: {id}\r\n"));
     write!(
         socket,
-        "POST /mcp HTTP/1.0\r\nHost: localhost:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /mcp HTTP/1.0\r\nHost: localhost:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\n{session}Content-Length: {}\r\n\r\n{body}",
         body.len()
     )
     .unwrap();
     let mut reply = String::new();
     socket.read_to_string(&mut reply).unwrap();
     let (head, body) = reply.split_once("\r\n\r\n").unwrap_or((&reply, ""));
-    (head.lines().next().unwrap_or_default().to_owned(), body.to_owned())
+    (head.to_owned(), body.to_owned())
 }
 
 fn get(port: u16, target: &str, headers: &str) -> (String, String, String) {
@@ -112,21 +114,48 @@ struct Agent {
     port: u16,
     token: String,
     id: u64,
+    /// The `Mcp-Session-Id` from `initialize`, sent back on every request after.
+    session: Option<String>,
 }
 
 impl Agent {
+    fn new(port: u16, token: &str) -> Agent {
+        Agent { port, token: token.to_owned(), id: 0, session: None }
+    }
+
     fn mcp(&mut self, method: &str, params: Value) -> Value {
         self.id += 1;
-        let (status, body) = post(self.port, &self.token, &json!({ "jsonrpc": "2.0", "id": self.id, "method": method, "params": params }));
-        assert_eq!(status, "HTTP/1.1 200 OK", "{method}: {body}");
+        let (head, body) = post(self.port, &self.token, self.session.as_deref(), &json!({ "jsonrpc": "2.0", "id": self.id, "method": method, "params": params }));
+        assert_eq!(head.lines().next(), Some("HTTP/1.1 200 OK"), "{method}: {body}");
+        if method == "initialize" {
+            self.session = head.lines().find_map(|line| line.strip_prefix("Mcp-Session-Id: ")).map(str::to_owned);
+        }
         serde_json::from_str(&body).unwrap()
     }
 
-    fn ok(&mut self, name: &str, arguments: Value) -> Value {
+    fn initialize(&mut self) -> Value {
+        self.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }))
+    }
+
+    fn call(&mut self, name: &str, arguments: Value) -> (bool, Value) {
         let reply = self.mcp("tools/call", json!({ "name": name, "arguments": arguments }));
         let text = reply["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{name}: {reply}"));
-        assert_eq!(reply["result"]["isError"], false, "{name}({arguments}): {text}");
-        serde_json::from_str(text).unwrap()
+        (reply["result"]["isError"] == true, serde_json::from_str(text).unwrap())
+    }
+
+    fn ok(&mut self, name: &str, arguments: Value) -> Value {
+        let (failed, result) = self.call(name, arguments.clone());
+        assert!(!failed, "{name}({arguments}): {result}");
+        result
+    }
+
+    /// Each open notebook's file name, and whether it's this session's.
+    fn this_session(&mut self) -> Vec<(String, bool)> {
+        let listed = self.ok("list_notebooks", json!({}));
+        let name = |nb: &Value| Path::new(nb["path"].as_str().unwrap()).file_name().unwrap().to_string_lossy().into_owned();
+        let mut marked: Vec<(String, bool)> = listed.as_array().unwrap().iter().map(|nb| (name(nb), nb["this_session"] == true)).collect();
+        marked.sort();
+        marked
     }
 }
 
@@ -192,9 +221,11 @@ fn serve_and_mcp_without_the_app() {
     assert!(marker.try_lock().is_err(), "the core holds a lease on its runtime's folder, which another version's unpack then keeps");
     drop(marker);
 
-    let mut agent = Agent { port, token: token.clone(), id: 0 };
-    step("an agent with only the bearer token: no session, no app", || {
-        let init = agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+    let mut agent = Agent::new(port, &token);
+    step("an agent with only the bearer token: no app, a session from initialize", || {
+        let init = agent.initialize();
+        let session = agent.session.as_deref().expect("initialize gives an Mcp-Session-Id");
+        assert!(session.starts_with("mcp-") && session.len() == 36, "{session}");
         let instructions = init["result"]["instructions"].as_str().unwrap();
         assert!(instructions.contains("call `notebook_guide` once") && instructions.contains("the user watches them in a web browser"), "{instructions}");
         let tools = agent.mcp("tools/list", json!({}));
@@ -216,13 +247,21 @@ fn serve_and_mcp_without_the_app() {
         assert_eq!((&read["output"], &read["errored"]), (&json!("42"), &json!(false)), "{read}");
         let status = agent.ok("pluto_session_status", json!({}));
         assert_eq!(status["browser_url"], json!(format!("http://localhost:{port}/?token={token}")), "{status}");
+        assert_eq!(agent.this_session(), vec![("analysis.jl".to_owned(), true)], "the notebook it made is this session's");
         notebook
     });
 
-    step("a notebook from disk opens in safe preview", || {
+    step("a notebook from disk opens in safe preview, in another session", || {
         std::fs::copy(folder.join("analysis.jl"), folder.join("copy.jl")).unwrap();
-        let opened = agent.ok("open_notebook", json!({ "path": "copy.jl" }));
+        let (failed, refused) = agent.call("open_notebook", json!({ "path": "copy.jl" }));
+        assert!(failed && refused["error"] == "one_notebook", "the first agent has its notebook: {refused}");
+        let mut other = Agent::new(port, &token);
+        other.initialize();
+        assert_ne!(other.session, agent.session);
+        let opened = other.ok("open_notebook", json!({ "path": "copy.jl" }));
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("copy.jl").display().to_string()), &json!(false)), "{opened}");
+        assert_eq!(other.this_session(), vec![("analysis.jl".to_owned(), false), ("copy.jl".to_owned(), true)]);
+        assert_eq!(agent.this_session(), vec![("analysis.jl".to_owned(), true), ("copy.jl".to_owned(), false)]);
     });
 
     step("the browser link sets the cookie and opens Pluto's page", || {
@@ -242,6 +281,7 @@ fn serve_and_mcp_without_the_app() {
         let listed = agent.ok("list_notebooks", json!({}));
         let opened = listed.as_array().unwrap().iter().find(|nb| nb["path"] == json!(path)).cloned().unwrap();
         assert_eq!(opened["execution_allowed"], false, "safe preview: {opened}");
+        assert_eq!(opened["this_session"], false, "the user's, from the browser: {opened}");
     });
 
     step("Ctrl-C stops Julia", || {
@@ -317,6 +357,11 @@ fn serve_and_mcp_without_the_app() {
         let reply: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(120)).unwrap()).unwrap();
         let created: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(created["path"], json!(other.join("b.jl").display().to_string()), "{reply}");
+        writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } })).unwrap();
+        let reply: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(120)).unwrap()).unwrap();
+        let listed: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let marked: Vec<(&str, &Value)> = listed.as_array().unwrap().iter().map(|nb| (nb["path"].as_str().unwrap(), &nb["this_session"])).collect();
+        assert_eq!(marked, vec![(other.join("b.jl").to_str().unwrap(), &json!(true))], "the stdio form's session owns what it made: {listed}");
         assert_eq!(recorded_pid(&state), Some(core), "the same runtime");
         drop(stdin);
         assert!(mcp.wait().unwrap().success());

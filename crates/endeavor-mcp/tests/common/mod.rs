@@ -225,6 +225,10 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
                 ("snapshot", _) if id.is_null() => serde_json::json!({ "result": { "notebooks": notebooks } }),
                 ("snapshot", Some(nb)) => serde_json::json!({ "result": nb }),
                 ("graph", Some(_)) => serde_json::json!({ "result": { "cells": [] } }),
+                ("open", _) => match notebooks.iter().find(|nb| nb["path"] == call["params"]["path"]) {
+                    Some(nb) => serde_json::json!({ "result": { "notebook_id": nb["notebook_id"], "path": nb["path"], "process_status": "ready" } }),
+                    None => serde_json::json!({ "error": "ArgumentError: file_not_found::not a notebook here" }),
+                },
                 _ => serde_json::json!({ "error": format!("KeyError: key \"notebook_not_found::No notebook with id '{}' in the current session\" not found", id.as_str().unwrap_or_default()) }),
             }
             .to_string();

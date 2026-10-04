@@ -199,8 +199,10 @@ package `endeavor-mcp`; it was `endeavor-remote` until the rename.
   relative path against the session's folder, in the app too.
 - **No holds.** Policies come only from the app's `endeavor/set_policy`; a
   session without one never waits, so `no_app` can't happen standalone.
-- **Sessions.** An agent over HTTP sends no `X-Endeavor-Session`: it has no
-  one-notebook rule and `this_session` is false for every notebook. The stdio
+- **Sessions.** An agent over HTTP sends no `X-Endeavor-Session`, so the
+  reply to its `initialize` gives it an `Mcp-Session-Id`, which is its
+  session key from then on (2026-10-03; see
+  [endeavor-mcp.md](endeavor-mcp.md#session-identity)). The stdio
   form sends its own session key and, once the runtime answers,
   `endeavor/set_session_folder` with its `--folder`, so agents in different
   projects share one runtime with their own folders.
