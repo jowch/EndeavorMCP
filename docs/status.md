@@ -33,14 +33,27 @@ app's (both 0.1.0). Bump them together.
 
 ## Open
 
+Checked live on 2026-10-03:
+
+- Pluto's page in a browser through an `ssh -L` tunnel. `endeavor serve
+  --port 41873` ran in the OrbStack Linux VM, and headless Chromium on the
+  Mac went through `ssh -L 51873:localhost:41873`: the token link set the
+  cookie, Pluto's WebSocket connected, and a cell typed and run in the page
+  showed its result. The local port differs from the runtime's because
+  OrbStack already forwards the VM's ports to the Mac's `localhost`, which
+  would have skipped ssh.
+- The Claude Code plugin, installed with the README's two `claude plugin`
+  lines into an empty `CLAUDE_CONFIG_DIR`. Claude Code lists the three
+  skills, the `skills` symlink is copied as a folder, `${CLAUDE_PROJECT_DIR}`
+  becomes the project folder, and the `endeavor` server connects with its
+  tools and no `notebook_guide`. The same `endeavor mcp --skills plugin`
+  command, driven over stdio, made a notebook and ran a cell (`42`). No
+  model turn was run, because the empty config isn't logged in.
+
 Not yet checked:
 
-- The Claude Code plugin installed from this repository's marketplace
-  (`claude-plugin/`).
 - Codex and Gemini against `endeavor serve` and `endeavor mcp`. Their config
   lines in the README come from each tool's documentation.
-- Pluto's page in a browser through an `ssh -L` tunnel. curl reached the
-  page; the WebSocket is only tested on loopback (`e2e_julia`).
 - The app sending the bundled macOS helper to a real macOS server.
 - An agent following the skills without the app. They mark which parts
   hold in the app and which without it, and `guide::STANDALONE` only names
@@ -52,6 +65,9 @@ Known gaps:
   command").
 - Over plain HTTP (no `X-Endeavor-Session`), `this_session` is false for
   every notebook.
+- `endeavor stop` from another terminal ends a `serve` that started Julia
+  with status 1 and "Julia stopped. Its log is …", the same as when Julia
+  crashes.
 - On Windows, `endeavor serve` doesn't catch Ctrl-C, so Julia keeps running
   until `endeavor stop`.
 - Unpacked runtime and plugin folders (`serve`'s cache, the app's
