@@ -17,7 +17,12 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
   and a Slurm job ([one-port.md](one-port.md)).
 - CI (`ci.yml`) builds and tests on Linux, macOS and Windows. `helpers.yml`
   publishes the Linux binaries to the `helpers` release under a key computed
-  from the helper's source (`scripts/helpers.sh`).
+  from the helper's source (`scripts/helpers.sh`), and `LATEST`, the newest
+  key, for builds from `main`.
+- `endeavor update` replaces a Linux binary from the Helpers release with the
+  newest build; `endeavor --version` prints the version and a build hash of
+  the source. `serve` and `mcp` say when the running Julia came from another
+  build (README, "Update it").
 
 ## Changing this repository and the app together
 
@@ -58,6 +63,12 @@ Checked live on 2026-10-03:
 
 Not yet checked:
 
+- `endeavor update` against the real Helpers release: `LATEST` appears
+  there only after this is pushed and the Helpers workflow runs. Tested
+  against a local server, and on the Linux VM against the real release's
+  files served locally.
+- The message when `serve` or `mcp` reuse a Julia from another build, with a
+  real Julia (unit-tested only).
 - Codex and Gemini against `endeavor serve` and `endeavor mcp`. Their config
   lines in the README come from each tool's documentation.
 - An agent following the skills without the app. They mark which parts
@@ -66,8 +77,6 @@ Not yet checked:
 
 Known gaps:
 
-- `endeavor update` is planned, not built (README, "Planned: an update
-  command").
 - Over plain HTTP (no `X-Endeavor-Session`), `this_session` is false for
   every notebook.
 - `serve` on Windows stops Julia on Ctrl-C and when its console closes, but
