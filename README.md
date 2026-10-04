@@ -38,12 +38,13 @@ a day.
 For Linux (x86_64 and aarch64) there are prebuilt binaries on the
 [Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers),
 built by the Helpers workflow for each change to the helper's source. Each
-file is named `endeavor-<key>-<platform>`, and `endeavor-<key>.sha256`
-holds the checksums for that key. Take the newest key and check the download:
+file is named `endeavor-<key>-<platform>`, `endeavor-<key>.sha256` holds the
+checksums for that key, and `LATEST` names the newest key. Download it and
+check it (on aarch64, use `linux-aarch64`):
 
 ```
-key=<newest key on the release page>
 base=https://github.com/jowch/EndeavorMCP/releases/download/helpers
+key=$(curl -fsSL $base/LATEST)
 curl -fLO $base/endeavor-$key-linux-x86_64
 curl -fLO $base/endeavor-$key.sha256
 sha256sum -c --ignore-missing endeavor-$key.sha256
@@ -52,7 +53,36 @@ mv endeavor-$key-linux-x86_64 ~/.local/bin/endeavor
 ```
 
 Binaries from before `serve` was added don't have it. Run
-`endeavor serve --help` to check.
+`endeavor serve --help` to check. `endeavor --version` prints the version
+and the build, a hash of the source it was built from.
+
+## Update it
+
+On Linux, with a binary from the Helpers release, run:
+
+```
+endeavor update
+```
+
+It downloads the newest build that `LATEST` names, checks it against the
+release's SHA-256 file, and puts it in place of the binary you ran. If you
+already have the newest build, it says so. It needs curl or wget, and write
+access to the binary's folder. Binaries from before `update` was added don't
+have it: download the newest one as in [Install it](#install-it).
+
+Other installs update the way they were installed:
+
+- If you installed with `cargo install`, run the same `cargo install` line
+  again. `endeavor update` prints it.
+- macOS and Windows have no prebuilt binaries, so reinstall with
+  `cargo install`. `endeavor update` says so.
+- The copy the Endeavor app installs on a server (in
+  `~/.cache/endeavor/<version>/`) updates with the app. `endeavor update`
+  refuses to replace it.
+
+A Julia that's already running keeps running from the build that started
+it. `endeavor update`, `serve` and `mcp` tell you when the running Julia
+came from another build. To switch, run `endeavor stop`, then start it again.
 
 ## Start it
 
@@ -297,21 +327,6 @@ recent notebook starts it and runs it.
   The stdio form gives each agent session one notebook, as the app does.
 - The idle stop is a flag, not a setting, and applies to the whole runtime.
 - On Windows, `serve` is untried.
-
-## Planned: an update command
-
-A command to update the binary, `endeavor update`, is planned and not
-built. Open questions:
-
-- Where it gets new versions: the Helpers release assets that
-  `scripts/helpers.sh` downloads, or a tagged release.
-- How it checks the download: a checksum, as `scripts/helpers.sh` does, or a
-  signature.
-- How it replaces its own binary while it runs.
-- What happens to a runtime already running from the older build. The app's
-  build check and its Restart Julia path handle this case today; `serve`
-  would need its own message.
-- How a `cargo install` user updates instead: probably `cargo install` again.
 
 ## What's in this repository
 

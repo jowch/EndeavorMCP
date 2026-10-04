@@ -227,12 +227,11 @@ package `endeavor-mcp`; it was `endeavor-remote` until the rename.
   so it doesn't start that server. `cargo install --git
   https://github.com/jowch/EndeavorMCP endeavor-mcp` builds it (tried from a
   local clone of the branch).
-- **Planned: `endeavor update`**. Open: where it
-  gets new versions (the Helpers release `scripts/helpers.sh` uses, or a
-  tagged release); how it checks the download (checksum or signature);
-  replacing its own binary while it runs; what happens to a runtime running
-  from the older build (the build check and Restart Julia cover the app's
-  case); how a `cargo install` user updates instead.
+- **`endeavor update`** replaces the binary with the newest Linux build on
+  the Helpers release (`LATEST` names its key), checked against the
+  release's SHA-256 file and renamed over the running binary. It leaves the
+  app's copies and cargo installs alone, and says when a running Julia came
+  from the older build (README, "Update it").
 
 ## To check
 
