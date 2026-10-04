@@ -49,12 +49,17 @@ Checked live on 2026-10-03:
   tools and no `notebook_guide`. The same `endeavor mcp --skills plugin`
   command, driven over stdio, made a notebook and ran a cell (`42`). No
   model turn was run, because the empty config isn't logged in.
+- The app sending its bundled macOS helper to a macOS server, with this Mac
+  as the server over `ssh localhost`. The app picked
+  `Resources/helpers/darwin-aarch64/endeavor`, the server's copy matched it
+  byte for byte, Julia started through it, and `list_notebooks` answered
+  over `/mcp`. Endeavor's ignored test
+  `remote::tests::a_real_server_gets_its_helper_and_runs_julia` repeats it.
 
 Not yet checked:
 
 - Codex and Gemini against `endeavor serve` and `endeavor mcp`. Their config
   lines in the README come from each tool's documentation.
-- The app sending the bundled macOS helper to a real macOS server.
 - An agent following the skills without the app. They mark which parts
   hold in the app and which without it, and `guide::STANDALONE` only names
   the setting; no agent session has run against that text yet.
