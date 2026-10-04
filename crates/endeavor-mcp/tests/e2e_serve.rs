@@ -282,6 +282,18 @@ fn serve_and_mcp_without_the_app() {
         let opened = listed.as_array().unwrap().iter().find(|nb| nb["path"] == json!(path)).cloned().unwrap();
         assert_eq!(opened["execution_allowed"], false, "safe preview: {opened}");
         assert_eq!(opened["this_session"], false, "the user's, from the browser: {opened}");
+
+        // What the pluto-session skill says of an open notebook the user names.
+        let id = opened["notebook_id"].clone();
+        let mut fresh = Agent::new(port, &token);
+        fresh.initialize();
+        let (failed, again) = fresh.call("open_notebook", json!({ "path": path }));
+        assert!(failed && again["error"] == "notebook_already_open", "it can't become the session's own: {again}");
+        let last = fresh.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        fresh.ok("read_cell", json!({ "notebook_id": id, "cell_id": last }));
+        fresh.ok("add_cell", json!({ "notebook_id": id, "code": "y = 1", "after_cell_id": last }));
+        let (failed, refused) = agent.call("add_cell", json!({ "notebook_id": id, "code": "y = 2", "after_cell_id": last }));
+        assert!(failed && refused["error"] == "one_notebook", "a session with its own notebook is refused: {refused}");
     });
 
     step("Ctrl-C stops Julia", || {

@@ -163,9 +163,10 @@ Why the MCP session id and not something else:
 
 Not done: a notebook the user already opened in the browser can't become an
 agent's notebook, because `open_notebook` on an open path is an error
-(`notebook_already_open`) and binds nothing. The standalone instructions
-(`guide::STANDALONE`) tell the agent it may still work in a notebook the user
-names.
+(`notebook_already_open`) and binds nothing. The pluto-session skill tells
+the agent, without the app, to work in such a notebook by its `notebook_id`
+when the user names it and the session has no notebook yet (the core holds an
+unbound session to nothing), and otherwise to suggest a new agent session.
 
 ## Approval
 

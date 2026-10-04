@@ -37,14 +37,19 @@ Reach for this skill when neither is present and you genuinely don't know which 
 
 Each agent session works on exactly one notebook. A session started from an existing notebook already has it. A session started as "New notebook" has none until you create one with `new_notebook`, and that becomes its notebook.
 
-- `list_notebooks` also lists other sessions' notebooks. Its `this_session` field is true only for this session's notebook. Never work in a notebook whose `this_session` is false.
+- `list_notebooks` also lists other sessions' notebooks. Its `this_session` field is true only for this session's notebook. Never work in a notebook whose `this_session` is false. (Without the app there is one exception, described below.)
 - If no notebook has `this_session` true and the user asks for anything that needs a notebook (code to run, a plot, an analysis), call `new_notebook` yourself right away. Don't ask the user to open or create a notebook, and don't ask them to confirm first. In the app, the notebook pane switches to the new notebook by itself.
 - Once the session has its notebook, `open_notebook` and `new_notebook` refuse any other path with a `one_notebook` error, and edits or runs on another open notebook are refused the same way.
 - You can still read any other notebook as a plain `.jl` file (for example with `Read`, or `read_file` on a server) to reuse its code or check what it did.
 - If the user wants to work on a different notebook, tell them to start a new session with it. Don't try to work around the refusal.
 - A notebook holds a whole line of analysis on a dataset. When the user asks for a new analysis step, add a new section to the current notebook (a markdown heading cell, then the cells for that step) instead of suggesting a new notebook.
 
-Without the app, an agent connected over HTTP has no session of its own: `this_session` is false for every notebook, and nothing holds it to one notebook. So without the app, if no notebook has `this_session` true, work in the notebook the user names, or create one with `new_notebook`.
+Without the app, each agent connection is its own session: one run of `endeavor mcp`, or, over HTTP, the MCP session your client starts when it connects. The session has no notebook until you create one with `new_notebook` or open one with `open_notebook`; the first one becomes its notebook, and `list_notebooks` shows it with `this_session` true. The rules above then apply as written.
+
+Without the app, a notebook that is already open can't become this session's notebook. That covers a notebook the user opened on Pluto's page in the browser, and one another session opened. `list_notebooks` shows it with `this_session` false, and `open_notebook` on its path fails with `notebook_already_open`. If the user asks you to work in such a notebook:
+
+- If this session has no notebook yet, work in it, using the `notebook_id` that `list_notebooks` shows. This is the exception to the `this_session` rule above. It still shows `this_session` false.
+- If this session already has its own notebook, edits and runs in the other one are refused with `one_notebook`. Tell the user, and suggest they start a new agent session for that notebook.
 
 ## Sessions on a server
 
@@ -86,7 +91,7 @@ A notebook nobody has used for a while (no tool calls, edits, or running cells; 
 |---------|-----|
 | `open_notebook` without a user-specified path | Never guess a path or scan the filesystem for a notebook to open |
 | Ask the user to open or create a notebook when the session has none | `new_notebook` yourself |
-| Edit a notebook that `list_notebooks` shows with `this_session` false | It's another session's; create this session's own with `new_notebook` |
+| Edit a notebook that `list_notebooks` shows with `this_session` false | It's another session's; create this session's own with `new_notebook`. Without the app, the exception is a notebook the user names while this session has none (see "One notebook per session") |
 | Hand-write a new `.jl` notebook file | `new_notebook()` — let Pluto write it |
 | Open or create a second notebook in the same session | Add a new section to the current notebook, read the other file with `Read`, or suggest a new session for it |
 | Re-`open_notebook` a path that's already open | `list_notebooks` first; if it's there, use its `notebook_id` (re-opening errors) |
