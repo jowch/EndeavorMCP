@@ -3,6 +3,10 @@
 //! and `mcp` work from the one file (see `standalone`) and Endeavor takes both
 //! from this crate (`embedded`). Each one's version names the folder it's
 //! unpacked to: the package version and a hash of the files.
+//!
+//! BUILD_VERSION names the whole build the same way, hashing the Rust source
+//! (this crate's and `wire`'s) along with both folders, since the package
+//! version alone doesn't change between builds.
 
 #[path = "../wire/src/tree.rs"]
 mod tree;
@@ -12,6 +16,14 @@ use std::path::PathBuf;
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let mut out = String::new();
+    let mut build = tree::Fnv::default();
+    for (folder, prefix) in [("crates/endeavor-mcp/src", "src"), ("crates/wire/src", "wire"), ("runtime", "runtime"), ("plugin", "plugin")] {
+        let dir = manifest.join("../..").join(folder).canonicalize().unwrap_or_else(|e| panic!("{folder}: {e}"));
+        println!("cargo:rerun-if-changed={}", dir.display());
+        let files = tree::files(&dir, prefix).unwrap();
+        build.add_files(files.iter().map(|(path, contents, _)| (path.as_str(), contents.as_slice())));
+    }
+    out.push_str(&format!("pub const BUILD_VERSION: &str = \"{}-{:016x}\";\n", std::env::var("CARGO_PKG_VERSION").unwrap(), build.0));
     for (name, folder) in [("RUNTIME", "runtime"), ("PLUGIN", "plugin")] {
         let dir = manifest.join("../..").join(folder).canonicalize().unwrap_or_else(|e| panic!("{folder}/ next to crates/: {e}"));
         println!("cargo:rerun-if-changed={}", dir.display());

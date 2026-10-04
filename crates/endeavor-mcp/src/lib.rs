@@ -25,6 +25,7 @@ mod notebooks;
 mod results;
 mod slurm;
 mod standalone;
+mod update;
 #[cfg(windows)]
 mod winproc;
 
@@ -67,7 +68,8 @@ const USAGE: &str = "usage: endeavor connect --state-dir DIR (--julia JULIA|auto
        endeavor node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
        endeavor core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
        endeavor askpass PROMPT
-       endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)";
+       endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)
+       endeavor --version";
 const LOG_TAIL: usize = 40;
 
 struct Args {
@@ -165,6 +167,7 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some("node-start") => slurm::node_start_main(&argv[1..]),
         Some("core") => core::main(&argv[1..]),
         Some("serve" | "mcp" | "stop") => standalone::main(&argv),
+        Some("--version" | "-V" | "version") => update::print_version(),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
         Some(prompt) if prompt != "connect" && std::env::var_os(wire::askpass::SOCKET_ENV).is_some() => askpass::run(prompt),
         _ => {}
