@@ -70,15 +70,19 @@ Not yet checked:
 - The message when `serve` or `mcp` reuse a Julia from another build, with a
   real Julia (unit-tested only).
 - Codex and Gemini against `endeavor serve` and `endeavor mcp`. Their config
-  lines in the README come from each tool's documentation.
+  lines in the README come from each tool's documentation. Over HTTP, that
+  each sends back the `Mcp-Session-Id` from `initialize`, which gives it a
+  notebook of its own. The spec requires it; no client is checked live yet,
+  Claude Code included.
 - An agent following the skills without the app. They mark which parts
   hold in the app and which without it, and `guide::STANDALONE` only names
   the setting; no agent session has run against that text yet.
 
 Known gaps:
 
-- Over plain HTTP (no `X-Endeavor-Session`), `this_session` is false for
-  every notebook.
+- A notebook already open (from Pluto's page in the browser, or another
+  session) can't become an agent's own: `open_notebook` on it is an error and
+  binds nothing ([endeavor-mcp.md](endeavor-mcp.md#session-identity)).
 - `serve` on Windows stops Julia on Ctrl-C and when its console closes, but
   only `cargo check` and clippy for the Windows target have seen that code.
 - Unpacking a new version removes older folders that no runtime holds and
