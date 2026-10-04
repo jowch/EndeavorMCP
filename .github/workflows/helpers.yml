@@ -21,6 +21,11 @@ on:
       - scripts/helpers.sh
   workflow_dispatch:
 
+# One run at a time, in push order, so LATEST ends up naming the newest push.
+concurrency:
+  group: helpers
+  cancel-in-progress: false
+
 jobs:
   build:
     name: ${{ matrix.platform }}
