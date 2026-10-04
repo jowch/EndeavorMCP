@@ -5,9 +5,9 @@ Curated from Pluto.jl source and docs. Pluto is **not** a file you patch — it 
 ## Core facts
 
 - Each **cell** is one node in a dependency graph; cells share one notebook module scope.
-- Pluto owns parsing, dependency analysis, execution, persistence, and pane sync.
+- Pluto owns parsing, dependency analysis, execution, persistence, and syncing the user's view of the notebook.
 - Notebooks save as `.jl` files, but **runtime state is in-memory** — re-read before edit.
-- The notebook tools write **server state**; the notebook pane has its own in-place editing (last-write-wins against a concurrent edit to the same cell).
+- The notebook tools write **server state**; the user's view of the notebook (the app's pane, or Pluto's page in a browser) has its own in-place editing (last-write-wins against a concurrent edit to the same cell).
 - **No hidden workspace state:** Pluto deletes/redefines globals on reactive runs (`bump_workspace_module`).
 - **Visual order ≠ execution order** — use `read_notebook_code` (execution order) or dependency graph.
 - **Fold = UI presentation** (`code_folded`, file markers `╟─` folded vs `╠═` open) — persisted metadata, not an execution gate; prefer `add_cell(..., folded=true)` for prose.
@@ -18,11 +18,11 @@ Editing a cell re-runs that cell and all **downstream** dependents in topologica
 
 ## Agent anti-patterns (Pluto warns about these)
 
-1. Patching `.jl` files directly — bypasses dependency analysis and pane sync
+1. Patching `.jl` files directly — bypasses dependency analysis and syncing the user's view
 2. Assuming visual `cell_order` = execution order
 3. Defining the same global in multiple cells — `MultipleDefinitionsError`
 4. Expecting Jupyter-style mutable kernel state — Pluto deletes stale globals
-5. Leaving safe preview on when the user needs live outputs — staged edits won't execute until the user clicks "Run notebook code" in the pane, or you call `allow_execution` because they asked
+5. Leaving safe preview on when the user needs live outputs — staged edits won't execute until the user clicks "Run notebook code" in the notebook, or you call `allow_execution` because they asked
 
 ## Pluto source citations
 

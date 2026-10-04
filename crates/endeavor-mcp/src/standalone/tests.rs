@@ -303,7 +303,8 @@ fn without_the_plugin_the_handshake_points_to_the_guide() {
     relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
     let lines: Vec<Value> = out.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(lines[0]["result"]["instructions"], format!("{}\n\n{}", crate::guide::INSTRUCTIONS, crate::guide::STANDALONE));
+    let instructions = lines[0]["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.starts_with(&format!("{}\n\nBefore your first notebook tool call in a session, call `notebook_guide` once", crate::guide::STANDALONE)), "{instructions}");
     assert_eq!(lines[1]["result"]["tools"][0]["name"], "notebook_guide");
     assert!(!lines[1]["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "run_shell"), "an agent on this machine has its own shell");
 }

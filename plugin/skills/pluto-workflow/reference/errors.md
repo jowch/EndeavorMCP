@@ -4,7 +4,7 @@
 
 | Error | Meaning | Action |
 |-------|---------|--------|
-| `pluto_not_running` | Endeavor's Pluto session isn't up | Unusual in normal use — Endeavor starts Pluto with the app; tell the user something's wrong rather than calling lifecycle tools yourself |
+| `pluto_not_running` | Endeavor's Pluto session isn't up | Unusual in normal use — Endeavor starts Pluto with the app, or with `endeavor serve` / `endeavor mcp` without it; tell the user something's wrong rather than calling lifecycle tools yourself |
 | `notebook_not_found` | Unknown or stale `notebook_id` | Confirm the notebook/path with the user; `list_notebooks` to see what's open |
 | `one_notebook` | This session already works on another notebook; the call tried to open, create, edit, or run a different one | Keep working in the session's notebook. Read the other notebook as a plain `.jl` file if you need its code. If the user wants to work on it, suggest they start a new session with it |
 | `notebook_already_open` (from `open_notebook`) | That path is already open in the session; the message gives its `notebook_id` | Use that `notebook_id` instead of reopening it |
@@ -16,7 +16,7 @@ If one of these fires before you've established any `notebook_id`, go to **pluto
 | Error | Meaning | Action |
 |-------|---------|--------|
 | `read_required` | You haven't `read_cell` / `read_notebook_code`'d this cell yet | Read it, then retry the edit |
-| `stale_read` | The cell changed since your last read (the user edited it live in the pane, or another call touched it) | `read_cell` again, then retry |
+| `stale_read` | The cell changed since your last read (the user edited it live in the notebook, or another call touched it) | `read_cell` again, then retry |
 
 `edit_cells` is all-or-nothing on this guard across the whole batch.
 
@@ -42,8 +42,8 @@ Cells that don't depend on the other session's changes run normally.
 | `error.fixes` | `wrap_begin_end` first, then `split_cells` |
 | `pending_run` | Cells staged and awaiting execution |
 | `execution_blocked` warning | Notebook is in safe preview — the edit is staged, it just hasn't run yet |
-| `already_ran` warning (from `execute_cell` / `submit_changes`) | While your run waited for approval, the user's own run reached the cells you changed, so they already ran with your code; they weren't run again. The receipt's outputs are from that run |
-| `not_approved` warning (from `edit_cell` / `add_cell` with `run_after`) | The user chose not to run it yet. Your edit was made and staged, not run. Don't run it again on your own |
+| `already_ran` warning (from `execute_cell` / `submit_changes`, in the app) | While your run waited for approval, the user's own run reached the cells you changed, so they already ran with your code; they weren't run again. The receipt's outputs are from that run |
+| `not_approved` warning (from `edit_cell` / `add_cell` with `run_after`, in the app) | The user chose not to run it yet. Your edit was made and staged, not run. Don't run it again on your own |
 
 ## Error kinds
 
@@ -53,6 +53,8 @@ Cells that don't depend on the other session's changes run normally.
 | `runtime` | Read `error.msg`, fix the code, re-submit |
 
 ## Refused runs and changes
+
+These come from the Endeavor app asking the user before a run. Without the app, nothing in the notebook tools asks, so they don't occur.
 
 | `error` | Meaning | Action |
 |---------|---------|--------|
@@ -68,5 +70,5 @@ Cells that don't depend on the other session's changes run normally.
 | Edit without `read_cell` | `read_cell` first |
 | Ignore `read_required` / `stale_read` | Re-read, then retry |
 | Patch the `.jl` file on disk directly | Notebook tools only — never hand-edit the notebook file |
-| Leave safe preview on when outputs are needed | User clicks "Run notebook code" in the pane, or `allow_execution` when they ask you to |
+| Leave safe preview on when outputs are needed | User clicks "Run notebook code" at the top of the notebook, or `allow_execution` when they ask you to |
 | Claim `submit_changes` ran cells while `execution_blocked` is set | Wait for safe preview to be exited, then poll `read_cell` for outputs |

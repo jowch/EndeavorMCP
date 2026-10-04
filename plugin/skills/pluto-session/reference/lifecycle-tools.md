@@ -13,4 +13,4 @@ Tools relevant to session orientation and opening/creating notebooks in Endeavor
 
 Each session works on one notebook. After the session has it, `open_notebook` and `new_notebook` refuse other paths with a `one_notebook` error; read other notebooks as plain files instead.
 
-`open_notebook` and `new_notebook` both switch the notebook pane to that notebook automatically once they succeed — there is no separate "show it to the user" step, and no landing page to navigate.
+In the app, `open_notebook` and `new_notebook` both switch the notebook pane to that notebook automatically once they succeed — there is no separate "show it to the user" step, and no landing page to navigate. Without the app, `open_notebook`, `new_notebook` and `pluto_session_status` return `browser_url`: give it to the user so they can watch the notebook in their browser.

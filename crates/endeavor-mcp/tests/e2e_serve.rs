@@ -325,9 +325,7 @@ fn serve_and_mcp_without_the_app() {
 }
 
 fn said_standalone() -> &'static str {
-    "Here the notebooks run without the Endeavor app: the user watches them in a web browser. \
-There is no notebook pane, no approval card and no annotation mode, so skip what the guide says about those; \
-your own permission prompts are how the user approves runs. \
-`new_notebook`, `open_notebook` and `pluto_session_status` return `browser_url`: give it to the user so they can watch the notebook. \
-If no notebook in `list_notebooks` has `this_session` true, work in the notebook the user names or one you create."
+    "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
+the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
+Where Endeavor's notes on these tools say \"in the app\" or \"without the app\", follow the parts for working without the app."
 }

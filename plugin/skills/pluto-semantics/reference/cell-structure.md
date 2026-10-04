@@ -56,7 +56,7 @@ Teaching notebooks use micro-cells and bare echo cells after `@bind`. **Agents d
 | Add control | New `widget_cell` |
 | Multi-step plot/setup | `compute_cell` with `begin`/`end` |
 | Local temps | `let`/`end` |
-| Add section / prose `md` | `add_cell(..., folded=true)` (or `fold_cell` after) so the notebook pane shows the rendered output only |
+| Add section / prose `md` | `add_cell(..., folded=true)` (or `fold_cell` after) so the notebook shows the rendered output only |
 | `pluto_multi_expression` | [grammar.md](grammar.md) + ex. 8 |
 | Dependency order unclear | `read_notebook_code` |
 

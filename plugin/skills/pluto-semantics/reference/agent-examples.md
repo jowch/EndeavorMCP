@@ -191,7 +191,7 @@ end
 | Bare echo cell (`x` alone after `@bind x`) | Pedagogy only — merge into compute or drop (**not** Pluto `code_folded` / `fold_cell`) |
 | `plot!()` mutating a plot from another cell | Stale/duplicate series — keep chain in one `begin` |
 | Code after `@bind` in same cell (unwrapped) | Parse error — `@bind` must return |
-| Leaving prose `md` cells unfolded | The notebook pane shows raw source instead of rendered text; use `add_cell(..., folded=true)` or `fold_cell` |
+| Leaving prose `md` cells unfolded | The notebook shows raw source instead of rendered text; use `add_cell(..., folded=true)` or `fold_cell` |
 
 ---
 

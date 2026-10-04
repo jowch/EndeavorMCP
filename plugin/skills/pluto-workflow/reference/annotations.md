@@ -1,6 +1,6 @@
 # Annotation mode
 
-The user can put the notebook pane into annotation mode, click one or more cells, and attach a comment. No browser tool or DOM resolution is involved on the agent's side — the app resolves the click to cell UUIDs itself and hands you plain resource links.
+Annotation mode exists only in the Endeavor app. The user can put the notebook pane into annotation mode, click one or more cells, and attach a comment. No browser tool or DOM resolution is involved on the agent's side — the app resolves the click to cell UUIDs itself and hands you plain resource links.
 
 ## What the prompt looks like
 

@@ -10,7 +10,7 @@ There are exactly two ways out:
 
 | Path | Who does it | When |
 |------|-------------|------|
-| Click "Run notebook code" in the notebook pane | **The user** | The default path — always available, no agent action needed |
+| Click "Run notebook code" at the top of the notebook (the notebook pane in the app, or Pluto's page in the browser without it) | **The user** | The default path — always available, no agent action needed |
 | `allow_execution(notebook_id=…)` | **The agent** | Only when the user explicitly asks you to run the notebook or cells |
 
 `allow_execution` defaults to `run_notebook=true` (queues one non-blocking full run). Pass `run_notebook=false` to exit the gate without a full run — useful when you only need your own staged cells to run: exit with `run_notebook=false`, then `submit_changes(wait_for_completion=false)` / `execute_cell` for those cells. Each such run also runs the cells it depends on that have never run (the receipt's `also_ran::` warning names them).
@@ -25,4 +25,4 @@ Don't claim outputs, plots, or widgets are live until safe preview has actually 
 
 > This notebook is in safe preview — click "Run notebook code" above to see live output, or tell me to run it.
 
-Only call `allow_execution` yourself when the user asks you to run something; otherwise leave the click in the pane to them.
+Only call `allow_execution` yourself when the user asks you to run something; otherwise leave the click to them.

@@ -25,27 +25,27 @@ const FILES: [(&str, &str); 14] = [
     ("pluto-semantics/reference/reactivity.md", include_str!("../../../plugin/skills/pluto-semantics/reference/reactivity.md")),
 ];
 
-/// The server's MCP `instructions`.
-pub const INSTRUCTIONS: &str = "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat. \
-Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
+/// Points an agent without the plugin's skills to the guide.
+const READ_GUIDE: &str = "Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
 how to find this session's notebook, the read-edit-run loop, when the user must approve a run, and how to lay out cells.";
 
-/// What a runtime without the app (`endeavor serve` or `mcp`) adds:
-/// the guide describes the app, and the agent needs to know where it differs.
-pub const STANDALONE: &str = "Here the notebooks run without the Endeavor app: the user watches them in a web browser. \
-There is no notebook pane, no approval card and no annotation mode, so skip what the guide says about those; \
-your own permission prompts are how the user approves runs. \
-`new_notebook`, `open_notebook` and `pluto_session_status` return `browser_url`: give it to the user so they can watch the notebook. \
-If no notebook in `list_notebooks` has `this_session` true, work in the notebook the user names or one you create.";
+/// What a runtime with the app tells an agent without the skills.
+const APP: &str = "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat.";
+
+/// What a runtime without the app (`endeavor serve` or `mcp`) tells every
+/// agent: the skills say where that setting differs, and this names it.
+pub const STANDALONE: &str = "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
+the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
+Where Endeavor's notes on these tools say \"in the app\" or \"without the app\", follow the parts for working without the app.";
 
 /// The server's MCP `instructions` for an agent with the plugin's skills or
 /// without (`has_skills`), on a runtime with the app or without (`standalone`).
 pub fn instructions(standalone: bool, has_skills: bool) -> Option<String> {
     match (standalone, has_skills) {
         (false, true) => None,
-        (false, false) => Some(INSTRUCTIONS.to_owned()),
+        (false, false) => Some(format!("{APP} {READ_GUIDE}")),
         (true, true) => Some(STANDALONE.to_owned()),
-        (true, false) => Some(format!("{INSTRUCTIONS}\n\n{STANDALONE}")),
+        (true, false) => Some(format!("{STANDALONE}\n\n{READ_GUIDE}")),
     }
 }
 

@@ -772,7 +772,12 @@ mod tests {
             serde_json::from_str::<Value>(&reply).unwrap()["result"].clone()
         };
         let names = |result: Value| result["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(ask("initialize", false)["instructions"], guide::INSTRUCTIONS);
+        assert_eq!(
+            ask("initialize", false)["instructions"],
+            "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat. \
+Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
+how to find this session's notebook, the read-edit-run loop, when the user must approve a run, and how to lay out cells."
+        );
         assert_eq!(names(ask("tools/list", false))[0], "notebook_guide");
         assert_eq!(ask("tools/list", false)["tools"][0]["annotations"]["readOnlyHint"], true);
 
