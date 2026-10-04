@@ -362,6 +362,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         let port = state.port.ok_or("The Julia running here was started by an older version of Endeavor. Stop it with `endeavor stop`, then try again.")?;
         return Ok(Up { state, port, started: None });
     }
+    let _ = std::fs::remove_file(dir.join(STOPPED));
     args.runtime = unpack_runtime(&options.cache)?;
     let (julia, version) = julia::find(&options.julia, &|line| progress(&line))?;
     progress(&format!("Starting Julia {version} ({julia})"));
@@ -504,6 +505,10 @@ fn recorded_folder(dir: &Path) -> Option<String> {
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
+/// In the state folder: the pid of the runtime `endeavor stop` ended, so a
+/// `serve` watching it tells that from a crash.
+const STOPPED: &str = "stopped";
+
 /// Take Ctrl-C, SIGTERM and SIGHUP on a thread of their own, as a request to
 /// stop. Called before any other thread starts, so they all inherit the mask.
 #[cfg(unix)]
@@ -596,6 +601,10 @@ fn serve(options: Options) -> ! {
     let _ = io::stdout().flush();
     while !stopping() {
         if !crate::pid_alive(up.state.pid, up.state.started) {
+            if std::fs::read_to_string(dir.join(STOPPED)).is_ok_and(|pid| pid == up.state.pid.to_string()) {
+                eprintln!("Julia was stopped with `endeavor stop`.");
+                std::process::exit(0);
+            }
             eprintln!("Julia stopped. Its log is {}.", dir.join("runtime.log").display());
             std::process::exit(1);
         }
@@ -628,6 +637,7 @@ fn stop(dir: &Path) -> ! {
         println!("No Julia is running from {}.", dir.display());
         std::process::exit(0);
     }
+    let _ = std::fs::write(dir.join(STOPPED), state.pid.to_string());
     let (events, _) = mpsc::channel();
     Runtime::recorded(&state, dir, &events).stop(Some(&state));
     println!("Stopped Julia (pid {}).", state.pid);
