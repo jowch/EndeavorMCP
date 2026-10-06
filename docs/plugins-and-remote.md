@@ -21,8 +21,8 @@ untested._
   server and the wire protocol over it. The server half is in this
   repository already. The client half moves here from the app.
 - A runtime is shared: the app and the plugin, from any of your computers,
-  attach to the same runtime on a server. A notebook has one agent session at
-  a time, and another session takes it over on purpose.
+  attach to the same runtime on a server. Several sessions can work in one
+  notebook, as in the app today.
 - First version: login with ssh keys only, and the binary installed with
   `curl` from the GitHub release.
 
@@ -39,7 +39,7 @@ untested._
 | The list of machines | One file the binary owns, in its own folder. The app reads and writes it there |
 | Jobs on a cluster | One at a time for each user. A second client attaches to the job as the first one asked for it, and is told its size |
 | Several clients on one runtime | Allowed. No client makes another exit |
-| Several agent sessions on one notebook | One owner at a time, with a deliberate takeover |
+| Several agent sessions on one notebook | Allowed, as in the app today. No owner and no takeover |
 | Windows | A target soon, so nothing macOS-only in the design |
 
 ## Three roles
@@ -183,8 +183,8 @@ it with the relay.
 - It uses the shared state folder, on servers and on your computer, and one
   package folder locally.
 - Quitting stops the local runtime only when nobody else uses it.
-- It shows "taken over" for a notebook where it shows "In use from another
-  connection" for a server.
+- It no longer hears "In use from another connection": nothing makes it
+  exit. It can show a notebook's other sessions instead.
 - Its rule for a runtime from another build compares builds for equality,
   so it would hold back runs in Ask to run whenever the plugin's build
   started the runtime. It should ask what the runtime can do.
@@ -195,66 +195,38 @@ it with the relay.
 
 Read from the code, not run.
 
-## Who works in a notebook
+## Several sessions in one notebook
 
-Not built. Today the core binds each session to the first notebook it opens
-and refuses a bound session on any other (`one_notebook`). Opening a
-notebook that is already open is an error, a session with no notebook is
-held to nothing, and a notebook whose session ended can't be picked up
-([status.md](status.md), "Known gaps").
+The app already lets several of its sessions work in one notebook, and the
+core guards it cell by cell: a session must read a cell before it edits it,
+and a cell another session changed since needs a fresh read (`stale_read`).
+The same holds between the app and the plugin, and between computers. An
+earlier draft gave each notebook one owner with a takeover; it was dropped
+as more than the problem needs, since an agent acts only when you ask it to.
 
-**The rule.** Opening a notebook makes the session its owner. If the
-current owner made a call in the last 5 minutes, the open fails unless it
-says to take over.
+So moving between computers needs nothing special. You close the laptop
+with a notebook open in the app, and at the office an agent in Claude Code
+opens the same notebook and works in it. You open the laptop again: the app
+reconnects and shows the live page, and both sessions can go on.
 
-- The owner edits and runs. Any session can list and read, and a session
-  must own a notebook before it changes one.
-- The owner's record has a label ("Claude Code on jc-workstation", "the
-  Endeavor app on jc-laptop") and when it was last active.
-- A quiet owner is replaced without a question. That is how a new agent
-  session picks up yesterday's notebook, and how you move to another
-  computer.
-- Taking over from an active owner needs your intent, not the other
-  session's consent: it is one person's runtime. In the plugin it is an
-  argument to `open_notebook`, shown in the harness's permission prompt. In
-  the app it is a dialog.
-- The notebook's state, variables and running cells stay as they are. It is
-  the same notebook process.
-- You are not locked. Pluto's page stays open to you in any browser.
+Not built:
 
-**For the session that lost the notebook:**
+- **Opening a notebook that is already open joins it.** Today
+  `open_notebook` on an open path is an error (`notebook_already_open`) and
+  the session gets no notebook ([status.md](status.md), "Known gaps"). It
+  should bind the session to the open notebook and return it. That is how a
+  new agent session picks up yesterday's notebook.
+- **Who else is there.** The core records each session's last call and a
+  label its client sends ("Claude Code on jc-workstation"). `list_notebooks`
+  and `pluto_session_status` show a notebook's other sessions and how lately
+  each was active, so an agent can say that someone else is working there.
 
-- A call in progress finishes and returns as usual. A running cell isn't
-  cancelled.
-- Its next edit or run fails: "This notebook was taken over by the Endeavor
-  app on jc-laptop at 14:02. Stop, and tell the user."
-- It can still read.
-- It learns at its next call. The front can't send the agent a message.
-
-**Reconnecting never takes over.** The app reopens its notebooks when its
-connection comes back. If another session owns one by then, the app shows
-the live page with "Claude Code on jc-workstation is working in this
-notebook. Take over here?".
-
-Example: you close the laptop with a notebook open in the app, and at the
-office an agent in Claude Code opens it. The app's session has been quiet,
-so the agent owns it. You open the laptop while the agent is still working:
-the app reconnects, shows the page and the question, and takes nothing. If
-you take over, the agent's next edit fails with the message above.
-
-| Case | What happens |
-|---|---|
-| Two agent sessions on one computer open the same notebook | The second is told it is in use and how lately; the agent asks you |
-| A cell the old owner started still runs at takeover | The new owner sees it running and may interrupt it |
-| The old owner had edits prepared and not applied | Dropped. The read-before-edit check makes it read again if it comes back |
-| A run waited for your answer in the app | Cancelled, as the core does today for a call that goes away |
-| You edit in the browser while an agent owns the notebook | Allowed, as today |
-| The runtime restarts or the job ends | Ownership ends with it. The files are saved, and the next to open one owns it |
+Each session still works in one notebook (`one_notebook`), as today.
 
 **Not covered: one file open in two runtimes**, such as a notebook on a
 shared disk opened on two servers, or on your computer and on a server.
-Each runtime knows only its own owners, and each saves over the other.
-Don't do this. One state folder per server removes the common case.
+Each runtime saves over the other. Don't do this. One state folder per
+machine removes the common case.
 
 ## What is reused
 
@@ -317,9 +289,9 @@ needs a new job, the result says so and the agent asks you.
 | `use_machine` | Put this session on a machine (or back on this computer), with a folder and, on a cluster, resources. Attaches to the runtime there, starts it, or submits the job |
 | `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Says first who else was active |
 
-`open_notebook` gains the take-over argument. `list_notebooks` and
-`pluto_session_status` gain each notebook's owner and when it was last
-active, and the machine, the job and its end time.
+`open_notebook` joins a notebook that is already open. `list_notebooks` and
+`pluto_session_status` gain a notebook's other sessions and when each was
+last active, and the machine, the job and its end time.
 
 `list_folder`, `read_file` and `run_shell` run on the server. The runtime
 lists and allows them only for a session that names its server, so the
@@ -329,9 +301,8 @@ front lists them always and they refuse on this computer, as built.
 
 - Don't add a machine, submit a job, switch machines or stop the runtime unless
   the user asked.
-- Take a notebook over from an active session only when the user asks in
-  this conversation. When told yours was taken over, stop and say so; don't
-  take it back.
+- When another session was active in your notebook lately, say so before
+  you change it.
 - Never ask for a password or passphrase, and never run `ssh` with one.
 - On a server, files are there: use `list_folder`, `read_file` and
   `run_shell`. A project checked out on both machines has the same paths in
@@ -446,14 +417,14 @@ folder, and that each loads the skills.
 
 1. Move the client code here as a library. Test it against a server with key
    login.
-2. Helpers attach without making each other exit. Notebook owners and
-   takeover in the core.
+2. Helpers attach without making each other exit (built). Opening an open
+   notebook joins it, and the core shows a notebook's other sessions.
 3. The link process and the machine tools in `mcp`.
 4. The Slurm path through the tools.
 5. macOS and Windows builds, the install scripts, the build's release key.
 6. Codex and Antigravity plugin folders.
-7. The app: the moved code, the shared state folder, takeover in its
-   interface, a version on its calls to the runtime.
+7. The app: the moved code, the shared state folder, a version on its calls
+   to the runtime.
 
 ## Not in the first version
 
