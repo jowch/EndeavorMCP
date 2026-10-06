@@ -424,17 +424,24 @@ impl Attached {
     /// a helper that is asked for a runtime meanwhile starts a new one after this
     /// one is gone, and never attaches to one that is on its way out. Without
     /// the lock within `limit` the runtime isn't stopped: it comes back with
-    /// why, still routed to. The streams are cut only once the lock is held.
+    /// why, still routed to. The streams are cut only once the lock is held,
+    /// and restored if a process is still alive after its stop.
     fn stop(self, args: &Args, routes: &Routes, rx: &mpsc::Receiver<Event>, limit: Duration, said: &mut Said) -> Result<(), Box<(Attached, String)>> {
         let _starting = match lock_stop(&args.state_dir, rx, limit, said) {
             Ok(lock) => lock,
             Err(why) => return Err(Box::new((self, why))),
         };
         *routes.write().unwrap() = Route::None;
-        match self.how {
-            How::Process(runtime, _) => stop_marked(&args.state_dir, &self.state, &runtime, stopped::How::Connection),
-            How::Slurm(job) => {
+        match &self.how {
+            How::Process(runtime, _) => {
+                if !stop_marked(&args.state_dir, &self.state, runtime, stopped::How::Connection) {
+                    *routes.write().unwrap() = self.route();
+                    return Err(Box::new((self, STILL_RUNNING.into())));
+                }
+            }
+            How::Slurm(_) => {
                 stopped::mark(&args.state_dir, stopped::Of::Runtime(self.state.pid), stopped::How::Connection);
+                let How::Slurm(job) = self.how else { unreachable!() };
                 job.stop(rx, said);
             }
         }
@@ -442,30 +449,35 @@ impl Attached {
     }
 }
 
+/// Why a stop that left the process alive is refused.
+const STILL_RUNNING: &str = "Julia was not stopped: it is still running.";
+
 /// Stop `runtime`, leaving a note for the other clients of how it was stopped
-/// (see `stopped`), and taking the note back if it is still alive.
-fn stop_marked(dir: &Path, state: &State, runtime: &Runtime, how: stopped::How) {
+/// (see `stopped`), and taking the note back if it is still alive. Whether it
+/// is gone.
+fn stop_marked(dir: &Path, state: &State, runtime: &Runtime, how: stopped::How) -> bool {
     let of = stopped::Of::Runtime(state.pid);
     stopped::mark(dir, of, how);
     runtime.stop(Some(state));
-    if pid_alive(state.pid, state.started) {
+    let gone = !pid_alive(state.pid, state.started);
+    if !gone {
         stopped::unmark(dir, of);
     }
-}
-
-/// How the client left while a stop was under way.
-enum Parting {
-    Detach,
-    Eof,
+    gone
 }
 
 /// What the client said while a stop was under way. The stop goes on whatever
 /// it says; the rest is done once the stop is over.
 #[derive(Default)]
 struct Said {
-    /// Further `Stop`s, each owed an answer of its own.
+    /// Further `Stop`s said before any `StartRuntime`, each owed the answer of
+    /// the stop under way.
     stops: u32,
-    parting: Option<Parting>,
+    /// A `StartRuntime` was said: a `Stop` after it is for the runtime it starts.
+    started: bool,
+    detached: bool,
+    /// The client's input ended; the main loop decides what that means.
+    eof: bool,
     /// Everything else, for the main loop to handle as if it had just arrived.
     later: Vec<Event>,
 }
@@ -473,16 +485,20 @@ struct Said {
 impl Said {
     fn note(&mut self, event: Event) {
         match event {
-            Event::App(ToHelper::Stop) => self.stops += 1,
-            Event::App(ToHelper::Detach) => self.parting = Some(Parting::Detach),
-            Event::Eof => drop(self.parting.get_or_insert(Parting::Eof)),
+            Event::App(ToHelper::Stop) if !self.started => self.stops += 1,
+            Event::App(ToHelper::StartRuntime { .. }) => {
+                self.started = true;
+                self.later.push(event);
+            }
+            Event::App(ToHelper::Detach) => self.detached = true,
+            Event::Eof => self.eof = true,
             // Answered as they arrive (relay_stdin).
             Event::App(ToHelper::Files { .. }) => {}
             event => self.later.push(event),
         }
     }
 
-    /// Answer the `Stop` that began the stop, and each one said since, once.
+    /// Answer the `Stop` that began the stop, and each one said before a start, once.
     fn answer(&self, mux: &Arc<Mux>, stopped: Result<(), String>) {
         let reply = stopped.map_or_else(|message| ToApp::NotStopped { message }, |()| ToApp::Stopped);
         for _ in 0..=self.stops {
@@ -492,21 +508,21 @@ impl Said {
 
     /// What is left for the main loop: what happened to the runtime first, so a
     /// start asked for meanwhile doesn't find a runtime that has since gone
-    /// attached.
+    /// attached; then what the app said, in the order it said it; then the end
+    /// of its input.
     fn later(mut self) -> Vec<Event> {
         self.later.sort_by_key(|event| matches!(event, Event::App(_)));
+        if self.eof {
+            self.later.push(Event::Eof);
+        }
         self.later
     }
 
-    /// Do what the client said about leaving.
+    /// Do what the client said about leaving, if it said to detach.
     fn part(&self, parts: &Parts) {
-        match self.parting {
-            Some(Parting::Detach) => {
-                parts.discard();
-                std::process::exit(0)
-            }
-            Some(Parting::Eof) => std::process::exit(0),
-            None => {}
+        if self.detached {
+            parts.discard();
+            std::process::exit(0)
         }
     }
 }
@@ -591,7 +607,11 @@ fn stop_recorded(args: &Args, rx: &mpsc::Receiver<Event>, events: &Sender<Event>
     let _starting = lock_stop(&args.state_dir, rx, standalone::stop_lock_limit(), said)?;
     match args.launcher {
         Launcher::Process => match existing(args) {
-            Ok(Some(state)) => stop_marked(&args.state_dir, &state, &Runtime::recorded(&state, &args.state_dir, events), stopped::How::Connection),
+            Ok(Some(state)) => {
+                if !stop_marked(&args.state_dir, &state, &Runtime::recorded(&state, &args.state_dir, events), stopped::How::Connection) {
+                    return Err(STILL_RUNNING.into());
+                }
+            }
             Ok(None) => {}
             Err(e) => return Err(format!("Julia was not stopped. {e}")),
         },
@@ -742,7 +762,10 @@ impl Runtime {
             self.exit.wait(Duration::from_secs(5));
         }
         stop_workers(self.pid);
-        remove_state(&self.state_dir, self.pid);
+        // A runtime that survived stays on record for the clients that can still reach it.
+        if !pid_alive(self.pid, None) {
+            remove_state(&self.state_dir, self.pid);
+        }
     }
 
     /// End the core, which ends its Job Object, and with it Julia and its workers.

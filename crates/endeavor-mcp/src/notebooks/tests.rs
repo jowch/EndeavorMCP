@@ -1297,6 +1297,32 @@ fn list_notebooks_says_which_other_sessions_work_in_each_notebook() {
 }
 
 #[test]
+fn a_call_that_finishes_after_its_session_ended_does_not_bind_or_show_it() {
+    let s = setup();
+    let paths = temp_notebooks("ended", 1);
+    s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.call("b", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.notebooks.end_session("a");
+    assert_eq!(s.notebooks.bound("a"), None);
+    assert!(!s.notebooks.state.lock().unwrap().seen.contains_key("a"));
+
+    // What was under way when it ended finishes: it opens the notebook, is bound by the app, makes a call.
+    s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.notebooks.bind("a", &paths[0]);
+    s.notebooks.issued("a", "Claude Code");
+    s.notebooks.note_call("a", Some("Claude Code"));
+    assert_eq!(s.notebooks.bound("a"), None);
+    assert!(!s.notebooks.state.lock().unwrap().seen.contains_key("a"));
+    let listed = s.call("b", "list_notebooks", json!({})).unwrap();
+    assert_eq!(listed[0]["other_sessions"], json!([]));
+
+    // The record of its end goes a week later, like a session's own.
+    s.seconds(8.0 * 24.0 * 3600.0);
+    s.notebooks.note_call("c", None);
+    assert!(s.notebooks.state.lock().unwrap().ended.is_empty());
+}
+
+#[test]
 fn pluto_session_status_lists_the_other_sessions_too() {
     let s = setup();
     let paths = temp_notebooks("status", 1);

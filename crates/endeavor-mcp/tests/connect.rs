@@ -1205,6 +1205,66 @@ fn a_start_asked_while_a_stop_waits_is_answered_after_the_stop_not_lost() {
 }
 
 #[test]
+fn a_stop_asked_after_a_start_that_waited_behind_a_stop_stops_that_start_not_the_first_stop() {
+    let dir = state_dir("stop-start-stop");
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let old = FakeRuntime::start(&dir, &this_host());
+    let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { reattached: true, .. }));
+    let held = hold_start_lock(&dir);
+    helper.send(ToHelper::Stop);
+    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::Stop);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(helper.control.try_recv().is_err() && old.alive());
+    drop(held);
+    assert_eq!(helper.next(), ToApp::Stopped, "the first Stop is answered alone");
+    let ToApp::Ready { pid, reattached, .. } = after_start(&helper) else { panic!("expected Ready") };
+    assert!(!reattached && pid != old.pid);
+    assert_eq!(helper.next(), ToApp::Stopped, "the last Stop stops the runtime the start made");
+    common::wait_for("the second runtime to end", || !common::pid_alive(pid as i32));
+    assert!(!dir.join("runtime.json").exists());
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn the_end_of_input_during_a_stop_that_fails_still_stops_the_runtime_with_quit_with_client() {
+    let dir = state_dir("stop-fails-eof");
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--any-node", "--quit-with-client"], &[("ENDEAVOR_STOP_LOCK_SECS", "1")]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    let held = hold_start_lock(&dir);
+    helper.send(ToHelper::Stop);
+    helper.stdin.0.lock().unwrap().take();
+    assert!(matches!(helper.next(), ToApp::NotStopped { .. }));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(runtime.alive() && helper.process.try_wait().unwrap().is_none(), "the helper waits for the lock to stop it");
+    drop(held);
+    helper.exits();
+    assert!(!runtime.alive(), "it was stopped as --quit-with-client says");
+}
+
+#[test]
+fn a_runtime_that_is_still_alive_after_the_stop_is_not_stopped_and_stays_attached() {
+    let dir = state_dir("wont-die");
+    // It ignores the shutdown call, and the signals leave a zombie that nobody reaps, which still counts as alive.
+    let runtime = FakeRuntime::slow_to_exit(&dir, "labbox3", Duration::from_secs(3600));
+    let mut helper = Helper::start(&dir, &["--any-node"]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    helper.send(ToHelper::Stop);
+    let ToApp::NotStopped { message } = helper.next_within(Duration::from_secs(60)) else { panic!("expected NotStopped") };
+    assert!(message.contains("still running"), "{message}");
+    assert!(dir.join("runtime.json").exists(), "it stays on record");
+    assert!(call(&helper).ends_with(CALL_REPLY_ENDS), "its route is back");
+    runtime.kill();
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
 fn a_start_asked_while_a_stop_waits_and_fails_finds_the_runtime_still_attached() {
     let dir = state_dir("stop-fails-then-start");
     let runtime = FakeRuntime::start(&dir, "labbox3");

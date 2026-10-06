@@ -164,7 +164,8 @@ the idle stop and a job's time limit end a runtime. `stop_machine` is for
 when you ask, such as to give a cluster node back. It first says which
 other sessions were active lately, and the clients still attached are told
 the runtime was stopped from another connection. The helper answers each
-stop with `Stopped` or `NotStopped` and why. A stop waits 20 s for
+stop with `Stopped` or `NotStopped` and why, and the client waits 60 s for
+that. A stop waits 20 s for
 `start.lock`, so it does not stop a runtime that another helper is still
 starting; it says so instead.
 

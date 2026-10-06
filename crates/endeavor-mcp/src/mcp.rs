@@ -241,6 +241,13 @@ impl Bridge {
                 self.notebooks.bind(&owner, &notebook);
                 eprintln!("[ Info: Session {owner} notebook: {}", if notebook.is_empty() { "(none)" } else { &notebook });
             }
+            "endeavor/end_session" => {
+                let owner = text("owner", "");
+                self.notebooks.end_session(&owner);
+                self.policies.lock().unwrap().remove(&owner);
+                self.folders.lock().unwrap().remove(&owner);
+                eprintln!("[ Info: Session {owner} ended");
+            }
             "endeavor/set_idle_limit" => {
                 let hours = match params.get("hours") {
                     Some(Value::Number(n)) => n.as_f64().unwrap_or(48.0),

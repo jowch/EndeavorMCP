@@ -298,6 +298,54 @@ fn a_quit_that_stops_ends_a_start_under_way() {
     assert_eq!(starting.join().unwrap().unwrap_err(), "Julia was stopped while it started.");
 }
 
+#[test]
+fn a_stop_from_another_thread_ends_a_start_under_way() {
+    let helper = Scripted::new();
+    let listener = Listener::start("lab").unwrap();
+    let starting = std::thread::spawn({
+        let (channel, listener) = (helper.channel.clone(), listener.clone());
+        move || channel.start_runtime(&listener, None, &mut |_| {}, |_| {})
+    });
+    helper.sent_has("StartRuntime");
+    let stopping = std::thread::spawn({
+        let channel = helper.channel.clone();
+        move || channel.stop()
+    });
+    helper.stops_sent(1);
+    helper.tell(&ToApp::Stopped);
+    assert_eq!(starting.join().unwrap().unwrap_err(), "Julia was stopped while it started.");
+    stopping.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_refusal_lets_the_runtime_be_watched_again_even_when_its_death_follows_at_once() {
+    let helper = Scripted::new();
+    let (noticed, heard) = mpsc::channel();
+    helper.started(&Listener::start("lab").unwrap(), move |notice| drop(noticed.send(notice)));
+    let stopping = std::thread::spawn({
+        let channel = helper.channel.clone();
+        move || channel.stop()
+    });
+    helper.stops_sent(1);
+    helper.tell(&ToApp::NotStopped { message: "busy".into() });
+    helper.tell(&ToApp::Died { status: "exit status: 1".into(), log_tail: Vec::new() });
+    assert_eq!(stopping.join().unwrap(), Err("busy".into()));
+    let notice = heard.recv_timeout(Duration::from_secs(5)).expect("the death is reported");
+    assert!(matches!(notice, Notice::Died(_)), "{notice:?}");
+}
+
+#[test]
+fn a_stop_that_gave_up_and_was_refused_later_leaves_the_runtime_watched() {
+    let helper = Scripted::new();
+    let (noticed, heard) = mpsc::channel();
+    helper.started(&Listener::start("lab").unwrap(), move |notice| drop(noticed.send(notice)));
+    assert!(helper.channel.stop().unwrap_err().contains("didn't answer"));
+    helper.tell(&ToApp::NotStopped { message: "busy".into() });
+    helper.tell(&ToApp::Died { status: "exit status: 1".into(), log_tail: Vec::new() });
+    let notice = heard.recv_timeout(Duration::from_secs(5)).expect("the death is reported");
+    assert!(matches!(notice, Notice::Died(_)), "{notice:?}");
+}
+
 /// What the listener says to an MCP call, which tells how it is away.
 fn says(listener: &Listener) -> String {
     let mut socket = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();

@@ -17,8 +17,9 @@ use wire::{Frame, ToApp, ToHelper};
 
 use super::listener::Listener;
 
-/// How long `stop` waits for the helper's answer.
-const STOP_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 30 });
+/// How long `stop` waits for the helper's answer: the helper waits up to 20 s
+/// for the start lock, then stopping takes up to 20 s more.
+const STOP_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 60 });
 
 /// A runtime the client is attached to, as its server's listener serves it.
 #[derive(Clone, Debug)]
@@ -69,14 +70,38 @@ pub struct Hello {
 enum Owed {
     /// A `stop` that is waiting for it.
     To(mpsc::Sender<ToApp>),
-    /// Whoever waits on the helper (`sink`): a start the `Stop` is to end.
-    Sink,
-    /// A `stop` that gave up waiting; the answer is dropped.
+    /// A `stop` that gave up waiting, or a quit that waits for none; the answer is dropped.
     Nobody,
 }
 
+/// A `Stop` that was sent and isn't answered yet.
+struct Pending {
+    number: u64,
+    owed: Owed,
+    /// The runtime's flag that keeps its watcher quiet, which the answer
+    /// `NotStopped` lowers: the runtime goes on, and so does its watcher. A
+    /// quit has none, since the client is leaving anyway.
+    leaving: Option<Arc<AtomicBool>>,
+}
+
+/// The `Stop`s sent whose answer hasn't come, and where a start stands.
+#[derive(Default)]
+struct Stops {
+    /// Oldest first. The helper answers each `Stop` with one `Stopped` or
+    /// `NotStopped`, in the order it got them, so an answer belongs to the
+    /// first entry.
+    queue: VecDeque<Pending>,
+    /// The number the next `Stop` had when the start under way began. A
+    /// `Stopped` that answers a `Stop` numbered from it on also ends that
+    /// start: the helper has one `Stopped` for both.
+    starting: Option<u64>,
+}
+
+/// The helper's input behind its lock; taking it out closes the helper's input.
+type SharedInput = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
 /// The helper's input, which the channel closes to let the helper see the end of it.
-struct Input(Arc<Mutex<Option<Box<dyn Write + Send>>>>);
+struct Input(SharedInput);
 
 impl Write for Input {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -92,7 +117,7 @@ impl Write for Input {
 /// lasts as long as the helper: runtimes start, die and stop on it.
 pub struct Channel {
     mux: Arc<Mux>,
-    input: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    input: SharedInput,
     /// Where control messages other than file replies go: to whoever waits on
     /// the helper now (its hello, a start, a stop, or the runtime's watcher).
     /// Replacing it ends the previous listener's wait.
@@ -109,14 +134,15 @@ pub struct Channel {
     /// Set when the client stops the current runtime or leaves the helper, so its
     /// watcher keeps quiet.
     leaving: Mutex<Arc<AtomicBool>>,
-    /// The `Stop`s sent whose answer hasn't come, oldest first, with the number
-    /// of each. The helper answers each `Stop` with one `Stopped` or
-    /// `NotStopped`, in the order it got them, so an answer belongs to the
-    /// first entry. An answer never reads as the outcome of the next
-    /// `start_runtime`: a `stop` that gave up leaves its entry as `Nobody`. The
-    /// reader hands answers out, and `stop` gives up, under this lock.
-    stops: Arc<Mutex<VecDeque<(u64, Owed)>>>,
+    /// An answer never reads as the outcome of the next `start_runtime`: a
+    /// `stop` that gave up leaves its entry as `Nobody`. The reader hands
+    /// answers out, and `stop` gives up, under this lock.
+    stops: Arc<Mutex<Stops>>,
     next_stop: AtomicU64,
+    /// Held while a `Stop` or a `StartRuntime` is queued and sent, so the
+    /// helper gets them in the order the queue has them. The reader never
+    /// takes it, so a send that blocks on a full pipe can't stop the reader.
+    sending: Mutex<()>,
 }
 
 impl Channel {
@@ -128,14 +154,14 @@ impl Channel {
     /// `open`, and `exited` is called once the helper has exited and before it
     /// is reaped, so its pid is still its own.
     pub fn open_watched(mut helper: Child, input: impl Write + Send + 'static, output: impl Read + Send + 'static, exited: impl FnOnce() + Send + 'static) -> Channel {
-        let input: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(Some(Box::new(input))));
+        let input: SharedInput = Arc::new(Mutex::new(Some(Box::new(input))));
         let mux = Mux::new(Input(input.clone()));
         let (hello_tx, hello) = mpsc::channel::<ToApp>();
         let sink = Arc::new(Mutex::new(Some(hello_tx)));
         let ended: Arc<(Mutex<bool>, Condvar)> = Arc::default();
         let listener: Arc<Mutex<Option<Arc<Listener>>>> = Arc::default();
         let files: Arc<Mutex<HashMap<u32, mpsc::Sender<files::Reply>>>> = Arc::default();
-        let stops: Arc<Mutex<VecDeque<(u64, Owed)>>> = Arc::default();
+        let stops: Arc<Mutex<Stops>> = Arc::default();
         let left = Arc::new(AtomicBool::new(false));
         std::thread::spawn({
             let (mux, sink, listener, files, ended, stops, left) = (mux.clone(), sink.clone(), listener.clone(), files.clone(), ended.clone(), stops.clone(), left.clone());
@@ -153,14 +179,24 @@ impl Channel {
                         Ok(message) => {
                             let mut stops = stops.lock().unwrap();
                             let answers_stop = matches!(message, ToApp::Stopped | ToApp::NotStopped { .. });
-                            match answers_stop.then(|| stops.pop_front()).flatten().map(|(_, owed)| owed) {
-                                Some(Owed::To(waiting)) => drop(waiting.send(message)),
-                                Some(Owed::Nobody) => {}
-                                Some(Owed::Sink) | None => {
-                                    if let Some(sink) = &*sink.lock().unwrap() {
-                                        let _ = sink.send(message);
-                                    }
+                            let to_sink = |message| {
+                                if let Some(sink) = &*sink.lock().unwrap() {
+                                    let _ = sink.send(message);
                                 }
+                            };
+                            let Some(Pending { number, owed, leaving }) = answers_stop.then(|| stops.queue.pop_front()).flatten() else {
+                                return to_sink(message);
+                            };
+                            if matches!(message, ToApp::NotStopped { .. })
+                                && let Some(leaving) = leaving
+                            {
+                                leaving.store(false, Ordering::SeqCst);
+                            }
+                            if matches!(message, ToApp::Stopped) && stops.starting.is_some_and(|began| number >= began) {
+                                to_sink(ToApp::Stopped);
+                            }
+                            if let Owed::To(waiting) = owed {
+                                let _ = waiting.send(message);
                             }
                         }
                         Err(e) => eprintln!("The runtime helper sent an unreadable message: {e}"),
@@ -176,7 +212,7 @@ impl Channel {
                 // Whoever waits hears the end.
                 sink.lock().unwrap().take();
                 files.lock().unwrap().clear();
-                stops.lock().unwrap().clear();
+                *stops.lock().unwrap() = Stops::default();
                 exit_unreaped(&mut helper);
                 exited();
                 let status = helper.wait().map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
@@ -198,6 +234,7 @@ impl Channel {
             leaving: Mutex::default(),
             stops,
             next_stop: AtomicU64::new(0),
+            sending: Mutex::new(()),
         }
     }
 
@@ -255,7 +292,12 @@ impl Channel {
         let events = self.subscribe();
         let leaving = Arc::new(AtomicBool::new(false));
         *self.leaving.lock().unwrap() = leaving.clone();
-        self.mux.send(&ToHelper::StartRuntime { job }.frame()).map_err(|_| "The connection to Endeavor's helper closed.".to_owned())?;
+        let _starting = Starting(&self.stops);
+        {
+            let _sending = self.sending.lock().unwrap();
+            self.stops.lock().unwrap().starting = Some(self.next_stop.load(Ordering::SeqCst));
+            self.mux.send(&ToHelper::StartRuntime { job }.frame()).map_err(|_| "The connection to Endeavor's helper closed.".to_owned())?;
+        }
         let runtime = loop {
             match events.recv() {
                 Ok(message @ (ToApp::Progress { .. } | ToApp::FoundJulia { .. } | ToApp::Submitted { .. } | ToApp::Queued { .. })) => on_message(message),
@@ -297,19 +339,30 @@ impl Channel {
         self.leaving.lock().unwrap().store(true, Ordering::SeqCst);
     }
 
-    /// Stop the runtime and wait until it's gone (blocks up to ~30 s). The
+    /// Queue a `Stop` and send it, in one step so that the helper gets `Stop`s
+    /// (and a `StartRuntime`) in the order they are queued. Its number.
+    fn send_stop(&self, owed: Owed, leaving: Option<Arc<AtomicBool>>) -> Result<u64, ()> {
+        let _sending = self.sending.lock().unwrap();
+        let number = self.next_stop.fetch_add(1, Ordering::SeqCst);
+        self.stops.lock().unwrap().queue.push_back(Pending { number, owed, leaving });
+        if self.mux.send(&ToHelper::Stop.frame()).is_err() {
+            self.stops.lock().unwrap().queue.retain(|pending| pending.number != number);
+            return Err(());
+        }
+        Ok(number)
+    }
+
+    /// Stop the runtime and wait until it's gone (blocks up to ~60 s). The
     /// helper stays connected. If the helper says it didn't stop, the runtime is
-    /// still attached and is watched as before.
+    /// still attached and is watched as before. A start under way on another
+    /// thread ends, since the helper's `Stopped` ends it too.
     pub fn stop(&self) -> Result<(), String> {
         let leaving = self.leaving.lock().unwrap().clone();
         leaving.store(true, Ordering::SeqCst);
         let (tx, answer) = mpsc::channel();
-        let id = self.next_stop.fetch_add(1, Ordering::Relaxed);
-        self.stops.lock().unwrap().push_back((id, Owed::To(tx)));
-        if self.mux.send(&ToHelper::Stop.frame()).is_err() {
-            self.stops.lock().unwrap().retain(|(n, _)| *n != id);
+        let Ok(id) = self.send_stop(Owed::To(tx), Some(leaving)) else {
             return Err("The connection to Endeavor's helper closed.".into());
-        }
+        };
         let answered = match answer.recv_timeout(STOP_WAIT) {
             Ok(message) => Ok(message),
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err("The connection to Endeavor's helper closed.".into()),
@@ -317,17 +370,14 @@ impl Channel {
                 let mut stops = self.stops.lock().unwrap();
                 // The reader answers under this lock, so an answer that came as the wait ended is here.
                 answer.try_recv().map_err(|_| {
-                    if let Some((_, owed)) = stops.iter_mut().find(|(n, _)| *n == id) {
-                        *owed = Owed::Nobody;
+                    if let Some(pending) = stops.queue.iter_mut().find(|pending| pending.number == id) {
+                        pending.owed = Owed::Nobody;
                     }
                 })
             }
         };
         match answered {
-            Ok(ToApp::NotStopped { message }) => {
-                leaving.store(false, Ordering::SeqCst);
-                Err(message)
-            }
+            Ok(ToApp::NotStopped { message }) => Err(message),
             Ok(_) => Ok(()),
             Err(()) => Err(format!("Endeavor's helper didn't answer in {} s, so Julia may not have stopped.", STOP_WAIT.as_secs())),
         }
@@ -368,12 +418,17 @@ impl Channel {
             let _ = self.mux.send(&ToHelper::Detach.frame());
             return;
         }
-        // Its answer is for a start that may be under way, which it ends.
-        let id = self.next_stop.fetch_add(1, Ordering::Relaxed);
-        self.stops.lock().unwrap().push_back((id, Owed::Sink));
-        if self.mux.send(&ToHelper::Stop.frame()).is_err() {
-            self.stops.lock().unwrap().retain(|(n, _)| *n != id);
-        }
+        // Its answer ends a start that may be under way.
+        let _ = self.send_stop(Owed::Nobody, None);
+    }
+}
+
+/// While it lives, a start is under way (`Stops::starting`).
+struct Starting<'a>(&'a Mutex<Stops>);
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().starting = None;
     }
 }
 

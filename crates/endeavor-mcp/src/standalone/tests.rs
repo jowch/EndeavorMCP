@@ -190,6 +190,14 @@ fn a_new_version_removes_older_folders_no_runtime_uses() {
     // The runtime from bbbb stopped.
     drop(running);
     unpack(&cache, "0.1.0-eeee", files).unwrap();
+    // A child another test is starting holds a copy of the lease until it execs.
+    for _ in 0..100 {
+        if !cache.join("0.1.0-bbbb").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        remove_unused(&cache, "0.1.0-eeee");
+    }
     assert_eq!(names(&cache), ["0.0.9-legacy", "0.1.0-cccc", "0.1.0-dddd", "0.1.0-eeee"]);
     std::fs::remove_dir_all(&cache).unwrap();
 }
@@ -328,7 +336,7 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
 }
 
 #[test]
-fn a_front_whose_agent_has_gone_clears_its_sessions_notebook() {
+fn a_front_whose_agent_has_gone_ends_its_session_in_the_runtime() {
     let (port, seen) = fake_core();
     let (relay, _) = ready_relay(port, true);
     relay.release();
@@ -336,34 +344,12 @@ fn a_front_whose_agent_has_gone_clears_its_sessions_notebook() {
     let (head, body) = &seen[0];
     assert_eq!(head.target(), "/endeavor/call");
     assert_eq!(head.header("Authorization"), Some("Bearer t0k"));
-    assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/set_notebook","params":{"notebook":null,"owner":"stdio-7"}}"#);
+    assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/end_session","params":{"owner":"stdio-7"}}"#);
     assert_eq!(seen.len(), 1);
     drop(seen);
     // Before the runtime is up there is nothing to tell.
     *relay.status.lock().unwrap() = Status::Starting(String::new());
     relay.release();
-}
-
-#[test]
-fn a_front_whose_agent_has_gone_waits_for_calls_under_way_before_clearing() {
-    let (port, seen) = fake_core();
-    let (relay, _) = ready_relay(port, true);
-    let call = relay.begin();
-    let releasing = std::thread::spawn({
-        let relay = relay.clone();
-        move || relay.release()
-    });
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(seen.lock().unwrap().is_empty() && !releasing.is_finished(), "it waits for the call");
-    drop(call);
-    releasing.join().unwrap();
-    assert_eq!(seen.lock().unwrap().len(), 1);
-
-    // A call that doesn't end holds it up only so long.
-    let _stuck = relay.begin();
-    let began = Instant::now();
-    relay.release();
-    assert!(began.elapsed() < Duration::from_secs(5) && seen.lock().unwrap().len() == 2, "{:?}", began.elapsed());
 }
 
 #[test]

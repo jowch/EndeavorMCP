@@ -198,6 +198,10 @@ struct State {
     /// with its binding, or `SESSION_KEPT` after its last call or its binding
     /// (and then its binding goes too).
     seen: HashMap<String, Seen>,
+    /// Sessions whose agent has gone (`end_session`), when each ended. Their
+    /// calls still under way bind and record nothing; the key is never used
+    /// again, so the entry goes `SESSION_KEPT` later.
+    ended: HashMap<String, f64>,
 }
 
 struct Seen {
@@ -228,8 +232,10 @@ impl State {
         self.record(owner, now).since = now;
     }
 
-    /// Drop the records of sessions that haven't called in a week, and their bindings.
+    /// Drop the records of sessions that haven't called in a week, and their
+    /// bindings, and the sessions that ended that long ago.
     fn forget_old(&mut self, now: f64) {
+        self.ended.retain(|_, ended| now - *ended < SESSION_KEPT);
         let bindings = &mut self.bindings;
         self.seen.retain(|session, seen| {
             let kept = now - seen.last_call.unwrap_or(f64::MIN).max(seen.since) < SESSION_KEPT;
@@ -462,7 +468,7 @@ impl Notebooks {
             asks: Asks::new(clock()),
             upstream,
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new(), ended: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),
@@ -756,6 +762,9 @@ impl Notebooks {
     pub fn bind(&self, owner: &str, path: &str) {
         let now = self.now();
         let mut state = self.state.lock().unwrap();
+        if state.ended.contains_key(owner) {
+            return;
+        }
         if path.is_empty() {
             state.bindings.remove(owner);
             state.seen.remove(owner);
@@ -765,10 +774,26 @@ impl Notebooks {
         }
     }
 
+    /// The session's agent has gone: it is unbound and forgotten, and what it
+    /// still has under way binds and records nothing.
+    pub fn end_session(&self, owner: &str) {
+        if owner.is_empty() {
+            return;
+        }
+        let now = self.now();
+        let mut state = self.state.lock().unwrap();
+        state.bindings.remove(owner);
+        state.seen.remove(owner);
+        state.ended.insert(owner.to_owned(), now);
+    }
+
     /// A new `Mcp-Session-Id` was given to a client that names itself `label`.
     pub fn issued(&self, owner: &str, label: &str) {
         let now = self.now();
         let mut state = self.state.lock().unwrap();
+        if state.ended.contains_key(owner) {
+            return;
+        }
         state.record(owner, now).client = Some(label.to_owned());
     }
 
@@ -779,6 +804,9 @@ impl Notebooks {
         }
         let now = self.now();
         let mut state = self.state.lock().unwrap();
+        if state.ended.contains_key(owner) {
+            return;
+        }
         let seen = state.record(owner, now);
         seen.last_call = Some(now);
         if let Some(label) = label {
@@ -819,6 +847,9 @@ impl Notebooks {
             let path = canonical_path(path).unwrap_or_else(|_| path.to_owned());
             let now = self.now();
             let mut state = self.state.lock().unwrap();
+            if state.ended.contains_key(owner) {
+                return;
+            }
             state.bindings.entry(owner.to_owned()).or_insert(path);
             state.record_bound(owner, now);
         }

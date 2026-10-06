@@ -180,9 +180,13 @@ other session bound to it, `{client, active_seconds_ago}`, with null for
 what isn't known. A session has a record from when it is bound, makes a
 tool call or is given an id, and only sessions with a record are listed.
 The record goes when the binding is cleared, and a week after the session's
-last call (after it was made, if there was none). `endeavor mcp` clears its
-session's binding when the agent's input ends; a front that is killed can't,
-so its session drops out after the week.
+last call (after it was made, if there was none). `endeavor mcp` sends
+`endeavor/end_session` with its key when the agent's input ends. The core
+unbinds the session and drops its record, folder and run policy, and from
+then on a call of that session still under way binds nothing and leaves no
+record. The key is unique to the process, so an ended session never returns;
+the core forgets that it ended a week later. A front that is killed can't
+send it, so its session drops out after the week.
 
 ## Approval
 
