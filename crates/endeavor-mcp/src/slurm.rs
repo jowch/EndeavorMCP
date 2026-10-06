@@ -271,7 +271,7 @@ fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, S
     };
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     let build = args.build.as_deref().map_or(String::new(), |build| format!(" --build {}", quote(build)));
-    let exit_idle = if args.core_env.iter().any(|(name, _)| *name == "ENDEAVOR_EXIT_IDLE") { " --exit-idle" } else { "" };
+    let exit_idle = if args.exit_idle { " --exit-idle" } else { "" };
     let script = format!(
         "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {} --runtime {} --depot {}{build}{exit_idle}\n",
         quote(&exe.display().to_string()),

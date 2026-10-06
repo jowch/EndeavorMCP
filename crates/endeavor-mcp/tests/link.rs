@@ -278,10 +278,17 @@ fn a_runtime_that_ended_while_disconnected_is_not_started_again() {
     for pid in place.helpers() {
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
-    let status = wait_status(&link, "connected again", |s| s.state == State::Connected || s.state == State::Failed);
+    let status = wait_status(&link, "the end told", |s| s.state == State::Failed);
     assert_eq!(status.runtime, None);
+    assert!(status.error.as_deref().is_some_and(|e| e.contains("Julia on lab")), "{status:?}");
     assert!(place.runtime().is_none_or(|pid| pid == before.pid as i32), "nothing started a new one: {:?}", status.step);
     assert!(!pid_alive(before.pid as i32));
+    // The listener no longer says that the connection comes back by itself.
+    let said = tool(before.port, &before.token, "list_notebooks", None);
+    assert!(said.as_str().is_some_and(|text| text.contains("Call use_machine") && !text.contains("by itself")), "{said}");
+    // And a start asked for now works.
+    link.start(None).unwrap();
+    assert_ne!(ready(&link).runtime.unwrap().pid, before.pid);
 }
 
 #[test]
@@ -377,4 +384,150 @@ fn a_link_for_a_machine_that_is_not_listed_says_so() {
     assert!(error.contains("There is no machine lab-other") && error.contains("machines.json"), "{error}");
     let error = ensure_with(&place.spawn, "../escape").expect_err("not an id");
     assert!(error.contains("isn't a machine id"), "{error}");
+}
+
+#[test]
+fn a_connection_lost_while_the_runtime_starts_is_resumed_after_the_reconnect() {
+    // Connecting waits while `gate` exists, so that the runtime is up before the link is back.
+    let place = Place::with("lost-starting", &[("ENDEAVOR_LINK_ASK", "while [ -e {dir}/gate ]; do sleep 0.1; done")]);
+    let (hold, gate) = (place.state.join("hold"), place.dir.join("gate"));
+    std::fs::write(&hold, "").unwrap();
+    let link = place.ensure();
+    link.start(None).unwrap();
+    wait_status(&link, "starting", |s| s.state == State::Starting);
+    wait_for("Julia to be asked for", || place.state.join("julia.args").exists());
+    std::fs::write(&gate, "").unwrap();
+    let helpers = place.helpers();
+    assert!(!helpers.is_empty());
+    for pid in &helpers {
+        // SAFETY: plain syscall, on the helper this test's link started.
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+    wait_status(&link, "the connection lost", |s| s.state == State::Connecting);
+    std::fs::remove_file(&hold).unwrap();
+    wait_for("the runtime to come up without the link", || place.runtime().is_some());
+    std::fs::remove_file(&gate).unwrap();
+    let runtime = ready(&link).runtime.expect("the runtime");
+    assert_eq!((runtime.pid as i32, runtime.reattached), (place.runtime().unwrap(), true));
+}
+
+#[test]
+fn a_stop_during_a_start_is_no_failure() {
+    let place = Place::new("stop-starting");
+    let hold = place.state.join("hold");
+    std::fs::write(&hold, "").unwrap();
+    let link = place.ensure();
+    link.start(None).unwrap();
+    wait_status(&link, "starting", |s| s.state == State::Starting);
+    wait_for("Julia to be asked for", || place.state.join("julia.args").exists());
+    link.stop().expect("stop");
+    std::fs::remove_file(&hold).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let status = link.status().unwrap();
+    assert_eq!((status.state, status.error, status.runtime), (State::Connected, None, None));
+}
+
+#[test]
+fn a_front_that_asks_right_after_a_quit_gets_a_new_link() {
+    let place = Place::new("quit-ensure");
+    let link = place.ensure();
+    link.quit().expect("quit");
+    let again = place.ensure();
+    assert_ne!(again.pid, link.pid);
+    assert!(again.status().is_ok());
+    wait_for("the first link to end", || !pid_alive(link.pid as i32));
+    assert_eq!(place.ensure(), again, "the record is the new link's");
+}
+
+#[test]
+fn a_link_that_lives_and_does_not_answer_is_not_replaced() {
+    let place = Place::new("silent");
+    // A port that nothing listens on, and a process that lives: this test.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    std::fs::create_dir_all(place.record().parent().unwrap()).unwrap();
+    let record = json!({ "machine": place.id, "pid": std::process::id(), "port": port, "token": "t", "build": "x" });
+    std::fs::write(place.record(), record.to_string()).unwrap();
+    let error = ensure_with(&place.spawn, &place.id).expect_err("nothing answers");
+    // Removed before anything can fail: cleaning up ends the pid in the record.
+    let kept = place.record().exists();
+    std::fs::remove_file(place.record()).unwrap();
+    assert!(error.contains(&format!("(pid {})", std::process::id())) && error.contains("isn't answering") && error.contains("Try again"), "{error}");
+    assert!(kept, "the record stays");
+    assert!(pids("link --machine lab-silent").is_empty(), "no second link");
+
+    // A record of a process that is gone is replaced.
+    let mut gone = Command::new("true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    std::fs::write(place.record(), json!({ "machine": place.id, "pid": pid, "port": port, "token": "t", "build": "x" }).to_string()).unwrap();
+    let link = place.ensure();
+    assert_ne!(link.pid, pid);
+}
+
+#[test]
+fn a_link_that_never_answers_is_ended_by_the_front_that_started_it() {
+    let place = Place::new("never");
+    let script = place.dir.join("never-answers");
+    std::fs::write(&script, format!("#!/bin/sh\necho $$ > {}/never.pid\nexec sleep 600\n", place.dir.display())).unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let spawn = Spawn { exe: script, env: place.spawn.env.clone() };
+    let error = ensure_with(&spawn, &place.id).expect_err("no answer");
+    assert!(error.contains("didn't answer"), "{error}");
+    let pid: i32 = std::fs::read_to_string(place.dir.join("never.pid")).unwrap().trim().parse().unwrap();
+    wait_for("the child to be ended", || !pid_alive(pid));
+}
+
+#[test]
+fn a_start_asked_for_while_connecting_does_not_make_another_attempt() {
+    // The sign-in takes 2 s and then fails.
+    let place = Place::with("kicks", &[("ENDEAVOR_LINK_ASK", "echo x >> {dir}/attempts; sleep 2; exit 1")]);
+    let link = place.ensure();
+    for _ in 0..5 {
+        link.start(None).unwrap();
+    }
+    wait_status(&link, "failed", |s| s.state == State::Failed);
+    std::thread::sleep(Duration::from_secs(2));
+    let attempts = || std::fs::read_to_string(place.dir.join("attempts")).unwrap_or_default().lines().count();
+    assert_eq!(attempts(), 1, "{}", place.log());
+    link.start(None).unwrap();
+    wait_for("a second attempt", || attempts() == 2);
+    wait_status(&link, "failed again", |s| s.state == State::Failed);
+    assert_eq!(attempts(), 2);
+}
+
+#[test]
+fn a_connection_that_cannot_come_back_tells_the_listener() {
+    let place = Place::new("given-up");
+    let link = place.ensure();
+    link.start(None).unwrap();
+    let runtime = ready(&link).runtime.unwrap();
+    // The machine leaves the list, so the next connect can't work and isn't tried again.
+    MachinesFile::at(place.dir.join("config/endeavor/machines.json")).remove(&place.id).unwrap();
+    for pid in place.helpers() {
+        // SAFETY: plain syscall, on the helper this test's link started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    let status = wait_status(&link, "failed", |s| s.state == State::Failed);
+    assert!(status.error.is_some_and(|e| e.contains("isn't in the list")));
+    let said = tool(runtime.port, &runtime.token, "list_notebooks", None);
+    assert!(said.as_str().is_some_and(|text| text.contains("Call use_machine") && !text.contains("by itself")), "{said}");
+}
+
+#[test]
+fn an_idle_time_that_is_no_time_is_ignored() {
+    for (name, value) in [("idle-negative", "-5"), ("idle-nan", "NaN"), ("idle-inf", "inf"), ("idle-zero", "0"), ("idle-huge", "1e300")] {
+        let place = Place::with(name, &[("ENDEAVOR_LINK_IDLE_SECS", value)]);
+        let link = place.ensure();
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(pid_alive(link.pid as i32) && link.status().is_ok(), "{value}: {}", place.log());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_link_works_in_a_folder_of_its_own() {
+    let place = Place::new("cwd");
+    let link = place.ensure();
+    let cwd = std::fs::read_link(format!("/proc/{}/cwd", link.pid)).unwrap();
+    assert_eq!(cwd, place.record().parent().unwrap().canonicalize().unwrap());
 }

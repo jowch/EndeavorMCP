@@ -23,17 +23,19 @@
 //! - `POST /link/start` `{"job": <JobRequest or null>}`: start the runtime, or
 //!   attach to the one running, in the background. The `Status` at once.
 //! - `POST /link/stop`: stop the runtime for every client. The link stays connected.
-//! - `POST /link/quit`: detach, remove the record and exit.
+//! - `POST /link/quit`: detach, remove the record and exit. The record goes
+//!   first, so a front that asks for a link right after gets a new one.
 //!
 //! Variables for tests only, read by the link process: `ENDEAVOR_LINK_SHELL`
 //! (any value) runs the helper on this computer through `sh`, as
 //! `Transport::Shell` does, so no sshd is needed; `ENDEAVOR_LINK_ROOT`,
 //! `ENDEAVOR_LINK_STATE` and `ENDEAVOR_LINK_DEPOT` set `Options::root`, `state`
-//! and `depot`, which otherwise are the server's own default folders.
+//! and `depot`, which otherwise are the server's own default folders;
+//! `ENDEAVOR_LINK_ASK` is a command that runs in the shell before each connect
+//! (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -42,11 +44,17 @@ use wire::slurm::{JobRequest, Partition};
 use crate::standalone::Env;
 
 mod run;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use run::main;
 
 /// How long `ensure` waits for a new link to answer.
 const START_WAIT: Duration = Duration::from_secs(10);
+
+/// How often, and how far apart, `ensure` asks a link whose process lives but doesn't answer.
+const SILENT_TRIES: u32 = 5;
+const SILENT_PAUSE: Duration = Duration::from_millis(700);
 
 /// How long a call to the link may take, except a stop (`Link::stop`).
 const CALL_WAIT: Duration = Duration::from_secs(5);
@@ -189,9 +197,14 @@ impl Spawn {
 }
 
 /// A machine's id becomes a folder's name, and the machines file can be edited by hand.
+/// Capitals are out because Windows and macOS give two ids that differ only in
+/// case one folder, and names Windows keeps for devices (`nul`, `com1`, even as
+/// `nul.txt`) and a trailing dot can't be folders there.
 fn valid_id(id: &str) -> Result<(), String> {
-    let plain = !id.is_empty() && id.len() <= 100 && !id.starts_with('.') && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    if plain { Ok(()) } else { Err(format!("\"{id}\" isn't a machine id: it has letters, digits, - and _ only.")) }
+    let stem = id.split('.').next().unwrap_or_default();
+    let device = matches!(stem, "con" | "prn" | "aux" | "nul") || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.ends_with(|c: char| c.is_ascii_digit() && c != '0'));
+    let plain = !id.is_empty() && id.len() <= 100 && !id.starts_with('.') && !id.ends_with('.') && !device && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
+    if plain { Ok(()) } else { Err(format!("\"{id}\" isn't a machine id: it has lower-case letters, digits, - _ and . only, doesn't start or end with a dot and isn't a name such as nul or com1.")) }
 }
 
 /// A running link, as a front reaches it.
@@ -226,12 +239,22 @@ pub fn ensure_with(spawn: &Spawn, machine: &str) -> Result<Link, String> {
     let waited = Instant::now();
     while !crate::try_lock(&lock) {
         if waited.elapsed() > START_WAIT + Duration::from_secs(10) {
-            return Err(format!("Gave up waiting for another process that is starting the link to {machine}. If none is, delete {} and try again.", lock_path.display()));
+            return Err(format!("Another process is still starting the link to {machine}. Try again in a moment."));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    if let Some(link) = running(&dir, machine) {
-        return Ok(link);
+    // A link that is alive and slow to answer is waited for, not replaced by a second one.
+    let mut silent = 0;
+    loop {
+        match look(&dir, machine) {
+            Found::Link(link) => return Ok(link),
+            Found::None => break,
+            Found::Silent(pid) if silent >= SILENT_TRIES => return Err(format!("The link to {machine} (pid {pid}) isn't answering. Try again in a moment.")),
+            Found::Silent(_) => {
+                silent += 1;
+                std::thread::sleep(SILENT_PAUSE);
+            }
+        }
     }
     let _ = std::fs::remove_file(dir.join("link.json"));
     let log_path = dir.join("link.log");
@@ -239,25 +262,45 @@ pub fn ensure_with(spawn: &Spawn, machine: &str) -> Result<Link, String> {
         .open(&log_path)
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let mut command = Command::new(&spawn.exe);
-    command.args(["link", "--machine", machine]).envs(spawn.env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
+    // Its own folder as the working directory, so that it doesn't hold the front's (a project's) folder.
+    command.args(["link", "--machine", machine]).current_dir(&dir).envs(spawn.env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
     let mut child = detached(command)?;
-    // Reaped as soon as it ends, and told of while `ensure` waits.
-    let (ended_tx, ended) = mpsc::channel();
-    std::thread::spawn(move || drop(ended_tx.send(child.wait())));
     let started = Instant::now();
-    loop {
+    let failed = loop {
         if let Some(link) = running(&dir, machine) {
+            // Reaped as soon as it ends.
+            std::thread::spawn(move || drop(child.wait()));
             return Ok(link);
         }
-        if let Ok(status) = ended.try_recv() {
-            let status = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
-            return Err(format!("The link to {machine} ended as it started ({status}). {}", log_tail(&log_path)));
+        if let Ok(Some(status)) = child.try_wait() {
+            break format!("The link to {machine} ended as it started ({status}). {}", log_tail(&log_path));
         }
         if started.elapsed() > START_WAIT {
-            return Err(format!("The link to {machine} didn't answer in {} s. {}", START_WAIT.as_secs(), log_tail(&log_path)));
+            end_child(&mut child);
+            break format!("The link to {machine} didn't answer in {} s. {}", START_WAIT.as_secs(), log_tail(&log_path));
         }
         std::thread::sleep(Duration::from_millis(50));
+    };
+    Err(failed)
+}
+
+/// End a link that `ensure` started and gave up on, which has its helper and `ssh`
+/// to let go of: ask it to leave, then end it if it doesn't.
+fn end_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: plain syscall, on a child this process started and has not reaped.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        let until = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < until {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The end of the link's log, for an error.
@@ -301,15 +344,34 @@ fn detached(mut command: Command) -> Result<std::process::Child, String> {
     .map_err(|e| format!("Couldn't start the link: {e}"))
 }
 
-/// The link whose record is in `dir`, if its process lives and its port answers with its token.
-fn running(dir: &Path, machine: &str) -> Option<Link> {
-    let record: Record = serde_json::from_str(&std::fs::read_to_string(dir.join("link.json")).ok()?).ok()?;
+/// What the record in a link's folder leads to.
+enum Found {
+    /// The link, answering with its token.
+    Link(Link),
+    /// Its process lives (the pid is this) and its port doesn't answer.
+    Silent(u32),
+    /// No record, an unreadable one, another machine's, or a process that is gone.
+    None,
+}
+
+fn look(dir: &Path, machine: &str) -> Found {
+    let Some(record) = std::fs::read_to_string(dir.join("link.json")).ok().and_then(|text| serde_json::from_str::<Record>(&text).ok()) else { return Found::None };
     if record.machine != machine || !crate::pid_alive(record.pid as i32, record.started) {
-        return None;
+        return Found::None;
     }
     let link = Link { machine: machine.to_owned(), port: record.port, token: record.token, pid: record.pid, build: record.build };
-    let status = link.status().ok()?;
-    (status.machine == machine && status.pid == link.pid).then_some(link)
+    match link.status() {
+        Ok(status) if status.machine == machine && status.pid == link.pid => Found::Link(link),
+        _ => Found::Silent(link.pid),
+    }
+}
+
+/// The link whose record is in `dir`, if its process lives and its port answers with its token.
+fn running(dir: &Path, machine: &str) -> Option<Link> {
+    match look(dir, machine) {
+        Found::Link(link) => Some(link),
+        _ => None,
+    }
 }
 
 impl Link {
@@ -337,9 +399,8 @@ impl Link {
     }
 
     fn call<T: serde::de::DeserializeOwned>(&self, method: &str, path: &str, body: &[u8], wait: Duration) -> Result<T, String> {
-        let bearer = format!("Authorization: Bearer {}", self.token);
-        let (name, value) = bearer.split_once(": ").unwrap_or_default();
-        let (status, reply) = crate::http::call(method, self.port, path, &[(name, value), ("Content-Type", "application/json")], body, Some(wait)).map_err(|e| format!("The link to {} didn't answer: {e}", self.machine))?;
+        let bearer = format!("Bearer {}", self.token);
+        let (status, reply) = crate::http::call(method, self.port, path, &[("Authorization", &bearer), ("Content-Type", "application/json")], body, Some(wait)).map_err(|e| format!("The link to {} didn't answer: {e}", self.machine))?;
         if status != 200 {
             let said = serde_json::from_slice::<serde_json::Value>(&reply).ok().and_then(|v| v["error"].as_str().map(str::to_owned));
             return Err(said.unwrap_or_else(|| format!("The link to {} answered HTTP {status}.", self.machine)));

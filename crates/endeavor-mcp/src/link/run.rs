@@ -16,7 +16,7 @@ use wire::files::{Reply, Request, RuntimeState};
 use wire::slurm::JobRequest;
 
 use super::{HelloInfo, JobInfo, JuliaInfo, QueueInfo, Record, RuntimeInfo, State, Status, valid_id};
-use crate::client::{Auth, Cancel, Channel, ConnectError, Event, Listener, MachinesFile, Messages, Notice, Options, Server, Transport, connect_checked, start, this_platform};
+use crate::client::{Auth, CLOSED, Cancel, Channel, ConnectError, Event, Listener, MachinesFile, Messages, Notice, Options, Server, Transport, connect_checked, start, this_platform};
 use crate::http::{self, Framing, Head};
 use crate::standalone::Env;
 
@@ -29,6 +29,10 @@ const RETRY_LAST: Duration = Duration::from_secs(30);
 
 /// A connection that stays lost this long is given up on (state `failed`).
 const RETRY_GIVE_UP: Duration = Duration::from_secs(10 * 60);
+
+/// How often `reattach` asks the helper whether the runtime is there, and how long it waits between.
+const REATTACH_TRIES: u32 = 3;
+const REATTACH_PAUSE: Duration = Duration::from_secs(1);
 
 /// The largest body a control request may have.
 const MAX_BODY: u64 = 64 * 1024;
@@ -66,7 +70,14 @@ struct Inner {
     /// A start is under way on this connection.
     starting: bool,
     /// Counts the stops, so the end of a start that one cut short is ignored.
+    /// A stop counts before it asks the helper, which takes a while.
     epoch: u64,
+    /// The supervisor is connecting, which a start request needn't wake it for.
+    connecting: bool,
+    /// A `Kick` is in the supervisor's inbox.
+    kick_pending: bool,
+    /// The runtime went away before the end of its start was handled.
+    gone_early: bool,
 }
 
 struct Shared {
@@ -92,12 +103,13 @@ struct Hooks {
     root: String,
     state: String,
     depot: String,
+    ask: Option<String>,
 }
 
 impl Hooks {
     fn read() -> Hooks {
         let var = |name: &str| std::env::var(name).unwrap_or_default();
-        Hooks { shell: std::env::var_os("ENDEAVOR_LINK_SHELL").is_some(), root: var("ENDEAVOR_LINK_ROOT"), state: var("ENDEAVOR_LINK_STATE"), depot: var("ENDEAVOR_LINK_DEPOT") }
+        Hooks { shell: std::env::var_os("ENDEAVOR_LINK_SHELL").is_some(), root: var("ENDEAVOR_LINK_ROOT"), state: var("ENDEAVOR_LINK_STATE"), depot: var("ENDEAVOR_LINK_DEPOT"), ask: std::env::var("ENDEAVOR_LINK_ASK").ok() }
     }
 }
 
@@ -129,7 +141,7 @@ pub(crate) fn main(argv: &[String]) -> ! {
         fail(format!("The link to {id} already runs (pid {}).", running.pid));
     }
     catch_stop_signals();
-    let idle = std::env::var("ENDEAVOR_LINK_IDLE_SECS").ok().and_then(|s| s.parse::<f64>().ok()).map_or(IDLE, Duration::from_secs_f64);
+    let idle = std::env::var("ENDEAVOR_LINK_IDLE_SECS").ok().and_then(|s| s.parse::<f64>().ok()).filter(|secs| *secs > 0.0).and_then(|secs| Duration::try_from_secs_f64(secs).ok()).unwrap_or(IDLE);
     let name = display_name(&server);
     let messages = Messages {
         restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
@@ -166,6 +178,9 @@ pub(crate) fn main(argv: &[String]) -> ! {
             resume: None,
             starting: false,
             epoch: 0,
+            connecting: false,
+            kick_pending: false,
+            gone_early: false,
         }),
         cancel: Mutex::new(Arc::new(Cancel::default())),
         activity: Mutex::new(Instant::now()),
@@ -266,6 +281,7 @@ impl Shared {
                 return None;
             }
             i.starting = true;
+            i.gone_early = false;
             i.state = State::Starting;
             i.error = None;
             i.queue = None;
@@ -283,44 +299,76 @@ impl Shared {
 
     /// `POST /link/start`.
     fn request_start(self: &Arc<Shared>, job: Option<JobRequest>) {
-        let kick = self.with(|i| {
+        let connected = self.with(|i| {
             if i.runtime.is_some() || i.starting {
-                return false;
+                return true;
             }
             i.wanted = Some(job);
             i.resume = None;
-            if i.channel.is_none() && i.state == State::Failed {
+            if i.channel.is_some() {
+                return true;
+            }
+            if i.state == State::Failed {
                 (i.state, i.error) = (State::Connecting, None);
             }
-            i.channel.is_none()
+            // No connection: the supervisor starts the runtime once it has one, and
+            // tries now if it was waiting. One wake-up is enough, and none while it connects.
+            if !i.connecting && !i.kick_pending {
+                i.kick_pending = true;
+                let _ = self.inbox.send(Msg::Kick);
+            }
+            false
         });
-        if kick {
-            // No connection: the supervisor starts the runtime once it has one, and tries now if it was waiting.
-            let _ = self.inbox.send(Msg::Kick);
-        } else {
+        if connected {
             self.begin_start();
         }
     }
 
     /// `POST /link/stop`.
     fn request_stop(&self) -> Result<(), String> {
-        let Some(channel) = self.with(|i| i.channel.clone()) else {
+        // Counted before the helper is asked: it takes a while, and the end of a start it cuts short is no failure.
+        let Some((channel, mine)) = self.with(|i| {
+            let channel = i.channel.clone()?;
+            i.epoch += 1;
+            Some((channel, i.epoch))
+        }) else {
             return Err(format!("Endeavor isn't connected to {} right now, so it can't stop the runtime. Try again once it is.", self.with(|i| i.name.clone())));
         };
-        channel.stop()?;
+        let stopped = channel.stop();
         self.with(|i| {
-            i.epoch += 1;
-            i.wanted = None;
-            i.starting = false;
-            i.runtime = None;
-            i.job = None;
-            i.queue = None;
-            i.error = None;
-            i.state = State::Connected;
-            i.step = Some("The runtime was stopped".into());
+            let same = i.channel.as_ref().is_some_and(|now| Arc::ptr_eq(now, &channel));
+            match &stopped {
+                Ok(()) => {
+                    // A connection that comes later mustn't attach to what was stopped.
+                    i.resume = None;
+                    if same {
+                        i.wanted = None;
+                        i.starting = false;
+                        i.runtime = None;
+                        i.job = None;
+                        i.queue = None;
+                        i.error = None;
+                        i.state = State::Connected;
+                        i.step = Some("The runtime was stopped".into());
+                    }
+                }
+                Err(message) => {
+                    // The runtime is still there, and the start that was under way goes on.
+                    if i.epoch == mine {
+                        i.epoch -= 1;
+                    }
+                    if same && i.starting && i.runtime.is_none() {
+                        i.starting = false;
+                        i.state = State::Failed;
+                        i.error = Some(message.clone());
+                    }
+                }
+            }
         });
-        self.listener.disconnected();
-        Ok(())
+        if stopped.is_ok() {
+            self.listener.disconnected();
+        }
+        stopped
     }
 }
 
@@ -336,9 +384,13 @@ fn supervise(shared: Arc<Shared>, inbox: Receiver<Msg>) -> ! {
             i.conn = conn;
             i.channel = None;
             i.state = State::Connecting;
+            i.connecting = true;
+            i.kick_pending = false;
             i.step = Some(format!("Connecting to {}", i.name));
             i.name.clone()
         });
+        // Wake-ups from before this connect are answered by it.
+        while inbox.try_recv().is_ok() {}
         match connect_now(&shared) {
             Err(error) => {
                 if shared.leaving.load(Ordering::SeqCst) {
@@ -348,6 +400,7 @@ fn supervise(shared: Arc<Shared>, inbox: Receiver<Msg>) -> ! {
                 let retry = reconnecting && error.retry && lost.elapsed() < RETRY_GIVE_UP;
                 eprintln!("The connection to {name} failed{}: {}", if retry { ", trying again" } else { "" }, error.message);
                 shared.with(|i| {
+                    i.connecting = false;
                     i.state = if retry { State::Connecting } else { State::Failed };
                     i.error = (!retry).then(|| error.message.clone());
                     i.step = Some(if retry { format!("Lost the connection to {name}: {}", error.message) } else { error.message.clone() });
@@ -359,6 +412,8 @@ fn supervise(shared: Arc<Shared>, inbox: Receiver<Msg>) -> ! {
                     reconnecting = false;
                     lost_since = None;
                     delay = RETRY_FIRST;
+                    // The listener has been saying that the connection comes back by itself.
+                    shared.listener.disconnected();
                     wait_for(&inbox, Duration::MAX);
                 }
             }
@@ -372,6 +427,7 @@ fn supervise(shared: Arc<Shared>, inbox: Receiver<Msg>) -> ! {
                     }
                 });
                 let resume = shared.with(|i| {
+                    i.connecting = false;
                     i.channel = Some(channel.clone());
                     i.state = State::Connected;
                     i.error = None;
@@ -409,16 +465,48 @@ fn find_partitions(shared: &Shared, channel: &Channel, conn: u64) {
     }
 }
 
-/// After a reconnect, attach to the runtime that was asked for only if it is
-/// still there: a start would otherwise begin a new one, or on a cluster
-/// submit a new job nobody asked for.
+/// After a reconnect, attach to the runtime that was asked for only if the
+/// helper says it is still there (running, or a job that waits): a start would
+/// otherwise begin a new runtime, or on a cluster submit a job nobody asked for.
+/// An answer that isn't clear is asked for again, and then leaves the link `failed`.
 fn reattach(shared: &Shared, channel: &Channel, job: Option<JobRequest>) {
-    match channel.files(Request::Runtime) {
-        Ok(Reply::Runtime { runtime: RuntimeState::NotRunning }) => shared.with(|i| {
-            i.step = Some(format!("The runtime on {} ended while Endeavor was disconnected", i.name));
-        }),
-        _ => shared.with(|i| i.wanted = Some(job)),
+    let mut trouble = String::new();
+    for attempt in 0..REATTACH_TRIES {
+        match channel.files(Request::Runtime) {
+            Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } }) => {
+                shared.with(|i| i.wanted = Some(job));
+                return;
+            }
+            Ok(Reply::Runtime { runtime: RuntimeState::NotRunning }) => {
+                shared.with(|i| {
+                    i.state = State::Failed;
+                    i.job = None;
+                    let said = format!("Julia on {} is not running any more: it ended, or its start was cut short, while Endeavor was disconnected.", i.name);
+                    i.step = Some(said.clone());
+                    i.error = Some(said);
+                });
+                shared.listener.disconnected();
+                return;
+            }
+            Ok(other) => trouble = format!("The helper answered {other:?}."),
+            Err(message) => trouble = message,
+        }
+        // The connection went again: the next one tries, with the same wish.
+        if channel.is_closed() {
+            shared.with(|i| i.resume = Some(job));
+            return;
+        }
+        if attempt + 1 < REATTACH_TRIES {
+            std::thread::sleep(REATTACH_PAUSE);
+        }
     }
+    eprintln!("Couldn't ask whether the runtime is still there: {trouble}");
+    shared.with(|i| {
+        i.state = State::Failed;
+        i.error = Some(format!("Endeavor couldn't find out whether Julia on {} is still running ({trouble}). Call use_machine to try again.", i.name));
+        i.step = i.error.clone();
+    });
+    shared.listener.disconnected();
 }
 
 /// Connect to the machine: its record is read again, so a change in the file is used.
@@ -439,7 +527,7 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
         }
     };
     let options = Options { auth: Auth::Batch, root: shared.hooks.root.clone(), state: shared.hooks.state.clone(), depot: shared.hooks.depot.clone(), exit_idle: true, helper: &helper };
-    let transport = if shared.hooks.shell { Transport::Shell { env: Vec::new(), ask: None } } else { Transport::for_server(&server) };
+    let transport = if shared.hooks.shell { Transport::Shell { env: Vec::new(), ask: shared.hooks.ask.clone() } } else { Transport::for_server(&server) };
     let cancel = Arc::new(Cancel::default());
     *shared.cancel.lock().unwrap() = cancel.clone();
     if shared.leaving.load(Ordering::SeqCst) {
@@ -497,6 +585,8 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
                     continue;
                 }
                 match result {
+                    // It went before its runtime was heard of, and was handled as gone: it is not ready.
+                    Ok(_) if shared.with(|i| std::mem::take(&mut i.gone_early)) => shared.with(|i| i.starting = false),
                     Ok(runtime) => shared.with(|i| {
                         i.starting = false;
                         i.state = State::Ready;
@@ -518,13 +608,17 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
                             job: runtime.job,
                         });
                     }),
+                    // The connection ended under the start: `Closed` follows and takes the start along to the next one.
+                    Err(message) if message == CLOSED || shared.with(|i| i.channel.as_ref().is_some_and(|c| c.is_closed())) => {}
                     Err(message) => {
                         eprintln!("Starting the runtime failed: {message}");
                         shared.with(|i| {
                             i.starting = false;
+                            i.gone_early = false;
                             i.wanted = None;
                             i.runtime = None;
                             i.state = State::Failed;
+                            i.job = None;
                             i.queue = None;
                             i.error = Some(message);
                         });
@@ -535,8 +629,11 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
             Msg::Notice(g, notice) if g == conn => match notice {
                 Notice::Died(reason) => {
                     shared.with(|i| {
+                        i.gone_early = i.starting;
                         i.runtime = None;
                         i.wanted = None;
+                        i.job = None;
+                        i.queue = None;
                         i.state = State::Failed;
                         i.error = Some(format!("Julia on {} stopped. {reason}", i.name).trim_end().to_owned());
                     });
@@ -544,8 +641,11 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
                 }
                 Notice::Replaced => {
                     shared.with(|i| {
+                        i.gone_early = i.starting;
                         i.runtime = None;
                         i.wanted = None;
+                        i.job = None;
+                        i.queue = None;
                         i.state = State::Failed;
                         i.error = Some(format!("Another connection took Julia on {} over.", i.name));
                     });
@@ -583,10 +683,29 @@ fn watch(shared: Arc<Shared>) {
 
 /// Detach from the runtime, remove the record and exit. Never stops the runtime.
 fn leave(shared: &Arc<Shared>) -> ! {
-    if shared.leaving.swap(true, Ordering::SeqCst) {
+    if !start_leaving(shared) {
         park();
     }
+    finish_leaving(shared)
+}
+
+/// The first step of leaving, which comes before anything slow: the record goes,
+/// so that a front that asks for the link now gets a new one, and the control
+/// port stops answering as a link. False when another thread is leaving already.
+fn start_leaving(shared: &Shared) -> bool {
+    if shared.leaving.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let path = shared.dir.join("link.json");
+    let ours = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Record>(&text).ok()).is_some_and(|r| r.pid == std::process::id());
+    if ours {
+        let _ = std::fs::remove_file(&path);
+    }
     shared.cancel.lock().unwrap().cancel();
+    true
+}
+
+fn finish_leaving(shared: &Shared) -> ! {
     if let Some(channel) = shared.with(|i| i.channel.take()) {
         // The helper goes when it has the word; a connection that is dead doesn't hold the exit up.
         let (done, waited) = mpsc::channel();
@@ -595,11 +714,6 @@ fn leave(shared: &Arc<Shared>) -> ! {
             let _ = done.send(());
         });
         let _ = waited.recv_timeout(Duration::from_secs(5));
-    }
-    let path = shared.dir.join("link.json");
-    let ours = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Record>(&text).ok()).is_some_and(|r| r.pid == std::process::id());
-    if ours {
-        let _ = std::fs::remove_file(&path);
     }
     exit(0)
 }
@@ -650,6 +764,9 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
     if !crate::core::same(head.header("Authorization").unwrap_or_default(), &format!("Bearer {}", shared.token)) {
         return reply(&mut connection, "401 Unauthorized", &json!({ "error": "unauthorized" }));
     }
+    if shared.leaving.load(Ordering::SeqCst) && head.path() != "/link/quit" {
+        return reply(&mut connection, "503 Service Unavailable", &json!({ "error": "The link is ending." }));
+    }
     let _request = InFlight::begin(shared);
     let body = match head.request_body()? {
         Framing::Length(n) if n <= MAX_BODY => http::read_body(&mut reader, Framing::Length(n))?,
@@ -675,8 +792,11 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
             Err(message) => reply(&mut connection, "409 Conflict", &json!({ "error": message })),
         },
         ("POST", "/link/quit") => {
-            reply(&mut connection, "200 OK", &json!({ "ok": true }))?;
-            leave(shared)
+            if start_leaving(shared) {
+                let _ = reply(&mut connection, "200 OK", &json!({ "ok": true }));
+                finish_leaving(shared)
+            }
+            reply(&mut connection, "200 OK", &json!({ "ok": true }))
         }
         (_, "/link/status" | "/link/start" | "/link/stop" | "/link/quit") => reply(&mut connection, "405 Method Not Allowed", &json!({ "error": "method_not_allowed" })),
         _ => reply(&mut connection, "404 Not Found", &json!({ "error": "not_found" })),

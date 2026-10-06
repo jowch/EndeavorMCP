@@ -97,6 +97,9 @@ struct Stops {
     starting: Option<u64>,
 }
 
+/// What a start or a stop says when the helper's connection ended under it.
+pub const CLOSED: &str = "The connection to Endeavor's helper closed.";
+
 /// The helper's input behind its lock; taking it out closes the helper's input.
 type SharedInput = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 
@@ -296,7 +299,7 @@ impl Channel {
         {
             let _sending = self.sending.lock().unwrap();
             self.stops.lock().unwrap().starting = Some(self.next_stop.load(Ordering::SeqCst));
-            self.mux.send(&ToHelper::StartRuntime { job }.frame()).map_err(|_| "The connection to Endeavor's helper closed.".to_owned())?;
+            self.mux.send(&ToHelper::StartRuntime { job }.frame()).map_err(|_| CLOSED.to_owned())?;
         }
         let runtime = loop {
             match events.recv() {
@@ -314,7 +317,7 @@ impl Channel {
                 Ok(ToApp::Stopped) => return Err("Julia was stopped while it started.".into()),
                 Ok(ToApp::Replaced) => return Err("Another connection took Julia over while it was starting.".into()),
                 Ok(ToApp::Hello { .. } | ToApp::Files { .. } | ToApp::NotStopped { .. }) => {}
-                Err(_) => return Err("The connection to Endeavor's helper closed.".into()),
+                Err(_) => return Err(CLOSED.into()),
             }
         };
         std::thread::spawn(move || {
@@ -361,11 +364,11 @@ impl Channel {
         leaving.store(true, Ordering::SeqCst);
         let (tx, answer) = mpsc::channel();
         let Ok(id) = self.send_stop(Owed::To(tx), Some(leaving)) else {
-            return Err("The connection to Endeavor's helper closed.".into());
+            return Err(CLOSED.into());
         };
         let answered = match answer.recv_timeout(STOP_WAIT) {
             Ok(message) => Ok(message),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("The connection to Endeavor's helper closed.".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(CLOSED.into()),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let mut stops = self.stops.lock().unwrap();
                 // The reader answers under this lock, so an answer that came as the wait ended is here.
@@ -399,6 +402,11 @@ impl Channel {
             Some(timeout) => drop(changed.wait_timeout_while(ended, timeout, |ended| !*ended)),
             None => drop(changed.wait_while(ended, |ended| !*ended)),
         }
+    }
+
+    /// The helper has gone, by itself or because the client let it go.
+    pub fn is_closed(&self) -> bool {
+        *self.ended.0.lock().unwrap()
     }
 
     /// Block until the helper has gone, whether or not Julia runs: `Lost` if

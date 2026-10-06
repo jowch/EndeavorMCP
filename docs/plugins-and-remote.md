@@ -101,13 +101,24 @@ request with an Origin.
 | `GET /link/status` | `state` (connecting, connected, starting, queued, ready, failed), the last `step`, an `error`, what the helper said (`hello`), the `runtime` once ready (the listener's port, the runtime's token, the page URL), and for a job its `job` and `queue` |
 | `POST /link/start` | `{"job": …}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error |
 | `POST /link/stop` | Stop the runtime for every client, and say why it didn't. The link stays connected |
-| `POST /link/quit` | Detach, remove the record and exit |
+| `POST /link/quit` | Remove the record, detach and exit. The record goes first, so a front that asks for a link right after gets a new one |
 
 When the connection drops, the link connects again (waiting 1 s, then more,
-up to 30 s apart, for 10 minutes) and attaches to the runtime it had, if that
-is still running, on the same listener port. A failed sign-in is not retried:
-the state is `failed` with the message, and the next start tries again. The
-link starts the runtime with `--exit-idle`.
+up to 30 s apart, for 10 minutes; a name that doesn't resolve or a network
+that is down is retried too) and attaches to the runtime it had, if the
+helper says it is still running or its job still waits, on the same listener
+port. A start that the drop cut short is taken up again the same way. A
+runtime that is gone is not started again: the state is `failed` and says
+so. A failed sign-in or host key is not retried, nor is giving up after 10
+minutes: the state is `failed` with the message, the listener tells the agent
+to call `use_machine`, and the next start tries again. A first connect that
+fails is reported once and not retried. The link starts the runtime with
+`--exit-idle`.
+
+A front that finds a link whose process lives but doesn't answer waits a few
+seconds, then reports that the link isn't answering. It doesn't start a second
+one. A machine's id is lower-case letters, digits, `-`, `_` and `.`, since it
+is the link's folder name on every system.
 
 **How long things last.** These are separate:
 

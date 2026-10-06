@@ -47,7 +47,8 @@ pub fn find_julia() -> Option<(PathBuf, Option<PathBuf>)> {
 }
 
 /// A julia that says it's 1.12, records its arguments, writes its state for the
-/// core naming `bridge`'s ports, and sleeps as its own pid.
+/// core naming `bridge`'s ports, and sleeps as its own pid. It waits first while
+/// the file `hold` is in `dir`.
 pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
     let bin = dir.join("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -57,6 +58,7 @@ pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
 [ "$1" = --version ] && {{ echo 'julia version 1.12.0'; exit 0; }}
 echo "$@" > "{dir}/julia.args"
 echo "booting"
+while [ -e "{dir}/hold" ]; do sleep 0.1; done
 printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"token":"%s","pluto_secret":"{PLUTO_SECRET}","job":""}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$ENDEAVOR_TOKEN" > "$ENDEAVOR_STATE.tmp"
 mv "$ENDEAVOR_STATE.tmp" "$ENDEAVOR_STATE"
 exec sleep 600

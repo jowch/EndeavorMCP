@@ -347,3 +347,22 @@ fn a_leading_tilde_is_the_servers_home() {
     fake_install(&home.join("a~b"));
     assert_eq!(where_they_land(&home, "~/a~b", "~x/y", "").0, format!("{h}/a~b/~x/y"));
 }
+
+#[test]
+fn only_sign_in_and_host_key_failures_end_a_reconnect() {
+    let ask = Auth::Batch;
+    let retry = |line: &str| explain_retry(&lab(), &ask, &[line.to_owned()], None, false, false).1;
+    for temporary in [
+        "ssh: Could not resolve hostname lab: Temporary failure in name resolution",
+        "ssh: connect to host lab port 22: Connection refused",
+        "ssh: connect to host lab port 22: Operation timed out",
+        "ssh: connect to host lab port 22: Network is unreachable",
+        "ssh: connect to host lab port 22: No route to host",
+    ] {
+        assert!(retry(temporary), "{temporary}");
+    }
+    for needs_the_user in ["jc@lab: Permission denied (publickey).", "Host key verification failed.", "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@"] {
+        assert!(!retry(needs_the_user), "{needs_the_user}");
+    }
+    assert!(!explain_retry(&lab(), &ask, &[], None, true, false).1, "a cancel");
+}

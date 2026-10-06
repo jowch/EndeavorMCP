@@ -379,6 +379,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         quit_with_client: false,
         any_node: false,
         build: Some(embedded::BUILD_VERSION.into()),
+        exit_idle,
         core_env: core_env(options, exit_idle),
     };
     if let Some(state) = crate::existing(&args)? {

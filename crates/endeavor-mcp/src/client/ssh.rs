@@ -332,7 +332,7 @@ pub fn this_platform() -> (String, String) {
 /// Why a connect failed, and whether trying again by itself could help: it
 /// can't when the user has to act first (a key to add, a host to accept) or
 /// the request itself is wrong, and can when the network or the server was
-/// the trouble.
+/// the trouble, a name that doesn't resolve (a laptop that just woke up) included.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConnectError {
     pub message: String,
@@ -575,7 +575,7 @@ fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: 
     let ssh_said = if !ssh_failed {
         None
     } else if said("Could not resolve hostname") {
-        Some((format!("Couldn't find a server called {host}. Check the SSH host."), false))
+        Some((format!("Couldn't find a server called {host}. Check the SSH host."), true))
     } else if said("REMOTE HOST IDENTIFICATION HAS CHANGED") {
         Some((format!("{host}'s identity (host key) changed since the last connection. If the server was reinstalled, remove its old key with `ssh-keygen -R {host}` in a terminal; otherwise ask its administrator."), false))
     } else if said("Host key verification failed") && batch {

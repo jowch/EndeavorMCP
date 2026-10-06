@@ -92,9 +92,11 @@ struct Args {
     /// The app build this helper and its runtime came from, which a runtime it
     /// starts reports to the app.
     build: Option<String>,
+    /// `--exit-idle`: the runtime ends once no notebook has been open for a while
+    /// (see `core::main`). The Slurm launcher passes it on to the job.
+    exit_idle: bool,
     /// More of the core's environment: a standalone runtime's settings, and
-    /// ENDEAVOR_EXIT_IDLE for `--exit-idle` (see `core::main`). Set on a core
-    /// this helper starts; the Slurm launcher passes `--exit-idle` on to the job.
+    /// ENDEAVOR_EXIT_IDLE when `exit_idle`. Set on a core this helper starts.
     core_env: Vec<(&'static str, String)>,
 }
 
@@ -253,6 +255,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         quit_with_client,
         any_node,
         build,
+        exit_idle,
         core_env: if exit_idle { vec![("ENDEAVOR_EXIT_IDLE", "1".into())] } else { Vec::new() },
     })
 }
