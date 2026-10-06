@@ -70,7 +70,10 @@ impl Running {
     /// The runtime or its job ended: why, in plain words, and what Julia last said.
     pub fn ended(&self, dir: &Path, said: Option<(String, Vec<String>)>) -> ToApp {
         self.link.kill();
-        let reason = if stopped_on_purpose(dir, self.pid) { Some(STOPPED_ELSEWHERE) } else { end_reason(&self.job, dir) };
+        let reason = match stopped::why(dir, stopped::Of::Runtime(self.pid)) {
+            Some(how) => Some(stopped_text(how)),
+            None => end_reason(&self.job, dir),
+        };
         // The job ends with Julia (its script execs it); make sure.
         scancel(&self.job);
         forget(dir, &self.job);
@@ -79,6 +82,7 @@ impl Running {
     }
 
     /// Ask the runtime to shut down through the relay, then cancel the job.
+    /// The caller holds the start lock.
     pub fn stop(self, rx: &mpsc::Receiver<Event>) {
         let generation = self.link.generation;
         if self.link.send(&ToHelper::Stop).is_ok() {
@@ -93,7 +97,7 @@ impl Running {
         }
         self.link.kill();
         scancel(&self.job);
-        forget(&self.state_dir, &self.job);
+        forget_locked(&self.state_dir, &self.job);
     }
 }
 
@@ -148,7 +152,7 @@ impl Link {
 /// `job.json` and waits for the same job.
 pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, request: JobRequest) -> Result<Attached, ToApp> {
     let failed = |message: String| ToApp::StartFailed { message };
-    let starting = standalone::start_lock(&args.state_dir).map_err(failed)?;
+    let starting = lock_start(args, mux, rx)?;
     let dir = &args.state_dir;
     if let Some(attached) = running(args, mux, events)? {
         return Ok(attached);
@@ -162,7 +166,7 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &
         None => match running(args, mux, events)? {
             Some(attached) => return Ok(attached),
             None => {
-                let _ = std::fs::remove_file(dir.join(standalone::STOPPED));
+                stopped::clear(dir);
                 submit(args, mux, &request).map_err(failed)?
             }
         },
@@ -235,14 +239,19 @@ pub fn check(dir: &Path) -> RuntimeState {
 
 /// Cancel the job recorded in `dir`: the one running the runtime, or one
 /// still waiting for a node.
+/// The caller holds the start lock.
 pub fn cancel_recorded(dir: &Path) {
-    if let Some(job) = read_state(dir).filter(|s| s.launcher == "slurm").and_then(|s| s.job) {
+    if let Some(state) = read_state(dir).filter(|s| s.launcher == "slurm")
+        && let Some(job) = state.job
+    {
+        stopped::mark(dir, stopped::Of::Runtime(state.pid), stopped::How::Connection);
         scancel(&job);
-        forget(dir, &job);
+        forget_locked(dir, &job);
     }
     if let Some((job, _)) = waiting_job(dir) {
+        stopped::mark(dir, stopped::Of::Job(&job), stopped::How::Connection);
         scancel(&job);
-        forget(dir, &job);
+        forget_locked(dir, &job);
     }
 }
 
@@ -313,6 +322,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
     let result = loop {
         match rx.recv_timeout(poll()) {
             Ok(Event::App(ToHelper::Stop)) => {
+                stopped::mark(dir, stopped::Of::Job(job), stopped::How::Connection);
                 scancel(job);
                 forget(dir, job);
                 break Err(ToApp::Stopped);
@@ -352,7 +362,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
                     if let Some(log) = log.take() {
                         let _ = log.join();
                     }
-                    let _ = std::fs::remove_file(dir.join("job.json"));
+                    under_start_lock(dir, || forget_job_record(dir, job));
                     // Before connecting, which can take a while: `q` says how long was left when it was asked.
                     let ends_at = ends_at(&q);
                     match connect_node(job, &state.node, dir, mux, events) {
@@ -372,6 +382,9 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
             }
             // Completing, or gone from the queue.
             _ => {
+                if let Some(how) = stopped::why(dir, stopped::Of::Job(job)) {
+                    break Err(ToApp::StartFailed { message: format!("The start was stopped. {}", stopped_text(how)) });
+                }
                 let reason = end_reason(job, dir).unwrap_or("Its Slurm job ended.");
                 let tail = log_tail(&dir.join("runtime.log"));
                 let said = tail.iter().rev().find(|l| !l.trim().is_empty()).map(|l| format!(" Its last output: {}", l.trim())).unwrap_or_default();
@@ -393,11 +406,40 @@ fn ends_at(q: &Queued) -> Option<u64> {
     q.left.map(|left| now + left)
 }
 
-/// Drop what's recorded about `job` (it ended or was cancelled).
+/// Drop what's recorded about `job` (it ended or was cancelled), unless the
+/// records have moved on to another job: helpers that shared `job` call this
+/// late, after one of them may have submitted the next. Whoever submits does it
+/// under the start lock, so the check and the removal are made under it too. A
+/// start that holds it for long isn't waited for: the records stay, and
+/// `waiting_job` drops a `job.json` whose job is gone.
 fn forget(dir: &Path, job: &str) {
-    let _ = std::fs::remove_file(dir.join("job.json"));
+    under_start_lock(dir, || forget_locked(dir, job));
+}
+
+/// Run `f` with the start lock, if it's free within a few seconds.
+fn under_start_lock(dir: &Path, f: impl FnOnce()) {
+    let Ok(file) = standalone::open_start_lock(dir) else { return };
+    for _ in 0..50 {
+        if try_lock(&file) {
+            return f();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// `forget`, for a caller that holds the start lock.
+fn forget_locked(dir: &Path, job: &str) {
+    forget_job_record(dir, job);
     if read_state(dir).is_some_and(|s| s.job.as_deref() == Some(job)) {
         let _ = std::fs::remove_file(dir.join("runtime.json"));
+    }
+}
+
+/// Remove `job.json` if it records `job`.
+fn forget_job_record(dir: &Path, job: &str) {
+    let recorded = std::fs::read_to_string(dir.join("job.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    if recorded.is_some_and(|v| v["job"].as_str() == Some(job)) {
+        let _ = std::fs::remove_file(dir.join("job.json"));
     }
 }
 

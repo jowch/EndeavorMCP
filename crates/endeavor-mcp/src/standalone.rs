@@ -114,6 +114,15 @@ impl Env {
         self.state_home.clone().unwrap_or_else(|| self.home.join(".local/state")).join("endeavor/serve").join(&self.node)
     }
 
+    /// For `connect --launcher slurm`: one for the whole cluster, since a reconnect
+    /// through another login node must find the same job.
+    fn cluster_state_dir(&self) -> PathBuf {
+        if cfg!(windows) {
+            return self.home.join("cluster");
+        }
+        self.state_home.clone().unwrap_or_else(|| self.home.join(".local/state")).join("endeavor/cluster")
+    }
+
     fn cache(&self) -> PathBuf {
         if cfg!(windows) {
             return self.home.join("serve-runtime");
@@ -362,7 +371,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         let port = state.port.ok_or("The Julia running here was started by an older version of Endeavor. Stop it with `endeavor stop`, then try again.")?;
         return Ok(Up { state, port, started: None });
     }
-    let _ = std::fs::remove_file(dir.join(STOPPED));
+    crate::stopped::clear(dir);
     args.runtime = unpack_runtime(&options.cache)?;
     let (julia, version) = julia::find(&options.julia, &|line| progress(&line))?;
     progress(&format!("Starting Julia {version} ({julia})"));
@@ -394,14 +403,35 @@ fn core_env(options: &Options, exit_idle: bool) -> Vec<(&'static str, String)> {
     env
 }
 
-/// Hold `DIR/start.lock` until dropped, waiting for another process's start.
-/// `serve`, `mcp` and `connect` take it while they find or start a runtime in `dir`.
-pub(crate) fn start_lock(dir: &Path) -> Result<std::fs::File, String> {
+/// `DIR/start.lock`, opened and not yet held. `serve`, `mcp` and `connect` hold
+/// it while they find or start a runtime in `dir`.
+pub(crate) fn open_start_lock(dir: &Path) -> Result<std::fs::File, String> {
     let path = dir.join("start.lock");
-    let file = crate::owner_only(std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false))
+    crate::owner_only(std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false))
         .open(&path)
-        .map_err(|e| format!("Couldn't open {}: {e}", path.display()))?;
+        .map_err(|e| format!("Couldn't open {}: {e}", path.display()))
+}
+
+/// How long to wait for another process's start before giving up. A first
+/// start downloads Julia and precompiles Pluto, which takes minutes, so this is
+/// well past that; `ENDEAVOR_START_LOCK_SECS` sets it (the tests do).
+pub(crate) fn start_lock_limit() -> Duration {
+    Duration::from_secs(std::env::var("ENDEAVOR_START_LOCK_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30 * 60))
+}
+
+/// What to say when `start_lock_limit` passes.
+pub(crate) fn start_lock_gave_up(dir: &Path) -> String {
+    format!("Gave up waiting for another process that is starting Julia in {}. If none is, delete {} and try again.", dir.display(), dir.join("start.lock").display())
+}
+
+/// Hold `DIR/start.lock` until dropped, waiting for another process's start.
+pub(crate) fn start_lock(dir: &Path) -> Result<std::fs::File, String> {
+    let file = open_start_lock(dir)?;
+    let started = std::time::Instant::now();
     while !crate::try_lock(&file) {
+        if started.elapsed() > start_lock_limit() {
+            return Err(start_lock_gave_up(dir));
+        }
         std::thread::sleep(Duration::from_millis(200));
     }
     Ok(file)
@@ -503,6 +533,11 @@ pub(crate) fn default_state_dir() -> PathBuf {
     Env::here().state_dir()
 }
 
+/// The state folder `connect --launcher slurm` uses when not given one.
+pub(crate) fn default_cluster_state_dir() -> PathBuf {
+    Env::here().cluster_state_dir()
+}
+
 /// The folder a running standalone runtime recorded for its notebooks.
 fn recorded_folder(dir: &Path) -> Option<String> {
     let state: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?;
@@ -532,10 +567,6 @@ pub(crate) fn other_build_than(dir: &Path, this: &str) -> Option<String> {
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
-
-/// In the state folder: the pid of the runtime `endeavor stop` ended, so a
-/// `serve` watching it tells that from a crash.
-pub(crate) const STOPPED: &str = "stopped";
 
 /// Take Ctrl-C, SIGTERM and SIGHUP on a thread of their own, as a request to
 /// stop. Called before any other thread starts, so they all inherit the mask.
@@ -632,12 +663,15 @@ fn serve(options: Options) -> ! {
     let _ = io::stdout().flush();
     while !stopping() {
         if !crate::pid_alive(up.state.pid, up.state.started) {
-            if std::fs::read_to_string(dir.join(STOPPED)).is_ok_and(|pid| pid == up.state.pid.to_string()) {
-                eprintln!("Julia was stopped with `endeavor stop`.");
-                std::process::exit(0);
+            match crate::stopped::why(dir, crate::stopped::Of::Runtime(up.state.pid)) {
+                Some(crate::stopped::How::Stop) => eprintln!("Julia was stopped with `endeavor stop`."),
+                Some(crate::stopped::How::Connection) => eprintln!("Julia was stopped from another connection."),
+                None => {
+                    eprintln!("Julia stopped. Its log is {}.", dir.join("runtime.log").display());
+                    std::process::exit(1);
+                }
             }
-            eprintln!("Julia stopped. Its log is {}.", dir.join("runtime.log").display());
-            std::process::exit(1);
+            std::process::exit(0);
         }
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -668,9 +702,12 @@ fn stop(dir: &Path) -> ! {
         println!("No Julia is running from {}.", dir.display());
         std::process::exit(0);
     }
-    let _ = std::fs::write(dir.join(STOPPED), state.pid.to_string());
+    crate::stopped::mark(dir, crate::stopped::Of::Runtime(state.pid), crate::stopped::How::Stop);
     let (events, _) = mpsc::channel();
     Runtime::recorded(&state, dir, &events).stop(Some(&state));
+    if crate::pid_alive(state.pid, state.started) {
+        crate::stopped::unmark(dir, crate::stopped::Of::Runtime(state.pid));
+    }
     println!("Stopped Julia (pid {}).", state.pid);
     std::process::exit(0)
 }

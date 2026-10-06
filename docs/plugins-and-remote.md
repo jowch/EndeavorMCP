@@ -37,6 +37,7 @@ untested._
 | Signing | Not needed for a `curl` install; wait |
 | State folder | One on each machine, yours included, for `serve`, `mcp`, the plugin and the app: the one `serve` uses today. The app stops choosing its own |
 | The list of machines | One file the binary owns, in its own folder. The app reads and writes it there |
+| State folder on a cluster | `~/.local/state/endeavor/cluster`, the same from every login node (built). The app's own is `~/.cache/endeavor/cluster-<id>` until it moves |
 | Jobs on a cluster | One at a time for each user. A second client attaches to the job as the first one asked for it, and is told its size |
 | Several clients on one runtime | Allowed. No client makes another exit |
 | Several agent sessions on one notebook | Allowed, as in the app today. No owner and no takeover |
@@ -407,9 +408,6 @@ folder, and that each loads the skills.
 - **The machines file's place and format.** The app's `hosts.json` records
   (`Server`, `Cluster`) move here with the client code. The folder is not
   chosen.
-- **A cluster's state folder.** One job for each user means one folder for
-  a cluster, shared by its login nodes. Its name is not chosen; the app's
-  is `~/.cache/endeavor/cluster-<id>` with an id of its own.
 - **Stopping one engine or the whole runtime**, once there is a second
   engine.
 

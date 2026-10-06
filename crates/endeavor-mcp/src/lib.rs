@@ -26,6 +26,7 @@ mod notebooks;
 mod results;
 mod slurm;
 mod standalone;
+mod stopped;
 mod update;
 #[cfg(windows)]
 mod winproc;
@@ -65,6 +66,7 @@ use wire::slurm::JobRequest;
 use wire::{Frame, ToApp, ToHelper};
 
 const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--build BUILD]
+                        (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster)
        endeavor relay --state-dir DIR
        endeavor node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
        endeavor core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
@@ -234,7 +236,10 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         }
     }
     Ok(Args {
-        state_dir: state_dir.unwrap_or_else(standalone::default_state_dir),
+        state_dir: state_dir.unwrap_or_else(|| match launcher {
+            Launcher::Process => standalone::default_state_dir(),
+            Launcher::Slurm => standalone::default_cluster_state_dir(),
+        }),
         julia: julia.ok_or("--julia or --julia-shell is required")?,
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
@@ -310,15 +315,15 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                 match attached.take() {
                     Some(runtime) => {
                         *routes.write().unwrap() = Route::None;
-                        runtime.stop(&args.state_dir, &rx);
+                        runtime.stop(args, mux, &rx);
                     }
-                    None => stop_recorded(args, &events),
+                    None => stop_recorded(args, mux, &rx, &events),
                 }
                 let _ = mux.send(&ToApp::Stopped.frame());
             }
             Event::Eof if args.quit_with_client => {
                 if let Some(runtime) = attached.take() {
-                    runtime.stop(&args.state_dir, &rx);
+                    runtime.stop(args, mux, &rx);
                 }
                 std::process::exit(0);
             }
@@ -405,13 +410,50 @@ impl Attached {
         }
     }
 
-    fn stop(self, dir: &Path, rx: &mpsc::Receiver<Event>) {
-        mark_stopped(dir, self.state.pid);
+    /// Stop the runtime for every client. The start lock is held throughout, so
+    /// a helper that is asked for a runtime meanwhile starts a new one after this
+    /// one is gone, and never attaches to one that is on its way out.
+    fn stop(self, args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>) {
+        let dir = &args.state_dir;
+        let _starting = lock_start(args, mux, rx).ok();
+        let of = stopped::Of::Runtime(self.state.pid);
+        stopped::mark(dir, of, stopped::How::Connection);
         match self.how {
-            How::Process(runtime, _) => runtime.stop(Some(&self.state)),
+            How::Process(runtime, _) => {
+                runtime.stop(Some(&self.state));
+                if pid_alive(runtime.pid, self.state.started) {
+                    stopped::unmark(dir, of);
+                }
+            }
             How::Slurm(job) => job.stop(rx),
         }
     }
+}
+
+/// Take the start lock, as `standalone::start_lock` does. While another
+/// helper holds it (a start can take minutes) the client is told once, and what
+/// it sends is still served: Detach and the end of input exit, and Stop gives up
+/// with `Stopped`, since nothing here is starting for it to stop.
+fn lock_start(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>) -> Result<File, ToApp> {
+    let file = standalone::open_start_lock(&args.state_dir).map_err(|message| ToApp::StartFailed { message })?;
+    let started = std::time::Instant::now();
+    let mut told = false;
+    while !try_lock(&file) {
+        if !told {
+            let _ = mux.send(&ToApp::Progress { line: "Another connection is starting Julia here; waiting for it.".into() }.frame());
+            told = true;
+        }
+        if started.elapsed() > standalone::start_lock_limit() {
+            return Err(ToApp::StartFailed { message: standalone::start_lock_gave_up(&args.state_dir) });
+        }
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(Event::App(ToHelper::Stop)) => return Err(ToApp::Stopped),
+            Ok(Event::App(ToHelper::Detach) | Event::Eof) => std::process::exit(0),
+            Err(RecvTimeoutError::Disconnected) => unreachable!("the watchers hold senders"),
+            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+    Ok(file)
 }
 
 /// Attach to the runtime in the state folder, or start one. The start lock
@@ -420,13 +462,13 @@ impl Attached {
 /// couldn't start, or that it died while starting.
 fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>) -> Result<Attached, ToApp> {
     let failed = |message: String| ToApp::StartFailed { message };
-    let _starting = standalone::start_lock(&args.state_dir).map_err(failed)?;
+    let _starting = lock_start(args, mux, rx)?;
     if let Some(state) = existing(args).map_err(failed)? {
         let port = state.port.ok_or_else(|| failed(OLDER_RUNTIME.into()))?;
         let runtime = Runtime::recorded(&state, &args.state_dir, events);
         return Ok(Attached { how: How::Process(runtime, port), state, reattached: true });
     }
-    let _ = std::fs::remove_file(args.state_dir.join(standalone::STOPPED));
+    stopped::clear(&args.state_dir);
     let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(failed)?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
     let token = token(&args.state_dir).map_err(failed)?;
@@ -439,41 +481,36 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
 /// Stop the runtime recorded in the state folder without attaching to it (on
 /// a cluster, cancel its job, or the job waiting for a node): the app's Stop
 /// for a host it only browsed. Waits for a start in progress, so it ends that runtime.
-fn stop_recorded(args: &Args, events: &Sender<Event>) {
-    let _starting = match standalone::start_lock(&args.state_dir) {
+fn stop_recorded(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>) {
+    let _starting = match lock_start(args, mux, rx) {
         Ok(lock) => lock,
-        Err(e) => return eprintln!("endeavor: not stopping: {e}"),
+        Err(ToApp::StartFailed { message }) => return eprintln!("endeavor: not stopping: {message}"),
+        Err(_) => return,
     };
     match args.launcher {
         Launcher::Process => match existing(args) {
             Ok(Some(state)) => {
-                mark_stopped(&args.state_dir, state.pid);
+                let of = stopped::Of::Runtime(state.pid);
+                stopped::mark(&args.state_dir, of, stopped::How::Connection);
                 let runtime = Runtime::recorded(&state, &args.state_dir, events);
                 runtime.stop(Some(&state));
+                if pid_alive(state.pid, state.started) {
+                    stopped::unmark(&args.state_dir, of);
+                }
             }
             Ok(None) => {}
             Err(e) => eprintln!("endeavor: not stopping: {e}"),
         },
-        Launcher::Slurm => {
-            if let Some(state) = read_state(&args.state_dir) {
-                mark_stopped(&args.state_dir, state.pid);
-            }
-            slurm::cancel_recorded(&args.state_dir)
-        }
+        Launcher::Slurm => slurm::cancel_recorded(&args.state_dir),
     }
 }
 
-/// What a client that finds the runtime gone is told when another connection stopped it.
-const STOPPED_ELSEWHERE: &str = "It was stopped from another connection.";
-
-/// Note in the state folder that the runtime `pid` is being stopped on purpose,
-/// for the other helpers attached to it (`Runtime::died`). The next start removes it.
-fn mark_stopped(dir: &Path, pid: i32) {
-    let _ = std::fs::write(dir.join(standalone::STOPPED), pid.to_string());
-}
-
-fn stopped_on_purpose(dir: &Path, pid: i32) -> bool {
-    std::fs::read_to_string(dir.join(standalone::STOPPED)).is_ok_and(|marked| marked == pid.to_string())
+/// What a client that finds the runtime gone is told, by how it was stopped.
+fn stopped_text(how: stopped::How) -> &'static str {
+    match how {
+        stopped::How::Connection => "It was stopped from another connection.",
+        stopped::How::Stop => "It was stopped with `endeavor stop`.",
+    }
 }
 
 /// What runs from the state folder, found without taking it over.
@@ -576,7 +613,7 @@ impl Runtime {
     /// It exited: clean up after it and say so, and if another connection
     /// stopped it, say that instead of how it exited.
     fn died(&self, status: String) -> ToApp {
-        let status = if stopped_on_purpose(&self.state_dir, self.pid) { STOPPED_ELSEWHERE.into() } else { status };
+        let status = stopped::why(&self.state_dir, stopped::Of::Runtime(self.pid)).map_or(status, |how| stopped_text(how).into());
         let log_tail = log_tail(&self.state_dir.join("runtime.log"));
         // Its notebook workers are no use without it.
         stop_workers(self.pid);
