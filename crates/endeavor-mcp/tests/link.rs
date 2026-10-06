@@ -195,7 +195,8 @@ fn one_link_serves_every_front_and_reaches_ready() {
     let status = wait_status(&link, "connected", |s| s.state == State::Connected);
     let hello = status.hello.clone().expect("the helper's hello");
     assert!(!hello.node.is_empty() && hello.uploads);
-    assert_eq!((hello.helper_installed, hello.os.as_deref()), (Some(true), Some("Linux")));
+    let uname = String::from_utf8(std::process::Command::new("uname").arg("-s").output().unwrap().stdout).unwrap();
+    assert_eq!((hello.helper_installed, hello.os.as_deref()), (Some(true), Some(uname.trim())));
     assert_eq!((status.machine.as_str(), status.name.as_str(), status.runtime.clone()), (place.id.as_str(), "lab", None));
     assert!(place.runtime().is_none());
 

@@ -332,7 +332,7 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
         ["Bearer t0k", "stdio-7", "plugin", "2025-03-26", "application/json, text/event-stream"]
     );
     assert_eq!(head.target(), "/mcp");
-    assert_eq!(client, format!("claude-code on {}", crate::hostname()), "the agent's own name, and where it runs");
+    assert_eq!(Some(client), crate::mcp::clean_label(&format!("claude-code on {}", crate::hostname())), "the agent's own name, and where it runs");
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn an_agent_that_gives_no_name_is_endeavor_mcp() {
     let (relay, _) = ready_relay(port, true);
     relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
-    assert_eq!(seen.lock().unwrap()[0].0.header("X-Endeavor-Client"), Some(format!("endeavor mcp on {}", crate::hostname()).as_str()));
+    assert_eq!(seen.lock().unwrap()[0].0.header("X-Endeavor-Client"), crate::mcp::clean_label(&format!("endeavor mcp on {}", crate::hostname())).as_deref());
 }
 
 #[test]

@@ -780,7 +780,9 @@ fn leaving_a_machine_or_ending_the_front_ends_its_session_there_and_leaves_the_l
     let others = || other_agent(&runtime, "watcher", "Watcher", "list_notebooks", json!({}))[0]["other_sessions"].clone();
     let seen = others();
     assert_eq!(seen.as_array().unwrap().len(), 1, "{seen}");
-    assert_eq!(seen[0]["client"], format!("Test Agent on {}", this_host()));
+    // A label is cut at 80 characters, which a long host name passes.
+    let label: String = format!("Test Agent on {}", this_host()).chars().take(80).collect();
+    assert_eq!(seen[0]["client"], label.trim_end());
 
     // Moving to this computer ends the key there; the new session has no notebook of its own.
     front.ok("use_machine", json!({ "machine": "local" }));
