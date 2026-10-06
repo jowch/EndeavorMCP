@@ -64,7 +64,8 @@ impl Notebooks {
             "search_code" => t.search_code(),
             "pluto_session_status" => self.call("status", json!({})).map(|mut status| {
                 if let Some(notebooks) = status["notebooks"].as_array_mut() {
-                    t.add_other_sessions(notebooks);
+                    let paths: Vec<String> = notebooks.iter().map(|nb| nb["path"].as_str().map_or_else(String::new, |path| canonical_path(path).unwrap_or_else(|_| path.to_owned()))).collect();
+                    t.add_other_sessions(notebooks, &paths);
                 }
                 status
             }),
@@ -485,24 +486,25 @@ impl Call<'_> {
         out
     }
 
-    /// Tell each notebook (an object with a `path`) which other sessions work in it.
-    fn add_other_sessions(&self, notebooks: &mut [Value]) {
-        for notebook in notebooks {
-            let Some(path) = notebook["path"].as_str() else { continue };
-            let path = canonical_path(path).unwrap_or_else(|_| path.to_owned());
-            notebook["other_sessions"] = self.nbs.other_sessions(self.owner, &path).into();
+    /// Tell each notebook which other sessions work in it. `paths` are the
+    /// notebooks' canonical paths.
+    fn add_other_sessions(&self, notebooks: &mut [Value], paths: &[String]) {
+        let others = self.nbs.other_sessions(self.owner);
+        for (notebook, path) in notebooks.iter_mut().zip(paths) {
+            notebook["other_sessions"] = others.get(path).cloned().unwrap_or_default().into();
         }
     }
 
     fn list_notebooks(&self) -> Result<Value, String> {
         let snapshots = self.nbs.snapshots()?;
         let bound = self.nbs.bound(self.owner);
-        let own = |nb: &Snapshot| bound.as_ref().is_some_and(|bound| canonical_path(&nb.path).is_ok_and(|path| path == *bound));
+        let paths: Vec<String> = snapshots.iter().map(|nb| canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone())).collect();
+        let own = |at: usize| bound.as_ref().is_some_and(|bound| paths[at] == *bound);
         let mut listed: Vec<Value> = {
             let mut state = self.nbs.state.lock().unwrap();
-            snapshots.iter().map(|nb| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(nb))).collect()
+            snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()
         };
-        self.add_other_sessions(&mut listed);
+        self.add_other_sessions(&mut listed, &paths);
         Ok(Value::Array(listed))
     }
 
@@ -873,10 +875,8 @@ impl Call<'_> {
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
         let opened = match self.nbs.call("open", json!({ "path": path, "run": run })) {
             Ok(opened) => opened,
-            Err(error) => match already_open(&error) {
-                Some(id) => return self.join(id),
-                None => return Err(error),
-            },
+            Err(error) if already_open(&error) => return self.join(path).unwrap_or(Err(error)),
+            Err(error) => return Err(error),
         };
         let mut result = json!({
             "notebook_id": opened["notebook_id"], "path": opened["path"], "execution_allowed": run, "ran": run,
@@ -891,14 +891,19 @@ impl Call<'_> {
 
     /// `open_notebook` on a notebook that is already open: the session
     /// works in it as it is. Nothing runs and its safe preview is as it was.
-    fn join(&self, id: &str) -> Result<Value, String> {
-        let raw = self.nbs.call("snapshot", json!({ "notebook_id": id }))?;
-        let nb = Snapshot::parse(&raw).ok_or("bad snapshot")?;
+    /// None if no open notebook has this path after all.
+    fn join(&self, path: &str) -> Option<Result<Value, String>> {
+        let wanted = canonical_path(path).unwrap_or_else(|_| path.to_owned());
+        let snapshots = match self.nbs.snapshots() {
+            Ok(snapshots) => snapshots,
+            Err(error) => return Some(Err(error)),
+        };
+        let nb = snapshots.iter().find(|nb| canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone()) == wanted)?;
         self.nbs.opened_by(self.owner, &nb.path);
-        Ok(json!({
+        Some(Ok(json!({
             "notebook_id": nb.id, "path": nb.path, "execution_allowed": nb.execution_allowed, "ran": false,
-            "process_status": raw["process_status"], "already_open": true,
-        }))
+            "process_status": nb.process_status, "already_open": true,
+        })))
     }
 
     fn new_notebook(&self, folder: Option<&str>) -> Result<Value, String> {
@@ -1032,11 +1037,10 @@ fn julia_iterate(value: &Value) -> Result<Vec<Value>, String> {
     }
 }
 
-/// The id of the open notebook in the adapter's `notebook_already_open` error.
-pub(super) fn already_open(error: &str) -> Option<&str> {
-    let (head, id) = error.rsplit_once(" is already open as notebook_id ")?;
-    head.contains("notebook_already_open::").then_some(())?;
-    id.split_once(';').map(|(id, _)| id)
+/// Whether the adapter refused to open a path because it is already open:
+/// its error's kind, as for every adapter error (`ArgumentError: kind::message`).
+pub(super) fn already_open(error: &str) -> bool {
+    error.strip_prefix("ArgumentError: ").is_some_and(|rest| rest.starts_with("notebook_already_open::"))
 }
 
 pub fn argument_error(message: &str) -> String {

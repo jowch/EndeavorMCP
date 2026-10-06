@@ -177,8 +177,12 @@ printable characters, trimmed and at most 80 long. `endeavor mcp` sends
 "<agent's name, else endeavor mcp> on <host name>". `list_notebooks` and
 `pluto_session_status` give each notebook `other_sessions`: an entry for each
 other session bound to it, `{client, active_seconds_ago}`, with null for
-what isn't known. The record goes when the binding is cleared, and a week
-after the session's last call.
+what isn't known. A session has a record from when it is bound, makes a
+tool call or is given an id, and only sessions with a record are listed.
+The record goes when the binding is cleared, and a week after the session's
+last call (after it was made, if there was none). `endeavor mcp` clears its
+session's binding when the agent's input ends; a front that is killed can't,
+so its session drops out after the week.
 
 ## Approval
 

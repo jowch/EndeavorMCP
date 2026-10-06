@@ -141,18 +141,12 @@ sessions get them and the desk's don't.
 passing it. For a while the helper also looks in the app's old folder, so a
 runtime already running from it is found and not started twice.
 
-**Quitting the app.** By default the app stops its local runtime when it
-quits (`--quit-with-client`). Shared, that would stop it under a plugin
-session, or under your laptop. So when its client's input ends, the helper
-stops the runtime only if no other client is attached, and otherwise exits
-and leaves the runtime to the idle stop. Each attached process keeps a file
-locked in `clients/` in the state folder, named from its host and pid: a
-helper from when it is ready until it detaches, stops or exits, an `mcp`
-front while it uses the runtime, and a foreground `serve`. A file whose lock
-can be taken belongs to a process that is gone and doesn't count (`clients.rs`).
-Stop from a client still ends the runtime for everyone, and Detach still
-leaves it. Two clients that quit at the same moment may each see the other
-and both leave it; the idle stop then ends it.
+**Quitting the app.** `--quit-with-client` stops the runtime when the app's
+end of the helper's input closes without a Stop or Detach, which happens
+when the app crashes. It stops the runtime for every client, as Stop does, so
+it is only for an app on the same computer. An ordinary quit is the app's
+own Stop or Detach. Not built: the app should detach instead of stopping
+when `other_sessions` shows another session was active lately.
 
 **The package folder locally.** On servers the app and `serve` already use
 the same one. On your own computer they differ (the app's is in its data
@@ -191,7 +185,8 @@ it with the relay.
 
 - It uses the shared state folder, on servers and on your computer, and one
   package folder locally.
-- Quitting stops the local runtime only when nobody else uses it.
+- Quitting detaches, and stops the local runtime only when `other_sessions`
+  shows no other session was active lately.
 - It no longer hears "In use from another connection": nothing makes it
   exit. It can show a notebook's other sessions instead.
 - Its rule for a runtime from another build compares builds for equality,

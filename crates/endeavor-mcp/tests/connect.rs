@@ -482,73 +482,6 @@ fn detaching_leaves_the_runtime_and_quit_with_client_stops_it_on_eof() {
     assert!(!dir.join("runtime.json").exists());
 }
 
-/// How many clients are recorded in `dir`, held or not.
-fn recorded(dir: &Path) -> usize {
-    std::fs::read_dir(dir.join("clients")).map_or(0, |entries| entries.count())
-}
-
-/// `endeavor mcp` in `dir`, once it has recorded itself as a client of the runtime there.
-fn mcp_in(dir: &Path) -> Child {
-    let before = recorded(dir);
-    let mcp = Command::new(env!("CARGO_BIN_EXE_endeavor"))
-        .arg("mcp")
-        .arg("--state-dir")
-        .arg(dir)
-        .args(["--julia", "/nonexistent/julia", "--depot", "/opt/depot:"])
-        .env("XDG_CACHE_HOME", dir.join("cache"))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    common::wait_for("mcp to record itself", || recorded(dir) > before);
-    mcp
-}
-
-/// A helper with `--quit-with-client`, attached to the runtime in `dir`, whose input then ends.
-fn quits(dir: &Path) {
-    let mut helper = Helper::start(dir, &["--any-node", "--quit-with-client"]);
-    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
-    helper.stdin.0.lock().unwrap().take();
-    helper.exits();
-}
-
-#[test]
-fn quit_with_client_leaves_a_runtime_that_other_clients_are_attached_to() {
-    let dir = state_dir("quit-others");
-    let runtime = FakeRuntime::start(&dir, "labbox3");
-
-    // Another helper.
-    let mut other = Helper::start(&dir, &["--any-node"]);
-    assert!(matches!(other.start_runtime(), ToApp::Ready { .. }));
-    quits(&dir);
-    assert!(runtime.alive() && dir.join("runtime.json").exists(), "another helper is attached");
-
-    // Once that one detaches, nothing else is attached.
-    other.send(ToHelper::Detach);
-    other.exits();
-    quits(&dir);
-    assert!(!runtime.alive(), "alone, it stops the runtime");
-
-    // `endeavor serve`, and `endeavor mcp`.
-    let runtime = FakeRuntime::start(&dir, &this_host());
-    let mut serve = serve_in(&dir);
-    quits(&dir);
-    assert!(runtime.alive(), "`serve` is attached");
-    serve.kill().unwrap();
-    serve.wait().unwrap();
-    let mut mcp = mcp_in(&dir);
-    quits(&dir);
-    assert!(runtime.alive(), "`mcp` is attached");
-
-    // What a killed process leaves behind isn't a client.
-    mcp.kill().unwrap();
-    mcp.wait().unwrap();
-    assert!(recorded(&dir) > 0, "its file is still there");
-    quits(&dir);
-    assert!(!runtime.alive(), "a record nobody holds doesn't count");
-}
-
 #[test]
 fn a_runtime_that_dies_is_reported_with_its_log() {
     let dir = state_dir("died");
@@ -1118,6 +1051,85 @@ fn a_helper_waiting_for_another_start_says_so_once_and_still_hears_the_client() 
     assert_eq!(helper.start_runtime(), ToApp::Progress { line: line.into() });
     let ToApp::StartFailed { message } = helper.next() else { panic!("expected StartFailed") };
     assert!(message.contains("Gave up waiting") && message.contains(&dir.display().to_string()), "{message}");
+}
+
+#[test]
+fn a_stop_waits_for_the_start_lock_and_then_stops() {
+    let dir = state_dir("stop-wait");
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    let mut helper = Helper::start(&dir, &["--any-node"]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    let held = hold_start_lock(&dir);
+    helper.send(ToHelper::Stop);
+    // A second Stop doesn't cancel the first, and nothing says a start is under way.
+    helper.send(ToHelper::Stop);
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(helper.control.try_recv().is_err() && runtime.alive(), "it waits for the lock");
+    drop(held);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    assert!(!runtime.alive());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(helper.control.try_recv().is_err(), "the second Stop was ignored");
+
+    // A Detach while it waits is done after the stop.
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    helper.send(ToHelper::StartRuntime { job: None });
+    assert!(matches!(helper.next(), ToApp::Ready { .. }));
+    let held = hold_start_lock(&dir);
+    helper.send(ToHelper::Stop);
+    helper.send(ToHelper::Detach);
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(runtime.alive() && helper.process.try_wait().unwrap().is_none(), "the Detach doesn't cancel the stop");
+    drop(held);
+    helper.exits();
+    assert!(!runtime.alive(), "the stop was made before the helper left");
+}
+
+#[test]
+fn a_stop_that_cant_get_the_lock_says_so_and_leaves_the_runtime_attached() {
+    let dir = state_dir("stop-gives-up");
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--any-node"], &[("ENDEAVOR_START_LOCK_SECS", "1")]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    let held = hold_start_lock(&dir);
+    helper.send(ToHelper::Stop);
+    let ToApp::Progress { line } = helper.next() else { panic!("expected why it didn't stop") };
+    assert!(line.contains("was not stopped") && line.contains(&dir.display().to_string()), "{line}");
+    assert!(runtime.alive() && dir.join("runtime.json").exists());
+    assert!(call(&helper).ends_with(CALL_REPLY_ENDS), "still attached");
+    drop(held);
+    helper.send(ToHelper::Stop);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    assert!(!runtime.alive());
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn a_detach_while_waiting_to_start_drops_an_unfinished_upload() {
+    let dir = state_dir("detach-wait");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join("fits")).unwrap();
+    let _held = hold_start_lock(&dir);
+    let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[("HOME", home.to_str().unwrap())]);
+    assert!(matches!(helper.start_runtime(), ToApp::Progress { .. }));
+    let ask = |id: u32, request: Request| {
+        helper.send(ToHelper::Files { id, request });
+        match helper.next() {
+            ToApp::Files { id: got, reply } if got == id => reply,
+            other => panic!("expected Files {id}, got {other:?}"),
+        }
+    };
+    let folder = "~/fits".to_string();
+    let sha256 = "b659e80980e7375313bf70ebf6e577f4abae7d5657bf7b563fa64c2f48a33eee".to_string();
+    assert_eq!(ask(1, Request::Place { folder: folder.clone(), name: "decay.csv".into(), size: 8, sha256 }), Reply::Place { path: "data/decay.csv".into(), have: false });
+    let unfinished = Request::Write { folder, path: "data/decay.csv".into(), offset: 0, bytes: b"t,y\n".to_vec(), last: false };
+    assert_eq!(ask(2, unfinished), Reply::Written);
+    let part = home.join("fits/data/.decay.csv.part");
+    assert!(part.exists());
+    helper.send(ToHelper::Detach);
+    helper.exits();
+    assert!(!part.exists(), "a Detach while it waits removes the part, as any other does");
 }
 
 #[test]

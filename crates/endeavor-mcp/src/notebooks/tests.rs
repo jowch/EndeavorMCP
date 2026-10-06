@@ -143,10 +143,8 @@ impl Engine {
             }
             "open" | "new" => {
                 let path = params["path"].as_str().map_or_else(|| format!("{}{SEP}made.jl", params["folder"].as_str().unwrap_or("/n")), str::to_owned);
-                if method == "open"
-                    && let Some(open) = notebooks.iter().find(|nb| nb.path == path)
-                {
-                    return Err(format!("ArgumentError: notebook_already_open::'{path}' is already open as notebook_id {}; use that id", open.id));
+                if method == "open" && notebooks.iter().any(|nb| nb.path == path) {
+                    return Err(format!("ArgumentError: notebook_already_open::Somebody has {path} open already."));
                 }
                 let mut made = self.made.lock().unwrap();
                 *made += 1;
@@ -1204,7 +1202,8 @@ fn opening_an_open_notebook_joins_it_and_changes_nothing() {
     assert_eq!(s.notebooks.bound("c").as_ref(), Some(&paths[1]));
 
     // Other adapter errors stay errors.
-    assert_eq!(super::tools::already_open("ArgumentError: file_not_found::'x' is already open as notebook_id y; use that id"), None);
+    assert!(!super::tools::already_open("ArgumentError: file_not_found::'x' is already open as notebook_id y; use that id"));
+    assert!(super::tools::already_open("ArgumentError: notebook_already_open::any wording"));
 }
 
 #[test]
@@ -1221,15 +1220,14 @@ fn list_notebooks_says_which_other_sessions_work_in_each_notebook() {
     assert_eq!(others("a"), json!([]));
 
     s.call("b", "open_notebook", json!({ "path": &paths[0] })).unwrap();
-    s.notebooks.set_client("b", "Claude Code on jc-workstation");
-    s.notebooks.note_call("b");
+    s.notebooks.note_call("b", Some("Claude Code on jc-workstation"));
     s.seconds(125.7);
     assert_eq!(others("a"), json!([{ "client": "Claude Code on jc-workstation", "active_seconds_ago": 125 }]));
     assert_eq!(others("c").as_array().unwrap().len(), 2, "a session in another notebook sees both");
 
     // A session the app bound has made no call and has no label; the most recent call comes first.
     s.notebooks.bind("app", &paths[0]);
-    s.notebooks.note_call("a");
+    s.notebooks.note_call("a", None);
     s.seconds(10.0);
     assert_eq!(others("b"), json!([{ "client": null, "active_seconds_ago": 10 }, { "client": null, "active_seconds_ago": null }]));
     // The app's own calls have no session, so every session bound there is another.
@@ -1238,13 +1236,21 @@ fn list_notebooks_says_which_other_sessions_work_in_each_notebook() {
     // Records go with the binding, and a week after the last call.
     s.notebooks.bind("b", "");
     assert!(!s.notebooks.state.lock().unwrap().seen.contains_key("b"));
-    s.seconds(8.0 * 24.0 * 3600.0);
-    assert_eq!(others("c"), json!([{ "client": null, "active_seconds_ago": null }, { "client": null, "active_seconds_ago": null }]));
-    assert!(s.notebooks.state.lock().unwrap().seen.is_empty());
+    assert_eq!(others("c").as_array().unwrap().len(), 2);
 
-    // Calls without a session are not recorded.
-    s.notebooks.note_call("");
-    assert!(s.notebooks.state.lock().unwrap().seen.is_empty());
+    // A session with no record isn't listed, and a record needs a binding, a call or an id.
+    s.notebooks.state.lock().unwrap().bindings.insert("ghost".into(), paths[0].clone());
+    assert_eq!(others("c").as_array().unwrap().len(), 2, "no record, not listed");
+    s.notebooks.note_call("", None);
+    assert!(!s.notebooks.state.lock().unwrap().seen.contains_key(""), "a call with no session isn't recorded");
+    assert_eq!(s.notebooks.state.lock().unwrap().seen.len(), 3, "a, c and the app's bound session");
+
+    // A week after its last call, or after it was bound if it made none, a session is left out.
+    s.seconds(6.0 * 24.0 * 3600.0);
+    s.notebooks.note_call("a", None);
+    s.seconds(2.0 * 24.0 * 3600.0);
+    assert_eq!(others("c"), json!([{ "client": null, "active_seconds_ago": 172800 }]));
+    assert_eq!(s.notebooks.state.lock().unwrap().seen.len(), 1, "c and the app's session were bound 8 days ago and never called");
 }
 
 #[test]
@@ -1253,7 +1259,7 @@ fn pluto_session_status_lists_the_other_sessions_too() {
     let paths = temp_notebooks("status", 1);
     s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
     s.call("b", "open_notebook", json!({ "path": &paths[0] })).unwrap();
-    s.notebooks.note_call("b");
+    s.notebooks.note_call("b", None);
     s.seconds(5.0);
     let status = s.call("a", "pluto_session_status", json!({})).unwrap();
     assert_eq!((&status["pluto"], &status["notebooks"][0]["other_sessions"]), (&json!("running"), &json!([{ "client": null, "active_seconds_ago": 5 }])));

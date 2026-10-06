@@ -304,16 +304,11 @@ impl Bridge {
         {
             caller.host = host;
         }
-        if !caller.owner.is_empty()
-            && let Some(label) = &caller.client
-        {
-            self.notebooks.set_client(&caller.owner, label);
-        }
         // A client without a key gets one, and is labelled as it says it is.
         let issued = |id: &str, initialize: &Value| {
             let named = initialize["params"]["clientInfo"]["name"].as_str().and_then(clean_label);
             if let Some(label) = caller.client.clone().or(named) {
-                self.notebooks.set_client(id, &label);
+                self.notebooks.issued(id, &label);
             }
         };
         let issue_session: Option<Issue> = caller.owner.is_empty().then_some(&issued);
@@ -328,7 +323,7 @@ impl Bridge {
         }
         answer(message, caller, self.standalone.is_some(), |params| {
             let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone };
-            self.notebooks.note_call(&caller.owner);
+            self.notebooks.note_call(&caller.owner, caller.client.as_deref());
             let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);

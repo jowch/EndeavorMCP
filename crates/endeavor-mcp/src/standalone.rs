@@ -424,17 +424,51 @@ pub(crate) fn start_lock_gave_up(dir: &Path) -> String {
     format!("Gave up waiting for another process that is starting Julia in {}. If none is, delete {} and try again.", dir.display(), dir.join("start.lock").display())
 }
 
-/// Hold `DIR/start.lock` until dropped, waiting for another process's start.
-pub(crate) fn start_lock(dir: &Path) -> Result<std::fs::File, String> {
-    let file = open_start_lock(dir)?;
-    let started = std::time::Instant::now();
+/// What `wait_for_start_lock` gave up on.
+pub(crate) enum Wait<E> {
+    /// The lock file couldn't be opened.
+    Failed(String),
+    /// The limit passed.
+    TimedOut,
+    /// `pause` said to stop waiting.
+    Interrupted(E),
+}
+
+/// Hold `DIR/start.lock` until dropped, waiting up to `limit` for another
+/// process to let go. `pause` is called between attempts and does the waiting;
+/// an error from it ends the wait.
+pub(crate) fn wait_for_start_lock<E>(dir: &Path, limit: Duration, mut pause: impl FnMut() -> Result<(), E>) -> Result<std::fs::File, Wait<E>> {
+    let file = open_start_lock(dir).map_err(Wait::Failed)?;
+    let started = Instant::now();
     while !crate::try_lock(&file) {
-        if started.elapsed() > start_lock_limit() {
-            return Err(start_lock_gave_up(dir));
+        if started.elapsed() > limit {
+            return Err(Wait::TimedOut);
         }
-        std::thread::sleep(Duration::from_millis(200));
+        pause().map_err(Wait::Interrupted)?;
     }
     Ok(file)
+}
+
+/// Hold `DIR/start.lock` until dropped, waiting for another process's start.
+pub(crate) fn start_lock(dir: &Path) -> Result<std::fs::File, String> {
+    let pause = || {
+        std::thread::sleep(Duration::from_millis(200));
+        Ok::<(), std::convert::Infallible>(())
+    };
+    wait_for_start_lock(dir, start_lock_limit(), pause).map_err(|wait| match wait {
+        Wait::Failed(message) => message,
+        Wait::TimedOut => start_lock_gave_up(dir),
+        Wait::Interrupted(never) => match never {},
+    })
+}
+
+/// What to say when a stop gave up waiting for the start lock.
+pub(crate) fn stop_lock_gave_up(dir: &Path) -> String {
+    format!(
+        "Julia was not stopped: another process has held the start lock in {} for too long. Julia is still running. Try again, or delete {} if nothing is starting Julia.",
+        dir.display(),
+        dir.join("start.lock").display()
+    )
 }
 
 /// Follow the log of a runtime we started until it writes its state and
@@ -640,7 +674,6 @@ fn serve(options: Options) -> ! {
         std::process::exit(1)
     });
     let dir = &options.state_dir;
-    let _presence = crate::clients::register(dir);
     let folder = recorded_folder(dir).unwrap_or_else(|| options.folder.display().to_string());
     if up.started.is_none() {
         eprintln!("Julia was already running from {} (pid {}); using it as it was started.", dir.display(), up.state.pid);
@@ -703,12 +736,8 @@ fn stop(dir: &Path) -> ! {
         println!("No Julia is running from {}.", dir.display());
         std::process::exit(0);
     }
-    crate::stopped::mark(dir, crate::stopped::Of::Runtime(state.pid), crate::stopped::How::Stop);
     let (events, _) = mpsc::channel();
-    Runtime::recorded(&state, dir, &events).stop(Some(&state));
-    if crate::pid_alive(state.pid, state.started) {
-        crate::stopped::unmark(dir, crate::stopped::Of::Runtime(state.pid));
-    }
+    crate::stop_marked(dir, &state, &Runtime::recorded(&state, dir, &events), crate::stopped::How::Stop);
     println!("Stopped Julia (pid {}).", state.pid);
     std::process::exit(0)
 }
@@ -736,8 +765,6 @@ struct Relay {
     mcp_session: Mutex<Option<String>>,
     /// The agent's name from `initialize`, which the runtime shows to other sessions.
     agent: Mutex<Option<String>>,
-    /// Kept while this front uses the runtime (see `clients`).
-    presence: Mutex<Option<crate::clients::Presence>>,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -756,12 +783,13 @@ fn relay(options: Options) -> ! {
         // must get through meanwhile.
         std::thread::spawn(move || relay.handle(&line));
     }
+    relay.release();
     std::process::exit(0)
 }
 
 impl Relay {
     fn new(options: Options, session: String, out: Box<dyn Write + Send>) -> Relay {
-        Relay { options, status: Mutex::new(Status::Idle), changed: Condvar::new(), session, protocol: Mutex::default(), mcp_session: Mutex::default(), agent: Mutex::default(), presence: Mutex::default(), out: Mutex::new(out) }
+        Relay { options, status: Mutex::new(Status::Idle), changed: Condvar::new(), session, protocol: Mutex::default(), mcp_session: Mutex::default(), agent: Mutex::default(), out: Mutex::new(out) }
     }
 
     fn write(&self, message: &str) {
@@ -789,11 +817,6 @@ impl Relay {
             };
             let status = match start_or_reuse(&relay.options, true, &progress, &|| false) {
                 Ok(up) => {
-                    let mut presence = relay.presence.lock().unwrap();
-                    if presence.is_none() {
-                        *presence = crate::clients::register(&relay.options.state_dir);
-                    }
-                    drop(presence);
                     relay.tell_folder(up.port, &up.state.token);
                     eprintln!("Endeavor's notebooks: http://localhost:{}/?token={}", up.port, up.state.token);
                     if let Some(message) = up.started.is_none().then(|| other_build(&relay.options.state_dir)).flatten() {
@@ -811,16 +834,33 @@ impl Relay {
         });
     }
 
-    /// Give the runtime this session's folder, as the app does for its
-    /// sessions: the runtime may have been started from another folder.
-    fn tell_folder(&self, port: u16, token: &str) {
-        let params = json!({ "owner": self.session, "folder": self.options.folder.display().to_string() });
-        let body = to_json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": params }));
+    /// Tell the runtime something about this session, as the app does for its
+    /// sessions with `/endeavor/call`.
+    fn tell(port: u16, token: &str, method: &str, params: Value) -> io::Result<(u16, Vec<u8>)> {
+        let body = to_json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }));
         let bearer = format!("Bearer {token}");
         let headers = [("Authorization", bearer.as_str()), ("Content-Type", "application/json")];
-        if let Err(e) = crate::http::post(port, crate::CALL, &headers, body.as_bytes()) {
+        crate::http::post(port, crate::CALL, &headers, body.as_bytes())
+    }
+
+    /// Give the runtime this session's folder: the runtime may have been
+    /// started from another folder.
+    fn tell_folder(&self, port: u16, token: &str) {
+        let params = json!({ "owner": self.session, "folder": self.options.folder.display().to_string() });
+        if let Err(e) = Relay::tell(port, token, "endeavor/set_session_folder", params) {
             eprintln!("endeavor: couldn't give the runtime this session's folder: {e}");
         }
+    }
+
+    /// The agent has gone: let the runtime forget this session's notebook, so
+    /// other sessions don't see it as still working there. Best effort, and
+    /// it doesn't hold up the exit for more than a moment.
+    fn release(&self) {
+        let Status::Ready { port, token } = &*self.status.lock().unwrap() else { return };
+        let (port, token, params) = (*port, token.clone(), json!({ "owner": self.session, "notebook": null }));
+        let (done, told) = mpsc::channel();
+        std::thread::spawn(move || drop(done.send(Relay::tell(port, &token, "endeavor/set_notebook", params))));
+        let _ = told.recv_timeout(Duration::from_millis(500));
     }
 
     /// The runtime's port and token, waiting up to `START_WAIT` for a start;

@@ -328,6 +328,23 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
 }
 
 #[test]
+fn a_front_whose_agent_has_gone_clears_its_sessions_notebook() {
+    let (port, seen) = fake_core();
+    let (relay, _) = ready_relay(port, true);
+    relay.release();
+    let seen = seen.lock().unwrap();
+    let (head, body) = &seen[0];
+    assert_eq!(head.target(), "/endeavor/call");
+    assert_eq!(head.header("Authorization"), Some("Bearer t0k"));
+    assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/set_notebook","params":{"notebook":null,"owner":"stdio-7"}}"#);
+    assert_eq!(seen.len(), 1);
+    drop(seen);
+    // Before the runtime is up there is nothing to tell.
+    *relay.status.lock().unwrap() = Status::Starting(String::new());
+    relay.release();
+}
+
+#[test]
 fn an_agent_that_gives_no_name_is_endeavor_mcp() {
     let (port, seen) = fake_core();
     let (relay, _) = ready_relay(port, true);

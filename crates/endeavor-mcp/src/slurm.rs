@@ -150,9 +150,9 @@ impl Link {
 /// decides and submits, so two helpers never submit two jobs, and let go
 /// before the wait in the queue: a helper that comes in meanwhile finds
 /// `job.json` and waits for the same job.
-pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, request: JobRequest) -> Result<Attached, ToApp> {
+pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, parts: &Parts, request: JobRequest) -> Result<Attached, ToApp> {
     let failed = |message: String| ToApp::StartFailed { message };
-    let starting = lock_start(args, mux, rx)?;
+    let starting = lock_start(args, mux, rx, parts)?;
     let dir = &args.state_dir;
     if let Some(attached) = running(args, mux, events)? {
         return Ok(attached);
@@ -173,7 +173,7 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &
     };
     drop(starting);
     let (state, running) = wait(args, mux, rx, events, &job)?;
-    Ok(Attached { how: How::Slurm(running), state, reattached: false, presence: None })
+    Ok(Attached { how: How::Slurm(running), state, reattached: false })
 }
 
 /// The runtime recorded as running in a job, attached to through a relay on its node.
@@ -189,7 +189,7 @@ fn running(args: &Args, mux: &Arc<Mux>, events: &Sender<Event>) -> Result<Option
                 let ends_at = ends_at(&q);
                 let (link, route) = connect_node(&job, &state.node, dir, mux, events).map_err(failed)?;
                 let running = Running { job, pid: state.pid, node: state.node.clone(), ends_at, route, link, state_dir: dir.clone() };
-                return Ok(Some(Attached { how: How::Slurm(running), state, reattached: true, presence: None }));
+                return Ok(Some(Attached { how: How::Slurm(running), state, reattached: true }));
             }
             _ => {
                 let _ = std::fs::remove_file(dir.join("runtime.json"));
@@ -418,12 +418,12 @@ fn forget(dir: &Path, job: &str) {
 
 /// Run `f` with the start lock, if it's free within a few seconds.
 fn under_start_lock(dir: &Path, f: impl FnOnce()) {
-    let Ok(file) = standalone::open_start_lock(dir) else { return };
-    for _ in 0..50 {
-        if try_lock(&file) {
-            return f();
-        }
+    let pause = || {
         std::thread::sleep(Duration::from_millis(100));
+        Ok::<(), std::convert::Infallible>(())
+    };
+    if let Ok(_lock) = standalone::wait_for_start_lock(dir, Duration::from_secs(5), pause) {
+        f();
     }
 }
 
