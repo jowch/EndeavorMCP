@@ -317,7 +317,7 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     let init: Value = serde_json::from_str(&lines[0]).unwrap();
     assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-    assert_eq!(init["result"]["instructions"], crate::guide::STANDALONE, "with the plugin's skills, only what differs without the app");
+    assert_eq!(init["result"]["instructions"], format!("{} {}", crate::guide::STANDALONE, crate::guide::MACHINES), "with the plugin's skills, what differs without the app, and the machine tools");
     assert!(seen.lock().unwrap().is_empty(), "the runtime saw neither");
 
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
@@ -401,7 +401,12 @@ fn without_the_plugin_the_handshake_points_to_the_guide() {
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
     let lines: Vec<Value> = out.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
     let instructions = lines[0]["result"]["instructions"].as_str().unwrap();
-    assert!(instructions.starts_with(&format!("{}\n\nBefore your first notebook tool call in a session, call `notebook_guide` once", crate::guide::STANDALONE)), "{instructions}");
+    assert!(instructions.starts_with(&format!("{} {}\n\nBefore your first notebook tool call in a session, call `notebook_guide` once", crate::guide::STANDALONE, crate::guide::MACHINES)), "{instructions}");
     assert_eq!(lines[1]["result"]["tools"][0]["name"], "notebook_guide");
-    assert!(!lines[1]["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "run_shell"), "an agent on this machine has its own shell");
+    let names: Vec<&str> = lines[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    for tool in ["run_shell", "read_file", "list_folder", "list_machines", "add_machine", "use_machine", "stop_machine"] {
+        assert!(names.contains(&tool), "{tool} is listed: on this computer the host tools refuse, and after use_machine they work");
+    }
+    let read_only = |name: &str| lines[1]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
+    assert_eq!([read_only("list_machines"), read_only("add_machine"), read_only("use_machine"), read_only("stop_machine")], [true, false, false, false]);
 }

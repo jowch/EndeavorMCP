@@ -197,6 +197,70 @@ on the user's computer) gives a link that works there. Without the header, or
 with one that isn't a port, only a runtime started by `serve` or `mcp` adds a
 `browser_url`, on its own port, as before.
 
+## The machine tools
+
+_Built 2026-10-06, in `endeavor mcp` only._
+
+`endeavor mcp` (the front) lists four tools that it answers itself and a
+runtime doesn't have: `list_machines`, `add_machine`, `use_machine` and
+`stop_machine` ([plugins-and-remote.md](plugins-and-remote.md)). Its
+`tools/list` always has the host tools too, which refuse while the session is
+on this computer. The schemas are `src/machine_tools.json`. `list_machines`
+is read-only, the others are not. Each returns one JSON object as the text of
+its result; a failure is `{error, message}` with `isError` true.
+
+A session is on this computer or on one machine. On a machine the front sends
+the runtime `X-Endeavor-Host: <name>` (so it lists and allows the host tools
+for this session) and `X-Endeavor-Browser-Port: <the link's runtime port>`
+(see [Session identity](#session-identity)), and gives it the session's folder
+with `endeavor/set_session_folder` each time it attaches to a runtime there.
+When the session moves to another runtime the front ends its key on the old
+one (`endeavor/end_session`) and makes a new key, since a runtime that has ended
+a key ignores it afterwards, and a notebook binding means nothing on another
+runtime. A session starts with no notebook on the machine it moves to.
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `list_machines` | none | `machines`: each `{name, host, cluster, state, this_session}` (`state` is `no link running` or the link's: `connecting`, `connected`, `starting`, `queued`, `ready`, `failed`, with `error`); `local` `{name, state, this_session}`; `this_session.machine`; `ssh_hosts_not_added`; `message`. Starts nothing |
+| `add_machine` | `host` (an ssh alias or `user@host[:port]`, through `valid_host`), `name`, `julia` | `{machine, host, state, saved, updated, node, home, os, arch, slurm, partitions: [{name, default, max_hours, cpus, memory_gb}], scratch, julia, message}`. `state` is `connecting` when 45 s ran out; call again. Julia is null until a runtime has been started there once |
+| `use_machine` | `machine` (a name, or `"local"`), `folder`; on a cluster `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | `{machine, state, ready, message, …}`. `ready`: `browser_url`, `node`, `folder`, `already_running`, and for a cluster `job` `{id, summary, node, ends_at, ends_in_minutes}`. `starting`, `queued`: `step`, `queue` `{state, reason, reason_text}`, `job`. `needs_job`: a cluster with nothing running and no resources given; `defaults`, `partitions`; nothing was submitted |
+| `stop_machine` | `machine`, `force` | `{machine, stopped, message}`; refused with `other_sessions` `[{client, active_seconds_ago, notebook}]` when another session was active in the last 15 minutes and `force` isn't true |
+
+`use_machine` and `pluto_session_status` use the link's own words for what is
+going on, and no call waits longer than 45 seconds (`ENDEAVOR_START_WAIT_SECS`
+sets it for tests). A notebook call while the target's runtime isn't up fails
+with a plain message built from the link's status; `pluto_session_status` is
+answered by the front from the link's status (`{machine, state, ready, step,
+error, queue, job, message}`), and when the runtime is up it is relayed with
+`machine` (and for a cluster `job`) added to its JSON. A queued job is not
+waited for.
+
+**What a project remembers.** `<state home>/endeavor/projects.json`, which the
+binary owns, maps a project folder (the front's `--folder`, canonical) to
+`{machine, folder}`. It is written whole and renamed, owner-only, under a lock.
+`use_machine` writes it; `"local"` removes the entry. A front that starts in a
+project with an entry targets that machine and starts nothing. On its first
+runtime call it asks the link to attach only to a runtime that is already
+there (`only_running`): a plain server then starts one if none runs, and a
+cluster submits nothing, and says so with the defaults to ask the user about.
+An entry whose machine is gone from the machines file is ignored, and the first
+result says so once.
+
+**The link's `only_running`.** `POST /link/start` takes `{"job": …,
+"only_running": true}`. After connecting, the link asks the helper whether a
+runtime runs or a job waits (`Request::Runtime`, as a reconnect does). If so it
+attaches as for any start. If not it starts nothing, and the status is
+`connected` with `nothing_running` true until the next start.
+
+**The link and the front.** While its target is a machine the front asks the
+link for its status every four minutes (`ENDEAVOR_FRONT_PING_SECS` for tests),
+which counts as activity, so the link's 8 hours run from the end of the last
+session. A link that is gone is started again by the next call and attached to
+whatever runs. A link of another build than the front's is quit and started
+again by `use_machine` only when no runtime hangs on it (a new link has a new
+port, and the browser's page would break); otherwise it is kept and the result
+says so.
+
 ## Approval
 
 A small change, about 1–2 days.

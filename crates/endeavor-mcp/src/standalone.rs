@@ -28,6 +28,9 @@ use crate::http::Head;
 use crate::mcp::to_json;
 use crate::{Args, Launcher, Runtime, State, embedded, julia};
 
+mod machines;
+mod projects;
+
 const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Julia here and print how to connect (Ctrl-C stops it)
        endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
        endeavor stop              stop the Julia that serve or mcp started
@@ -48,9 +51,12 @@ options:
 /// started, how long the runtime stays up with no notebook open): the app's default.
 const IDLE_HOURS: f64 = 48.0;
 
-/// How long a relayed call waits for a runtime that is still starting before
-/// it says so, under the time agents give a tool call.
-const START_WAIT: Duration = Duration::from_secs(45);
+/// How long a relayed call, and each machine tool, waits for a runtime that is
+/// still starting before it says so, under the time agents give a tool call.
+/// `ENDEAVOR_START_WAIT_SECS` sets it (the tests do).
+fn start_wait() -> Duration {
+    lock_limit("ENDEAVOR_START_WAIT_SECS", 45)
+}
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Command {
@@ -126,6 +132,14 @@ impl Env {
             return self.home.join("links");
         }
         self.state_home.clone().unwrap_or_else(|| self.home.join(".local/state")).join("endeavor/links")
+    }
+
+    /// What projects remember (`projects`).
+    pub(crate) fn projects_path(&self) -> PathBuf {
+        if cfg!(windows) {
+            return self.home.join("projects.json");
+        }
+        self.state_home.clone().unwrap_or_else(|| self.home.join(".local/state")).join("endeavor/projects.json")
     }
 
     /// For `connect --launcher slurm`: one for the whole cluster, since a reconnect
@@ -747,27 +761,46 @@ fn serve(options: Options) -> ! {
     std::process::exit(0)
 }
 
-fn stop(dir: &Path) -> ! {
-    let Some(state) = crate::read_state(dir) else {
-        println!("No Julia is running from {}.", dir.display());
-        std::process::exit(0)
-    };
+/// What ending the runtime recorded in a state folder came to.
+enum Ended {
+    /// None was recorded, or its process is gone.
+    NotRunning,
+    /// It runs on another machine (its name).
+    Elsewhere(String),
+    /// Stopped (its pid).
+    Stopped(i32),
+    /// Still running after the stop (its pid).
+    Alive(i32),
+}
+
+/// End the runtime recorded in `dir`, as `endeavor stop` does.
+fn end_runtime(dir: &Path) -> Ended {
+    let Some(state) = crate::read_state(dir) else { return Ended::NotRunning };
     let here = crate::hostname();
     if state.node != here {
-        eprintln!("The Julia recorded in {} runs on {}, not here ({here}). Stop it there.", dir.display(), state.node);
-        std::process::exit(1);
+        return Ended::Elsewhere(state.node);
     }
     if !crate::pid_alive(state.pid, state.started) {
         crate::remove_state(dir, state.pid);
-        println!("No Julia is running from {}.", dir.display());
-        std::process::exit(0);
+        return Ended::NotRunning;
     }
     let (events, _) = mpsc::channel();
-    if !crate::stop_marked(dir, &state, &Runtime::recorded(&state, dir, &events), crate::stopped::How::Stop) {
-        eprintln!("Julia (pid {}) is still running.", state.pid);
-        std::process::exit(1);
+    if crate::stop_marked(dir, &state, &Runtime::recorded(&state, dir, &events), crate::stopped::How::Stop) { Ended::Stopped(state.pid) } else { Ended::Alive(state.pid) }
+}
+
+fn stop(dir: &Path) -> ! {
+    match end_runtime(dir) {
+        Ended::NotRunning => println!("No Julia is running from {}.", dir.display()),
+        Ended::Elsewhere(node) => {
+            eprintln!("The Julia recorded in {} runs on {node}, not here ({}). Stop it there.", dir.display(), crate::hostname());
+            std::process::exit(1);
+        }
+        Ended::Alive(pid) => {
+            eprintln!("Julia (pid {pid}) is still running.");
+            std::process::exit(1);
+        }
+        Ended::Stopped(pid) => println!("Stopped Julia (pid {pid})."),
     }
-    println!("Stopped Julia (pid {}).", state.pid);
     std::process::exit(0)
 }
 
@@ -786,8 +819,22 @@ struct Relay {
     status: Mutex<Status>,
     changed: Condvar,
     /// This agent session's key (`X-Endeavor-Session`): the runtime gives each
-    /// session one notebook, and tells sessions apart in its warnings.
-    session: String,
+    /// session one notebook, and tells sessions apart in its warnings. It is
+    /// new when the session moves to another runtime (`new_session`): a runtime
+    /// that has ended a key ignores it afterwards.
+    session: Mutex<String>,
+    /// The first key, which the later ones are made from.
+    session_base: String,
+    /// How many keys the front has made.
+    sessions: std::sync::atomic::AtomicU64,
+    /// Where this session's notebooks run.
+    target: Mutex<machines::Target>,
+    /// One machine tool at a time (they switch, start and stop things).
+    ops: Mutex<()>,
+    /// Said once, in the first result.
+    notice: Mutex<Option<String>>,
+    machines: crate::client::MachinesFile,
+    projects: projects::Projects,
     /// What `initialize` negotiated, for `MCP-Protocol-Version`.
     protocol: Mutex<Option<String>>,
     /// The runtime's `Mcp-Session-Id`, if it gives one.
@@ -800,7 +847,11 @@ struct Relay {
 fn relay(options: Options) -> ! {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let relay = Arc::new(Relay::new(options, format!("stdio-{}-{}", std::process::id(), now.as_millis()), Box::new(io::stdout())));
-    relay.start();
+    relay.target_from_project();
+    if matches!(*relay.target.lock().unwrap(), machines::Target::Local { .. }) {
+        relay.start();
+    }
+    relay.keep_link_alive();
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -818,7 +869,27 @@ fn relay(options: Options) -> ! {
 
 impl Relay {
     fn new(options: Options, session: String, out: Box<dyn Write + Send>) -> Relay {
-        Relay { options, status: Mutex::new(Status::Idle), changed: Condvar::new(), session, protocol: Mutex::default(), mcp_session: Mutex::default(), agent: Mutex::default(), out: Mutex::new(out) }
+        Relay {
+            options,
+            status: Mutex::new(Status::Idle),
+            changed: Condvar::new(),
+            session_base: session.clone(),
+            session: Mutex::new(session),
+            sessions: std::sync::atomic::AtomicU64::new(0),
+            target: Mutex::new(machines::Target::Local { stopped: false }),
+            ops: Mutex::new(()),
+            notice: Mutex::new(None),
+            machines: crate::client::MachinesFile::here(),
+            projects: projects::Projects::at(Env::here().projects_path()),
+            protocol: Mutex::default(),
+            mcp_session: Mutex::default(),
+            agent: Mutex::default(),
+            out: Mutex::new(out),
+        }
+    }
+
+    fn session(&self) -> String {
+        self.session.lock().unwrap().clone()
     }
 
     fn write(&self, message: &str) {
@@ -875,7 +946,12 @@ impl Relay {
     /// Give the runtime this session's folder: the runtime may have been
     /// started from another folder.
     fn tell_folder(&self, port: u16, token: &str) {
-        let params = json!({ "owner": self.session, "folder": self.options.folder.display().to_string() });
+        self.tell_session_folder(port, token, &self.options.folder.display().to_string());
+    }
+
+    /// Give the runtime on `port` this session's folder, which is `folder` there.
+    fn tell_session_folder(&self, port: u16, token: &str, folder: &str) {
+        let params = json!({ "owner": self.session(), "folder": folder });
         if let Err(e) = Relay::tell(port, token, "endeavor/set_session_folder", params) {
             eprintln!("endeavor: couldn't give the runtime this session's folder: {e}");
         }
@@ -884,19 +960,35 @@ impl Relay {
     /// The agent has gone: let the runtime end this session, so other sessions
     /// don't see it as still working in a notebook, and a call still under way
     /// doesn't bind it again. Best effort, and it doesn't hold up the exit for
-    /// more than a moment.
+    /// more than a moment. The link stays.
     fn release(&self) {
-        let Status::Ready { port, token } = &*self.status.lock().unwrap() else { return };
-        let (port, token, params) = (*port, token.clone(), json!({ "owner": self.session }));
+        let Some((port, token)) = self.current_runtime() else { return };
+        self.end_session(port, &token);
+    }
+
+    /// End this session's key on the runtime at `port`, without waiting more than a moment.
+    fn end_session(&self, port: u16, token: &str) {
+        let (token, params) = (token.to_owned(), json!({ "owner": self.session() }));
         let (done, told) = mpsc::channel();
         std::thread::spawn(move || drop(done.send(Relay::tell(port, &token, "endeavor/end_session", params))));
         let _ = told.recv_timeout(Duration::from_millis(500));
     }
 
-    /// The runtime's port and token, waiting up to `START_WAIT` for a start;
+    /// The port and token of the runtime this session is using, if it is up, without starting anything.
+    fn current_runtime(&self) -> Option<(u16, String)> {
+        match self.machine() {
+            Some(machine) => self.machine_runtime(&machine),
+            None => match &*self.status.lock().unwrap() {
+                Status::Ready { port, token } => Some((*port, token.clone())),
+                _ => None,
+            },
+        }
+    }
+
+    /// The runtime's port and token, waiting up to `start_wait()` for a start;
     /// else why it can't be used yet.
     fn runtime(self: &Arc<Self>) -> Result<(u16, String), String> {
-        let deadline = Instant::now() + START_WAIT;
+        let deadline = Instant::now() + start_wait();
         let mut status = self.status.lock().unwrap();
         loop {
             match &*status {
@@ -928,6 +1020,12 @@ impl Relay {
 
     /// The runtime went away: start or find it again.
     fn lost(self: &Arc<Self>) {
+        if let machines::Target::Machine(machine) = &mut *self.target.lock().unwrap() {
+            // The link is gone, or its runtime: the next call asks the link again.
+            machine.link = None;
+            machine.asked = None;
+            return;
+        }
         let mut status = self.status.lock().unwrap();
         if matches!(*status, Status::Ready { .. }) {
             *status = Status::Idle;
@@ -951,17 +1049,22 @@ impl Relay {
         if message["method"] == "notifications/initialized" {
             return;
         }
+        let tool = (message["method"] == "tools/call").then(|| message["params"]["name"].as_str().unwrap_or_default().to_owned());
+        if let Some(tool) = tool.as_deref().filter(|tool| crate::mcp::MACHINE_NAMES.contains(tool)) {
+            return self.machine_tool(&message, tool);
+        }
         let failed = |why: String| {
             if let Some(id) = &id {
-                self.write(&tool_failure(id, &message, &why));
+                self.write(&self.decorate(&message, tool.as_deref(), tool_failure(id, &message, &why)));
             }
         };
+        let sink = |reply: String| self.write(&self.decorate(&message, tool.as_deref(), reply));
         for attempt in 0..2 {
-            let (port, token) = match self.runtime() {
-                Ok(runtime) => runtime,
-                Err(why) => return failed(why),
+            let route = match self.route(tool.as_deref() != Some("pluto_session_status")) {
+                Ok(route) => route,
+                Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
-            match self.post(port, &token, line) {
+            match self.post(&route, line, &sink) {
                 Ok(()) => return,
                 Err(Sent::NotConnected(e)) if attempt == 0 => {
                     eprintln!("endeavor: the runtime isn't answering ({e}); starting it again");
@@ -972,15 +1075,20 @@ impl Relay {
         }
     }
 
-    /// POST one message to the runtime and write what it answers.
-    fn post(&self, port: u16, token: &str, body: &str) -> Result<(), Sent> {
+    /// POST one message to the runtime and give what it answers to `sink`.
+    fn post(&self, route: &Route, body: &str, sink: &dyn Fn(String)) -> Result<(), Sent> {
+        let port = route.port;
+        let token = &route.token;
         let socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)).map_err(Sent::NotConnected)?;
         let _ = socket.set_nodelay(true);
         let mut head = format!(
             "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nX-Endeavor-Session: {}\r\nContent-Length: {}\r\n",
-            self.session,
+            self.session(),
             body.len()
         );
+        if let Some(host) = &route.host {
+            head.push_str(&format!("X-Endeavor-Host: {host}\r\nX-Endeavor-Browser-Port: {port}\r\n"));
+        }
         if self.options.skills_plugin {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
         }
@@ -1015,14 +1123,14 @@ impl Relay {
             202 => Ok(()),
             200 if event_stream => {
                 for event in events(body) {
-                    self.write(&one_line(&event.map_err(Sent::Failed)?));
+                    sink(one_line(&event.map_err(Sent::Failed)?));
                 }
                 Ok(())
             }
             200 => {
                 let mut text = String::new();
                 BufReader::new(body).read_to_string(&mut text).map_err(Sent::Failed)?;
-                self.write(&one_line(&text));
+                sink(one_line(&text));
                 Ok(())
             }
             _ => {
@@ -1055,6 +1163,15 @@ fn one_line(text: &str) -> String {
         Ok(value) => to_json(&value),
         Err(_) => text.replace(['\r', '\n'], " "),
     }
+}
+
+/// Where a call goes: a runtime's port and token, and for a machine's runtime its name.
+pub(crate) struct Route {
+    pub port: u16,
+    pub token: String,
+    /// The machine's name (`X-Endeavor-Host`). With it the runtime also gets
+    /// the link's port as the browser's (`X-Endeavor-Browser-Port`), which is `port`.
+    pub host: Option<String>,
 }
 
 /// A response body as its sender framed it, read without the framing.

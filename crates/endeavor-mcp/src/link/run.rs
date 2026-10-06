@@ -78,6 +78,10 @@ struct Inner {
     kick_pending: bool,
     /// The runtime went away before the end of its start was handled.
     gone_early: bool,
+    /// The next start only attaches to a runtime that is there.
+    check_first: bool,
+    /// The last such start found nothing (`Status::nothing_running`).
+    nothing_running: bool,
 }
 
 struct Shared {
@@ -181,6 +185,8 @@ pub(crate) fn main(argv: &[String]) -> ! {
             connecting: false,
             kick_pending: false,
             gone_early: false,
+            check_first: false,
+            nothing_running: false,
         }),
         cancel: Mutex::new(Arc::new(Cancel::default())),
         activity: Mutex::new(Instant::now()),
@@ -226,6 +232,7 @@ impl Shared {
             runtime: i.runtime.clone(),
             job: i.job.clone(),
             queue: i.queue.clone(),
+            nothing_running: i.nothing_running,
             pid: std::process::id(),
             build: crate::embedded::BUILD_VERSION.to_owned(),
         })
@@ -286,25 +293,68 @@ impl Shared {
             i.error = None;
             i.queue = None;
             i.step = Some(format!("Starting the runtime on {}", i.name));
-            Some((channel, job, i.conn, i.epoch))
+            Some((channel, job, i.conn, i.epoch, std::mem::take(&mut i.check_first)))
         });
-        let Some((channel, job, conn, epoch)) = begun else { return };
+        let Some((channel, job, conn, epoch, check)) = begun else { return };
         let shared = self.clone();
         std::thread::spawn(move || {
+            if check && !shared.runtime_is_there(&channel, conn, epoch) {
+                return;
+            }
             let tx = shared.inbox.clone();
             let result = start(&channel, &shared.listener, job, &|event| shared.on_event(event), move |notice| drop(tx.send(Msg::Notice(conn, notice))));
             let _ = shared.inbox.send(Msg::Started(conn, epoch, result));
         });
     }
 
+    /// For a start that only attaches: ask the helper whether a runtime runs or a
+    /// job waits. If not, end the start with nothing started. False then, and when
+    /// the answer was no use.
+    fn runtime_is_there(&self, channel: &Channel, conn: u64, epoch: u64) -> bool {
+        let answer = channel.files(Request::Runtime);
+        let current = |i: &Inner| i.conn == conn && i.epoch == epoch;
+        match answer {
+            Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } }) => true,
+            Ok(Reply::Runtime { runtime: RuntimeState::NotRunning }) => {
+                self.with(|i| {
+                    if current(i) {
+                        i.starting = false;
+                        i.wanted = None;
+                        i.nothing_running = true;
+                        i.state = State::Connected;
+                        i.step = Some(format!("No runtime is running on {}", i.name));
+                    }
+                });
+                false
+            }
+            // The connection went: `Closed` follows and takes the wish along to the next one.
+            Ok(_) | Err(_) if channel.is_closed() => false,
+            other => {
+                let trouble = other.map_or_else(|e| e, |reply| format!("The helper answered {reply:?}."));
+                self.with(|i| {
+                    if current(i) {
+                        i.starting = false;
+                        i.wanted = None;
+                        i.state = State::Failed;
+                        i.error = Some(format!("Endeavor couldn't find out whether Julia on {} is running ({trouble}). Call use_machine to try again.", i.name));
+                        i.step = i.error.clone();
+                    }
+                });
+                false
+            }
+        }
+    }
+
     /// `POST /link/start`.
-    fn request_start(self: &Arc<Shared>, job: Option<JobRequest>) {
+    fn request_start(self: &Arc<Shared>, job: Option<JobRequest>, only_running: bool) {
         let connected = self.with(|i| {
             if i.runtime.is_some() || i.starting {
                 return true;
             }
             i.wanted = Some(job);
             i.resume = None;
+            i.check_first = only_running;
+            i.nothing_running = false;
             if i.channel.is_some() {
                 return true;
             }
@@ -776,15 +826,16 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
     match (head.method(), head.path()) {
         ("GET", "/link/status") => reply(&mut connection, "200 OK", &json!(shared.status())),
         ("POST", "/link/start") => {
-            let job = if body.is_empty() {
-                None
+            let (job, only_running) = if body.is_empty() {
+                (None, false)
             } else {
-                match serde_json::from_slice::<Value>(&body).ok().and_then(|v| serde_json::from_value::<Option<JobRequest>>(v.get("job").cloned().unwrap_or(Value::Null)).ok()) {
-                    Some(job) => job,
-                    None => return reply(&mut connection, "400 Bad Request", &json!({ "error": "job isn't a job request" })),
-                }
+                let Ok(asked) = serde_json::from_slice::<Value>(&body) else { return reply(&mut connection, "400 Bad Request", &json!({ "error": "the body isn't JSON" })) };
+                let Ok(job) = serde_json::from_value::<Option<JobRequest>>(asked.get("job").cloned().unwrap_or(Value::Null)) else {
+                    return reply(&mut connection, "400 Bad Request", &json!({ "error": "job isn't a job request" }));
+                };
+                (job, asked["only_running"] == true)
             };
-            shared.request_start(job);
+            shared.request_start(job, only_running);
             reply(&mut connection, "200 OK", &json!(shared.status()))
         }
         ("POST", "/link/stop") => match shared.request_stop() {

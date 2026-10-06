@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 pub const TOOL: &str = "notebook_guide";
 
 /// Each skill file by its path under `plugin/skills`.
-const FILES: [(&str, &str); 14] = [
+const FILES: [(&str, &str); 16] = [
     ("pluto-session/SKILL.md", include_str!("../../../plugin/skills/pluto-session/SKILL.md")),
     ("pluto-workflow/SKILL.md", include_str!("../../../plugin/skills/pluto-workflow/SKILL.md")),
     ("pluto-semantics/SKILL.md", include_str!("../../../plugin/skills/pluto-semantics/SKILL.md")),
@@ -23,6 +23,8 @@ const FILES: [(&str, &str); 14] = [
     ("pluto-semantics/reference/error-kinds.md", include_str!("../../../plugin/skills/pluto-semantics/reference/error-kinds.md")),
     ("pluto-semantics/reference/grammar.md", include_str!("../../../plugin/skills/pluto-semantics/reference/grammar.md")),
     ("pluto-semantics/reference/reactivity.md", include_str!("../../../plugin/skills/pluto-semantics/reference/reactivity.md")),
+    ("endeavor-machines/SKILL.md", include_str!("../../../plugin/skills/endeavor-machines/SKILL.md")),
+    ("endeavor-machines/reference/machine-tools.md", include_str!("../../../plugin/skills/endeavor-machines/reference/machine-tools.md")),
 ];
 
 /// Points an agent without the plugin's skills to the guide.
@@ -38,14 +40,20 @@ pub const STANDALONE: &str = "These tools edit and run live Pluto (Julia) notebo
 the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
 Where Endeavor's notes on these tools say \"in the app\" or \"without the app\", follow the parts for working without the app.";
 
+/// What `endeavor mcp` adds to what it tells every agent: it has the machine tools.
+pub const MACHINES: &str = "This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
+that the user reaches over ssh. Use them only when the user asks to work on a machine; they say how to continue.";
+
 /// The server's MCP `instructions` for an agent with the plugin's skills or
-/// without (`has_skills`), on a runtime with the app or without (`standalone`).
-pub fn instructions(standalone: bool, has_skills: bool) -> Option<String> {
+/// without (`has_skills`), on a runtime with the app or without (`standalone`);
+/// `machines`: from `endeavor mcp`, which has the machine tools.
+pub fn instructions(standalone: bool, has_skills: bool, machines: bool) -> Option<String> {
+    let standalone_text = if machines { format!("{STANDALONE} {MACHINES}") } else { STANDALONE.to_owned() };
     match (standalone, has_skills) {
         (false, true) => None,
         (false, false) => Some(format!("{APP} {READ_GUIDE}")),
-        (true, true) => Some(STANDALONE.to_owned()),
-        (true, false) => Some(format!("{STANDALONE}\n\n{READ_GUIDE}")),
+        (true, true) => Some(standalone_text),
+        (true, false) => Some(format!("{standalone_text}\n\n{READ_GUIDE}")),
     }
 }
 
@@ -89,10 +97,11 @@ fn whole() -> String {
          call `notebook_guide` with `topic` set to the path when you need one.\n\
          Tool names such as `Read`, `Bash` or `Write` refer to your own file and shell tools, whatever they are called.\n",
     );
-    for (path, text) in FILES.iter().filter(|(p, _)| p.ends_with("/SKILL.md")) {
+    for (path, text) in FILES.iter().filter(|(p, _)| p.ends_with("/SKILL.md") && p.starts_with("pluto-")) {
         out.push_str("\n---\n\n");
         out.push_str(&served(path, text));
     }
+    out.push_str("\n---\n\nIf you have the tool `list_machines`, the notebooks can run on a server or cluster: call `notebook_guide` with `topic` set to `endeavor-machines` for how.\n");
     out
 }
 

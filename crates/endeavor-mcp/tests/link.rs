@@ -248,6 +248,37 @@ fn stopping_ends_the_runtime_but_not_the_link_and_a_start_after_it_works() {
 }
 
 #[test]
+fn an_attach_starts_nothing_when_no_runtime_is_there_and_takes_the_one_that_is() {
+    let place = Place::new("attach");
+    let link = place.ensure();
+    // Asked at once, while the link may still be connecting: it asks the helper once connected.
+    link.attach().expect("attach");
+    let status = wait_status(&link, "nothing running", |s| s.nothing_running);
+    assert_eq!((status.state, status.runtime.is_none(), status.error.clone()), (State::Connected, true, None), "{status:?}");
+    assert!(place.runtime().is_none() && !place.state.join("julia.args").exists(), "no Julia was started");
+    assert!(status.step.unwrap().contains("No runtime is running"));
+
+    // A start after it is a start, and the flag clears.
+    let asked = link.start(None).unwrap();
+    assert!(!asked.nothing_running);
+    let runtime = ready(&link).runtime.unwrap();
+    assert!(!runtime.reattached);
+
+    // Another link attaches to what runs, and is not told that nothing does.
+    link.quit().unwrap();
+    wait_for("the link to end", || !pid_alive(link.pid as i32));
+    let second = place.ensure();
+    assert_ne!(second.pid, link.pid);
+    second.attach().unwrap();
+    let status = ready(&second);
+    let attached = status.runtime.unwrap();
+    assert!(attached.reattached && attached.pid == runtime.pid, "{attached:?}");
+    assert!(!status.nothing_running);
+    // With a runtime attached, an attach changes nothing.
+    assert_eq!(second.attach().unwrap().state, State::Ready);
+}
+
+#[test]
 fn the_connection_comes_back_on_the_same_port() {
     let place = Place::new("reconnect");
     let link = place.ensure();

@@ -1,0 +1,860 @@
+//! The machine tools of `endeavor mcp` (the front), driven over stdio as an
+//! agent's harness drives it, against the link process (`endeavor link`) and
+//! the helper with a local `sh` standing in for ssh (`ENDEAVOR_LINK_SHELL`), a
+//! stand-in Julia under the real core, and fake Slurm commands for a cluster.
+//! No sshd, Julia or Slurm is needed. Everything is under `target/tmp`: the
+//! front's HOME, state, config and cache folders, the links, the helper's
+//! install and state folders, and the ssh config that `list_machines` reads
+//! (it finds it through HOME).
+
+#![cfg(unix)]
+
+mod common;
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::os::unix::process::CommandExt;
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use common::front::Front;
+use common::{FakeBridge, TOKEN, pid_alive, serving_julia, wait_for};
+use endeavor_mcp::client::{Cluster, MachinesFile, Server};
+use endeavor_mcp::link::{Link, Spawn, State, Status, ensure_with};
+use serde_json::{Value, json};
+use wire::slurm::{Partition, Resources};
+
+const NOTEBOOK: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+
+/// A machine called `lab` (or `hpc`, a cluster) whose helper, runtime and link live in a folder of the
+/// test's own, and the folders of a front on "this computer" with a runtime of its own.
+struct Place {
+    dir: PathBuf,
+    /// The front's project folder.
+    project: PathBuf,
+    /// The helper's state folder, where its runtime keeps `runtime.json`.
+    state: PathBuf,
+    /// The runtime of "this computer".
+    local_state: PathBuf,
+    bridge: FakeBridge,
+    local_bridge: FakeBridge,
+    julia: PathBuf,
+    local_julia: PathBuf,
+    /// What a front and a link get (a front is given nothing else).
+    env: Vec<(String, String)>,
+    spawn: Spawn,
+}
+
+impl Place {
+    fn new(name: &str) -> Place {
+        Place::with(name, &[])
+    }
+
+    /// With more variables, or other values for those set here; `{dir}` is this place's folder.
+    fn with(name: &str, more: &[(&str, &str)]) -> Place {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("machines-{name}"));
+        end_leftovers(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let (state, local_state, project) = (dir.join("runtime-state"), dir.join("local-state"), dir.join("project"));
+        for folder in [&state, &local_state, &project, &dir.join("home/.ssh")] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let (bridge, local_bridge) = (FakeBridge::start(&state), FakeBridge::start(&local_state));
+        let (julia, local_julia) = (serving_julia(&state, &bridge), serving_julia(&local_state, &local_bridge));
+        for folder in [&state, &local_state] {
+            std::fs::write(folder.join("token"), TOKEN).unwrap();
+        }
+        let path = |name: &str| dir.join(name).display().to_string();
+        let mut env: Vec<(String, String)> = [
+            ("PATH", std::env::var("PATH").unwrap()),
+            ("HOME", path("home")),
+            ("XDG_STATE_HOME", path("state-home")),
+            ("XDG_CONFIG_HOME", path("config")),
+            ("XDG_CACHE_HOME", path("cache")),
+            ("ENDEAVOR_LINK_SHELL", "1".into()),
+            ("ENDEAVOR_LINK_ROOT", path("root")),
+            ("ENDEAVOR_LINK_STATE", state.display().to_string()),
+            ("ENDEAVOR_LINK_DEPOT", path("depot")),
+            ("ENDEAVOR_LINK_IDLE_SECS", "3600".into()),
+            ("ENDEAVOR_START_WAIT_SECS", "30".into()),
+            ("ENDEAVOR_SLURM_POLL_MS", "100".into()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        for (name, value) in more {
+            env.retain(|(n, _)| n != name);
+            env.push((name.to_string(), value.replace("{dir}", &dir.display().to_string())));
+        }
+        let spawn = Spawn { exe: PathBuf::from(env!("CARGO_BIN_EXE_endeavor")), env: env.clone() };
+        let project = project.canonicalize().unwrap();
+        Place { dir, project, state, local_state, bridge, local_bridge, julia, local_julia, env, spawn }
+    }
+
+    fn machines(&self) -> MachinesFile {
+        MachinesFile::at(self.dir.join("config/endeavor/machines.json"))
+    }
+
+    /// A plain server called `lab`.
+    fn add_lab(&self) {
+        self.machines().save(Server { id: "lab".into(), name: "lab".into(), ssh_host: "lab".into(), julia: Some(self.julia.display().to_string()), ..Default::default() }).unwrap();
+    }
+
+    /// A cluster called `hpc`, with a default job of 8 CPUs, 32 GB and 8 hours.
+    fn add_hpc(&self) {
+        let resources = Resources { partition: None, cpus: 8, mem_gb: 32, minutes: 480, gres: None, extra: Vec::new() };
+        let partitions = vec![Partition { name: "shared".into(), default: true, max_minutes: Some(1440), cpus: 32, mem_mb: 128 * 1024 }];
+        let cluster = Cluster { resources, partitions, ..Default::default() };
+        self.machines().save(Server { id: "hpc".into(), name: "hpc".into(), ssh_host: "hpc".into(), julia: Some(self.julia.display().to_string()), cluster: Some(cluster), ..Default::default() }).unwrap();
+    }
+
+    /// The running link of machine `id`, started if there is none (a front would too).
+    fn link(&self, id: &str) -> Link {
+        ensure_with(&self.spawn, id).expect("a link")
+    }
+
+    fn record(&self, id: &str) -> PathBuf {
+        self.dir.join("state-home/endeavor/links").join(id).join("link.json")
+    }
+
+    fn links_dir(&self) -> PathBuf {
+        self.dir.join("state-home/endeavor/links")
+    }
+
+    fn projects(&self) -> Value {
+        std::fs::read_to_string(self.dir.join("state-home/endeavor/projects.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null)
+    }
+
+    fn runtime(&self) -> Option<i32> {
+        recorded_pid(&self.state)
+    }
+
+    fn local_runtime(&self) -> Option<i32> {
+        recorded_pid(&self.local_state)
+    }
+
+    /// The pids of the helper (`endeavor connect`) of this place's machine.
+    fn helpers(&self) -> Vec<i32> {
+        pids(&format!("connect --state-dir {}", self.state.display()))
+    }
+
+    /// A notebook file in the project, open in the machine's runtime.
+    fn notebook(&self, name: &str) -> String {
+        let path = self.project.join(name);
+        std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+        let path = path.display().to_string();
+        self.bridge.set_notebooks(vec![notebook_json(NOTEBOOK, &path)]);
+        path
+    }
+
+    fn front(&self) -> Front {
+        start_front(self, &[])
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        end_leftovers(&self.dir);
+    }
+}
+
+fn notebook_json(id: &str, path: &str) -> Value {
+    json!({
+        "notebook_id": id, "path": path, "cell_order": ["c1"], "execution_allowed": true, "safe_preview": false, "pending_run": [],
+        "cells": [{ "cell_id": "c1", "code": "x = 1", "running": false, "queued": false, "errored": false }],
+    })
+}
+
+fn recorded_pid(state: &Path) -> Option<i32> {
+    let text = std::fs::read_to_string(state.join("runtime.json")).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?["pid"].as_i64().map(|p| p as i32).filter(|&p| p > 1)
+}
+
+fn pids(pattern: &str) -> Vec<i32> {
+    let found = Command::new("pgrep").arg("-f").arg("--").arg(pattern).output().unwrap();
+    String::from_utf8_lossy(&found.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect()
+}
+
+/// End what a test of `dir` started: its links, then its runtimes (a core, Julia and its workers are one process group).
+fn end_leftovers(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir.join("state-home/endeavor/links")) {
+        for entry in entries.flatten() {
+            let pid = std::fs::read_to_string(entry.path().join("link.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|r| r["pid"].as_i64()).filter(|&p| p > 1);
+            if let Some(pid) = pid {
+                // SAFETY: plain syscall, on a link this test started.
+                unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                wait_for("the link to end", || !pid_alive(pid as i32));
+            }
+        }
+    }
+    for state in ["runtime-state", "local-state"] {
+        if let Some(pid) = recorded_pid(&dir.join(state)) {
+            // SAFETY: plain syscall, on a runtime this test started.
+            unsafe { libc::kill(-pid, libc::SIGTERM) };
+        }
+    }
+}
+
+fn start_front(place: &Place, more: &[(&str, &str)]) -> Front {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+    command
+        .args(["mcp", "--skills", "plugin", "--folder"])
+        .arg(&place.project)
+        .arg("--julia")
+        .arg(&place.local_julia)
+        .arg("--depot")
+        .arg(place.dir.join("local-depot"))
+        .arg("--state-dir")
+        .arg(&place.local_state)
+        .env_clear()
+        .envs(place.env.iter().map(|(k, v)| (k, v)))
+        .envs(more.iter().copied())
+        .current_dir(&place.project);
+    Front::spawn(command)
+}
+
+/// One request to `port`: the status code and the body.
+fn http(port: u16, request: &str) -> (u16, String) {
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    socket.write_all(request.as_bytes()).unwrap();
+    let mut reply = String::new();
+    let _ = socket.read_to_string(&mut reply);
+    let (head, body) = reply.split_once("\r\n\r\n").unwrap_or((&reply, ""));
+    (head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0), body.to_owned())
+}
+
+/// Another agent session's tool call, straight to a runtime's port. The tool's result.
+fn other_agent(runtime: &endeavor_mcp::link::RuntimeInfo, session: &str, client: &str, name: &str, arguments: Value) -> Value {
+    let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } }).to_string();
+    let request = format!(
+        "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nX-Endeavor-Session: {session}\r\nX-Endeavor-Client: {client}\r\nContent-Length: {}\r\n\r\n{message}",
+        runtime.port,
+        runtime.token,
+        message.len()
+    );
+    let (code, body) = http(runtime.port, &request);
+    assert_eq!(code, 200, "{body}");
+    let reply: Value = serde_json::from_str(&body).unwrap();
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{reply}"));
+    serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()))
+}
+
+fn wait_status(link: &Link, what: &str, done: impl Fn(&Status) -> bool) -> Status {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        let status = link.status().expect("status");
+        if done(&status) {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}; the link says {status:#?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What a failed call said: the plain text of a call that couldn't reach a runtime, or the message of a tool's own error.
+fn text(said: &Value) -> &str {
+    said.as_str().or_else(|| said["message"].as_str()).unwrap_or_else(|| panic!("no message in {said}"))
+}
+
+fn this_host() -> String {
+    String::from_utf8(Command::new("hostname").output().unwrap().stdout).unwrap().trim().to_owned()
+}
+
+/// The port in a `browser_url`.
+fn url_port(url: &Value) -> u16 {
+    url.as_str().and_then(|u| u.strip_prefix("http://localhost:")).and_then(|u| u.split(['/', '?']).next()).and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("not a browser url: {url}"))
+}
+
+#[test]
+fn the_tool_list_has_the_host_tools_and_the_four_machine_tools() {
+    let place = Place::new("tools");
+    let mut front = place.front();
+    let init = front.initialize();
+    let instructions = init["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("`list_machines`, `add_machine`, `use_machine` and `stop_machine`"), "{instructions}");
+    let reply = front.request("tools/list", json!({}));
+    let tools = reply["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    for name in ["list_notebooks", "new_notebook", "list_folder", "read_file", "run_shell", "list_machines", "add_machine", "use_machine", "stop_machine"] {
+        assert!(names.contains(&name), "{name} in {names:?}");
+    }
+    assert!(!names.contains(&"notebook_guide"), "the agent has the plugin's skills");
+    let read_only = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
+    assert_eq!([read_only("list_machines"), read_only("add_machine"), read_only("use_machine"), read_only("stop_machine"), read_only("run_shell")], [true, false, false, false, false]);
+    // On this computer the host tools refuse, as the runtime says.
+    let (failed, refused) = front.call("list_folder", json!({ "path": "/" }));
+    assert!(failed && refused["message"].as_str().unwrap().contains("only for sessions on a server"), "{refused}");
+}
+
+#[test]
+fn list_machines_starts_no_link_and_add_machine_reports_and_saves_a_cluster() {
+    let slurm = FakeSlurm::new("add");
+    let place = Place::with("add", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    std::fs::write(place.dir.join("home/.ssh/config"), "Host hpc other\n  HostName example.org\nHost *.edu\n  User ada\n").unwrap();
+    let mut front = place.front();
+    front.initialize();
+
+    let listed = front.ok("list_machines", json!({}));
+    assert_eq!(listed["machines"], json!([]));
+    assert_eq!(listed["this_session"]["machine"], "local");
+    assert_eq!(listed["local"]["name"], "local");
+    assert_eq!(listed["local"]["this_session"], true);
+    assert_eq!(listed["ssh_hosts_not_added"], json!(["hpc", "other"]));
+    assert!(!place.links_dir().exists(), "no link was started");
+
+    let julia = place.julia.display().to_string();
+    let added = front.ok("add_machine", json!({ "host": "hpc", "julia": julia }));
+    assert_eq!((added["machine"].as_str(), added["host"].as_str(), added["state"].as_str(), added["saved"].clone()), (Some("hpc"), Some("hpc"), Some("connected"), json!(true)));
+    assert_eq!(added["node"], this_host());
+    assert_eq!(added["home"], place.dir.join("home").display().to_string());
+    assert_eq!(added["slurm"], true);
+    assert_eq!(added["partitions"], json!([{ "name": "shared", "default": true, "max_hours": 8.0, "cpus": 10, "memory_gb": 7 }]));
+    assert!(added["message"].as_str().unwrap().contains("It has Slurm. Partitions: shared (default) (up to 8 h, 10 CPUs and 7 GB a node)"), "{}", added["message"]);
+
+    let saved = place.machines().find_by_name("hpc").unwrap().expect("saved");
+    assert_eq!((saved.id.as_str(), saved.ssh_host.as_str(), saved.julia.as_deref()), ("hpc", "hpc", Some(julia.as_str())));
+    let cluster = saved.cluster.expect("a cluster, since Slurm is there");
+    assert_eq!(cluster.partitions.len(), 1);
+    assert_eq!((cluster.resources.cpus, cluster.resources.mem_gb, cluster.resources.minutes), (8, 7, 480), "a medium job, kept within the partition");
+    assert!(!place.record("hpc").exists(), "the link that connected as a plain server is gone, so the next one connects for Slurm");
+
+    let listed = front.ok("list_machines", json!({}));
+    assert_eq!(listed["machines"], json!([{ "name": "hpc", "host": "hpc", "cluster": true, "state": "no link running", "this_session": false }]));
+    assert_eq!(listed["ssh_hosts_not_added"], json!(["other"]));
+
+    // Adding it again updates it.
+    let again = front.ok("add_machine", json!({ "host": "hpc" }));
+    assert_eq!((again["updated"].clone(), again["partitions"].clone()), (json!(true), added["partitions"].clone()));
+    assert_eq!(place.machines().load().unwrap().len(), 1);
+    // A name that isn't plain, and a host that ssh would take as an option, are refused before anything runs.
+    let (failed, refused) = front.call("add_machine", json!({ "host": "-oProxyCommand=x" }));
+    assert!(failed && refused["message"].as_str().unwrap().contains("isn't an SSH host name"), "{refused}");
+    let (failed, refused) = front.call("add_machine", json!({ "host": "lab", "name": "local" }));
+    assert!(failed && refused["message"].as_str().unwrap().contains("is this computer"), "{refused}");
+    assert_eq!(place.machines().load().unwrap().len(), 1);
+}
+
+#[test]
+fn adding_a_plain_server_again_keeps_it_plain_even_when_slurm_is_there() {
+    let slurm = FakeSlurm::new("keep-plain");
+    let place = Place::with("keep-plain", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_lab();
+    let mut front = place.front();
+    front.initialize();
+    let added = front.ok("add_machine", json!({ "host": "lab" }));
+    assert_eq!((added["slurm"].clone(), added["updated"].clone(), added["partitions"].as_array().map(Vec::len)), (json!(true), json!(true), Some(1)), "{added}");
+    assert!(added["message"].as_str().unwrap().contains("saved before as a plain server"), "{added}");
+    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "still a plain server");
+    assert!(place.record("lab").exists(), "and its link goes on");
+}
+
+#[test]
+fn a_failing_add_machine_leaves_no_record_and_no_link() {
+    let place = Place::with("failadd", &[("ENDEAVOR_LINK_ASK", "echo 'Permission denied (publickey)' >&2; false")]);
+    let mut front = place.front();
+    front.initialize();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "name": "failadd", "julia": place.julia.display().to_string() }));
+    let message = text(&said);
+    assert!(failed && message.contains("Couldn't connect to lab") && message.contains("Nothing was saved") && message.contains("never ask them for a password"), "{said}");
+    assert!(place.machines().load().unwrap().is_empty(), "no record");
+    assert!(!place.record("failadd").exists());
+    wait_for("the helper to go", || place.helpers().is_empty());
+
+    // A machine that was there before keeps its record as it was.
+    place.machines().save(Server { id: "failadd".into(), name: "failadd".into(), ssh_host: "lab".into(), ..Default::default() }).unwrap();
+    let before = place.machines().load().unwrap();
+    let (failed, _) = front.call("add_machine", json!({ "host": "lab2", "name": "failadd" }));
+    assert!(failed);
+    assert_eq!(place.machines().load().unwrap(), before);
+    assert!(!place.record("failadd").exists(), "the link that failed is gone");
+}
+
+#[test]
+fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
+    let place = Place::new("use");
+    place.add_lab();
+    let machine_notebook = place.notebook("machine.jl");
+    let local_file = place.project.join("local.jl");
+    std::fs::write(&local_file, "### A Pluto.jl notebook ###").unwrap();
+    place.local_bridge.set_notebooks(vec![notebook_json("bbbbbbbb-0000-0000-0000-000000000002", &local_file.display().to_string())]);
+    std::fs::create_dir_all(place.dir.join("home/work")).unwrap();
+    let mut front = place.front();
+    front.initialize();
+
+    let used = front.ok("use_machine", json!({ "machine": "lab", "folder": place.dir.join("home/work").display().to_string() }));
+    assert_eq!((used["state"].as_str(), used["ready"].clone(), used["already_running"].clone()), (Some("ready"), json!(true), json!(false)), "{used}");
+    assert_eq!(used["node"], this_host());
+    assert_eq!(used["folder"], place.dir.join("home/work").display().to_string());
+    let link = place.link("lab");
+    let runtime = wait_status(&link, "ready", |s| s.state == State::Ready).runtime.unwrap();
+    assert_eq!(used["browser_url"], format!("http://localhost:{}/?token={TOKEN}", runtime.port));
+    assert!(used["message"].as_str().unwrap().contains("no notebook on lab yet"));
+
+    // The agent's calls go to the machine's runtime, with its host and browser port.
+    let listed = front.ok("list_notebooks", json!({}));
+    assert_eq!(listed[0]["path"], machine_notebook, "the machine's notebooks, not this computer's: {listed}");
+    let status = front.ok("pluto_session_status", json!({}));
+    assert_eq!(url_port(&status["browser_url"]), runtime.port, "the link's port, which the user's browser reaches");
+    assert_eq!(status["machine"], "lab");
+    let folder = front.ok("list_folder", json!({ "path": place.project.display().to_string() }));
+    assert!(folder.to_string().contains("machine.jl"), "{folder}");
+    let shell = front.ok("run_shell", json!({ "command": "pwd; echo on-the-machine" }));
+    assert!(shell.to_string().contains(&place.dir.join("home/work").display().to_string()) && shell.to_string().contains("on-the-machine"), "the session's folder there: {shell}");
+    assert_eq!(place.projects()[place.project.display().to_string()], json!({ "machine": "lab", "folder": place.dir.join("home/work").display().to_string() }));
+
+    // Back on this computer: its runtime, its notebooks, and the host tools refuse again.
+    let back = front.ok("use_machine", json!({ "machine": "local" }));
+    assert_eq!((back["machine"].as_str(), back["state"].as_str()), (Some("local"), Some("ready")), "{back}");
+    let listed = front.ok("list_notebooks", json!({}));
+    assert_eq!(listed[0]["path"], local_file.display().to_string(), "this computer's notebooks: {listed}");
+    let local_port = url_port(&front.ok("pluto_session_status", json!({}))["browser_url"]);
+    assert_ne!(local_port, runtime.port);
+    assert!(front.ok("pluto_session_status", json!({})).get("machine").is_none());
+    let (failed, refused) = front.call("list_folder", json!({ "path": "/" }));
+    assert!(failed && refused["message"].as_str().unwrap().contains("only for sessions on a server"), "{refused}");
+    assert_eq!(place.projects().get(place.project.display().to_string()), None, "local clears what the project remembers");
+    assert!(pid_alive(place.runtime().unwrap()), "leaving a machine doesn't stop its runtime");
+
+    // And to the machine again.
+    let again = front.ok("use_machine", json!({ "machine": "LAB" }));
+    assert_eq!((again["state"].as_str(), again["already_running"].clone()), (Some("ready"), json!(true)), "{again}");
+    let (failed, unknown) = front.call("use_machine", json!({ "machine": "nowhere" }));
+    assert!(failed && unknown["message"].as_str().unwrap().contains("There is no machine \"nowhere\". Machines: lab."), "{unknown}");
+}
+
+#[test]
+fn a_second_front_in_the_same_project_comes_up_on_the_remembered_machine() {
+    let place = Place::new("remember");
+    place.add_lab();
+    let work = place.dir.join("home/work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab", "folder": work.display().to_string() }));
+    let runtime = place.runtime().unwrap();
+    let link = place.link("lab");
+    first.finish();
+    assert!(pid_alive(link.pid as i32) && pid_alive(runtime), "the front's exit leaves the link and the runtime");
+
+    let mut second = place.front();
+    second.initialize();
+    let status = second.ok("pluto_session_status", json!({}));
+    assert_eq!(status["machine"], "lab", "attached without use_machine: {status}");
+    let shell = second.ok("run_shell", json!({ "command": "pwd" }));
+    assert!(shell.to_string().contains(&work.display().to_string()), "the folder there is remembered too: {shell}");
+    assert_eq!(place.runtime(), Some(runtime), "the runtime that was running");
+    assert_eq!(place.link("lab"), link, "and the link");
+    assert!(!second.said().iter().any(|l| l.starts_with("Endeavor's notebooks:")), "nothing was started on this computer: {:?}", second.said());
+    assert!(second.said().iter().any(|l| l.contains("this project uses the machine lab")));
+}
+
+#[test]
+fn a_remembered_plain_server_is_started_when_nothing_runs_there() {
+    let place = Place::new("remember-start");
+    place.add_lab();
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab" }));
+    let stopped = first.ok("stop_machine", json!({ "machine": "lab" }));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    let (failed, said) = first.call("list_notebooks", json!({}));
+    assert!(failed && text(&said).contains("was stopped from this session") && text(&said).contains("`use_machine` with machine \"lab\""), "{said}");
+    first.finish();
+    assert!(place.runtime().is_none());
+
+    let mut second = place.front();
+    second.initialize();
+    let listed = second.ok("list_notebooks", json!({}));
+    assert_eq!(listed, json!([]));
+    assert!(place.runtime().is_some_and(pid_alive), "it started the runtime there, as asked last time");
+}
+
+#[test]
+fn a_remembered_machine_that_is_gone_from_the_list_is_said_once() {
+    let place = Place::new("remember-gone");
+    place.add_lab();
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab" }));
+    first.finish();
+    place.machines().remove("lab").unwrap();
+
+    let mut second = place.front();
+    second.initialize();
+    let (failed, contents) = second.contents("list_notebooks", json!({}));
+    assert!(!failed);
+    assert_eq!(contents[0], json!([]), "this computer's runtime answers");
+    assert!(contents[1].as_str().unwrap().contains("last used the machine \"lab\", which isn't in the list of machines any more"), "{contents:?}");
+    let (_, again) = second.contents("list_notebooks", json!({}));
+    assert_eq!(again.len(), 1, "said once");
+    assert!(second.said().iter().any(|l| l.starts_with("Endeavor's notebooks:")), "this computer's runtime was started");
+}
+
+#[test]
+fn a_notebook_call_while_the_runtime_is_still_starting_returns_the_status_within_the_limit() {
+    let place = Place::with("starting", &[("ENDEAVOR_START_WAIT_SECS", "3")]);
+    place.add_lab();
+    std::fs::write(place.state.join("hold"), "").unwrap();
+    let mut front = place.front();
+    front.initialize();
+    let started = Instant::now();
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
+    assert_eq!((used["state"].as_str(), used["ready"].clone()), (Some("starting"), json!(false)), "{used}");
+    assert!(used["message"].as_str().unwrap().contains("Julia is starting on lab") && used["message"].as_str().unwrap().contains("`pluto_session_status`"), "{used}");
+
+    let started = Instant::now();
+    let (failed, said) = front.call("list_notebooks", json!({}));
+    assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
+    assert!(failed && text(&said).contains("Julia is starting on lab"), "{said}");
+    let status = front.ok("pluto_session_status", json!({}));
+    assert_eq!((status["machine"].as_str(), status["state"].as_str(), status["ready"].clone()), (Some("lab"), Some("starting"), json!(false)), "{status}");
+    assert!(status["step"].is_string());
+
+    std::fs::remove_file(place.state.join("hold")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        let status = front.ok("pluto_session_status", json!({}));
+        if status.get("browser_url").is_some() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "{status}");
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    assert_eq!(status["machine"], "lab");
+    assert_eq!(front.ok("list_notebooks", json!({})), json!([]));
+}
+
+#[test]
+fn stop_machine_refuses_when_another_session_was_active_and_stops_with_force() {
+    let place = Place::new("stop");
+    place.add_lab();
+    let path = place.notebook("a.jl");
+    let mut front = place.front();
+    front.initialize();
+    front.ok("use_machine", json!({ "machine": "lab" }));
+    let link = place.link("lab");
+    let runtime = wait_status(&link, "ready", |s| s.state == State::Ready).runtime.unwrap();
+    let opened = other_agent(&runtime, "someone-else", "Codex on the-lab", "open_notebook", json!({ "path": path }));
+    assert_eq!(opened["notebook_id"], NOTEBOOK, "{opened}");
+
+    let refused = front.ok("stop_machine", json!({ "machine": "lab" }));
+    assert_eq!(refused["stopped"], false);
+    assert_eq!(refused["other_sessions"][0]["client"], "Codex on the-lab");
+    assert_eq!(refused["other_sessions"][0]["notebook"], path);
+    assert!(refused["other_sessions"][0]["active_seconds_ago"].as_u64().is_some_and(|s| s < 60));
+    assert!(refused["message"].as_str().unwrap().contains("Codex on the-lab") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
+    assert!(pid_alive(place.runtime().unwrap()), "nothing was stopped");
+    assert_eq!(front.ok("list_notebooks", json!({}))[0]["path"], path, "and the session still works");
+
+    let runtime_pid = place.runtime().unwrap();
+    let stopped = front.ok("stop_machine", json!({ "machine": "lab", "force": true }));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    wait_for("the runtime to end", || !pid_alive(runtime_pid));
+    assert!(pid_alive(link.pid as i32), "the link stays");
+    let (failed, said) = front.call("list_notebooks", json!({}));
+    assert!(failed && text(&said).contains("was stopped from this session") && text(&said).contains("`use_machine`"), "{said}");
+    let status = front.ok("pluto_session_status", json!({}));
+    assert_eq!((status["machine"].as_str(), status["ready"].clone()), (Some("lab"), json!(false)), "{status}");
+
+    // Starting it again works, on the same port.
+    let again = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(url_port(&again["browser_url"]), runtime.port, "{again}");
+    assert_ne!(place.runtime(), Some(runtime_pid));
+    // Nothing runs, so a stop says so.
+    front.ok("stop_machine", json!({ "machine": "lab", "force": true }));
+    let nothing = front.ok("stop_machine", json!({ "machine": "lab" }));
+    assert_eq!(nothing["stopped"], false, "{nothing}");
+    assert!(nothing["message"].as_str().unwrap().contains("isn't running on lab"), "{nothing}");
+}
+
+#[test]
+fn stop_machine_works_on_this_computer_with_the_same_check() {
+    let place = Place::new("stop-local");
+    let path = place.project.join("l.jl");
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    place.local_bridge.set_notebooks(vec![notebook_json(NOTEBOOK, &path.display().to_string())]);
+    let mut front = place.front();
+    front.initialize();
+    assert_eq!(front.ok("list_notebooks", json!({}))[0]["path"], path.display().to_string());
+    let local = place.local_runtime().unwrap();
+    // Another session works there.
+    let port = std::fs::read_to_string(place.local_state.join("runtime.json")).map(|t| serde_json::from_str::<Value>(&t).unwrap()).unwrap()["port"].as_u64().unwrap() as u16;
+    let runtime = endeavor_mcp::link::RuntimeInfo { port, token: TOKEN.into(), mcp_url: String::new(), page_url: String::new(), node: String::new(), pid: 0, reattached: false, job: None };
+    other_agent(&runtime, "someone-else", "Claude Code on the-desk", "open_notebook", json!({ "path": path.display().to_string() }));
+
+    let refused = front.ok("stop_machine", json!({ "machine": "local" }));
+    assert_eq!((refused["stopped"].clone(), refused["other_sessions"][0]["client"].clone()), (json!(false), json!("Claude Code on the-desk")), "{refused}");
+    assert!(pid_alive(local));
+    let stopped = front.ok("stop_machine", json!({ "machine": "local", "force": true }));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    wait_for("the local runtime to end", || !pid_alive(local));
+    let (failed, said) = front.call("list_notebooks", json!({}));
+    assert!(failed && text(&said).contains("`use_machine` with machine \"local\""), "{said}");
+    assert!(place.local_runtime().is_none() || !pid_alive(place.local_runtime().unwrap()), "not started again by the call");
+    let back = front.ok("use_machine", json!({ "machine": "local" }));
+    assert_eq!(back["state"], "ready", "{back}");
+    assert!(pid_alive(place.local_runtime().unwrap()));
+}
+
+#[test]
+fn leaving_a_machine_or_ending_the_front_ends_its_session_there_and_leaves_the_link() {
+    let place = Place::new("sessions");
+    place.add_lab();
+    let path = place.notebook("a.jl");
+    let mut front = place.front();
+    front.initialize();
+    front.ok("use_machine", json!({ "machine": "lab" }));
+    let link = place.link("lab");
+    let runtime = wait_status(&link, "ready", |s| s.state == State::Ready).runtime.unwrap();
+    let joined = front.ok("open_notebook", json!({ "path": path }));
+    assert_eq!(joined["already_open"], true, "{joined}");
+    let others = || other_agent(&runtime, "watcher", "Watcher", "list_notebooks", json!({}))[0]["other_sessions"].clone();
+    let seen = others();
+    assert_eq!(seen.as_array().unwrap().len(), 1, "{seen}");
+    assert_eq!(seen[0]["client"], format!("Test Agent on {}", this_host()));
+
+    // Moving to this computer ends the key there; the new session has no notebook of its own.
+    front.ok("use_machine", json!({ "machine": "local" }));
+    assert_eq!(others(), json!([]), "the session ended on the machine");
+    front.ok("use_machine", json!({ "machine": "lab" }));
+    let listed = front.ok("list_notebooks", json!({}));
+    assert_eq!(listed[0]["this_session"], false, "a new session, so it isn't bound to the notebook any more: {listed}");
+    front.ok("open_notebook", json!({ "path": path }));
+    assert_eq!(others().as_array().unwrap().len(), 1);
+
+    // The front's own end ends its session, and leaves the link and the runtime.
+    front.finish();
+    wait_for("the session to end on the machine", || others() == json!([]));
+    assert_eq!(place.link("lab"), link, "the link stays");
+    assert!(pid_alive(link.pid as i32) && pid_alive(place.runtime().unwrap()));
+    assert!(!place.helpers().is_empty());
+}
+
+#[test]
+fn a_link_that_is_gone_is_started_again_by_the_next_call_and_attaches_to_the_runtime() {
+    let place = Place::new("link-gone");
+    place.add_lab();
+    let mut front = place.front();
+    front.initialize();
+    front.ok("use_machine", json!({ "machine": "lab" }));
+    let link = place.link("lab");
+    let runtime = place.runtime().unwrap();
+    link.quit().unwrap();
+    wait_for("the link to end", || !pid_alive(link.pid as i32));
+    assert!(pid_alive(runtime), "a quit detaches and leaves the runtime");
+
+    let status = front.ok("pluto_session_status", json!({}));
+    assert_eq!(status["machine"], "lab", "{status}");
+    let again = place.link("lab");
+    assert_ne!(again.pid, link.pid, "a new link");
+    assert_eq!(place.runtime(), Some(runtime), "attached to the runtime that was running");
+}
+
+#[test]
+fn a_link_from_another_build_is_replaced_only_when_nothing_hangs_on_it() {
+    let place = Place::new("build");
+    place.add_lab();
+    let other_build = |place: &Place| {
+        let path = place.record("lab");
+        let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        record["build"] = "an-older-build".into();
+        std::fs::write(&path, record.to_string()).unwrap();
+    };
+    let idle = place.link("lab");
+    wait_status(&idle, "connected", |s| s.state == State::Connected);
+    other_build(&place);
+    let mut front = place.front();
+    front.initialize();
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["state"], "ready", "{used}");
+    let now = place.link("lab");
+    assert_ne!(now.pid, idle.pid, "nothing hung on the old link, so it was replaced");
+    assert_eq!(now.build, endeavor_mcp::embedded::BUILD_VERSION);
+
+    // With a runtime in use through it, it is kept, and the result says why.
+    other_build(&place);
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["state"], "ready");
+    assert!(used["message"].as_str().unwrap().contains("another build of endeavor (an-older-build)"), "{used}");
+    assert_eq!(place.link("lab").pid, now.pid, "the same link, and so the same browser port");
+}
+
+#[test]
+fn a_front_keeps_its_link_from_ending_while_it_is_on_the_machine() {
+    let place = Place::with("ping", &[("ENDEAVOR_LINK_IDLE_SECS", "3")]);
+    place.add_lab();
+    let front_env = [("ENDEAVOR_FRONT_PING_SECS", "0.5")];
+    let mut front = start_front(&place, &front_env);
+    front.initialize();
+    front.ok("use_machine", json!({ "machine": "lab" }));
+    let link = place.link("lab");
+    std::thread::sleep(Duration::from_secs(8));
+    assert!(pid_alive(link.pid as i32), "asked every half second, the link outlived its 3 s idle limit");
+    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab");
+}
+
+#[test]
+fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
+    let slurm = FakeSlurm::new("cluster");
+    let place = Place::with("cluster", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_hpc();
+    let mut front = place.front();
+    front.initialize();
+
+    // No job and no resources: nothing is submitted, and the defaults come back to be confirmed.
+    let asked = front.ok("use_machine", json!({ "machine": "hpc" }));
+    assert_eq!((asked["state"].as_str(), asked["needs_job"].clone(), asked["ready"].clone()), (Some("needs_job"), json!(true), json!(false)), "{asked}");
+    assert_eq!((asked["defaults"]["cpus"].clone(), asked["defaults"]["memory_gb"].clone(), asked["defaults"]["hours"].clone()), (json!(8), json!(32), json!(8.0)));
+    assert!(asked["message"].as_str().unwrap().contains("nothing was submitted"), "{asked}");
+    assert_eq!(slurm.read("sbatch.args"), "", "no job was submitted");
+    let (failed, said) = front.call("list_notebooks", json!({}));
+    assert!(failed && text(&said).contains("no job is running there") && text(&said).contains("Ask the user"), "{said}");
+    assert_eq!(slurm.read("sbatch.args"), "", "a notebook call submits nothing either");
+    let (failed, plain) = front.call("use_machine", json!({ "machine": "lab", "cpus": 4 }));
+    assert!(failed && plain["message"].as_str().unwrap().contains("There is no machine"), "{plain}");
+
+    // With resources: the job is submitted, and the queue shows through pluto_session_status.
+    let queued = front.ok("use_machine", json!({ "machine": "hpc", "cpus": 4, "memory_gb": 16, "hours": 2, "partition": "shared", "account": "lab" }));
+    assert_eq!((queued["state"].as_str(), queued["ready"].clone()), (Some("queued"), json!(false)), "{queued}");
+    assert_eq!((queued["job"]["id"].as_str(), queued["queue"]["state"].as_str(), queued["queue"]["reason"].as_str()), (Some("42"), Some("PENDING"), Some("Priority")), "{queued}");
+    assert!(queued["message"].as_str().unwrap().contains("waiting in the queue: other jobs are ahead of it"), "{queued}");
+    let sbatch = slurm.read("sbatch.args");
+    assert!(sbatch.contains("--account=lab --partition=shared --cpus-per-task=4 --mem=16G --time=120"), "{sbatch}");
+    let saved = place.machines().find_by_name("hpc").unwrap().unwrap().cluster.unwrap();
+    assert_eq!((saved.resources.cpus, saved.resources.mem_gb, saved.resources.minutes, saved.account.as_deref()), (4, 16, 120, Some("lab")), "what was used is the new default");
+
+    let status = front.ok("pluto_session_status", json!({}));
+    assert_eq!((status["machine"].as_str(), status["state"].as_str(), status["ready"].clone()), (Some("hpc"), Some("queued"), json!(false)), "{status}");
+    assert_eq!((status["queue"]["state"].as_str(), status["queue"]["reason_text"].as_str(), status["job"]["id"].as_str()), (Some("PENDING"), Some("other jobs are ahead of it"), Some("42")), "{status}");
+    slurm.set("reason", "Resources");
+    wait_for("the queue's new reason", || front.ok("pluto_session_status", json!({}))["queue"]["reason"] == "Resources");
+    let (failed, said) = front.call("list_notebooks", json!({}));
+    assert!(failed && text(&said).contains("Slurm job 42 on hpc is waiting in the queue"), "{said}");
+
+    // The job runs: its node starts the runtime, and the session gets to it.
+    slurm.set("node", &this_host());
+    slurm.set("left", "29:30");
+    slurm.set("state", "RUNNING");
+    let mut node = Command::new(env!("CARGO_BIN_EXE_endeavor"))
+        .args(["node-start", "--state-dir"])
+        .arg(&place.state)
+        .arg("--julia")
+        .arg(&place.julia)
+        .args(["--runtime", "/nonexistent", "--depot", "/nonexistent", "--exit-idle"])
+        .env("FAKE_JOB", "42")
+        .current_dir(&place.dir)
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    slurm.set("node.pid", &node.id().to_string());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        let status = front.ok("pluto_session_status", json!({}));
+        if status.get("browser_url").is_some() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "{status}\n{:?}", front.said());
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    assert_eq!(status["machine"], "hpc");
+    assert_eq!(status["job"]["id"], "42", "{status}");
+    assert!(status["job"]["ends_in_minutes"].as_u64().is_some_and(|m| (28..=30).contains(&m)), "{status}");
+    assert_eq!(status["job"]["node"], this_host());
+    assert_eq!(front.ok("list_notebooks", json!({})), json!([]));
+    assert_eq!(slurm.read("sbatch.args").lines().count(), 1, "one job");
+
+    // A later session finds the job running, and takes it with no use_machine and no new job.
+    front.finish();
+    let mut second = place.front();
+    second.initialize();
+    assert_eq!(second.ok("pluto_session_status", json!({}))["job"]["id"], "42");
+    let used = second.ok("use_machine", json!({ "machine": "hpc" }));
+    assert_eq!((used["state"].as_str(), used["already_running"].clone(), used["job"]["id"].as_str()), (Some("ready"), json!(true), Some("42")), "{used}");
+    assert!(used["message"].as_str().unwrap().contains("The job ends in"), "{used}");
+
+    // Stopping cancels the job.
+    let stopped = second.ok("stop_machine", json!({ "machine": "hpc" }));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    assert_eq!(slurm.read("scancel.log").trim(), "42");
+    assert!(stopped["message"].as_str().unwrap().contains("Slurm job was cancelled"));
+    let _ = node.kill();
+    let _ = node.wait();
+}
+
+#[test]
+fn a_remembered_cluster_with_no_job_is_not_submitted_for_but_told_what_to_ask() {
+    let slurm = FakeSlurm::new("cluster-remembered");
+    let place = Place::with("cluster-remembered", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_hpc();
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "hpc" }));
+    assert_eq!(place.projects()[place.project.display().to_string()]["machine"], "hpc", "remembered even though no job was asked for");
+    first.finish();
+
+    let mut second = place.front();
+    second.initialize();
+    let (failed, said) = second.call("list_notebooks", json!({}));
+    let message = text(&said);
+    assert!(failed && message.contains("This project uses hpc, a Slurm cluster, and no job is running there") && message.contains("The defaults would be 8 CPUs · 32 GB · 8 h on the cluster's default partition") && message.contains("`use_machine`"), "{said}");
+    assert_eq!(slurm.read("sbatch.args"), "", "nothing was submitted");
+    let status = second.ok("pluto_session_status", json!({}));
+    assert_eq!((status["machine"].as_str(), status["state"].as_str()), (Some("hpc"), Some("connected")), "{status}");
+}
+
+/// Slurm's commands as scripts over files in `target/tmp/machines-NAME-slurm`: the test moves a job
+/// through the queue by writing its state.
+struct FakeSlurm {
+    dir: PathBuf,
+    bin: PathBuf,
+}
+
+impl FakeSlurm {
+    fn new(name: &str) -> FakeSlurm {
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("machines-{name}-slurm"));
+        let _ = std::fs::remove_dir_all(&root);
+        let (bin, dir) = (root.join("bin"), root.join("state"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let scripts = [
+            ("sbatch", "echo \"$@\" >> \"$FAKE_SLURM/sbatch.args\"\nfor a; do last=$a; done\ncp \"$last\" \"$FAKE_SLURM/job.sh\"\necho PENDING > \"$FAKE_SLURM/state\"\necho Priority > \"$FAKE_SLURM/reason\"\necho 42\n"),
+            (
+                "squeue",
+                "for a; do [ \"$p\" = -j ] && job=$a; p=$a; done\nstate=$(cat \"$FAKE_SLURM/state\" 2>/dev/null)\ncase \"$*\" in *\"-t all\"*) echo \"$state\"; exit 0;; esac\ncase \"$state\" in PENDING|RUNNING) ;; *) exit 0;; esac\necho \"$state|$(cat \"$FAKE_SLURM/reason\")|$(cat \"$FAKE_SLURM/node\" 2>/dev/null)|$(cat \"$FAKE_SLURM/left\" 2>/dev/null || echo 8:00:00)\"\n",
+            ),
+            (
+                "scancel",
+                // Slurm ends the job's processes: the one the test started as its node.
+                "echo \"$@\" >> \"$FAKE_SLURM/scancel.log\"\necho CANCELLED > \"$FAKE_SLURM/state\"\nif [ -f \"$FAKE_SLURM/node.pid\" ]; then p=$(cat \"$FAKE_SLURM/node.pid\"); kill -TERM -- \"-$p\" 2>/dev/null; kill -TERM \"$p\" 2>/dev/null; fi\nexit 0\n",
+            ),
+            ("sacct", "cat \"$FAKE_SLURM/sacct\" 2>/dev/null\nexit 0\n"),
+            (
+                "srun",
+                "echo \"$@\" >> \"$FAKE_SLURM/srun.args\"\ncase \" $* \" in *\" --unbuffered \"*) u=1;; esac\nwhile [ $# -gt 0 ]; do case \"$1\" in -*) shift;; *) break;; esac; done\n[ -n \"$u\" ] && exec \"$@\"\n\"$@\" > \"$FAKE_SLURM/srun.out\"\ncat \"$FAKE_SLURM/srun.out\"\n",
+            ),
+            ("sinfo", "echo 'shared*|8:00:00|10|7492'\n"),
+        ];
+        for (name, body) in scripts {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        FakeSlurm { dir, bin }
+    }
+
+    /// A PATH with these commands first.
+    fn path(&self) -> String {
+        format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap())
+    }
+
+    fn set(&self, file: &str, value: &str) {
+        std::fs::write(self.dir.join(file), format!("{value}\n")).unwrap();
+    }
+
+    fn read(&self, file: &str) -> String {
+        std::fs::read_to_string(self.dir.join(file)).unwrap_or_default()
+    }
+}

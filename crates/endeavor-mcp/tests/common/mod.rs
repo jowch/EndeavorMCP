@@ -9,6 +9,7 @@
 
 #![allow(dead_code)]
 
+pub mod front;
 pub mod helper;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -59,7 +60,7 @@ pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
 echo "$@" > "{dir}/julia.args"
 echo "booting"
 while [ -e "{dir}/hold" ]; do sleep 0.1; done
-printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"token":"%s","pluto_secret":"{PLUTO_SECRET}","job":""}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$ENDEAVOR_TOKEN" > "$ENDEAVOR_STATE.tmp"
+printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"token":"%s","pluto_secret":"{PLUTO_SECRET}","job":"%s"}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$ENDEAVOR_TOKEN" "$FAKE_JOB" > "$ENDEAVOR_STATE.tmp"
 mv "$ENDEAVOR_STATE.tmp" "$ENDEAVOR_STATE"
 exec sleep 600
 "#,

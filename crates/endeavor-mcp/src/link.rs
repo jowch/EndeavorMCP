@@ -20,8 +20,11 @@
 //! the runtime running. It never stops a runtime by itself.
 //!
 //! - `GET /link/status`: a `Status`.
-//! - `POST /link/start` `{"job": <JobRequest or null>}`: start the runtime, or
-//!   attach to the one running, in the background. The `Status` at once.
+//! - `POST /link/start` `{"job": <JobRequest or null>, "only_running": bool}`: start
+//!   the runtime, or attach to the one running, in the background. The `Status`
+//!   at once. With `only_running` it attaches only if the helper says a runtime
+//!   runs, or a job waits, and otherwise starts nothing: the state is then
+//!   `connected` and `nothing_running` is true.
 //! - `POST /link/stop`: stop the runtime for every client. The link stays connected.
 //! - `POST /link/quit`: detach, remove the record and exit. The record goes
 //!   first, so a front that asks for a link right after gets a new one.
@@ -97,6 +100,10 @@ pub struct Status {
     pub job: Option<JobInfo>,
     /// Slurm's state and reason while the job waits.
     pub queue: Option<QueueInfo>,
+    /// A start that was to attach only to a runtime already there (`Link::attach`)
+    /// found none, and started nothing.
+    #[serde(default)]
+    pub nothing_running: bool,
     /// The link process and the build it is from.
     pub pid: u32,
     pub build: String,
@@ -200,7 +207,7 @@ impl Spawn {
 /// Capitals are out because Windows and macOS give two ids that differ only in
 /// case one folder, and names Windows keeps for devices (`nul`, `com1`, even as
 /// `nul.txt`) and a trailing dot can't be folders there.
-fn valid_id(id: &str) -> Result<(), String> {
+pub(crate) fn valid_id(id: &str) -> Result<(), String> {
     let stem = id.split('.').next().unwrap_or_default();
     let device = matches!(stem, "con" | "prn" | "aux" | "nul") || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.ends_with(|c: char| c.is_ascii_digit() && c != '0'));
     let plain = !id.is_empty() && id.len() <= 100 && !id.starts_with('.') && !id.ends_with('.') && !device && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
@@ -219,6 +226,12 @@ pub struct Link {
     /// front that needs its own can `quit` the old one and `ensure` again,
     /// which gives the browser a new port.
     pub build: String,
+}
+
+/// The running link for `machine`, if there is one that answers; no link is started.
+pub fn find(machine: &str) -> Result<Option<Link>, String> {
+    valid_id(machine)?;
+    Ok(running(&Spawn::here()?.dir(machine), machine))
 }
 
 /// The link for `machine` (an id in the machines file), started if none runs.
@@ -385,6 +398,13 @@ impl Link {
     /// error. `job` is what to submit on a cluster.
     pub fn start(&self, job: Option<JobRequest>) -> Result<Status, String> {
         self.call("POST", "/link/start", &serde_json::to_vec(&serde_json::json!({ "job": job })).map_err(|e| e.to_string())?, CALL_WAIT)
+    }
+
+    /// Attach to the runtime if one is running there (or, on a cluster, a job waits
+    /// or runs), and start nothing otherwise: then the status says `nothing_running`.
+    /// Returns at once, like `start`.
+    pub fn attach(&self) -> Result<Status, String> {
+        self.call("POST", "/link/start", &serde_json::to_vec(&serde_json::json!({ "job": null, "only_running": true })).map_err(|e| e.to_string())?, CALL_WAIT)
     }
 
     /// Stop the runtime for every client, and wait until it is gone (up to a minute

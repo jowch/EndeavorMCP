@@ -46,6 +46,13 @@ const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"]
 pub const NOTEBOOK_TOOLS_JSON: &str = include_str!("notebook_tools.json");
 static NOTEBOOK_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(NOTEBOOK_TOOLS_JSON).expect("notebook_tools.json"));
 
+/// The machine tools' schemas: `endeavor mcp` answers them itself (`standalone::machines`).
+pub const MACHINE_TOOLS_JSON: &str = include_str!("machine_tools.json");
+static MACHINE_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(MACHINE_TOOLS_JSON).expect("machine_tools.json"));
+
+/// The machine tools, which `endeavor mcp` answers and a runtime doesn't have.
+pub const MACHINE_NAMES: [&str; 4] = ["list_machines", "add_machine", "use_machine", "stop_machine"];
+
 /// `/call` methods Julia still answers: Pluto's folder for new notebooks, and
 /// ending the process.
 const JULIA_CALLS: [&str; 2] = ["endeavor/set_folder", "endeavor/shutdown"];
@@ -110,7 +117,7 @@ pub struct Standalone {
 }
 
 /// A link to `target` on Pluto's page, at `port` on this computer, that lets a browser in.
-fn browser_link(port: u16, token: &str, target: &str) -> String {
+pub(crate) fn browser_link(port: u16, token: &str, target: &str) -> String {
     let join = if target.contains('?') { '&' } else { '?' };
     format!("http://localhost:{port}{target}{join}token={token}")
 }
@@ -149,6 +156,9 @@ pub struct Caller {
     /// The port the user's browser reaches this runtime on (`X-Endeavor-Browser-Port`), when
     /// it isn't the runtime's own: a link's loopback port. The links in results use it.
     pub browser_port: Option<u16>,
+    /// The caller is the stdio front (`endeavor mcp`), which also lists the host
+    /// tools and the machine tools, and answers the machine tools itself.
+    pub front: bool,
 }
 
 /// A client's label as other sessions see it: printable characters only,
@@ -167,7 +177,7 @@ impl Caller {
         let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
         let client = request.header("X-Endeavor-Client").and_then(clean_label);
         let browser_port = request.header("X-Endeavor-Browser-Port").and_then(|port| port.trim().parse().ok()).filter(|&port| port != 0);
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", client, browser_port }
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", client, browser_port, front: false }
     }
 }
 
@@ -652,7 +662,7 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") },
             });
-            if let Some(instructions) = guide::instructions(standalone, caller.has_skills) {
+            if let Some(instructions) = guide::instructions(standalone, caller.has_skills, caller.front) {
                 result["instructions"] = instructions.into();
             }
             ok(result)
@@ -663,12 +673,15 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
             if !caller.has_skills {
                 tools.insert(0, guide::schema());
             }
-            if !caller.host.is_empty() {
+            if !caller.host.is_empty() || caller.front {
                 tools.extend(host_tools::schemas());
+            }
+            if caller.front {
+                tools.extend(MACHINE_TOOLS.as_array().cloned().unwrap_or_default());
             }
             for tool in &mut tools {
                 // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
-                let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name));
+                let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name) || (MACHINE_NAMES.contains(&name) && name != "list_machines"));
                 tool["annotations"] = json!({ "readOnlyHint": read_only });
             }
             ok(json!({ "tools": tools }))
@@ -690,7 +703,7 @@ pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> 
 /// with the plugin's skills or without (`has_skills`). None for anything else.
 pub(crate) fn answer_locally(message: &Value, has_skills: bool) -> Option<String> {
     let local = matches!(message["method"].as_str(), Some("initialize" | "ping" | "tools/list"));
-    let caller = Caller { has_skills, ..Caller::default() };
+    let caller = Caller { has_skills, front: true, ..Caller::default() };
     local.then(|| answer(message, &caller, true, |_| unreachable!("tools/call isn't answered locally"))).flatten()
 }
 

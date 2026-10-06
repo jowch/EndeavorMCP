@@ -8,7 +8,7 @@ description: >-
 
 # Pluto session orientation
 
-Endeavor owns the Pluto session: one Julia process running Pluto and its notebook tools. You have no tool to start, stop, or reconnect it. If `pluto_session_status` ever reports Pluto isn't running, that's a problem to flag to the user.
+Endeavor owns the Pluto session: one Julia process running Pluto and its notebook tools. You have no tool to start, stop, or reconnect it, except that with the machine tools (`list_machines`, `use_machine`; see **endeavor-machines**) you can put the session on a server or cluster the user asks for. If `pluto_session_status` ever reports Pluto isn't running, that's a problem to flag to the user, and on a machine it says what state the connection is in.
 
 ## With the Endeavor app or without it
 
@@ -54,7 +54,7 @@ A notebook that is already open, such as one the user opened on Pluto's page in 
 
 ## Sessions on a server
 
-When the notebook runs on a server, the notebook and its files live on that server, not on the user's computer. In the app, your own file and shell tools (`Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) are turned off in these sessions because they would see the Mac. Without the app, you have the tools below only if the user started `endeavor serve` with `--host-tools`. When you have them, use them for the server's files; they run on the server:
+When the notebook runs on a server, the notebook and its files live on that server, not on the user's computer. In the app, your own file and shell tools (`Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) are turned off in these sessions because they would see the Mac. Without the app, you have the tools below only if the user started `endeavor serve` with `--host-tools`, or if your session is on a machine through `use_machine` (see **endeavor-machines**). When you have them, use them for the server's files; they run on the server:
 
 - `list_folder(path)` — what's in a folder.
 - `read_file(path, offset, limit)` — read a text file (numbered lines; continue with `offset=end_line+1`).

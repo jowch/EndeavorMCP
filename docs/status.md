@@ -16,7 +16,10 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
 - The link (`endeavor link`, `link::ensure`) is built and tested with a local
   shell for ssh and, over real ssh and Julia, in `e2e_link`
   ([plugins-and-remote.md](plugins-and-remote.md)). The machine tools in
-  `mcp` that call it are not built.
+  `mcp` (`list_machines`, `add_machine`, `use_machine`, `stop_machine`), what a
+  project remembers (`projects.json`) and the `endeavor-machines` skill are
+  built and tested with a local shell for ssh, a stand-in Julia and fake
+  Slurm (`tests/machines.rs`), and over real ssh and Julia in `e2e_machines`.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
 - CI (`ci.yml`) builds and tests on Linux, macOS and Windows. `helpers.yml`
@@ -66,6 +69,10 @@ Checked live on 2026-10-03:
   `remote::tests::a_real_server_gets_its_helper_and_runs_julia` repeats it.
 
 Not yet checked:
+
+- The machine tools against a real cluster (`e2e_slurm` covers the helper
+  and Slurm, `tests/machines.rs` the tools with fake Slurm), and an agent
+  following the `endeavor-machines` skill.
 
 - `endeavor update` replacing a binary with a newer build from the real
   Helpers release. The first build with `update` is the newest one, so

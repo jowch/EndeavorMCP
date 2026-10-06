@@ -2,7 +2,7 @@
 
 How EndeavorMCP ships as a plugin for Claude Code, Codex and Antigravity, and
 how an agent on your computer works on notebooks that run on a server or a
-cluster. A design: nothing here is built except where marked.
+cluster. A design; what is built is marked.
 
 _Drafted 2026-10-05, rewritten the same day after reading the Endeavor app's
 remote code ([remote-sessions.md](https://github.com/jowch/Endeavor/blob/main/docs/remote-sessions.md)).
@@ -49,7 +49,7 @@ untested._
 |---|---|---|---|
 | Front | `endeavor mcp` | your computer, one for each agent session | built |
 | Runtime | the core (`endeavor core`) and the engines behind it | where the notebooks run | built for Pluto |
-| Link | a background process, one for each server | your computer | built; the front doesn't call it yet |
+| Link | a background process, one for each server | your computer | built; the front calls it |
 
 **The runtime is the core, not Julia.** The core is one Rust process on a
 machine. It owns the port, the sessions and who works in which notebook,
@@ -99,7 +99,7 @@ request with an Origin.
 | Call | What it does |
 |---|---|
 | `GET /link/status` | `state` (connecting, connected, starting, queued, ready, failed), the last `step`, an `error`, what the helper said (`hello`), the `runtime` once ready (the listener's port, the runtime's token, the page URL), and for a job its `job` and `queue` |
-| `POST /link/start` | `{"job": …}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error |
+| `POST /link/start` | `{"job": …, "only_running": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true |
 | `POST /link/stop` | Stop the runtime for every client, and say why it didn't. The link stays connected |
 | `POST /link/quit` | Remove the record, detach and exit. The record goes first, so a front that asks for a link right after gets a new one |
 
@@ -141,10 +141,35 @@ is the link's folder name on every system.
 ready. The link keeps it in its state folder (readable only by you), and the
 front adds it to each request, as it does for a local runtime.
 
-**The session.** The front makes one session key for its run and sends it on
+**The session.** The front makes a session key for its run and sends it on
 every request, with the server's name once it uses a server. The front
 outlives a dropped `ssh`, so the agent keeps its notebook when the link
-reconnects.
+reconnects. When the session moves to another runtime, the front ends its key
+on the old one and makes a new one (`<first key>-N`): a runtime ignores a key
+it has ended, and a notebook binding means nothing on another runtime.
+
+**What the front does with the link (built).** The front asks its link for its
+status every four minutes while its target is a machine, so the 8 hours count
+from the end of the last session. A call that finds the link gone starts it
+again and attaches to what runs. A link of another build than the front's is
+used as it is, except that `use_machine` quits it and starts a new one when no
+runtime is attached through it (the new link has another port, and an open
+browser page would break); with a runtime attached it keeps the old link and the
+result says so. When the front's input ends it ends its key on the runtime it is
+on and leaves the link running.
+
+**What a project remembers (built).** `projects.json` in the local state folder
+(`<state home>/endeavor/`, next to `links/`; `%LOCALAPPDATA%\Endeavor` on
+Windows) maps a project folder, the front's `--folder` as a canonical path, to
+`{machine, folder}`: the machine's id and the folder there. It is written whole
+and renamed, owner-only, under a lock, as `machines.json` is. `use_machine`
+writes it, and `"local"` removes the entry. A front that starts in such a project
+targets the machine and starts nothing; its first runtime call asks the link to
+attach only to a runtime that is there (`only_running`). With none: a plain
+server starts one, and a cluster submits nothing, so the call fails with a
+message that names the machine, the defaults and `use_machine`. A machine that
+is no longer in the machines file is dropped from the session, and the first
+result says so.
 
 ## Sharing a runtime
 
@@ -311,21 +336,26 @@ app moves its pin ([status.md](status.md)).
 
 ## What the user sees
 
-**The first time on a server.** You say "use hoffman2 for this".
+**The first time on a server (built).** You say "use hoffman2 for this".
 
 1. The agent calls `list_machines`: the machines you've added, and the `Host`
    names in `~/.ssh/config`.
 2. It calls `add_machine("hoffman2")`. The link connects, sends the helper if
-   the server lacks this build, and reports the machine's name, whether
-   Slurm is there, the partitions with their limits, and whether Julia was
-   found. That report becomes the saved record.
+   the server lacks this build, and reports the machine's node and home folder,
+   whether Slurm is there, and the partitions with their limits. That report
+   becomes the saved record. Julia isn't looked for until the first runtime
+   starts there (the helper has no call for it), so the report has it as null
+   until then. A machine that turns out to have Slurm is saved as a cluster
+   and its link is quit, so the next connection starts the helper for Slurm.
 3. On a cluster it proposes resources ("8 CPUs, 32 GB, 8 hours on
    `shared`?"), then calls `use_machine`.
 
-**Waiting for a job.** `use_machine` returns at once with the job's number.
-`pluto_session_status` then gives the queue state, Slurm's reason in plain
-words, the time waited, and once the runtime is up, when the job ends. No call
-waits longer than 45 seconds (Codex's tool timeout defaults to 60).
+**Waiting for a job.** `use_machine` returns with the job's number once the job is
+queued. `pluto_session_status` then gives the queue state, Slurm's reason in
+plain words, and once the runtime is up, when the job ends. No call waits
+longer than 45 seconds (Codex's tool timeout defaults to 60), and a queued job
+is not waited for. The time waited is not given: the link doesn't know when a
+job was submitted by an earlier connection.
 
 **The notebook.** `browser_url` is on your computer's loopback and stays the
 same while the link runs.
@@ -336,7 +366,7 @@ needs a new job, the result says so and the agent asks you.
 
 **Approval.** The harness's own permission prompt, for every tool call.
 
-### Tools the front adds
+### Tools the front adds (built)
 
 | Tool | What it does |
 |---|---|
@@ -351,9 +381,15 @@ last active, and the machine, the job and its end time.
 
 `list_folder`, `read_file` and `run_shell` run on the server. The runtime
 lists and allows them only for a session that names its server, so the
-front lists them always and they refuse on this computer, as built.
+front lists them always and they refuse on this computer, as built. Results
+are in [endeavor-mcp.md](endeavor-mcp.md#the-machine-tools).
 
-### What the skill tells the agent
+On a cluster `use_machine` with no job running and no resources given submits
+nothing: it returns `needs_job` with the saved defaults, and the agent asks
+you and calls again with them. The resources it submits become the machine's
+defaults.
+
+### What the skill tells the agent (built: `endeavor-machines`)
 
 - Don't add a machine, submit a job, switch machines or stop the runtime unless
   the user asked.
@@ -469,8 +505,10 @@ folder, and that each loads the skills.
    login.
 2. Helpers attach without making each other exit (built). Opening an open
    notebook joins it, and the core shows a notebook's other sessions.
-3. The link process (built) and the machine tools in `mcp`.
-4. The Slurm path through the tools.
+3. The link process (built) and the machine tools in `mcp` (built), with the
+   `endeavor-machines` skill.
+4. The Slurm path through the tools (built against fake Slurm; the helper's side
+   is `e2e_slurm`).
 5. macOS and Windows builds, the install scripts, the build's release key.
 6. Codex and Antigravity plugin folders.
 7. The app: the moved code, the shared state folder, a version on its calls

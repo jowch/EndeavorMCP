@@ -410,5 +410,7 @@ fn serve_and_mcp_without_the_app() {
 fn said_standalone() -> &'static str {
     "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
 the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
-Where Endeavor's notes on these tools say \"in the app\" or \"without the app\", follow the parts for working without the app."
+Where Endeavor's notes on these tools say \"in the app\" or \"without the app\", follow the parts for working without the app. \
+This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
+that the user reaches over ssh. Use them only when the user asks to work on a machine; they say how to continue."
 }
