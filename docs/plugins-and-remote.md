@@ -511,8 +511,9 @@ folder, and that each loads the skills.
    notebook joins it, and the core shows a notebook's other sessions.
 3. The link process (built) and the machine tools in `mcp` (built), with the
    `endeavor-machines` skill.
-4. The Slurm path through the tools (built against fake Slurm; the helper's side
-   is `e2e_slurm`).
+4. The Slurm path through the tools (built against fake Slurm, and checked on
+   real Slurm: the helper's side in `e2e_slurm`, the whole path through
+   `endeavor mcp` in `e2e_machines_slurm`).
 5. macOS and Windows builds, the install scripts, the build's release key.
 6. Codex and Antigravity plugin folders.
 7. The app: the moved code, the shared state folder, a version on its calls

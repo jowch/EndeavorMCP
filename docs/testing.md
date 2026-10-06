@@ -210,6 +210,24 @@ cell (`42`), `read_file` and `run_shell` on the server, fetches the
 `browser_url` over HTTP, and `stop_machine`, and checks that nothing is left
 running.
 
+The same path on a cluster is `e2e_machines_slurm.rs`, which also needs Slurm on
+the host (`localhost` on a single-node cluster) and submits one job of 1 CPU,
+2 GB and 15 minutes to `LocalQ` (`ENDEAVOR_TEST_SLURM_PARTITION` names another):
+
+```sh
+ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines_slurm -- --ignored --nocapture
+```
+
+Through `endeavor mcp` it runs `add_machine` with `slurm: true` (the partitions
+and their limits), `use_machine` with no resources (`needs_job`, nothing in
+`squeue`), then with resources (the job's id, node and end time), a cell that
+reads `SLURM_JOB_ID` and `run_shell` on the node, and the page through the
+link's port. A second and a third `endeavor mcp` in the same project attach to
+the same job with no `use_machine` and no second job; the job outlives each
+front; `stop_machine` is refused while another session is active and with
+`force` the job leaves `squeue`. The job's id is recorded so a failed step
+cancels it.
+
 ## The Slurm launcher over real ssh and real Slurm
 
 `crates/endeavor-mcp/tests/e2e_slurm.rs` runs the cluster path of

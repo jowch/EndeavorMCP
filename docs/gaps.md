@@ -92,10 +92,20 @@ _Started 2026-10-06, on the `client-library` branch._
   `known_hosts`.
 - **The end reason read from the job's log** (used where `sacct` is off) is
   not exercised by a real test.
+- **The reason for a job cancelled from outside is sometimes not "cancelled".**
+  `e2e_slurm` failed once on that check (the client was told the job ended,
+  with another reason) and passed on the next six runs. `sacct` is off on
+  this workstation, so the reason comes from the job's state and its log,
+  and that probably races with Slurm marking the job. Not investigated. To
+  close: capture the reason string when it happens, and wait for the job's
+  final state before reading it.
 - **A queued job has no id in the link's status until it is submitted by
   this link.** A link that re-attaches to a job already queued shows `queue`
   but no `job` until it runs, because the library's queued event carries no
-  id.
+  id. A job already running shows its id, node and end time to a new link
+  (`e2e_machines_slurm`). Queued and starting states have not been seen on
+  real Slurm through the tools: the queue here is empty and a job runs at
+  once, so their wording is checked against the fake Slurm only.
 - **A `serve` you started inside your own job** is recorded under the
   compute node's name and isn't found from the login node. Add the node as
   the machine instead.
@@ -126,6 +136,12 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The machine tools
 
+- **`use_machine` without `folder` resets the session's folder.** A second
+  session that calls it for a machine the project already uses moves to the
+  server's home folder and the project forgets the folder it remembered. A
+  session that attaches on its own keeps the remembered folder. Left because
+  "no folder" means home by the tool's definition. To close: keep the
+  remembered folder when the machine is the project's and no folder is given.
 - **Julia is not known when a machine is added.** The helper has no call for
   it, so `add_machine` reports `julia: null` until the first runtime start.
 - **Adding a cluster takes two connections.** The first link connects as a
