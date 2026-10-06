@@ -143,8 +143,16 @@ runtime already running from it is found and not started twice.
 
 **Quitting the app.** By default the app stops its local runtime when it
 quits (`--quit-with-client`). Shared, that would stop it under a plugin
-session, or under your laptop. Quitting should stop the runtime only when
-no other session was active lately, and otherwise leave it to the idle stop.
+session, or under your laptop. So when its client's input ends, the helper
+stops the runtime only if no other client is attached, and otherwise exits
+and leaves the runtime to the idle stop. Each attached process keeps a file
+locked in `clients/` in the state folder, named from its host and pid: a
+helper from when it is ready until it detaches, stops or exits, an `mcp`
+front while it uses the runtime, and a foreground `serve`. A file whose lock
+can be taken belongs to a process that is gone and doesn't count (`clients.rs`).
+Stop from a client still ends the runtime for everyone, and Detach still
+leaves it. Two clients that quit at the same moment may each see the other
+and both leave it; the idle stop then ends it.
 
 **The package folder locally.** On servers the app and `serve` already use
 the same one. On your own computer they differ (the app's is in its data
@@ -210,17 +218,19 @@ with a notebook open in the app, and at the office an agent in Claude Code
 opens the same notebook and works in it. You open the laptop again: the app
 reconnects and shows the live page, and both sessions can go on.
 
-Not built:
+Built:
 
-- **Opening a notebook that is already open joins it.** Today
-  `open_notebook` on an open path is an error (`notebook_already_open`) and
-  the session gets no notebook ([status.md](status.md), "Known gaps"). It
-  should bind the session to the open notebook and return it. That is how a
-  new agent session picks up yesterday's notebook.
+- **Opening a notebook that is already open joins it.** `open_notebook` on an
+  open path binds the session to that notebook and returns it, with
+  `already_open` true. Nothing runs and safe preview is unchanged. That is
+  how a new agent session picks up yesterday's notebook. The app's own calls
+  get the same result: it lists first and only opens what isn't open, so it
+  never relied on the error.
 - **Who else is there.** The core records each session's last call and a
   label its client sends ("Claude Code on jc-workstation"). `list_notebooks`
   and `pluto_session_status` show a notebook's other sessions and how lately
-  each was active, so an agent can say that someone else is working there.
+  each was active, so an agent can say that someone else is working there
+  ([endeavor-mcp.md](endeavor-mcp.md#session-identity)).
 
 Each session still works in one notebook (`one_notebook`), as today.
 

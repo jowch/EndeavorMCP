@@ -470,7 +470,7 @@ pub fn serve_unreachable(client: TcpStream, token: &str, why: &str) -> io::Resul
         return http::respond(&mut client, status, Some("application/json"), body.as_bytes(), false);
     }
     if request.method() == "POST" {
-        crate::mcp::post(&request, &mut reader, &mut client, false, false, |message, _| crate::mcp::answer_unreachable(message, &request, why))?;
+        crate::mcp::post(&request, &mut reader, &mut client, false, None, |message, _| crate::mcp::answer_unreachable(message, &request, why))?;
     }
     Ok(())
 }

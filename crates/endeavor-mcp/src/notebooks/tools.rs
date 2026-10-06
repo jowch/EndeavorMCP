@@ -62,7 +62,12 @@ impl Notebooks {
             "find_symbol_references" => t.find_symbol("references"),
             "validate_cell" => t.validate_cell(),
             "search_code" => t.search_code(),
-            "pluto_session_status" => self.call("status", json!({})),
+            "pluto_session_status" => self.call("status", json!({})).map(|mut status| {
+                if let Some(notebooks) = status["notebooks"].as_array_mut() {
+                    t.add_other_sessions(notebooks);
+                }
+                status
+            }),
             "open_notebook" => t.open_notebook(folder),
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),
@@ -480,12 +485,25 @@ impl Call<'_> {
         out
     }
 
+    /// Tell each notebook (an object with a `path`) which other sessions work in it.
+    fn add_other_sessions(&self, notebooks: &mut [Value]) {
+        for notebook in notebooks {
+            let Some(path) = notebook["path"].as_str() else { continue };
+            let path = canonical_path(path).unwrap_or_else(|_| path.to_owned());
+            notebook["other_sessions"] = self.nbs.other_sessions(self.owner, &path).into();
+        }
+    }
+
     fn list_notebooks(&self) -> Result<Value, String> {
         let snapshots = self.nbs.snapshots()?;
         let bound = self.nbs.bound(self.owner);
         let own = |nb: &Snapshot| bound.as_ref().is_some_and(|bound| canonical_path(&nb.path).is_ok_and(|path| path == *bound));
-        let mut state = self.nbs.state.lock().unwrap();
-        Ok(snapshots.iter().map(|nb| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(nb))).collect())
+        let mut listed: Vec<Value> = {
+            let mut state = self.nbs.state.lock().unwrap();
+            snapshots.iter().map(|nb| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(nb))).collect()
+        };
+        self.add_other_sessions(&mut listed);
+        Ok(Value::Array(listed))
     }
 
     fn read_cell(&self) -> Result<Value, String> {
@@ -853,7 +871,13 @@ impl Call<'_> {
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
-        let opened = self.nbs.call("open", json!({ "path": path, "run": run }))?;
+        let opened = match self.nbs.call("open", json!({ "path": path, "run": run })) {
+            Ok(opened) => opened,
+            Err(error) => match already_open(&error) {
+                Some(id) => return self.join(id),
+                None => return Err(error),
+            },
+        };
         let mut result = json!({
             "notebook_id": opened["notebook_id"], "path": opened["path"], "execution_allowed": run, "ran": run,
             "process_status": opened["process_status"],
@@ -863,6 +887,18 @@ impl Call<'_> {
         }
         self.nbs.opened_by(self.owner, opened["path"].as_str().unwrap_or_default());
         Ok(result)
+    }
+
+    /// `open_notebook` on a notebook that is already open: the session
+    /// works in it as it is. Nothing runs and its safe preview is as it was.
+    fn join(&self, id: &str) -> Result<Value, String> {
+        let raw = self.nbs.call("snapshot", json!({ "notebook_id": id }))?;
+        let nb = Snapshot::parse(&raw).ok_or("bad snapshot")?;
+        self.nbs.opened_by(self.owner, &nb.path);
+        Ok(json!({
+            "notebook_id": nb.id, "path": nb.path, "execution_allowed": nb.execution_allowed, "ran": false,
+            "process_status": raw["process_status"], "already_open": true,
+        }))
     }
 
     fn new_notebook(&self, folder: Option<&str>) -> Result<Value, String> {
@@ -994,6 +1030,13 @@ fn julia_iterate(value: &Value) -> Result<Vec<Value>, String> {
         Value::Number(_) | Value::Bool(_) => Ok(vec![value.clone()]),
         _ => Err(argument_error("invalid_argument::cell_ids must be a list of cell IDs")),
     }
+}
+
+/// The id of the open notebook in the adapter's `notebook_already_open` error.
+pub(super) fn already_open(error: &str) -> Option<&str> {
+    let (head, id) = error.rsplit_once(" is already open as notebook_id ")?;
+    head.contains("notebook_already_open::").then_some(())?;
+    id.split_once(';').map(|(id, _)| id)
 }
 
 pub fn argument_error(message: &str) -> String {

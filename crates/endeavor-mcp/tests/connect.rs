@@ -482,6 +482,73 @@ fn detaching_leaves_the_runtime_and_quit_with_client_stops_it_on_eof() {
     assert!(!dir.join("runtime.json").exists());
 }
 
+/// How many clients are recorded in `dir`, held or not.
+fn recorded(dir: &Path) -> usize {
+    std::fs::read_dir(dir.join("clients")).map_or(0, |entries| entries.count())
+}
+
+/// `endeavor mcp` in `dir`, once it has recorded itself as a client of the runtime there.
+fn mcp_in(dir: &Path) -> Child {
+    let before = recorded(dir);
+    let mcp = Command::new(env!("CARGO_BIN_EXE_endeavor"))
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(dir)
+        .args(["--julia", "/nonexistent/julia", "--depot", "/opt/depot:"])
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    common::wait_for("mcp to record itself", || recorded(dir) > before);
+    mcp
+}
+
+/// A helper with `--quit-with-client`, attached to the runtime in `dir`, whose input then ends.
+fn quits(dir: &Path) {
+    let mut helper = Helper::start(dir, &["--any-node", "--quit-with-client"]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn quit_with_client_leaves_a_runtime_that_other_clients_are_attached_to() {
+    let dir = state_dir("quit-others");
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+
+    // Another helper.
+    let mut other = Helper::start(&dir, &["--any-node"]);
+    assert!(matches!(other.start_runtime(), ToApp::Ready { .. }));
+    quits(&dir);
+    assert!(runtime.alive() && dir.join("runtime.json").exists(), "another helper is attached");
+
+    // Once that one detaches, nothing else is attached.
+    other.send(ToHelper::Detach);
+    other.exits();
+    quits(&dir);
+    assert!(!runtime.alive(), "alone, it stops the runtime");
+
+    // `endeavor serve`, and `endeavor mcp`.
+    let runtime = FakeRuntime::start(&dir, &this_host());
+    let mut serve = serve_in(&dir);
+    quits(&dir);
+    assert!(runtime.alive(), "`serve` is attached");
+    serve.kill().unwrap();
+    serve.wait().unwrap();
+    let mut mcp = mcp_in(&dir);
+    quits(&dir);
+    assert!(runtime.alive(), "`mcp` is attached");
+
+    // What a killed process leaves behind isn't a client.
+    mcp.kill().unwrap();
+    mcp.wait().unwrap();
+    assert!(recorded(&dir) > 0, "its file is still there");
+    quits(&dir);
+    assert!(!runtime.alive(), "a record nobody holds doesn't count");
+}
+
 #[test]
 fn a_runtime_that_dies_is_reported_with_its_log() {
     let dir = state_dir("died");

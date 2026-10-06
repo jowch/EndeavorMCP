@@ -82,9 +82,6 @@ Not yet checked:
 
 Known gaps:
 
-- A notebook already open (from Pluto's page in the browser, or another
-  session) can't become an agent's own: `open_notebook` on it is an error and
-  binds nothing ([endeavor-mcp.md](endeavor-mcp.md#session-identity)).
 - `serve` on Windows stops Julia on Ctrl-C and when its console closes, but
   only `cargo check` and clippy for the Windows target have seen that code.
 - Unpacking a new version removes older folders that no runtime holds and

@@ -264,6 +264,27 @@ fn serve_and_mcp_without_the_app() {
         assert_eq!(agent.this_session(), vec![("analysis.jl".to_owned(), true), ("copy.jl".to_owned(), false)]);
     });
 
+    step("a second agent opens the first one's notebook by path, joins it, and each sees the other", || {
+        let mut joiner = Agent::new(port, &token);
+        joiner.initialize();
+        let analysis = folder.join("analysis.jl").display().to_string();
+        let joined = joiner.ok("open_notebook", json!({ "path": analysis, "run_notebook": true }));
+        assert_eq!((&joined["notebook_id"], &joined["already_open"], &joined["ran"]), (&json!(notebook), &json!(true), &json!(false)), "{joined}");
+        assert_eq!(joined["execution_allowed"], true, "as it was, not run again: {joined}");
+        assert_eq!(joiner.this_session(), vec![("analysis.jl".to_owned(), true), ("copy.jl".to_owned(), false)]);
+        assert_eq!(agent.this_session(), vec![("analysis.jl".to_owned(), true), ("copy.jl".to_owned(), false)], "still the first agent's");
+        let others = |agent: &mut Agent| {
+            let listed = agent.ok("list_notebooks", json!({}));
+            listed.as_array().unwrap().iter().find(|nb| nb["path"] == json!(analysis)).unwrap()["other_sessions"].clone()
+        };
+        for who in [&mut agent, &mut joiner] {
+            let seen = others(who);
+            assert_eq!(seen.as_array().unwrap().len(), 1, "the other one: {seen}");
+            assert_eq!(seen[0]["client"], "e2e", "named by its initialize: {seen}");
+            assert!(seen[0]["active_seconds_ago"].as_u64().is_some_and(|s| s < 60), "{seen}");
+        }
+    });
+
     step("the browser link sets the cookie and opens Pluto's page", || {
         let (status, head, _) = get(port, &format!("/edit?id={notebook}&token={token}"), "");
         assert_eq!(status, "HTTP/1.1 303 See Other", "{head}");
@@ -287,8 +308,9 @@ fn serve_and_mcp_without_the_app() {
         let id = opened["notebook_id"].clone();
         let mut fresh = Agent::new(port, &token);
         fresh.initialize();
-        let (failed, again) = fresh.call("open_notebook", json!({ "path": path }));
-        assert!(failed && again["error"] == "notebook_already_open", "it can't become the session's own: {again}");
+        let joined = fresh.ok("open_notebook", json!({ "path": path }));
+        assert_eq!((&joined["notebook_id"], &joined["already_open"], &joined["execution_allowed"]), (&id, &json!(true), &json!(false)), "it joins, in safe preview as it was: {joined}");
+        assert!(fresh.this_session().contains(&("from_browser.jl".to_owned(), true)), "and it is the session's own now");
         let last = fresh.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].as_array().unwrap().last().unwrap().clone();
         fresh.ok("read_cell", json!({ "notebook_id": id, "cell_id": last }));
         fresh.ok("add_cell", json!({ "notebook_id": id, "code": "y = 1", "after_cell_id": last }));

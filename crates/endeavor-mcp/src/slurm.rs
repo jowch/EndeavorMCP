@@ -173,7 +173,7 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &
     };
     drop(starting);
     let (state, running) = wait(args, mux, rx, events, &job)?;
-    Ok(Attached { how: How::Slurm(running), state, reattached: false })
+    Ok(Attached { how: How::Slurm(running), state, reattached: false, presence: None })
 }
 
 /// The runtime recorded as running in a job, attached to through a relay on its node.
@@ -189,7 +189,7 @@ fn running(args: &Args, mux: &Arc<Mux>, events: &Sender<Event>) -> Result<Option
                 let ends_at = ends_at(&q);
                 let (link, route) = connect_node(&job, &state.node, dir, mux, events).map_err(failed)?;
                 let running = Running { job, pid: state.pid, node: state.node.clone(), ends_at, route, link, state_dir: dir.clone() };
-                return Ok(Some(Attached { how: How::Slurm(running), state, reattached: true }));
+                return Ok(Some(Attached { how: How::Slurm(running), state, reattached: true, presence: None }));
             }
             _ => {
                 let _ = std::fs::remove_file(dir.join("runtime.json"));

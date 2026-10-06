@@ -1,6 +1,6 @@
 [
   {
-    "description": "List all notebooks currently open in the Pluto session, with each one's run state: pending_run (ids of edited cells not yet run), running (ids of cells queued or running, in notebook order), and execution_allowed (whether Pluto will run code now: false in safe preview, and while the notebook process is stopped, restarting, or crashed). Other Endeavor sessions' notebooks are listed too: this_session is true only for this session's own notebook. If no notebook has this_session true, this session has no notebook yet; when the user asks for notebook work, create one with new_notebook yourself instead of asking them to open or create one, and don't use another session's notebook. Does not count as reading any cell.",
+    "description": "List all notebooks currently open in the Pluto session, with each one's run state: pending_run (ids of edited cells not yet run), running (ids of cells queued or running, in notebook order), and execution_allowed (whether Pluto will run code now: false in safe preview, and while the notebook process is stopped, restarting, or crashed). Other Endeavor sessions' notebooks are listed too: this_session is true only for this session's own notebook, and other_sessions lists the other sessions working in each notebook, each with client (what its client calls itself, or null) and active_seconds_ago (seconds since its last tool call, or null if it has made none). If no notebook has this_session true, this session has no notebook yet; when the user asks for notebook work, create one with new_notebook yourself instead of asking them to open or create one, and don't change another session's notebook unless the user asks you to work in it (open_notebook on its path does that). Does not count as reading any cell.",
     "inputSchema": {
       "properties": {},
       "required": [],
@@ -522,7 +522,7 @@
     "name": "pluto_session_status"
   },
   {
-    "description": "Load a .jl notebook file into the live Pluto session (user-confirmed path). Default safe preview (no auto-run); set run_notebook=true to queue a single non-blocking full run; don't also call run_all_cells, which would run it twice. Each session works on one notebook: once it has one, opening a different path is refused (read other notebooks as plain .jl files instead).",
+    "description": "Load a .jl notebook file into the live Pluto session (user-confirmed path). Default safe preview (no auto-run); set run_notebook=true to queue a single non-blocking full run; don't also call run_all_cells, which would run it twice. If the path is already open, this session joins that notebook as it is: the result says already_open, nothing runs, safe preview stays as it was, and run_notebook is ignored. Each session works on one notebook: once it has one, opening a different path is refused (read other notebooks as plain .jl files instead).",
     "inputSchema": {
       "properties": {
         "path": {

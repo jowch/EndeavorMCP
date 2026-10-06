@@ -7,7 +7,6 @@
 | `pluto_not_running` | Endeavor's Pluto session isn't up | Unusual in normal use — Endeavor starts Pluto with the app, or with `endeavor serve` / `endeavor mcp` without it; tell the user something's wrong rather than calling lifecycle tools yourself |
 | `notebook_not_found` | Unknown or stale `notebook_id` | Confirm the notebook/path with the user; `list_notebooks` to see what's open |
 | `one_notebook` | This session already works on another notebook; the call tried to open, create, edit, or run a different one | Keep working in the session's notebook. Read the other notebook as a plain `.jl` file if you need its code. If the user wants to work on it, suggest they start a new session with it |
-| `notebook_already_open` (from `open_notebook`) | That path is already open in the session; the message gives its `notebook_id` | Use that `notebook_id` instead of reopening it |
 
 If one of these fires before you've established any `notebook_id`, go to **pluto-session** first.
 

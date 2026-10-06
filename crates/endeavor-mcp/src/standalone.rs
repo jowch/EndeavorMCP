@@ -640,6 +640,7 @@ fn serve(options: Options) -> ! {
         std::process::exit(1)
     });
     let dir = &options.state_dir;
+    let _presence = crate::clients::register(dir);
     let folder = recorded_folder(dir).unwrap_or_else(|| options.folder.display().to_string());
     if up.started.is_none() {
         eprintln!("Julia was already running from {} (pid {}); using it as it was started.", dir.display(), up.state.pid);
@@ -733,6 +734,10 @@ struct Relay {
     protocol: Mutex<Option<String>>,
     /// The runtime's `Mcp-Session-Id`, if it gives one.
     mcp_session: Mutex<Option<String>>,
+    /// The agent's name from `initialize`, which the runtime shows to other sessions.
+    agent: Mutex<Option<String>>,
+    /// Kept while this front uses the runtime (see `clients`).
+    presence: Mutex<Option<crate::clients::Presence>>,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -756,7 +761,7 @@ fn relay(options: Options) -> ! {
 
 impl Relay {
     fn new(options: Options, session: String, out: Box<dyn Write + Send>) -> Relay {
-        Relay { options, status: Mutex::new(Status::Idle), changed: Condvar::new(), session, protocol: Mutex::default(), mcp_session: Mutex::default(), out: Mutex::new(out) }
+        Relay { options, status: Mutex::new(Status::Idle), changed: Condvar::new(), session, protocol: Mutex::default(), mcp_session: Mutex::default(), agent: Mutex::default(), presence: Mutex::default(), out: Mutex::new(out) }
     }
 
     fn write(&self, message: &str) {
@@ -784,6 +789,11 @@ impl Relay {
             };
             let status = match start_or_reuse(&relay.options, true, &progress, &|| false) {
                 Ok(up) => {
+                    let mut presence = relay.presence.lock().unwrap();
+                    if presence.is_none() {
+                        *presence = crate::clients::register(&relay.options.state_dir);
+                    }
+                    drop(presence);
                     relay.tell_folder(up.port, &up.state.token);
                     eprintln!("Endeavor's notebooks: http://localhost:{}/?token={}", up.port, up.state.token);
                     if let Some(message) = up.started.is_none().then(|| other_build(&relay.options.state_dir)).flatten() {
@@ -861,6 +871,7 @@ impl Relay {
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
         if let Some(reply) = crate::mcp::answer_locally(&message, self.options.skills_plugin) {
             if message["method"] == "initialize" {
+                *self.agent.lock().unwrap() = message["params"]["clientInfo"]["name"].as_str().and_then(crate::mcp::clean_label);
                 let negotiated: Value = serde_json::from_str(&reply).unwrap_or_default();
                 *self.protocol.lock().unwrap() = negotiated["result"]["protocolVersion"].as_str().map(str::to_owned);
             }
@@ -902,6 +913,10 @@ impl Relay {
         );
         if self.options.skills_plugin {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
+        }
+        let agent = self.agent.lock().unwrap().clone().unwrap_or_else(|| "endeavor mcp".into());
+        if let Some(label) = crate::mcp::clean_label(&format!("{agent} on {}", crate::hostname())) {
+            head.push_str(&format!("X-Endeavor-Client: {label}\r\n"));
         }
         if let Some(version) = &*self.protocol.lock().unwrap() {
             head.push_str(&format!("MCP-Protocol-Version: {version}\r\n"));

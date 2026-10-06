@@ -161,12 +161,24 @@ Why the MCP session id and not something else:
   rejected: it would tell the agent that the user's and other sessions'
   notebooks are its own.
 
-Not done: a notebook the user already opened in the browser can't become an
-agent's notebook, because `open_notebook` on an open path is an error
-(`notebook_already_open`) and binds nothing. The pluto-session skill tells
-the agent, without the app, to work in such a notebook by its `notebook_id`
-when the user names it and the session has no notebook yet (the core holds an
-unbound session to nothing), and otherwise to suggest a new agent session.
+A notebook the user already opened in the browser, or another session
+opened, can become an agent's notebook: `open_notebook` on an open path binds
+the session to it and returns it as it is, with `already_open` true. The core
+catches the adapter's `notebook_already_open` error and builds the result from
+a fresh snapshot, so nothing runs and safe preview is unchanged. The app's own
+calls, which carry no session, get the same result. A session already bound
+to another notebook is still refused (`one_notebook`).
+
+Each session also leaves a record: when it last made a tool call (a held
+`/endeavor/events` stream doesn't count) and a label for its client. The label
+is the `X-Endeavor-Client` header, else, for a client that got an
+`Mcp-Session-Id`, the `clientInfo.name` from its `initialize`. It is cut to
+printable characters, trimmed and at most 80 long. `endeavor mcp` sends
+"<agent's name, else endeavor mcp> on <host name>". `list_notebooks` and
+`pluto_session_status` give each notebook `other_sessions`: an entry for each
+other session bound to it, `{client, active_seconds_ago}`, with null for
+what isn't known. The record goes when the binding is cleared, and a week
+after the session's last call.
 
 ## Approval
 

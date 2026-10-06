@@ -32,19 +32,23 @@ the test goes through these steps in order:
 4. `list_notebooks` marks `this_session` right for two sessions. A second
    notebook for the same session is refused, and so is a change to the other
    session's notebook.
-5. The run policy. `endeavor/run_preview` says what an asked run would run,
+5. A fourth session that names its client opens the first session's
+   notebook by path. It joins: the same `notebook_id`, `already_open`, nothing
+   run again. Each session sees the other in `other_sessions`, and the
+   `/endeavor/call` `open_notebook` of the app gets the notebook the same way.
+6. The run policy. `endeavor/run_preview` says what an asked run would run,
    including a dependent cell. Plan mode refuses edits and runs but allows
    reads.
-6. Uploads through the helper's `Place` and `Write`. The same file is reused.
+7. Uploads through the helper's `Place` and `Write`. The same file is reused.
    A different file with the same name becomes `decay (2).csv`.
-7. Restart, as the app's Restart Julia does it. The test stops and starts the
+8. Restart, as the app's Restart Julia does it. The test stops and starts the
    runtime, then reopens each notebook. The unchanged notebook runs again. The
    notebook whose file changed opens in safe preview.
-8. A notebook in safe preview doesn't run code until `allow_execution`.
-9. A notebook's own Julia killed during a run that `execute_cell` waits
-   for. The call fails with `process_exited` and "Julia stopped unexpectedly
-   while running `rates`. …", and `list_notebooks` has `exited` with that cell.
-10. Idle stop with a limit of about two seconds, seen on the app's
+9. A notebook in safe preview doesn't run code until `allow_execution`.
+10. A notebook's own Julia killed during a run that `execute_cell` waits
+    for. The call fails with `process_exited` and "Julia stopped unexpectedly
+    while running `rates`. …", and `list_notebooks` has `exited` with that cell.
+11. Idle stop with a limit of about two seconds, seen on the app's
     `/endeavor/events` stream. `ENDEAVOR_IDLE_CHECK_SECS` makes the core
     check every second instead of every five minutes.
 
@@ -75,8 +79,10 @@ It takes about a minute and starts Julia twice:
 1. `serve` in a terminal. The agent connects over HTTP with only the bearer
    header, makes a notebook in the project folder, runs a cell and reads it.
    A notebook from disk opens in safe preview, through the tools and through
-   Pluto's `/open`. The browser link sets the cookie and Pluto's page loads.
-   Ctrl-C ends the core and Julia's process group.
+   Pluto's `/open`. A second agent opens the first one's notebook by path and
+   joins it, and each sees the other in `other_sessions`; an agent also joins
+   the notebook opened from the browser. The browser link sets the cookie and
+   Pluto's page loads. Ctrl-C ends the core and Julia's process group.
 2. `mcp` over stdio starts a runtime in the background. A second `mcp` with
    another folder shares it, and `stop` ends it.
 

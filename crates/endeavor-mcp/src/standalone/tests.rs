@@ -303,7 +303,7 @@ fn ready_relay(port: u16, skills_plugin: bool) -> (Arc<Relay>, Out) {
 fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     let (port, seen) = fake_core();
     let (relay, out) = ready_relay(port, true);
-    relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}"#);
+    relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claude-code\u0007"}}}"#);
     relay.handle(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
     let lines = out.lines();
     assert_eq!(lines.len(), 1, "{lines:?}");
@@ -318,11 +318,22 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     let (head, body) = &seen[0];
     assert_eq!(body, r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
     let header = |name| head.header(name).unwrap_or("(none)");
+    let client = header("X-Endeavor-Client").to_owned();
     assert_eq!(
         [header("Authorization"), header("X-Endeavor-Session"), header("X-Endeavor-Skills"), header("MCP-Protocol-Version"), header("Accept")],
         ["Bearer t0k", "stdio-7", "plugin", "2025-03-26", "application/json, text/event-stream"]
     );
     assert_eq!(head.target(), "/mcp");
+    assert_eq!(client, format!("claude-code on {}", crate::hostname()), "the agent's own name, and where it runs");
+}
+
+#[test]
+fn an_agent_that_gives_no_name_is_endeavor_mcp() {
+    let (port, seen) = fake_core();
+    let (relay, _) = ready_relay(port, true);
+    relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
+    relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
+    assert_eq!(seen.lock().unwrap()[0].0.header("X-Endeavor-Client"), Some(format!("endeavor mcp on {}", crate::hostname()).as_str()));
 }
 
 #[test]

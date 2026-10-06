@@ -226,7 +226,10 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
                 ("snapshot", Some(nb)) => serde_json::json!({ "result": nb }),
                 ("graph", Some(_)) => serde_json::json!({ "result": { "cells": [] } }),
                 ("open", _) => match notebooks.iter().find(|nb| nb["path"] == call["params"]["path"]) {
-                    Some(nb) => serde_json::json!({ "result": { "notebook_id": nb["notebook_id"], "path": nb["path"], "process_status": "ready" } }),
+                    Some(nb) => {
+                        let (path, id) = (nb["path"].as_str().unwrap(), nb["notebook_id"].as_str().unwrap());
+                        serde_json::json!({ "error": format!("ArgumentError: notebook_already_open::'{path}' is already open as notebook_id {id}; use that id") })
+                    }
                     None => serde_json::json!({ "error": "ArgumentError: file_not_found::not a notebook here" }),
                 },
                 _ => serde_json::json!({ "error": format!("KeyError: key \"notebook_not_found::No notebook with id '{}' in the current session\" not found", id.as_str().unwrap_or_default()) }),

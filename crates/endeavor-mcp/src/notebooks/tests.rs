@@ -137,9 +137,17 @@ impl Engine {
         let now = *self.clock.lock().unwrap();
         let mut notebooks = self.notebooks.lock().unwrap();
         match method {
-            "status" => return Ok(json!({ "pluto": "running" })),
+            "status" => {
+                let listed: Vec<Value> = notebooks.iter().map(|nb| json!({ "notebook_id": nb.id, "path": nb.path, "cell_count": nb.cells.len() })).collect();
+                return Ok(json!({ "pluto": "running", "notebooks": listed }));
+            }
             "open" | "new" => {
                 let path = params["path"].as_str().map_or_else(|| format!("{}{SEP}made.jl", params["folder"].as_str().unwrap_or("/n")), str::to_owned);
+                if method == "open"
+                    && let Some(open) = notebooks.iter().find(|nb| nb.path == path)
+                {
+                    return Err(format!("ArgumentError: notebook_already_open::'{path}' is already open as notebook_id {}; use that id", open.id));
+                }
                 let mut made = self.made.lock().unwrap();
                 *made += 1;
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
@@ -981,12 +989,12 @@ fn a_run_receipt_has_the_text_form_of_rich_outputs() {
 #[test]
 fn opening_and_making_notebooks() {
     let s = setup();
-    let dir = temp_notebooks("open", 1)[0].rsplit_once(SEP).unwrap().0.to_owned();
+    let dir = temp_notebooks("open", 2)[0].rsplit_once(SEP).unwrap().0.to_owned();
     let path = format!("{dir}{SEP}nb0.jl");
     let opened = s.call("", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap();
     assert_eq!(opened["warnings"], json!(["async_execution::open queued non-blocking notebook run; poll read_cell for completion"]));
     assert_eq!((&opened["execution_allowed"], &opened["ran"], &opened["process_status"]), (&json!(true), &json!(true), &json!("starting")));
-    let previewed = s.call("", "open_notebook", json!({ "path": path })).unwrap();
+    let previewed = s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}nb1.jl") })).unwrap();
     assert_eq!((&previewed["execution_allowed"], previewed.get("warnings")), (&json!(false), None));
     assert_eq!(s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}none.jl") })), Err(format!("ArgumentError: file_not_found::No file at '{dir}{SEP}none.jl'")));
     assert_eq!(s.call("", "open_notebook", json!({})), Err("ArgumentError: invalid_path::path is required".into()));
@@ -1164,6 +1172,91 @@ fn one_notebook_per_session() {
     assert_eq!(s.notebooks.bound("c").as_ref(), Some(&paths[2]));
     assert_eq!(refused(s.call("c", "new_notebook", json!({ "path": &paths[3] }))), one);
     assert_eq!(refused(s.call("c", "open_notebook", json!({ "path": first_nb }))), one);
+}
+
+#[test]
+fn opening_an_open_notebook_joins_it_and_changes_nothing() {
+    let s = setup();
+    let paths = temp_notebooks("join", 2);
+    let first = s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    assert_eq!(first.get("already_open"), None);
+    let id = first["notebook_id"].as_str().unwrap().to_owned();
+    s.engine.with(&id, |nb| nb.safe_preview = true);
+    let calls = s.engine.calls.lock().unwrap().len();
+
+    // Another session, and a call without a session (the app's), get the open notebook as it is.
+    let joined = s.call("b", "open_notebook", json!({ "path": &paths[0], "run_notebook": true })).unwrap();
+    assert_eq!(
+        joined,
+        json!({ "notebook_id": id, "path": paths[0], "execution_allowed": false, "ran": false, "process_status": "waiting_for_permission", "already_open": true })
+    );
+    assert_eq!(s.notebooks.bound("b").as_ref(), Some(&paths[0]));
+    let apps = s.call("", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    assert_eq!((&apps["notebook_id"], &apps["already_open"], s.notebooks.bound("")), (&json!(id), &json!(true), None));
+    assert!(s.engine.with(&id, |nb| nb.safe_preview), "still in safe preview");
+    let made = s.engine.calls.lock().unwrap()[calls..].iter().filter(|call| matches!(call.as_str(), "run" | "apply" | "allow")).count();
+    assert_eq!(made, 0, "nothing ran or changed");
+
+    // A session bound to another notebook is still refused; its own notebook joins as always.
+    s.call("c", "open_notebook", json!({ "path": &paths[1] })).unwrap();
+    assert!(s.call("c", "open_notebook", json!({ "path": &paths[0] })).unwrap_err().starts_with("ArgumentError: one_notebook::"));
+    assert_eq!(s.call("c", "open_notebook", json!({ "path": &paths[1] })).unwrap()["already_open"], true);
+    assert_eq!(s.notebooks.bound("c").as_ref(), Some(&paths[1]));
+
+    // Other adapter errors stay errors.
+    assert_eq!(super::tools::already_open("ArgumentError: file_not_found::'x' is already open as notebook_id y; use that id"), None);
+}
+
+#[test]
+fn list_notebooks_says_which_other_sessions_work_in_each_notebook() {
+    let s = setup();
+    let paths = temp_notebooks("others", 2);
+    s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.call("c", "open_notebook", json!({ "path": &paths[1] })).unwrap();
+    // The other sessions of the first notebook, as `owner` lists them.
+    let others = |owner: &str| -> Value {
+        let listed = s.call(owner, "list_notebooks", json!({})).unwrap();
+        listed.as_array().unwrap().iter().find(|nb| nb["path"] == paths[0].as_str()).unwrap()["other_sessions"].clone()
+    };
+    assert_eq!(others("a"), json!([]));
+
+    s.call("b", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.notebooks.set_client("b", "Claude Code on jc-workstation");
+    s.notebooks.note_call("b");
+    s.seconds(125.7);
+    assert_eq!(others("a"), json!([{ "client": "Claude Code on jc-workstation", "active_seconds_ago": 125 }]));
+    assert_eq!(others("c").as_array().unwrap().len(), 2, "a session in another notebook sees both");
+
+    // A session the app bound has made no call and has no label; the most recent call comes first.
+    s.notebooks.bind("app", &paths[0]);
+    s.notebooks.note_call("a");
+    s.seconds(10.0);
+    assert_eq!(others("b"), json!([{ "client": null, "active_seconds_ago": 10 }, { "client": null, "active_seconds_ago": null }]));
+    // The app's own calls have no session, so every session bound there is another.
+    assert_eq!(others("").as_array().unwrap().len(), 3);
+
+    // Records go with the binding, and a week after the last call.
+    s.notebooks.bind("b", "");
+    assert!(!s.notebooks.state.lock().unwrap().seen.contains_key("b"));
+    s.seconds(8.0 * 24.0 * 3600.0);
+    assert_eq!(others("c"), json!([{ "client": null, "active_seconds_ago": null }, { "client": null, "active_seconds_ago": null }]));
+    assert!(s.notebooks.state.lock().unwrap().seen.is_empty());
+
+    // Calls without a session are not recorded.
+    s.notebooks.note_call("");
+    assert!(s.notebooks.state.lock().unwrap().seen.is_empty());
+}
+
+#[test]
+fn pluto_session_status_lists_the_other_sessions_too() {
+    let s = setup();
+    let paths = temp_notebooks("status", 1);
+    s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.call("b", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.notebooks.note_call("b");
+    s.seconds(5.0);
+    let status = s.call("a", "pluto_session_status", json!({})).unwrap();
+    assert_eq!((&status["pluto"], &status["notebooks"][0]["other_sessions"]), (&json!("running"), &json!([{ "client": null, "active_seconds_ago": 5 }])));
 }
 
 #[test]

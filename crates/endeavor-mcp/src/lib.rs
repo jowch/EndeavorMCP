@@ -15,6 +15,7 @@
 mod askpass;
 mod asks;
 pub mod client;
+mod clients;
 mod core;
 mod guard;
 mod guide;
@@ -301,7 +302,8 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                     Launcher::Slurm => slurm::attach(args, mux, &rx, &events, job.unwrap_or_default()),
                 };
                 match result {
-                    Ok(now) => {
+                    Ok(mut now) => {
+                        now.presence = clients::register(&args.state_dir);
                         *routes.write().unwrap() = now.route();
                         let _ = mux.send(&now.ready(now.reattached).frame());
                         attached = Some(now);
@@ -322,7 +324,10 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                 let _ = mux.send(&ToApp::Stopped.frame());
             }
             Event::Eof if args.quit_with_client => {
-                if let Some(runtime) = attached.take() {
+                // Others attached to it keep it; the idle stop ends it later.
+                if let Some(runtime) = attached.take()
+                    && runtime.presence.as_ref().is_none_or(|presence| presence.others() == 0)
+                {
                     runtime.stop(args, mux, &rx);
                 }
                 std::process::exit(0);
@@ -379,6 +384,8 @@ struct Attached {
     how: How,
     state: State,
     reattached: bool,
+    /// Records that this helper is attached (see `clients`), from when it is ready.
+    presence: Option<clients::Presence>,
 }
 
 enum How {
@@ -466,7 +473,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     if let Some(state) = existing(args).map_err(failed)? {
         let port = state.port.ok_or_else(|| failed(OLDER_RUNTIME.into()))?;
         let runtime = Runtime::recorded(&state, &args.state_dir, events);
-        return Ok(Attached { how: How::Process(runtime, port), state, reattached: true });
+        return Ok(Attached { how: How::Process(runtime, port), state, reattached: true, presence: None });
     }
     stopped::clear(&args.state_dir);
     let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(failed)?;
@@ -475,7 +482,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     let child = start(args, &julia, &token).map_err(failed)?;
     let runtime = Runtime::child(child, &args.state_dir, events);
     let (state, port) = boot(args, mux, &runtime, rx)?;
-    Ok(Attached { how: How::Process(runtime, port), state, reattached: false })
+    Ok(Attached { how: How::Process(runtime, port), state, reattached: false, presence: None })
 }
 
 /// Stop the runtime recorded in the state folder without attaching to it (on

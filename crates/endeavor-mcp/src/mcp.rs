@@ -146,13 +146,26 @@ pub struct Caller {
     /// The agent loads Endeavor's skills itself (Claude Code's plugin), so it
     /// gets no guide.
     pub has_skills: bool,
+    /// What the client calls itself (`X-Endeavor-Client`), for other sessions to see.
+    pub client: Option<String>,
 }
+
+/// A client's label as other sessions see it: printable characters only,
+/// trimmed, at most `LABEL_MAX` of them. None if nothing is left.
+pub(crate) fn clean_label(text: &str) -> Option<String> {
+    let label: String = text.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(LABEL_MAX).collect();
+    let label = label.trim_end().to_owned();
+    (!label.is_empty()).then_some(label)
+}
+
+const LABEL_MAX: usize = 80;
 
 impl Caller {
     fn of(request: &Head) -> Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
         let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin" }
+        let client = request.header("X-Endeavor-Client").and_then(clean_label);
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", client }
     }
 }
 
@@ -291,7 +304,19 @@ impl Bridge {
         {
             caller.host = host;
         }
-        let issue_session = caller.owner.is_empty();
+        if !caller.owner.is_empty()
+            && let Some(label) = &caller.client
+        {
+            self.notebooks.set_client(&caller.owner, label);
+        }
+        // A client without a key gets one, and is labelled as it says it is.
+        let issued = |id: &str, initialize: &Value| {
+            let named = initialize["params"]["clientInfo"]["name"].as_str().and_then(clean_label);
+            if let Some(label) = caller.client.clone().or(named) {
+                self.notebooks.set_client(id, &label);
+            }
+        };
+        let issue_session: Option<Issue> = caller.owner.is_empty().then_some(&issued);
         post(request, reader, client, request.keeps_alive(), issue_session, |message, gone| self.dispatch(message, &caller, gone))
     }
 
@@ -303,6 +328,7 @@ impl Bridge {
         }
         answer(message, caller, self.standalone.is_some(), |params| {
             let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone };
+            self.notebooks.note_call(&caller.owner);
             let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);
@@ -481,18 +507,22 @@ fn closed(_socket: &TcpStream) -> bool {
     false
 }
 
+/// Told the `Mcp-Session-Id` a new session gets, and its `initialize`.
+type Issue<'a> = &'a dyn Fn(&str, &Value);
+
 /// Serve one `POST /mcp`: one JSON-RPC message in; a request gets `reply`'s
 /// answer in this response, a notification or a response from the client gets
 /// `202 Accepted` with no body. `reply` is given the message and a check to
 /// call while its answer waits on the user (`Held::waiting`). With
 /// `issue_session`, the reply to `initialize` gives the client a new
-/// `Mcp-Session-Id`. Whether the connection can carry another request.
+/// `Mcp-Session-Id`, which `issue_session` is told with that message.
+/// Whether the connection can carry another request.
 pub(crate) fn post(
     request: &Head,
     reader: &mut BufReader<TcpStream>,
     client: &mut TcpStream,
     keep_alive: bool,
-    issue_session: bool,
+    issue_session: Option<Issue>,
     reply: impl FnOnce(&Value, &dyn Fn() -> bool) -> Option<String>,
 ) -> io::Result<bool> {
     let body = http::read_body(reader, request.request_body()?)?;
@@ -513,7 +543,11 @@ pub(crate) fn post(
         http::write_chunk(client, b"")?;
         return Ok(keep_alive);
     }
-    let session = (issue_session && message["method"] == "initialize").then(new_session_id).flatten();
+    let session = issue_session.filter(|_| message["method"] == "initialize").and_then(|issue| {
+        let id = new_session_id()?;
+        issue(&id, &message);
+        Some(id)
+    });
     let headers: Vec<(&str, &str)> = session.iter().map(|id| ("Mcp-Session-Id", id.as_str())).collect();
     match reply {
         Some(reply) => http::respond_with(client, "200 OK", Some("application/json"), &headers, reply.as_bytes(), keep_alive)?,
@@ -805,6 +839,15 @@ how to find this session's notebook, the read-edit-run loop, when the user must 
         assert!(ask("initialize", true).get("instructions").is_none(), "Claude Code has the plugin's skills");
         assert!(!names(ask("tools/list", true)).contains(&"notebook_guide".to_owned()));
         assert!(is_tool("notebook_guide") && is_tool("edit_cell") && is_tool("run_shell") && !is_tool("edit"));
+    }
+
+    #[test]
+    fn a_label_is_printable_trimmed_and_short() {
+        assert_eq!(clean_label("  Claude Code on jc-workstation \r\n"), Some("Claude Code on jc-workstation".into()));
+        assert_eq!(clean_label("a\u{7}b\tc"), Some("abc".into()));
+        assert_eq!(clean_label(" \n\u{7}"), None);
+        assert_eq!(clean_label(&"é".repeat(100)), Some("é".repeat(80)));
+        assert_eq!(clean_label(&format!("{} z", "y".repeat(79))), Some("y".repeat(79)), "no trailing space after the cut");
     }
 
     #[test]

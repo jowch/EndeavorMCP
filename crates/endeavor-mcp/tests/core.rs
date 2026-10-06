@@ -405,6 +405,50 @@ fn an_agent_without_the_session_header_is_told_apart_by_its_mcp_session_id() {
 }
 
 #[test]
+fn sessions_join_an_open_notebook_and_see_each_other_with_their_labels() {
+    let dir = state_dir("core-join");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let folder = temp_folder("core-join-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let id = "aaaaaaaa-0000-0000-0000-000000000001";
+    let mut open = notebook(id, "x = 1");
+    open["path"] = path.as_str().into();
+    bridge.set_notebooks(vec![open]);
+
+    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"codex-cli","version":"1"}}}"#;
+    let (_, headers, _) = mcp_response(&core, initialize, &[]);
+    let plain = headers.into_iter().find(|(name, _)| name == "mcp-session-id").unwrap().1;
+    let call = |caller: &[(&str, &str)], name: &str, arguments: serde_json::Value| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), caller).1).unwrap();
+        serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let others = |caller: &[(&str, &str)]| call(caller, "list_notebooks", serde_json::json!({}))[0]["other_sessions"].clone();
+
+    // The first session opens the notebook; the second, which names itself in a header, joins it.
+    let one = [("Mcp-Session-Id", plain.as_str())];
+    let opened = call(&one, "open_notebook", serde_json::json!({ "path": path }));
+    assert_eq!((&opened["notebook_id"], opened.get("already_open")), (&serde_json::json!(id), Some(&serde_json::json!(true))), "the notebook was open already");
+    let two = [("X-Endeavor-Session", "stdio-1"), ("X-Endeavor-Client", "  Claude Code on jc-workstation\u{7} ")];
+    let joined = call(&two, "open_notebook", serde_json::json!({ "path": path, "run_notebook": true }));
+    assert_eq!((&joined["notebook_id"], &joined["already_open"], &joined["ran"]), (&serde_json::json!(id), &serde_json::json!(true), &serde_json::json!(false)));
+    let marked = call(&two, "list_notebooks", serde_json::json!({}));
+    assert_eq!(marked[0]["this_session"], true);
+
+    assert_eq!(others(&two), serde_json::json!([{ "client": "codex-cli", "active_seconds_ago": 0 }]), "named by its initialize");
+    assert_eq!(others(&one), serde_json::json!([{ "client": "Claude Code on jc-workstation", "active_seconds_ago": 0 }]), "named by its header, cleaned");
+
+    // A call with no session sees every session, and a long label is cut.
+    let nothing = call(&[], "list_notebooks", serde_json::json!({}));
+    assert_eq!(nothing[0]["other_sessions"].as_array().unwrap().len(), 2);
+    let long = "x".repeat(200);
+    let _ = call(&[("X-Endeavor-Session", "stdio-1"), ("X-Endeavor-Client", long.as_str())], "list_notebooks", serde_json::json!({}));
+    assert_eq!(others(&one)[0]["client"].as_str().unwrap().len(), 80);
+}
+
+#[test]
 fn serves_the_agents_mcp_messages() {
     let dir = state_dir("core-mcp");
     let bridge = FakeBridge::start(&dir);
