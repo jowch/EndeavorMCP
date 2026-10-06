@@ -64,7 +64,7 @@ use wire::files::RuntimeState;
 use wire::slurm::JobRequest;
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor connect --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--build BUILD]
+const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--build BUILD]
        endeavor relay --state-dir DIR
        endeavor node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
        endeavor core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
@@ -125,9 +125,6 @@ enum Event {
     Eof,
     /// The runtime with this pid exited, with this status.
     Exited(i32, String),
-    /// Another helper wants the runtime.
-    #[cfg_attr(windows, allow(dead_code))]
-    Replaced,
     /// A control message from the relay on a job's node (`slurm::Link`).
     Node(u64, ToApp),
     /// That relay's output ended.
@@ -182,10 +179,9 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
             std::process::exit(2);
         }
     };
-    // Before any thread starts, so every thread inherits the mask and only the watcher takes it.
-    let replace_signal = block_sigusr1();
+    block_sigusr1();
     let mux = stdout_mux();
-    let Err(message) = serve(&args, &mux, replace_signal);
+    let Err(message) = serve(&args, &mux);
     eprintln!("endeavor: {message}");
     let _ = mux.send(&ToApp::Error { message }.frame());
     std::process::exit(1);
@@ -238,7 +234,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         }
     }
     Ok(Args {
-        state_dir: state_dir.ok_or("--state-dir is required")?,
+        state_dir: state_dir.unwrap_or_else(standalone::default_state_dir),
         julia: julia.ok_or("--julia or --julia-shell is required")?,
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
@@ -268,10 +264,9 @@ fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
 
 /// Say hello, then serve the app until it detaches or goes away, starting,
 /// stopping and relaying to the runtime as it asks. Returns only on failure.
-fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: ReplaceSignal) -> Result<std::convert::Infallible, String> {
+fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String> {
     make_state_dir(&args.state_dir)?;
     let (events, rx) = mpsc::channel();
-    watch_replace_signal(replace_signal, events.clone());
     let routes: Routes = Arc::new(RwLock::new(Route::None));
     let parts = Parts::default();
     let answer: Answer = {
@@ -315,7 +310,7 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: ReplaceSignal) -> Result<s
                 match attached.take() {
                     Some(runtime) => {
                         *routes.write().unwrap() = Route::None;
-                        runtime.stop(&rx);
+                        runtime.stop(&args.state_dir, &rx);
                     }
                     None => stop_recorded(args, &events),
                 }
@@ -323,7 +318,7 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: ReplaceSignal) -> Result<s
             }
             Event::Eof if args.quit_with_client => {
                 if let Some(runtime) = attached.take() {
-                    runtime.stop(&rx);
+                    runtime.stop(&args.state_dir, &rx);
                 }
                 std::process::exit(0);
             }
@@ -354,12 +349,6 @@ fn serve(args: &Args, mux: &Arc<Mux>, replace_signal: ReplaceSignal) -> Result<s
                     lost_node(args, mux, &routes, &mut attached, &events, None);
                 }
             }
-            Event::Replaced => {
-                if attached.is_some() {
-                    let _ = mux.send(&ToApp::Replaced.frame());
-                    std::process::exit(0);
-                }
-            }
         }
     }
 }
@@ -380,12 +369,11 @@ fn lost_node(args: &Args, mux: &Arc<Mux>, routes: &Routes, attached: &mut Option
     let _ = mux.send(&job.ended(&args.state_dir, said).frame());
 }
 
-/// The runtime this helper is the client of, and the lock that makes it the only one.
+/// The runtime this helper is a client of. Any number of helpers attach to one runtime.
 struct Attached {
     how: How,
     state: State,
     reattached: bool,
-    _lock: File,
 }
 
 enum How {
@@ -417,7 +405,8 @@ impl Attached {
         }
     }
 
-    fn stop(self, rx: &mpsc::Receiver<Event>) {
+    fn stop(self, dir: &Path, rx: &mpsc::Receiver<Event>) {
+        mark_stopped(dir, self.state.pid);
         match self.how {
             How::Process(runtime, _) => runtime.stop(Some(&self.state)),
             How::Slurm(job) => job.stop(rx),
@@ -425,45 +414,66 @@ impl Attached {
     }
 }
 
-/// Take the runtime over, or start one. The error is the app's answer: why it
+/// Attach to the runtime in the state folder, or start one. The start lock
+/// is held until the runtime is ready, so helpers asked at once start one
+/// runtime and the rest attach to it. The error is the app's answer: why it
 /// couldn't start, or that it died while starting.
 fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>) -> Result<Attached, ToApp> {
     let failed = |message: String| ToApp::StartFailed { message };
-    let lock = lock(&args.state_dir).map_err(failed)?;
+    let _starting = standalone::start_lock(&args.state_dir).map_err(failed)?;
     if let Some(state) = existing(args).map_err(failed)? {
         let port = state.port.ok_or_else(|| failed(OLDER_RUNTIME.into()))?;
         let runtime = Runtime::recorded(&state, &args.state_dir, events);
-        return Ok(Attached { how: How::Process(runtime, port), state, reattached: true, _lock: lock });
+        return Ok(Attached { how: How::Process(runtime, port), state, reattached: true });
     }
+    let _ = std::fs::remove_file(args.state_dir.join(standalone::STOPPED));
     let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(failed)?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
     let token = token(&args.state_dir).map_err(failed)?;
     let child = start(args, &julia, &token).map_err(failed)?;
     let runtime = Runtime::child(child, &args.state_dir, events);
     let (state, port) = boot(args, mux, &runtime, rx)?;
-    Ok(Attached { how: How::Process(runtime, port), state, reattached: false, _lock: lock })
+    Ok(Attached { how: How::Process(runtime, port), state, reattached: false })
 }
 
 /// Stop the runtime recorded in the state folder without attaching to it (on
 /// a cluster, cancel its job, or the job waiting for a node): the app's Stop
-/// for a host it only browsed. Taking the lock first makes any other client
-/// let go.
+/// for a host it only browsed. Waits for a start in progress, so it ends that runtime.
 fn stop_recorded(args: &Args, events: &Sender<Event>) {
-    let _lock = match lock(&args.state_dir) {
+    let _starting = match standalone::start_lock(&args.state_dir) {
         Ok(lock) => lock,
         Err(e) => return eprintln!("endeavor: not stopping: {e}"),
     };
     match args.launcher {
         Launcher::Process => match existing(args) {
             Ok(Some(state)) => {
+                mark_stopped(&args.state_dir, state.pid);
                 let runtime = Runtime::recorded(&state, &args.state_dir, events);
                 runtime.stop(Some(&state));
             }
             Ok(None) => {}
             Err(e) => eprintln!("endeavor: not stopping: {e}"),
         },
-        Launcher::Slurm => slurm::cancel_recorded(&args.state_dir),
+        Launcher::Slurm => {
+            if let Some(state) = read_state(&args.state_dir) {
+                mark_stopped(&args.state_dir, state.pid);
+            }
+            slurm::cancel_recorded(&args.state_dir)
+        }
     }
+}
+
+/// What a client that finds the runtime gone is told when another connection stopped it.
+const STOPPED_ELSEWHERE: &str = "It was stopped from another connection.";
+
+/// Note in the state folder that the runtime `pid` is being stopped on purpose,
+/// for the other helpers attached to it (`Runtime::died`). The next start removes it.
+fn mark_stopped(dir: &Path, pid: i32) {
+    let _ = std::fs::write(dir.join(standalone::STOPPED), pid.to_string());
+}
+
+fn stopped_on_purpose(dir: &Path, pid: i32) -> bool {
+    std::fs::read_to_string(dir.join(standalone::STOPPED)).is_ok_and(|marked| marked == pid.to_string())
 }
 
 /// What runs from the state folder, found without taking it over.
@@ -500,11 +510,6 @@ fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, rx: &mpsc::Receiver<Even
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Exited(pid, status)) if pid == runtime.pid => break Err(runtime.died(status)),
             Ok(Event::Exited(..) | Event::Node(..) | Event::NodeGone(_) | Event::App(ToHelper::StartRuntime { .. } | ToHelper::Files { .. })) => {}
-            Ok(Event::Replaced) => {
-                runtime.kill();
-                let _ = mux.send(&ToApp::Replaced.frame());
-                std::process::exit(0);
-            }
             Ok(Event::App(ToHelper::Stop)) => {
                 runtime.stop(None);
                 break Err(ToApp::Stopped);
@@ -568,8 +573,10 @@ impl Runtime {
         }
     }
 
-    /// It exited: clean up after it and say so.
+    /// It exited: clean up after it and say so, and if another connection
+    /// stopped it, say that instead of how it exited.
     fn died(&self, status: String) -> ToApp {
+        let status = if stopped_on_purpose(&self.state_dir, self.pid) { STOPPED_ELSEWHERE.into() } else { status };
         let log_tail = log_tail(&self.state_dir.join("runtime.log"));
         // Its notebook workers are no use without it.
         stop_workers(self.pid);
@@ -710,52 +717,6 @@ pub fn end_recorded_runtime(pid: i32, started: Option<u64>) {
     }
 }
 
-/// Take `DIR/lock`: one client per runtime. A helper already holding it on
-/// this machine is asked to hand over (it tells its app it was replaced, then
-/// exits). The file says "pid host": on a cluster the folder is shared by
-/// login nodes, and a pid means nothing on another one.
-fn lock(dir: &Path) -> Result<File, String> {
-    let path = dir.join("lock");
-    let mut file = owner_only(OpenOptions::new().read(true).write(true).create(true).truncate(false))
-        .open(&path)
-        .map_err(|e| format!("Couldn't open {}: {e}", path.display()))?;
-    if !try_lock(&file) {
-        let here = hostname();
-        let mut tries = 0;
-        let mut holder = String::new();
-        while !try_lock(&file) {
-            // Every second, in case the holder hadn't written its pid yet.
-            if tries % 10 == 0 {
-                holder.clear();
-                let _ = (&file).seek(SeekFrom::Start(0)).and_then(|_| (&file).read_to_string(&mut holder));
-                let mut words = holder.split_whitespace();
-                let pid = words.next().and_then(|p| p.parse::<i32>().ok());
-                let host = words.next().unwrap_or(&here);
-                if let Some(pid) = pid
-                    && pid > 0
-                    && host == here
-                    && pid != std::process::id() as i32
-                {
-                    ask_to_hand_over(pid);
-                }
-            }
-            tries += 1;
-            if tries > 300 {
-                let elsewhere = holder.split_whitespace().nth(1).filter(|h| *h != here);
-                return Err(match elsewhere {
-                    Some(host) => format!("Endeavor is still connected to this Julia from {host}, and it didn't let go. Try again in a minute."),
-                    None => "Another connection to this Julia didn't hand it over.".into(),
-                });
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-    let me = format!("{} {}", std::process::id(), hostname());
-    file.set_len(0).and_then(|_| file.seek(SeekFrom::Start(0))).and_then(|_| write!(file, "{me}"))
-        .map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
-    Ok(file)
-}
-
 #[cfg(unix)]
 fn try_lock(file: &File) -> bool {
     // SAFETY: plain syscall on a file we hold open.
@@ -767,54 +728,18 @@ fn try_lock(file: &File) -> bool {
     file.try_lock().is_ok()
 }
 
-/// Ask the helper `pid` on this machine to hand its runtime over (see `watch_replace_signal`).
-#[cfg(unix)]
-fn ask_to_hand_over(pid: i32) {
-    // SAFETY: plain syscall.
-    unsafe { libc::kill(pid, libc::SIGUSR1) };
-}
-
-/// Not ported: Windows needs a named event or a call on a loopback port, so a
-/// second client waits for the lock and then fails.
-#[cfg(windows)]
-fn ask_to_hand_over(_pid: i32) {}
-
-#[cfg(unix)]
-type ReplaceSignal = libc::sigset_t;
-#[cfg(windows)]
-type ReplaceSignal = ();
-
-#[cfg(unix)]
-fn block_sigusr1() -> libc::sigset_t {
+/// Block SIGUSR1 in every thread (call before any starts), so it can't end
+/// the process: the helper of an older build sends it to the one named in `DIR/lock`.
+fn block_sigusr1() {
     // SAFETY: initializing and applying a signal set on this (still only) thread.
+    #[cfg(unix)]
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
         libc::sigaddset(&mut set, libc::SIGUSR1);
         libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-        set
     }
 }
-
-#[cfg(windows)]
-fn block_sigusr1() -> ReplaceSignal {}
-
-#[cfg(unix)]
-fn watch_replace_signal(set: libc::sigset_t, events: Sender<Event>) {
-    std::thread::spawn(move || {
-        loop {
-            let mut signal = 0;
-            // SAFETY: `set` holds only SIGUSR1, blocked in every thread.
-            if unsafe { libc::sigwait(&set, &mut signal) } == 0 && signal == libc::SIGUSR1 {
-                let _ = events.send(Event::Replaced);
-            }
-        }
-    });
-}
-
-/// Not ported (see `ask_to_hand_over`).
-#[cfg(windows)]
-fn watch_replace_signal(_set: ReplaceSignal, _events: Sender<Event>) {}
 
 /// Read frames from the app: streams go where the attached runtime is (its
 /// ports here, or the relay on its job's node), file requests are answered on

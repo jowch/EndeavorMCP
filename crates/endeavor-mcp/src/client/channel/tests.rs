@@ -6,6 +6,7 @@ fn says_plainly_why_julia_stopped() {
     assert_eq!(died_reason("exit status: 3", &[]), "It exited with code 3.");
     assert_eq!(died_reason("signal: 9 (SIGKILL)", &[]), "It was killed (signal 9 (SIGKILL)), perhaps for using too much memory.");
     assert_eq!(died_reason("Its Slurm job reached its time limit.", &[]), "Its Slurm job reached its time limit.");
+    assert_eq!(died_reason("It was stopped from another connection.", &[]), "It was stopped from another connection.");
     assert!(died_reason("exited", &["IOError: listen: address already in use (EADDRINUSE)".into()]).contains("port"));
 }
 

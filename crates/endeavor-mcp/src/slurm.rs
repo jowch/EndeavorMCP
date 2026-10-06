@@ -32,6 +32,8 @@ const RELAY_TIMEOUT: Duration = Duration::from_secs(60);
 /// The runtime's job while this helper relays to it.
 pub struct Running {
     job: String,
+    /// The runtime's pid on the node, as `runtime.json` has it.
+    pid: i32,
     node: String,
     ends_at: Option<u64>,
     route: &'static str,
@@ -68,7 +70,7 @@ impl Running {
     /// The runtime or its job ended: why, in plain words, and what Julia last said.
     pub fn ended(&self, dir: &Path, said: Option<(String, Vec<String>)>) -> ToApp {
         self.link.kill();
-        let reason = end_reason(&self.job, dir);
+        let reason = if stopped_on_purpose(dir, self.pid) { Some(STOPPED_ELSEWHERE) } else { end_reason(&self.job, dir) };
         // The job ends with Julia (its script execs it); make sure.
         scancel(&self.job);
         forget(dir, &self.job);
@@ -140,10 +142,39 @@ impl Link {
 }
 
 /// Take the cluster runtime over: the one running in a job, a job already
-/// waiting, or a new job.
+/// waiting, or a new job. The start lock is held while it reads `job.json`,
+/// decides and submits, so two helpers never submit two jobs, and let go
+/// before the wait in the queue: a helper that comes in meanwhile finds
+/// `job.json` and waits for the same job.
 pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, request: JobRequest) -> Result<Attached, ToApp> {
     let failed = |message: String| ToApp::StartFailed { message };
-    let lock = lock(&args.state_dir).map_err(failed)?;
+    let starting = standalone::start_lock(&args.state_dir).map_err(failed)?;
+    let dir = &args.state_dir;
+    if let Some(attached) = running(args, mux, events)? {
+        return Ok(attached);
+    }
+    let job = match waiting_job(dir) {
+        Some((job, summary)) => {
+            let _ = mux.send(&ToApp::Submitted { job: job.clone(), summary }.frame());
+            job
+        }
+        // A helper waiting for the job removes `job.json` once the runtime is up, which this didn't see before.
+        None => match running(args, mux, events)? {
+            Some(attached) => return Ok(attached),
+            None => {
+                let _ = std::fs::remove_file(dir.join(standalone::STOPPED));
+                submit(args, mux, &request).map_err(failed)?
+            }
+        },
+    };
+    drop(starting);
+    let (state, running) = wait(args, mux, rx, events, &job)?;
+    Ok(Attached { how: How::Slurm(running), state, reattached: false })
+}
+
+/// The runtime recorded as running in a job, attached to through a relay on its node.
+fn running(args: &Args, mux: &Arc<Mux>, events: &Sender<Event>) -> Result<Option<Attached>, ToApp> {
+    let failed = |message: String| ToApp::StartFailed { message };
     let dir = &args.state_dir;
     if let Some(state) = read_state(dir).filter(|s| s.launcher == "slurm")
         && let Some(job) = state.job.clone()
@@ -153,23 +184,15 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &
             Some(q) if q.running() => {
                 let ends_at = ends_at(&q);
                 let (link, route) = connect_node(&job, &state.node, dir, mux, events).map_err(failed)?;
-                let running = Running { job, node: state.node.clone(), ends_at, route, link, state_dir: dir.clone() };
-                return Ok(Attached { how: How::Slurm(running), state, reattached: true, _lock: lock });
+                let running = Running { job, pid: state.pid, node: state.node.clone(), ends_at, route, link, state_dir: dir.clone() };
+                return Ok(Some(Attached { how: How::Slurm(running), state, reattached: true }));
             }
             _ => {
                 let _ = std::fs::remove_file(dir.join("runtime.json"));
             }
         }
     }
-    let job = match waiting_job(dir) {
-        Some((job, summary)) => {
-            let _ = mux.send(&ToApp::Submitted { job: job.clone(), summary }.frame());
-            job
-        }
-        None => submit(args, mux, &request).map_err(failed)?,
-    };
-    let (state, running) = wait(args, mux, rx, events, &job)?;
-    Ok(Attached { how: How::Slurm(running), state, reattached: false, _lock: lock })
+    Ok(None)
 }
 
 /// A job an earlier connect submitted that's still queued or starting: (id, summary).
@@ -295,10 +318,6 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
                 break Err(ToApp::Stopped);
             }
             Ok(Event::App(ToHelper::Detach) | Event::Eof) => std::process::exit(0),
-            Ok(Event::Replaced) => {
-                let _ = mux.send(&ToApp::Replaced.frame());
-                std::process::exit(0);
-            }
             Ok(_) => continue,
             Err(RecvTimeoutError::Disconnected) => unreachable!("the watchers hold senders"),
             Err(RecvTimeoutError::Timeout) => {}
@@ -338,7 +357,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
                     let ends_at = ends_at(&q);
                     match connect_node(job, &state.node, dir, mux, events) {
                         Ok((link, route)) => {
-                            let running = Running { job: job.into(), node: state.node.clone(), ends_at, route, link, state_dir: dir.clone() };
+                            let running = Running { job: job.into(), pid: state.pid, node: state.node.clone(), ends_at, route, link, state_dir: dir.clone() };
                             break Ok((state, running));
                         }
                         Err(e) => {
@@ -572,10 +591,9 @@ pub fn relay_main(argv: &[String]) -> ! {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
-    let replace_signal = block_sigusr1();
+    block_sigusr1();
     let mux = stdout_mux();
     let (events, rx) = mpsc::channel();
-    watch_replace_signal(replace_signal, events.clone());
     let home = wire::files::home().display().to_string();
     let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false }.frame());
     let here = hostname();

@@ -103,8 +103,10 @@ reconnects.
 
 ## Sharing a runtime
 
-Not built. Today a second `endeavor connect` makes the first one exit, and
-the app keeps its runtime in a folder of its own.
+Built here: helpers attach together, and `endeavor connect` without
+`--state-dir` uses `serve`'s folder. Not built: the app's side. The app
+still passes a folder of its own, and a helper from an older build still
+makes another older one exit.
 
 **One runtime on a server, however it started.** `serve`, `mcp` and
 `endeavor connect` find a runtime with the same code (`existing` in
@@ -148,9 +150,11 @@ the same one. On your own computer they differ (the app's is in its data
 folder). A shared runtime uses the folder of whichever client started it, so
 the two should become one, or packages install twice.
 
-**No client makes another exit.** The helper holds the state folder's lock
-only while it starts a runtime, as `mcp` does with `start.lock`. Any number
-of helpers then attach. The runtime's port already serves many clients.
+**No client makes another exit.** `serve`, `mcp` and the helper hold
+`start.lock` in the state folder only while they find or start a runtime.
+Any number of helpers then attach. The runtime's port already serves many
+clients. On a cluster the lock covers submitting the job and not the wait
+in the queue, so a second helper waits for the same job.
 
 **Stopping the runtime stops it for everyone.** It is not part of ordinary work:
 the idle stop and a job's time limit end a runtime. `stop_machine` is for

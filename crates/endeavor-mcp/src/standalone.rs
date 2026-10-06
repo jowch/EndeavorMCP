@@ -395,7 +395,8 @@ fn core_env(options: &Options, exit_idle: bool) -> Vec<(&'static str, String)> {
 }
 
 /// Hold `DIR/start.lock` until dropped, waiting for another process's start.
-fn start_lock(dir: &Path) -> Result<std::fs::File, String> {
+/// `serve`, `mcp` and `connect` take it while they find or start a runtime in `dir`.
+pub(crate) fn start_lock(dir: &Path) -> Result<std::fs::File, String> {
     let path = dir.join("start.lock");
     let file = crate::owner_only(std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false))
         .open(&path)
@@ -534,7 +535,7 @@ static STOP: AtomicBool = AtomicBool::new(false);
 
 /// In the state folder: the pid of the runtime `endeavor stop` ended, so a
 /// `serve` watching it tells that from a crash.
-const STOPPED: &str = "stopped";
+pub(crate) const STOPPED: &str = "stopped";
 
 /// Take Ctrl-C, SIGTERM and SIGHUP on a thread of their own, as a request to
 /// stop. Called before any other thread starts, so they all inherit the mask.

@@ -138,6 +138,7 @@ pub struct Options<'a> {
     pub root: String,
     /// The runtime's state folder on the server: an absolute path, or one
     /// relative to `root`. `Server::launcher` has the app's name for it.
+    /// Empty is the helper's own default, the folder `serve` and `mcp` use.
     pub state: String,
     /// Julia's `JULIA_DEPOT_PATH` on the server. Empty is `<root>/depot:`.
     pub depot: String,
@@ -168,12 +169,12 @@ pub fn bootstrap_script(version: &str) -> String {
         r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln || exit 1"#,
         r#"c="${rt:-$HOME/.cache/endeavor}""#,
         r#"d="$c/$v""#,
-        r#"case "$st" in /*) sd="$st";; *) sd="$c/$st";; esac"#,
+        r#"set --; if [ -n "$st" ]; then case "$st" in /*) sd="$st";; *) sd="$c/$st";; esac; set -- --state-dir "$sd"; fi"#,
         r#"[ -n "$dp" ] || dp="$c/depot:""#,
         r#"if [ -x "$d/endeavor" ] && [ -f "$d/runtime/boot.jl" ]; then s=have; else s=need; fi"#,
         r#"echo "ENDEAVOR $(uname -s) $(uname -m) $s""#,
         r#"if [ $s = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; echo "Endeavor: installing into $d failed" >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
-        r#"exec "$d/endeavor" connect --state-dir "$sd" --launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#,
+        r#"exec "$d/endeavor" connect "$@" --launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#,
     ]
     .join("; ")
 }
@@ -182,9 +183,6 @@ pub fn bootstrap_script(version: &str) -> String {
 fn preamble(server: &Server, options: &Options) -> Result<Vec<u8>, String> {
     let [flag, value] = server.julia_args();
     let [launcher, _] = server.launcher();
-    if options.state.is_empty() {
-        return Err("The state folder is empty.".into());
-    }
     let lines = [("install folder", &options.root), ("state folder", &options.state), ("depot", &options.depot), ("Julia setting", &flag), ("Julia setting", &value), ("launcher", &launcher)];
     for (what, line) in lines {
         if line.contains('\n') {

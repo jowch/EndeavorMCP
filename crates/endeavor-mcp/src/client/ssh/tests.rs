@@ -119,6 +119,16 @@ fn root_state_and_depot_land_where_given() {
 
 #[test]
 #[cfg(unix)]
+fn an_empty_state_folder_leaves_the_flag_out() {
+    let home = crate::client::scratch("bootstrap-default-state");
+    fake_install(&home.join("root"));
+    let args = connect_args(&home, &format!("{}/root\n\n/d:\n--julia\nauto\nprocess\n", home.display()));
+    assert_eq!(args[..2], ["connect", "--launcher"], "{args:?}");
+    assert!(!args.iter().any(|a| a == "--state-dir"), "{args:?}");
+}
+
+#[test]
+#[cfg(unix)]
 fn an_empty_root_means_the_cache_folder_in_home() {
     let home = crate::client::scratch("bootstrap-home");
     fake_install(&home.join(".cache/endeavor"));
@@ -143,7 +153,7 @@ fn a_line_break_in_a_parameter_is_refused() {
         let err = preamble(&server, &options(root, state, depot)).unwrap_err();
         assert!(err.contains("can't hold a line break"), "{err}");
     }
-    assert!(preamble(&server, &options("", "", "")).is_err());
+    assert!(preamble(&server, &options("", "", "")).is_ok(), "an empty state folder is the helper's default");
     let err = connect(&server, &Transport::Shell { env: Vec::new(), ask: None }, &options("a\nb", "s", ""), &Cancel::default(), &|_| {}).err().expect("refused");
     assert!(err.contains("install folder"), "{err}");
 }
