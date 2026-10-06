@@ -109,3 +109,51 @@ The test connects, expects the helper's hello, starts the runtime, does an MCP
 one), stops the runtime through the channel, and checks the channel ends as a
 detach and not as a drop. `tests/client.rs` covers the same code with a local
 `sh` for ssh and no Julia, in plain `cargo test`.
+
+## The Slurm launcher over real ssh and real Slurm
+
+`crates/endeavor-mcp/tests/e2e_slurm.rs` runs the cluster path of
+`endeavor_mcp::client` against a real scheduler: `ssh` with `Auth::Batch` to a
+login node, the helper submitting a job with `sbatch`, the runtime starting in
+it, and the relay to its node. It needs a host this user can `ssh` to with a
+key, named in `ENDEAVOR_TEST_SSH_HOST`, that has Slurm; a single-node
+cluster that is also this machine, with `localhost` as the host, works. It
+prints `SKIPPED` and passes without the variable, without `sinfo`, or without
+Julia. Julia is found as `e2e_client` finds it, and the depot is that test's
+(`target/tmp/e2e-client/depot`), so run `e2e_client` first or expect several
+minutes for the first run. The install and state folders are under
+`target/tmp/e2e-slurm`, and the host has to see them at the same path.
+
+```sh
+ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_slurm -- --ignored --nocapture
+```
+
+It submits three small real jobs, one after another, of 1 CPU, 2 GB and 15
+minutes each, to partition `LocalQ` (`ENDEAVOR_TEST_SLURM_PARTITION` names
+another), and takes about a minute. It cancels any job it submitted that is still
+listed, also when it fails, and a job left by an earlier run in its state
+folder. Other jobs of the user are not touched. The test goes through these
+steps:
+
+1. Connect with a cluster `Server`: the hello has `slurm: true`. Start the
+   runtime: the client hears `Submitted`, then `Ready` with the job id. `squeue`
+   lists the job as running, named `endeavor`, and ours. The helper's own
+   `Runtime` check finds the running job. `runtime.json` has the job id, and
+   `job.json` is gone.
+2. MCP through the local listener: `initialize`, `tools/list`, 401 for a wrong
+   token, then `new_notebook`, a cell, and its output (`42`).
+3. A second client connects and starts with the same state folder: `Ready`
+   with `reattached`, the same job and process, no second job, and its own
+   listener reaches the first client's notebook.
+4. The second client detaches. Its helper and relay are gone, and the job and
+   the first client go on.
+5. The first client stops the runtime: the channel ends as a detach, no
+   notice is sent, the job ends, `runtime.json` is gone, and no process of the
+   job (the core, Julia, Pluto's worker, the relays) is left.
+6. A third client starts a new job, and the test cancels it with `scancel`
+   while the client is attached. The client gets `Died` with "Its Slurm job was
+   cancelled.", the state is cleaned, and the processes are gone.
+
+The test prints the node names it sees (`squeue`'s, `runtime.json`'s, the
+helper's), how the helper reached the node (`srun` or `ssh`), and the time from
+submit to ready.
