@@ -15,13 +15,14 @@ mod tests {
 
     #[test]
     fn only_an_absolute_path_counts() {
+        let abs = if cfg!(windows) { r"C:\data" } else { "/data" };
         let read = |name: &str| match name {
-            "ABS" => Some("/data".to_owned()),
+            "ABS" => Some(abs.to_owned()),
             "REL" => Some("data/share".to_owned()),
             "EMPTY" => Some(String::new()),
             _ => None,
         };
-        assert_eq!(absolute_var(&read, "ABS"), Some("/data".into()));
+        assert_eq!(absolute_var(&read, "ABS"), Some(abs.into()));
         for name in ["REL", "EMPTY", "UNSET"] {
             assert_eq!(absolute_var(&read, name), None, "{name}");
         }

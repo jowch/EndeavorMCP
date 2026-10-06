@@ -207,9 +207,11 @@ fn a_channel_that_was_detached_or_quit_is_left_alone_when_dropped() {
     let helper = Scripted::new();
     helper.channel.quit(true);
     helper.sent_has("Detach");
-    let closed = helper.closed.clone();
-    drop(helper);
+    // The helper's output stays open, so only the drop could end its input.
+    let Scripted { channel, say, closed, .. } = helper;
+    drop(channel);
     assert!(!closed.load(Ordering::SeqCst));
+    drop(say);
 }
 
 #[test]
