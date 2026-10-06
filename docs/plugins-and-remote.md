@@ -36,7 +36,7 @@ untested._
 | Installing the binary | `curl` from the GitHub release. npm later, once there are version tags |
 | Signing | Not needed for a `curl` install; wait |
 | State folder | One on each machine, yours included, for `serve`, `mcp`, the plugin and the app: the one `serve` uses today. The app stops choosing its own |
-| The list of machines | One file the binary owns, in its own folder. The app reads and writes it there |
+| The list of machines | One file the binary owns: `machines.json`, a list of the app's server records, in `$XDG_CONFIG_HOME/endeavor/` (default `~/.config/endeavor/`, on macOS too), and in `%APPDATA%\Endeavor\` on Windows (built). The app will read and write it there |
 | State folder on a cluster | `~/.local/state/endeavor/cluster`, the same from every login node (built). The app's own is `~/.cache/endeavor/cluster-<id>` until it moves |
 | Jobs on a cluster | One at a time for each user. A second client attaches to the job as the first one asked for it, and is told its size |
 | Several clients on one runtime | Allowed. No client makes another exit |
@@ -49,7 +49,7 @@ untested._
 |---|---|---|---|
 | Front | `endeavor mcp` | your computer, one for each agent session | built |
 | Runtime | the core (`endeavor core`) and the engines behind it | where the notebooks run | built for Pluto |
-| Link | a background process, one for each server | your computer | not built |
+| Link | a background process, one for each server | your computer | built; the front doesn't call it yet |
 
 **The runtime is the core, not Julia.** The core is one Rust process on a
 machine. It owns the port, the sessions and who works in which notebook,
@@ -84,6 +84,31 @@ in a local state folder, as `mcp` finds `runtime.json`, and starts it under
 a lock when there is none. The app keeps its own connection; the two don't
 disturb each other (see [Sharing a runtime](#sharing-a-runtime)).
 
+**The link, as built.** `endeavor link --machine <id>` is a hidden command; a
+front starts it with `link::ensure(<id>)`, which returns the link's control
+port and token. The link reads the machine from the machines file, connects as
+the library does (batch sign-in), sends its own binary as the helper when the
+server's platform is this computer's, and starts the one loopback port that
+relays to the runtime. It keeps `links/<id>/link.json` (its pid, control
+port, token and build), `link.lock` and `link.log` in the state folder
+(`~/.local/state/endeavor`, `%LOCALAPPDATA%\Endeavor` on Windows). The control
+interface is HTTP on a loopback port of its own, with the token from
+`link.json` as a bearer token. It refuses a Host that isn't loopback and any
+request with an Origin.
+
+| Call | What it does |
+|---|---|
+| `GET /link/status` | `state` (connecting, connected, starting, queued, ready, failed), the last `step`, an `error`, what the helper said (`hello`), the `runtime` once ready (the listener's port, the runtime's token, the page URL), and for a job its `job` and `queue` |
+| `POST /link/start` | `{"job": …}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error |
+| `POST /link/stop` | Stop the runtime for every client, and say why it didn't. The link stays connected |
+| `POST /link/quit` | Detach, remove the record and exit |
+
+When the connection drops, the link connects again (waiting 1 s, then more,
+up to 30 s apart, for 10 minutes) and attaches to the runtime it had, if that
+is still running, on the same listener port. A failed sign-in is not retried:
+the state is `failed` with the message, and the next start tries again. The
+link starts the runtime with `--exit-idle`.
+
 **How long things last.** These are separate:
 
 - The link stays for 8 hours after the last agent session, so the browser
@@ -92,6 +117,14 @@ disturb each other (see [Sharing a runtime](#sharing-a-runtime)).
 - A link or an app that goes away detaches. It never stops the runtime.
 - The runtime's idle stop is the core's, as today: 48 hours unless set
   otherwise, for the whole runtime, by whoever started it.
+- A runtime the link starts also ends once no notebook has been open for that
+  long (`endeavor connect --exit-idle`, like one `mcp` starts), so a runtime
+  nobody uses doesn't stay up for good. Attaching to a running runtime
+  changes nothing about it. On a cluster the flag goes to the core in the job,
+  and the job's time limit ends it too.
+- The link counts every control request as activity, and ends 8 hours after
+  the last one. Pluto's page and the agent's calls through its port aren't
+  control requests, so a front calls `status` while its session lasts.
 
 **The token.** The helper sends the runtime's token when the runtime is
 ready. The link keeps it in its state folder (readable only by you), and the
@@ -256,8 +289,10 @@ threads and blocking I/O, as here, and no new dependencies):
 Written again without the GUI: the connect and retry rules (about 300 lines
 of `connection.rs`).
 
-New: the link process, the machine tools, and getting the Linux helper to
-send.
+New: the link process (built), the machine tools, and getting the Linux
+helper to send. The link sends its own binary when the server is the same
+platform as your computer, and refuses other platforms until the release's
+helpers can be fetched.
 
 The app keeps its copy until it switches to the moved code. That is a change
 in both repositories: it lands here, the Helpers release builds, then the
@@ -414,9 +449,6 @@ folder, and that each loads the skills.
 
 ## Open
 
-- **The machines file's place and format.** The app's `hosts.json` records
-  (`Server`, `Cluster`) move here with the client code. The folder is not
-  chosen.
 - **Stopping one engine or the whole runtime**, once there is a second
   engine.
 
@@ -426,7 +458,7 @@ folder, and that each loads the skills.
    login.
 2. Helpers attach without making each other exit (built). Opening an open
    notebook joins it, and the core shows a notebook's other sessions.
-3. The link process and the machine tools in `mcp`.
+3. The link process (built) and the machine tools in `mcp`.
 4. The Slurm path through the tools.
 5. macOS and Windows builds, the install scripts, the build's release key.
 6. Codex and Antigravity plugin folders.

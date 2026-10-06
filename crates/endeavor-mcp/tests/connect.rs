@@ -626,6 +626,72 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
     helper.exits();
 }
 
+#[test]
+fn a_runtime_started_with_exit_idle_ends_once_no_notebook_is_open() {
+    let idle = [("ENDEAVOR_IDLE_CHECK_SECS", "0.2"), ("ENDEAVOR_IDLE_HOURS", "0.0003")];
+
+    // Without the flag the runtime stays up well past the idle limit.
+    let dir = state_dir("exit-idle-off");
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &idle);
+    assert!(matches!(helper.start_runtime(), ToApp::FoundJulia { .. }));
+    let ToApp::Ready { pid, .. } = helper.after_progress() else { panic!("expected Ready") };
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(common::pid_alive(pid as i32), "the idle stop of 48 hours is the runtime's only end");
+    helper.send(ToHelper::Stop);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+
+    // With it, the runtime the helper starts ends by itself.
+    let dir = state_dir("exit-idle-on");
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap(), "--exit-idle"], &idle);
+    assert!(matches!(helper.start_runtime(), ToApp::FoundJulia { .. }));
+    let ToApp::Ready { pid, .. } = helper.after_progress() else { panic!("expected Ready") };
+    let core = pid as i32;
+    common::wait_for("the runtime to end itself", || !common::pid_alive(core));
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn a_cluster_job_is_submitted_with_exit_idle_and_its_node_start_passes_it_on() {
+    let dir = state_dir("slurm-exit-idle");
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let mut command = slurm.command(&julia, 100);
+    command.arg("--state-dir").arg(&dir).arg("--exit-idle");
+    let helper = Helper::spawn(command);
+    helper.hello();
+    helper.send(ToHelper::StartRuntime { job: small_job() });
+    assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
+    assert!(matches!(helper.next(), ToApp::Submitted { .. }));
+    let script = slurm.read("job.sh");
+    assert!(script.trim_end().ends_with("--build '1.0.0-abc' --exit-idle"), "{script}");
+
+    // What the job runs: the core it becomes ends when idle.
+    let node = state_dir("slurm-exit-idle-node");
+    let bridge = common::FakeBridge::start(&node);
+    let serving = common::serving_julia(&node, &bridge);
+    std::fs::write(node.join("token"), TOKEN).unwrap();
+    let mut core = Command::new(env!("CARGO_BIN_EXE_endeavor"))
+        .args(["node-start", "--state-dir"])
+        .arg(&node)
+        .arg("--julia")
+        .arg(&serving)
+        .args(["--runtime", "/nonexistent", "--depot", "/nonexistent", "--exit-idle"])
+        .env("ENDEAVOR_IDLE_CHECK_SECS", "0.2")
+        .env("ENDEAVOR_IDLE_HOURS", "0.0003")
+        .spawn()
+        .unwrap();
+    common::wait_for("the job's runtime to end itself", || core.try_wait().unwrap().is_some());
+}
+
 /// Slurm's commands as scripts over files in `dir/slurm`: the test moves a job
 /// through the queue by writing its state (and node, time left, `sacct`'s answer).
 struct FakeSlurm {

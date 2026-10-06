@@ -319,9 +319,18 @@ pub fn write_chunk(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
 /// POST `body` to `path` on the loopback server at `port`: the response's
 /// status and whole body.
 pub fn post(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> io::Result<(u16, Vec<u8>)> {
+    call("POST", port, path, headers, body, None)
+}
+
+/// One request to the loopback server at `port`, on a connection of its own:
+/// the response's status and whole body. With `wait`, a server that goes quiet
+/// for that long is an error.
+pub fn call(method: &str, port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], wait: Option<std::time::Duration>) -> io::Result<(u16, Vec<u8>)> {
     let upstream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), std::time::Duration::from_secs(5))?;
     let _ = upstream.set_nodelay(true);
-    let mut head = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    upstream.set_read_timeout(wait)?;
+    upstream.set_write_timeout(wait)?;
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
     for (name, value) in headers {
         // A value can't end the header early.
         let value: String = value.chars().filter(|c| !c.is_control()).collect();
@@ -338,7 +347,7 @@ pub fn post(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> io:
             break response;
         }
     };
-    let body = read_body(&mut reader, response.response_body("POST")?)?;
+    let body = read_body(&mut reader, response.response_body(method)?)?;
     Ok((response.status(), body))
 }
 

@@ -102,6 +102,19 @@ fn stopping_on_purpose_says_so_not_that_it_reconnects_by_itself() {
 }
 
 #[test]
+fn a_caller_can_word_the_messages_that_name_the_apps_controls() {
+    let messages = Messages { restart_failed: |name| format!("Julia on {name} didn't start. Call use_machine again."), not_connected: |name| format!("Not connected to {name}. Call use_machine.") };
+    let listener = Listener::new("lab-server", None, messages).unwrap();
+    let mux = Mux::new(std::io::sink());
+    listener.attach(mux, "secret".into());
+    listener.restarting();
+    listener.restart_failed();
+    assert!(post(&listener, "secret", LIST).contains(r#""text":"Julia on lab-server didn't start. Call use_machine again.""#));
+    listener.disconnected();
+    assert!(post(&listener, "secret", LIST).contains(r#""text":"Not connected to lab-server. Call use_machine.""#));
+}
+
+#[test]
 fn a_connection_before_any_runtime_is_closed() {
     let mut socket = TcpStream::connect(("127.0.0.1", Listener::start("lab-server").unwrap().port())).unwrap();
     socket.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();

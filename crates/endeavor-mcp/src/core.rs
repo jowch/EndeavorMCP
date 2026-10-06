@@ -72,9 +72,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 /// Started without the app (`standalone`), the environment also has
 /// ENDEAVOR_FOLDER, the notebooks' folder, which makes it a standalone
 /// runtime; ENDEAVOR_PORT, a fixed port; ENDEAVOR_HOST_TOOLS, the host name
-/// under which every session gets the host tools; ENDEAVOR_IDLE_HOURS, the
-/// idle stop; and ENDEAVOR_EXIT_IDLE, to end the runtime once no notebook has
-/// been open for that long.
+/// under which every session gets the host tools; and ENDEAVOR_IDLE_HOURS, the
+/// idle stop. ENDEAVOR_EXIT_IDLE, to end the runtime once no notebook has
+/// been open for that long, works with or without a folder: the link asks for
+/// it on a runtime `connect` starts.
 pub fn main(argv: &[String]) -> ! {
     let args = parse_args(argv).unwrap_or_else(|e| {
         eprintln!("{e}\n{USAGE}");
@@ -142,9 +143,9 @@ pub fn main(argv: &[String]) -> ! {
             }
             if let Some(standalone) = &served.bridge.standalone {
                 set_pluto_folder(ready.bridge_port, &served.bridge.token, &standalone.folder);
-                if exit_idle {
-                    exit_when_idle(served.clone(), ready.bridge_port);
-                }
+            }
+            if exit_idle {
+                exit_when_idle(served.clone(), ready.bridge_port);
             }
             served.bridge.notebooks.start();
             break julia.wait().unwrap_or_else(|e| fail(format!("waiting for Julia: {e}")));
@@ -248,8 +249,8 @@ fn set_pluto_folder(julia_port: u16, token: &str, folder: &str) {
 }
 
 /// End the runtime once no notebook has been open for the idle limit (none
-/// when it's 0): a runtime the stdio form started in the background has no
-/// one to stop it.
+/// when it's 0): a runtime the stdio form or a link started in the background
+/// has no one to stop it.
 fn exit_when_idle(served: Arc<Served>, julia_port: u16) {
     std::thread::spawn(move || {
         let notebooks = &served.bridge.notebooks;
@@ -270,7 +271,7 @@ fn exit_when_idle(served: Arc<Served>, julia_port: u16) {
 
 /// Write `path` whole and readable only by us, so a reader never sees half of
 /// it and nobody else sees the token.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     let _ = std::fs::remove_file(&tmp);
     owner_only(OpenOptions::new().write(true).create_new(true))
@@ -564,7 +565,7 @@ fn without_token(target: &str) -> (Option<&str>, String) {
 }
 
 /// `Host` as clients send it: `127.0.0.1:2346`, `localhost`, `[::1]:2346`.
-fn loopback_host(host: &str) -> bool {
+pub(crate) fn loopback_host(host: &str) -> bool {
     let name = match host.strip_prefix('[') {
         Some(_) => host.find(']').map_or("", |end| &host[..=end]),
         None => host.split(':').next().unwrap_or_default(),
@@ -573,7 +574,7 @@ fn loopback_host(host: &str) -> bool {
 }
 
 /// Whether `given` is `expected`, compared in constant time.
-fn same(given: &str, expected: &str) -> bool {
+pub(crate) fn same(given: &str, expected: &str) -> bool {
     given.len() == expected.len() && given.bytes().zip(expected.bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 

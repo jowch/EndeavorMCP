@@ -17,6 +17,25 @@ const HOLD: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 2 });
 /// Why an agent's call is refused: its session key, the tool and its arguments.
 pub type Refuse = Box<dyn Fn(&str, &str, &Value) -> Option<String> + Send + Sync>;
 
+/// What a listener says when the runtime is away and nothing will bring it
+/// back by itself, as a function of the server's name. The default speaks in
+/// the app's words (its buttons); a caller with other controls says its own.
+pub struct Messages {
+    /// A restart that was announced (`restarting`) did not bring Julia back.
+    pub restart_failed: fn(&str) -> String,
+    /// The server was stopped or disconnected on purpose.
+    pub not_connected: fn(&str) -> String,
+}
+
+impl Default for Messages {
+    fn default() -> Messages {
+        Messages {
+            restart_failed: |name| format!("Julia on {name} couldn't start. Use Restart Julia to try again."),
+            not_connected: |name| format!("Endeavor isn't connected to {name}. Reconnect it to use its notebook again."),
+        }
+    }
+}
+
 pub struct Listener {
     port: u16,
     /// The server, as the agent is told it.
@@ -25,6 +44,7 @@ pub struct Listener {
     changed: Condvar,
     /// Without one, connections are relayed without reading the HTTP in them.
     refuse: Option<Refuse>,
+    messages: Messages,
 }
 
 /// Where a listener's connections go.
@@ -40,16 +60,17 @@ enum Upstream {
 
 impl Listener {
     pub fn start(name: &str) -> Result<Arc<Listener>, String> {
-        Listener::open(name, None)
+        Listener::new(name, None, Messages::default())
     }
 
     /// A listener that parses the agent's MCP calls and fails the ones `refuse`
     /// gives a reason for (`serve_guarded`).
     pub fn with_refuse(name: &str, refuse: Refuse) -> Result<Arc<Listener>, String> {
-        Listener::open(name, Some(refuse))
+        Listener::new(name, Some(refuse), Messages::default())
     }
 
-    fn open(name: &str, refuse: Option<Refuse>) -> Result<Arc<Listener>, String> {
+    /// A listener with `refuse` (if any) and its own wording for the messages it gives.
+    pub fn new(name: &str, refuse: Option<Refuse>, messages: Messages) -> Result<Arc<Listener>, String> {
         let socket = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let listener = Arc::new(Listener {
             port: socket.local_addr().map_err(|e| e.to_string())?.port(),
@@ -57,6 +78,7 @@ impl Listener {
             upstream: Mutex::new(Upstream::None),
             changed: Condvar::new(),
             refuse,
+            messages,
         });
         let accepting = listener.clone();
         std::thread::spawn(move || {
@@ -146,11 +168,11 @@ impl Listener {
 
     /// The restart `restarting` announced didn't work out: Julia didn't come back.
     pub fn restart_failed(&self) {
-        self.deliberately(format!("Julia on {} couldn't start. Use Restart Julia to try again.", self.name), false);
+        self.deliberately((self.messages.restart_failed)(&self.name), false);
     }
 
     fn not_connected(&self) -> String {
-        format!("Endeavor isn't connected to {}. Reconnect it to use its notebook again.", self.name)
+        (self.messages.not_connected)(&self.name)
     }
 
     /// The server was stopped or disconnected on purpose: nothing will

@@ -963,6 +963,38 @@ fn a_standalone_runtime_has_a_folder_a_fixed_port_and_host_tools_for_every_sessi
 }
 
 #[test]
+fn results_carry_a_browser_url_on_the_port_a_caller_names() {
+    let dir = state_dir("core-browser-port");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let status = |caller: &[(&str, &str)]| -> serde_json::Value {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "pluto_session_status", "arguments": {} } });
+        let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), caller).1).unwrap();
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{reply}"))).unwrap()
+    };
+    assert_eq!(status(&[("X-Endeavor-Session", "7")]).get("browser_url"), None, "without the header, a runtime the app or a helper started has none");
+    assert_eq!(status(&[("X-Endeavor-Browser-Port", "45678")])["browser_url"], format!("http://localhost:45678/?token={TOKEN}"), "through a link, whatever started the runtime");
+    for bad in ["0", "65536", "-1", "http", ""] {
+        assert_eq!(status(&[("X-Endeavor-Browser-Port", bad)]).get("browser_url"), None, "{bad:?}");
+    }
+    drop(core);
+
+    let dir = state_dir("core-browser-port-standalone");
+    let bridge = FakeBridge::start(&dir);
+    let folder = temp_folder("core-browser-port-folder");
+    let core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_FOLDER", folder.to_str().unwrap())]);
+    let own = core.port;
+    let status = |caller: &[(&str, &str)]| -> serde_json::Value {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "pluto_session_status", "arguments": {} } });
+        let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), caller).1).unwrap();
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(status(&[])["browser_url"], format!("http://localhost:{own}/?token={TOKEN}"));
+    assert_eq!(status(&[("X-Endeavor-Browser-Port", "45678")])["browser_url"], format!("http://localhost:45678/?token={TOKEN}"), "the caller's port wins");
+    assert_eq!(status(&[("X-Endeavor-Browser-Port", "0")])["browser_url"], format!("http://localhost:{own}/?token={TOKEN}"), "a bad one is ignored");
+}
+
+#[test]
 fn list_folder_and_read_file_read_the_server() {
     let dir = state_dir("core-host-files");
     let bridge = FakeBridge::start(&dir);

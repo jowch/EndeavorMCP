@@ -13,6 +13,10 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
   on servers (`endeavor connect`, `endeavor core`), the standalone command
   (`endeavor serve`, `endeavor mcp`, `endeavor stop`, see the
   [README](../README.md)), and the Slurm relay.
+- The link (`endeavor link`, `link::ensure`) is built and tested with a local
+  shell for ssh and, over real ssh and Julia, in `e2e_link`
+  ([plugins-and-remote.md](plugins-and-remote.md)). The machine tools in
+  `mcp` that call it are not built.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
 - CI (`ci.yml`) builds and tests on Linux, macOS and Windows. `helpers.yml`

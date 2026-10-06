@@ -152,6 +152,10 @@ pub struct Options<'a> {
     /// Julia's `JULIA_DEPOT_PATH` on the server. A leading `~/` in its first
     /// entry is the server's home. Empty is `<root>/depot:`.
     pub depot: String,
+    /// A runtime this connect starts ends itself once no notebook has been
+    /// open for the idle limit (`endeavor connect --exit-idle`). One that is
+    /// already running is left as it was started.
+    pub exit_idle: bool,
     /// The helper binary to send to a server whose `uname -s` is `os` and
     /// `uname -m` is `arch`, as `linux` and `x86_64` (`arm64` as `aarch64`).
     /// Asked only when the server has no helper of this build yet.
@@ -172,8 +176,9 @@ pub fn no_helper(os: &str, arch: &str) -> String {
 /// empty ones), prints `ENDEAVOR <os> <arch> <have|need>`, and if it needs the
 /// install, reads a byte count and then that many bytes of tar. Then it
 /// becomes the helper. The values come over stdin and not in the script, so
-/// no path can break it.
-pub fn bootstrap_script(version: &str) -> String {
+/// no path can break it. `exit_idle` adds the helper's `--exit-idle`; being
+/// a fixed word, it is in the script and not in the lines it reads.
+pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
     [
         &format!("v={version}"),
         r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln || exit 1"#,
@@ -187,7 +192,7 @@ pub fn bootstrap_script(version: &str) -> String {
         r#"if [ -x "$d/endeavor" ] && [ -f "$d/runtime/boot.jl" ]; then s=have; else s=need; fi"#,
         r#"echo "ENDEAVOR $(uname -s) $(uname -m) $s""#,
         r#"if [ $s = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; echo "Endeavor: installing into $d failed" >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
-        r#"exec "$d/endeavor" connect "$@" --launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#,
+        &format!(r#"exec "$d/endeavor" connect "$@" {}--launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#, if exit_idle { "--exit-idle " } else { "" }),
     ]
     .join("; ")
 }
@@ -318,16 +323,38 @@ fn platform(os: &str, arch: &str) -> (String, String) {
     (os.to_lowercase(), if arch == "arm64" { "aarch64" } else { arch }.to_owned())
 }
 
+/// This computer's platform in the same words (`darwin` for macOS), as
+/// `Options::helper` is asked for a server's.
+pub fn this_platform() -> (String, String) {
+    (if cfg!(target_os = "macos") { "darwin" } else { std::env::consts::OS }.to_owned(), std::env::consts::ARCH.to_owned())
+}
+
+/// Why a connect failed, and whether trying again by itself could help: it
+/// can't when the user has to act first (a key to add, a host to accept) or
+/// the request itself is wrong, and can when the network or the server was
+/// the trouble.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectError {
+    pub message: String,
+    pub retry: bool,
+}
+
 /// Run the bootstrap on `server` and wait for the helper's hello. The runtime
 /// starts later, when the channel is asked to (`start`).
 pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), String> {
-    let preamble = preamble(server, options)?;
+    connect_checked(server, transport, options, cancel, on).map_err(|e| e.message)
+}
+
+/// `connect`, and a failure says whether retrying could help.
+pub fn connect_checked(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
+    let wrong = |message: String| ConnectError { message, retry: false };
+    let preamble = preamble(server, options).map_err(wrong)?;
     let version = crate::embedded::BUILD_VERSION;
-    let mut command = transport.command(&bootstrap_script(version), &options.auth)?;
+    let mut command = transport.command(&bootstrap_script(version, options.exit_idle), &options.auth).map_err(wrong)?;
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(|e| format!("Couldn't run ssh: {e}"))?;
+    let mut child = command.spawn().map_err(|e| wrong(format!("Couldn't run ssh: {e}")))?;
     if !cancel.started(child.id()) {
         kill_group(child.id());
     }
@@ -339,7 +366,13 @@ pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel
         kill_group(child.id());
         Cancel::finished(&cancel.pid, child.id());
         let status = child.wait().ok();
-        why.unwrap_or_else(|| explain(transport, &options.auth, &stderr.finish(), status, cancel.cancelled.load(Ordering::SeqCst), signed_in))
+        match why {
+            Some(why) => wrong(why),
+            None => {
+                let (message, retry) = explain_retry(transport, &options.auth, &stderr.finish(), status, cancel.cancelled.load(Ordering::SeqCst), signed_in);
+                ConnectError { message, retry }
+            }
+        }
     };
 
     // The script reads these before it says anything; a failed write shows as the script's end.
@@ -383,8 +416,16 @@ pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel
 
     let (pid, slot) = (child.id(), cancel.pid.clone());
     let channel = Channel::open_watched(child, stdin, stdout, move || Cancel::finished(&slot, pid));
-    let hello = channel.wait_hello(|| explain(transport, &options.auth, &stderr.finish(), None, cancel.cancelled.load(Ordering::SeqCst), true))?;
-    Ok((channel, hello))
+    let retry = std::cell::Cell::new(true);
+    let hello = channel.wait_hello(|| {
+        let (message, again) = explain_retry(transport, &options.auth, &stderr.finish(), None, cancel.cancelled.load(Ordering::SeqCst), true);
+        retry.set(again);
+        message
+    });
+    match hello {
+        Ok(hello) => Ok((channel, hello)),
+        Err(message) => Err(ConnectError { message, retry: retry.get() }),
+    }
 }
 
 /// Start the runtime on a connected server's channel (on a cluster, `job` is
@@ -516,9 +557,15 @@ impl Stderr {
 /// command's status, so those explanations apply only to a 255 or an unknown
 /// status (ssh was killed, or the status isn't known), and never once
 /// `signed_in`: what the server's script said then is shown as it is.
+#[cfg(test)]
 fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> String {
+    explain_retry(transport, auth, stderr, status, cancelled, signed_in).0
+}
+
+/// `explain`, and whether trying again by itself could help (`ConnectError`).
+fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> (String, bool) {
     if cancelled {
-        return "Cancelled.".into();
+        return ("Cancelled.".into(), false);
     }
     let host = transport.host();
     let batch = *auth == Auth::Batch;
@@ -528,29 +575,32 @@ fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option
     let ssh_said = if !ssh_failed {
         None
     } else if said("Could not resolve hostname") {
-        Some(format!("Couldn't find a server called {host}. Check the SSH host."))
+        Some((format!("Couldn't find a server called {host}. Check the SSH host."), false))
     } else if said("REMOTE HOST IDENTIFICATION HAS CHANGED") {
-        Some(format!("{host}'s identity (host key) changed since the last connection. If the server was reinstalled, remove its old key with `ssh-keygen -R {host}` in a terminal; otherwise ask its administrator."))
+        Some((format!("{host}'s identity (host key) changed since the last connection. If the server was reinstalled, remove its old key with `ssh-keygen -R {host}` in a terminal; otherwise ask its administrator."), false))
     } else if said("Host key verification failed") && batch {
-        Some(format!("{host} isn't one of the servers this computer has connected to before, so Endeavor can't check its identity (host key). Run `{}` once in a terminal and accept its host key, then try again.", transport.login_command()))
+        Some((format!("{host} isn't one of the servers this computer has connected to before, so Endeavor can't check its identity (host key). Run `{}` once in a terminal and accept its host key, then try again.", transport.login_command()), false))
     } else if said("Host key verification failed") {
-        Some(format!("{host}'s identity (host key) wasn't confirmed, so Endeavor didn't connect."))
+        Some((format!("{host}'s identity (host key) wasn't confirmed, so Endeavor didn't connect."), false))
     } else if said("Permission denied") && batch {
-        Some(format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent (run `ssh-add` in a terminal to add it). Or the server asks for a password or a code, which Endeavor can't ask for yet."))
+        Some((format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent (run `ssh-add` in a terminal to add it). Or the server asks for a password or a code, which Endeavor can't ask for yet."), false))
     } else if said("Permission denied") {
-        Some(format!("{host} refused the sign-in. Check the user name, and your key or password."))
+        Some((format!("{host} refused the sign-in. Check the user name, and your key or password."), false))
     } else if said("Connection refused") {
-        Some(format!("{host} refused the connection. Check the host name and port, and that it accepts SSH."))
+        Some((format!("{host} refused the connection. Check the host name and port, and that it accepts SSH."), true))
     } else if said("timed out") || said("Operation timed out") {
-        Some(format!("{host} didn't answer (the connection timed out). Check the host name, and that you're on a network that can reach it (a VPN, perhaps)."))
+        Some((format!("{host} didn't answer (the connection timed out). Check the host name, and that you're on a network that can reach it (a VPN, perhaps)."), true))
     } else if said("No route to host") || said("Network is unreachable") {
-        Some(format!("Couldn't reach {host} from this network."))
+        Some((format!("Couldn't reach {host} from this network."), true))
     } else {
         None
     };
-    ssh_said.unwrap_or_else(|| match last {
-        Some(line) => format!("The connection to {host} ended: {line}"),
-        None => format!("The connection to {host} ended before Endeavor could start{}.", status.map(|s| format!(" ({s})")).unwrap_or_default()),
+    ssh_said.unwrap_or_else(|| {
+        let message = match last {
+            Some(line) => format!("The connection to {host} ended: {line}"),
+            None => format!("The connection to {host} ended before Endeavor could start{}.", status.map(|s| format!(" ({s})")).unwrap_or_default()),
+        };
+        (message, true)
     })
 }
 

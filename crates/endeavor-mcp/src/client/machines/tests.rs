@@ -127,3 +127,81 @@ fn a_bad_target_says_what_is_wrong() {
         assert!(Server::parse_target(bad).is_err(), "{bad}");
     }
 }
+
+fn machine(id: &str, name: &str) -> Server {
+    Server { id: id.into(), name: name.into(), ssh_host: name.into(), ..Default::default() }
+}
+
+#[test]
+fn the_machines_file_is_where_the_configuration_folder_says() {
+    let env = |vars: &'static [(&'static str, &'static str)]| move |name: &str| vars.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string());
+    if cfg!(windows) {
+        assert_eq!(machines_path(&env(&[("APPDATA", r"C:\Users\jc\AppData\Roaming")])), Path::new(r"C:\Users\jc\AppData\Roaming").join("Endeavor").join("machines.json"));
+        return;
+    }
+    assert_eq!(machines_path(&env(&[("XDG_CONFIG_HOME", "/x/config"), ("HOME", "/h")])), Path::new("/x/config/endeavor/machines.json"));
+    assert_eq!(machines_path(&env(&[("HOME", "/h")])), Path::new("/h/.config/endeavor/machines.json"));
+    assert_eq!(machines_path(&env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/h")])), Path::new("/h/.config/endeavor/machines.json"), "empty is unset");
+    assert_eq!(machines_path(&env(&[("XDG_CONFIG_HOME", "relative"), ("HOME", "/h")])), Path::new("/h/.config/endeavor/machines.json"), "XDG says to ignore a relative one");
+}
+
+#[test]
+fn machines_are_added_found_replaced_and_removed() {
+    let file = MachinesFile::at(crate::client::scratch("machines-file").join("config/endeavor/machines.json"));
+    assert_eq!(file.load(), Ok(Vec::new()), "no file is no machines");
+    file.save(machine("server-1", "Hoffman2")).unwrap();
+    file.save(machine("server-2", "lab")).unwrap();
+    assert_eq!(file.load().unwrap().iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["server-1", "server-2"]);
+    assert_eq!(file.find_by_id("server-2").unwrap().unwrap().name, "lab");
+    assert_eq!(file.find_by_name("hoffman2").unwrap().unwrap().id, "server-1", "names ignore case");
+    assert_eq!(file.find("server-1").unwrap().unwrap().name, "Hoffman2");
+    assert_eq!(file.find("lab").unwrap().unwrap().id, "server-2");
+    assert_eq!(file.find("nope"), Ok(None));
+
+    let renamed = Server { name: "Lab box".into(), port: Some(2222), ..machine("server-2", "lab") };
+    file.save(renamed.clone()).unwrap();
+    assert_eq!(file.load().unwrap(), [machine("server-1", "Hoffman2"), renamed], "replaced in place");
+    assert_eq!(file.remove("server-1"), Ok(true));
+    assert_eq!(file.remove("server-1"), Ok(false));
+    assert_eq!(file.load().unwrap().len(), 1);
+    let left: Vec<_> = std::fs::read_dir(file.path().parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(left.iter().all(|name| !name.contains(".tmp")), "{left:?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn the_machines_file_is_for_its_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let file = MachinesFile::at(crate::client::scratch("machines-private").join("endeavor/machines.json"));
+    file.save(machine("server-1", "lab")).unwrap();
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(file.path()), 0o600);
+    assert_eq!(mode(file.path().parent().unwrap()), 0o700);
+}
+
+#[test]
+fn a_file_that_cant_be_read_is_an_error_that_names_it_and_stays_as_it_is() {
+    let dir = crate::client::scratch("machines-broken");
+    let path = dir.join("machines.json");
+    let file = MachinesFile::at(&path);
+    for broken in ["{not json", "", "{\"id\":\"a\"}"] {
+        std::fs::write(&path, broken).unwrap();
+        let error = file.load().unwrap_err();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(file.save(machine("server-1", "lab")).unwrap_err().contains(&path.display().to_string()));
+        assert!(file.remove("server-1").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken, "never replaced");
+    }
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(file.load().unwrap_err().contains(&path.display().to_string()), "a folder in its place is not 'no machines'");
+}
+
+#[test]
+fn the_apps_entries_load_with_fields_this_version_lacks() {
+    let dir = crate::client::scratch("machines-app");
+    let path = dir.join("machines.json");
+    std::fs::write(&path, r#"[{"id":"server-1","name":"lab","ssh_host":"lab","port":2222,"julia":"module load julia","idle_stop":"week","later":true}]"#).unwrap();
+    let server = MachinesFile::at(&path).find("lab").unwrap().unwrap();
+    assert_eq!((server.port, server.julia.as_deref(), server.idle_stop), (Some(2222), Some("module load julia"), Some(IdleStop::Week)));
+}

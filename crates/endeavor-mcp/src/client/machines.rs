@@ -2,7 +2,9 @@
 //! a cluster's login node. The JSON is the app's `hosts.json` entry for a
 //! server, which this and the app read and write alike.
 
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use wire::slurm::{JobRequest, Partition, Resources};
@@ -132,6 +134,117 @@ impl Server {
             Some(path) if is_path(path) => ["--julia".into(), path.into()],
             Some(line) => ["--julia-shell".into(), line.replace('\n', "; ")],
         }
+    }
+}
+
+/// The machines file's place: `$XDG_CONFIG_HOME/endeavor/machines.json`, by
+/// default `~/.config/endeavor/machines.json` (macOS too), and on Windows
+/// `%APPDATA%\Endeavor\machines.json`. `var` reads the environment.
+pub fn machines_path(var: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+    let set = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if cfg!(windows) {
+        return set("APPDATA").unwrap_or_default().join("Endeavor").join("machines.json");
+    }
+    let config = set("XDG_CONFIG_HOME").filter(|p| p.is_absolute()).or_else(|| set("HOME").or_else(std::env::home_dir).map(|home| home.join(".config")));
+    config.unwrap_or_default().join("endeavor").join("machines.json")
+}
+
+/// The one file that lists the machines: a JSON array of `Server` records,
+/// which the app reads and writes as well. It is written whole to a temporary
+/// file that is then renamed, readable by this user only. A file that can't be
+/// read or parsed is an error that names it, and is never replaced.
+/// Fields of a record that `Server` doesn't have are dropped when it is rewritten.
+pub struct MachinesFile {
+    path: PathBuf,
+}
+
+impl MachinesFile {
+    pub fn at(path: impl Into<PathBuf>) -> MachinesFile {
+        MachinesFile { path: path.into() }
+    }
+
+    /// The file for this user, from the environment.
+    pub fn here() -> MachinesFile {
+        MachinesFile::at(machines_path(&|name| std::env::var(name).ok()))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Every machine, in the order they were added; none if there is no file yet.
+    pub fn load(&self) -> Result<Vec<Server>, String> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("Couldn't read the list of machines in {}: {e}", self.path.display())),
+        };
+        serde_json::from_str(&text).map_err(|e| format!("The list of machines in {} isn't valid ({e}). Fix or remove the file; Endeavor won't overwrite it.", self.path.display()))
+    }
+
+    pub fn find_by_id(&self, id: &str) -> Result<Option<Server>, String> {
+        Ok(self.load()?.into_iter().find(|server| server.id == id))
+    }
+
+    /// By name, ignoring case.
+    pub fn find_by_name(&self, name: &str) -> Result<Option<Server>, String> {
+        Ok(self.load()?.into_iter().find(|server| server.name.eq_ignore_ascii_case(name)))
+    }
+
+    /// By id, else by name.
+    pub fn find(&self, key: &str) -> Result<Option<Server>, String> {
+        let servers = self.load()?;
+        let by_name = || servers.iter().find(|server| server.name.eq_ignore_ascii_case(key));
+        Ok(servers.iter().find(|server| server.id == key).or_else(by_name).cloned())
+    }
+
+    /// Add `server`, or replace the one with its id where it stands.
+    pub fn save(&self, server: Server) -> Result<(), String> {
+        self.change(|servers| match servers.iter_mut().find(|s| s.id == server.id) {
+            Some(known) => *known = server,
+            None => servers.push(server),
+        })
+        .map(|_| ())
+    }
+
+    /// Remove the machine with this id. Whether there was one.
+    pub fn remove(&self, id: &str) -> Result<bool, String> {
+        self.change(|servers| {
+            let before = servers.len();
+            servers.retain(|s| s.id != id);
+            servers.len() != before
+        })
+    }
+
+    /// Read, change and write back under a lock, so two processes don't lose each other's change.
+    fn change<T>(&self, change: impl FnOnce(&mut Vec<Server>) -> T) -> Result<T, String> {
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        crate::make_state_dir(dir)?;
+        let lock_path = self.path.with_extension("lock");
+        let lock = crate::owner_only(std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false))
+            .open(&lock_path)
+            .map_err(|e| format!("Couldn't open {}: {e}", lock_path.display()))?;
+        let started = Instant::now();
+        while !crate::try_lock(&lock) {
+            if started.elapsed() > Duration::from_secs(10) {
+                return Err(format!("Another Endeavor process has held {} for too long.", lock_path.display()));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut servers = self.load()?;
+        let result = change(&mut servers);
+        let text = serde_json::to_string_pretty(&servers).map_err(|e| e.to_string())?;
+        let tmp = self.path.with_extension(format!("json.tmp{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        crate::owner_only(std::fs::OpenOptions::new().write(true).create_new(true))
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all()))
+            .and_then(|_| std::fs::rename(&tmp, &self.path))
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("Couldn't write the list of machines to {}: {e}", self.path.display())
+            })?;
+        Ok(result)
     }
 }
 

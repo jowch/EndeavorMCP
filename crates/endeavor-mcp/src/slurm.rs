@@ -271,8 +271,9 @@ fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, S
     };
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     let build = args.build.as_deref().map_or(String::new(), |build| format!(" --build {}", quote(build)));
+    let exit_idle = if args.core_env.iter().any(|(name, _)| *name == "ENDEAVOR_EXIT_IDLE") { " --exit-idle" } else { "" };
     let script = format!(
-        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {} --runtime {} --depot {}{build}\n",
+        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {} --runtime {} --depot {}{build}{exit_idle}\n",
         quote(&exe.display().to_string()),
         quote(&dir.display().to_string()),
         quote(&julia),
@@ -687,7 +688,10 @@ pub fn node_start_main(argv: &[String]) -> ! {
         std::process::exit(1);
     };
     let token = std::fs::read_to_string(dir.join("token")).unwrap_or_else(|e| fail(format!("Couldn't read the token in {}: {e}", dir.display())));
-    let command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm", flag(argv, "--build").as_deref()).unwrap_or_else(|e| fail(e));
+    let mut command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm", flag(argv, "--build").as_deref()).unwrap_or_else(|e| fail(e));
+    if argv.iter().any(|a| a == "--exit-idle") {
+        command.env("ENDEAVOR_EXIT_IDLE", "1");
+    }
     let error = exec(command);
     fail(format!("Couldn't start the runtime: {error}"))
 }

@@ -13,7 +13,7 @@ fn no_helper_here(os: &str, arch: &str) -> Result<PathBuf, String> {
 }
 
 fn options(root: &str, state: &str, depot: &str) -> Options<'static> {
-    Options { auth: Auth::Batch, root: root.into(), state: state.into(), depot: depot.into(), helper: &no_helper_here }
+    Options { auth: Auth::Batch, root: root.into(), state: state.into(), depot: depot.into(), exit_idle: false, helper: &no_helper_here }
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn a_host_that_is_not_a_host_never_reaches_ssh() {
 
 #[test]
 fn the_bootstrap_holds_nothing_a_login_shell_would_change() {
-    let script = bootstrap_script(crate::embedded::BUILD_VERSION);
+    let script = bootstrap_script(crate::embedded::BUILD_VERSION, false);
     for bad in ['\'', '\\', '!', '\n'] {
         assert!(!script.contains(bad), "{bad:?} in {script}");
     }
@@ -74,7 +74,7 @@ fn run_script(script: &str, preamble: &str, home: &Path) -> String {
 #[cfg(unix)]
 fn the_bootstrap_runs_under_a_shell_and_asks_for_an_install() {
     let home = crate::client::scratch("bootstrap-need");
-    let said = run_script(&bootstrap_script("v1"), "\n\n\n--julia\nauto\nprocess\n", &home);
+    let said = run_script(&bootstrap_script("v1", false), "\n\n\n--julia\nauto\nprocess\n", &home);
     assert!(said.starts_with("ENDEAVOR ") && said.trim_end().ends_with(" need"), "{said}");
     assert!(!home.join(".cache").exists());
 }
@@ -94,7 +94,7 @@ fn fake_install(root: &Path) {
 /// The `connect` arguments the script gives the helper, as lines.
 #[cfg(unix)]
 fn connect_args(home: &Path, preamble: &str) -> Vec<String> {
-    let said = run_script(&bootstrap_script("v1"), preamble, home);
+    let said = run_script(&bootstrap_script("v1", false), preamble, home);
     let mut lines = said.lines();
     assert!(lines.next().is_some_and(|l| l.starts_with("ENDEAVOR ") && l.ends_with(" have")), "{said}");
     lines.map(|l| l.strip_prefix("arg:").unwrap_or(l).to_owned()).collect()
@@ -115,6 +115,20 @@ fn root_state_and_depot_land_where_given() {
     let args = connect_args(&home, &format!("{root}\n/var/endeavor/state\n\n--julia\nauto\nprocess\n"));
     assert_eq!(args[2], "/var/endeavor/state", "an absolute state folder is used as it is");
     assert_eq!(args[10], format!("{root}/depot:"), "no depot means one in the install folder");
+}
+
+#[test]
+#[cfg(unix)]
+fn exit_idle_reaches_the_helper_with_the_same_six_lines() {
+    let home = crate::client::scratch("bootstrap-exit-idle");
+    fake_install(&home.join("root"));
+    let preamble = format!("{}/root\nstate\n/d:\n--julia\nauto\nprocess\n", home.display());
+    let args_of = |exit_idle| run_script(&bootstrap_script("v1", exit_idle), &preamble, &home).lines().skip(1).map(str::to_owned).collect::<Vec<_>>();
+    assert!(!args_of(false).iter().any(|a| a == "arg:--exit-idle"));
+    let with = args_of(true);
+    let at = with.iter().position(|a| a == "arg:--exit-idle").expect("--exit-idle is passed");
+    assert_eq!(with[at + 1], "arg:--launcher", "{with:?}");
+    assert_eq!(with.len(), args_of(false).len() + 1);
 }
 
 #[test]

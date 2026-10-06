@@ -10,9 +10,9 @@ mod machines;
 mod ssh;
 
 pub use channel::{Channel, Hello, Notice, Runtime, died_reason};
-pub use listener::{Listener, Refuse};
-pub use machines::{Cluster, IdleStop, Server, ssh_config_hosts};
-pub use ssh::{Auth, Cancel, Event, Options, Transport, bootstrap_script, connect, no_helper, start, test, valid_host};
+pub use listener::{Listener, Messages, Refuse};
+pub use machines::{Cluster, IdleStop, MachinesFile, Server, machines_path, ssh_config_hosts};
+pub use ssh::{Auth, Cancel, ConnectError, Event, Options, Transport, bootstrap_script, connect, connect_checked, no_helper, start, test, this_platform, valid_host};
 
 /// A folder of a unit test's own under `target/tmp`, emptied.
 #[cfg(test)]

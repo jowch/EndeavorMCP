@@ -109,12 +109,10 @@ pub struct Standalone {
     pub host: Option<String>,
 }
 
-impl Standalone {
-    /// A link to `target` on Pluto's page that lets a browser in.
-    pub fn link(&self, token: &str, target: &str) -> String {
-        let join = if target.contains('?') { '&' } else { '?' };
-        format!("http://localhost:{}{target}{join}token={token}", self.port)
-    }
+/// A link to `target` on Pluto's page, at `port` on this computer, that lets a browser in.
+fn browser_link(port: u16, token: &str, target: &str) -> String {
+    let join = if target.contains('?') { '&' } else { '?' };
+    format!("http://localhost:{port}{target}{join}token={token}")
 }
 
 /// What every client connection shares.
@@ -148,6 +146,9 @@ pub struct Caller {
     pub has_skills: bool,
     /// What the client calls itself (`X-Endeavor-Client`), for other sessions to see.
     pub client: Option<String>,
+    /// The port the user's browser reaches this runtime on (`X-Endeavor-Browser-Port`), when
+    /// it isn't the runtime's own: a link's loopback port. The links in results use it.
+    pub browser_port: Option<u16>,
 }
 
 /// A client's label as other sessions see it: printable characters only,
@@ -165,7 +166,8 @@ impl Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
         let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
         let client = request.header("X-Endeavor-Client").and_then(clean_label);
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", client }
+        let browser_port = request.header("X-Endeavor-Browser-Port").and_then(|port| port.trim().parse().ok()).filter(|&port| port != 0);
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", client, browser_port }
     }
 }
 
@@ -398,7 +400,7 @@ impl Bridge {
         };
         match reply {
             Ok(Reply::Json(mut result)) => {
-                self.add_browser_url(name, &mut result);
+                self.add_browser_url(name, caller, &mut result);
                 text(&result)
             }
             Ok(Reply::Image { meta, png_base64 }) => json!({
@@ -413,9 +415,12 @@ impl Bridge {
     }
 
     /// Without the app, the user watches notebooks in a browser: the results
-    /// that name a notebook, or the session, carry the link to it.
-    fn add_browser_url(&self, tool: &str, result: &mut Value) {
-        let (Some(standalone), Value::Object(fields)) = (&self.standalone, result) else { return };
+    /// that name a notebook, or the session, carry the link to it. A caller
+    /// that says which port its browser uses (through a link) gets it on any
+    /// runtime; otherwise only a standalone runtime adds one, with its own port.
+    fn add_browser_url(&self, tool: &str, caller: &Caller, result: &mut Value) {
+        let Some(port) = caller.browser_port.or_else(|| self.standalone.as_ref().map(|s| s.port)) else { return };
+        let Value::Object(fields) = result else { return };
         let target = match tool {
             "new_notebook" | "open_notebook" => match fields.get("notebook_id").and_then(Value::as_str) {
                 Some(id) => format!("/edit?id={id}"),
@@ -424,7 +429,7 @@ impl Bridge {
             "pluto_session_status" => "/".to_owned(),
             _ => return,
         };
-        fields.insert("browser_url".into(), standalone.link(&self.token, &target).into());
+        fields.insert("browser_url".into(), browser_link(port, &self.token, &target).into());
     }
 
     /// Wait for the user's answer to a call the session's policy holds

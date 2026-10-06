@@ -41,7 +41,7 @@ impl Place {
     }
 
     fn options(&self) -> Options<'static> {
-        Options { auth: Auth::Batch, root: self.root.display().to_string(), state: self.state.display().to_string(), depot: String::new(), helper: &helper_binary }
+        Options { auth: Auth::Batch, root: self.root.display().to_string(), state: self.state.display().to_string(), depot: String::new(), exit_idle: false, helper: &helper_binary }
     }
 
     fn transport(&self) -> Transport {

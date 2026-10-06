@@ -21,6 +21,7 @@ mod guide;
 mod host_tools;
 mod http;
 mod julia;
+pub mod link;
 mod mcp;
 mod notebooks;
 mod results;
@@ -66,7 +67,7 @@ use wire::files::RuntimeState;
 use wire::slurm::JobRequest;
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--build BUILD]
+const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
                         (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster)
        endeavor relay --state-dir DIR
        endeavor node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
@@ -91,7 +92,9 @@ struct Args {
     /// The app build this helper and its runtime came from, which a runtime it
     /// starts reports to the app.
     build: Option<String>,
-    /// More of the core's environment: a standalone runtime's settings (see `core::main`).
+    /// More of the core's environment: a standalone runtime's settings, and
+    /// ENDEAVOR_EXIT_IDLE for `--exit-idle` (see `core::main`). Set on a core
+    /// this helper starts; the Slurm launcher passes `--exit-idle` on to the job.
     core_env: Vec<(&'static str, String)>,
 }
 
@@ -169,6 +172,7 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some("node-start") => slurm::node_start_main(&argv[1..]),
         Some("core") => core::main(&argv[1..]),
         Some("serve" | "mcp" | "stop") => standalone::main(&argv),
+        Some("link") => link::main(&argv[1..]),
         Some("--version" | "-V" | "version") => update::print_version(),
         Some("update") => update::main(&argv[1..]),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
@@ -213,7 +217,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         return Err("expected the `connect` command".into());
     }
     let (mut state_dir, mut julia, mut runtime, mut depot) = (None, None::<julia::Source>, None, None);
-    let (mut quit_with_client, mut any_node, mut launcher, mut build) = (false, false, Launcher::Process, None);
+    let (mut quit_with_client, mut any_node, mut launcher, mut build, mut exit_idle) = (false, false, Launcher::Process, None, false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -232,6 +236,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             }
             "--quit-with-client" => quit_with_client = true,
             "--any-node" => any_node = true,
+            "--exit-idle" => exit_idle = true,
             "--build" => build = Some(value()?),
             _ => return Err(format!("unknown argument {arg}")),
         }
@@ -248,7 +253,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         quit_with_client,
         any_node,
         build,
-        core_env: Vec::new(),
+        core_env: if exit_idle { vec![("ENDEAVOR_EXIT_IDLE", "1".into())] } else { Vec::new() },
     })
 }
 

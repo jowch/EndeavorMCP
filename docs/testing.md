@@ -110,6 +110,56 @@ one), stops the runtime through the channel, and checks the channel ends as a
 detach and not as a drop. `tests/client.rs` covers the same code with a local
 `sh` for ssh and no Julia, in plain `cargo test`.
 
+## The link over real ssh
+
+`crates/endeavor-mcp/tests/e2e_link.rs` runs `endeavor link`, the process one
+front shares for each machine, over real `ssh` and real Julia. It needs the
+same host as `e2e_client` (`ENDEAVOR_TEST_SSH_HOST`, a key login, Julia at the
+same path there) and prints `SKIPPED` and passes without them. It uses
+`e2e_client`'s depot (`target/tmp/e2e-client/depot`), so run that test first or
+expect several minutes. The link's records, the machines file, and the
+helper's install and state folders are under `target/tmp/e2e-link`; `HOME`
+stays yours, so `ssh` finds its keys.
+
+```sh
+ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_link -- --ignored --nocapture
+```
+
+The test goes through these steps:
+
+1. `link::ensure` starts a link from a machines file that has one machine, and
+   a second `ensure` gets the same link. Its status reaches `connected`, with
+   the helper's hello and the helper installed in the test's folder.
+2. `POST /link/start`: the status reaches `ready`, with the listener's port
+   and the runtime's token.
+3. Through the listener's port, with `X-Endeavor-Browser-Port`, `new_notebook`
+   and `pluto_session_status` return a `browser_url` on that port.
+4. The page, as a browser reaches it: the link in `browser_url` sets the cookie,
+   and Pluto's page loads over HTTP.
+5. `POST /link/stop` ends the runtime and the link stays connected. `POST
+   /link/quit` ends the link. No link, helper or runtime process is left, and
+   `runtime.json` and `link.json` are gone.
+
+`crates/endeavor-mcp/tests/link.rs` covers the link with a local `sh` for ssh
+(`ENDEAVOR_LINK_SHELL`) and the stand-in Julia under the real core, in plain
+`cargo test`, with every folder under `target/tmp`:
+
+- Four fronts that call `ensure` at once get one link, and a later one reuses
+  it. Its record is owner-only. The status goes from `connected` to `ready`,
+  and a call through the listener's port, with the runtime's token and
+  `X-Endeavor-Browser-Port`, gets a `browser_url` on that port.
+- A stop ends the runtime and not the link; the listener then says to call
+  `use_machine`; a start after it gives a new runtime on the same port.
+- The helper killed: the link connects again, on the same listener port, and
+  attaches to the same runtime. A runtime that ended meanwhile is not started
+  again.
+- Idle exit (`ENDEAVOR_LINK_IDLE_SECS`), `quit` and SIGTERM each remove the
+  record, end the helper and leave the runtime running. A new link attaches to
+  it.
+- The control port refuses a wrong token, a request with an Origin, and a Host
+  that isn't loopback.
+- A connect that fails is reported once, not retried until the next start.
+
 ## The Slurm launcher over real ssh and real Slurm
 
 `crates/endeavor-mcp/tests/e2e_slurm.rs` runs the cluster path of

@@ -91,11 +91,17 @@ pub(crate) struct Env {
 
 impl Env {
     fn here() -> Env {
-        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        Env::from_vars(&|name| std::env::var(name).ok())
+    }
+
+    /// The defaults for the environment `read` gives, which a process started
+    /// with other variables (`link::Spawn`) has.
+    pub(crate) fn from_vars(read: &dyn Fn(&str) -> Option<String>) -> Env {
+        let var = |name: &str| read(name).filter(|v| !v.is_empty());
         #[cfg(windows)]
         let home = var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default().join("Endeavor");
         #[cfg(not(windows))]
-        let home = std::env::home_dir().unwrap_or_default();
+        let home = var("HOME").map(PathBuf::from).or_else(std::env::home_dir).unwrap_or_default();
         Env {
             home,
             state_home: var("XDG_STATE_HOME").map(PathBuf::from),
@@ -112,6 +118,14 @@ impl Env {
             return self.home.join("serve").join(&self.node);
         }
         self.state_home.clone().unwrap_or_else(|| self.home.join(".local/state")).join("endeavor/serve").join(&self.node)
+    }
+
+    /// One folder for each machine's link (`link`): its record, lock and log.
+    pub(crate) fn links_dir(&self) -> PathBuf {
+        if cfg!(windows) {
+            return self.home.join("links");
+        }
+        self.state_home.clone().unwrap_or_else(|| self.home.join(".local/state")).join("endeavor/links")
     }
 
     /// For `connect --launcher slurm`: one for the whole cluster, since a reconnect

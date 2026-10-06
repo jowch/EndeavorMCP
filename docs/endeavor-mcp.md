@@ -188,6 +188,15 @@ record. The key is unique to the process, so an ended session never returns;
 the core forgets that it ended a week later. A front that is killed can't
 send it, so its session drops out after the week.
 
+**Where the browser reaches the runtime.** The results that name a notebook or
+the session (`new_notebook`, `open_notebook`, `pluto_session_status`) carry a
+`browser_url`. A request to `/mcp` may send `X-Endeavor-Browser-Port: <port>`,
+a port from 1 to 65535, and then the link is on `http://localhost:<port>`, on
+any runtime. That is how a runtime reached through a link (its loopback port
+on the user's computer) gives a link that works there. Without the header, or
+with one that isn't a port, only a runtime started by `serve` or `mcp` adds a
+`browser_url`, on its own port, as before.
+
 ## Approval
 
 A small change, about 1–2 days.
