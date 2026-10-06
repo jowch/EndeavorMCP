@@ -162,7 +162,7 @@ fn the_machine_tools_over_real_slurm() {
     let mut one = front();
 
     // Adding the cluster: Slurm is found, the partitions come with their limits, and the host's name for it is saved.
-    let added = one.ok("add_machine", json!({ "host": host, "name": "e2e-slurm", "julia": julia.display().to_string(), "slurm": true }));
+    let added = one.ok("add_machine", json!({ "host": host, "name": "e2e-slurm", "julia": julia.display().to_string(), "slurm": true, "install": true }));
     eprintln!("[{:?}] add_machine: {added}", started.elapsed());
     assert_eq!((added["state"].as_str(), added["saved"].clone(), added["slurm"].clone(), added["cluster"].clone(), added["runs_in"].clone()), (Some("connected"), json!(true), json!(true), json!(true), json!("slurm_jobs")), "{added}");
     let partitions = added["partitions"].as_array().unwrap_or_else(|| panic!("{added}"));

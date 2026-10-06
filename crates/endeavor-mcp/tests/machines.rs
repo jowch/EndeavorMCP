@@ -51,8 +51,16 @@ impl Place {
         Place::with(name, &[])
     }
 
-    /// With more variables, or other values for those set here; `{dir}` is this place's folder.
+    /// With the helper installed on the machine already.
     fn with(name: &str, more: &[(&str, &str)]) -> Place {
+        let place = Place::bare(name, more);
+        common::install_helper(&place.dir.join("root"));
+        place
+    }
+
+    /// With more variables, or other values for those set here; `{dir}` is this place's folder.
+    /// The machine has no helper.
+    fn bare(name: &str, more: &[(&str, &str)]) -> Place {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("machines-{name}"));
         end_leftovers(&dir);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1103,4 +1111,145 @@ impl FakeSlurm {
     fn read(&self, file: &str) -> String {
         std::fs::read_to_string(self.dir.join(file)).unwrap_or_default()
     }
+}
+
+#[test]
+fn add_machine_only_looks_until_told_to_install() {
+    let place = Place::bare("needs-install", &[]);
+    // A runtime that a helper of an earlier install left: the look reports it.
+    std::fs::write(place.state.join("runtime.json"), json!({ "launcher": "process", "node": "n", "pid": std::process::id(), "token": "t" }).to_string()).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!((first["state"].as_str(), first["needs_install"].clone(), first["saved"].clone()), (Some("needs_install"), json!(true), json!(true)), "{first}");
+    assert_eq!(first["install"]["what"], "helper", "{first}");
+    assert_eq!(first["install"]["running"], json!({ "process": std::process::id() }), "{first}");
+    let message = first["message"].as_str().unwrap();
+    assert!(message.contains("`install: true`") && message.contains("Ask the user") && message.contains("MB") && message.contains("already running"), "{message}");
+    assert!(message.contains(&place.dir.join("root").display().to_string()), "where it would go: {message}");
+    assert!(!place.dir.join("root").exists(), "nothing was installed");
+    assert!(place.helpers().is_empty());
+    // Saved but not added.
+    assert!(place.links_dir().join("lab/provisional").exists());
+    assert_eq!(front.ok("list_machines", json!({}))["machines"][0]["state"], "not yet connected");
+    let (failed, said) = front.call("use_machine", json!({ "machine": "lab" }));
+    assert!(failed && text(&said).contains("never finished connecting"), "{said}");
+    assert!(!place.dir.join("root").exists());
+
+    // Asking again without the agreement looks again and changes nothing.
+    let again = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!(again["state"], "needs_install", "{again}");
+    assert!(!place.dir.join("root").exists());
+
+    // With the agreement it installs and adds the machine.
+    std::fs::remove_file(place.state.join("runtime.json")).unwrap();
+    let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert_eq!((done["state"].as_str(), done["saved"].clone()), (Some("connected"), json!(true)), "{done}");
+    assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
+    assert!(!place.links_dir().join("lab/provisional").exists());
+    assert_eq!(front.ok("list_machines", json!({}))["machines"][0]["name"], "lab");
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "install": "yes" }));
+    assert!(failed && text(&said).contains("install must be true or false"), "{said}");
+}
+
+#[test]
+fn use_machine_installs_the_helper_only_when_told_to() {
+    let place = Place::bare("use-install", &[]);
+    place.add_lab();
+    let mut front = place.front();
+    front.initialize();
+    let first = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!((first["state"].as_str(), first["ready"].clone(), first["needs_install"].clone()), (Some("needs_install"), json!(false), json!(true)), "{first}");
+    assert!(text(&first).contains("`install: true`"), "{first}");
+    assert!(!place.dir.join("root").exists(), "nothing was installed");
+    assert_eq!(place.projects(), Value::Null, "the project doesn't remember it");
+    assert_eq!(front.ok("pluto_session_status", json!({})).get("machine"), None, "the session stays where it was");
+    assert_eq!(front.ok("list_machines", json!({}))["machines"][0]["state"], "needs_install");
+
+    let used = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
+    assert_eq!(used["state"], "ready", "{used}");
+    assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
+    assert_eq!(place.projects()[place.project.display().to_string()]["machine"], "lab");
+}
+
+#[test]
+fn a_helper_of_an_older_build_is_an_update_that_needs_the_user_too() {
+    let place = Place::new("older-helper");
+    place.add_lab();
+    let root = place.dir.join("root");
+    std::fs::rename(root.join(endeavor_mcp::embedded::BUILD_VERSION), root.join("0.0.1-old")).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    let first = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(first["state"], "needs_install", "{first}");
+    assert_eq!(first["install"]["update"], true, "{first}");
+    assert!(text(&first).contains("this is an update"), "{first}");
+    assert!(!root.join(endeavor_mcp::embedded::BUILD_VERSION).exists());
+    let used = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
+    assert_eq!(used["state"], "ready", "{used}");
+    assert!(root.join("0.0.1-old").exists(), "the older one stays");
+}
+
+#[test]
+fn a_remembered_project_never_installs() {
+    let place = Place::bare("remember-install", &[]);
+    place.add_lab();
+    std::fs::create_dir_all(place.dir.join("state-home/endeavor")).unwrap();
+    let remembered = json!({ place.project.display().to_string(): { "machine": "lab", "folder": null } });
+    std::fs::write(place.dir.join("state-home/endeavor/projects.json"), remembered.to_string()).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    let (failed, said) = front.call("list_notebooks", json!({}));
+    assert!(failed && text(&said).contains("isn't installed on lab") && text(&said).contains("`install: true`") && text(&said).contains("Ask the user"), "{said}");
+    let status = front.ok("pluto_session_status", json!({}));
+    assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("needs_install"), json!(false)), "{status}");
+    assert!(!place.dir.join("root").exists(), "nothing was installed");
+    front.finish();
+}
+
+/// A `PATH` of fake `curl` and `wget` that only note they were run (and fail), then the system's own.
+fn no_julia_path(place_dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = place_dir.join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["curl", "wget"] {
+        let script = format!("#!/bin/sh\necho {tool} >> '{}'\necho 'no network in this test' >&2\nexit 1\n", place_dir.join("download-tried").display());
+        std::fs::write(bin.join(tool), script).unwrap();
+        std::fs::set_permissions(bin.join(tool), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    format!("{}:/usr/bin:/bin", bin.display())
+}
+
+#[test]
+fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("machines-julia-download");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let place = Place::with("julia-download", &[("PATH", &no_julia_path(&dir)), ("SHELL", "/bin/sh")]);
+    let tried = place.dir.join("download-tried");
+    let _ = std::fs::remove_file(&tried);
+    // A server that Julia is not on, as far as a login shell can tell.
+    let find = Command::new("/bin/sh").args(["-lc", "command -v julia"]).env("HOME", place.dir.join("home")).env("PATH", no_julia_path(&place.dir)).output().unwrap();
+    if find.status.success() {
+        eprintln!("skipped: a login shell finds julia at {}", String::from_utf8_lossy(&find.stdout).trim());
+        return;
+    }
+    // No `julia` in the machine's record, so Endeavor looks for it itself.
+    place.machines().save(Server { id: "lab".into(), name: "lab".into(), ssh_host: "lab".into(), ..Default::default() }).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    let first = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!((first["state"].as_str(), first["install"]["what"].as_str()), (Some("needs_install"), Some("julia")), "{first}");
+    let message = text(&first);
+    assert!(message.contains("Julia wasn't found on lab") && message.contains("download its own copy") && message.contains("MB") && message.contains("`julia`") && message.contains("`install: true`"), "{message}");
+    assert!(!tried.exists(), "nothing was downloaded");
+    assert_eq!(place.projects(), Value::Null);
+    assert_eq!(front.ok("pluto_session_status", json!({})).get("machine"), None, "the session stays where it was");
+
+    // With the agreement the download is tried (the fake curl fails), on the same link.
+    let (failed, said) = front.call("use_machine", json!({ "machine": "lab", "install": true }));
+    assert!(failed && text(&said).contains("Couldn't download Julia"), "{said}");
+    assert!(tried.exists(), "the download was tried");
+    front.finish();
 }

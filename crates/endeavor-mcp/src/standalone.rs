@@ -395,6 +395,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
     let mut args = Args {
         state_dir: dir.clone(),
         julia: options.julia.clone(),
+        julia_download: true,
         runtime: PathBuf::new(),
         depot: options.depot.clone(),
         launcher: Launcher::Process,
@@ -410,7 +411,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
     }
     crate::stopped::clear(dir);
     args.runtime = unpack_runtime(&options.cache)?;
-    let (julia, version) = julia::find(&options.julia, &|line| progress(&line))?;
+    let (julia, version) = julia::find(&options.julia, true, &|line| progress(&line))?;
     progress(&format!("Starting Julia {version} ({julia})"));
     let token = crate::token(dir)?;
     let child = crate::start(&args, &julia, &token)?;

@@ -17,7 +17,7 @@ use wire::slurm::{JobRequest, Partition, Resources, check_extra_flag};
 use super::projects::Remembered;
 use super::{Relay, Route, Status as Local, start_wait, tool_failure};
 use crate::client::{Cluster, Server, ssh_config_hosts};
-use crate::link::{self, Link, State};
+use crate::link::{self, InstallWhat, Link, State};
 use crate::mcp::{browser_link, to_json, tool_error};
 
 /// What `use_machine` and `stop_machine` call this computer.
@@ -82,10 +82,10 @@ impl Deadline {
     }
 
     /// A start or attach request to `link`, sent whatever its build: `Relay::ask` is the one that holds back.
-    fn send(self, link: &Link, ask: Ask) -> Result<link::Status, String> {
+    fn send(self, link: &Link, ask: Ask, install: bool) -> Result<link::Status, String> {
         match ask {
-            Ask::Attach => link.attach_within(self.call_wait()?),
-            Ask::Start(job) => link.start_within(job, self.call_wait()?),
+            Ask::Attach => link.attach_within(install, self.call_wait()?),
+            Ask::Start(job) => link.start_within(job, install, self.call_wait()?),
         }
     }
 
@@ -94,6 +94,11 @@ impl Deadline {
         let (done, waited) = mpsc::channel();
         std::thread::spawn(move || drop(done.send(f())));
         waited.recv_timeout(self.left()).map_err(|_| "This call ran out of the time a tool call gets while it waited for the link. Call it again to continue.".to_owned())
+    }
+
+    /// Tell the link the user agreed to install the helper.
+    fn install(self, link: &Link) -> Result<link::Status, String> {
+        link.install_within(self.call_wait()?)
     }
 
     fn ensure(self, id: &str) -> Result<Link, String> {
@@ -174,6 +179,7 @@ fn state_word(state: State) -> &'static str {
         State::Queued => "queued",
         State::Ready => "ready",
         State::Failed => "failed",
+        State::NeedsInstall => "needs_install",
     }
 }
 
@@ -209,14 +215,71 @@ fn not_ready_message(name: &str, status: &link::Status) -> String {
             let error = status.error.as_deref().unwrap_or("it didn't say why");
             format!("Julia on {name} isn't available: {error}\nCall `use_machine` with machine \"{name}\" to try again, or tell the user.")
         }
+        State::NeedsInstall => format!("{} Nothing was installed.", install_text(name, status, "use_machine")),
         State::Ready => format!("Julia on {name} is ready."),
     }
+}
+
+fn megabytes(bytes: u64) -> u64 {
+    bytes.div_ceil(1_000_000).max(1)
+}
+
+/// What installing would do on the machine and what to ask the user, for the agent to relay.
+/// `tool` is the machine tool to call again, with `install: true`, once the user has agreed.
+fn install_text(name: &str, status: &link::Status, tool: &str) -> String {
+    let Some(info) = &status.needs_install else { return format!("Endeavor needs to install something on {name}.") };
+    let again = if tool == "add_machine" { "`add_machine` again with the same arguments".to_owned() } else { format!("`use_machine` again with machine \"{name}\" (and the same other arguments)") };
+    let ask = format!("Ask the user whether Endeavor may do that. Only if they agree, call {again} and `install: true`.");
+    match (&info.what, &info.helper, &info.julia) {
+        (InstallWhat::Helper, Some(helper), _) => {
+            let update = if helper.update { " A helper of an older version is installed there already (this is an update); it stays beside the new one." } else { "" };
+            let running = match &helper.running {
+                Some(crate::client::Running::Process(pid)) => format!(" Julia is already running there (process {pid}); installing the helper doesn't touch it, and the helper is what lets Endeavor attach to it."),
+                Some(crate::client::Running::Job(id)) => format!(" A Slurm job ({id}) is already recorded there for Julia; installing the helper doesn't touch it, and the helper is what lets Endeavor attach to it."),
+                None => " No running Julia was found there.".to_owned(),
+            };
+            format!(
+                "Endeavor's helper isn't installed on {name} ({} {}). Installing it copies about {} MB into {} on {name} and changes nothing else there.{update}{running} {ask}",
+                helper.os,
+                helper.arch,
+                megabytes(helper.bytes),
+                helper.folder
+            )
+        }
+        (_, _, Some(julia)) => format!(
+            "Julia wasn't found on {name}. {julia} Or, if Julia is on {name}, call `add_machine` with its host and `julia` set to the path of the julia program, or to a shell line such as `module load julia`, and it is used instead. {ask}"
+        ),
+        _ => format!("Endeavor needs to install something on {name}. {ask}"),
+    }
+}
+
+fn install_json(status: &link::Status) -> Option<Value> {
+    let info = status.needs_install.as_ref()?;
+    Some(match (&info.helper, &info.julia) {
+        (Some(helper), _) => json!({
+            "what": "helper", "os": helper.os, "arch": helper.arch, "folder": helper.folder, "size_mb": megabytes(helper.bytes), "update": helper.update,
+            "running": helper.running.as_ref().map(|r| match r { crate::client::Running::Process(pid) => json!({ "process": pid }), crate::client::Running::Job(id) => json!({ "slurm_job": id }) }),
+        }),
+        (_, julia) => json!({ "what": "julia", "detail": julia }),
+    })
+}
+
+/// What a tool says when the machine needs something installed that the user hasn't agreed to.
+fn needs_install_result(name: &str, status: &link::Status, tool: &str) -> Value {
+    json!({
+        "machine": name,
+        "state": "needs_install",
+        "ready": false,
+        "needs_install": true,
+        "install": install_json(status),
+        "message": format!("{} Nothing was installed on {name}.", install_text(name, status, tool)),
+    })
 }
 
 /// A link whose build isn't this front's is replaced (quit, then started again) only when no
 /// runtime hangs on it, since a new link has another port and the user's browser page would break.
 fn replaceable(status: &link::Status) -> bool {
-    status.runtime.is_none() && matches!(status.state, State::Connecting | State::Connected | State::Failed)
+    status.runtime.is_none() && matches!(status.state, State::Connecting | State::Connected | State::Failed | State::NeedsInstall)
 }
 
 fn job_json(status: &link::Status) -> Option<Value> {
@@ -252,6 +315,7 @@ fn status_result(name: &str, status: &link::Status, message: &str) -> Value {
     put("error", status.error.clone().map(Into::into));
     put("queue", queue_json(status));
     put("job", job_json(status));
+    put("install", install_json(status));
     out
 }
 
@@ -316,6 +380,14 @@ fn text_arg(args: &Value, key: &str) -> Result<Option<String>, String> {
         Some(Value::String(text)) if text.chars().any(char::is_control) => Err(invalid(format!("{key} can't hold control characters"))),
         Some(Value::String(text)) => Ok(Some(text.trim().to_owned()).filter(|t| !t.is_empty())),
         Some(_) => Err(invalid(format!("{key} must be a string"))),
+    }
+}
+
+fn flag_arg(args: &Value, key: &str) -> Result<bool, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(flag)) => Ok(*flag),
+        Some(_) => Err(invalid(format!("{key} must be true or false"))),
     }
 }
 
@@ -526,14 +598,14 @@ impl Relay {
                 return self.machine_ready(&machine, &status, &session).ok_or_else(|| NotReady::of(&name, &status, "The link to the machine says it is ready but gave no runtime. Try again."));
             }
             if machine.asked != Some(link.pid) {
-                self.ask(&link, Ask::Attach, deadline).map_err(NotReady::plain)?;
+                self.ask(&link, Ask::Attach, false, deadline).map_err(NotReady::plain)?;
                 self.update_machine(&machine.id, |m| m.asked = Some(link.pid));
                 continue;
             }
             match status.state {
                 State::Connected if status.nothing_running && machine.cluster => return Err(NotReady::of(&name, &status, self.needs_job_message(&machine))),
                 State::Connected if status.nothing_running => {
-                    if self.ask(&link, Ask::Start(None), deadline).map_err(NotReady::plain)? {
+                    if self.ask(&link, Ask::Start(None), false, deadline).map_err(NotReady::plain)? {
                         continue;
                     }
                     return Err(NotReady::of(&name, &status, not_ready_message(&name, &status)));
@@ -543,7 +615,7 @@ impl Relay {
                         return Err(NotReady::of(&name, &status, not_ready_message(&name, &status)));
                     }
                 }
-                State::Failed | State::Queued => return Err(NotReady::of(&name, &status, not_ready_message(&name, &status))),
+                State::Failed | State::Queued | State::NeedsInstall => return Err(NotReady::of(&name, &status, not_ready_message(&name, &status))),
                 _ => connected_since = None,
             }
             if !wait || deadline.spent() {
@@ -603,11 +675,11 @@ impl Relay {
     /// Ask `link` to start the runtime or attach to it. A link from another build gets nothing: it
     /// may not know `only_running`, and would then start what was only to be attached to (on a
     /// cluster, a job nobody agreed to). False when nothing was sent. Every start goes through here.
-    pub(super) fn ask(&self, link: &Link, ask: Ask, deadline: Deadline) -> Result<bool, String> {
+    pub(super) fn ask(&self, link: &Link, ask: Ask, install: bool, deadline: Deadline) -> Result<bool, String> {
         if link.build != crate::embedded::BUILD_VERSION {
             return Ok(false);
         }
-        deadline.send(link, ask)?;
+        deadline.send(link, ask, install)?;
         Ok(true)
     }
 
@@ -773,6 +845,7 @@ impl Relay {
         };
         valid_name(&name)?;
         let julia = text_arg(args, "julia")?;
+        let install = flag_arg(args, "install")?;
         let slurm = match args.get("slurm") {
             None | Some(Value::Null) => None,
             Some(Value::Bool(slurm)) => Some(*slurm),
@@ -827,9 +900,19 @@ impl Relay {
             let _ = old.quit();
         }
         let link = deadline.ensure(&record.id).inspect_err(|_| undo(self))?;
+        if install {
+            deadline.install(&link).inspect_err(|_| undo(self))?;
+        }
         let mut status = deadline.status(&link).inspect_err(|_| undo(self))?;
         let status = loop {
             match status.state {
+                State::NeedsInstall if status.needs_install.as_ref().is_some_and(|n| n.what == InstallWhat::Helper) => {
+                    let mut result = needs_install_result(&record.name, &status, "add_machine");
+                    result["host"] = record.ssh_target().into();
+                    result["saved"] = true.into();
+                    result["message"] = format!("{} The machine is saved, but it isn't added until it has connected, and `use_machine` refuses it until then.", result["message"].as_str().unwrap_or_default()).into();
+                    return Ok(result);
+                }
                 State::Failed => {
                     undo(self);
                     return Err(format!(
@@ -871,13 +954,21 @@ impl Relay {
                 display_name(&record)
             ));
         }
-        while cluster && status.hello.as_ref().is_some_and(|h| h.slurm && h.partitions.is_none()) && !deadline.spent() {
+        // The link asks Slurm for the partitions after it connects, so they may come a moment later.
+        while status.hello.as_ref().is_some_and(|h| h.slurm && h.partitions.is_none()) && !deadline.spent() {
             std::thread::sleep(POLL);
             if !deadline.spent() {
                 status = deadline.status(&link).inspect_err(|_| undo(self))?;
             }
         }
         let hello = status.hello.clone().unwrap_or_default();
+        if cluster && hello.slurm && hello.partitions.is_none() && record.cluster.as_ref().is_none_or(|c| c.partitions.is_empty()) {
+            return Ok(json!({
+                "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": true,
+                "step": status.step,
+                "message": format!("Connected to {}, but Slurm hasn't listed its partitions yet. Call `add_machine` again with the same host to continue. The machine is saved, but it isn't added until it has connected, and `use_machine` refuses it until then.", record.ssh_target()),
+            }));
+        }
         if cluster {
             let before = record.cluster.take();
             let mut cluster = before.clone().unwrap_or_default();
@@ -905,7 +996,7 @@ impl Relay {
         if let Some(saved) = &record.cluster {
             message.push_str("It has Slurm, and Julia runs in Slurm jobs there");
             if partitions.is_empty() {
-                message.push_str(", but it didn't list its partitions. ");
+                message.push_str(if hello.partitions_failed { ", but its partitions couldn't be read. " } else { ", but it didn't list its partitions. " });
             } else {
                 message.push_str(&format!(". Partitions: {}. ", partitions.iter().map(partition_text).collect::<Vec<_>>().join("; ")));
             }
@@ -972,7 +1063,7 @@ impl Relay {
         loop {
             let status = deadline.last_status(link)?;
             match status.state {
-                State::Ready | State::Queued | State::Failed => return Ok(status),
+                State::Ready | State::Queued | State::Failed | State::NeedsInstall => return Ok(status),
                 State::Connected if status.nothing_running => return Ok(status),
                 State::Connected if connected_since.get_or_insert_with(Instant::now).elapsed() > GRACE => return Ok(status),
                 State::Connected => {}
@@ -995,6 +1086,7 @@ impl Relay {
             return self.use_local();
         }
         let server = self.find_machine(&key)?;
+        let install = flag_arg(args, "install")?;
         let given = Given::parse(args)?;
         let folder = match text_arg(args, "folder")? {
             Some(folder) => Some(folder),
@@ -1014,28 +1106,31 @@ impl Relay {
         let mut saved_resources = None;
         let status = match &server.cluster {
             None => {
-                self.ask(&link, Ask::Start(None), deadline)?;
+                self.ask(&link, Ask::Start(None), install, deadline)?;
                 self.settle(&link, deadline)?
             }
             Some(cluster) => {
-                self.ask(&link, Ask::Attach, deadline)?;
+                self.ask(&link, Ask::Attach, install, deadline)?;
                 let mut status = self.settle(&link, deadline)?;
                 if status.nothing_running {
                     let Some((resources, account)) = planned else { return Ok(self.needs_job(&name, cluster)) };
                     let mut job = cluster.job(&resources);
                     job.account = account.clone();
-                    if self.ask(&link, Ask::Start(Some(job)), deadline)? {
+                    if self.ask(&link, Ask::Start(Some(job)), install, deadline)? {
                         saved_resources = Some((resources, account));
                     } else {
                         notes.push("No job was submitted: this link is from another build.".into());
                     }
                     status = self.settle(&link, deadline)?;
-                } else if given.any() {
+                } else if given.any() && status.state != State::NeedsInstall {
                     notes.push("A job is already queued or running there, so the resources you gave were not used.".into());
                 }
                 status
             }
         };
+        if status.state == State::NeedsInstall {
+            return Ok(needs_install_result(&name, &status, "use_machine"));
+        }
         if status.state == State::Failed {
             return Err(format!("{}{}", not_ready_message(&name, &status), notes.iter().map(|n| format!(" {n}")).collect::<String>()));
         }
@@ -1169,7 +1264,7 @@ impl Relay {
         let name = display_name(&server);
         let (link, mut status, _) = self.link_for_use(&server, deadline)?;
         if !matches!(status.state, State::Ready | State::Starting | State::Queued) {
-            self.ask(&link, Ask::Attach, deadline)?;
+            self.ask(&link, Ask::Attach, false, deadline)?;
             status = self.settle(&link, deadline)?;
         }
         if status.nothing_running {

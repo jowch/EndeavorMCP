@@ -2,7 +2,8 @@
 //! bootstrap script that installs the helper and `runtime/` if this build's
 //! aren't there yet, then becomes `endeavor connect`, whose frames use the
 //! rest of ssh's stdin and stdout. From there on it's the same channel as a
-//! helper on this computer's (`Channel`).
+//! helper on this computer's (`Channel`). Unless `Options::allow_install`, a
+//! server without the helper is only looked at: nothing is written there.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -12,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use wire::ToApp;
 use wire::slurm::JobRequest;
 
@@ -156,6 +158,12 @@ pub struct Options<'a> {
     /// open for the idle limit (`endeavor connect --exit-idle`). One that is
     /// already running is left as it was started.
     pub exit_idle: bool,
+    /// The user agreed that Endeavor installs things on the server: its helper,
+    /// and its own Julia when none is found there (`--no-julia-download`
+    /// otherwise). Without it a server that lacks this build's helper is only
+    /// looked at, and `connect` ends with `ConnectError::needs`. The app, which
+    /// asks its user itself, passes true.
+    pub allow_install: bool,
     /// The helper binary to send to a server whose `uname -s` is `os` and
     /// `uname -m` is `arch`, as `linux` and `x86_64` (`arm64` as `aarch64`).
     /// Asked only when the server has no helper of this build yet.
@@ -173,12 +181,18 @@ pub fn no_helper(os: &str, arch: &str) -> String {
 ///
 /// It reads six lines (the install root, the state folder, the depot, the
 /// helper's Julia flag and its value, and its launcher; see `Options` for the
-/// empty ones), prints `ENDEAVOR <os> <arch> <have|need>`, and if it needs the
-/// install, reads a byte count and then that many bytes of tar. Then it
-/// becomes the helper. The values come over stdin and not in the script, so
-/// no path can break it. `exit_idle` adds the helper's `--exit-idle`; being
-/// a fixed word, it is in the script and not in the lines it reads.
-pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
+/// empty ones), and prints `ENDEAVOR <os> <arch> have`, or when this build's
+/// helper isn't installed `ENDEAVOR <os> <arch> need <seen> <older|first> <folder>`:
+/// `seen` is `none`, `process:PID` or `job:ID` for a runtime recorded in the
+/// state folder the helper would use (read with `sh`, `cat` and `kill -0`
+/// alone, as the helper isn't there to ask), `older` that a helper of another
+/// build is installed, and `folder` where this build's would go. If it needs
+/// the install, it then reads a byte count and that many bytes of tar, unless
+/// the client ends it first. Then it becomes the helper. The values come over
+/// stdin and not in the script, so no path can break it. `exit_idle` adds the
+/// helper's `--exit-idle` and `allow_install` false its `--no-julia-download`;
+/// being fixed words, they are in the script and not in the lines it reads.
+pub fn bootstrap_script(version: &str, exit_idle: bool, allow_install: bool) -> String {
     [
         &format!("v={version}"),
         r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln || exit 1"#,
@@ -190,9 +204,11 @@ pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
         r#"set --; if [ -n "$st" ]; then case "$st" in /*) sd="$st";; *) sd="$c/$st";; esac; set -- --state-dir "$sd"; fi"#,
         r#"[ -n "$dp" ] || dp="$c/depot:""#,
         r#"if [ -x "$d/endeavor" ] && [ -f "$d/runtime/boot.jl" ]; then s=have; else s=need; fi"#,
-        r#"echo "ENDEAVOR $(uname -s) $(uname -m) $s""#,
+        r#"r=none; u=first"#,
+        r#"if [ $s = need ]; then if [ -n "$st" ]; then pd="$sd"; else case "$ln" in slurm) pd="${XDG_STATE_HOME:-$HOME/.local/state}/endeavor/cluster";; *) pd="${XDG_STATE_HOME:-$HOME/.local/state}/endeavor/serve/$(uname -n)";; esac; fi; for o in "$c"/*/endeavor; do if [ -x "$o" ]; then u=older; fi; done; for f in runtime.json job.json; do j=$(cat "$pd/$f" 2>/dev/null); if [ "$ln" = slurm ]; then case "$j" in *job?:?[0-9]*) v=${j#*job?:}; v=$(printf %s "$v" | tr ",}" "  " | cut -d" " -f1); v=${v#?}; v=${v%?}; if [ $r = none ]; then r=job:$v; fi;; esac; else case "$j" in *pid?:[0-9]*) p=${j#*pid?:}; p=$(printf %s "$p" | tr ",}" "  " | cut -d" " -f1); if kill -0 "$p" 2>/dev/null; then r=process:$p; fi;; esac; fi; done; fi"#,
+        r#"if [ $s = need ]; then echo "ENDEAVOR $(uname -s) $(uname -m) need $r $u $d"; else echo "ENDEAVOR $(uname -s) $(uname -m) have"; fi"#,
         r#"if [ $s = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; echo "Endeavor: installing into $d failed" >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
-        &format!(r#"exec "$d/endeavor" connect "$@" {}--launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#, if exit_idle { "--exit-idle " } else { "" }),
+        &format!(r#"exec "$d/endeavor" connect "$@" {}{}--launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#, if exit_idle { "--exit-idle " } else { "" }, if allow_install { "" } else { "--no-julia-download " }),
     ]
     .join("; ")
 }
@@ -329,6 +345,33 @@ pub fn this_platform() -> (String, String) {
     (if cfg!(target_os = "macos") { "darwin" } else { std::env::consts::OS }.to_owned(), std::env::consts::ARCH.to_owned())
 }
 
+/// A runtime recorded on a server and alive there, found without the helper.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Running {
+    /// A process, by its pid on the server.
+    Process(u32),
+    /// A Slurm job recorded for the cluster, by its id.
+    Job(String),
+}
+
+/// What a connect found on a server that lacks this build's helper, when it
+/// wasn't allowed to install it (`Options::allow_install`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NeedsInstall {
+    /// `uname`'s words for the server, as `Linux` and `x86_64`.
+    pub os: String,
+    pub arch: String,
+    /// Where this build's helper would be installed on the server.
+    pub folder: String,
+    /// About how much would be sent there, in bytes.
+    pub bytes: u64,
+    /// A helper of another build is installed there already; this one goes beside it.
+    pub update: bool,
+    /// A runtime recorded in the folder the helper would use, and alive.
+    pub running: Option<Running>,
+}
+
 /// Why a connect failed, and whether trying again by itself could help: it
 /// can't when the user has to act first (a key to add, a host to accept) or
 /// the request itself is wrong, and can when the network or the server was
@@ -337,6 +380,9 @@ pub fn this_platform() -> (String, String) {
 pub struct ConnectError {
     pub message: String,
     pub retry: bool,
+    /// Set when nothing failed but the server needs the helper installed first
+    /// and that wasn't allowed: nothing was written there, and `retry` is false.
+    pub needs: Option<NeedsInstall>,
 }
 
 /// Run the bootstrap on `server` and wait for the helper's hello. The runtime
@@ -347,10 +393,10 @@ pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel
 
 /// `connect`, and a failure says whether retrying could help.
 pub fn connect_checked(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
-    let wrong = |message: String| ConnectError { message, retry: false };
+    let wrong = |message: String| ConnectError { message, retry: false, needs: None };
     let preamble = preamble(server, options).map_err(wrong)?;
     let version = crate::embedded::BUILD_VERSION;
-    let mut command = transport.command(&bootstrap_script(version, options.exit_idle), &options.auth).map_err(wrong)?;
+    let mut command = transport.command(&bootstrap_script(version, options.exit_idle, options.allow_install), &options.auth).map_err(wrong)?;
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -370,7 +416,7 @@ pub fn connect_checked(server: &Server, transport: &Transport, options: &Options
             Some(why) => wrong(why),
             None => {
                 let (message, retry) = explain_retry(transport, &options.auth, &stderr.finish(), status, cancel.cancelled.load(Ordering::SeqCst), signed_in);
-                ConnectError { message, retry }
+                ConnectError { message, retry, needs: None }
             }
         }
     };
@@ -379,28 +425,40 @@ pub fn connect_checked(server: &Server, transport: &Transport, options: &Options
     let _ = stdin.write_all(&preamble).and_then(|_| stdin.flush());
 
     // Login scripts may print things before the script's own line.
-    let (os, arch, have) = loop {
+    let (os, arch, found) = loop {
         let mut bytes = Vec::new();
         match stdout.read_until(b'\n', &mut bytes) {
             Ok(0) | Err(_) => return Err(give_up(child, None, false)),
             Ok(_) => {
                 let line = String::from_utf8_lossy(&bytes);
-                let words: Vec<&str> = line.split_whitespace().collect();
-                if let ["ENDEAVOR", os, arch, have @ ("have" | "need")] = words[..] {
-                    break (os.to_owned(), arch.to_owned(), have == "have");
+                let words: Vec<&str> = line.trim_end().splitn(7, ' ').collect();
+                match words[..] {
+                    ["ENDEAVOR", os, arch, "have"] => break (os.to_owned(), arch.to_owned(), None),
+                    ["ENDEAVOR", os, arch, "need", seen, age, folder] => break (os.to_owned(), arch.to_owned(), Some((seen.to_owned(), age == "older", folder.to_owned()))),
+                    _ => eprintln!("{host}: {}", line.trim_end()),
                 }
-                eprintln!("{host}: {}", line.trim_end());
             }
         }
     };
     on(Event::Connected { os: os.clone(), arch: arch.clone() });
 
-    let install = match have {
-        true => None,
-        false => {
-            let (os, arch) = platform(&os, &arch);
-            match (options.helper)(&os, &arch).and_then(|helper| install_tar(&helper)) {
-                Ok(tar) => Some(tar),
+    let install = match &found {
+        None => None,
+        Some((seen, update, folder)) => {
+            let (platform_os, platform_arch) = platform(&os, &arch);
+            match (options.helper)(&platform_os, &platform_arch).and_then(|helper| install_tar(&helper)) {
+                Ok(tar) if options.allow_install => Some(tar),
+                Ok(tar) => {
+                    let running = match seen.split_once(':') {
+                        Some(("process", pid)) => pid.parse().ok().map(Running::Process),
+                        Some(("job", id)) => Some(Running::Job(id.to_owned())),
+                        _ => None,
+                    };
+                    let needs = NeedsInstall { os: os.clone(), arch: arch.clone(), folder: folder.clone(), bytes: tar.len() as u64, update: *update, running };
+                    let mut error = give_up(child, Some(format!("Endeavor's helper isn't installed on {host}, and installing it wasn't allowed.")), true);
+                    error.needs = Some(needs);
+                    return Err(error);
+                }
                 Err(e) => return Err(give_up(child, Some(e), true)),
             }
         }
@@ -424,7 +482,7 @@ pub fn connect_checked(server: &Server, transport: &Transport, options: &Options
     });
     match hello {
         Ok(hello) => Ok((channel, hello)),
-        Err(message) => Err(ConnectError { message, retry: retry.get() }),
+        Err(message) => Err(ConnectError { message, retry: retry.get(), needs: None }),
     }
 }
 

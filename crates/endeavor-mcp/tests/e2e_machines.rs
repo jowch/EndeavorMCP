@@ -123,7 +123,10 @@ fn the_machine_tools_over_real_ssh() {
     assert!(!work.join("state-home/endeavor/links").exists(), "no link yet");
 
     // The host may have Slurm, as a workstation or login node may; this test runs Julia there directly, not in a job.
-    let added = front.ok("add_machine", json!({ "host": host, "name": "e2e-machines", "julia": julia.display().to_string(), "slurm": false }));
+    let looked = front.ok("add_machine", json!({ "host": host, "name": "e2e-machines", "julia": julia.display().to_string(), "slurm": false }));
+    assert_eq!(looked["state"], "needs_install", "{looked}");
+    assert!(!root.join(endeavor_mcp::embedded::BUILD_VERSION).exists(), "a look installs nothing");
+    let added = front.ok("add_machine", json!({ "host": host, "name": "e2e-machines", "julia": julia.display().to_string(), "slurm": false, "install": true }));
     eprintln!("[{:?}] add_machine: {}", started.elapsed(), added["message"]);
     assert_eq!((added["state"].as_str(), added["saved"].clone()), (Some("connected"), json!(true)), "{added}");
     assert!(added["node"].as_str().is_some_and(|n| !n.is_empty()) && added["home"].as_str().is_some_and(|h| h.starts_with('/')), "{added}");

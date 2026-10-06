@@ -53,8 +53,13 @@ pub enum Source {
     Shell(String),
 }
 
-/// The julia binary and its version ("1.12.6"). `progress` hears about a download.
-pub fn find(source: &Source, progress: &dyn Fn(String)) -> Result<(String, String), String> {
+/// What an error starts with when Julia isn't found and a download isn't allowed
+/// (`find`'s `download`), the rest saying what would be downloaded.
+pub const NOT_FOUND: &str = "Julia wasn't found on this machine.";
+
+/// The julia binary and its version ("1.12.6"). `progress` hears about a
+/// download, which only happens when `download` is true.
+pub fn find(source: &Source, download: bool, progress: &dyn Fn(String)) -> Result<(String, String), String> {
     match source {
         Source::Path(path) => {
             let path = expand_home(path);
@@ -76,7 +81,7 @@ pub fn find(source: &Source, progress: &dyn Fn(String)) -> Result<(String, Strin
             {
                 return Ok((path, version));
             }
-            let path = own_julia(progress)?;
+            let path = own_julia(download, progress)?;
             let version = checked_version(&path, "Endeavor's Julia doesn't run on this machine.")?;
             Ok((path, version))
         }
@@ -125,7 +130,7 @@ fn uname(flag: &str) -> String {
 }
 
 /// `~/.cache/endeavor/julia-<version>/bin/julia`, downloading it the first time.
-fn own_julia(progress: &dyn Fn(String)) -> Result<String, String> {
+fn own_julia(download: bool, progress: &dyn Fn(String)) -> Result<String, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME isn't set".to_owned())?;
     let cache = PathBuf::from(home).join(".cache/endeavor");
     let dir = cache.join(format!("julia-{JULIA_VERSION}"));
@@ -136,6 +141,9 @@ fn own_julia(progress: &dyn Fn(String)) -> Result<String, String> {
             .iter()
             .find(|t| t.0 == os && t.1 == arch)
             .ok_or_else(|| format!("No julia on this machine's PATH, and Endeavor has no Julia download for {os} {arch}. Set How to get Julia for this server."))?;
+        if !download {
+            return Err(format!("{NOT_FOUND} Endeavor can download its own copy: Julia {JULIA_VERSION}, about {} MB, into {}.", size / 1_000_000, dir.display()));
+        }
         install(&cache, &dir, url, sha256, size, progress)?;
     }
     Ok(bin.display().to_string())

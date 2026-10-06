@@ -80,6 +80,19 @@ pub fn state_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// What a connect installs on a server, put under `root` as it would be: this build's
+/// helper and `runtime/`, so that a link finds them there and asks nothing.
+pub fn install_helper(root: &Path) {
+    let dir = root.join(endeavor_mcp::embedded::BUILD_VERSION);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_endeavor"), dir.join("endeavor")).unwrap();
+    for (path, contents) in endeavor_mcp::embedded::RUNTIME_FILES {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, contents).unwrap();
+    }
+}
+
 pub fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while !done() {

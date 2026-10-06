@@ -62,7 +62,7 @@ fn files(dir: &Path) -> Vec<String> {
     while let Some(next) = todo.pop() {
         for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
             let path = entry.path();
-            found.push(path.strip_prefix(dir).unwrap().display().to_string());
+            found.push(path.strip_prefix(dir).unwrap().display().to_string().replace('\\', "/"));
             if path.is_dir() {
                 todo.push(path);
             }

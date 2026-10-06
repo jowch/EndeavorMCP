@@ -261,7 +261,7 @@ pub fn cancel_recorded(dir: &Path) {
 fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, String> {
     let dir = &args.state_dir;
     let flags = request.checked_sbatch_args().map_err(|why| format!("The job wasn't submitted: {why}"))?;
-    let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame())))?;
+    let (julia, version) = julia::find(&args.julia, args.julia_download, &|line| drop(mux.send(&ToApp::Progress { line }.frame())))?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
     token(dir)?;
     let depot = match request.depot.as_deref().map(str::trim).filter(|d| !d.is_empty()) {

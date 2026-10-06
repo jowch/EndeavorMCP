@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use common::{FakeBridge, TOKEN, pid_alive, serving_julia, wait_for};
 use endeavor_mcp::client::{MachinesFile, Server};
-use endeavor_mcp::link::{Link, Spawn, State, Status, ensure_with};
+use endeavor_mcp::link::{InstallWhat, Link, Spawn, State, Status, ensure_with};
 use serde_json::{Value, json};
 
 /// One machine called `lab-NAME` whose helper, runtime and link all live in a folder of the test's own.
@@ -73,7 +73,15 @@ impl Place {
         Place { dir, id, state, spawn, _bridge: bridge }
     }
 
+    /// The link, with the user's agreement to install the helper given.
     fn ensure(&self) -> Link {
+        let link = self.look();
+        link.install().expect("install");
+        link
+    }
+
+    /// The link as `ensure` starts it: it looks and installs nothing.
+    fn look(&self) -> Link {
         ensure_with(&self.spawn, &self.id).expect("a link")
     }
 
@@ -182,6 +190,7 @@ fn one_link_serves_every_front_and_reaches_ready() {
     });
     assert!(links.iter().all(|l| l == &links[0]), "{links:?}");
     let link = links[0].clone();
+    link.install().expect("install");
     assert!(pid_alive(link.pid as i32));
     assert_eq!(place.ensure(), link, "a later front reuses it");
     assert_eq!(pids("link --machine lab-ready").len(), 1, "one process");
@@ -567,4 +576,93 @@ fn the_link_works_in_a_folder_of_its_own() {
     let link = place.ensure();
     let cwd = std::fs::read_link(format!("/proc/{}/cwd", link.pid)).unwrap();
     assert_eq!(cwd, place.record().parent().unwrap().canonicalize().unwrap());
+}
+
+#[test]
+fn a_machine_without_the_helper_waits_for_the_user_and_installs_once_told() {
+    let place = Place::new("needs-install");
+    let root = place.dir.join("root");
+    let link = place.look();
+    let status = wait_status(&link, "needs_install", |s| s.state == State::NeedsInstall);
+    let needs = status.needs_install.clone().expect("what it needs");
+    assert_eq!(needs.what, InstallWhat::Helper);
+    let helper = needs.helper.expect("the helper's details");
+    assert_eq!(Path::new(&helper.folder), root.join(endeavor_mcp::embedded::BUILD_VERSION));
+    assert!(helper.bytes > 1000 && !helper.update && helper.running.is_none(), "{helper:?}");
+    assert_eq!(status.error, None, "it isn't a failure");
+    assert!(status.hello.is_some_and(|h| h.os.is_some()), "what it found is kept");
+
+    // A start without the agreement asks again and finds the same, and nothing is written there.
+    link.start(None).unwrap();
+    wait_for("the second look", || link.status().is_ok_and(|s| s.state == State::NeedsInstall && s.step.as_deref().is_some_and(|step| step.contains("isn't installed"))));
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(link.status().unwrap().state, State::NeedsInstall, "not tried in a loop");
+    assert!(!root.exists() && place.helpers().is_empty(), "nothing was installed");
+    assert_eq!(place.log().matches("waiting for the user's agreement").count(), 2, "one look for each request: {}", place.log());
+
+    // The agreement in the start installs and starts.
+    link.start_within(None, true, Duration::from_secs(5)).unwrap();
+    let status = ready(&link);
+    assert_eq!(status.needs_install, None);
+    assert_eq!(status.hello.unwrap().helper_installed, Some(true));
+    assert!(root.join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
+
+    // The connection drops and the helper is gone from the machine: the reconnect installs it again, with no new question.
+    let before = ready(&link).runtime.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+    for pid in place.helpers() {
+        // SAFETY: plain syscall, on the helper this test's link started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    let after = ready(&link).runtime.unwrap();
+    assert_eq!(after.pid, before.pid);
+    wait_for("the helper again", || !place.helpers().is_empty());
+    assert!(root.join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists(), "installed again by the reconnect");
+    assert_ne!(link.status().unwrap().state, State::NeedsInstall);
+    link.stop().unwrap();
+
+    // A new link process asks nothing: the helper is there.
+    link.quit().unwrap();
+    wait_for("the first link to end", || !pid_alive(link.pid as i32));
+    let fresh = place.look();
+    let status = wait_status(&fresh, "connected", |s| s.state == State::Connected);
+    assert_eq!(status.hello.unwrap().helper_installed, Some(false));
+    assert_eq!(status.needs_install, None);
+}
+
+#[test]
+fn the_agreement_without_a_start_installs_the_helper_and_starts_nothing() {
+    let place = Place::new("install-only");
+    let link = place.look();
+    wait_status(&link, "needs_install", |s| s.state == State::NeedsInstall);
+    link.start(None).unwrap();
+    wait_status(&link, "needs_install", |s| s.state == State::NeedsInstall);
+    // The wish for a runtime isn't kept for the agreement that comes later.
+    link.install().unwrap();
+    let status = wait_status(&link, "connected", |s| s.state == State::Connected);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!((status.runtime, link.status().unwrap().state), (None, State::Connected));
+    assert!(place.runtime().is_none() && !place.state.join("julia.args").exists(), "no Julia was started");
+}
+
+#[test]
+fn an_agreement_that_comes_while_connecting_is_not_lost() {
+    let place = Place::with("install-racing", &[("ENDEAVOR_LINK_ASK", "sleep 1")]);
+    let link = place.look();
+    link.install().unwrap();
+    let status = wait_status(&link, "connected", |s| s.state == State::Connected);
+    assert_eq!(status.hello.unwrap().helper_installed, Some(true));
+}
+
+#[test]
+fn a_start_body_with_an_unknown_field_is_still_refused_and_install_is_known() {
+    let place = Place::new("install-field");
+    let link = place.look();
+    let call = |body: &str| {
+        let request = format!("POST /link/start HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n{body}", link.port, link.token, body.len());
+        http(link.port, &request).0
+    };
+    assert_eq!(call(r#"{"job":null,"installs":true}"#), 400);
+    assert_eq!(call(r#"{"job":null,"install":true}"#), 200);
+    ready(&link);
 }

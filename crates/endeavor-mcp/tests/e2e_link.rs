@@ -137,6 +137,9 @@ fn the_link_over_real_ssh() {
 
     let link = ensure_with(&spawn, "e2e-link").expect("a link");
     assert_eq!(ensure_with(&spawn, "e2e-link").unwrap(), link, "a second front reuses it");
+    let looked = wait_status(&link, "the helper missing", Duration::from_secs(120), |s| s.state == State::NeedsInstall);
+    assert!(looked.needs_install.is_some() && !root.join(endeavor_mcp::embedded::BUILD_VERSION).exists(), "a look installs nothing");
+    link.install().expect("install");
     let status = wait_status(&link, "connected", Duration::from_secs(120), |s| s.state == State::Connected);
     let hello = status.hello.expect("hello");
     assert!(!hello.node.is_empty() && hello.uploads);

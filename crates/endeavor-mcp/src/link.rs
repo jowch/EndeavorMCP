@@ -20,13 +20,19 @@
 //! the runtime running. It never stops a runtime by itself.
 //!
 //! - `GET /link/status`: a `Status`.
-//! - `POST /link/start` `{"job": <JobRequest or null>, "only_running": bool}`: start
+//! - `POST /link/start` `{"job": <JobRequest or null>, "only_running": bool, "install": bool}`: start
 //!   the runtime, or attach to the one running, in the background. The `Status`
 //!   at once. With `only_running` it attaches only if the helper says a runtime
 //!   runs, or a job waits, and otherwise starts nothing: the state is then
 //!   `connected` and `nothing_running` is true. A body with any other field is
 //!   refused (HTTP 400), so that a field a newer front adds is never silently
-//!   ignored by an older link.
+//!   ignored by an older link. The link connects without installing anything
+//!   on the machine (its helper, or Endeavor's own Julia): where that is needed
+//!   the state is `needs_install`. `install: true` is the user's agreement; it
+//!   connects again with installs allowed and goes on, and the link keeps the
+//!   permission, reconnects included, for as long as it runs.
+//! - `POST /link/install`: the same agreement without a start: a link that
+//!   needs the helper installed connects again and installs it.
 //! - `POST /link/stop`: stop the runtime for every client. The link stays connected.
 //! - `POST /link/quit`: detach, remove the record and exit. The record goes
 //!   first, so a front that asks for a link right after gets a new one.
@@ -80,6 +86,30 @@ pub enum State {
     Ready,
     /// The last step didn't work: `error` says why. `POST /link/start` tries again.
     Failed,
+    /// Endeavor must install something on the machine first (`Status::needs_install`)
+    /// and the user hasn't agreed. Not a failure, and not tried again by itself:
+    /// `POST /link/start` or `POST /link/install` with permission goes on.
+    #[serde(rename = "needs_install")]
+    NeedsInstall,
+}
+
+/// What the link wants to install on the machine, and what it found there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InstallInfo {
+    pub what: InstallWhat,
+    /// The helper: the platform, where it would go, its size and what runs there already.
+    pub helper: Option<crate::client::NeedsInstall>,
+    /// Julia: what Endeavor would download there, as the helper said it.
+    pub julia: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstallWhat {
+    /// Endeavor's helper (this build's) isn't on the machine.
+    Helper,
+    /// No Julia was found there, and Endeavor's own would be downloaded.
+    Julia,
 }
 
 /// What `GET /link/status` answers.
@@ -106,6 +136,9 @@ pub struct Status {
     /// found none, and started nothing.
     #[serde(default)]
     pub nothing_running: bool,
+    /// With state `needs_install`: what, and what was found on the machine.
+    #[serde(default)]
+    pub needs_install: Option<InstallInfo>,
     /// The link process and the build it is from.
     pub pid: u32,
     pub build: String,
@@ -126,6 +159,9 @@ pub struct HelloInfo {
     pub julia: Option<JuliaInfo>,
     /// Slurm's partitions, on a machine that has Slurm.
     pub partitions: Option<Vec<Partition>>,
+    /// Asking Slurm for them failed, so `partitions` is empty.
+    #[serde(default)]
+    pub partitions_failed: bool,
     pub scratch: Option<String>,
 }
 
@@ -429,24 +465,38 @@ impl Link {
     /// `status` for the rest. A start under way, or a runtime attached, is not an
     /// error. `job` is what to submit on a cluster.
     pub fn start(&self, job: Option<JobRequest>) -> Result<Status, String> {
-        self.start_within(job, CALL_WAIT)
+        self.start_within(job, false, CALL_WAIT)
     }
 
-    /// `start`, with the call allowed `wait` at most.
-    pub fn start_within(&self, job: Option<JobRequest>, wait: Duration) -> Result<Status, String> {
-        self.call("POST", "/link/start", &serde_json::to_vec(&serde_json::json!({ "job": job })).map_err(|e| e.to_string())?, wait)
+    /// `start`, with the call allowed `wait` at most. `install` is the user's
+    /// agreement to install what the machine lacks (`State::NeedsInstall`).
+    pub fn start_within(&self, job: Option<JobRequest>, install: bool, wait: Duration) -> Result<Status, String> {
+        let body = if install { serde_json::json!({ "job": job, "install": true }) } else { serde_json::json!({ "job": job }) };
+        self.call("POST", "/link/start", &serde_json::to_vec(&body).map_err(|e| e.to_string())?, wait)
+    }
+
+    /// The user agreed to install the helper on the machine: a link waiting for
+    /// that connects again with installs allowed. Returns at once.
+    pub fn install(&self) -> Result<Status, String> {
+        self.install_within(CALL_WAIT)
+    }
+
+    /// `install`, with the call allowed `wait` at most.
+    pub fn install_within(&self, wait: Duration) -> Result<Status, String> {
+        self.call("POST", "/link/install", &[], wait)
     }
 
     /// Attach to the runtime if one is running there (or, on a cluster, a job waits
     /// or runs), and start nothing otherwise: then the status says `nothing_running`.
     /// Returns at once, like `start`.
     pub fn attach(&self) -> Result<Status, String> {
-        self.attach_within(CALL_WAIT)
+        self.attach_within(false, CALL_WAIT)
     }
 
-    /// `attach`, with the call allowed `wait` at most.
-    pub fn attach_within(&self, wait: Duration) -> Result<Status, String> {
-        self.call("POST", "/link/start", &serde_json::to_vec(&serde_json::json!({ "job": null, "only_running": true })).map_err(|e| e.to_string())?, wait)
+    /// `attach`, with the call allowed `wait` at most, and `install` as in `start_within`.
+    pub fn attach_within(&self, install: bool, wait: Duration) -> Result<Status, String> {
+        let body = if install { serde_json::json!({ "job": null, "only_running": true, "install": true }) } else { serde_json::json!({ "job": null, "only_running": true }) };
+        self.call("POST", "/link/start", &serde_json::to_vec(&body).map_err(|e| e.to_string())?, wait)
     }
 
     /// Stop the runtime for every client, and wait until it is gone (up to a minute

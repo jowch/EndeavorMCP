@@ -14,10 +14,15 @@ Without these tools the notebooks run on the user's own computer. With them (`li
 
 Don't add a machine, switch machines, submit a job or stop a runtime unless the user asked for it. A project remembers the machine and folder its last session used, so a new session may already be on one: `list_machines` says which.
 
+## Installing needs the user
+
+Looking at a machine installs nothing. When `add_machine` or `use_machine` returns `needs_install`, Endeavor has not changed the machine: its helper is missing (or older than this plugin's, an update) or Julia wasn't found and Endeavor would download its own. Tell the user exactly what the result says it would do (what, where, about how large, and whether Julia already runs there) and ask. Only after they agree, call the same tool again with the same arguments and `install: true`. Never set `install` on a first call, and never to get past an error. The user may instead tell you where Julia is: `add_machine` with `julia` set to its path, or to a shell line such as `module load julia`. A remembered project's first call never installs; its notebook tool says what is missing.
+
 ## The first time
 
 1. `list_machines`: the machines already added, and the `Host` names in the user's `~/.ssh/config` that are not added yet. If the user named a machine that is listed, skip to step 3.
 2. `add_machine(host)`: connects, and reports the machine's node, home folder, whether it has Slurm, its partitions and their limits. It waits up to 45 seconds. If it says it is still connecting, call `add_machine` again with the same host: the machine can't be used until a call has connected.
+   If it returns `needs_install`, see above.
    Whether Julia runs in Slurm jobs or directly on the machine is the user's choice. When the machine has Slurm and the user hasn't said, ask: a workstation can have Slurm's tools without being a cluster. Pass `slurm: true` (jobs) or `slurm: false` (directly). Left out, a new machine with Slurm gets jobs; one added before stays as it was saved. The result says which it used (`cluster`, `runs_in`) and how to change it; changing is refused while Julia runs there.
 3. `use_machine(machine)`: puts this session on it and starts or attaches to the Julia there. On a plain server that is all. On a cluster with no job running it submits nothing and returns `needs_job` with the saved default resources, and the session stays where it was: propose the resources to the user (for example "8 CPUs, 32 GB, 8 hours on `shared`?"), and once they agree call `use_machine` again with those values (`gpus: 0` means no GPU; `extra_sbatch_flags` entries are one string each, such as `"--constraint=a100"`). Never submit a job the user hasn't agreed to. A call that fails leaves the session where it was.
 4. Tell the user the `browser_url`, and on a cluster the queue state and when the job ends. Then work as in **pluto-session**: the session starts with no notebook on the new machine, so create or open one there.
@@ -48,6 +53,7 @@ Details of each tool and its result: [machine-tools.md](reference/machine-tools.
 
 | Mistake | Fix |
 |---------|-----|
+| Set `install: true` before the user agreed | Install nothing without a yes to the specific thing the result names |
 | `use_machine` with made-up resources on a cluster | Show the user the defaults it returned and have them confirm or change them |
 | Let a machine with Slurm tools become a cluster without asking | Ask whether Julia should run in Slurm jobs, and pass `slurm` |
 | Read a server's files with `Read` or `Bash` | `read_file` and `run_shell`; your own tools see the user's computer |

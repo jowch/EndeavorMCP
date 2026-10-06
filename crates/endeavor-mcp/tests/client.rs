@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Notice, Options, Server, Transport, connect, no_helper, start};
+use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Notice, Options, Running, Server, Transport, connect, connect_checked, no_helper, start};
 use wire::files;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -41,7 +41,7 @@ impl Place {
     }
 
     fn options(&self) -> Options<'static> {
-        Options { auth: Auth::Batch, root: self.root.display().to_string(), state: self.state.display().to_string(), depot: String::new(), exit_idle: false, helper: &helper_binary }
+        Options { auth: Auth::Batch, root: self.root.display().to_string(), state: self.state.display().to_string(), depot: String::new(), exit_idle: false, allow_install: true, helper: &helper_binary }
     }
 
     fn transport(&self) -> Transport {
@@ -391,4 +391,120 @@ fn a_line_that_is_not_utf8_on_ssh_stderr_does_not_hide_the_reason_after_it() {
     let transport = Transport::Shell { env: Vec::new(), ask: Some(ask.into()) };
     let err = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).err().expect("refused");
     assert!(err.contains("refused the sign-in") && err.contains("ssh-add"), "{err}");
+}
+
+/// Everything under `dir`, as paths.
+fn tree(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        found.push(entry.path());
+        if entry.path().is_dir() {
+            found.extend(tree(&entry.path()));
+        }
+    }
+    found
+}
+
+#[test]
+fn without_permission_a_server_that_lacks_the_helper_is_only_looked_at() {
+    let place = Place::new("no-install");
+    let options = Options { allow_install: false, ..place.options() };
+    let (seen, on) = events();
+    let err = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).err().expect("no connection");
+    let needs = err.needs.expect("it says what it needs");
+    assert!(!err.retry);
+    assert_eq!(needs.folder, place.installed().display().to_string());
+    assert!(needs.bytes > 10_000 && !needs.update && needs.running.is_none(), "{needs:?}");
+    assert_eq!((needs.os.as_str(), needs.arch.as_str()), (String::from_utf8(Command::new("uname").arg("-s").output().unwrap().stdout).unwrap().trim(), String::from_utf8(Command::new("uname").arg("-m").output().unwrap().stdout).unwrap().trim()));
+    assert!(err.message.contains("isn't installed") && err.message.contains("wasn't allowed"), "{}", err.message);
+    assert!(matches!(seen.lock().unwrap().as_slice(), [Event::Connected { .. }]), "it never says the helper is there: {:?}", seen.lock().unwrap());
+    assert!(!place.root.exists() && !place.home.join(".cache").exists(), "nothing was written on the server: {:?}", tree(&place.home));
+    no_helper_left(&place.state);
+    // `connect` gives the message alone.
+    let message = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().expect("no connection");
+    assert_eq!(message, err.message);
+}
+
+#[test]
+fn a_runtime_recorded_and_alive_there_is_reported_without_the_helper() {
+    let place = Place::new("no-install-running");
+    let runtime = FakeRuntime::start(&place.state);
+    let pid = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(place.state.join("runtime.json")).unwrap()).unwrap()["pid"].as_u64().unwrap() as u32;
+    let options = Options { allow_install: false, ..place.options() };
+    let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    assert_eq!(needs.running, Some(Running::Process(pid)));
+    // A record whose process is gone isn't reported.
+    drop(runtime);
+    wait_gone(pid);
+    let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    assert_eq!(needs.running, None);
+    assert!(!place.root.exists());
+}
+
+fn wait_gone(pid: u32) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // SAFETY: signal 0 only checks the process.
+    while unsafe { libc::kill(pid as i32, 0) } == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_slurm_job_recorded_in_the_cluster_folder_is_reported() {
+    let place = Place::new("no-install-job");
+    std::fs::write(place.state.join("job.json"), r#"{"job":"4242","summary":"8 CPUs"}"#).unwrap();
+    let cluster = Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() };
+    let options = Options { allow_install: false, ..place.options() };
+    let needs = connect_checked(&cluster, &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    assert_eq!(needs.running, Some(Running::Job("4242".into())));
+    // A plain server's folder isn't looked at for jobs.
+    let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    assert_eq!(needs.running, None);
+}
+
+#[test]
+fn the_default_state_folders_are_looked_in_when_none_is_given() {
+    let place = Place::new("no-install-default");
+    let state_home = place.home.join("xdg-state");
+    let node = hostname();
+    let (process, cluster) = (state_home.join("endeavor/serve").join(&node), state_home.join("endeavor/cluster"));
+    std::fs::create_dir_all(&process).unwrap();
+    std::fs::create_dir_all(&cluster).unwrap();
+    std::fs::write(process.join("runtime.json"), serde_json::json!({ "launcher": "process", "node": node, "pid": std::process::id(), "token": "t" }).to_string()).unwrap();
+    std::fs::write(cluster.join("runtime.json"), serde_json::json!({ "launcher": "slurm", "node": "n1", "pid": 7, "job": "99", "token": "t" }).to_string()).unwrap();
+    let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string()), ("XDG_STATE_HOME".into(), state_home.display().to_string())], ask: None };
+    let options = Options { allow_install: false, state: String::new(), ..place.options() };
+    let needs = |server: &Server| connect_checked(server, &transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    assert_eq!(needs(&Server::default()).running, Some(Running::Process(std::process::id())));
+    assert_eq!(needs(&Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() }).running, Some(Running::Job("99".into())));
+}
+
+#[test]
+fn an_older_helper_makes_it_an_update() {
+    let place = Place::new("no-install-older");
+    std::fs::create_dir_all(place.root.join("0.0.1-old")).unwrap();
+    std::fs::write(place.root.join("0.0.1-old/endeavor"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(place.root.join("0.0.1-old/endeavor"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let options = Options { allow_install: false, ..place.options() };
+    let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    assert!(needs.update);
+    assert!(!place.installed().exists());
+}
+
+#[test]
+fn with_permission_it_installs_as_before_and_a_helper_already_there_needs_none() {
+    let place = Place::new("install-allowed");
+    let (seen, on) = events();
+    let (channel, _) = connect_checked(&Server::default(), &place.transport(), &place.options(), &Cancel::default(), &on).expect("connects");
+    assert!(seen.lock().unwrap().contains(&Event::Helper { installed: true }));
+    assert!(place.installed().join("endeavor").exists());
+    channel.detach();
+    no_helper_left(&place.state);
+    // Without permission, with the helper there: it connects.
+    let (seen, on) = events();
+    let options = Options { allow_install: false, ..place.options() };
+    let (channel, _) = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).expect("connects");
+    assert!(seen.lock().unwrap().contains(&Event::Helper { installed: false }));
+    channel.detach();
+    no_helper_left(&place.state);
 }

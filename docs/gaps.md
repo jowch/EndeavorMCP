@@ -184,6 +184,24 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The machine tools
 
+- **A runtime without the helper is looked for by `sh`.** The bootstrap reads
+  `runtime.json` with shell patterns (the first `pid` followed by a quote and
+  a colon, and the first `job` the same way), so a node name that holds
+  `pid":` would confuse it. It checks the process with `kill -0` only, not its
+  port, so a recycled pid reads as a runtime. For a cluster it reports a
+  recorded job without asking Slurm whether it still exists.
+- **The agreement is one flag for everything.** `install: true` allows the
+  helper and Julia's download alike; a user can't allow one and not the other.
+- **Julia's download on a server whose Julia is found later is not retried
+  by the link by itself.** After `needs_install` for Julia it waits for
+  `install: true` or for `add_machine` with a `julia` setting.
+- **The Julia decision is tested through the link and the tools** with a fake
+  `curl`, not against a real download; its unit test would need a login shell
+  that finds no Julia, which a developer's machine often has. That test
+  skips itself where a login shell finds Julia.
+- **The look at a server only reads the platform's helper size** from the
+  local helper file (or the fetched one), so the size is the tar's, not the
+  transfer's after compression by ssh.
 - **Julia is not known when a machine is added.** The helper has no call for
   it, so `add_machine` reports `julia: null` until the first runtime start.
 - **Adding a cluster takes two connections.** The first link connects as a

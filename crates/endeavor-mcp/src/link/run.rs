@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use wire::files::{Reply, Request, RuntimeState};
 use wire::slurm::JobRequest;
 
-use super::{HelloInfo, JobInfo, JuliaInfo, QueueInfo, Record, RuntimeInfo, State, Status, valid_id};
+use super::{HelloInfo, InstallInfo, InstallWhat, JobInfo, JuliaInfo, QueueInfo, Record, RuntimeInfo, State, Status, valid_id};
 use crate::client::{Auth, CLOSED, Cancel, Channel, ConnectError, Event, Listener, MachinesFile, Messages, Notice, Options, Server, Transport, connect_checked, start, this_platform};
 use crate::http::{self, Framing, Head};
 use crate::standalone::Env;
@@ -85,6 +85,11 @@ struct Inner {
     check_first: bool,
     /// The last such start found nothing (`Status::nothing_running`).
     nothing_running: bool,
+    /// What the machine needs installed, while the state is `needs_install`.
+    needs: Option<InstallInfo>,
+    /// The current connection was made with installs allowed, which decides
+    /// whether a permission given since needs a new one.
+    conn_allowed: bool,
 }
 
 struct Shared {
@@ -100,6 +105,10 @@ struct Shared {
     /// Control requests in flight.
     busy: AtomicUsize,
     leaving: AtomicBool,
+    /// The user agreed to installs on the machine (`POST /link/start` with
+    /// `install`, or `/link/install`). Kept for as long as the link runs, so a
+    /// reconnect doesn't need it again.
+    allow_install: AtomicBool,
     idle: Duration,
     hooks: Hooks,
 }
@@ -191,11 +200,14 @@ pub(crate) fn main(argv: &[String]) -> ! {
             gone_early: false,
             check_first: false,
             nothing_running: false,
+            needs: None,
+            conn_allowed: false,
         }),
         cancel: Mutex::new(Arc::new(Cancel::default())),
         activity: Mutex::new(Instant::now()),
         busy: AtomicUsize::new(0),
         leaving: AtomicBool::new(false),
+        allow_install: AtomicBool::new(false),
         idle,
         hooks: Hooks::read(),
     });
@@ -237,6 +249,7 @@ impl Shared {
             job: i.job.clone(),
             queue: i.queue.clone(),
             nothing_running: i.nothing_running,
+            needs_install: i.needs.clone(),
             pid: std::process::id(),
             build: crate::embedded::BUILD_VERSION.to_owned(),
         })
@@ -296,6 +309,7 @@ impl Shared {
             i.ended = None;
             i.state = State::Starting;
             i.error = None;
+            i.needs = None;
             i.queue = None;
             i.step = Some(format!("Starting the runtime on {}", i.name));
             Some((channel, job, i.conn, i.epoch, std::mem::take(&mut i.check_first)))
@@ -350,9 +364,52 @@ impl Shared {
         }
     }
 
+    /// The user agreed to installs on the machine. A connection made without that
+    /// which refused a download of Julia is dropped, so that the next one allows it
+    /// (the wish for a runtime stays). True then. A machine that lacks the helper has
+    /// no connection, and the caller connects it again.
+    fn permit(&self, i: &mut Inner) -> bool {
+        self.allow_install.store(true, Ordering::SeqCst);
+        i.needs.as_ref().is_some_and(|n| n.what == InstallWhat::Julia) && self.redo_connection(i)
+    }
+
+    /// Drop the connection and connect again, with installs allowed. False when there is none.
+    fn redo_connection(&self, i: &mut Inner) -> bool {
+        let Some(channel) = i.channel.take() else { return false };
+        // A channel that was let go reports no end of its own.
+        let (inbox, conn) = (self.inbox.clone(), i.conn);
+        std::thread::spawn(move || {
+            channel.detach();
+            let _ = inbox.send(Msg::Closed(conn));
+        });
+        i.state = State::Connecting;
+        i.needs = None;
+        i.error = None;
+        i.step = Some(format!("Connecting to {} again, to download Julia there", i.name));
+        true
+    }
+
+    /// `POST /link/install`.
+    fn request_install(&self) {
+        self.with(|i| {
+            if !self.permit(i) && i.state == State::NeedsInstall && i.channel.is_none() {
+                self.reconnect_now(i);
+            }
+        });
+    }
+
+    fn reconnect_now(&self, i: &mut Inner) {
+        (i.state, i.error, i.needs) = (State::Connecting, None, None);
+        if !i.connecting && !i.kick_pending {
+            i.kick_pending = true;
+            let _ = self.inbox.send(Msg::Kick);
+        }
+    }
+
     /// `POST /link/start`.
-    fn request_start(self: &Arc<Shared>, job: Option<JobRequest>, only_running: bool) {
+    fn request_start(self: &Arc<Shared>, job: Option<JobRequest>, only_running: bool, install: bool) {
         let connected = self.with(|i| {
+            let redone = install && self.permit(i);
             if i.runtime.is_some() || i.starting {
                 return true;
             }
@@ -360,14 +417,17 @@ impl Shared {
             i.resume = None;
             i.check_first = only_running;
             i.nothing_running = false;
+            if redone {
+                return false;
+            }
             if i.channel.is_some() {
                 return true;
             }
-            if i.state == State::Failed {
-                (i.state, i.error) = (State::Connecting, None);
-            }
             // No connection: the supervisor starts the runtime once it has one, and
             // tries now if it was waiting. One wake-up is enough, and none while it connects.
+            if matches!(i.state, State::Failed | State::NeedsInstall) {
+                (i.state, i.error, i.needs) = (State::Connecting, None, None);
+            }
             if !i.connecting && !i.kick_pending {
                 i.kick_pending = true;
                 let _ = self.inbox.send(Msg::Kick);
@@ -441,6 +501,7 @@ fn supervise(shared: Arc<Shared>, inbox: Receiver<Msg>) -> ! {
             i.state = State::Connecting;
             i.connecting = true;
             i.kick_pending = false;
+            i.needs = None;
             i.step = Some(format!("Connecting to {}", i.name));
             i.name.clone()
         });
@@ -450,6 +511,34 @@ fn supervise(shared: Arc<Shared>, inbox: Receiver<Msg>) -> ! {
             Err(error) => {
                 if shared.leaving.load(Ordering::SeqCst) {
                     park();
+                }
+                if let Some(helper) = error.needs.clone() {
+                    // The permission may have come while this connect looked.
+                    if shared.allow_install.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    eprintln!("The helper isn't installed on {name}; waiting for the user's agreement to install it");
+                    let parked = shared.with(|i| {
+                        // Checked with the lock held, so that a permission is never lost between the two.
+                        if shared.allow_install.load(Ordering::SeqCst) {
+                            return false;
+                        }
+                        i.connecting = false;
+                        i.state = State::NeedsInstall;
+                        i.error = None;
+                        i.wanted = None;
+                        i.resume = None;
+                        i.step = Some(format!("Endeavor's helper isn't installed on {name}"));
+                        i.needs = Some(InstallInfo { what: InstallWhat::Helper, helper: Some(helper), julia: None });
+                        true
+                    });
+                    if !parked {
+                        continue;
+                    }
+                    (reconnecting, lost_since, delay) = (false, None, RETRY_FIRST);
+                    shared.listener.disconnected();
+                    wait_for(&inbox, Duration::MAX);
+                    continue;
                 }
                 let lost = *lost_since.get_or_insert_with(Instant::now);
                 let retry = reconnecting && error.retry && lost.elapsed() < RETRY_GIVE_UP;
@@ -517,13 +606,18 @@ fn hello_wants_slurm(shared: &Shared) -> bool {
 
 /// Ask a machine with Slurm about its partitions, for `hello`.
 fn find_partitions(shared: &Shared, channel: &Channel, conn: u64) {
-    if let Ok(Reply::Slurm { scheduler }) = channel.files(Request::Slurm) {
-        shared.with(|i| {
-            if let Some(hello) = i.hello.as_mut().filter(|_| i.conn == conn) {
-                (hello.partitions, hello.scratch) = (Some(scheduler.partitions), scheduler.scratch);
+    let found = match channel.files(Request::Slurm) {
+        Ok(Reply::Slurm { scheduler }) => Some(scheduler),
+        _ => None,
+    };
+    shared.with(|i| {
+        if let Some(hello) = i.hello.as_mut().filter(|_| i.conn == conn) {
+            match found {
+                Some(scheduler) => (hello.partitions, hello.scratch) = (Some(scheduler.partitions), scheduler.scratch),
+                None => (hello.partitions, hello.partitions_failed) = (Some(Vec::new()), true),
             }
-        });
-    }
+        }
+    });
 }
 
 /// After a reconnect, attach to the runtime that was asked for only if the
@@ -572,7 +666,7 @@ fn reattach(shared: &Shared, channel: &Channel, job: Option<JobRequest>) {
 
 /// Connect to the machine: its record is read again, so a change in the file is used.
 fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
-    let wrong = |message: String| ConnectError { message, retry: false };
+    let wrong = |message: String| ConnectError { message, retry: false, needs: None };
     let id = shared.with(|i| i.id.clone());
     let server = shared
         .machines
@@ -587,7 +681,9 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
             crate::release::helper_for(os, arch, &Env::from_vars(&|name| std::env::var(name).ok()).helpers_dir())
         }
     };
-    let options = Options { auth: Auth::Batch, root: shared.hooks.root.clone(), state: shared.hooks.state.clone(), depot: shared.hooks.depot.clone(), exit_idle: true, helper: &helper };
+    let allowed = shared.allow_install.load(Ordering::SeqCst);
+    shared.with(|i| i.conn_allowed = allowed);
+    let options = Options { auth: Auth::Batch, root: shared.hooks.root.clone(), state: shared.hooks.state.clone(), depot: shared.hooks.depot.clone(), exit_idle: true, allow_install: allowed, helper: &helper };
     let transport = if shared.hooks.shell { Transport::Shell { env: Vec::new(), ask: shared.hooks.ask.clone() } } else { Transport::for_server(&server) };
     let cancel = Arc::new(Cancel::default());
     *shared.cancel.lock().unwrap() = cancel.clone();
@@ -672,6 +768,24 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
                     }),
                     // The connection ended under the start: `Closed` follows and takes the start along to the next one.
                     Err(message) if message == CLOSED || shared.with(|i| i.channel.as_ref().is_some_and(|c| c.is_closed())) => {}
+                    Err(message) if message.starts_with(crate::julia::NOT_FOUND) => {
+                        eprintln!("Starting the runtime: {message}");
+                        let redone = shared.with(|i| {
+                            (i.starting, i.gone_early, i.runtime, i.job, i.queue) = (false, false, None, None, None);
+                            if shared.allow_install.load(Ordering::SeqCst) && !i.conn_allowed && shared.redo_connection(i) {
+                                return true;
+                            }
+                            i.wanted = None;
+                            i.state = State::NeedsInstall;
+                            i.error = None;
+                            i.step = Some(format!("Julia wasn't found on {}", i.name));
+                            i.needs = Some(InstallInfo { what: InstallWhat::Julia, helper: None, julia: Some(message[crate::julia::NOT_FOUND.len()..].trim().to_owned()) });
+                            false
+                        });
+                        if !redone {
+                            shared.listener.restart_failed();
+                        }
+                    }
                     Err(message) => {
                         eprintln!("Starting the runtime failed: {message}");
                         shared.with(|i| {
@@ -838,20 +952,24 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
     match (head.method(), head.path()) {
         ("GET", "/link/status") => reply(&mut connection, "200 OK", &json!(shared.status())),
         ("POST", "/link/start") => {
-            let (job, only_running) = if body.is_empty() {
-                (None, false)
+            let (job, only_running, install) = if body.is_empty() {
+                (None, false, false)
             } else {
                 let Ok(asked) = serde_json::from_slice::<Value>(&body) else { return reply(&mut connection, "400 Bad Request", &json!({ "error": "the body isn't JSON" })) };
-                if let Some(unknown) = asked.as_object().and_then(|fields| fields.keys().find(|key| !matches!(key.as_str(), "job" | "only_running"))) {
+                if let Some(unknown) = asked.as_object().and_then(|fields| fields.keys().find(|key| !matches!(key.as_str(), "job" | "only_running" | "install"))) {
                     let said = format!("This link doesn't know the field \"{unknown}\" in a start request, so it didn't start anything.");
                     return reply(&mut connection, "400 Bad Request", &json!({ "error": said }));
                 }
                 let Ok(job) = serde_json::from_value::<Option<JobRequest>>(asked.get("job").cloned().unwrap_or(Value::Null)) else {
                     return reply(&mut connection, "400 Bad Request", &json!({ "error": "job isn't a job request" }));
                 };
-                (job, asked["only_running"] == true)
+                (job, asked["only_running"] == true, asked["install"] == true)
             };
-            shared.request_start(job, only_running);
+            shared.request_start(job, only_running, install);
+            reply(&mut connection, "200 OK", &json!(shared.status()))
+        }
+        ("POST", "/link/install") => {
+            shared.request_install();
             reply(&mut connection, "200 OK", &json!(shared.status()))
         }
         ("POST", "/link/stop") => match shared.request_stop() {
@@ -865,7 +983,7 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
             }
             reply(&mut connection, "200 OK", &json!({ "ok": true }))
         }
-        (_, "/link/status" | "/link/start" | "/link/stop" | "/link/quit") => reply(&mut connection, "405 Method Not Allowed", &json!({ "error": "method_not_allowed" })),
+        (_, "/link/status" | "/link/start" | "/link/install" | "/link/stop" | "/link/quit") => reply(&mut connection, "405 Method Not Allowed", &json!({ "error": "method_not_allowed" })),
         _ => reply(&mut connection, "404 Not Found", &json!({ "error": "not_found" })),
     }
 }
