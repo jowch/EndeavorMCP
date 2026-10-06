@@ -134,13 +134,16 @@ pub fn valid_host(host: &str) -> Result<(), String> {
 pub struct Options<'a> {
     pub auth: Auth,
     /// Where the helper and `runtime/` are installed on the server, in a
-    /// folder named for this build. Empty is `~/.cache/endeavor`.
+    /// folder named for this build. A leading `~/` is the server's home.
+    /// Empty is `~/.cache/endeavor`.
     pub root: String,
     /// The runtime's state folder on the server: an absolute path, or one
-    /// relative to `root`. `Server::launcher` has the app's name for it.
+    /// relative to `root`; a leading `~/` is the server's home. `Server::launcher`
+    /// has the app's name for it.
     /// Empty is the helper's own default, the folder `serve` and `mcp` use.
     pub state: String,
-    /// Julia's `JULIA_DEPOT_PATH` on the server. Empty is `<root>/depot:`.
+    /// Julia's `JULIA_DEPOT_PATH` on the server. A leading `~/` in its first
+    /// entry is the server's home. Empty is `<root>/depot:`.
     pub depot: String,
     /// The helper binary to send to a server whose `uname -s` is `os` and
     /// `uname -m` is `arch`, as `linux` and `x86_64` (`arm64` as `aarch64`).
@@ -167,6 +170,9 @@ pub fn bootstrap_script(version: &str) -> String {
     [
         &format!("v={version}"),
         r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln || exit 1"#,
+        r#"case "$rt" in [~]|[~]/*) rt="$HOME${rt#?}";; esac"#,
+        r#"case "$st" in [~]|[~]/*) st="$HOME${st#?}";; esac"#,
+        r#"case "$dp" in [~]|[~]/*|[~]:*) dp="$HOME${dp#?}";; esac"#,
         r#"c="${rt:-$HOME/.cache/endeavor}""#,
         r#"d="$c/$v""#,
         r#"set --; if [ -n "$st" ]; then case "$st" in /*) sd="$st";; *) sd="$c/$st";; esac; set -- --state-dir "$sd"; fi"#,
@@ -272,6 +278,11 @@ impl Cancel {
         *self.pid.lock().unwrap() = Some(pid);
         !self.cancelled.load(Ordering::SeqCst)
     }
+
+    /// The connect is over and ssh's pid is no longer this connect's to kill.
+    fn finished(&self) {
+        *self.pid.lock().unwrap() = None;
+    }
 }
 
 /// ssh runs in its own process group, which ends with it: the askpass it may
@@ -296,6 +307,12 @@ fn platform(os: &str, arch: &str) -> (String, String) {
 /// Run the bootstrap on `server` and wait for the helper's hello. The runtime
 /// starts later, when the channel is asked to (`start`).
 pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), String> {
+    let result = connect_with(server, transport, options, cancel, on);
+    cancel.finished();
+    result
+}
+
+fn connect_with(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), String> {
     let preamble = preamble(server, options)?;
     let version = crate::embedded::BUILD_VERSION;
     let mut command = transport.command(&bootstrap_script(version), &options.auth)?;
@@ -310,10 +327,10 @@ pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let host = transport.host();
-    let give_up = |mut child: Child, why: Option<String>| {
+    let give_up = |mut child: Child, why: Option<String>, signed_in: bool| {
         kill_group(child.id());
         let status = child.wait().ok();
-        why.unwrap_or_else(|| explain(transport, &options.auth, &stderr.finish(), status, cancel.cancelled.load(Ordering::SeqCst)))
+        why.unwrap_or_else(|| explain(transport, &options.auth, &stderr.finish(), status, cancel.cancelled.load(Ordering::SeqCst), signed_in))
     };
 
     // The script reads these before it says anything; a failed write shows as the script's end.
@@ -321,10 +338,11 @@ pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel
 
     // Login scripts may print things before the script's own line.
     let (os, arch, have) = loop {
-        let mut line = String::new();
-        match stdout.read_line(&mut line) {
-            Ok(0) | Err(_) => return Err(give_up(child, None)),
+        let mut bytes = Vec::new();
+        match stdout.read_until(b'\n', &mut bytes) {
+            Ok(0) | Err(_) => return Err(give_up(child, None, false)),
             Ok(_) => {
+                let line = String::from_utf8_lossy(&bytes);
                 let words: Vec<&str> = line.split_whitespace().collect();
                 if let ["ENDEAVOR", os, arch, have @ ("have" | "need")] = words[..] {
                     break (os.to_owned(), arch.to_owned(), have == "have");
@@ -341,7 +359,7 @@ pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel
             let (os, arch) = platform(&os, &arch);
             match (options.helper)(&os, &arch).and_then(|helper| install_tar(&helper)) {
                 Ok(tar) => Some(tar),
-                Err(e) => return Err(give_up(child, Some(e))),
+                Err(e) => return Err(give_up(child, Some(e), true)),
             }
         }
     };
@@ -349,13 +367,13 @@ pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel
         let mut send = format!("{}\n", tar.len()).into_bytes();
         send.extend(tar);
         if stdin.write_all(&send).and_then(|_| stdin.flush()).is_err() {
-            return Err(give_up(child, None));
+            return Err(give_up(child, None, true));
         }
     }
     on(Event::Helper { installed: install.is_some() });
 
     let channel = Channel::open(child, stdin, stdout);
-    let hello = channel.wait_hello(|| explain(transport, &options.auth, &stderr.finish(), None, cancel.cancelled.load(Ordering::SeqCst)))?;
+    let hello = channel.wait_hello(|| explain(transport, &options.auth, &stderr.finish(), None, cancel.cancelled.load(Ordering::SeqCst), true))?;
     Ok((channel, hello))
 }
 
@@ -473,8 +491,10 @@ impl Stderr {
 }
 
 /// What went wrong, in plain words, from ssh's stderr. In batch mode ssh can't
-/// ask, so the sign-in failures say what to do instead.
-fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool) -> String {
+/// ask, so the sign-in failures say what to do instead. Once `signed_in`, what
+/// the server's script said is not about signing in or the network, and the
+/// last of it is shown as it is.
+fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> String {
     if cancelled {
         return "Cancelled.".into();
     }
@@ -482,6 +502,12 @@ fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option
     let batch = *auth == Auth::Batch;
     let said = |needle: &str| stderr.iter().any(|l| l.contains(needle));
     let last = stderr.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty());
+    if signed_in {
+        return match last {
+            Some(line) => format!("The connection to {host} ended: {line}"),
+            None => format!("The connection to {host} ended before Endeavor could start{}.", status.map(|s| format!(" ({s})")).unwrap_or_default()),
+        };
+    }
     if said("Could not resolve hostname") {
         format!("Couldn't find a server called {host}. Check the SSH host.")
     } else if said("REMOTE HOST IDENTIFICATION HAS CHANGED") {

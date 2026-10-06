@@ -129,3 +129,15 @@ fn the_refuse_hook_sees_the_session_tool_and_arguments() {
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n") && response.contains("This runtime is from an older build.") && response.contains(r#""isError":true"#), "{response}");
     assert_eq!(*seen.lock().unwrap(), [("7".to_owned(), "execute_cell".to_owned(), serde_json::json!({ "cell_id": "a" }))]);
 }
+
+#[test]
+fn a_drop_then_a_deliberate_stop_says_the_stop() {
+    let listener = away();
+    assert!(post(&listener, "secret", LIST).contains("reconnecting by itself"));
+    listener.disconnected();
+    assert!(post(&listener, "secret", LIST).contains("Endeavor isn't connected to lab-server."));
+    listener.restarting();
+    assert!(post(&listener, "secret", LIST).contains("Endeavor is restarting Julia on lab-server."));
+    listener.restart_failed();
+    assert!(post(&listener, "secret", LIST).contains("Julia on lab-server couldn't start."));
+}

@@ -84,31 +84,43 @@ impl Server {
         }
     }
 
-    /// The SSH host as typed: `host`, or `host:port`.
+    /// The SSH host as typed: `host`, or `host:port`. An IPv6 address, whose
+    /// colons would run into the port, is bracketed (`[::1]:2222`, or
+    /// `user@[::1]:2222`).
     pub fn ssh_target(&self) -> String {
-        match self.port {
-            Some(port) => format!("{}:{port}", self.ssh_host),
-            None => self.ssh_host.clone(),
+        let Some(port) = self.port else { return self.ssh_host.clone() };
+        match self.ssh_host.rsplit_once('@').unwrap_or(("", &self.ssh_host)) {
+            (user, host) if host.contains(':') => format!("{}[{host}]:{port}", if user.is_empty() { String::new() } else { format!("{user}@") }),
+            _ => format!("{}:{port}", self.ssh_host),
         }
     }
 
     /// Read `ssh_target`'s text back: a trailing `:port` is the port. A host
-    /// with more colons (an IPv6 address) is taken whole.
+    /// with more colons (an IPv6 address) is taken whole, and needs brackets to
+    /// have a port.
     pub fn parse_target(text: &str) -> Result<(String, Option<u16>), String> {
         let text = text.trim();
-        if text.is_empty() {
-            return Err("Enter an SSH host: an alias from ~/.ssh/config, or user@host.".into());
-        }
-        if text.chars().any(char::is_whitespace) || text.starts_with('-') {
-            return Err(format!("\"{text}\" isn't an SSH host name."));
-        }
-        match text.rsplit_once(':') {
-            Some((host, port)) if !host.is_empty() && !host.contains(':') => match port.parse::<u16>() {
-                Ok(port) if port > 0 => Ok((host.to_owned(), Some(port))),
-                _ => Err(format!("\"{port}\" isn't a port number.")),
+        let port = |port: &str| match port.parse::<u16>() {
+            Ok(port) if port > 0 => Ok(Some(port)),
+            _ => Err(format!("\"{port}\" isn't a port number.")),
+        };
+        let (user, address) = match text.split_once('@') {
+            Some((user, address)) => (format!("{user}@"), address),
+            None => (String::new(), text),
+        };
+        let (host, port) = match address.strip_prefix('[') {
+            Some(bracketed) => match bracketed.split_once(']') {
+                Some((host, "")) => (format!("{user}{host}"), None),
+                Some((host, rest)) if rest.starts_with(':') => (format!("{user}{host}"), port(&rest[1..])?),
+                _ => return Err(format!("\"{text}\" isn't an SSH host name.")),
             },
-            _ => Ok((text.to_owned(), None)),
-        }
+            None => match text.rsplit_once(':') {
+                Some((host, p)) if !host.is_empty() && !host.contains(':') => (host.to_owned(), port(p)?),
+                _ => (text.to_owned(), None),
+            },
+        };
+        super::ssh::valid_host(&host)?;
+        Ok((host, port))
     }
 
     /// The helper's Julia arguments for this server. A path to a julia binary

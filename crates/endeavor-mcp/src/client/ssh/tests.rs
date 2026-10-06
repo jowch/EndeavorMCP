@@ -204,7 +204,7 @@ fn the_platform_is_named_as_helper_folders_are() {
 }
 
 fn say_in(auth: &Auth, line: &str) -> String {
-    explain(&Transport::Ssh { host: "lab".into(), port: None }, auth, &[line.to_owned()], None, false)
+    explain(&Transport::Ssh { host: "lab".into(), port: None }, auth, &[line.to_owned()], None, false, false)
 }
 
 #[test]
@@ -219,8 +219,8 @@ fn explains_ssh_failures_plainly() {
     assert!(say("ssh: connect to host lab port 22: No route to host").contains("Couldn't reach lab"));
     assert!(say("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@").contains("ssh-keygen -R lab"));
     assert_eq!(say("bash: line 1: sh: command not found"), "The connection to lab ended: bash: line 1: sh: command not found");
-    assert_eq!(explain(&lab(), &ask, &[], None, true), "Cancelled.");
-    assert_eq!(explain(&lab(), &ask, &[], None, false), "The connection to lab ended before Endeavor could start.");
+    assert_eq!(explain(&lab(), &ask, &[], None, true, false), "Cancelled.");
+    assert_eq!(explain(&lab(), &ask, &[], None, false, false), "The connection to lab ended before Endeavor could start.");
 }
 
 #[test]
@@ -232,8 +232,46 @@ fn in_batch_mode_a_sign_in_failure_says_what_to_do() {
     assert!(denied.contains("ssh-add") && denied.contains("password or a code, which Endeavor can't ask for yet"), "{denied}");
     // The same words for a password server: ssh lists its methods.
     assert_eq!(say("jc@lab: Permission denied (publickey,password,keyboard-interactive)."), denied);
-    let with_port = explain(&Transport::Ssh { host: "lab".into(), port: Some(2222) }, &Auth::Batch, &["Host key verification failed.".to_owned()], None, false);
+    let with_port = explain(&Transport::Ssh { host: "lab".into(), port: Some(2222) }, &Auth::Batch, &["Host key verification failed.".to_owned()], None, false, false);
     assert!(with_port.contains("`ssh -p 2222 lab`"), "{with_port}");
     // The rest reads the same as without batch mode.
     assert!(say("ssh: connect to host lab port 22: Operation timed out").contains("timed out"));
+}
+
+#[test]
+fn after_sign_in_the_servers_own_words_are_shown() {
+    let said = |lines: &[&str]| explain(&lab(), &Auth::Batch, &lines.iter().map(|l| l.to_string()).collect::<Vec<_>>(), None, false, true);
+    assert_eq!(
+        said(&["mkdir: cannot create directory '/opt/x': Permission denied", "Endeavor: installing into /opt/x/v failed"]),
+        "The connection to lab ended: Endeavor: installing into /opt/x/v failed"
+    );
+    assert_eq!(said(&["tar: write error: Connection timed out"]), "The connection to lab ended: tar: write error: Connection timed out");
+    assert_eq!(said(&[]), "The connection to lab ended before Endeavor could start.");
+    assert_eq!(explain(&lab(), &Auth::Batch, &[], None, true, true), "Cancelled.");
+}
+
+/// What the script hands the helper for `root`, `state` and `depot` under `home`.
+#[cfg(unix)]
+fn where_they_land(home: &Path, root: &str, state: &str, depot: &str) -> (String, String, String) {
+    let args = connect_args(home, &format!("{root}\n{state}\n{depot}\n--julia\nauto\nprocess\n"));
+    let at = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
+    (at("--state-dir"), at("--runtime"), at("--depot"))
+}
+
+#[test]
+#[cfg(unix)]
+fn a_leading_tilde_is_the_servers_home() {
+    let home = crate::client::scratch("bootstrap-tilde");
+    let h = home.display().to_string();
+    fake_install(&home.join("r"));
+    assert_eq!(where_they_land(&home, "~/r", "~/s", "~/d:"), (format!("{h}/s"), format!("{h}/r/v1/runtime"), format!("{h}/d:")));
+    // Only the depot's first entry is the home's; a `~` that is not first or not leading stays as it is.
+    assert_eq!(where_they_land(&home, "~/r", "rel", "~/d:/x/~/y:").2, format!("{h}/d:/x/~/y:"));
+    assert_eq!(where_they_land(&home, "~/r", "rel", "/a:~/b:").2, "/a:~/b:");
+    assert_eq!(where_they_land(&home, "~/r", "rel", "~:").2, format!("{h}:"));
+    assert_eq!(where_they_land(&home, "~/r", "~", "").0, h);
+    fake_install(&home);
+    assert_eq!(where_they_land(&home, "~", "st", "").1, format!("{h}/v1/runtime"));
+    fake_install(&home.join("a~b"));
+    assert_eq!(where_they_land(&home, "~/a~b", "~x/y", "").0, format!("{h}/a~b/~x/y"));
 }

@@ -53,6 +53,21 @@ impl Place {
     }
 }
 
+/// The helpers running with `state` as their state folder: the one kind of process that has it in its arguments.
+fn helper_pids(state: &Path) -> Vec<i32> {
+    let found = Command::new("pgrep").arg("-f").arg("--").arg(state.display().to_string()).output().unwrap();
+    String::from_utf8_lossy(&found.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect()
+}
+
+/// Wait for every helper of `state` to be gone.
+fn no_helper_left(state: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !helper_pids(state).is_empty() {
+        assert!(std::time::Instant::now() < deadline, "a helper for {} is still running", state.display());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn events() -> (Arc<Mutex<Vec<Event>>>, impl Fn(Event)) {
     let seen: Arc<Mutex<Vec<Event>>> = Arc::default();
     let s = seen.clone();
@@ -208,9 +223,7 @@ fn a_helper_that_ends_with_no_julia_is_a_drop_and_a_detach_is_not() {
         move || heard_tx.send(channel.closed()).unwrap()
     });
     assert!(heard.recv_timeout(Duration::from_millis(500)).is_err(), "nothing while it's up");
-    // The helper is the one process that has this test's state folder in its arguments.
-    let found = Command::new("pgrep").arg("-f").arg("--").arg(place.state.display().to_string()).output().unwrap();
-    let pids: Vec<i32> = String::from_utf8_lossy(&found.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect();
+    let pids = helper_pids(&place.state);
     assert!(!pids.is_empty(), "the helper was running");
     for pid in pids {
         // SAFETY: plain syscall, on the helper this test started.
@@ -280,4 +293,66 @@ fn a_connect_cancelled_before_it_starts_runs_nothing() {
     cancel.cancel();
     let err = connect(&Server::default(), &transport, &place.options(), &cancel, &|_| {}).err().expect("cancelled");
     assert_eq!(err, "Cancelled.");
+}
+
+#[test]
+fn a_start_that_fails_leaves_no_helper_behind() {
+    let place = Place::new("leak-start");
+    let server = Server { julia: Some("/no/such/julia".into()), ..Default::default() };
+    let (channel, _) = connect(&server, &place.transport(), &place.options(), &Cancel::default(), &|_| {}).expect("connect");
+    assert!(!helper_pids(&place.state).is_empty());
+    let err = start(&channel, &Listener::start("test").unwrap(), None, &|_| {}, |_| {}).expect_err("no Julia there");
+    assert!(!err.is_empty());
+    drop(channel);
+    no_helper_left(&place.state);
+}
+
+#[test]
+fn a_connect_that_fails_after_the_helper_started_leaves_no_helper_behind() {
+    let place = Place::new("leak-hello");
+    let frames = place.root.with_file_name("frames");
+    std::fs::create_dir_all(frames.parent().unwrap()).unwrap();
+    std::fs::write(&frames, wire::ToApp::Error { message: "no hello for you".into() }.frame().encode()).unwrap();
+    // Says an error instead of hello, then stays until the client sends it anything (a detach).
+    let script = place.root.with_file_name("fake-helper");
+    std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", frames.display())).unwrap();
+    let fake = |_: &str, _: &str| Ok(script.clone());
+    let options = Options { helper: &fake, ..place.options() };
+    let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().expect("no hello");
+    assert_eq!(err, "no hello for you");
+    no_helper_left(&place.state);
+}
+
+#[test]
+fn a_failed_install_is_reported_as_one_not_as_a_refused_sign_in() {
+    let place = Place::new("unwritable");
+    let shut = place.root.with_file_name("shut");
+    std::fs::create_dir_all(&shut).unwrap();
+    std::fs::set_permissions(&shut, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+    // SAFETY: plain syscall.
+    if unsafe { libc::geteuid() } == 0 {
+        return eprintln!("skipped: root can write anywhere");
+    }
+    let options = Options { root: shut.join("root").display().to_string(), ..place.options() };
+    let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().expect("can't install");
+    assert!(err.contains("installing into") && err.contains("failed") && !err.contains("refused the sign-in"), "{err}");
+}
+
+#[test]
+fn text_that_is_not_utf8_before_the_bootstrap_line_is_skipped() {
+    let place = Place::new("banner");
+    let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string())], ask: Some(r"printf 'caf\351 banner\n'".into()) };
+    let (channel, _) = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).expect("connect");
+    channel.detach();
+}
+
+#[test]
+fn cancelling_after_the_connect_is_over_does_not_touch_the_helper() {
+    let place = Place::new("cancel-late");
+    let cancel = Cancel::default();
+    let (channel, _) = connect(&Server::default(), &place.transport(), &place.options(), &cancel, &|_| {}).expect("connect");
+    cancel.cancel();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(channel.files(files::Request::List { path: "~".into() }).is_ok(), "the helper still answers");
+    channel.detach();
 }

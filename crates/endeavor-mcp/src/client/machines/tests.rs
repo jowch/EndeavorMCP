@@ -78,3 +78,31 @@ fn suggests_plain_hosts_from_ssh_config() {
     collect_hosts(&dir.join("config"), &dir, &mut hosts, 0);
     assert_eq!(hosts, ["lab-server", "bench", "hoffman2", "h2", "gpu-box"]);
 }
+
+#[test]
+fn targets_round_trip_with_and_without_a_port() {
+    for (host, port, text) in [
+        ("lab", None, "lab"),
+        ("lab", Some(2222), "lab:2222"),
+        ("jc@lab.example.edu", Some(22), "jc@lab.example.edu:22"),
+        ("::1", None, "::1"),
+        ("::1", Some(2222), "[::1]:2222"),
+        ("jc@fe80::1", Some(2222), "jc@[fe80::1]:2222"),
+        ("jc@fe80::1", None, "jc@fe80::1"),
+    ] {
+        let server = Server { ssh_host: host.into(), port, ..Default::default() };
+        assert_eq!(server.ssh_target(), text);
+        assert_eq!(Server::parse_target(text), Ok((host.to_owned(), port)), "{text}");
+    }
+    assert_eq!(Server::parse_target("[::1]"), Ok(("::1".into(), None)));
+}
+
+#[test]
+fn a_bad_target_says_what_is_wrong() {
+    assert_eq!(Server::parse_target("  ").unwrap_err(), "Enter an SSH host: an alias from ~/.ssh/config, or user@host.");
+    assert_eq!(Server::parse_target("[::1]:ssh").unwrap_err(), "\"ssh\" isn't a port number.");
+    assert_eq!(Server::parse_target("lab:0").unwrap_err(), "\"0\" isn't a port number.");
+    for bad in ["[::1", "[::1]x", "[]", "[::1;x]:22", "lab;rm", "-x"] {
+        assert!(Server::parse_target(bad).is_err(), "{bad}");
+    }
+}

@@ -60,9 +60,15 @@ impl Listener {
         });
         let accepting = listener.clone();
         std::thread::spawn(move || {
-            for connection in socket.incoming().map_while(Result::ok) {
-                let listener = accepting.clone();
-                std::thread::spawn(move || listener.route(connection));
+            // A failed accept (no file descriptors left, a connection reset before it was taken) doesn't end the listener.
+            for connection in socket.incoming() {
+                match connection {
+                    Ok(connection) => {
+                        let listener = accepting.clone();
+                        std::thread::spawn(move || listener.route(connection));
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                }
             }
         });
         Ok(listener)
@@ -101,46 +107,49 @@ impl Listener {
         self.changed.notify_all();
     }
 
-    /// The runtime is away while `why` holds, if it was up (and, with `only`,
-    /// is that `mux`'s).
-    fn away(&self, why: String, only: Option<&Arc<Mux>>) {
+    /// The runtime is away while `why` holds, if it was up and is `mux`'s. A
+    /// runtime that is already away keeps the reason it has: a drop never
+    /// replaces a deliberate one.
+    fn dropped(&self, why: String, mux: &Arc<Mux>) {
         let mut upstream = self.upstream.lock().unwrap();
-        if let Upstream::Up { mux, token } = &*upstream
-            && only.is_none_or(|only| Arc::ptr_eq(only, mux))
+        if let Upstream::Up { mux: up, token } = &*upstream
+            && Arc::ptr_eq(mux, up)
         {
             *upstream = Upstream::Away { token: token.clone(), why };
         }
     }
 
-    /// `why` replaces an already-away runtime's reason, once more is known (a
-    /// restart's outcome, say). No-op if it came back up, or was never away:
-    /// callers only reach for this once `away` (or `restarting`) already ran.
-    fn still_away(&self, why: String) {
+    /// The runtime is away on purpose while `why` holds, whether it was up or
+    /// away for another reason.
+    fn deliberately(&self, why: String) {
         let mut upstream = self.upstream.lock().unwrap();
-        if let Upstream::Away { token, .. } = &*upstream {
+        if let Upstream::Up { token, .. } | Upstream::Away { token, .. } = &*upstream {
             *upstream = Upstream::Away { token: token.clone(), why };
         }
     }
 
     /// The runtime is being restarted.
     pub fn restarting(&self) {
-        self.away(format!("Endeavor is restarting Julia on {}. Try again in a moment.", self.name), None);
+        self.deliberately(format!("Endeavor is restarting Julia on {}. Try again in a moment.", self.name));
     }
 
     /// The restart `restarting` announced didn't work out: Julia didn't come back.
     pub fn restart_failed(&self) {
-        self.still_away(format!("Julia on {} couldn't start. Use Restart Julia to try again.", self.name));
+        let mut upstream = self.upstream.lock().unwrap();
+        if let Upstream::Away { token, .. } = &*upstream {
+            *upstream = Upstream::Away { token: token.clone(), why: format!("Julia on {} couldn't start. Use Restart Julia to try again.", self.name) };
+        }
     }
 
     /// The server was stopped or disconnected on purpose: nothing will
     /// reconnect it by itself, unlike a drop (`forget`).
     pub fn disconnected(&self) {
-        self.away(format!("Endeavor isn't connected to {}. Reconnect it to use its notebook again.", self.name), None);
+        self.deliberately(format!("Endeavor isn't connected to {}. Reconnect it to use its notebook again.", self.name));
     }
 
     /// `mux`'s helper has gone.
     pub(super) fn forget(&self, mux: &Arc<Mux>) {
-        self.away(format!("Endeavor lost the connection to {} and is reconnecting by itself. Try again in a moment.", self.name), Some(mux));
+        self.dropped(format!("Endeavor lost the connection to {} and is reconnecting by itself. Try again in a moment.", self.name), mux);
     }
 
     pub fn port(&self) -> u16 {
@@ -162,7 +171,13 @@ impl Listener {
 fn loopback_pair() -> std::io::Result<(TcpStream, TcpStream)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let ours = TcpStream::connect(listener.local_addr()?)?;
-    let (theirs, _) = listener.accept()?;
+    // Another process may reach the temporary port first.
+    let theirs = loop {
+        let (theirs, from) = listener.accept()?;
+        if from == ours.local_addr()? {
+            break theirs;
+        }
+    };
     let _ = ours.set_nodelay(true);
     let _ = theirs.set_nodelay(true);
     Ok((ours, theirs))

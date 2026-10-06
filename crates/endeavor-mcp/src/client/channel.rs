@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wire::files;
 use wire::relay::Mux;
@@ -16,6 +16,9 @@ use wire::slurm::JobRequest;
 use wire::{Frame, ToApp, ToHelper};
 
 use super::listener::Listener;
+
+/// How long `stop` waits for the helper's `Stopped`.
+const STOP_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 30 });
 
 /// A runtime the client is attached to, as its server's listener serves it.
 #[derive(Clone, Debug)]
@@ -82,6 +85,10 @@ pub struct Channel {
     /// Set when the client stops the current runtime or leaves the helper, so its
     /// watcher keeps quiet.
     leaving: Mutex<Arc<AtomicBool>>,
+    /// `Stopped` replies still owed to `stop`s that gave up waiting. The helper
+    /// answers each `Stop` with one, which must not read as the outcome of the
+    /// next `start_runtime`; the reader drops them, under this lock.
+    abandoned: Arc<Mutex<u32>>,
 }
 
 impl Channel {
@@ -93,8 +100,9 @@ impl Channel {
         let ended: Arc<(Mutex<bool>, Condvar)> = Arc::default();
         let listener: Arc<Mutex<Option<Arc<Listener>>>> = Arc::default();
         let files: Arc<Mutex<HashMap<u32, mpsc::Sender<files::Reply>>>> = Arc::default();
+        let abandoned: Arc<Mutex<u32>> = Arc::default();
         std::thread::spawn({
-            let (mux, sink, listener, files, ended) = (mux.clone(), sink.clone(), listener.clone(), files.clone(), ended.clone());
+            let (mux, sink, listener, files, ended, abandoned) = (mux.clone(), sink.clone(), listener.clone(), files.clone(), ended.clone(), abandoned.clone());
             move || {
                 let result = mux.run(
                     output,
@@ -107,7 +115,10 @@ impl Channel {
                             }
                         }
                         Ok(message) => {
-                            if let Some(sink) = &*sink.lock().unwrap() {
+                            let mut abandoned = abandoned.lock().unwrap();
+                            if message == ToApp::Stopped && *abandoned > 0 {
+                                *abandoned -= 1;
+                            } else if let Some(sink) = &*sink.lock().unwrap() {
                                 let _ = sink.send(message);
                             }
                         }
@@ -136,6 +147,7 @@ impl Channel {
             left: AtomicBool::new(false),
             listener,
             leaving: Mutex::default(),
+            abandoned,
         }
     }
 
@@ -235,16 +247,22 @@ impl Channel {
         self.leaving.lock().unwrap().store(true, Ordering::SeqCst);
     }
 
-    /// Stop the runtime and wait until it's gone (blocks up to ~30 s). The
-    /// helper stays connected.
+    /// Stop the runtime and wait until it's gone (blocks up to ~30 s in all).
+    /// The helper stays connected.
     pub fn stop(&self) {
         self.leave();
         let events = self.subscribe();
         if self.mux.send(&ToHelper::Stop.frame()).is_ok() {
-            while let Ok(message) = events.recv_timeout(Duration::from_secs(30)) {
+            let deadline = Instant::now() + STOP_WAIT;
+            while let Ok(message) = events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 if message == ToApp::Stopped {
-                    break;
+                    return;
                 }
+            }
+            let mut abandoned = self.abandoned.lock().unwrap();
+            // The reader delivers under this lock, so a `Stopped` that came as the wait ended is in `events`.
+            if !events.try_iter().any(|message| message == ToApp::Stopped) {
+                *abandoned += 1;
             }
         }
     }
@@ -282,6 +300,17 @@ impl Channel {
         self.left.store(true, Ordering::SeqCst);
         let message = if keep_running { ToHelper::Detach } else { ToHelper::Stop };
         let _ = self.mux.send(&message.frame());
+    }
+}
+
+impl Drop for Channel {
+    /// A channel nobody holds any more lets the helper go, so ssh and the
+    /// helper don't outlive a failed connect.
+    fn drop(&mut self) {
+        if !self.left.swap(true, Ordering::SeqCst) {
+            self.leave();
+            let _ = self.mux.send(&ToHelper::Detach.frame());
+        }
     }
 }
 
