@@ -233,10 +233,10 @@ says another call is still running and has changed nothing.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `list_machines` | none | `machines`: each `{name, host, cluster, state, this_session}` (`state` is `no link running` or the link's: `connecting`, `connected`, `starting`, `queued`, `ready`, `failed`, `needs_install`, with `error`); `local` `{name, state, this_session}`; `this_session.machine`; `ssh_hosts_not_added`; `message`. Starts nothing |
-| `add_machine` | `host` (an ssh alias or `user@host[:port]`, through `valid_host`), `name`, `julia`, `slurm` (boolean), `install` (boolean, only after the user agreed) | `{machine, host, state, saved, updated, node, home, os, arch, slurm, cluster, runs_in, partitions: [{name, default, max_hours, cpus, memory_gb}], scratch, julia, message}`. `slurm` is whether Slurm was found; `cluster` and `runs_in` (`slurm_jobs` or `directly`) are what is used. `state` is `connecting` when 45 s ran out; call again. `needs_install` when this build's helper isn't on the machine and `install` wasn't given: `install` `{what: "helper", os, arch, folder, size_mb, update, running}` (`running` is `{process}` or `{slurm_job}` when a runtime is recorded and alive there, else null), `saved` true (not added), and a `message` that tells the agent to ask the user. Julia is null until a runtime has been started there once |
-| `use_machine` | `machine` (a name, or `"local"`), `folder`, `install` (boolean, only after the user agreed); on a cluster `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | `{machine, state, ready, message, …}`. `ready`: `browser_url`, `node`, `folder`, `already_running`, and for a cluster `job` `{id, summary, node, ends_at, ends_in_minutes}`. `starting`, `queued`: `step`, `queue` `{state, reason, reason_text}`, `job`. `needs_job`: a cluster with nothing running and no resources given; `defaults`, `partitions`; nothing was submitted and the session did not move. `needs_install`: the machine lacks this build's helper (an update when an older one is there), or no Julia was found and Endeavor would download its own (`install` `{what: "julia", detail}`); nothing was installed and the session did not move; call again with `install: true` after the user agreed. `gpus` 0 is no GPU (it overrides and clears the saved default); each `extra_sbatch_flags` entry starts with `-`, and `--wrap` and line breaks are refused |
-| `stop_machine` | `machine`, `force` | `{machine, stopped, message}`; refused without `force` with `other_sessions` `[{client, active_seconds_ago, notebook}]` when another session was active in the last 15 minutes; with `state` `starting`/`queued`, `job` and `queue` when Julia is starting or a job is queued (waiting sessions can't be seen); or as an error when the runtime doesn't answer the check for 5 s |
+| `list_machines` | none | `machines`: each `{name, host, cluster, state, this_session}` (`state` is `no link running` or the link's: `connecting`, `connected`, `starting`, `queued`, `ready`, `failed`, `needs_install`, `unknown` (a state of a newer link), with `error`); `local` `{name, state, this_session}`; `this_session.machine`; `ssh_hosts_not_added`; `message`. Starts nothing |
+| `add_machine` | `host` (an ssh alias or `user@host[:port]`, through `valid_host`), `name`, `julia`, `slurm` (boolean), `install` (boolean, only after the user agreed; covers the helper only) | `{machine, host, state, saved, updated, node, home, os, arch, slurm, cluster, runs_in, partitions: [{name, default, max_hours, cpus, memory_gb}], scratch, julia, message}`. `slurm` is whether Slurm was found; `cluster` and `runs_in` (`slurm_jobs` or `directly`) are what is used. `state` is `connecting` when 45 s ran out; call again. `needs_install` when this build's helper isn't on the machine and `install` wasn't given: `install` `{what: "helper", os, arch, folder, size_mb, update, running}` (`size_mb` is null for a server of another platform than this computer's; `running` is `{process}` or `{slurm_job}` when a runtime is recorded and alive there, and `{process_recorded}` or `{slurm_job_recorded}` when it is recorded and alive but `ps` or `squeue` couldn't say more, else null), `saved` true (not added), and a `message` that tells the agent to ask the user. Julia is null until a runtime has been started there once |
+| `use_machine` | `machine` (a name, or `"local"`), `folder`, `install` (boolean, only after the user agreed); on a cluster `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | `{machine, state, ready, message, …}`. `ready`: `browser_url`, `node`, `folder`, `already_running`, and for a cluster `job` `{id, summary, node, ends_at, ends_in_minutes}`. `starting`, `queued`: `step`, `queue` `{state, reason, reason_text}`, `job`. `needs_job`: a cluster with nothing running and no resources given; `defaults`, `partitions`; nothing was submitted and the session did not move. `needs_install`: the machine lacks this build's helper (an update when an older one is there), or no Julia was found and Endeavor would download its own (`install` `{what: "julia", detail}`); nothing was installed and the session did not move; call again with `install: true` after the user agreed. That covers what this call needs, the helper and then Julia, and is asked as two separate questions: the helper's agreement (even from `add_machine`) never covers a later download of Julia. `gpus` 0 is no GPU (it overrides and clears the saved default); each `extra_sbatch_flags` entry starts with `-`, and `--wrap` and line breaks are refused |
+| `stop_machine` | `machine`, `force`, `install` (boolean, only after the user agreed) | `{machine, stopped, message}`; `needs_install` (`stopped` false) when the machine has only an older build's helper, since stopping needs this build's: the same `install` as above, and nothing was stopped; refused without `force` with `other_sessions` `[{client, active_seconds_ago, notebook}]` when another session was active in the last 15 minutes; with `state` `starting`/`queued`, `job` and `queue` when Julia is starting or a job is queued (waiting sessions can't be seen); or as an error when the runtime doesn't answer the check for 5 s |
 
 `use_machine` and `pluto_session_status` use the link's own words for what is
 going on, and no call waits longer than 45 seconds (`ENDEAVOR_START_WAIT_SECS`
@@ -275,25 +275,45 @@ function applies that rule to every link a front gets, for the tools and for a
 notebook call, before any start or attach is sent; a link of another build that
 is kept is sent no start, since it may not know `only_running` and would start
 what was only to be attached to. The link refuses a start request with a field
-it doesn't know (HTTP 400).
+it doesn't know (HTTP 400). A front reads a status from a newer link: a state
+or install kind it doesn't know reads as `unknown` (not ready; a link in it is
+replaced only by the rule above), unknown fields are ignored, and fields that
+are missing have defaults.
 
-**Installing needs the user.** The link connects with installs not allowed
-(`client::Options::allow_install` false). A machine without this build's helper
-is then only looked at: the bootstrap reports its platform, where the helper
-would go, whether an older build is there, and whether a runtime (a `process`
-whose pid answers `kill -0`) or a Slurm job is recorded in the state folder
-the helper would use (`runtime.json`, and `job.json` on a cluster), read with
-`sh`, `cat`, `tr` and `cut`. The connect ends with `ConnectError::needs`, the
+**Installing needs the user.** The link connects with the helper's install not
+allowed (`client::Options::allow_install` false), and starts Julia without a
+download (`ToHelper::StartRuntime`'s `download_julia` false). A machine without
+this build's helper is then only looked at: the bootstrap reports its platform,
+where the helper would go, whether a complete helper of another build is there,
+and whether a runtime or a Slurm job is recorded in the state folder the helper
+would use (`runtime.json`, and `job.json` on a cluster), read with `sh`, `cat`,
+`tr`, `cut`, `kill`, `ps` and `squeue`. A process counts as running when it is
+alive and its command looks like a core's (`ps -p PID -o args=` has `core` and
+`--state-dir`), and as recorded when `ps` can't say; a job counts when `squeue`
+lists it as pending, running or configuring, and as recorded when there is no
+`squeue` or it didn't answer. The connect ends with `ConnectError::needs`, the
 link's state is `needs_install` (not a failure, not retried by itself) with
-`needs_install` in its status. `POST /link/start` with `"install": true`, or
-`POST /link/install`, is the agreement: the link connects again with installs
-allowed, and keeps that for as long as it runs, reconnects included. The helper
-is also started with `--no-julia-download`; a start that finds no Julia then
-fails with a message that starts with `julia::NOT_FOUND`, and the link goes to
-`needs_install` with the download's size and place, until `install: true`
-makes it drop the connection and connect again to download. A reconnect after
-the agreement asks nothing. `use_machine` passes `install` on to the link;
-a remembered project's first notebook call never does.
+`needs_install` in its status. Nothing is fetched for the look: the size is
+known only for this computer's own platform, and the helper for another is
+fetched once the install is allowed.
+
+There are two agreements. The helper's belongs to the connection:
+`POST /link/install`, a `"install": true` start, or `endeavor link --install`
+(what `add_machine` passes to a link it has to start, so that it connects once)
+allow it, and the link keeps that for as long as it runs, so that a reconnect
+to a machine that lost the helper asks nothing. Julia's download belongs to the
+start: `"install": true` on `POST /link/start` sends that one `StartRuntime`
+with `download_julia` true (the same for a job's `StartRuntime` on a cluster),
+and any other start sends false. A helper that finds no Julia then answers
+`ToApp::NoJulia` with what a download would be, and the link goes to
+`needs_install` (`what: "julia"`) on the same connection. So `use_machine`
+without `install` never downloads, however the helper was agreed to, and a
+remembered project's first notebook call never installs or downloads.
+`POST /link/install`, which `add_machine` uses, covers the helper only.
+`StartRuntime` leaves `download_julia` out when it is true, so an older helper
+gets the frame it knew; a false is sent only to a helper of this build, since
+the bootstrap runs `<root>/<build>/endeavor` and installs it when it is
+missing, so a link never talks to a helper that would ignore the field.
 
 **Plain or cluster.** The user chooses whether Julia runs in Slurm jobs or
 directly on the machine, since a host can have Slurm's tools without being a

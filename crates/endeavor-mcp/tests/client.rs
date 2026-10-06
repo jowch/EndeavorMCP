@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Notice, Options, Running, Server, Transport, connect, connect_checked, no_helper, start};
+use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Notice, Options, Running, Server, StartError, Transport, connect, connect_checked, no_helper, start, start_with};
 use wire::files;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -82,6 +82,46 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+/// A process whose command looks like a runtime's core, for the probe that looks at what a recorded pid is.
+fn core_child() -> std::process::Child {
+    Command::new("sleep").arg("600").arg0("endeavor core --state-dir fake").process_group(0).spawn().unwrap()
+}
+
+/// `core_child`, ended when it is dropped, whatever a test did before.
+struct CoreLike(std::process::Child);
+
+fn core_like() -> CoreLike {
+    CoreLike(core_child())
+}
+
+impl Drop for CoreLike {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A `PATH` for a login shell on the server that holds only the tools the bootstrap script uses, and
+/// a `squeue` that lists the jobs given (none at all for `None`), so that the real scheduler isn't asked.
+fn server_path(place: &Place, listed: Option<&str>) -> String {
+    let bin = place.home.join(if listed.is_some() { "bin-squeue" } else { "bin" });
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["sh", "cat", "tr", "cut", "uname", "id", "grep", "ps", "rm", "mkdir", "head", "tar", "mv", "sleep"] {
+        let found = ["/usr/bin", "/bin"].iter().map(|dir| Path::new(dir).join(tool)).find(|path| path.exists()).expect(tool);
+        let _ = std::os::unix::fs::symlink(found, bin.join(tool));
+    }
+    if let Some(jobs) = listed {
+        let squeue = bin.join("squeue");
+        std::fs::write(&squeue, format!("#!/bin/sh\nprintf '%s\\n' {jobs}\n")).unwrap();
+        std::fs::set_permissions(&squeue, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    bin.display().to_string()
+}
+
+fn looking(place: &Place, listed: Option<&str>) -> Transport {
+    Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string()), ("PATH".into(), server_path(place, listed))], ask: None }
+}
+
 /// A runtime as the helper sees one: a live pid on this node, and a bridge that answers `ping`.
 struct FakeRuntime {
     process: Arc<Mutex<std::process::Child>>,
@@ -89,7 +129,7 @@ struct FakeRuntime {
 
 impl FakeRuntime {
     fn start(state_dir: &Path) -> FakeRuntime {
-        let process = Command::new("sleep").arg("600").process_group(0).spawn().unwrap();
+        let process = core_child();
         let bridge = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = bridge.local_addr().unwrap().port();
         let pid = process.id() as i32;
@@ -408,13 +448,14 @@ fn tree(dir: &Path) -> Vec<PathBuf> {
 #[test]
 fn without_permission_a_server_that_lacks_the_helper_is_only_looked_at() {
     let place = Place::new("no-install");
-    let options = Options { allow_install: false, ..place.options() };
+    // Nothing is fetched or read for the helper before the install is allowed.
+    let options = Options { allow_install: false, helper: &|_, _| Err("the helper was asked for".into()), ..place.options() };
     let (seen, on) = events();
     let err = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).err().expect("no connection");
     let needs = err.needs.expect("it says what it needs");
     assert!(!err.retry);
     assert_eq!(needs.folder, place.installed().display().to_string());
-    assert!(needs.bytes > 10_000 && !needs.update && needs.running.is_none(), "{needs:?}");
+    assert!(needs.bytes.is_some_and(|bytes| bytes > 10_000) && !needs.update && needs.running.is_none(), "{needs:?}");
     assert_eq!((needs.os.as_str(), needs.arch.as_str()), (String::from_utf8(Command::new("uname").arg("-s").output().unwrap().stdout).unwrap().trim(), String::from_utf8(Command::new("uname").arg("-m").output().unwrap().stdout).unwrap().trim()));
     assert!(err.message.contains("isn't installed") && err.message.contains("wasn't allowed"), "{}", err.message);
     assert!(matches!(seen.lock().unwrap().as_slice(), [Event::Connected { .. }]), "it never says the helper is there: {:?}", seen.lock().unwrap());
@@ -432,13 +473,33 @@ fn a_runtime_recorded_and_alive_there_is_reported_without_the_helper() {
     let pid = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(place.state.join("runtime.json")).unwrap()).unwrap()["pid"].as_u64().unwrap() as u32;
     let options = Options { allow_install: false, ..place.options() };
     let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
-    assert_eq!(needs.running, Some(Running::Process(pid)));
+    assert_eq!(needs.running, Some(Running::Process { pid, checked: true }));
     // A record whose process is gone isn't reported.
     drop(runtime);
     wait_gone(pid);
     let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
     assert_eq!(needs.running, None);
     assert!(!place.root.exists());
+}
+
+#[test]
+fn a_pid_that_is_not_a_runtime_is_not_reported_and_without_ps_it_is_only_recorded() {
+    let place = Place::new("no-install-pid");
+    // This test's own process is alive, and is not a core.
+    std::fs::write(place.state.join("runtime.json"), serde_json::json!({ "launcher": "process", "node": hostname(), "pid": std::process::id(), "token": "t" }).to_string()).unwrap();
+    let options = Options { allow_install: false, ..place.options() };
+    let needs = |transport: &Transport| connect_checked(&Server::default(), transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    assert_eq!(needs(&looking(&place, None)).running, None);
+    // A shell whose `ps` takes no -p says nothing of the process, which is alive: recorded, not checked.
+    let bin = place.home.join("no-ps");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in std::fs::read_dir(place.home.join("bin")).unwrap().flatten().filter(|t| t.file_name() != "ps") {
+        let _ = std::os::unix::fs::symlink(std::fs::read_link(tool.path()).unwrap(), bin.join(tool.file_name()));
+    }
+    std::fs::write(bin.join("ps"), "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(bin.join("ps"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string()), ("PATH".into(), bin.display().to_string())], ask: None };
+    assert_eq!(needs(&transport).running, Some(Running::Process { pid: std::process::id(), checked: false }));
 }
 
 fn wait_gone(pid: u32) {
@@ -450,16 +511,17 @@ fn wait_gone(pid: u32) {
 }
 
 #[test]
-fn a_slurm_job_recorded_in_the_cluster_folder_is_reported() {
+fn a_slurm_job_recorded_in_the_cluster_folder_is_reported_as_slurm_says() {
     let place = Place::new("no-install-job");
     std::fs::write(place.state.join("job.json"), r#"{"job":"4242","summary":"8 CPUs"}"#).unwrap();
     let cluster = Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() };
     let options = Options { allow_install: false, ..place.options() };
-    let needs = connect_checked(&cluster, &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
-    assert_eq!(needs.running, Some(Running::Job("4242".into())));
+    let needs = |server: &Server, transport: &Transport| connect_checked(server, transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    assert_eq!(needs(&cluster, &looking(&place, Some("1 4242 7"))).running, Some(Running::Job { id: "4242".into(), listed: true }));
+    assert_eq!(needs(&cluster, &looking(&place, Some("1 7"))).running, None, "Slurm doesn't list it any more");
+    assert_eq!(needs(&cluster, &looking(&place, None)).running, Some(Running::Job { id: "4242".into(), listed: false }), "no squeue to ask");
     // A plain server's folder isn't looked at for jobs.
-    let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
-    assert_eq!(needs.running, None);
+    assert_eq!(needs(&Server::default(), &looking(&place, Some("4242"))).running, None);
 }
 
 #[test]
@@ -470,25 +532,45 @@ fn the_default_state_folders_are_looked_in_when_none_is_given() {
     let (process, cluster) = (state_home.join("endeavor/serve").join(&node), state_home.join("endeavor/cluster"));
     std::fs::create_dir_all(&process).unwrap();
     std::fs::create_dir_all(&cluster).unwrap();
-    std::fs::write(process.join("runtime.json"), serde_json::json!({ "launcher": "process", "node": node, "pid": std::process::id(), "token": "t" }).to_string()).unwrap();
+    let core = core_like();
+    std::fs::write(process.join("runtime.json"), serde_json::json!({ "launcher": "process", "node": node, "pid": core.0.id(), "token": "t" }).to_string()).unwrap();
     std::fs::write(cluster.join("runtime.json"), serde_json::json!({ "launcher": "slurm", "node": "n1", "pid": 7, "job": "99", "token": "t" }).to_string()).unwrap();
-    let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string()), ("XDG_STATE_HOME".into(), state_home.display().to_string())], ask: None };
+    let mut env = match looking(&place, Some("99")) {
+        Transport::Shell { env, .. } => env,
+        _ => unreachable!(),
+    };
+    env.push(("XDG_STATE_HOME".into(), state_home.display().to_string()));
+    let transport = Transport::Shell { env, ask: None };
     let options = Options { allow_install: false, state: String::new(), ..place.options() };
     let needs = |server: &Server| connect_checked(server, &transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
-    assert_eq!(needs(&Server::default()).running, Some(Running::Process(std::process::id())));
-    assert_eq!(needs(&Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() }).running, Some(Running::Job("99".into())));
+    assert_eq!(needs(&Server::default()).running, Some(Running::Process { pid: core.0.id(), checked: true }));
+    assert_eq!(needs(&Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() }).running, Some(Running::Job { id: "99".into(), listed: true }));
 }
 
 #[test]
-fn an_older_helper_makes_it_an_update() {
+fn only_a_complete_helper_of_another_build_makes_it_an_update() {
     let place = Place::new("no-install-older");
-    std::fs::create_dir_all(place.root.join("0.0.1-old")).unwrap();
-    std::fs::write(place.root.join("0.0.1-old/endeavor"), "#!/bin/sh\n").unwrap();
-    std::fs::set_permissions(place.root.join("0.0.1-old/endeavor"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let options = Options { allow_install: false, ..place.options() };
-    let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
-    assert!(needs.update);
-    assert!(!place.installed().exists());
+    let update = || connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap().update;
+    let helper_in = |name: &str, with_runtime: bool| {
+        let dir = place.root.join(name);
+        std::fs::create_dir_all(dir.join("runtime")).unwrap();
+        std::fs::write(dir.join("endeavor"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(dir.join("endeavor"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        if with_runtime {
+            std::fs::write(dir.join("runtime/boot.jl"), "").unwrap();
+        }
+    };
+    let build = endeavor_mcp::embedded::BUILD_VERSION;
+    // This build's own folder, half installed, and what an install that was cut short leaves.
+    helper_in(build, false);
+    helper_in(&format!("{build}.part.123"), true);
+    helper_in("0.0.1-old.part.9", true);
+    helper_in("0.0.2-unfinished", false);
+    assert!(!update());
+    helper_in("0.0.1-old", true);
+    assert!(update());
+    assert!(!place.installed().join("runtime/boot.jl").exists());
 }
 
 #[test]
@@ -505,6 +587,70 @@ fn with_permission_it_installs_as_before_and_a_helper_already_there_needs_none()
     let options = Options { allow_install: false, ..place.options() };
     let (channel, _) = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).expect("connects");
     assert!(seen.lock().unwrap().contains(&Event::Helper { installed: false }));
+    channel.detach();
+    no_helper_left(&place.state);
+}
+
+#[test]
+fn the_helper_gets_this_builds_name_after_the_probe_found_a_job() {
+    let place = Place::new("build-after-job");
+    std::fs::write(place.state.join("job.json"), r#"{"job":"4242","summary":"8 CPUs"}"#).unwrap();
+    let record = place.home.join("helper-args");
+    let fake = place.home.join("fake-helper");
+    std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", record.display())).unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let helper = |_: &str, _: &str| Ok(fake.clone());
+    let options = Options { helper: &helper, ..place.options() };
+    let cluster = Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() };
+    // The fake helper says nothing, so the connect fails; what matters is how it was started.
+    let _ = connect(&cluster, &looking(&place, Some("4242")), &options, &Cancel::default(), &|_| {});
+    let args: Vec<String> = std::fs::read_to_string(&record).expect("the installed helper was run").lines().map(str::to_owned).collect();
+    let at = args.iter().position(|a| a == "--build").expect("--build is passed");
+    assert_eq!(args[at + 1], endeavor_mcp::embedded::BUILD_VERSION, "{args:?}");
+    assert!(args.windows(2).any(|w| w == ["--launcher", "slurm"]), "{args:?}");
+    assert!(args.windows(2).any(|w| w == ["--state-dir", place.state.to_str().unwrap()]), "the arguments the script set before the probe survive it: {args:?}");
+}
+
+#[test]
+fn a_folder_with_a_space_or_an_escape_in_it_is_reported_whole() {
+    let place = Place::new("odd-root");
+    for name in ["a folder with spaces", r"back\cslash", r"new\nline-like", "dollar$HOME"] {
+        let root = place.home.join(name);
+        let options = Options { allow_install: false, root: root.display().to_string(), ..place.options() };
+        let needs = connect_checked(&Server::default(), &looking(&place, None), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap_or_else(|| panic!("{name}: it didn't say what it needs"));
+        assert_eq!(needs.folder, root.join(endeavor_mcp::embedded::BUILD_VERSION).display().to_string(), "{name}");
+    }
+}
+
+#[test]
+fn a_setup_line_that_cannot_be_read_ends_the_connect_with_a_message() {
+    let place = Place::new("odd-line");
+    let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string())], ask: Some("echo ENDEAVOR Linux x86_64 need nonsense first /x".into()) };
+    let (done, waited) = mpsc::channel();
+    let options = Options { allow_install: false, ..place.options() };
+    std::thread::spawn(move || done.send(connect(&Server::default(), &transport, &options, &Cancel::default(), &|_| {}).err()).unwrap());
+    let err = waited.recv_timeout(Duration::from_secs(10)).expect("it doesn't wait for more").expect("an error");
+    assert!(err.contains("answered with something Endeavor doesn't understand") && err.contains("need nonsense first /x"), "{err}");
+}
+
+#[test]
+fn a_start_that_forbids_the_download_says_no_julia_and_one_that_allows_it_goes_on() {
+    let place = Place::new("no-julia");
+    let transport = looking(&place, None);
+    let find = Command::new("/bin/sh").args(["-lc", "command -v julia"]).env("HOME", &place.home).env("PATH", server_path(&place, None)).output().unwrap();
+    if find.status.success() {
+        eprintln!("skipped: a login shell finds julia at {}", String::from_utf8_lossy(&find.stdout).trim());
+        return;
+    }
+    let (channel, _) = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).expect("connect");
+    let listener = Listener::start("test").unwrap();
+    let err = start_with(&channel, &listener, None, false, &|_| {}, |_| {}).expect_err("no Julia there");
+    let StartError::NoJulia(offer) = err else { panic!("{err:?}") };
+    assert!(offer.contains("Endeavor can download its own copy") && offer.contains("MB") && offer.contains(&place.home.display().to_string()), "{offer}");
+    assert!(!place.home.join(".cache").exists(), "nothing was downloaded");
+    // The same helper, allowed to download, tries (there is neither curl nor wget here).
+    let err = start_with(&channel, &listener, None, true, &|_| {}, |_| {}).expect_err("no download tool");
+    assert!(matches!(&err, StartError::Failed(message) if message.contains("neither curl nor wget")), "{err:?}");
     channel.detach();
     no_helper_left(&place.state);
 }

@@ -1113,18 +1113,30 @@ impl FakeSlurm {
     }
 }
 
+/// A stand-in process that is ended when it is dropped, whatever a test did before.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[test]
 fn add_machine_only_looks_until_told_to_install() {
     let place = Place::bare("needs-install", &[]);
     // A runtime that a helper of an earlier install left: the look reports it.
-    std::fs::write(place.state.join("runtime.json"), json!({ "launcher": "process", "node": "n", "pid": std::process::id(), "token": "t" }).to_string()).unwrap();
+    let core = KillOnDrop(std::os::unix::process::CommandExt::arg0(Command::new("sleep").arg("600"), "endeavor core --state-dir fake").spawn().unwrap());
+    let core_pid = core.0.id();
+    std::fs::write(place.state.join("runtime.json"), json!({ "launcher": "process", "node": "n", "pid": core_pid, "token": "t" }).to_string()).unwrap();
     let mut front = place.front();
     front.initialize();
     let julia = place.julia.display().to_string();
     let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
     assert_eq!((first["state"].as_str(), first["needs_install"].clone(), first["saved"].clone()), (Some("needs_install"), json!(true), json!(true)), "{first}");
     assert_eq!(first["install"]["what"], "helper", "{first}");
-    assert_eq!(first["install"]["running"], json!({ "process": std::process::id() }), "{first}");
+    assert_eq!(first["install"]["running"], json!({ "process": core_pid }), "{first}");
     let message = first["message"].as_str().unwrap();
     assert!(message.contains("`install: true`") && message.contains("Ask the user") && message.contains("MB") && message.contains("already running"), "{message}");
     assert!(message.contains(&place.dir.join("root").display().to_string()), "where it would go: {message}");
@@ -1144,6 +1156,7 @@ fn add_machine_only_looks_until_told_to_install() {
 
     // With the agreement it installs and adds the machine.
     std::fs::remove_file(place.state.join("runtime.json")).unwrap();
+    drop(core);
     let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
     assert_eq!((done["state"].as_str(), done["saved"].clone()), (Some("connected"), json!(true)), "{done}");
     assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
@@ -1252,4 +1265,152 @@ fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
     assert!(failed && text(&said).contains("Couldn't download Julia"), "{said}");
     assert!(tried.exists(), "the download was tried");
     front.finish();
+}
+
+#[test]
+fn add_machine_with_install_connects_once_and_without_it_does_not_install() {
+    let place = Place::bare("install-once", &[("ENDEAVOR_LINK_ASK", "echo connect >> {dir}/connects")]);
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert_eq!(done["state"], "connected", "{done}");
+    let connects = std::fs::read_to_string(place.dir.join("connects")).unwrap();
+    assert_eq!(connects.lines().count(), 1, "one connection, allowed from the start: {connects:?}\n{}", std::fs::read_to_string(place.links_dir().join("lab/link.log")).unwrap_or_default());
+}
+
+#[test]
+fn the_agreement_to_the_helper_is_not_one_to_download_julia() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("machines-julia-per-start");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let place = Place::bare("julia-per-start", &[("PATH", &no_julia_path(&dir)), ("SHELL", "/bin/sh")]);
+    let tried = place.dir.join("download-tried");
+    let _ = std::fs::remove_file(&tried);
+    let find = Command::new("/bin/sh").args(["-lc", "command -v julia"]).env("HOME", place.dir.join("home")).env("PATH", no_julia_path(&place.dir)).output().unwrap();
+    if find.status.success() {
+        eprintln!("skipped: a login shell finds julia at {}", String::from_utf8_lossy(&find.stdout).trim());
+        return;
+    }
+    let mut front = place.front();
+    front.initialize();
+    // The helper is agreed to through add_machine, which says nothing of Julia.
+    let added = front.ok("add_machine", json!({ "host": "lab", "install": true, "slurm": false }));
+    assert_eq!(added["state"], "connected", "{added}");
+    assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
+    let tries = || std::fs::read_to_string(&tried).unwrap_or_default().lines().count();
+
+    // A use_machine without `install` doesn't download Julia, though the helper was agreed to.
+    let first = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!((first["state"].as_str(), first["install"]["what"].as_str()), (Some("needs_install"), Some("julia")), "{first}");
+    let message = text(&first);
+    assert!(message.contains("Julia wasn't found on lab") && message.contains("MB") && message.contains("`install: true`"), "{message}");
+    assert_eq!(tries(), 0, "nothing was downloaded");
+    assert_eq!(place.projects(), Value::Null, "the project doesn't remember it");
+
+    // With `install: true` the download is taken (the fake curl fails).
+    let (failed, said) = front.call("use_machine", json!({ "machine": "lab", "install": true }));
+    assert!(failed && text(&said).contains("Couldn't download Julia"), "{said}");
+    assert_eq!(tries(), 1, "the download was tried");
+
+    // That agreement was for that call: the next one without it asks again and downloads nothing.
+    let again = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!((again["state"].as_str(), again["install"]["what"].as_str()), (Some("needs_install"), Some("julia")), "{again}");
+    assert_eq!(tries(), 1, "no second try");
+
+    // A project that remembers the machine doesn't download either.
+    std::fs::create_dir_all(place.dir.join("state-home/endeavor")).unwrap();
+    let remembered = json!({ place.project.display().to_string(): { "machine": "lab", "folder": null } });
+    std::fs::write(place.dir.join("state-home/endeavor/projects.json"), remembered.to_string()).unwrap();
+    let mut second = place.front();
+    second.initialize();
+    let (failed, said) = second.call("list_notebooks", json!({}));
+    assert!(failed && text(&said).contains("Julia wasn't found on lab"), "{said}");
+    assert_eq!(tries(), 1, "a remembered project's call downloads nothing");
+    second.finish();
+    front.finish();
+}
+
+#[test]
+fn add_machine_leaves_a_link_of_another_build_with_a_runtime_alone_and_replaces_an_idle_one() {
+    let place = Place::new("add-build");
+    place.add_lab();
+    let other_build = |place: &Place| {
+        let path = place.record("lab");
+        let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        record["build"] = "an-older-build".into();
+        std::fs::write(&path, record.to_string()).unwrap();
+    };
+    let julia = place.julia.display().to_string();
+    let idle = place.link("lab");
+    wait_status(&idle, "connected", |s| s.state == State::Connected);
+    other_build(&place);
+    let mut front = place.front();
+    front.initialize();
+    let added = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert_eq!(added["state"], "connected", "{added}");
+    let now = place.link("lab");
+    assert_ne!(now.pid, idle.pid, "nothing was on the old link, so it was replaced first");
+    assert_eq!(now.build, endeavor_mcp::embedded::BUILD_VERSION);
+
+    // With a runtime on it, it is kept, is not sent `install`, and the result says so.
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["state"], "ready", "{used}");
+    other_build(&place);
+    let added = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    let message = text(&added);
+    assert!(message.contains("another build of endeavor (an-older-build)") && message.contains("wasn't passed on"), "{message}");
+    assert_eq!(place.link("lab").pid, now.pid, "the same link, with its runtime");
+    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab");
+
+    // A call that fails after that doesn't quit it either.
+    let (failed, _) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "slurm": true }));
+    assert!(failed);
+    assert_eq!(place.link("lab").pid, now.pid, "an add that is undone leaves a link with a runtime running");
+    assert!(pid_alive(now.pid as i32));
+}
+
+#[test]
+fn stop_machine_asks_before_installing_the_helper_it_needs() {
+    let place = Place::new("stop-install");
+    place.add_lab();
+    let mut front = place.front();
+    front.initialize();
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["state"], "ready", "{used}");
+    let runtime = place.runtime().expect("a runtime");
+    // The connection ends, the runtime goes on, and the machine has only a helper of an older build.
+    let link = place.link("lab");
+    link.quit().unwrap();
+    wait_for("the link to end", || !pid_alive(link.pid as i32));
+    wait_for("the helper to end", || place.helpers().is_empty());
+    let root = place.dir.join("root");
+    std::fs::rename(root.join(endeavor_mcp::embedded::BUILD_VERSION), root.join("0.0.1-old")).unwrap();
+    std::fs::create_dir_all(root.join("0.0.1-old/runtime")).unwrap();
+    std::fs::write(root.join("0.0.1-old/runtime/boot.jl"), "").unwrap();
+
+    let first = front.ok("stop_machine", json!({ "machine": "lab", "force": true }));
+    assert_eq!((first["state"].as_str(), first["stopped"].clone(), first["install"]["what"].as_str()), (Some("needs_install"), json!(false), Some("helper")), "{first}");
+    let message = text(&first);
+    assert!(message.contains("Stopping the runtime there needs it") && message.contains("`stop_machine` again") && message.contains("`install: true`"), "{message}");
+    assert_eq!(place.runtime(), Some(runtime), "the runtime is still there");
+    assert!(!root.join(endeavor_mcp::embedded::BUILD_VERSION).exists(), "nothing was installed");
+
+    let stopped = front.ok("stop_machine", json!({ "machine": "lab", "force": true, "install": true }));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    wait_for("the runtime to end", || place.runtime().is_none_or(|pid| !pid_alive(pid)));
+}
+
+#[test]
+fn no_partitions_are_waited_for_when_the_machine_is_saved_as_a_plain_server() {
+    let slurm = FakeSlurm::new("plain-no-wait");
+    std::fs::write(slurm.bin.join("sinfo"), "#!/bin/sh\nsleep 8\necho 'shared*|8:00:00|10|7492'\n").unwrap();
+    let place = Place::with("plain-no-wait", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    let started = Instant::now();
+    let added = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "slurm": false }));
+    assert_eq!((added["state"].as_str(), added["cluster"].clone()), (Some("connected"), json!(false)), "{added}");
+    assert!(started.elapsed() < Duration::from_secs(6), "it didn't wait for sinfo: {:?}", started.elapsed());
 }

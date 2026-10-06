@@ -69,7 +69,7 @@ use wire::files::RuntimeState;
 use wire::slurm::JobRequest;
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--exit-idle] [--no-julia-download] [--build BUILD]
+const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
                         (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster)
        endeavor relay --state-dir DIR
        endeavor node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
@@ -83,8 +83,6 @@ const LOG_TAIL: usize = 40;
 struct Args {
     state_dir: PathBuf,
     julia: julia::Source,
-    /// Endeavor may download its own Julia when none is found (`--no-julia-download` says no).
-    julia_download: bool,
     runtime: PathBuf,
     depot: String,
     launcher: Launcher,
@@ -223,7 +221,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         return Err("expected the `connect` command".into());
     }
     let (mut state_dir, mut julia, mut runtime, mut depot) = (None, None::<julia::Source>, None, None);
-    let (mut quit_with_client, mut any_node, mut launcher, mut build, mut exit_idle, mut julia_download) = (false, false, Launcher::Process, None, false, true);
+    let (mut quit_with_client, mut any_node, mut launcher, mut build, mut exit_idle) = (false, false, Launcher::Process, None, false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -243,7 +241,6 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             "--quit-with-client" => quit_with_client = true,
             "--any-node" => any_node = true,
             "--exit-idle" => exit_idle = true,
-            "--no-julia-download" => julia_download = false,
             "--build" => build = Some(value()?),
             _ => return Err(format!("unknown argument {arg}")),
         }
@@ -254,7 +251,6 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             Launcher::Slurm => standalone::default_cluster_state_dir(),
         }),
         julia: julia.ok_or("--julia or --julia-shell is required")?,
-        julia_download,
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
         launcher,
@@ -309,14 +305,14 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
     loop {
         let event = later.pop_front().unwrap_or_else(|| rx.recv().expect("senders live as long as their threads"));
         match event {
-            Event::App(ToHelper::StartRuntime { job }) => {
+            Event::App(ToHelper::StartRuntime { job, download_julia }) => {
                 if let Some(attached) = &attached {
                     let _ = mux.send(&attached.ready(true).frame());
                     continue;
                 }
                 let result = match args.launcher {
-                    Launcher::Process => attach(args, mux, &rx, &events, &parts),
-                    Launcher::Slurm => slurm::attach(args, mux, &rx, &events, &parts, job.unwrap_or_default()),
+                    Launcher::Process => attach(args, mux, &rx, &events, &parts, download_julia),
+                    Launcher::Slurm => slurm::attach(args, mux, &rx, &events, &parts, job.unwrap_or_default(), download_julia),
                 };
                 match result {
                     Ok(now) => {
@@ -594,7 +590,7 @@ fn lock_stop(dir: &Path, rx: &mpsc::Receiver<Event>, limit: Duration, said: &mut
 /// is held until the runtime is ready, so helpers asked at once start one
 /// runtime and the rest attach to it. The error is the app's answer: why it
 /// couldn't start, or that it died while starting.
-fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, parts: &Parts) -> Result<Attached, ToApp> {
+fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, parts: &Parts, download_julia: bool) -> Result<Attached, ToApp> {
     let failed = |message: String| ToApp::StartFailed { message };
     let _starting = lock_start(args, mux, rx, parts)?;
     if let Some(state) = existing(args).map_err(failed)? {
@@ -603,7 +599,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
         return Ok(Attached { how: How::Process(runtime, port), state, reattached: true });
     }
     stopped::clear(&args.state_dir);
-    let (julia, version) = julia::find(&args.julia, args.julia_download, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(failed)?;
+    let (julia, version) = julia::find(&args.julia, download_julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(julia::Failure::into_app)?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
     let token = token(&args.state_dir).map_err(failed)?;
     let child = start(args, &julia, &token).map_err(failed)?;
@@ -1326,7 +1322,5 @@ mod tests {
         assert!(args("connect --state-dir /s").is_err());
         assert!(args("serve --state-dir /s --julia /j --runtime /r --depot /d").is_err());
         assert!(args("connect --state-dir /s --julia /j --runtime /r --depot /d --bogus").is_err());
-        assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().julia_download);
-        assert!(!args("connect --state-dir /s --julia auto --runtime /r --depot /d --no-julia-download").unwrap().julia_download);
     }
 }

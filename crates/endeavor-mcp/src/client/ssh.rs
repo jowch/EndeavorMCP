@@ -4,6 +4,8 @@
 //! rest of ssh's stdin and stdout. From there on it's the same channel as a
 //! helper on this computer's (`Channel`). Unless `Options::allow_install`, a
 //! server without the helper is only looked at: nothing is written there.
+//! Downloading Julia there is not part of that: it is asked for with each start
+//! (`start_with`).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -17,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use wire::ToApp;
 use wire::slurm::JobRequest;
 
-use super::channel::{Channel, Hello, Notice, Runtime};
+use super::channel::{Channel, Hello, Notice, Runtime, StartError};
 use super::listener::Listener;
 use super::machines::Server;
 
@@ -158,15 +160,15 @@ pub struct Options<'a> {
     /// open for the idle limit (`endeavor connect --exit-idle`). One that is
     /// already running is left as it was started.
     pub exit_idle: bool,
-    /// The user agreed that Endeavor installs things on the server: its helper,
-    /// and its own Julia when none is found there (`--no-julia-download`
-    /// otherwise). Without it a server that lacks this build's helper is only
-    /// looked at, and `connect` ends with `ConnectError::needs`. The app, which
-    /// asks its user itself, passes true.
+    /// The user agreed that Endeavor installs its helper on the server. Without
+    /// it a server that lacks this build's helper is only looked at, and
+    /// `connect` ends with `ConnectError::needs`. The app, which asks its user
+    /// itself, passes true. (Downloading Julia is asked for by each `start_with`.)
     pub allow_install: bool,
     /// The helper binary to send to a server whose `uname -s` is `os` and
     /// `uname -m` is `arch`, as `linux` and `x86_64` (`arm64` as `aarch64`).
-    /// Asked only when the server has no helper of this build yet.
+    /// Asked only when the server has no helper of this build yet and
+    /// `allow_install` is true.
     pub helper: &'a (dyn Fn(&str, &str) -> Result<PathBuf, String> + Sync),
 }
 
@@ -182,17 +184,22 @@ pub fn no_helper(os: &str, arch: &str) -> String {
 /// It reads six lines (the install root, the state folder, the depot, the
 /// helper's Julia flag and its value, and its launcher; see `Options` for the
 /// empty ones), and prints `ENDEAVOR <os> <arch> have`, or when this build's
-/// helper isn't installed `ENDEAVOR <os> <arch> need <seen> <older|first> <folder>`:
-/// `seen` is `none`, `process:PID` or `job:ID` for a runtime recorded in the
-/// state folder the helper would use (read with `sh`, `cat` and `kill -0`
-/// alone, as the helper isn't there to ask), `older` that a helper of another
-/// build is installed, and `folder` where this build's would go. If it needs
-/// the install, it then reads a byte count and that many bytes of tar, unless
-/// the client ends it first. Then it becomes the helper. The values come over
-/// stdin and not in the script, so no path can break it. `exit_idle` adds the
-/// helper's `--exit-idle` and `allow_install` false its `--no-julia-download`;
-/// being fixed words, they are in the script and not in the lines it reads.
-pub fn bootstrap_script(version: &str, exit_idle: bool, allow_install: bool) -> String {
+/// helper isn't installed `ENDEAVOR <os> <arch> need <seen> <older|first> <folder>`,
+/// the folder being the rest of the line:
+/// `seen` is `none`, or for a runtime recorded in the state folder the helper
+/// would use (read with `sh`, `cat`, `kill`, `ps` and `squeue` alone, as the
+/// helper isn't there to ask): `process:PID` (alive, and its command is a
+/// core's), `process-recorded:PID` (alive, and `ps` couldn't say what it is),
+/// `job:ID` (Slurm lists it as pending or running) or `job-recorded:ID` (no
+/// `squeue`, or it didn't answer). `older` says that a complete helper of
+/// another build is installed, and `folder` where this build's would go. If it
+/// needs the install, it then reads a byte count and that many bytes of tar,
+/// unless the client ends it first. Then it becomes the helper. The values come
+/// over stdin and not in the script, so no path can break it; the line is
+/// written with `printf %s`, which reads no escapes, and the ids are checked to
+/// be digits. `exit_idle` adds the helper's `--exit-idle`; being a fixed word, it
+/// is in the script and not in the lines it reads.
+pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
     [
         &format!("v={version}"),
         r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln || exit 1"#,
@@ -205,10 +212,11 @@ pub fn bootstrap_script(version: &str, exit_idle: bool, allow_install: bool) -> 
         r#"[ -n "$dp" ] || dp="$c/depot:""#,
         r#"if [ -x "$d/endeavor" ] && [ -f "$d/runtime/boot.jl" ]; then s=have; else s=need; fi"#,
         r#"r=none; u=first"#,
-        r#"if [ $s = need ]; then if [ -n "$st" ]; then pd="$sd"; else case "$ln" in slurm) pd="${XDG_STATE_HOME:-$HOME/.local/state}/endeavor/cluster";; *) pd="${XDG_STATE_HOME:-$HOME/.local/state}/endeavor/serve/$(uname -n)";; esac; fi; for o in "$c"/*/endeavor; do if [ -x "$o" ]; then u=older; fi; done; for f in runtime.json job.json; do j=$(cat "$pd/$f" 2>/dev/null); if [ "$ln" = slurm ]; then case "$j" in *job?:?[0-9]*) v=${j#*job?:}; v=$(printf %s "$v" | tr ",}" "  " | cut -d" " -f1); v=${v#?}; v=${v%?}; if [ $r = none ]; then r=job:$v; fi;; esac; else case "$j" in *pid?:[0-9]*) p=${j#*pid?:}; p=$(printf %s "$p" | tr ",}" "  " | cut -d" " -f1); if kill -0 "$p" 2>/dev/null; then r=process:$p; fi;; esac; fi; done; fi"#,
-        r#"if [ $s = need ]; then echo "ENDEAVOR $(uname -s) $(uname -m) need $r $u $d"; else echo "ENDEAVOR $(uname -s) $(uname -m) have"; fi"#,
-        r#"if [ $s = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; echo "Endeavor: installing into $d failed" >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
-        &format!(r#"exec "$d/endeavor" connect "$@" {}{}--launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#, if exit_idle { "--exit-idle " } else { "" }, if allow_install { "" } else { "--no-julia-download " }),
+        r#"num() { [ -n "$1" ] && [ -z "$(printf %s "$1" | tr -d 0-9)" ]; }"#,
+        r#"if [ "$s" = need ]; then if [ -n "$st" ]; then pd="$sd"; else case "$ln" in slurm) pd="${XDG_STATE_HOME:-$HOME/.local/state}/endeavor/cluster";; *) pd="${XDG_STATE_HOME:-$HOME/.local/state}/endeavor/serve/$(uname -n)";; esac; fi; for po in "$c"/*/endeavor; do pq=${po%/endeavor}; case "$pq" in "$d") ;; *) case "${pq##*/}" in *.part.*) ;; *) if [ -x "$po" ] && [ -f "$pq/runtime/boot.jl" ]; then u=older; fi;; esac;; esac; done; for pf in runtime.json job.json; do pj=$(cat "$pd/$pf" 2>/dev/null); if [ "$ln" = slurm ]; then case "$pj" in *job?:?[0-9]*) pk=${pj#*job?:}; pk=$(printf %s "$pk" | tr ",}" "  " | cut -d" " -f1); pk=${pk#?}; pk=${pk%?}; if [ "$r" = none ] && num "$pk"; then if command -v squeue >/dev/null 2>&1 && pl=$(squeue -h -t PENDING,RUNNING,CONFIGURING -o %i -u "$(id -un)" 2>/dev/null); then if printf %s "$pl" | grep -qx "$pk"; then r=job:$pk; fi; else r=job-recorded:$pk; fi; fi;; esac; else case "$pj" in *pid?:[0-9]*) pk=${pj#*pid?:}; pk=$(printf %s "$pk" | tr ",}" "  " | cut -d" " -f1); if num "$pk" && kill -0 "$pk" 2>/dev/null; then if pa=$(ps -p "$pk" -o args= 2>/dev/null) && [ -n "$pa" ]; then case "$pa" in *core*--state-dir*) r=process:$pk;; esac; else r=process-recorded:$pk; fi; fi;; esac; fi; done; fi"#,
+        r#"if [ "$s" = need ]; then printf %s "ENDEAVOR $(uname -s) $(uname -m) need $r $u $d"; else printf %s "ENDEAVOR $(uname -s) $(uname -m) have"; fi; echo"#,
+        r#"if [ "$s" = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; printf %s "Endeavor: installing into $d failed" >&2; echo >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
+        &format!(r#"exec "$d/endeavor" connect "$@" {}--launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#, if exit_idle { "--exit-idle " } else { "" }),
     ]
     .join("; ")
 }
@@ -345,31 +353,64 @@ pub fn this_platform() -> (String, String) {
     (if cfg!(target_os = "macos") { "darwin" } else { std::env::consts::OS }.to_owned(), std::env::consts::ARCH.to_owned())
 }
 
-/// A runtime recorded on a server and alive there, found without the helper.
+/// A runtime recorded on a server, found without the helper.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Running {
-    /// A process, by its pid on the server.
-    Process(u32),
-    /// A Slurm job recorded for the cluster, by its id.
-    Job(String),
+    /// A process, by its pid on the server. `checked`: its command is a
+    /// runtime's; false when `ps` couldn't say, so that it is only known to be alive.
+    Process { pid: u32, checked: bool },
+    /// A Slurm job recorded for the cluster, by its id. `listed`: Slurm lists it
+    /// as pending or running; false when `squeue` wasn't there or didn't answer,
+    /// so that it is only known to be recorded.
+    Job { id: String, listed: bool },
 }
 
 /// What a connect found on a server that lacks this build's helper, when it
 /// wasn't allowed to install it (`Options::allow_install`).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NeedsInstall {
     /// `uname`'s words for the server, as `Linux` and `x86_64`.
     pub os: String,
     pub arch: String,
     /// Where this build's helper would be installed on the server.
     pub folder: String,
-    /// About how much would be sent there, in bytes.
-    pub bytes: u64,
+    /// About how much would be sent there, in bytes. Not known for a server of
+    /// another platform than this computer's, whose helper isn't fetched before
+    /// the install is allowed.
+    pub bytes: Option<u64>,
     /// A helper of another build is installed there already; this one goes beside it.
     pub update: bool,
-    /// A runtime recorded in the folder the helper would use, and alive.
+    /// A runtime recorded in the folder the helper would use.
+    #[serde(deserialize_with = "lenient")]
     pub running: Option<Running>,
+}
+
+/// An `Option` that is `None` for a value this build doesn't know, so that a
+/// status from a newer link still reads.
+fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(from: D) -> Result<Option<T>, D::Error> {
+    Ok(Option::<serde_json::Value>::deserialize(from)?.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+/// `seen` of the script's `need` line.
+fn parse_seen(seen: &str) -> Option<Option<Running>> {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    match seen.split_once(':') {
+        None if seen == "none" => Some(None),
+        Some(("process", pid)) if digits(pid) => Some(Some(Running::Process { pid: pid.parse().ok()?, checked: true })),
+        Some(("process-recorded", pid)) if digits(pid) => Some(Some(Running::Process { pid: pid.parse().ok()?, checked: false })),
+        Some(("job", id)) if digits(id) => Some(Some(Running::Job { id: id.to_owned(), listed: true })),
+        Some(("job-recorded", id)) if digits(id) => Some(Some(Running::Job { id: id.to_owned(), listed: false })),
+        _ => None,
+    }
+}
+
+/// About what an install sends from this computer: the helper as it runs
+/// here and the runtime's files.
+fn this_copy_bytes() -> Option<u64> {
+    let helper = std::fs::metadata(std::env::current_exe().ok()?).ok()?.len();
+    Some(helper + crate::embedded::RUNTIME_FILES.iter().map(|(_, contents)| contents.len() as u64).sum::<u64>())
 }
 
 /// Why a connect failed, and whether trying again by itself could help: it
@@ -396,7 +437,7 @@ pub fn connect_checked(server: &Server, transport: &Transport, options: &Options
     let wrong = |message: String| ConnectError { message, retry: false, needs: None };
     let preamble = preamble(server, options).map_err(wrong)?;
     let version = crate::embedded::BUILD_VERSION;
-    let mut command = transport.command(&bootstrap_script(version, options.exit_idle, options.allow_install), &options.auth).map_err(wrong)?;
+    let mut command = transport.command(&bootstrap_script(version, options.exit_idle), &options.auth).map_err(wrong)?;
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -431,11 +472,19 @@ pub fn connect_checked(server: &Server, transport: &Transport, options: &Options
             Ok(0) | Err(_) => return Err(give_up(child, None, false)),
             Ok(_) => {
                 let line = String::from_utf8_lossy(&bytes);
-                let words: Vec<&str> = line.trim_end().splitn(7, ' ').collect();
-                match words[..] {
-                    ["ENDEAVOR", os, arch, "have"] => break (os.to_owned(), arch.to_owned(), None),
-                    ["ENDEAVOR", os, arch, "need", seen, age, folder] => break (os.to_owned(), arch.to_owned(), Some((seen.to_owned(), age == "older", folder.to_owned()))),
-                    _ => eprintln!("{host}: {}", line.trim_end()),
+                let line = line.trim_end_matches(['\n', '\r']);
+                let Some(said) = line.strip_prefix("ENDEAVOR ") else {
+                    eprintln!("{host}: {line}");
+                    continue;
+                };
+                let parsed = match said.splitn(6, ' ').collect::<Vec<_>>()[..] {
+                    [os, arch, "have"] => Some((os, arch, None)),
+                    [os, arch, "need", seen, age @ ("older" | "first"), folder] if !folder.is_empty() => parse_seen(seen).map(|running| (os, arch, Some((running, age == "older", folder.to_owned())))),
+                    _ => None,
+                };
+                match parsed {
+                    Some((os, arch, found)) => break (os.to_owned(), arch.to_owned(), found),
+                    None => return Err(give_up(child, Some(format!("{host}'s setup script answered with something Endeavor doesn't understand: {line}")), true)),
                 }
             }
         }
@@ -444,22 +493,19 @@ pub fn connect_checked(server: &Server, transport: &Transport, options: &Options
 
     let install = match &found {
         None => None,
-        Some((seen, update, folder)) => {
+        Some((running, update, folder)) => {
             let (platform_os, platform_arch) = platform(&os, &arch);
-            match (options.helper)(&platform_os, &platform_arch).and_then(|helper| install_tar(&helper)) {
-                Ok(tar) if options.allow_install => Some(tar),
-                Ok(tar) => {
-                    let running = match seen.split_once(':') {
-                        Some(("process", pid)) => pid.parse().ok().map(Running::Process),
-                        Some(("job", id)) => Some(Running::Job(id.to_owned())),
-                        _ => None,
-                    };
-                    let needs = NeedsInstall { os: os.clone(), arch: arch.clone(), folder: folder.clone(), bytes: tar.len() as u64, update: *update, running };
-                    let mut error = give_up(child, Some(format!("Endeavor's helper isn't installed on {host}, and installing it wasn't allowed.")), true);
-                    error.needs = Some(needs);
-                    return Err(error);
+            if options.allow_install {
+                match (options.helper)(&platform_os, &platform_arch).and_then(|helper| install_tar(&helper)) {
+                    Ok(tar) => Some(tar),
+                    Err(e) => return Err(give_up(child, Some(e), true)),
                 }
-                Err(e) => return Err(give_up(child, Some(e), true)),
+            } else {
+                let here = (platform_os, platform_arch) == this_platform();
+                let needs = NeedsInstall { os: os.clone(), arch: arch.clone(), folder: folder.clone(), bytes: if here { this_copy_bytes() } else { None }, update: *update, running: running.clone() };
+                let mut error = give_up(child, Some(format!("Endeavor's helper isn't installed on {host}, and installing it wasn't allowed.")), true);
+                error.needs = Some(needs);
+                return Err(error);
             }
         }
     };
@@ -489,10 +535,20 @@ pub fn connect_checked(server: &Server, transport: &Transport, options: &Options
 /// Start the runtime on a connected server's channel (on a cluster, `job` is
 /// what to submit); `on` hears Julia being found, the job queueing, and its
 /// log. `notice` hears if the runtime goes away later.
+/// The helper may download Julia if it finds none (`start_with`).
 pub fn start(channel: &Channel, listener: &Arc<Listener>, job: Option<JobRequest>, on: &dyn Fn(Event), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, String> {
-    let runtime = channel.start_runtime(
+    start_with(channel, listener, job, true, on, notice).map_err(StartError::message)
+}
+
+/// `start`, and `download_julia` false has the helper download nothing:
+/// `StartError::NoJulia` says what a download would be. The channel is always
+/// to a helper of this build (the bootstrap script runs the build's own and
+/// installs it when it is missing), which is what knows that.
+pub fn start_with(channel: &Channel, listener: &Arc<Listener>, job: Option<JobRequest>, download_julia: bool, on: &dyn Fn(Event), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, StartError> {
+    let runtime = channel.start_runtime_with(
         listener,
         job,
+        download_julia,
         &mut |message| match message {
             ToApp::Progress { line } => on(Event::Progress(line)),
             ToApp::FoundJulia { path, version } => on(Event::FoundJulia { path, version }),

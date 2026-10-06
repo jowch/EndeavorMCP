@@ -33,7 +33,7 @@ untested._
 | Transport to a server | The wire protocol over one `ssh`, as in the app. Not `ssh -L` |
 | Who sets a server up | The agent, through tools. No file the user edits |
 | Sign-in | Your ssh configuration, keys and agent. No password prompt in the first version |
-| Installing on a server | Only after the user agreed. Installing the plugin is the agreement to the binary on your own computer; the helper on a server, an update of it, and Endeavor's own Julia there need a question first (built). Looking at what is there needs none beyond the harness's prompt for the tool call. The tools take `install: true` only after the user said yes |
+| Installing on a server | Only after the user agreed. Installing the plugin is the agreement to the binary on your own computer; the helper on a server, an update of it, and Endeavor's own Julia there each need a question first, the helper's first and Julia's only if none is found (built). Looking at what is there needs none beyond the harness's prompt for the tool call. The tools take `install: true` only after the user said yes |
 | Installing the binary | `scripts/install.sh` or `scripts/install.ps1`, run from the web, downloading from the GitHub release (built). npm later, once there are version tags |
 | Signing | Not needed for a `curl` install; wait |
 | State folder | One on each machine, yours included, for `serve`, `mcp`, the plugin and the app: the one `serve` uses today. The app stops choosing its own |
@@ -353,13 +353,15 @@ app moves its pin ([status.md](status.md)).
    starts there (the helper has no call for it), so the report has it as null
    until then. A machine that turns out to have Slurm is saved as a cluster
    and its link is quit, so the next connection starts the helper for Slurm.
-   The same question comes with `use_machine` when a plugin update left the
-   server with an older helper (an update, which sits beside the old one), and
-   when no Julia is found on the machine and Endeavor would download its own
-   (a few hundred MB, into `~/.cache/endeavor` there). You can instead tell the
+   The same question comes with `use_machine` and `stop_machine` when a plugin
+   update left the server with an older helper (an update, which sits beside the
+   old one). Julia is a second question, asked when it matters: if no Julia is
+   found on the machine, `use_machine` returns `needs_install` for Julia, which
+   Endeavor would download itself (a few hundred MB, into `~/.cache/endeavor`
+   there). Your yes to the helper doesn't cover it. You can instead tell the
    agent where Julia is (`add_machine` with `julia`). A project's remembered
-   machine never installs: the first notebook call says what is missing and the
-   agent asks you.
+   machine never installs or downloads: the first notebook call says what is
+   missing and the agent asks you.
 3. On a cluster it proposes resources ("8 CPUs, 32 GB, 8 hours on
    `shared`?"), then calls `use_machine`.
 
@@ -386,7 +388,7 @@ needs a new job, the result says so and the agent asks you.
 | `list_machines` | Saved machines with their state, and ssh `Host` names not yet added |
 | `add_machine` | Connect to an ssh alias, report and save what was found; installs the helper only with `install: true`, which the user agreed to |
 | `use_machine` | Put this session on a machine (or back on this computer), with a folder and, on a cluster, resources. Attaches to the runtime there, starts it, or submits the job |
-| `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Says first who else was active |
+| `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Says first who else was active. Needs this build's helper there, so it can ask to install it too |
 
 `open_notebook` joins a notebook that is already open. `list_notebooks` and
 `pluto_session_status` gain a notebook's other sessions and when each was
@@ -408,7 +410,8 @@ defaults.
   the user asked.
 - Never install on a machine (its helper, an update of it, or Endeavor's own
   Julia) without asking: a `needs_install` result says what it would do; set
-  `install: true` only after the user agreed.
+  `install: true` only after the user agreed to that. Julia's download is a
+  separate question from the helper's, asked again for each start that needs it.
 - When another session was active in your notebook lately, say so before
   you change it.
 - Never ask for a password or passphrase, and never run `ssh` with one.
@@ -530,13 +533,14 @@ folder, and that each loads the skills.
 
 - Nothing is installed on a server without the user's agreement. The link
   connects with installs not allowed (the bootstrap script only reports the
-  platform, whether this build's helper is there, and, with `sh`, `cat` and
-  `kill -0`, whether a runtime or a job is recorded in the state folder the
-  helper would use), and the helper is started with `--no-julia-download`. The
-  agreement (`install: true`) is for one link process: it lasts for its
-  reconnects, and a new link starts without it, which is harmless since the
-  helper is installed by then. The app, which asks its user itself, passes
-  `allow_install` true.
+  platform, whether this build's helper is there, and, with `sh`, `cat`, `kill`,
+  `ps` and `squeue`, whether a runtime or a job is recorded in the state folder
+  the helper would use), and starts Julia with `download_julia` false. The
+  agreement to the helper is for one link process: it lasts for its reconnects,
+  and a new link starts without it, which is harmless since the helper is
+  installed by then. The agreement to Julia's download is for one start and is
+  not kept. The app, which asks its user itself, passes `allow_install` true and
+  starts with `download_julia` true.
 - Both ends stay on loopback. The link's port needs the token, as a
   runtime's does.
 - `add_machine` takes an ssh alias: letters, digits, `.`, `-`, `_` and an

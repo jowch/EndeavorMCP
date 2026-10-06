@@ -151,8 +151,7 @@ impl Link {
 /// decides and submits, so two helpers never submit two jobs, and let go
 /// before the wait in the queue: a helper that comes in meanwhile finds
 /// `job.json` and waits for the same job.
-pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, parts: &Parts, request: JobRequest) -> Result<Attached, ToApp> {
-    let failed = |message: String| ToApp::StartFailed { message };
+pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, parts: &Parts, request: JobRequest, download_julia: bool) -> Result<Attached, ToApp> {
     let starting = lock_start(args, mux, rx, parts)?;
     let dir = &args.state_dir;
     if let Some(attached) = running(args, mux, events)? {
@@ -168,7 +167,7 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &
             Some(attached) => return Ok(attached),
             None => {
                 stopped::clear(dir);
-                submit(args, mux, &request).map_err(failed)?
+                submit(args, mux, &request, download_julia)?
             }
         },
     };
@@ -258,11 +257,17 @@ pub fn cancel_recorded(dir: &Path) {
 
 /// Find Julia (here, on the shared filesystem), write the job script and
 /// submit it. The job's id.
-fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, String> {
-    let dir = &args.state_dir;
-    let flags = request.checked_sbatch_args().map_err(|why| format!("The job wasn't submitted: {why}"))?;
-    let (julia, version) = julia::find(&args.julia, args.julia_download, &|line| drop(mux.send(&ToApp::Progress { line }.frame())))?;
+fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest, download_julia: bool) -> Result<String, ToApp> {
+    let flags = request.checked_sbatch_args().map_err(|why| ToApp::StartFailed { message: format!("The job wasn't submitted: {why}") })?;
+    let (julia, version) = julia::find(&args.julia, download_julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame())))
+        .map_err(julia::Failure::into_app)?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
+    submit_job(args, mux, request, flags, &julia).map_err(|message| ToApp::StartFailed { message })
+}
+
+/// Write the job script for the Julia at `julia` and submit it. The job's id.
+fn submit_job(args: &Args, mux: &Arc<Mux>, request: &JobRequest, flags: Vec<String>, julia: &str) -> Result<String, String> {
+    let dir = &args.state_dir;
     token(dir)?;
     let depot = match request.depot.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
         Some(d) => format!("{}:", wire::files::expand(d).display()),
@@ -278,7 +283,7 @@ fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, S
         "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {} --runtime {} --depot {}{build}{exit_idle}\n",
         quote(&exe.display().to_string()),
         quote(&dir.display().to_string()),
-        quote(&julia),
+        quote(julia),
         quote(&args.runtime.display().to_string()),
         quote(&depot),
     );

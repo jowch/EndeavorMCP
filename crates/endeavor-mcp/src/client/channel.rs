@@ -54,6 +54,25 @@ pub enum Notice {
     Lost(String),
 }
 
+/// Why `start_runtime_with` didn't give a runtime.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StartError {
+    /// No Julia was found there, and a download wasn't allowed: nothing was
+    /// started or downloaded. What a download would be.
+    NoJulia(String),
+    Failed(String),
+}
+
+impl StartError {
+    /// The words for an error, whichever it is.
+    pub fn message(self) -> String {
+        match self {
+            StartError::NoJulia(offer) => format!("Julia wasn't found on that machine. {offer}"),
+            StartError::Failed(message) => message,
+        }
+    }
+}
+
 /// What the helper says as soon as it runs.
 #[derive(Clone, Debug)]
 pub struct Hello {
@@ -285,13 +304,23 @@ impl Channel {
     /// Blocks until it's ready; `on_message` hears `Progress`, `FoundJulia`,
     /// `Submitted` and `Queued` meanwhile, and `notice` the first word of the
     /// runtime going away later, unless the client is the one stopping it.
-    pub fn start_runtime(
+    /// The helper may download Julia if it finds none.
+    pub fn start_runtime(&self, listener: &Arc<Listener>, job: Option<JobRequest>, on_message: &mut dyn FnMut(ToApp), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, String> {
+        self.start_runtime_with(listener, job, true, on_message, notice).map_err(StartError::message)
+    }
+
+    /// `start_runtime`, and `download_julia` false has the helper download
+    /// nothing: it ends with `StartError::NoJulia` when it finds no Julia.
+    /// That is sent only to a helper of this build, which knows it (`ToHelper::StartRuntime`).
+    pub fn start_runtime_with(
         &self,
         listener: &Arc<Listener>,
         job: Option<JobRequest>,
+        download_julia: bool,
         on_message: &mut dyn FnMut(ToApp),
         notice: impl FnOnce(Notice) + Send + 'static,
-    ) -> Result<Runtime, String> {
+    ) -> Result<Runtime, StartError> {
+        let failed = StartError::Failed;
         let events = self.subscribe();
         let leaving = Arc::new(AtomicBool::new(false));
         *self.leaving.lock().unwrap() = leaving.clone();
@@ -299,7 +328,7 @@ impl Channel {
         {
             let _sending = self.sending.lock().unwrap();
             self.stops.lock().unwrap().starting = Some(self.next_stop.load(Ordering::SeqCst));
-            self.mux.send(&ToHelper::StartRuntime { job }.frame()).map_err(|_| CLOSED.to_owned())?;
+            self.mux.send(&ToHelper::StartRuntime { job, download_julia }.frame()).map_err(|_| failed(CLOSED.to_owned()))?;
         }
         let runtime = loop {
             match events.recv() {
@@ -309,15 +338,16 @@ impl Channel {
                     listener.attach(self.mux.clone(), token.clone());
                     break Runtime { port: listener.port(), mcp_url: listener.mcp_url(), page_url: listener.page_url(&token), token, pid, reattached, node, job };
                 }
-                Ok(ToApp::StartFailed { message } | ToApp::Error { message }) => return Err(message),
+                Ok(ToApp::StartFailed { message } | ToApp::Error { message }) => return Err(failed(message)),
+                Ok(ToApp::NoJulia { offer }) => return Err(StartError::NoJulia(offer)),
                 Ok(ToApp::Died { status, log_tail }) => {
                     let how = died_reason(&status, &[]);
-                    return Err(format!("Julia stopped before Pluto was ready. {how}{}{}", if how.is_empty() { "" } else { " " }, diagnose(&log_tail)));
+                    return Err(failed(format!("Julia stopped before Pluto was ready. {how}{}{}", if how.is_empty() { "" } else { " " }, diagnose(&log_tail))));
                 }
-                Ok(ToApp::Stopped) => return Err("Julia was stopped while it started.".into()),
-                Ok(ToApp::Replaced) => return Err("Another connection took Julia over while it was starting.".into()),
+                Ok(ToApp::Stopped) => return Err(failed("Julia was stopped while it started.".into())),
+                Ok(ToApp::Replaced) => return Err(failed("Another connection took Julia over while it was starting.".into())),
                 Ok(ToApp::Hello { .. } | ToApp::Files { .. } | ToApp::NotStopped { .. }) => {}
-                Err(_) => return Err(CLOSED.into()),
+                Err(_) => return Err(failed(CLOSED.into())),
             }
         };
         std::thread::spawn(move || {

@@ -53,13 +53,42 @@ pub enum Source {
     Shell(String),
 }
 
-/// What an error starts with when Julia isn't found and a download isn't allowed
-/// (`find`'s `download`), the rest saying what would be downloaded.
-pub const NOT_FOUND: &str = "Julia wasn't found on this machine.";
+/// Why Julia wasn't found.
+#[derive(Debug, PartialEq)]
+pub enum Failure {
+    /// None was found and `find`'s `download` was false: nothing was downloaded.
+    /// What a download would be (the version, its size and where it goes).
+    Missing(String),
+    Failed(String),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Failure {
+        Failure::Failed(message)
+    }
+}
+
+impl Failure {
+    /// The words for an error, whichever it is.
+    pub fn message(self) -> String {
+        match self {
+            Failure::Missing(offer) => format!("Julia wasn't found on this machine. {offer}"),
+            Failure::Failed(message) => message,
+        }
+    }
+
+    /// What the helper tells its client.
+    pub fn into_app(self) -> wire::ToApp {
+        match self {
+            Failure::Missing(offer) => wire::ToApp::NoJulia { offer },
+            Failure::Failed(message) => wire::ToApp::StartFailed { message },
+        }
+    }
+}
 
 /// The julia binary and its version ("1.12.6"). `progress` hears about a
 /// download, which only happens when `download` is true.
-pub fn find(source: &Source, download: bool, progress: &dyn Fn(String)) -> Result<(String, String), String> {
+pub fn find(source: &Source, download: bool, progress: &dyn Fn(String)) -> Result<(String, String), Failure> {
     match source {
         Source::Path(path) => {
             let path = expand_home(path);
@@ -130,7 +159,7 @@ fn uname(flag: &str) -> String {
 }
 
 /// `~/.cache/endeavor/julia-<version>/bin/julia`, downloading it the first time.
-fn own_julia(download: bool, progress: &dyn Fn(String)) -> Result<String, String> {
+fn own_julia(download: bool, progress: &dyn Fn(String)) -> Result<String, Failure> {
     let home = std::env::var("HOME").map_err(|_| "HOME isn't set".to_owned())?;
     let cache = PathBuf::from(home).join(".cache/endeavor");
     let dir = cache.join(format!("julia-{JULIA_VERSION}"));
@@ -142,7 +171,7 @@ fn own_julia(download: bool, progress: &dyn Fn(String)) -> Result<String, String
             .find(|t| t.0 == os && t.1 == arch)
             .ok_or_else(|| format!("No julia on this machine's PATH, and Endeavor has no Julia download for {os} {arch}. Set How to get Julia for this server."))?;
         if !download {
-            return Err(format!("{NOT_FOUND} Endeavor can download its own copy: Julia {JULIA_VERSION}, about {} MB, into {}.", size / 1_000_000, dir.display()));
+            return Err(Failure::Missing(format!("Endeavor can download its own copy: Julia {JULIA_VERSION}, about {} MB, into {}.", size / 1_000_000, dir.display())));
         }
         install(&cache, &dir, url, sha256, size, progress)?;
     }

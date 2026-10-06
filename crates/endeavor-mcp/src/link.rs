@@ -5,8 +5,9 @@
 //! for each agent session) share it: `ensure` finds the running link for a
 //! machine or starts one, and `Link` has the calls its control interface takes.
 //!
-//! A link is `endeavor link --machine ID`, started by `ensure` and not by
-//! hand. It reads the machine from the machines file
+//! A link is `endeavor link --machine ID [--install]`, started by `ensure` and
+//! not by hand (`--install`: the helper may be installed at once, as for
+//! `ensure_with_install`). It reads the machine from the machines file
 //! (`client::MachinesFile`) and keeps, in `<state home>/endeavor/links/ID/`:
 //!
 //! - `link.json`: its pid, control port, token and build. Present while it runs.
@@ -27,12 +28,17 @@
 //!   `connected` and `nothing_running` is true. A body with any other field is
 //!   refused (HTTP 400), so that a field a newer front adds is never silently
 //!   ignored by an older link. The link connects without installing anything
-//!   on the machine (its helper, or Endeavor's own Julia): where that is needed
-//!   the state is `needs_install`. `install: true` is the user's agreement; it
-//!   connects again with installs allowed and goes on, and the link keeps the
-//!   permission, reconnects included, for as long as it runs.
-//! - `POST /link/install`: the same agreement without a start: a link that
-//!   needs the helper installed connects again and installs it.
+//!   on the machine (its helper), and starts without downloading Julia: where
+//!   either is needed the state is `needs_install`, and `needs_install` says
+//!   which (`helper` or `julia`). `install: true` is the user's agreement to what
+//!   this start needs: the helper if it is missing, which connects again and
+//!   goes on, and Julia if none is found, which the helper downloads for this
+//!   start only. A start without it never downloads Julia, whatever was agreed
+//!   before. The agreement to the helper is kept for as long as the link runs,
+//!   but only a reconnect (to a machine that lost the helper) uses it again.
+//! - `POST /link/install`: the agreement to the helper alone, without a start:
+//!   a link that needs it installed connects again and installs it. It covers
+//!   no download of Julia.
 //! - `POST /link/stop`: stop the runtime for every client. The link stays connected.
 //! - `POST /link/quit`: detach, remove the record and exit. The record goes
 //!   first, so a front that asks for a link right after gets a new one.
@@ -88,9 +94,12 @@ pub enum State {
     Failed,
     /// Endeavor must install something on the machine first (`Status::needs_install`)
     /// and the user hasn't agreed. Not a failure, and not tried again by itself:
-    /// `POST /link/start` or `POST /link/install` with permission goes on.
+    /// `POST /link/start` with `install`, or for the helper `POST /link/install`, goes on.
     #[serde(rename = "needs_install")]
     NeedsInstall,
+    /// A state this build doesn't know, from a link of a newer one: not ready.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What the link wants to install on the machine, and what it found there.
@@ -110,6 +119,9 @@ pub enum InstallWhat {
     Helper,
     /// No Julia was found there, and Endeavor's own would be downloaded.
     Julia,
+    /// Something this build doesn't know, from a link of a newer one.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What `GET /link/status` answers.
@@ -145,6 +157,7 @@ pub struct Status {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HelloInfo {
     pub node: String,
     pub home: String,
@@ -189,6 +202,7 @@ pub struct RuntimeInfo {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct JobInfo {
     pub id: String,
     /// "8 CPUs · 32 GB · 8 h".
@@ -304,6 +318,18 @@ pub fn ensure(machine: &str) -> Result<Link, String> {
 
 /// `ensure`, starting the link with `spawn`.
 pub fn ensure_with(spawn: &Spawn, machine: &str) -> Result<Link, String> {
+    ensure_with_install(spawn, machine, false)
+}
+
+/// `ensure`, and a link that has to be started may install the helper on the
+/// machine at once (`install`, the user's agreement), so that it connects once.
+/// One that runs already is not asked: `Link::install` does that.
+pub fn ensure_install(machine: &str, install: bool) -> Result<Link, String> {
+    ensure_with_install(&Spawn::here()?, machine, install)
+}
+
+/// `ensure_install`, starting the link with `spawn`.
+pub fn ensure_with_install(spawn: &Spawn, machine: &str, install: bool) -> Result<Link, String> {
     valid_id(machine)?;
     let dir = spawn.dir(machine);
     crate::make_state_dir(&dir)?;
@@ -339,7 +365,7 @@ pub fn ensure_with(spawn: &Spawn, machine: &str) -> Result<Link, String> {
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let mut command = Command::new(&spawn.exe);
     // Its own folder as the working directory, so that it doesn't hold the front's (a project's) folder.
-    command.args(["link", "--machine", machine]).current_dir(&dir).envs(spawn.env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
+    command.args(["link", "--machine", machine]).args(install.then_some("--install")).current_dir(&dir).envs(spawn.env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
     let mut child = detached(command)?;
     let started = Instant::now();
     let failed = loop {
@@ -469,14 +495,15 @@ impl Link {
     }
 
     /// `start`, with the call allowed `wait` at most. `install` is the user's
-    /// agreement to install what the machine lacks (`State::NeedsInstall`).
+    /// agreement to what this start needs on the machine (`State::NeedsInstall`):
+    /// the helper, and Julia if none is found there.
     pub fn start_within(&self, job: Option<JobRequest>, install: bool, wait: Duration) -> Result<Status, String> {
         let body = if install { serde_json::json!({ "job": job, "install": true }) } else { serde_json::json!({ "job": job }) };
         self.call("POST", "/link/start", &serde_json::to_vec(&body).map_err(|e| e.to_string())?, wait)
     }
 
-    /// The user agreed to install the helper on the machine: a link waiting for
-    /// that connects again with installs allowed. Returns at once.
+    /// The user agreed to install the helper on the machine (not to a download
+    /// of Julia): a link waiting for that connects again with it allowed. Returns at once.
     pub fn install(&self) -> Result<Status, String> {
         self.install_within(CALL_WAIT)
     }

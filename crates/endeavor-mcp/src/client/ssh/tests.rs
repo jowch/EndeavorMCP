@@ -55,8 +55,8 @@ fn a_host_that_is_not_a_host_never_reaches_ssh() {
 
 #[test]
 fn the_bootstrap_holds_nothing_a_login_shell_would_change() {
-    for (exit_idle, allow) in [(false, true), (true, false)] {
-        let script = bootstrap_script(crate::embedded::BUILD_VERSION, exit_idle, allow);
+    for exit_idle in [false, true] {
+        let script = bootstrap_script(crate::embedded::BUILD_VERSION, exit_idle);
         for bad in ['\'', '\\', '!', '\n'] {
             assert!(!script.contains(bad), "{bad:?} in {script}");
         }
@@ -66,19 +66,63 @@ fn the_bootstrap_holds_nothing_a_login_shell_would_change() {
 /// `script` run as a login shell would run ssh's command, with `preamble` on stdin.
 #[cfg(unix)]
 fn run_script(script: &str, preamble: &str, home: &Path) -> String {
-    let mut shell = Command::new("sh").arg("-c").arg(format!("sh -c '{script}'")).env("HOME", home).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    run_script_in(script, preamble, home, &[])
+}
+
+/// `run_script`, with more variables set (a `PATH`, for one).
+#[cfg(unix)]
+fn run_script_in(script: &str, preamble: &str, home: &Path, env: &[(&str, &str)]) -> String {
+    let mut shell = Command::new("sh").arg("-c").arg(format!("sh -c '{script}'")).env("HOME", home).envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     shell.stdin.take().unwrap().write_all(preamble.as_bytes()).unwrap();
     let out = shell.wait_with_output().unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// The shells that stand for the server's `sh` here: dash, bash and busybox's, whichever are installed.
+#[cfg(unix)]
+fn shells() -> Vec<(&'static str, PathBuf)> {
+    let found: Vec<_> = ["dash", "bash", "busybox"].into_iter().filter_map(|name| ["/usr/bin", "/bin"].iter().map(|dir| Path::new(dir).join(name)).find(|path| path.exists()).map(|path| (name, path))).collect();
+    eprintln!("the bootstrap runs under: {}", found.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "));
+    found
+}
+
+/// A `PATH` folder where `sh` is `shell`, the tools the script uses are the system's, and `squeue` lists
+/// `listed` (is absent for `None`), so that the real scheduler isn't asked. `ps` is the system's unless `ps` says otherwise.
+#[cfg(unix)]
+fn server_path(dir: &Path, shell: &Path, listed: Option<&str>, ps: Option<&str>) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).unwrap();
+    std::os::unix::fs::symlink(shell, dir.join("sh")).unwrap();
+    for tool in ["cat", "tr", "cut", "uname", "id", "grep", "ps", "rm", "mkdir", "head", "tar", "mv", "sleep"] {
+        let found = ["/usr/bin", "/bin"].iter().map(|d| Path::new(d).join(tool)).find(|path| path.exists()).expect(tool);
+        std::os::unix::fs::symlink(found, dir.join(tool)).ok();
+    }
+    let script = |name: &str, body: &str| {
+        let path = dir.join(name);
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    if let Some(listed) = listed {
+        script("squeue", &format!("printf '%s\\n' {listed}"));
+    }
+    if let Some(ps) = ps {
+        script("ps", ps);
+    }
+    dir.display().to_string()
+}
+
 #[test]
 #[cfg(unix)]
 fn the_bootstrap_runs_under_a_shell_and_asks_for_an_install() {
-    let home = crate::client::scratch("bootstrap-need");
-    let said = run_script(&bootstrap_script("v1", false, true), "\n\n\n--julia\nauto\nprocess\n", &home);
-    assert!(said.starts_with("ENDEAVOR ") && said.trim_end().contains(" need none first ") && said.trim_end().ends_with("/.cache/endeavor/v1"), "{said}");
-    assert!(!home.join(".cache").exists());
+    for (name, shell) in shells() {
+        let home = crate::client::scratch(&format!("bootstrap-need-{name}"));
+        let path = server_path(&home.join("bin"), &shell, None, None);
+        let said = run_script_in(&bootstrap_script("v1", false), "\n\n\n--julia\nauto\nprocess\n", &home, &[("PATH", &path)]);
+        assert!(said.starts_with("ENDEAVOR ") && said.trim_end().contains(" need none first ") && said.trim_end().ends_with("/.cache/endeavor/v1"), "{said}");
+        assert!(!home.join(".cache").exists());
+    }
 }
 
 /// A `v1` install under `root` whose `endeavor` says how it was run.
@@ -96,7 +140,7 @@ fn fake_install(root: &Path) {
 /// The `connect` arguments the script gives the helper, as lines.
 #[cfg(unix)]
 fn connect_args(home: &Path, preamble: &str) -> Vec<String> {
-    let said = run_script(&bootstrap_script("v1", false, true), preamble, home);
+    let said = run_script(&bootstrap_script("v1", false), preamble, home);
     let mut lines = said.lines();
     assert!(lines.next().is_some_and(|l| l.starts_with("ENDEAVOR ") && l.ends_with(" have")), "{said}");
     lines.map(|l| l.strip_prefix("arg:").unwrap_or(l).to_owned()).collect()
@@ -125,7 +169,7 @@ fn exit_idle_reaches_the_helper_with_the_same_six_lines() {
     let home = crate::client::scratch("bootstrap-exit-idle");
     fake_install(&home.join("root"));
     let preamble = format!("{}/root\nstate\n/d:\n--julia\nauto\nprocess\n", home.display());
-    let args_of = |exit_idle| run_script(&bootstrap_script("v1", exit_idle, true), &preamble, &home).lines().skip(1).map(str::to_owned).collect::<Vec<_>>();
+    let args_of = |exit_idle| run_script(&bootstrap_script("v1", exit_idle), &preamble, &home).lines().skip(1).map(str::to_owned).collect::<Vec<_>>();
     assert!(!args_of(false).iter().any(|a| a == "arg:--exit-idle"));
     let with = args_of(true);
     let at = with.iter().position(|a| a == "arg:--exit-idle").expect("--exit-idle is passed");
@@ -133,44 +177,94 @@ fn exit_idle_reaches_the_helper_with_the_same_six_lines() {
     assert_eq!(with.len(), args_of(false).len() + 1);
 }
 
-#[test]
+/// What the script says about a server with no helper, with `launcher` and the state folder given.
 #[cfg(unix)]
-fn without_permission_the_helper_is_told_not_to_download_julia() {
-    let home = crate::client::scratch("bootstrap-no-download");
-    fake_install(&home.join("root"));
-    let preamble = format!("{}/root\nstate\n/d:\n--julia\nauto\nprocess\n", home.display());
-    let args_of = |allow| run_script(&bootstrap_script("v1", false, allow), &preamble, &home).lines().skip(1).map(str::to_owned).collect::<Vec<_>>();
-    assert!(!args_of(true).iter().any(|a| a == "arg:--no-julia-download"));
-    let without = args_of(false);
-    let at = without.iter().position(|a| a == "arg:--no-julia-download").expect("the flag is passed");
-    assert_eq!(without[at + 1], "arg:--launcher", "{without:?}");
+fn needs_line(home: &Path, state: &Path, launcher: &str, path: &str) -> String {
+    let mut shell = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false))).env("HOME", home).env("PATH", path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    // It waits for the byte count, and the end of its input ends it.
+    shell.stdin.take().unwrap().write_all(format!("{}/root\n{}\n\n--julia\nauto\n{launcher}\n", home.display(), state.display()).as_bytes()).unwrap();
+    String::from_utf8_lossy(&shell.wait_with_output().unwrap().stdout).into_owned()
+}
+
+/// A stand-in process that is ended when it is dropped, whatever a test did before.
+#[cfg(unix)]
+struct KillOnDrop(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 #[test]
 #[cfg(unix)]
 fn a_server_without_the_helper_is_described_and_nothing_is_written() {
-    let home = crate::client::scratch("bootstrap-describe");
-    let state = home.join("st");
-    std::fs::create_dir_all(&state).unwrap();
-    // A pid that lives (this test's), a quoted node name that holds "pid", and a recorded job.
-    std::fs::write(state.join("runtime.json"), format!(r#"{{"launcher":"process","node":"rapid-pid1","pid":{},"port":5,"token":"t"}}"#, std::process::id())).unwrap();
-    let said = |launcher: &str| {
-        let mut shell = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false, true))).env("HOME", &home).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-        // It waits for the byte count, and the end of its input ends it.
-        shell.stdin.take().unwrap().write_all(format!("{}/root\n{}\n\n--julia\nauto\n{launcher}\n", home.display(), state.display()).as_bytes()).unwrap();
-        String::from_utf8_lossy(&shell.wait_with_output().unwrap().stdout).into_owned()
-    };
-    let line = said("process");
-    assert!(line.contains(&format!(" need process:{} first {}/root/v1", std::process::id(), home.display())), "{line}");
-    assert!(said("slurm").contains(" need none first "), "a plain runtime isn't a job");
-    std::fs::write(state.join("job.json"), r#"{"job":"77","summary":"x"}"#).unwrap();
-    assert!(said("slurm").contains(" need job:77 "), "{}", said("slurm"));
-    std::fs::remove_file(state.join("job.json")).unwrap();
-    std::fs::write(state.join("runtime.json"), r#"{"launcher":"slurm","job":null,"pid":5,"token":"t"}"#).unwrap();
-    assert!(said("slurm").contains(" need none "));
-    std::fs::write(state.join("runtime.json"), r#"{"launcher":"slurm","job":"123","pid":5,"token":"t"}"#).unwrap();
-    assert!(said("slurm").contains(" need job:123 "));
-    assert!(!home.join("root").exists(), "nothing was written");
+    for (name, shell) in shells() {
+        let home = crate::client::scratch(&format!("bootstrap-describe-{name}"));
+        let state = home.join("st");
+        std::fs::create_dir_all(&state).unwrap();
+        let bin = |listed: Option<&str>, ps: Option<&str>| server_path(&home.join("bin"), &shell, listed, ps);
+        // A process whose command is a core's, a quoted node name that holds "pid", and a recorded job.
+        let core = KillOnDrop(std::os::unix::process::CommandExt::arg0(Command::new("sleep").arg("60"), "endeavor core --state-dir fake").spawn().unwrap());
+        let pid = core.0.id();
+        let write = |text: String| std::fs::write(state.join("runtime.json"), text).unwrap();
+        write(format!(r#"{{"launcher":"process","node":"rapid-pid1","pid":{pid},"port":5,"token":"t"}}"#));
+        let line = needs_line(&home, &state, "process", &bin(None, None));
+        // Busybox's own `ps` has no -p, so it can only say that the process is alive.
+        let seen = if name == "busybox" { "process-recorded" } else { "process" };
+        assert!(line.contains(&format!(" need {seen}:{pid} first {}/root/v1", home.display())), "{name}: {line}");
+        assert!(needs_line(&home, &state, "slurm", &bin(None, None)).contains(" need none first "), "{name}: a plain runtime isn't a job");
+        // A `ps` that can't say: alive, and recorded only. One that says another command: not it.
+        assert!(needs_line(&home, &state, "process", &bin(None, Some("exit 1"))).contains(&format!(" need process-recorded:{pid} first ")), "{name}");
+        if name != "busybox" {
+            assert!(needs_line(&home, &state, "process", &bin(None, Some("echo sleep 60"))).contains(" need none first "), "{name}: a pid that was reused");
+        }
+        drop(core);
+        write(format!(r#"{{"launcher":"process","node":"n","pid":{pid},"port":5,"token":"t"}}"#));
+        assert!(needs_line(&home, &state, "process", &bin(None, None)).contains(" need none "), "{name}: gone");
+
+        std::fs::write(state.join("job.json"), r#"{"job":"77","summary":"x"}"#).unwrap();
+        assert!(needs_line(&home, &state, "slurm", &bin(Some("5 77"), None)).contains(" need job:77 "), "{name}");
+        assert!(needs_line(&home, &state, "slurm", &bin(Some("5 6"), None)).contains(" need none "), "{name}: not listed any more");
+        assert!(needs_line(&home, &state, "slurm", &bin(None, None)).contains(" need job-recorded:77 "), "{name}: no squeue");
+        std::fs::remove_file(state.join("job.json")).unwrap();
+        write(r#"{"launcher":"slurm","job":null,"pid":5,"token":"t"}"#.into());
+        assert!(needs_line(&home, &state, "slurm", &bin(Some("5"), None)).contains(" need none "));
+        write(r#"{"launcher":"slurm","job":"123","pid":5,"token":"t"}"#.into());
+        assert!(needs_line(&home, &state, "slurm", &bin(Some("123"), None)).contains(" need job:123 "));
+        assert!(!home.join("root").exists(), "nothing was written");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn ids_that_are_not_digits_are_not_reported_and_values_are_never_read_as_escapes() {
+    for (name, shell) in shells() {
+        let home = crate::client::scratch(&format!("bootstrap-values-{name}"));
+        let state = home.join("st");
+        std::fs::create_dir_all(&state).unwrap();
+        let path = server_path(&home.join("bin"), &shell, Some("77"), None);
+        for text in [r#"{"pid":12ab,"x":1}"#, r#"{"pid":1;2}"#, r#"{"pid":$(touch pwned)}"#] {
+            std::fs::write(state.join("runtime.json"), text).unwrap();
+            assert!(needs_line(&home, &state, "process", &path).contains(" need none "), "{name}: {text}");
+        }
+        for text in [r#"{"job":"7x7"}"#, r#"{"job":"7 7"}"#, r#"{"job":"77;x"}"#] {
+            std::fs::write(state.join("job.json"), text).unwrap();
+            assert!(needs_line(&home, &state, "slurm", &path).contains(" need none "), "{name}: {text}");
+        }
+        assert!(!home.join("pwned").exists() && !state.join("pwned").exists());
+        // `\c` ends an echo's output in dash and busybox, and `\n` is a line break there: the line is printed as it is.
+        for odd in [r"x\cy", r"a\nb", "with space", "$HOME"] {
+            let root = home.join(odd);
+            let mut sh = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false))).env("HOME", &home).env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            sh.stdin.take().unwrap().write_all(format!("{}\n\n\n--julia\nauto\nprocess\n", root.display()).as_bytes()).unwrap();
+            let said = String::from_utf8_lossy(&sh.wait_with_output().unwrap().stdout).into_owned();
+            assert_eq!(said.lines().count(), 1, "{name}: {said:?}");
+            assert!(said.ends_with(&format!(" first {}/v1\n", root.display())), "{name}: {said:?}");
+        }
+    }
 }
 
 #[test]

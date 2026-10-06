@@ -187,21 +187,37 @@ _Started 2026-10-06, on the `client-library` branch._
 - **A runtime without the helper is looked for by `sh`.** The bootstrap reads
   `runtime.json` with shell patterns (the first `pid` followed by a quote and
   a colon, and the first `job` the same way), so a node name that holds
-  `pid":` would confuse it. It checks the process with `kill -0` only, not its
-  port, so a recycled pid reads as a runtime. For a cluster it reports a
-  recorded job without asking Slurm whether it still exists.
-- **The agreement is one flag for everything.** `install: true` allows the
-  helper and Julia's download alike; a user can't allow one and not the other.
+  `pid":` would confuse it. It doesn't check the runtime's port. A process
+  counts as Julia's when it is alive and its command (`ps -p PID -o args=`)
+  has `core` and `--state-dir`, which is the shape of `endeavor core`; a
+  server whose `ps` has no `-p` (busybox) reports it as recorded and alive,
+  not checked. A cluster's job counts when the user's `squeue` lists it as
+  pending, running or configuring, and is reported as recorded when there is
+  no `squeue` or it fails.
 - **Julia's download on a server whose Julia is found later is not retried
   by the link by itself.** After `needs_install` for Julia it waits for
   `install: true` or for `add_machine` with a `julia` setting.
+- **A start that is already under way takes no later agreement.** A
+  `use_machine` without `install` that is still starting when a second one
+  with `install: true` arrives keeps its own permission, so it can end with
+  `needs_install` for Julia; the second call, made again, then goes through.
 - **The Julia decision is tested through the link and the tools** with a fake
   `curl`, not against a real download; its unit test would need a login shell
   that finds no Julia, which a developer's machine often has. That test
   skips itself where a login shell finds Julia.
-- **The look at a server only reads the platform's helper size** from the
-  local helper file (or the fetched one), so the size is the tar's, not the
-  transfer's after compression by ssh.
+- **The look at a server knows the helper's size only for this computer's
+  platform** (this program's size plus the runtime's files, not the transfer's
+  after compression by ssh). For another platform the helper is fetched only
+  once the install is allowed, so the question gives no size. A platform the
+  release has no helper for is found out then too.
+- **A link of another build that has a runtime on it is not sent `install`.**
+  `add_machine` says so in its result, and the user has to end the runtime, or
+  wait for the link to end, to install through a new link.
+- **A front built before `needs_install` can't use a link that says it,** and
+  one built at the commit that added it can't read this build's `running` and
+  `bytes` of a helper's look (their shapes changed). A front reads unknown
+  states and kinds as `unknown` and ignores unknown fields from now on, but
+  that doesn't change fronts already built.
 - **Julia is not known when a machine is added.** The helper has no call for
   it, so `add_machine` reports `julia: null` until the first runtime start.
 - **Adding a cluster takes two connections.** The first link connects as a

@@ -16,7 +16,7 @@ use wire::files::{Reply, Request, RuntimeState};
 use wire::slurm::JobRequest;
 
 use super::{HelloInfo, InstallInfo, InstallWhat, JobInfo, JuliaInfo, QueueInfo, Record, RuntimeInfo, State, Status, valid_id};
-use crate::client::{Auth, CLOSED, Cancel, Channel, ConnectError, Event, Listener, MachinesFile, Messages, Notice, Options, Server, Transport, connect_checked, start, this_platform};
+use crate::client::{Auth, CLOSED, Cancel, Channel, ConnectError, Event, Listener, MachinesFile, Messages, Notice, Options, Server, StartError, Transport, connect_checked, start_with, this_platform};
 use crate::http::{self, Framing, Head};
 use crate::standalone::Env;
 
@@ -44,9 +44,19 @@ enum Msg {
     /// The helper of this connection ended by itself.
     Closed(u64),
     /// A runtime start on this connection ended (`Shared::epoch` when it began).
-    Started(u64, u64, Result<crate::client::Runtime, String>),
+    Started(u64, u64, Result<crate::client::Runtime, StartError>),
     /// The attached runtime went away.
     Notice(u64, Notice),
+}
+
+/// What a start asked for.
+#[derive(Clone, Debug, Default)]
+struct Wish {
+    /// On a cluster, what to submit.
+    job: Option<JobRequest>,
+    /// The helper may download Julia for this start if it finds none: the
+    /// `install` of the request, and not what was agreed for an earlier one.
+    download: bool,
 }
 
 struct Inner {
@@ -63,10 +73,10 @@ struct Inner {
     channel: Option<Arc<Channel>>,
     conn: u64,
     /// What the runtime was asked for, from a start until a stop or a failure.
-    wanted: Option<Option<JobRequest>>,
+    wanted: Option<Wish>,
     /// What an attached or starting runtime had been asked for when the
     /// connection was lost: the next connection gets it back, if it is still there.
-    resume: Option<Option<JobRequest>>,
+    resume: Option<Wish>,
     /// Why the runtime had ended when the connection was lost, which the next
     /// connection still says: it has nothing to bring back.
     ended: Option<String>,
@@ -87,9 +97,6 @@ struct Inner {
     nothing_running: bool,
     /// What the machine needs installed, while the state is `needs_install`.
     needs: Option<InstallInfo>,
-    /// The current connection was made with installs allowed, which decides
-    /// whether a permission given since needs a new one.
-    conn_allowed: bool,
 }
 
 struct Shared {
@@ -105,9 +112,11 @@ struct Shared {
     /// Control requests in flight.
     busy: AtomicUsize,
     leaving: AtomicBool,
-    /// The user agreed to installs on the machine (`POST /link/start` with
-    /// `install`, or `/link/install`). Kept for as long as the link runs, so a
-    /// reconnect doesn't need it again.
+    /// The user agreed to installing the helper on the machine (`POST /link/start`
+    /// with `install`, `/link/install`, or `--install` at the link's start). Kept
+    /// for as long as the link runs, so that a reconnect to a machine that lost
+    /// the helper doesn't need it again. Julia's download is not part of it: it
+    /// is asked for by each start (`Wish::download`).
     allow_install: AtomicBool,
     idle: Duration,
     hooks: Hooks,
@@ -137,9 +146,10 @@ pub(crate) fn main(argv: &[String]) -> ! {
         eprintln!("endeavor link: {message}");
         exit(1)
     };
-    let id = match argv {
-        [flag, id] if flag == "--machine" => id.clone(),
-        _ => fail("usage: endeavor link --machine ID".into()),
+    let (id, install) = match argv {
+        [flag, id] if flag == "--machine" => (id.clone(), false),
+        [flag, id, install] if flag == "--machine" && install == "--install" => (id.clone(), true),
+        _ => fail("usage: endeavor link --machine ID [--install]".into()),
     };
     valid_id(&id).unwrap_or_else(|e| fail(e));
     let env = Env::from_vars(&|name| std::env::var(name).ok());
@@ -201,13 +211,12 @@ pub(crate) fn main(argv: &[String]) -> ! {
             check_first: false,
             nothing_running: false,
             needs: None,
-            conn_allowed: false,
         }),
         cancel: Mutex::new(Arc::new(Cancel::default())),
         activity: Mutex::new(Instant::now()),
         busy: AtomicUsize::new(0),
         leaving: AtomicBool::new(false),
-        allow_install: AtomicBool::new(false),
+        allow_install: AtomicBool::new(install),
         idle,
         hooks: Hooks::read(),
     });
@@ -300,7 +309,7 @@ impl Shared {
     /// way or attached. Never called with the lock held.
     fn begin_start(self: &Arc<Shared>) {
         let begun = self.with(|i| {
-            let (Some(channel), Some(job)) = (i.channel.clone(), i.wanted.clone()) else { return None };
+            let (Some(channel), Some(wish)) = (i.channel.clone(), i.wanted.clone()) else { return None };
             if i.starting || i.runtime.is_some() {
                 return None;
             }
@@ -312,16 +321,16 @@ impl Shared {
             i.needs = None;
             i.queue = None;
             i.step = Some(format!("Starting the runtime on {}", i.name));
-            Some((channel, job, i.conn, i.epoch, std::mem::take(&mut i.check_first)))
+            Some((channel, wish, i.conn, i.epoch, std::mem::take(&mut i.check_first)))
         });
-        let Some((channel, job, conn, epoch, check)) = begun else { return };
+        let Some((channel, wish, conn, epoch, check)) = begun else { return };
         let shared = self.clone();
         std::thread::spawn(move || {
             if check && !shared.runtime_is_there(&channel, conn, epoch) {
                 return;
             }
             let tx = shared.inbox.clone();
-            let result = start(&channel, &shared.listener, job, &|event| shared.on_event(event), move |notice| drop(tx.send(Msg::Notice(conn, notice))));
+            let result = start_with(&channel, &shared.listener, wish.job, wish.download, &|event| shared.on_event(event), move |notice| drop(tx.send(Msg::Notice(conn, notice))));
             let _ = shared.inbox.send(Msg::Started(conn, epoch, result));
         });
     }
@@ -364,35 +373,12 @@ impl Shared {
         }
     }
 
-    /// The user agreed to installs on the machine. A connection made without that
-    /// which refused a download of Julia is dropped, so that the next one allows it
-    /// (the wish for a runtime stays). True then. A machine that lacks the helper has
-    /// no connection, and the caller connects it again.
-    fn permit(&self, i: &mut Inner) -> bool {
-        self.allow_install.store(true, Ordering::SeqCst);
-        i.needs.as_ref().is_some_and(|n| n.what == InstallWhat::Julia) && self.redo_connection(i)
-    }
-
-    /// Drop the connection and connect again, with installs allowed. False when there is none.
-    fn redo_connection(&self, i: &mut Inner) -> bool {
-        let Some(channel) = i.channel.take() else { return false };
-        // A channel that was let go reports no end of its own.
-        let (inbox, conn) = (self.inbox.clone(), i.conn);
-        std::thread::spawn(move || {
-            channel.detach();
-            let _ = inbox.send(Msg::Closed(conn));
-        });
-        i.state = State::Connecting;
-        i.needs = None;
-        i.error = None;
-        i.step = Some(format!("Connecting to {} again, to download Julia there", i.name));
-        true
-    }
-
-    /// `POST /link/install`.
+    /// `POST /link/install`: the helper may be installed. A machine that lacks it
+    /// has no connection, and is connected again.
     fn request_install(&self) {
+        self.allow_install.store(true, Ordering::SeqCst);
         self.with(|i| {
-            if !self.permit(i) && i.state == State::NeedsInstall && i.channel.is_none() {
+            if i.state == State::NeedsInstall && i.channel.is_none() {
                 self.reconnect_now(i);
             }
         });
@@ -409,17 +395,18 @@ impl Shared {
     /// `POST /link/start`.
     fn request_start(self: &Arc<Shared>, job: Option<JobRequest>, only_running: bool, install: bool) {
         let connected = self.with(|i| {
-            let redone = install && self.permit(i);
+            // Only a start with no connection can mean the helper: with one, `install` is for Julia, and a
+            // yes to that mustn't be kept as one for the helper. Set under the lock, as the supervisor checks it.
+            if install && i.channel.is_none() {
+                self.allow_install.store(true, Ordering::SeqCst);
+            }
             if i.runtime.is_some() || i.starting {
                 return true;
             }
-            i.wanted = Some(job);
+            i.wanted = Some(Wish { job, download: install });
             i.resume = None;
             i.check_first = only_running;
             i.nothing_running = false;
-            if redone {
-                return false;
-            }
             if i.channel.is_some() {
                 return true;
             }
@@ -447,7 +434,7 @@ impl Shared {
             i.epoch += 1;
             Some((channel, i.epoch))
         }) else {
-            return Err(format!("Endeavor isn't connected to {} right now, so it can't stop the runtime. Try again once it is.", self.with(|i| i.name.clone())));
+            return Err(self.with(|i| not_connected_to_stop(i)));
         };
         let stopped = channel.stop();
         self.with(|i| {
@@ -484,6 +471,16 @@ impl Shared {
             self.listener.disconnected();
         }
         stopped
+    }
+}
+
+/// Why a stop can't reach the helper, and what to do about it.
+fn not_connected_to_stop(i: &Inner) -> String {
+    let name = &i.name;
+    match i.state {
+        State::NeedsInstall => format!("Endeavor isn't connected to {name}: its helper isn't installed there, and stopping the runtime needs it. Ask the user whether Endeavor may install it, then call `stop_machine` again with `install: true`."),
+        State::Failed => format!("Endeavor isn't connected to {name}: {} Tell the user, and call `stop_machine` again once that is fixed.", i.error.as_deref().unwrap_or("the connection failed.")),
+        _ => format!("Endeavor isn't connected to {name} yet, so it can't stop the runtime. It is connecting: wait a few seconds, then call `stop_machine` again."),
     }
 }
 
@@ -589,8 +586,8 @@ fn supervise(shared: Arc<Shared>, inbox: Receiver<Msg>) -> ! {
                     let (shared, channel) = (shared.clone(), channel.clone());
                     std::thread::spawn(move || find_partitions(&shared, &channel, conn));
                 }
-                if let Some(job) = resume {
-                    reattach(&shared, &channel, job);
+                if let Some(wish) = resume {
+                    reattach(&shared, &channel, wish);
                 }
                 reconnecting = true;
                 shared.begin_start();
@@ -608,6 +605,8 @@ fn hello_wants_slurm(shared: &Shared) -> bool {
 fn find_partitions(shared: &Shared, channel: &Channel, conn: u64) {
     let found = match channel.files(Request::Slurm) {
         Ok(Reply::Slurm { scheduler }) => Some(scheduler),
+        // The connection ended: the next one asks again.
+        Err(_) if channel.is_closed() => return,
         _ => None,
     };
     shared.with(|i| {
@@ -624,12 +623,12 @@ fn find_partitions(shared: &Shared, channel: &Channel, conn: u64) {
 /// helper says it is still there (running, or a job that waits): a start would
 /// otherwise begin a new runtime, or on a cluster submit a job nobody asked for.
 /// An answer that isn't clear is asked for again, and then leaves the link `failed`.
-fn reattach(shared: &Shared, channel: &Channel, job: Option<JobRequest>) {
+fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
     let mut trouble = String::new();
     for attempt in 0..REATTACH_TRIES {
         match channel.files(Request::Runtime) {
             Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } }) => {
-                shared.with(|i| i.wanted = Some(job));
+                shared.with(|i| i.wanted = Some(wish));
                 return;
             }
             Ok(Reply::Runtime { runtime: RuntimeState::NotRunning }) => {
@@ -648,7 +647,7 @@ fn reattach(shared: &Shared, channel: &Channel, job: Option<JobRequest>) {
         }
         // The connection went again: the next one tries, with the same wish.
         if channel.is_closed() {
-            shared.with(|i| i.resume = Some(job));
+            shared.with(|i| i.resume = Some(wish));
             return;
         }
         if attempt + 1 < REATTACH_TRIES {
@@ -682,7 +681,6 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
         }
     };
     let allowed = shared.allow_install.load(Ordering::SeqCst);
-    shared.with(|i| i.conn_allowed = allowed);
     let options = Options { auth: Auth::Batch, root: shared.hooks.root.clone(), state: shared.hooks.state.clone(), depot: shared.hooks.depot.clone(), exit_idle: true, allow_install: allowed, helper: &helper };
     let transport = if shared.hooks.shell { Transport::Shell { env: Vec::new(), ask: shared.hooks.ask.clone() } } else { Transport::for_server(&server) };
     let cancel = Arc::new(Cancel::default());
@@ -725,7 +723,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
                     park();
                 }
                 shared.with(|i| {
-                    i.resume = (i.runtime.is_some() || i.starting).then(|| i.wanted.take().or_else(|| i.resume.take()).unwrap_or(None));
+                    i.resume = (i.runtime.is_some() || i.starting).then(|| i.wanted.take().or_else(|| i.resume.take()).unwrap_or_default());
                     i.ended = (i.resume.is_none() && i.state == State::Failed).then(|| i.error.take()).flatten();
                     i.channel = None;
                     i.runtime = None;
@@ -767,26 +765,21 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
                         });
                     }),
                     // The connection ended under the start: `Closed` follows and takes the start along to the next one.
-                    Err(message) if message == CLOSED || shared.with(|i| i.channel.as_ref().is_some_and(|c| c.is_closed())) => {}
-                    Err(message) if message.starts_with(crate::julia::NOT_FOUND) => {
-                        eprintln!("Starting the runtime: {message}");
-                        let redone = shared.with(|i| {
+                    Err(StartError::Failed(message)) if message == CLOSED => {}
+                    Err(_) if shared.with(|i| i.channel.as_ref().is_some_and(|c| c.is_closed())) => {}
+                    Err(StartError::NoJulia(offer)) => {
+                        eprintln!("Starting the runtime: no Julia, and no download was allowed. {offer}");
+                        shared.with(|i| {
                             (i.starting, i.gone_early, i.runtime, i.job, i.queue) = (false, false, None, None, None);
-                            if shared.allow_install.load(Ordering::SeqCst) && !i.conn_allowed && shared.redo_connection(i) {
-                                return true;
-                            }
                             i.wanted = None;
                             i.state = State::NeedsInstall;
                             i.error = None;
                             i.step = Some(format!("Julia wasn't found on {}", i.name));
-                            i.needs = Some(InstallInfo { what: InstallWhat::Julia, helper: None, julia: Some(message[crate::julia::NOT_FOUND.len()..].trim().to_owned()) });
-                            false
+                            i.needs = Some(InstallInfo { what: InstallWhat::Julia, helper: None, julia: Some(offer) });
                         });
-                        if !redone {
-                            shared.listener.restart_failed();
-                        }
+                        shared.listener.restart_failed();
                     }
-                    Err(message) => {
+                    Err(StartError::Failed(message)) => {
                         eprintln!("Starting the runtime failed: {message}");
                         shared.with(|i| {
                             i.starting = false;

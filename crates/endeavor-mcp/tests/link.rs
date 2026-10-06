@@ -588,7 +588,7 @@ fn a_machine_without_the_helper_waits_for_the_user_and_installs_once_told() {
     assert_eq!(needs.what, InstallWhat::Helper);
     let helper = needs.helper.expect("the helper's details");
     assert_eq!(Path::new(&helper.folder), root.join(endeavor_mcp::embedded::BUILD_VERSION));
-    assert!(helper.bytes > 1000 && !helper.update && helper.running.is_none(), "{helper:?}");
+    assert!(helper.bytes.is_some_and(|bytes| bytes > 1000) && !helper.update && helper.running.is_none(), "{helper:?}");
     assert_eq!(status.error, None, "it isn't a failure");
     assert!(status.hello.is_some_and(|h| h.os.is_some()), "what it found is kept");
 
@@ -665,4 +665,30 @@ fn a_start_body_with_an_unknown_field_is_still_refused_and_install_is_known() {
     assert_eq!(call(r#"{"job":null,"installs":true}"#), 400);
     assert_eq!(call(r#"{"job":null,"install":true}"#), 200);
     ready(&link);
+}
+
+#[test]
+fn an_agreement_given_with_a_connection_up_is_not_kept_for_the_helper() {
+    let place = Place::new("agreement-not-kept");
+    let root = place.dir.join("root");
+    common::install_helper(&root);
+    let link = place.look();
+    wait_status(&link, "connected", |s| s.state == State::Connected);
+    // With the helper connected, `install` can only be for what the start needs (Julia).
+    link.start_within(None, true, Duration::from_secs(5)).unwrap();
+    ready(&link);
+    // The helper goes from the machine, and the connection with it: that reconnect asks.
+    std::fs::remove_dir_all(&root).unwrap();
+    for pid in place.helpers() {
+        // SAFETY: plain syscall, on the helper this test's link started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    let status = wait_status(&link, "needs_install", |s| s.state == State::NeedsInstall);
+    assert_eq!(status.needs_install.map(|n| n.what), Some(InstallWhat::Helper));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!root.exists(), "nothing was installed without a question");
+    // The agreement to the helper does it, and `stop` ends the runtime that was left.
+    link.install().unwrap();
+    wait_status(&link, "connected", |s| s.state == State::Connected);
+    link.stop().unwrap();
 }

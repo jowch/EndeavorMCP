@@ -3,15 +3,15 @@
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | `list_machines` | The added machines and their state, `"local"`, which one this session uses, and `Host` names in `~/.ssh/config` not added yet | Starts no connection; safe anytime |
-| `add_machine(host, name?, julia?, slurm?, install?)` | Connect to an ssh alias or `user@host`, report and save what was found | Waits up to 45 s. Existing machine: updates it. Failure: nothing saved. Installs the helper only with `install: true`, after the user agreed |
+| `add_machine(host, name?, julia?, slurm?, install?)` | Connect to an ssh alias or `user@host`, report and save what was found | Waits up to 45 s. Existing machine: updates it. Failure: nothing saved. Installs the helper only with `install: true`, after the user agreed; it never downloads Julia |
 | `use_machine(machine, folder?, …)` | Put this session on a machine, or back on `"local"` | Cluster resources below. Remembered by the project |
-| `stop_machine(machine, force?)` | Stop the runtime there for every client | Refuses and names who when another session was active in the last 15 minutes |
+| `stop_machine(machine, force?, install?)` | Stop the runtime there for every client | Refuses and names who when another session was active in the last 15 minutes. Needs this plugin's helper on the machine: if only an older one is there it returns `needs_install` and stops nothing |
 
 `machine` is a name from `list_machines`, or `"local"` for the user's own computer. A tool that fails says why in `message`.
 
 ## Installing
 
-`install: true` on `add_machine` or `use_machine` is the user's yes to what a `needs_install` result named. Without it nothing is installed or downloaded on the machine. The result has `install`: `what` `helper` (with `os`, `arch`, `folder`, `size_mb`, `update` true when an older helper is there, and `running`: `{process}` or `{slurm_job}` when a runtime is already running there, else null) or `julia` (`detail`: what would be downloaded and where). `add_machine` leaves the machine saved but `not yet connected`; `use_machine` leaves the session where it was.
+`install: true` is the user's yes to what a `needs_install` result named. Without it nothing is installed or downloaded on the machine. The result has `install`: `what` `helper` (with `os`, `arch`, `folder`, `size_mb` (null when not known), `update` true when an older helper is there, and `running`: `{process}` or `{slurm_job}` when a runtime is running there, `{process_recorded}` or `{slurm_job_recorded}` when one is recorded and alive but Endeavor couldn't check what it is, else null) or `julia` (`detail`: what would be downloaded and where). The helper and Julia are two questions: `install: true` on one call covers what that call needs and is not kept, so a yes to the helper (even through `add_machine`) never covers Julia. `add_machine` leaves the machine saved but `not yet connected` and only ever installs the helper; `use_machine` and `stop_machine` leave the session and the runtime where they were.
 
 ## add_machine
 

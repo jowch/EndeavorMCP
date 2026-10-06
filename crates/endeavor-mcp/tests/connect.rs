@@ -294,8 +294,8 @@ fn helpers_asked_to_start_at_once_start_one_runtime_that_serve_then_finds() {
     let mut second = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
     first.hello();
     second.hello();
-    first.send(ToHelper::StartRuntime { job: None });
-    second.send(ToHelper::StartRuntime { job: None });
+    first.send(ToHelper::StartRuntime { job: None, download_julia: true });
+    second.send(ToHelper::StartRuntime { job: None, download_julia: true });
     let (ToApp::Ready { pid: a, reattached: a_again, .. }, ToApp::Ready { pid: b, reattached: b_again, .. }) = (after_start(&first), after_start(&second)) else { panic!("expected Ready") };
     assert_eq!(a, b, "one runtime");
     assert_eq!(running(&format!("core --state-dir {}", dir.display())), 1);
@@ -320,7 +320,7 @@ fn helpers_asked_to_start_at_once_start_one_runtime_that_serve_then_finds() {
     assert!(std::fs::read_to_string(dir.join("stopped")).unwrap().ends_with(" connection"));
     let mut again = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
     again.hello();
-    again.send(ToHelper::StartRuntime { job: None });
+    again.send(ToHelper::StartRuntime { job: None, download_julia: true });
     assert!(matches!(after_start(&again), ToApp::Ready { reattached: false, .. }));
     assert!(!dir.join("stopped").exists());
     serve = serve_in(&dir);
@@ -495,7 +495,7 @@ fn a_runtime_that_dies_is_reported_with_its_log() {
     assert_eq!(log_tail, ["booting", "Go to http://localhost:1234/?secret=… now", "ERROR: boom"]);
     assert!(!dir.join("runtime.json").exists());
     // Still connected: asking again tries to start a new one (no Julia here).
-    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
     assert!(matches!(helper.next(), ToApp::StartFailed { .. }));
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
@@ -668,7 +668,7 @@ fn a_cluster_job_is_submitted_with_exit_idle_and_its_node_start_passes_it_on() {
     command.arg("--state-dir").arg(&dir).arg("--exit-idle");
     let helper = Helper::spawn(command);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { job: small_job() });
+    helper.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
     assert!(matches!(helper.next(), ToApp::Submitted { .. }));
     let script = slurm.read("job.sh");
@@ -763,6 +763,36 @@ impl FakeSlurm {
     }
 }
 
+#[test]
+fn a_start_that_forbids_the_download_submits_no_job_and_says_no_julia() {
+    let dir = state_dir("slurm-no-julia");
+    let slurm = FakeSlurm::new(&dir);
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let path = format!("{}:/usr/bin:/bin", slurm.bin.display());
+    let find = Command::new("/bin/sh").args(["-lc", "command -v julia"]).env("HOME", &home).env("PATH", &path).output().unwrap();
+    if find.status.success() {
+        eprintln!("skipped: a login shell finds julia at {}", String::from_utf8_lossy(&find.stdout).trim());
+        return;
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+    command
+        .args(["connect", "--runtime", "/nonexistent", "--depot", "/nonexistent", "--launcher", "slurm", "--julia", "auto", "--build", "1.0.0-abc", "--state-dir"])
+        .arg(&dir)
+        .env("HOME", &home)
+        .env("SHELL", "/bin/sh")
+        .env("PATH", &path)
+        .env("FAKE_SLURM", &slurm.dir)
+        .env("SCRATCH", "/scratch/jc");
+    let helper = Helper::spawn(command);
+    helper.hello();
+    helper.send(ToHelper::StartRuntime { job: small_job(), download_julia: false });
+    let ToApp::NoJulia { offer } = helper.next() else { panic!("expected NoJulia") };
+    assert!(offer.contains("Endeavor can download its own copy") && offer.contains("MB"), "{offer}");
+    assert_eq!(slurm.read("sbatch.args"), "", "no job was submitted");
+    assert!(!home.join(".cache").exists(), "nothing was downloaded");
+}
+
 fn this_host() -> String {
     String::from_utf8(Command::new("hostname").output().unwrap().stdout).unwrap().trim().to_owned()
 }
@@ -780,7 +810,7 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     let mut helper = slurm.helper(&dir, &julia);
     let ToApp::Hello { slurm: slurm_here, .. } = helper.hello() else { unreachable!() };
     assert!(slurm_here, "sinfo is on the PATH");
-    helper.send(ToHelper::StartRuntime { job: small_job() });
+    helper.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
     assert_eq!(helper.next(), ToApp::Submitted { job: "42".into(), summary: "2 CPUs · 8 GB · 30 min".into() });
     assert_eq!(helper.next(), ToApp::Queued { job: "42".into(), state: "PENDING".into(), reason: "Priority".into() });
@@ -821,7 +851,7 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     assert_eq!(pluto.read_to_end(&mut rest).unwrap_or(0), 0);
     let helper = slurm.helper(&dir, &julia);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
     let ToApp::Ready { reattached, job: Some(job), .. } = helper.after_progress() else { panic!("expected Ready") };
     assert!(reattached && job.id == "42");
     assert_eq!(slurm.read("sbatch.args").lines().count(), 1, "no second job");
@@ -848,7 +878,7 @@ fn a_queued_job_survives_a_disconnect_and_stop_cancels_it() {
     let slurm = FakeSlurm::new(&dir);
     let mut helper = slurm.helper(&dir, &julia);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { job: small_job() });
+    helper.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
     assert!(matches!(helper.next(), ToApp::Submitted { .. }));
     assert!(matches!(helper.next(), ToApp::Queued { .. }));
@@ -874,7 +904,7 @@ fn a_job_that_ends_before_julia_is_ready_says_why() {
     let slurm = FakeSlurm::new(&dir);
     let helper = slurm.helper(&dir, &julia);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { job: small_job() });
+    helper.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
     assert!(matches!(helper.next(), ToApp::Submitted { .. }));
     assert!(matches!(helper.next(), ToApp::Queued { .. }));
@@ -892,7 +922,7 @@ fn stopping_a_running_job_shuts_julia_down_then_cancels_the_job() {
     let slurm = FakeSlurm::new(&dir);
     let helper = slurm.helper(&dir, &julia);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { job: small_job() });
+    helper.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
     assert!(matches!(helper.next(), ToApp::Submitted { .. }));
     assert!(matches!(helper.next(), ToApp::Queued { .. }));
@@ -916,7 +946,7 @@ fn a_cluster_check_sees_the_job_and_stop_cancels_it_without_attaching() {
     let slurm = FakeSlurm::new(&dir);
     let mut first = slurm.helper(&dir, &julia);
     first.hello();
-    first.send(ToHelper::StartRuntime { job: small_job() });
+    first.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert!(matches!(first.after_progress(), ToApp::FoundJulia { .. }));
     assert!(matches!(first.next(), ToApp::Submitted { .. }));
     assert!(matches!(first.next(), ToApp::Queued { .. }));
@@ -952,8 +982,8 @@ fn two_helpers_on_a_cluster_share_one_job_and_a_stop_from_one_ends_it_for_both()
     first.hello();
     second.hello();
     // Both ask at once: one submits, the other waits for that job.
-    first.send(ToHelper::StartRuntime { job: small_job() });
-    second.send(ToHelper::StartRuntime { job: small_job() });
+    first.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
+    second.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     for helper in [&first, &second] {
         loop {
             match helper.next() {
@@ -1013,14 +1043,14 @@ fn extra_sbatch_flags_that_could_change_what_runs_are_not_submitted() {
     for (extra, why) in [(["--wrap=sleep 1"], "--wrap"), (["--wra=x"], "--wrap"), (["normal"], "doesn't start with"), (["--x\ny"], "line break")] {
         let mut job = small_job().unwrap();
         job.resources.extra = extra.map(String::from).to_vec();
-        helper.send(ToHelper::StartRuntime { job: Some(job) });
+        helper.send(ToHelper::StartRuntime { job: Some(job), download_julia: true });
         let ToApp::StartFailed { message } = helper.after_progress() else { panic!("expected StartFailed") };
         assert!(message.starts_with("The job wasn't submitted:") && message.contains(why), "{message}");
     }
     assert_eq!(slurm.read("sbatch.args"), "", "nothing reached sbatch");
     let mut job = small_job().unwrap();
     job.resources.extra = vec!["--qos=normal".into(), "-N1".into()];
-    helper.send(ToHelper::StartRuntime { job: Some(job) });
+    helper.send(ToHelper::StartRuntime { job: Some(job), download_julia: true });
     assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
     assert_eq!(helper.next(), ToApp::Submitted { job: "42".into(), summary: "2 CPUs · 8 GB · 30 min".into() });
     assert!(slurm.read("sbatch.args").contains("--time=30 --qos=normal -N1"), "{}", slurm.read("sbatch.args"));
@@ -1038,16 +1068,16 @@ fn a_stop_while_the_job_is_queued_is_told_to_the_others_and_a_late_cleanup_spare
     let mut b = slurm.helper_polling(&dir, &julia, 1500);
     a.hello();
     b.hello();
-    a.send(ToHelper::StartRuntime { job: small_job() });
+    a.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert_eq!(queued(&a), "42");
-    b.send(ToHelper::StartRuntime { job: small_job() });
+    b.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert_eq!(queued(&b), "42");
 
     // A stops the job and asks again, which submits the next one, before B looks again.
     a.send(ToHelper::Stop);
     assert_eq!(a.next(), ToApp::Stopped);
     slurm.set("next", "43");
-    a.send(ToHelper::StartRuntime { job: small_job() });
+    a.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert_eq!(queued(&a), "43");
     let ToApp::StartFailed { message } = b.next() else { panic!("expected StartFailed") };
     assert_eq!(message, "The start was stopped. It was stopped from another connection.");
@@ -1087,7 +1117,7 @@ fn the_default_state_folder_is_the_hosts_for_a_process_and_one_for_the_cluster_f
     command.env("HOME", &home).env("XDG_STATE_HOME", &xdg);
     let helper = Helper::spawn(command);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { job: small_job() });
+    helper.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert_eq!(queued(&helper), "42");
     assert!(xdg.join("endeavor/cluster/job.json").exists(), "a cluster's folder has no host name in it");
     assert!(!xdg.join("endeavor/serve").exists());
@@ -1096,7 +1126,7 @@ fn the_default_state_folder_is_the_hosts_for_a_process_and_one_for_the_cluster_f
     command.args(["connect", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent", "--depot", "/nonexistent"]).env("HOME", &home).env("XDG_STATE_HOME", &xdg);
     let helper = Helper::spawn(command);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
     assert!(matches!(helper.next(), ToApp::StartFailed { .. }));
     assert!(xdg.join("endeavor/serve").join(this_host()).join("start.lock").exists());
 }
@@ -1118,7 +1148,7 @@ fn a_helper_waiting_for_another_start_says_so_once_and_still_hears_the_client() 
     // Detach is honoured while it waits.
     let mut helper = Helper::start(&dir, &[]);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
     assert_eq!(helper.next(), ToApp::Progress { line: line.into() });
     std::thread::sleep(Duration::from_millis(700));
     assert!(helper.control.try_recv().is_err(), "it says so once");
@@ -1167,7 +1197,7 @@ fn a_stop_waits_for_the_start_lock_and_then_stops() {
 
     // A Detach while it waits is done after the stop.
     let runtime = FakeRuntime::start(&dir, "labbox3");
-    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
     assert!(matches!(helper.next(), ToApp::Ready { .. }));
     let held = hold_start_lock(&dir);
     helper.send(ToHelper::Stop);
@@ -1242,7 +1272,7 @@ fn a_stop_holds_off_a_start_until_the_old_runtime_is_gone() {
     a.send(ToHelper::Stop);
     std::thread::sleep(Duration::from_millis(400));
     assert!(old.alive(), "it takes a moment to exit");
-    c.send(ToHelper::StartRuntime { job: None });
+    c.send(ToHelper::StartRuntime { job: None, download_julia: true });
     let ToApp::Ready { pid, reattached, .. } = after_start(&c) else { panic!("expected Ready, not the old runtime and then its death") };
     assert_eq!(a.next(), ToApp::Stopped);
     assert!(!old.alive());
@@ -1283,7 +1313,7 @@ fn a_start_asked_while_a_stop_waits_is_answered_after_the_stop_not_lost() {
     assert!(matches!(helper.start_runtime(), ToApp::Ready { reattached: true, .. }));
     let held = hold_start_lock(&dir);
     helper.send(ToHelper::Stop);
-    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
     std::thread::sleep(Duration::from_millis(500));
     assert!(helper.control.try_recv().is_err() && old.alive());
     drop(held);
@@ -1307,7 +1337,7 @@ fn a_stop_asked_after_a_start_that_waited_behind_a_stop_stops_that_start_not_the
     assert!(matches!(helper.start_runtime(), ToApp::Ready { reattached: true, .. }));
     let held = hold_start_lock(&dir);
     helper.send(ToHelper::Stop);
-    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
     helper.send(ToHelper::Stop);
     std::thread::sleep(Duration::from_millis(500));
     assert!(helper.control.try_recv().is_err() && old.alive());
@@ -1364,7 +1394,7 @@ fn a_start_asked_while_a_stop_waits_and_fails_finds_the_runtime_still_attached()
     let ToApp::Ready { pid: attached, .. } = helper.start_runtime() else { panic!("expected Ready") };
     let _held = hold_start_lock(&dir);
     helper.send(ToHelper::Stop);
-    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
     assert!(matches!(helper.next(), ToApp::NotStopped { .. }));
     assert!(matches!(helper.next(), ToApp::Ready { pid, reattached: true, .. } if pid == attached));
     assert!(runtime.alive() && call(&helper).ends_with(CALL_REPLY_ENDS));
@@ -1380,7 +1410,7 @@ fn a_runtime_that_dies_while_a_stop_waits_is_reported_and_is_not_attached_again(
     assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
     let held = hold_start_lock(&dir);
     helper.send(ToHelper::Stop);
-    helper.send(ToHelper::StartRuntime { job: None });
+    helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
     std::thread::sleep(Duration::from_millis(300));
     runtime.kill();
     assert!(matches!(helper.next(), ToApp::NotStopped { .. }));
@@ -1401,7 +1431,7 @@ fn stopping_job(name: &str) -> (PathBuf, FakeSlurm, Helper, FakeRuntime) {
     let slurm = FakeSlurm::new(&dir);
     let helper = slurm.helper(&dir, &julia);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { job: small_job() });
+    helper.send(ToHelper::StartRuntime { job: small_job(), download_julia: true });
     assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
     assert!(matches!(helper.next(), ToApp::Submitted { .. }));
     assert!(matches!(helper.next(), ToApp::Queued { .. }));

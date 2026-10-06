@@ -71,7 +71,7 @@ impl Drop for Runtime {
 impl Runtime {
     /// Ask for the runtime and wait until it's ready, however long Julia takes.
     fn start(&mut self) {
-        self.helper.send(ToHelper::StartRuntime { job: None });
+        self.helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
         let mut log = Vec::new();
         loop {
             match self.helper.next_within(Duration::from_secs(900)) {

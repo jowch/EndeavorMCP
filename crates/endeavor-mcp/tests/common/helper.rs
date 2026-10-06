@@ -75,7 +75,7 @@ impl Helper {
     /// Hello, then ask for the runtime: its answer.
     pub fn start_runtime(&self) -> ToApp {
         self.hello();
-        self.send(ToHelper::StartRuntime { job: None });
+        self.send(ToHelper::StartRuntime { job: None, download_julia: true });
         self.next()
     }
 

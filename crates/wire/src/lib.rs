@@ -154,9 +154,14 @@ pub enum ToApp {
         #[serde(default)]
         job: Option<slurm::Job>,
     },
-    /// The runtime couldn't start (no Julia, running on another node, …); the
-    /// helper stays connected, so `StartRuntime` can try again.
+    /// The runtime couldn't start (running on another node, …); the helper
+    /// stays connected, so `StartRuntime` can try again.
     StartFailed { message: String },
+    /// No Julia was found, and the `StartRuntime` didn't allow downloading one:
+    /// nothing was started or downloaded. `offer` says what a download would
+    /// be (the version, its size, and where it would go). The helper stays
+    /// connected, so `StartRuntime` can try again, allowing the download.
+    NoJulia { offer: String },
     /// The runtime exited; the helper stays connected.
     Died { status: String, log_tail: Vec<String> },
     /// The runtime stopped as the app asked; the helper stays connected.
@@ -179,9 +184,18 @@ pub enum ToApp {
 pub enum ToHelper {
     /// Attach to the runtime, starting it if it isn't running. On a cluster,
     /// `job` says what to submit.
+    ///
+    /// `download_julia` false says the helper must not download Julia: when it
+    /// finds none it answers `NoJulia`. Absent means true, as before the field
+    /// existed, and a true is not sent. A helper from before the field would
+    /// ignore a false and download, so a client sends false only to a helper of
+    /// its own build: the bootstrap script runs `<root>/<build>/endeavor` and
+    /// installs that first if it is missing, so the helper is never another build's.
     StartRuntime {
         #[serde(default)]
         job: Option<slurm::JobRequest>,
+        #[serde(default = "allowed", skip_serializing_if = "is_allowed")]
+        download_julia: bool,
     },
     /// Stop the runtime and stay connected: the attached one, else the one
     /// recorded in the state folder, or on a cluster the job waiting for it.
@@ -189,6 +203,14 @@ pub enum ToHelper {
     /// Exit and leave the runtime running.
     Detach,
     Files { id: u32, request: files::Request },
+}
+
+fn allowed() -> bool {
+    true
+}
+
+fn is_allowed(allowed: &bool) -> bool {
+    *allowed
 }
 
 impl ToApp {
@@ -286,7 +308,14 @@ mod tests {
         let Frame::Control(json) = not_stopped.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&json).unwrap()["type"], "NotStopped");
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), not_stopped);
-        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime"}"#).unwrap(), ToHelper::StartRuntime { job: None });
+        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime"}"#).unwrap(), ToHelper::StartRuntime { job: None, download_julia: true });
+        let forbidden = ToHelper::StartRuntime { job: None, download_julia: false };
+        assert_eq!(serde_json::to_string(&forbidden).unwrap(), r#"{"type":"StartRuntime","job":null,"download_julia":false}"#);
+        assert_eq!(serde_json::to_string(&ToHelper::StartRuntime { job: None, download_julia: true }).unwrap(), r#"{"type":"StartRuntime","job":null}"#, "what an older helper gets");
+        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","download_julia":false}"#).unwrap(), forbidden);
+        let no_julia = ToApp::NoJulia { offer: "Julia 1.12.6, about 190 MB".into() };
+        let Frame::Control(json) = no_julia.frame() else { panic!() };
+        assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), no_julia);
         let old_hello = r#"{"type":"Hello","version":"0.1.0","node":"labbox3","home":"/home/ada"}"#;
         assert!(matches!(serde_json::from_str::<ToApp>(old_hello).unwrap(), ToApp::Hello { slurm: false, uploads: false, .. }), "a helper from before uploads");
     }
