@@ -161,6 +161,10 @@ pub enum ToApp {
     Died { status: String, log_tail: Vec<String> },
     /// The runtime stopped as the app asked; the helper stays connected.
     Stopped,
+    /// The runtime did not stop, and why; it is as it was and the helper stays
+    /// connected. The helper answers each `Stop` with one `Stopped` or one
+    /// `NotStopped`.
+    NotStopped { message: String },
     /// Another client took over this runtime; the helper exits.
     Replaced,
     /// The answer to `ToHelper::Files` with the same id.
@@ -278,6 +282,10 @@ mod tests {
         assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Detach"}"#).unwrap(), ToHelper::Detach);
         assert_eq!(serde_json::from_str::<ToApp>(r#"{"type":"Replaced"}"#).unwrap(), ToApp::Replaced);
+        let not_stopped = ToApp::NotStopped { message: "Julia was not stopped.".into() };
+        let Frame::Control(json) = not_stopped.frame() else { panic!() };
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&json).unwrap()["type"], "NotStopped");
+        assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), not_stopped);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime"}"#).unwrap(), ToHelper::StartRuntime { job: None });
         let old_hello = r#"{"type":"Hello","version":"0.1.0","node":"labbox3","home":"/home/ada"}"#;
         assert!(matches!(serde_json::from_str::<ToApp>(old_hello).unwrap(), ToApp::Hello { slurm: false, uploads: false, .. }), "a helper from before uploads");

@@ -345,6 +345,28 @@ fn a_front_whose_agent_has_gone_clears_its_sessions_notebook() {
 }
 
 #[test]
+fn a_front_whose_agent_has_gone_waits_for_calls_under_way_before_clearing() {
+    let (port, seen) = fake_core();
+    let (relay, _) = ready_relay(port, true);
+    let call = relay.begin();
+    let releasing = std::thread::spawn({
+        let relay = relay.clone();
+        move || relay.release()
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(seen.lock().unwrap().is_empty() && !releasing.is_finished(), "it waits for the call");
+    drop(call);
+    releasing.join().unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 1);
+
+    // A call that doesn't end holds it up only so long.
+    let _stuck = relay.begin();
+    let began = Instant::now();
+    relay.release();
+    assert!(began.elapsed() < Duration::from_secs(5) && seen.lock().unwrap().len() == 2, "{:?}", began.elapsed());
+}
+
+#[test]
 fn an_agent_that_gives_no_name_is_endeavor_mcp() {
     let (port, seen) = fake_core();
     let (relay, _) = ready_relay(port, true);

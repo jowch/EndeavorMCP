@@ -51,6 +51,8 @@ const IDLE_HOURS: f64 = 48.0;
 /// How long a relayed call waits for a runtime that is still starting before
 /// it says so, under the time agents give a tool call.
 const START_WAIT: Duration = Duration::from_secs(45);
+/// How long `Relay::release` waits for calls still under way.
+const CALLS_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 2 });
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Command {
@@ -419,6 +421,13 @@ pub(crate) fn start_lock_limit() -> Duration {
     Duration::from_secs(std::env::var("ENDEAVOR_START_LOCK_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30 * 60))
 }
 
+/// How long a stop waits for the start lock, which is less than the client waits
+/// for its answer (`STOP_WAIT` in the client); `ENDEAVOR_STOP_LOCK_SECS` sets it
+/// (the tests do).
+pub(crate) fn stop_lock_limit() -> Duration {
+    Duration::from_secs(std::env::var("ENDEAVOR_STOP_LOCK_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(20))
+}
+
 /// What to say when `start_lock_limit` passes.
 pub(crate) fn start_lock_gave_up(dir: &Path) -> String {
     format!("Gave up waiting for another process that is starting Julia in {}. If none is, delete {} and try again.", dir.display(), dir.join("start.lock").display())
@@ -766,6 +775,20 @@ struct Relay {
     /// The agent's name from `initialize`, which the runtime shows to other sessions.
     agent: Mutex<Option<String>>,
     out: Mutex<Box<dyn Write + Send>>,
+    /// How many messages are being handled, which `release` waits for: a call
+    /// still in the runtime would bind the session to a notebook again.
+    calls: Mutex<usize>,
+    idle: Condvar,
+}
+
+/// A message being handled (`Relay::begin`).
+struct Call(Arc<Relay>);
+
+impl Drop for Call {
+    fn drop(&mut self) {
+        *self.0.calls.lock().unwrap() -= 1;
+        self.0.idle.notify_all();
+    }
 }
 
 fn relay(options: Options) -> ! {
@@ -778,10 +801,10 @@ fn relay(options: Options) -> ! {
         if line.trim().is_empty() {
             continue;
         }
-        let relay = relay.clone();
+        let call = relay.begin();
         // Each on its own thread: a run can take minutes, and a cancellation
         // must get through meanwhile.
-        std::thread::spawn(move || relay.handle(&line));
+        std::thread::spawn(move || call.0.handle(&line));
     }
     relay.release();
     std::process::exit(0)
@@ -789,7 +812,13 @@ fn relay(options: Options) -> ! {
 
 impl Relay {
     fn new(options: Options, session: String, out: Box<dyn Write + Send>) -> Relay {
-        Relay { options, status: Mutex::new(Status::Idle), changed: Condvar::new(), session, protocol: Mutex::default(), mcp_session: Mutex::default(), agent: Mutex::default(), out: Mutex::new(out) }
+        Relay { options, status: Mutex::new(Status::Idle), changed: Condvar::new(), session, protocol: Mutex::default(), mcp_session: Mutex::default(), agent: Mutex::default(), out: Mutex::new(out), calls: Mutex::new(0), idle: Condvar::new() }
+    }
+
+    /// A message is taken up, until the `Call` is dropped.
+    fn begin(self: &Arc<Self>) -> Call {
+        *self.calls.lock().unwrap() += 1;
+        Call(self.clone())
     }
 
     fn write(&self, message: &str) {
@@ -854,8 +883,10 @@ impl Relay {
 
     /// The agent has gone: let the runtime forget this session's notebook, so
     /// other sessions don't see it as still working there. Best effort, and
-    /// it doesn't hold up the exit for more than a moment.
+    /// it doesn't hold up the exit for more than a moment: it waits a couple of
+    /// seconds for calls under way, which would bind the session again.
     fn release(&self) {
+        drop(self.idle.wait_timeout_while(self.calls.lock().unwrap(), CALLS_WAIT, |calls| *calls > 0).unwrap());
         let Status::Ready { port, token } = &*self.status.lock().unwrap() else { return };
         let (port, token, params) = (*port, token.clone(), json!({ "owner": self.session, "notebook": null }));
         let (done, told) = mpsc::channel();

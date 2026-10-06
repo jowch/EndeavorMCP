@@ -104,7 +104,7 @@ impl Server {
             Ok(port) if port > 0 => Ok(Some(port)),
             _ => Err(format!("\"{port}\" isn't a port number.")),
         };
-        let (user, address) = match text.split_once('@') {
+        let (user, address) = match text.rsplit_once('@') {
             Some((user, address)) => (format!("{user}@"), address),
             None => (String::new(), text),
         };

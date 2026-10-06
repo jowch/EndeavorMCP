@@ -415,7 +415,7 @@ fn a_runtime_in_a_slurm_job() {
         eprintln!("processes of the job before the stop:\n  {}", named.join("\n  "));
 
         let stopping = Instant::now();
-        one.channel.stop();
+        one.channel.stop().expect("stop");
         eprintln!("stop took {:?}", stopping.elapsed());
         assert!(stopping.elapsed() < Duration::from_secs(25), "stop returned on the helper's Stopped, not its timeout");
         assert!(one.lost.try_recv().is_err(), "stopping on purpose is no notice");

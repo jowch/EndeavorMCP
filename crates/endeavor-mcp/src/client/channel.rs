@@ -2,13 +2,13 @@
 //! or over ssh: the helper's hello, file requests, and a runtime starting,
 //! dying and stopping on it. It lasts as long as the helper does.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use wire::files;
 use wire::relay::Mux;
@@ -17,7 +17,7 @@ use wire::{Frame, ToApp, ToHelper};
 
 use super::listener::Listener;
 
-/// How long `stop` waits for the helper's `Stopped`.
+/// How long `stop` waits for the helper's answer.
 const STOP_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 30 });
 
 /// A runtime the client is attached to, as its server's listener serves it.
@@ -65,10 +65,34 @@ pub struct Hello {
     pub uploads: bool,
 }
 
+/// Who is owed the helper's answer to a `Stop`.
+enum Owed {
+    /// A `stop` that is waiting for it.
+    To(mpsc::Sender<ToApp>),
+    /// Whoever waits on the helper (`sink`): a start the `Stop` is to end.
+    Sink,
+    /// A `stop` that gave up waiting; the answer is dropped.
+    Nobody,
+}
+
+/// The helper's input, which the channel closes to let the helper see the end of it.
+struct Input(Arc<Mutex<Option<Box<dyn Write + Send>>>>);
+
+impl Write for Input {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().as_mut().ok_or(std::io::ErrorKind::BrokenPipe)?.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().as_mut().ok_or(std::io::ErrorKind::BrokenPipe)?.flush()
+    }
+}
+
 /// The client's end of a helper's stdin/stdout, on this computer or over ssh. It
 /// lasts as long as the helper: runtimes start, die and stop on it.
 pub struct Channel {
     mux: Arc<Mux>,
+    input: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     /// Where control messages other than file replies go: to whoever waits on
     /// the helper now (its hello, a start, a stop, or the runtime's watcher).
     /// Replacing it ends the previous listener's wait.
@@ -78,31 +102,43 @@ pub struct Channel {
     next_file: AtomicU32,
     /// Set once the helper has exited (or its end of the channel closed).
     ended: Arc<(Mutex<bool>, Condvar)>,
-    /// The client let the helper go (a detach or a quit), so its end is no drop.
-    left: AtomicBool,
+    /// The client let the helper go (a detach, a quit or dropping the channel), so its end is no drop.
+    left: Arc<AtomicBool>,
     /// The listener relaying to this channel, which forgets it when it ends.
     listener: Arc<Mutex<Option<Arc<Listener>>>>,
     /// Set when the client stops the current runtime or leaves the helper, so its
     /// watcher keeps quiet.
     leaving: Mutex<Arc<AtomicBool>>,
-    /// `Stopped` replies still owed to `stop`s that gave up waiting. The helper
-    /// answers each `Stop` with one, which must not read as the outcome of the
-    /// next `start_runtime`; the reader drops them, under this lock.
-    abandoned: Arc<Mutex<u32>>,
+    /// The `Stop`s sent whose answer hasn't come, oldest first, with the number
+    /// of each. The helper answers each `Stop` with one `Stopped` or
+    /// `NotStopped`, in the order it got them, so an answer belongs to the
+    /// first entry. An answer never reads as the outcome of the next
+    /// `start_runtime`: a `stop` that gave up leaves its entry as `Nobody`. The
+    /// reader hands answers out, and `stop` gives up, under this lock.
+    stops: Arc<Mutex<VecDeque<(u64, Owed)>>>,
+    next_stop: AtomicU64,
 }
 
 impl Channel {
     /// `output` is the helper's stdout, read up to its first frame.
-    pub fn open(mut helper: Child, input: impl Write + Send + 'static, output: impl Read + Send + 'static) -> Channel {
-        let mux = Mux::new(input);
+    pub fn open(helper: Child, input: impl Write + Send + 'static, output: impl Read + Send + 'static) -> Channel {
+        Channel::open_watched(helper, input, output, || {})
+    }
+
+    /// `open`, and `exited` is called once the helper has exited and before it
+    /// is reaped, so its pid is still its own.
+    pub fn open_watched(mut helper: Child, input: impl Write + Send + 'static, output: impl Read + Send + 'static, exited: impl FnOnce() + Send + 'static) -> Channel {
+        let input: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(Some(Box::new(input))));
+        let mux = Mux::new(Input(input.clone()));
         let (hello_tx, hello) = mpsc::channel::<ToApp>();
         let sink = Arc::new(Mutex::new(Some(hello_tx)));
         let ended: Arc<(Mutex<bool>, Condvar)> = Arc::default();
         let listener: Arc<Mutex<Option<Arc<Listener>>>> = Arc::default();
         let files: Arc<Mutex<HashMap<u32, mpsc::Sender<files::Reply>>>> = Arc::default();
-        let abandoned: Arc<Mutex<u32>> = Arc::default();
+        let stops: Arc<Mutex<VecDeque<(u64, Owed)>>> = Arc::default();
+        let left = Arc::new(AtomicBool::new(false));
         std::thread::spawn({
-            let (mux, sink, listener, files, ended, abandoned) = (mux.clone(), sink.clone(), listener.clone(), files.clone(), ended.clone(), abandoned.clone());
+            let (mux, sink, listener, files, ended, stops, left) = (mux.clone(), sink.clone(), listener.clone(), files.clone(), ended.clone(), stops.clone(), left.clone());
             move || {
                 let result = mux.run(
                     output,
@@ -115,22 +151,34 @@ impl Channel {
                             }
                         }
                         Ok(message) => {
-                            let mut abandoned = abandoned.lock().unwrap();
-                            if message == ToApp::Stopped && *abandoned > 0 {
-                                *abandoned -= 1;
-                            } else if let Some(sink) = &*sink.lock().unwrap() {
-                                let _ = sink.send(message);
+                            let mut stops = stops.lock().unwrap();
+                            let answers_stop = matches!(message, ToApp::Stopped | ToApp::NotStopped { .. });
+                            match answers_stop.then(|| stops.pop_front()).flatten().map(|(_, owed)| owed) {
+                                Some(Owed::To(waiting)) => drop(waiting.send(message)),
+                                Some(Owed::Nobody) => {}
+                                Some(Owed::Sink) | None => {
+                                    if let Some(sink) = &*sink.lock().unwrap() {
+                                        let _ = sink.send(message);
+                                    }
+                                }
                             }
                         }
                         Err(e) => eprintln!("The runtime helper sent an unreadable message: {e}"),
                     },
                 );
                 if let Some(listener) = listener.lock().unwrap().take() {
-                    listener.forget(&mux);
+                    if left.load(Ordering::SeqCst) {
+                        listener.left(&mux);
+                    } else {
+                        listener.forget(&mux);
+                    }
                 }
                 // Whoever waits hears the end.
                 sink.lock().unwrap().take();
                 files.lock().unwrap().clear();
+                stops.lock().unwrap().clear();
+                exit_unreaped(&mut helper);
+                exited();
                 let status = helper.wait().map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
                 eprintln!("The runtime helper exited ({status}){}", result.err().map(|e| format!(": {e}")).unwrap_or_default());
                 *ended.0.lock().unwrap() = true;
@@ -139,15 +187,17 @@ impl Channel {
         });
         Channel {
             mux,
+            input,
             sink,
             hello: Mutex::new(Some(hello)),
             files,
             next_file: AtomicU32::new(0),
             ended,
-            left: AtomicBool::new(false),
+            left,
             listener,
             leaving: Mutex::default(),
-            abandoned,
+            stops,
+            next_stop: AtomicU64::new(0),
         }
     }
 
@@ -221,7 +271,7 @@ impl Channel {
                 }
                 Ok(ToApp::Stopped) => return Err("Julia was stopped while it started.".into()),
                 Ok(ToApp::Replaced) => return Err("Another connection took Julia over while it was starting.".into()),
-                Ok(ToApp::Hello { .. } | ToApp::Files { .. }) => {}
+                Ok(ToApp::Hello { .. } | ToApp::Files { .. } | ToApp::NotStopped { .. }) => {}
                 Err(_) => return Err("The connection to Endeavor's helper closed.".into()),
             }
         };
@@ -247,23 +297,39 @@ impl Channel {
         self.leaving.lock().unwrap().store(true, Ordering::SeqCst);
     }
 
-    /// Stop the runtime and wait until it's gone (blocks up to ~30 s in all).
-    /// The helper stays connected.
-    pub fn stop(&self) {
-        self.leave();
-        let events = self.subscribe();
-        if self.mux.send(&ToHelper::Stop.frame()).is_ok() {
-            let deadline = Instant::now() + STOP_WAIT;
-            while let Ok(message) = events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                if message == ToApp::Stopped {
-                    return;
-                }
+    /// Stop the runtime and wait until it's gone (blocks up to ~30 s). The
+    /// helper stays connected. If the helper says it didn't stop, the runtime is
+    /// still attached and is watched as before.
+    pub fn stop(&self) -> Result<(), String> {
+        let leaving = self.leaving.lock().unwrap().clone();
+        leaving.store(true, Ordering::SeqCst);
+        let (tx, answer) = mpsc::channel();
+        let id = self.next_stop.fetch_add(1, Ordering::Relaxed);
+        self.stops.lock().unwrap().push_back((id, Owed::To(tx)));
+        if self.mux.send(&ToHelper::Stop.frame()).is_err() {
+            self.stops.lock().unwrap().retain(|(n, _)| *n != id);
+            return Err("The connection to Endeavor's helper closed.".into());
+        }
+        let answered = match answer.recv_timeout(STOP_WAIT) {
+            Ok(message) => Ok(message),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("The connection to Endeavor's helper closed.".into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let mut stops = self.stops.lock().unwrap();
+                // The reader answers under this lock, so an answer that came as the wait ended is here.
+                answer.try_recv().map_err(|_| {
+                    if let Some((_, owed)) = stops.iter_mut().find(|(n, _)| *n == id) {
+                        *owed = Owed::Nobody;
+                    }
+                })
             }
-            let mut abandoned = self.abandoned.lock().unwrap();
-            // The reader delivers under this lock, so a `Stopped` that came as the wait ended is in `events`.
-            if !events.try_iter().any(|message| message == ToApp::Stopped) {
-                *abandoned += 1;
+        };
+        match answered {
+            Ok(ToApp::NotStopped { message }) => {
+                leaving.store(false, Ordering::SeqCst);
+                Err(message)
             }
+            Ok(_) => Ok(()),
+            Err(()) => Err(format!("Endeavor's helper didn't answer in {} s, so Julia may not have stopped.", STOP_WAIT.as_secs())),
         }
     }
 
@@ -298,20 +364,51 @@ impl Channel {
     pub fn quit(&self, keep_running: bool) {
         self.leave();
         self.left.store(true, Ordering::SeqCst);
-        let message = if keep_running { ToHelper::Detach } else { ToHelper::Stop };
-        let _ = self.mux.send(&message.frame());
+        if keep_running {
+            let _ = self.mux.send(&ToHelper::Detach.frame());
+            return;
+        }
+        // Its answer is for a start that may be under way, which it ends.
+        let id = self.next_stop.fetch_add(1, Ordering::Relaxed);
+        self.stops.lock().unwrap().push_back((id, Owed::Sink));
+        if self.mux.send(&ToHelper::Stop.frame()).is_err() {
+            self.stops.lock().unwrap().retain(|(n, _)| *n != id);
+        }
     }
 }
 
 impl Drop for Channel {
-    /// A channel nobody holds any more lets the helper go, so ssh and the
-    /// helper don't outlive a failed connect.
+    /// A channel nobody holds any more ends the helper's input, as a client that
+    /// vanished does, so the helper applies its own rule (`--quit-with-client`)
+    /// and ssh and the helper don't outlive a failed connect or a panic.
     fn drop(&mut self) {
         if !self.left.swap(true, Ordering::SeqCst) {
             self.leave();
-            let _ = self.mux.send(&ToHelper::Detach.frame());
+            self.input.lock().unwrap().take();
         }
     }
+}
+
+/// Wait until `child` has exited without reaping it, so its pid is not given to
+/// another process yet.
+#[cfg(unix)]
+fn exit_unreaped(child: &mut Child) {
+    loop {
+        // SAFETY: waitid fills in the zeroed siginfo_t it is given; WNOWAIT leaves the child to `wait`.
+        let done = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(libc::P_PID, child.id() as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT)
+        };
+        if done == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+/// A process id stays its own while a handle to the process is open, which `child` holds.
+#[cfg(windows)]
+fn exit_unreaped(child: &mut Child) {
+    let _ = child.wait();
 }
 
 /// Plain-language cause for common failures in Julia's log, if recognized.

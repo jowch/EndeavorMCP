@@ -98,6 +98,27 @@ fn targets_round_trip_with_and_without_a_port() {
 }
 
 #[test]
+fn a_user_name_with_an_at_sign_round_trips() {
+    for (host, port, text) in [
+        ("a@b@lab", None, "a@b@lab"),
+        ("a@b@lab", Some(22), "a@b@lab:22"),
+        ("a@b@fe80::1", Some(2222), "a@b@[fe80::1]:2222"),
+        ("a@b@fe80::1", None, "a@b@fe80::1"),
+    ] {
+        let server = Server { ssh_host: host.into(), port, ..Default::default() };
+        assert_eq!(server.ssh_target(), text);
+        assert_eq!(Server::parse_target(text), Ok((host.to_owned(), port)), "{text}");
+    }
+}
+
+#[test]
+fn a_target_without_a_host_or_without_a_user_before_its_at_sign_is_refused() {
+    for bad in ["jc@", "@lab", ":22", "jc@:22", "jc@[]:22", "[]:22", "@", "@@", "@lab:22"] {
+        assert!(Server::parse_target(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn a_bad_target_says_what_is_wrong() {
     assert_eq!(Server::parse_target("  ").unwrap_err(), "Enter an SSH host: an alias from ~/.ssh/config, or user@host.");
     assert_eq!(Server::parse_target("[::1]:ssh").unwrap_err(), "\"ssh\" isn't a port number.");

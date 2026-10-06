@@ -118,13 +118,20 @@ impl Transport {
 }
 
 /// Whether `host` can be given to ssh as the destination: an alias, a name,
-/// an address (IPv6 has colons) or `user@host`. A leading `-` would be an
-/// option to ssh, and anything else is not a host name.
+/// an address (IPv6 has colons) or `user@host`, where the user, which may hold
+/// an `@` itself, and the host are not empty. A leading `-` would be an option
+/// to ssh, and anything else is not a host name.
 pub fn valid_host(host: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err("Enter an SSH host: an alias from ~/.ssh/config, or user@host.".into());
     }
-    if host.starts_with('-') || !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | ':')) {
+    let (user, name) = match host.rsplit_once('@') {
+        Some((user, name)) => (Some(user), name),
+        None => (None, host),
+    };
+    // A name with a colon is an IPv6 address, which has at least two.
+    let address = !name.contains(':') || name.matches(':').count() >= 2;
+    if host.starts_with('-') || !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | ':')) || name.is_empty() || user == Some("") || !address {
         return Err(format!("\"{host}\" isn't an SSH host name."));
     }
     Ok(())
@@ -259,10 +266,14 @@ fn tar_entry(tar: &mut Vec<u8>, path: &str, contents: &[u8], mode: u32, kind: u8
     Ok(())
 }
 
-/// Lets another thread give up on a connect, killing its ssh.
+/// Lets another thread give up on a connect and what follows on its channel
+/// (`start`, `test`), killing its ssh.
 #[derive(Default)]
 pub struct Cancel {
-    pid: Mutex<Option<u32>>,
+    /// The ssh the connect started, from then until it has exited and before it
+    /// is reaped (the channel's reader does that), so the pid is never another
+    /// process's.
+    pid: Arc<Mutex<Option<u32>>>,
     cancelled: AtomicBool,
 }
 
@@ -279,9 +290,12 @@ impl Cancel {
         !self.cancelled.load(Ordering::SeqCst)
     }
 
-    /// The connect is over and ssh's pid is no longer this connect's to kill.
-    fn finished(&self) {
-        *self.pid.lock().unwrap() = None;
+    /// ssh `pid` has exited, and it is no longer this connect's to kill.
+    fn finished(pid_slot: &Mutex<Option<u32>>, pid: u32) {
+        let mut slot = pid_slot.lock().unwrap();
+        if *slot == Some(pid) {
+            *slot = None;
+        }
     }
 }
 
@@ -307,12 +321,6 @@ fn platform(os: &str, arch: &str) -> (String, String) {
 /// Run the bootstrap on `server` and wait for the helper's hello. The runtime
 /// starts later, when the channel is asked to (`start`).
 pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), String> {
-    let result = connect_with(server, transport, options, cancel, on);
-    cancel.finished();
-    result
-}
-
-fn connect_with(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), String> {
     let preamble = preamble(server, options)?;
     let version = crate::embedded::BUILD_VERSION;
     let mut command = transport.command(&bootstrap_script(version), &options.auth)?;
@@ -329,6 +337,7 @@ fn connect_with(server: &Server, transport: &Transport, options: &Options, cance
     let host = transport.host();
     let give_up = |mut child: Child, why: Option<String>, signed_in: bool| {
         kill_group(child.id());
+        Cancel::finished(&cancel.pid, child.id());
         let status = child.wait().ok();
         why.unwrap_or_else(|| explain(transport, &options.auth, &stderr.finish(), status, cancel.cancelled.load(Ordering::SeqCst), signed_in))
     };
@@ -372,7 +381,8 @@ fn connect_with(server: &Server, transport: &Transport, options: &Options, cance
     }
     on(Event::Helper { installed: install.is_some() });
 
-    let channel = Channel::open(child, stdin, stdout);
+    let (pid, slot) = (child.id(), cancel.pid.clone());
+    let channel = Channel::open_watched(child, stdin, stdout, move || Cancel::finished(&slot, pid));
     let hello = channel.wait_hello(|| explain(transport, &options.auth, &stderr.finish(), None, cancel.cancelled.load(Ordering::SeqCst), true))?;
     Ok((channel, hello))
 }
@@ -405,7 +415,7 @@ pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &
     if server.cluster.is_some() {
         let reply = channel.files(wire::files::Request::Slurm);
         channel.detach();
-        return match reply? {
+        return match reply.map_err(|e| or_cancelled(cancel, e))? {
             wire::files::Reply::Slurm { scheduler } => {
                 on(Event::Slurm(scheduler));
                 Ok(())
@@ -414,17 +424,19 @@ pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &
         };
     }
     let listener = test_listener()?;
-    let runtime = start(&channel, &listener, None, on, |_| {})?;
+    let runtime = start(&channel, &listener, None, on, |_| {}).map_err(|e| or_cancelled(cancel, e))?;
     let answered = bridge_ping(listener.port(), &runtime.token);
-    if runtime.reattached {
-        channel.detach();
-    } else {
-        channel.stop();
-        channel.detach();
-    }
+    let stopped = if runtime.reattached { Ok(()) } else { channel.stop() };
+    channel.detach();
     answered.map_err(|e| format!("Julia started on {}, but it didn't answer through Endeavor's connection ({e}).", runtime.node))?;
+    stopped?;
     on(Event::Finished { stopped: !runtime.reattached });
     Ok(())
+}
+
+/// What a failure of `test` after its connect reads as: a cancel kills ssh, which shows as the connection closing.
+fn or_cancelled(cancel: &Cancel, error: String) -> String {
+    if cancel.cancelled.load(Ordering::SeqCst) { "Cancelled.".into() } else { error }
 }
 
 /// One listener for every `test` (they run one at a time).
@@ -470,7 +482,15 @@ impl Stderr {
         std::thread::spawn({
             let lines = lines.clone();
             move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                // Bytes, decoded as they come: a line that isn't UTF-8 (a banner in Latin-1) doesn't end the reading.
+                let mut stderr = BufReader::new(stderr);
+                let mut bytes = Vec::new();
+                while let Ok(n) = stderr.read_until(b'\n', &mut bytes) {
+                    if n == 0 {
+                        break;
+                    }
+                    let line = String::from_utf8_lossy(&bytes).trim_end_matches(['\n', '\r']).to_owned();
+                    bytes.clear();
                     eprintln!("ssh: {line}");
                     let mut lines = lines.lock().unwrap();
                     lines.push(line);
@@ -491,9 +511,11 @@ impl Stderr {
 }
 
 /// What went wrong, in plain words, from ssh's stderr. In batch mode ssh can't
-/// ask, so the sign-in failures say what to do instead. Once `signed_in`, what
-/// the server's script said is not about signing in or the network, and the
-/// last of it is shown as it is.
+/// ask, so the sign-in failures say what to do instead. ssh exits with 255 for
+/// its own failures (sign-in, network, host key) and otherwise with the remote
+/// command's status, so those explanations apply only to a 255 or an unknown
+/// status (ssh was killed, or the status isn't known), and never once
+/// `signed_in`: what the server's script said then is shown as it is.
 fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> String {
     if cancelled {
         return "Cancelled.".into();
@@ -502,36 +524,34 @@ fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option
     let batch = *auth == Auth::Batch;
     let said = |needle: &str| stderr.iter().any(|l| l.contains(needle));
     let last = stderr.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty());
-    if signed_in {
-        return match last {
-            Some(line) => format!("The connection to {host} ended: {line}"),
-            None => format!("The connection to {host} ended before Endeavor could start{}.", status.map(|s| format!(" ({s})")).unwrap_or_default()),
-        };
-    }
-    if said("Could not resolve hostname") {
-        format!("Couldn't find a server called {host}. Check the SSH host.")
+    let ssh_failed = !signed_in && status.is_none_or(|s| s.code().is_none_or(|code| code == 255));
+    let ssh_said = if !ssh_failed {
+        None
+    } else if said("Could not resolve hostname") {
+        Some(format!("Couldn't find a server called {host}. Check the SSH host."))
     } else if said("REMOTE HOST IDENTIFICATION HAS CHANGED") {
-        format!("{host}'s identity (host key) changed since the last connection. If the server was reinstalled, remove its old key with `ssh-keygen -R {host}` in a terminal; otherwise ask its administrator.")
+        Some(format!("{host}'s identity (host key) changed since the last connection. If the server was reinstalled, remove its old key with `ssh-keygen -R {host}` in a terminal; otherwise ask its administrator."))
     } else if said("Host key verification failed") && batch {
-        format!("{host} isn't one of the servers this computer has connected to before, so Endeavor can't check its identity (host key). Run `{}` once in a terminal and accept its host key, then try again.", transport.login_command())
+        Some(format!("{host} isn't one of the servers this computer has connected to before, so Endeavor can't check its identity (host key). Run `{}` once in a terminal and accept its host key, then try again.", transport.login_command()))
     } else if said("Host key verification failed") {
-        format!("{host}'s identity (host key) wasn't confirmed, so Endeavor didn't connect.")
+        Some(format!("{host}'s identity (host key) wasn't confirmed, so Endeavor didn't connect."))
     } else if said("Permission denied") && batch {
-        format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent (run `ssh-add` in a terminal to add it). Or the server asks for a password or a code, which Endeavor can't ask for yet.")
+        Some(format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent (run `ssh-add` in a terminal to add it). Or the server asks for a password or a code, which Endeavor can't ask for yet."))
     } else if said("Permission denied") {
-        format!("{host} refused the sign-in. Check the user name, and your key or password.")
+        Some(format!("{host} refused the sign-in. Check the user name, and your key or password."))
     } else if said("Connection refused") {
-        format!("{host} refused the connection. Check the host name and port, and that it accepts SSH.")
+        Some(format!("{host} refused the connection. Check the host name and port, and that it accepts SSH."))
     } else if said("timed out") || said("Operation timed out") {
-        format!("{host} didn't answer (the connection timed out). Check the host name, and that you're on a network that can reach it (a VPN, perhaps).")
+        Some(format!("{host} didn't answer (the connection timed out). Check the host name, and that you're on a network that can reach it (a VPN, perhaps)."))
     } else if said("No route to host") || said("Network is unreachable") {
-        format!("Couldn't reach {host} from this network.")
-    } else if let Some(line) = last {
-        format!("The connection to {host} ended: {line}")
+        Some(format!("Couldn't reach {host} from this network."))
     } else {
-        let status = status.map(|s| format!(" ({s})")).unwrap_or_default();
-        format!("The connection to {host} ended before Endeavor could start{status}.")
-    }
+        None
+    };
+    ssh_said.unwrap_or_else(|| match last {
+        Some(line) => format!("The connection to {host} ended: {line}"),
+        None => format!("The connection to {host} ended before Endeavor could start{}.", status.map(|s| format!(" ({s})")).unwrap_or_default()),
+    })
 }
 
 #[cfg(test)]

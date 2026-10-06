@@ -1065,11 +1065,13 @@ fn a_stop_waits_for_the_start_lock_and_then_stops() {
     helper.send(ToHelper::Stop);
     std::thread::sleep(Duration::from_millis(700));
     assert!(helper.control.try_recv().is_err() && runtime.alive(), "it waits for the lock");
+    assert!(call(&helper).ends_with(CALL_REPLY_ENDS), "the runtime is still reached while the stop waits");
     drop(held);
     assert_eq!(helper.next(), ToApp::Stopped);
+    assert_eq!(helper.next(), ToApp::Stopped, "each Stop is answered");
     assert!(!runtime.alive());
     std::thread::sleep(Duration::from_millis(300));
-    assert!(helper.control.try_recv().is_err(), "the second Stop was ignored");
+    assert!(helper.control.try_recv().is_err(), "once each");
 
     // A Detach while it waits is done after the stop.
     let runtime = FakeRuntime::start(&dir, "labbox3");
@@ -1081,6 +1083,7 @@ fn a_stop_waits_for_the_start_lock_and_then_stops() {
     std::thread::sleep(Duration::from_millis(700));
     assert!(runtime.alive() && helper.process.try_wait().unwrap().is_none(), "the Detach doesn't cancel the stop");
     drop(held);
+    assert_eq!(helper.next(), ToApp::Stopped, "the Stop is answered before the helper leaves");
     helper.exits();
     assert!(!runtime.alive(), "the stop was made before the helper left");
 }
@@ -1089,12 +1092,12 @@ fn a_stop_waits_for_the_start_lock_and_then_stops() {
 fn a_stop_that_cant_get_the_lock_says_so_and_leaves_the_runtime_attached() {
     let dir = state_dir("stop-gives-up");
     let runtime = FakeRuntime::start(&dir, "labbox3");
-    let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--any-node"], &[("ENDEAVOR_START_LOCK_SECS", "1")]);
+    let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--any-node"], &[("ENDEAVOR_STOP_LOCK_SECS", "1")]);
     assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
     let held = hold_start_lock(&dir);
     helper.send(ToHelper::Stop);
-    let ToApp::Progress { line } = helper.next() else { panic!("expected why it didn't stop") };
-    assert!(line.contains("was not stopped") && line.contains(&dir.display().to_string()), "{line}");
+    let ToApp::NotStopped { message } = helper.next() else { panic!("expected why it didn't stop") };
+    assert!(message.contains("was not stopped") && message.contains(&dir.display().to_string()), "{message}");
     assert!(runtime.alive() && dir.join("runtime.json").exists());
     assert!(call(&helper).ends_with(CALL_REPLY_ENDS), "still attached");
     drop(held);
@@ -1160,5 +1163,183 @@ fn a_stop_holds_off_a_start_until_the_old_runtime_is_gone() {
     for helper in [&mut a, &mut c] {
         helper.stdin.0.lock().unwrap().take();
         helper.exits();
+    }
+}
+
+#[test]
+fn a_runtime_this_helper_may_not_stop_is_not_stopped_and_the_client_is_told() {
+    let dir = state_dir("stop-other-node");
+    let runtime = FakeRuntime::start(&dir, "some-other-node");
+    let mut helper = Helper::start(&dir, &[]);
+    helper.hello();
+    helper.send(ToHelper::Stop);
+    let ToApp::NotStopped { message } = helper.next() else { panic!("expected NotStopped") };
+    assert!(message.starts_with("Julia was not stopped.") && message.contains("some-other-node"), "{message}");
+    assert!(runtime.alive() && dir.join("runtime.json").exists());
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn a_start_asked_while_a_stop_waits_is_answered_after_the_stop_not_lost() {
+    let dir = state_dir("stop-then-start");
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let old = FakeRuntime::start(&dir, &this_host());
+    let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { reattached: true, .. }));
+    let held = hold_start_lock(&dir);
+    helper.send(ToHelper::Stop);
+    helper.send(ToHelper::StartRuntime { job: None });
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(helper.control.try_recv().is_err() && old.alive());
+    drop(held);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    let ToApp::Ready { pid, reattached, .. } = after_start(&helper) else { panic!("expected Ready") };
+    assert!(!reattached && pid != old.pid, "the start began a new runtime once the old one was gone");
+    helper.send(ToHelper::Stop);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn a_start_asked_while_a_stop_waits_and_fails_finds_the_runtime_still_attached() {
+    let dir = state_dir("stop-fails-then-start");
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--any-node"], &[("ENDEAVOR_STOP_LOCK_SECS", "1")]);
+    let ToApp::Ready { pid: attached, .. } = helper.start_runtime() else { panic!("expected Ready") };
+    let _held = hold_start_lock(&dir);
+    helper.send(ToHelper::Stop);
+    helper.send(ToHelper::StartRuntime { job: None });
+    assert!(matches!(helper.next(), ToApp::NotStopped { .. }));
+    assert!(matches!(helper.next(), ToApp::Ready { pid, reattached: true, .. } if pid == attached));
+    assert!(runtime.alive() && call(&helper).ends_with(CALL_REPLY_ENDS));
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn a_runtime_that_dies_while_a_stop_waits_is_reported_and_is_not_attached_again() {
+    let dir = state_dir("stop-died");
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--any-node"], &[("ENDEAVOR_STOP_LOCK_SECS", "2")]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    let held = hold_start_lock(&dir);
+    helper.send(ToHelper::Stop);
+    helper.send(ToHelper::StartRuntime { job: None });
+    std::thread::sleep(Duration::from_millis(300));
+    runtime.kill();
+    assert!(matches!(helper.next(), ToApp::NotStopped { .. }));
+    drop(held);
+    let died = helper.next();
+    assert!(matches!(died, ToApp::Died { .. }), "the end of the runtime was heard, not lost with the wait: {died:?}");
+    // The start asked for meanwhile finds nothing attached: it starts, and there is no Julia here.
+    assert!(matches!(helper.after_progress(), ToApp::StartFailed { .. }));
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+/// A helper on a "cluster" whose runtime runs in job 42 and takes a moment to
+/// shut down, with a folder to upload into.
+fn stopping_job(name: &str) -> (PathBuf, FakeSlurm, Helper, FakeRuntime) {
+    let dir = state_dir(name);
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let helper = slurm.helper(&dir, &julia);
+    helper.hello();
+    helper.send(ToHelper::StartRuntime { job: small_job() });
+    assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
+    assert!(matches!(helper.next(), ToApp::Submitted { .. }));
+    assert!(matches!(helper.next(), ToApp::Queued { .. }));
+    slurm.set("node", &this_host());
+    slurm.set("state", "RUNNING");
+    assert!(matches!(helper.next(), ToApp::Queued { .. }));
+    let state = serde_json::json!({ "launcher": "slurm", "job": "42" });
+    let runtime = FakeRuntime::start_as(&dir, &this_host(), state, Duration::from_millis(1500));
+    assert!(matches!(helper.after_progress(), ToApp::Ready { .. }));
+    std::fs::create_dir_all(dir.join("home/fits")).unwrap();
+    (dir, slurm, helper, runtime)
+}
+
+/// An unfinished upload into `dir/home/fits`: its part.
+fn unfinished_upload(helper: &Helper, dir: &Path) -> PathBuf {
+    let ask = |id: u32, request: Request| {
+        helper.send(ToHelper::Files { id, request });
+        match helper.next() {
+            ToApp::Files { id: got, reply } if got == id => reply,
+            other => panic!("expected Files {id}, got {other:?}"),
+        }
+    };
+    let folder = dir.join("home/fits").display().to_string();
+    let sha256 = "b659e80980e7375313bf70ebf6e577f4abae7d5657bf7b563fa64c2f48a33eee".to_string();
+    assert!(matches!(ask(1, Request::Place { folder: folder.clone(), name: "decay.csv".into(), size: 8, sha256 }), Reply::Place { .. }));
+    assert_eq!(ask(2, Request::Write { folder, path: "data/decay.csv".into(), offset: 0, bytes: b"t,y\n".to_vec(), last: false }), Reply::Written);
+    let part = dir.join("home/fits/data/.decay.csv.part");
+    assert!(part.exists());
+    part
+}
+
+#[test]
+fn a_stop_then_detach_on_a_cluster_is_answered_and_leaves_nothing_behind() {
+    let (dir, slurm, mut helper, runtime) = stopping_job("slurm-stop-detach");
+    let part = unfinished_upload(&helper, &dir);
+    helper.send(ToHelper::Stop);
+    helper.send(ToHelper::Stop);
+    helper.send(ToHelper::Detach);
+    assert_eq!(helper.next(), ToApp::Stopped);
+    assert_eq!(helper.next(), ToApp::Stopped, "each Stop is answered, while the helper waits for the node too");
+    helper.exits();
+    assert!(!runtime.alive() && slurm.read("scancel.log").trim() == "42");
+    assert!(!part.exists(), "the Detach removed the unfinished upload");
+}
+
+#[test]
+fn a_stop_then_the_end_of_input_on_a_cluster_does_not_leave_the_helper_behind() {
+    let (_dir, _slurm, mut helper, runtime) = stopping_job("slurm-stop-eof");
+    helper.send(ToHelper::Stop);
+    std::thread::sleep(Duration::from_millis(300));
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+    assert!(!runtime.alive());
+}
+
+/// A client `Channel` on a helper started with `flags` over `dir`.
+fn channel_on(dir: &Path, flags: &[&str]) -> endeavor_mcp::client::Channel {
+    let mut helper = Command::new(env!("CARGO_BIN_EXE_endeavor"))
+        .args(["connect", "--state-dir"])
+        .arg(dir)
+        .args(["--runtime", "/nonexistent", "--depot", "/nonexistent", "--julia", "/nonexistent/julia"])
+        .args(flags)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (stdin, stdout) = (helper.stdin.take().unwrap(), helper.stdout.take().unwrap());
+    let channel = endeavor_mcp::client::Channel::open(helper, stdin, stdout);
+    channel.wait_hello(|| "the helper vanished".into()).unwrap();
+    channel
+}
+
+fn no_helper_left(dir: &Path) {
+    common::wait_for("the helper to end", || {
+        let found = Command::new("pgrep").arg("-f").arg("--").arg(dir.display().to_string()).output().unwrap();
+        found.stdout.is_empty()
+    });
+}
+
+#[test]
+fn a_channel_dropped_without_a_word_is_a_vanished_client_to_the_helper() {
+    for (flags, stops) in [(&["--any-node", "--quit-with-client"][..], true), (&["--any-node"][..], false)] {
+        let dir = state_dir(if stops { "channel-drop-quit" } else { "channel-drop" });
+        let runtime = FakeRuntime::start(&dir, "labbox3");
+        let channel = channel_on(&dir, flags);
+        let listener = endeavor_mcp::client::Listener::start("lab").unwrap();
+        channel.start_runtime(&listener, None, &mut |_| {}, |_| {}).expect("attached");
+        drop(channel);
+        no_helper_left(&dir);
+        assert_eq!(runtime.alive(), !stops, "the helper's own rule for a client that goes away: --quit-with-client is {stops}");
+        assert_eq!(dir.join("runtime.json").exists(), !stops);
     }
 }

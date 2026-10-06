@@ -51,6 +51,8 @@ struct FakeNotebook {
     safe_preview: bool,
     /// Its process ended by itself, while these cells ran.
     exited: Option<Vec<String>>,
+    /// Its snapshot can't be read.
+    broken: bool,
 }
 
 #[derive(Default)]
@@ -73,7 +75,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -89,6 +91,9 @@ impl Engine {
     }
 
     fn snapshot(nb: &FakeNotebook) -> Value {
+        if nb.broken {
+            return json!({ "notebook_id": nb.id, "path": nb.path });
+        }
         json!({
             "notebook_id": nb.id, "path": nb.path,
             "process_status": if nb.safe_preview { "waiting_for_permission" } else if nb.exited.is_some() { "no_process" } else { "ready" },
@@ -151,7 +156,7 @@ impl Engine {
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
                 let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed }));
             }
             _ => {}
@@ -1204,6 +1209,44 @@ fn opening_an_open_notebook_joins_it_and_changes_nothing() {
     // Other adapter errors stay errors.
     assert!(!super::tools::already_open("ArgumentError: file_not_found::'x' is already open as notebook_id y; use that id"));
     assert!(super::tools::already_open("ArgumentError: notebook_already_open::any wording"));
+}
+
+#[test]
+fn joining_an_open_notebook_reads_that_notebook_and_no_other() {
+    let s = setup();
+    let paths = temp_notebooks("join-one", 2);
+    let first = s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    let second = s.call("b", "open_notebook", json!({ "path": &paths[1] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    s.engine.with(&second, |nb| nb.broken = true);
+    assert!(s.notebooks.snapshots().is_err(), "a snapshot of every notebook fails");
+    s.engine.calls.lock().unwrap().clear();
+    let joined = s.call("c", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    assert_eq!((&joined["notebook_id"], &joined["already_open"]), (&json!(first), &json!(true)));
+    assert_eq!(s.notebooks.bound("c").as_ref(), Some(&paths[0]));
+    let calls = s.engine.calls.lock().unwrap().clone();
+    assert!(calls.contains(&"status".to_owned()), "found by its path in the list of open notebooks: {calls:?}");
+}
+
+#[test]
+fn a_session_bound_again_after_its_record_went_stale_is_not_dropped() {
+    let s = setup();
+    let paths = temp_notebooks("rebound", 2);
+    s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.call("c", "open_notebook", json!({ "path": &paths[1] })).unwrap();
+    s.seconds(8.0 * 24.0 * 3600.0);
+    // `a`'s record is a week old and not yet cleared when the app binds it, or it opens its notebook, again.
+    s.notebooks.bind("a", &paths[0]);
+    s.notebooks.note_call("d", None);
+    assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[0]));
+    assert!(s.notebooks.state.lock().unwrap().seen.contains_key("a"));
+    // `c` was not, so its record and then its binding went with it.
+    assert_eq!(s.notebooks.bound("c"), None);
+    assert!(!s.notebooks.state.lock().unwrap().bindings.contains_key("c"));
+
+    s.seconds(8.0 * 24.0 * 3600.0);
+    s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.notebooks.note_call("e", None);
+    assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[0]), "opening an open notebook again keeps the session too");
 }
 
 #[test]

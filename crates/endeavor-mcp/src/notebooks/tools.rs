@@ -894,11 +894,16 @@ impl Call<'_> {
     /// None if no open notebook has this path after all.
     fn join(&self, path: &str) -> Option<Result<Value, String>> {
         let wanted = canonical_path(path).unwrap_or_else(|_| path.to_owned());
-        let snapshots = match self.nbs.snapshots() {
-            Ok(snapshots) => snapshots,
+        // The list of open notebooks has ids and paths, where a snapshot of each would hold every cell.
+        let open = match self.nbs.call("status", json!({})) {
+            Ok(status) => status,
             Err(error) => return Some(Err(error)),
         };
-        let nb = snapshots.iter().find(|nb| canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone()) == wanted)?;
+        let found = open["notebooks"].as_array()?.iter().find(|nb| nb["path"].as_str().is_some_and(|open| canonical_path(open).unwrap_or_else(|_| open.to_owned()) == wanted))?;
+        let nb = match self.nbs.snapshot(found["notebook_id"].as_str()?) {
+            Ok(nb) => nb,
+            Err(error) => return Some(Err(error)),
+        };
         self.nbs.opened_by(self.owner, &nb.path);
         Some(Ok(json!({
             "notebook_id": nb.id, "path": nb.path, "execution_allowed": nb.execution_allowed, "ran": false,

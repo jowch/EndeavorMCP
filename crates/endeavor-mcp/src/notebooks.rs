@@ -195,7 +195,8 @@ struct State {
     /// What each agent session's client calls itself and when it last made a
     /// tool call, for `list_notebooks` to show a notebook's other sessions.
     /// Made when a session is bound, makes a call or is given an id; dropped
-    /// with its binding, or `SESSION_KEPT` after its last call (its binding, if none).
+    /// with its binding, or `SESSION_KEPT` after its last call or its binding
+    /// (and then its binding goes too).
     seen: HashMap<String, Seen>,
 }
 
@@ -222,9 +223,21 @@ impl State {
         self.seen.entry(owner.to_owned()).or_insert(Seen { client: None, last_call: None, since: now })
     }
 
-    /// Drop the records of sessions that haven't called in a week.
+    /// A session is bound or opens a notebook: its record is kept from now on, whether it was old or not.
+    fn record_bound(&mut self, owner: &str, now: f64) {
+        self.record(owner, now).since = now;
+    }
+
+    /// Drop the records of sessions that haven't called in a week, and their bindings.
     fn forget_old(&mut self, now: f64) {
-        self.seen.retain(|_, seen| now - seen.last_call.unwrap_or(seen.since) < SESSION_KEPT);
+        let bindings = &mut self.bindings;
+        self.seen.retain(|session, seen| {
+            let kept = now - seen.last_call.unwrap_or(f64::MIN).max(seen.since) < SESSION_KEPT;
+            if !kept {
+                bindings.remove(session);
+            }
+            kept
+        });
     }
 }
 
@@ -748,7 +761,7 @@ impl Notebooks {
             state.seen.remove(owner);
         } else {
             state.bindings.insert(owner.to_owned(), canonical_path(path).unwrap_or_else(|_| path.to_owned()));
-            state.record(owner, now);
+            state.record_bound(owner, now);
         }
     }
 
@@ -807,7 +820,7 @@ impl Notebooks {
             let now = self.now();
             let mut state = self.state.lock().unwrap();
             state.bindings.entry(owner.to_owned()).or_insert(path);
-            state.record(owner, now);
+            state.record_bound(owner, now);
         }
     }
 

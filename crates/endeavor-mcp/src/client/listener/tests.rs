@@ -141,3 +141,28 @@ fn a_drop_then_a_deliberate_stop_says_the_stop() {
     listener.restart_failed();
     assert!(post(&listener, "secret", LIST).contains("Julia on lab-server couldn't start."));
 }
+
+#[test]
+fn a_helper_the_client_let_go_is_not_reconnecting() {
+    let listener = Listener::start("lab-server").unwrap();
+    let mux = Mux::new(std::io::sink());
+    listener.attach(mux.clone(), "secret".into());
+    listener.left(&mux);
+    let response = post(&listener, "secret", LIST);
+    assert!(response.contains("Endeavor isn't connected to lab-server.") && !response.contains("reconnecting"), "{response}");
+    // Another channel's listener use isn't undone by an older channel's end.
+    let (newer, older) = (Mux::new(std::io::sink()), Mux::new(std::io::sink()));
+    listener.attach(newer, "secret".into());
+    listener.left(&older);
+    assert!(matches!(&*listener.upstream.lock().unwrap(), Upstream::Up { .. }));
+}
+
+#[test]
+fn a_failing_accept_backs_off_up_to_a_second_and_starts_over_after_one_works() {
+    let mut backoff = Backoff::default();
+    let ms = |(pause, first): (Duration, bool)| (pause.as_millis(), first);
+    let failures: Vec<_> = (0..7).map(|_| ms(backoff.failed())).collect();
+    assert_eq!(failures, [(50, true), (100, false), (200, false), (400, false), (800, false), (1000, false), (1000, false)]);
+    backoff.accepted();
+    assert_eq!(ms(backoff.failed()), (50, true), "reported again after a success");
+}

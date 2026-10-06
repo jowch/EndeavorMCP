@@ -131,7 +131,7 @@ fn a_runtime_over_real_ssh() {
     let (status, _) = mcp(runtime.port, "wrong", &json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} }));
     assert_eq!(status, "HTTP/1.1 401 Unauthorized", "the token is checked");
 
-    channel.stop();
+    channel.stop().expect("stop");
     let deadline = Instant::now() + Duration::from_secs(30);
     // SAFETY: signal 0 only checks that the process exists.
     while unsafe { libc::kill(runtime.pid as i32, 0) } == 0 {

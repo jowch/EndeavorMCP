@@ -83,14 +83,14 @@ impl Running {
 
     /// Ask the runtime to shut down through the relay, then cancel the job.
     /// The caller holds the start lock.
-    pub fn stop(self, rx: &mpsc::Receiver<Event>) {
+    pub fn stop(self, rx: &mpsc::Receiver<Event>, said: &mut Said) {
         let generation = self.link.generation;
         if self.link.send(&ToHelper::Stop).is_ok() {
             let deadline = Instant::now() + Duration::from_secs(20);
             while let Some(left) = deadline.checked_duration_since(Instant::now()) {
                 match rx.recv_timeout(left) {
                     Ok(Event::Node(g, ToApp::Stopped | ToApp::Died { .. })) | Ok(Event::NodeGone(g)) if g == generation => break,
-                    Ok(_) => {}
+                    Ok(event) => said.note(event),
                     Err(_) => break,
                 }
             }

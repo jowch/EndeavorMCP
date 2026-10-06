@@ -223,6 +223,7 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
             let found = notebooks.iter().find(|nb| nb["notebook_id"] == *id).cloned();
             let reply = match (call["method"].as_str().unwrap(), found) {
                 ("snapshot", _) if id.is_null() => serde_json::json!({ "result": { "notebooks": notebooks } }),
+                ("status", _) => serde_json::json!({ "result": { "notebooks": notebooks.iter().map(|nb| serde_json::json!({ "notebook_id": nb["notebook_id"], "path": nb["path"] })).collect::<Vec<_>>() } }),
                 ("snapshot", Some(nb)) => serde_json::json!({ "result": nb }),
                 ("graph", Some(_)) => serde_json::json!({ "result": { "cells": [] } }),
                 ("open", _) => match notebooks.iter().find(|nb| nb["path"] == call["params"]["path"]) {

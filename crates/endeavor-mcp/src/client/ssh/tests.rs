@@ -43,11 +43,11 @@ fn ssh_gets_its_usual_arguments_and_the_script_last() {
 
 #[test]
 fn a_host_that_is_not_a_host_never_reaches_ssh() {
-    for bad in ["", "-oProxyCommand=x", "-p", "lab host", "lab;rm", "lab\nx", "$(x)", "a'b", "lab/", "lab*"] {
+    for bad in ["", "-oProxyCommand=x", "-p", "lab host", "lab;rm", "lab\nx", "$(x)", "a'b", "lab/", "lab*", "jc@", "@lab", "@", ":22", "jc@:22", "lab:22"] {
         assert!(valid_host(bad).is_err(), "{bad:?}");
         assert!(Transport::Ssh { host: bad.into(), port: None }.command("true", &Auth::Batch).is_err(), "{bad:?}");
     }
-    for good in ["lab", "jc@lab.example.edu", "10.0.0.2", "fe80::1", "hoffman2_login-1"] {
+    for good in ["lab", "jc@lab.example.edu", "10.0.0.2", "fe80::1", "::1", "jc@fe80::1", "a@b@lab", "hoffman2_login-1"] {
         assert!(valid_host(good).is_ok(), "{good:?}");
     }
     assert_eq!(valid_host("-x").unwrap_err(), "\"-x\" isn't an SSH host name.");
@@ -248,6 +248,64 @@ fn after_sign_in_the_servers_own_words_are_shown() {
     assert_eq!(said(&["tar: write error: Connection timed out"]), "The connection to lab ended: tar: write error: Connection timed out");
     assert_eq!(said(&[]), "The connection to lab ended before Endeavor could start.");
     assert_eq!(explain(&lab(), &Auth::Batch, &[], None, true, true), "Cancelled.");
+}
+
+#[cfg(unix)]
+fn exited_with(code: i32) -> Option<ExitStatus> {
+    Some(std::os::unix::process::ExitStatusExt::from_raw(code << 8))
+}
+
+#[test]
+#[cfg(unix)]
+fn only_ssh_own_failures_are_explained_as_sign_in_or_network_problems() {
+    let denied = ["jc@lab: Permission denied (publickey).".to_owned()];
+    let says = |status: Option<ExitStatus>, signed_in: bool| explain(&lab(), &Auth::Batch, &denied, status, false, signed_in);
+    // ssh's own status, or none known (killed, or not asked).
+    for status in [exited_with(255), None, Some(std::os::unix::process::ExitStatusExt::from_raw(9))] {
+        assert!(says(status, false).contains("refused the sign-in"), "{status:?}");
+    }
+    // Any other status is the remote command's: its own words.
+    assert_eq!(says(exited_with(1), false), "The connection to lab ended: jc@lab: Permission denied (publickey).");
+    assert_eq!(says(exited_with(0), false), says(exited_with(1), false));
+    // And never once signed in, whatever the status.
+    assert_eq!(says(exited_with(255), true), "The connection to lab ended: jc@lab: Permission denied (publickey).");
+    assert_eq!(explain(&lab(), &Auth::Batch, &[], exited_with(3), false, false), "The connection to lab ended before Endeavor could start (exit status: 3).");
+}
+
+#[test]
+fn the_collected_stderr_survives_a_line_that_is_not_utf8() {
+    let stderr = Stderr::collect(&b"caf\xe9 banner\r\nssh: Permission denied (publickey).\nlast, no newline"[..]);
+    assert_eq!(stderr.finish(), ["caf\u{fffd} banner", "ssh: Permission denied (publickey).", "last, no newline"]);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_cancel_holds_ssh_while_the_helper_lives_and_lets_go_once_it_has_exited() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = crate::client::scratch("cancel-pid");
+    std::fs::write(dir.join("frames"), ToApp::Hello { version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false }.frame().encode()).unwrap();
+    // Says hello, then stays until the client sends it anything (a detach).
+    let script = dir.join("helper");
+    std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", dir.join("frames").display())).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fake = |_: &str, _: &str| Ok(script.clone());
+    let options = Options { helper: &fake, root: dir.join("root").display().to_string(), ..options("", "", "") };
+    let transport = Transport::Shell { env: vec![("HOME".into(), dir.display().to_string())], ask: None };
+    let cancel = Cancel::default();
+    let (channel, _) = connect(&Server::default(), &transport, &options, &cancel, &|_| {}).unwrap();
+    assert!(cancel.pid.lock().unwrap().is_some(), "after the connect, for as long as the helper lives");
+    channel.detach();
+    assert!(cancel.pid.lock().unwrap().is_none(), "not after it has exited");
+    cancel.cancel();
+}
+
+#[test]
+fn a_cancel_forgets_ssh_once_it_has_exited() {
+    let slot: Mutex<Option<u32>> = Mutex::new(Some(7));
+    Cancel::finished(&slot, 8);
+    assert_eq!(*slot.lock().unwrap(), Some(7), "another connect's ssh isn't forgotten");
+    Cancel::finished(&slot, 7);
+    assert_eq!(*slot.lock().unwrap(), None);
 }
 
 /// What the script hands the helper for `root`, `state` and `depot` under `home`.

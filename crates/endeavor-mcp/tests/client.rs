@@ -189,7 +189,7 @@ fn the_helper_is_installed_then_reused_and_attaches() {
     let (channel, _) = connect(&server, &transport, &options, &Cancel::default(), &on).expect("second connect");
     assert_eq!(seen.lock().unwrap()[1], Event::Helper { installed: false });
     start(&channel, &listener, None, &on, |_| {}).expect("start again");
-    channel.stop();
+    channel.stop().expect("stop");
     assert!(!fake.alive(), "Stop reaches the runtime's bridge");
     // The helper stays connected after a stop.
     assert!(channel.files(files::Request::List { path: "~".into() }).is_ok());
@@ -347,12 +347,48 @@ fn text_that_is_not_utf8_before_the_bootstrap_line_is_skipped() {
 }
 
 #[test]
-fn cancelling_after_the_connect_is_over_does_not_touch_the_helper() {
+fn cancelling_after_the_connect_is_over_ends_the_connection_while_it_lasts() {
     let place = Place::new("cancel-late");
     let cancel = Cancel::default();
     let (channel, _) = connect(&Server::default(), &place.transport(), &place.options(), &cancel, &|_| {}).expect("connect");
+    assert!(channel.files(files::Request::List { path: "~".into() }).is_ok());
     cancel.cancel();
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(channel.files(files::Request::List { path: "~".into() }).is_ok(), "the helper still answers");
-    channel.detach();
+    let notice = channel.closed();
+    assert!(matches!(&notice, Some(Notice::Lost(_))), "{notice:?}");
+    no_helper_left(&place.state);
+}
+
+#[test]
+fn cancelling_a_test_while_its_start_waits_ends_it_at_once() {
+    let place = Place::new("cancel-test-start");
+    // Another start holds the lock, so the helper waits for it to say anything about Julia.
+    let held = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(place.state.join("start.lock")).unwrap();
+    // SAFETY: plain syscall on a file we hold open.
+    assert_eq!(unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&held), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    let cancel = Arc::new(Cancel::default());
+    let (seen, on) = events();
+    let (done_tx, done) = mpsc::channel();
+    std::thread::spawn({
+        let (cancel, options, transport) = (cancel.clone(), place.options(), place.transport());
+        move || done_tx.send(endeavor_mcp::client::test(&Server::default(), &transport, &options, &cancel, &on)).unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !seen.lock().unwrap().iter().any(|e| matches!(e, Event::Progress(line) if line.contains("waiting for it"))) {
+        assert!(std::time::Instant::now() < deadline, "the start never began waiting: {:?}", seen.lock().unwrap());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(done.recv_timeout(Duration::from_millis(300)).is_err(), "it waits for the start");
+    cancel.cancel();
+    assert_eq!(done.recv_timeout(Duration::from_secs(10)).expect("test returns"), Err("Cancelled.".to_owned()));
+    no_helper_left(&place.state);
+    drop(held);
+}
+
+#[test]
+fn a_line_that_is_not_utf8_on_ssh_stderr_does_not_hide_the_reason_after_it() {
+    let place = Place::new("stderr-latin1");
+    let ask = r"printf 'caf\351 banner\n' >&2; echo 'jc@lab: Permission denied (publickey).' >&2; exit 255";
+    let transport = Transport::Shell { env: Vec::new(), ask: Some(ask.into()) };
+    let err = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).err().expect("refused");
+    assert!(err.contains("refused the sign-in") && err.contains("ssh-add"), "{err}");
 }

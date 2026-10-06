@@ -61,13 +61,21 @@ impl Listener {
         let accepting = listener.clone();
         std::thread::spawn(move || {
             // A failed accept (no file descriptors left, a connection reset before it was taken) doesn't end the listener.
+            let mut backoff = Backoff::default();
             for connection in socket.incoming() {
                 match connection {
                     Ok(connection) => {
+                        backoff.accepted();
                         let listener = accepting.clone();
                         std::thread::spawn(move || listener.route(connection));
                     }
-                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                    Err(e) => {
+                        let (pause, first) = backoff.failed();
+                        if first {
+                            eprintln!("Endeavor's port {} for {} couldn't take a connection: {e}", accepting.port, accepting.name);
+                        }
+                        std::thread::sleep(pause);
+                    }
                 }
             }
         });
@@ -119,37 +127,46 @@ impl Listener {
         }
     }
 
-    /// The runtime is away on purpose while `why` holds, whether it was up or
-    /// away for another reason.
-    fn deliberately(&self, why: String) {
+    /// The runtime is away on purpose while `why` holds, whether it was away
+    /// for another reason or, if `from_up`, up.
+    fn deliberately(&self, why: String, from_up: bool) {
         let mut upstream = self.upstream.lock().unwrap();
-        if let Upstream::Up { token, .. } | Upstream::Away { token, .. } = &*upstream {
-            *upstream = Upstream::Away { token: token.clone(), why };
-        }
+        let token = match &*upstream {
+            Upstream::Away { token, .. } => token.clone(),
+            Upstream::Up { token, .. } if from_up => token.clone(),
+            _ => return,
+        };
+        *upstream = Upstream::Away { token, why };
     }
 
     /// The runtime is being restarted.
     pub fn restarting(&self) {
-        self.deliberately(format!("Endeavor is restarting Julia on {}. Try again in a moment.", self.name));
+        self.deliberately(format!("Endeavor is restarting Julia on {}. Try again in a moment.", self.name), true);
     }
 
     /// The restart `restarting` announced didn't work out: Julia didn't come back.
     pub fn restart_failed(&self) {
-        let mut upstream = self.upstream.lock().unwrap();
-        if let Upstream::Away { token, .. } = &*upstream {
-            *upstream = Upstream::Away { token: token.clone(), why: format!("Julia on {} couldn't start. Use Restart Julia to try again.", self.name) };
-        }
+        self.deliberately(format!("Julia on {} couldn't start. Use Restart Julia to try again.", self.name), false);
+    }
+
+    fn not_connected(&self) -> String {
+        format!("Endeavor isn't connected to {}. Reconnect it to use its notebook again.", self.name)
     }
 
     /// The server was stopped or disconnected on purpose: nothing will
     /// reconnect it by itself, unlike a drop (`forget`).
     pub fn disconnected(&self) {
-        self.deliberately(format!("Endeavor isn't connected to {}. Reconnect it to use its notebook again.", self.name));
+        self.deliberately(self.not_connected(), true);
     }
 
-    /// `mux`'s helper has gone.
+    /// `mux`'s helper has gone, unexpectedly.
     pub(super) fn forget(&self, mux: &Arc<Mux>) {
         self.dropped(format!("Endeavor lost the connection to {} and is reconnecting by itself. Try again in a moment.", self.name), mux);
+    }
+
+    /// `mux`'s helper has gone because the client let it go, so nothing will reconnect it.
+    pub(super) fn left(&self, mux: &Arc<Mux>) {
+        self.dropped(self.not_connected(), mux);
     }
 
     pub fn port(&self) -> u16 {
@@ -164,6 +181,37 @@ impl Listener {
     /// Pluto's start page: the core trades `token` in the URL for a cookie, and drops it from the URL.
     pub(super) fn page_url(&self, token: &str) -> String {
         format!("http://127.0.0.1:{}/?token={token}", self.port)
+    }
+}
+
+/// How long the accept loop waits after a failed accept: 50 ms, doubling at each
+/// failure in a row up to a second, and 50 ms again once one succeeds.
+struct Backoff {
+    pause: Duration,
+    failing: bool,
+}
+
+impl Default for Backoff {
+    fn default() -> Backoff {
+        Backoff { pause: Backoff::FIRST, failing: false }
+    }
+}
+
+impl Backoff {
+    const FIRST: Duration = Duration::from_millis(50);
+    const LAST: Duration = Duration::from_secs(1);
+
+    /// How long to wait now, and whether this is the first failure of a run, which is the one to report.
+    fn failed(&mut self) -> (Duration, bool) {
+        let first = !self.failing;
+        let pause = self.pause;
+        self.failing = true;
+        self.pause = (self.pause * 2).min(Backoff::LAST);
+        (pause, first)
+    }
+
+    fn accepted(&mut self) {
+        *self = Backoff::default();
     }
 }
 
