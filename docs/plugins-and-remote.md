@@ -23,8 +23,8 @@ untested._
 - A runtime is shared: the app and the plugin, from any of your computers,
   attach to the same runtime on a server. Several sessions can work in one
   notebook, as in the app today.
-- First version: login with ssh keys only, and the binary installed with
-  `curl` from the GitHub release.
+- First version: login with ssh keys only, and the binary installed with an
+  install script that downloads it from the GitHub release.
 
 ## Decided
 
@@ -33,7 +33,7 @@ untested._
 | Transport to a server | The wire protocol over one `ssh`, as in the app. Not `ssh -L` |
 | Who sets a server up | The agent, through tools. No file the user edits |
 | Sign-in | Your ssh configuration, keys and agent. No password prompt in the first version |
-| Installing the binary | `curl` from the GitHub release. npm later, once there are version tags |
+| Installing the binary | `scripts/install.sh` or `scripts/install.ps1`, run from the web, downloading from the GitHub release (built). npm later, once there are version tags |
 | Signing | Not needed for a `curl` install; wait |
 | State folder | One on each machine, yours included, for `serve`, `mcp`, the plugin and the app: the one `serve` uses today. The app stops choosing its own |
 | The list of machines | One file the binary owns: `machines.json`, a list of the app's server records, in `$XDG_CONFIG_HOME/endeavor/` (default `~/.config/endeavor/`, on macOS too), and in `%APPDATA%\Endeavor\` on Windows (built). The app will read and write it there |
@@ -88,7 +88,8 @@ disturb each other (see [Sharing a runtime](#sharing-a-runtime)).
 front starts it with `link::ensure(<id>)`, which returns the link's control
 port and token. The link reads the machine from the machines file, connects as
 the library does (batch sign-in), sends its own binary as the helper when the
-server's platform is this computer's, and starts the one loopback port that
+server's platform is this computer's (and else the release's helper for that
+platform, see [Installing the binary](#installing-the-binary)), and starts the one loopback port that
 relays to the runtime. It keeps `links/<id>/link.json` (its pid, control
 port, token and build), `link.lock` and `link.log` in the state folder
 (`~/.local/state/endeavor`, `%LOCALAPPDATA%\Endeavor` on Windows). The control
@@ -325,10 +326,10 @@ threads and blocking I/O, as here, and no new dependencies):
 Written again without the GUI: the connect and retry rules (about 300 lines
 of `connection.rs`).
 
-New: the link process (built), the machine tools, and getting the Linux
-helper to send. The link sends its own binary when the server is the same
-platform as your computer, and refuses other platforms until the release's
-helpers can be fetched.
+New: the link process (built), the machine tools, and getting the helper to
+send (built). The link sends its own binary when the server is the same
+platform as your computer, and else fetches the release's helper for the
+server's platform.
 
 The app keeps its copy until it switches to the moved code. That is a change
 in both repositories: it lands here, the Helpers release builds, then the
@@ -429,26 +430,56 @@ The app has the same open question.
 
 The plugin's entry is `endeavor mcp`, found on the `PATH`.
 
-- Two install scripts, `sh` and PowerShell: pick the platform, download from
-  the release, check the SHA-256, put `endeavor` on the `PATH`.
-- When the binary is missing, the MCP server fails to start but the skills
-  still load. A setup skill tells the agent to run the install line with the
-  user's approval, then to ask them to reconnect.
-- A file fetched with `curl` carries no quarantine mark, so Gatekeeper and
-  SmartScreen don't check it, and the Rust linker signs Apple Silicon
-  binaries ad hoc. Untested here.
+**Built:**
 
-Needed first:
+- Two install scripts, `scripts/install.sh` (`sh`, macOS and Linux) and
+  `scripts/install.ps1` (PowerShell 5.1, Windows): pick the platform, read
+  `LATEST` from the release, download `endeavor-<key>-<platform>` (`.exe` on
+  Windows) and `endeavor-<key>.sha256`, check the SHA-256, and put
+  `endeavor` in `~/.local/bin` (`%LOCALAPPDATA%\Endeavor\bin`), or in the
+  folder given by `--dir` / `-Dir` or `ENDEAVOR_INSTALL_DIR`. An existing
+  binary is replaced; a Windows one that is running is renamed aside.
+  `install.sh` prints the `PATH` line to add and edits no file;
+  `install.ps1` adds the folder to the user `PATH` and says so. No `sudo`
+  and no administrator rights. `ENDEAVOR_RELEASE_URL` replaces the release's
+  address, for tests.
+- The Helpers workflow builds `linux-x86_64`, `linux-aarch64`,
+  `darwin-x86_64`, `darwin-aarch64` and `windows-x86_64`, and every build gets
+  the release's key (`scripts/helpers.sh --key`) in `ENDEAVOR_RELEASE_KEY`.
+  `build.rs` records it as `embedded::RELEASE_KEY`, and `endeavor --version`
+  prints it as a second line, `release <key>`, after the first line it
+  always had. A build without the variable has no key.
+- `endeavor update` works on all five platforms (`release.rs`, which the link
+  shares for downloads and checksums). On Windows the running exe is renamed
+  to `endeavor.exe.old` and the new one put in its place; the next update
+  deletes the old one.
+- When the server's platform isn't this computer's, the link fetches
+  `endeavor-<key>-<platform>` from the release, checks it against
+  `endeavor-<key>.sha256` from the same release, and keeps it as
+  `<cache>/endeavor/helpers/<key>/<platform>/endeavor` (`~/.cache` by
+  default, `%LOCALAPPDATA%\Endeavor\helpers` on Windows; the folders 0700
+  and the file 0600), with the checksum beside it. The next connect uses the
+  kept file once its SHA-256 matches the one recorded, with no download. A
+  build without a release key says that a helper for that platform needs a
+  release build. A download that fails or doesn't match is deleted, the
+  link's state is `failed` with the message, and nothing retries it. The
+  release's names for platforms are in one place (`release::platform_name`);
+  a server that reports another platform (or Windows) is refused with "no
+  runtime helper for <os> <arch> servers". Servers are reached by `uname`'s
+  words, so macOS servers are `darwin-*`.
+- When the server is the same platform as this computer, the link sends its
+  own binary, as before.
 
-- macOS and Windows builds on the release. The Helpers workflow has the
-  macOS rows commented out and no Windows rows.
-- `endeavor update` for macOS and Windows. It replaces Linux binaries only.
-- A way for a binary to find its own Linux build to send to a server. The
-  binary's build hash (`build.rs`) and the release's key
-  (`scripts/helpers.sh --key`) are computed differently, so the build has to
-  record the key. The link downloads that helper, checks its SHA-256 and
-  keeps it. When the server is the same platform as your computer, it sends
-  its own binary.
+**Not run:** the PowerShell script (no PowerShell here), the workflow's new
+rows (they run on the next push to `main`), `endeavor update` on macOS and
+Windows, and a Mac or Windows computer reaching a Linux server. A file
+fetched with `curl` carries no quarantine mark, so Gatekeeper and SmartScreen
+shouldn't check it, and the Rust linker signs Apple Silicon binaries ad hoc.
+Untested.
+
+When the binary is missing, the MCP server fails to start but the skills
+still load. A setup skill tells the agent to run the install line with the
+user's approval, then to ask them to reconnect (not built).
 
 ## Plugins
 
@@ -495,8 +526,12 @@ folder, and that each loads the skills.
   word is never taken as the script), and `--wrap` (also as `--wr` or
   `--wra`) and line breaks are refused, by the front and again by the helper
   before it calls `sbatch`.
-- The helper sent to a server is checked against the release's SHA-256
-  before it is kept. The app sends its bundled helper unchecked.
+- The helper fetched for a server of another platform is checked against the
+  release's SHA-256 before it is kept, and again each time it is used. The
+  checksum file comes from the same release as the binary, so this guards
+  against a damaged download and not a tampered release. The same holds for
+  the install scripts and `endeavor update`. The app sends its bundled helper
+  unchecked.
 
 ## Open
 
@@ -514,7 +549,9 @@ folder, and that each loads the skills.
 4. The Slurm path through the tools (built against fake Slurm, and checked on
    real Slurm: the helper's side in `e2e_slurm`, the whole path through
    `endeavor mcp` in `e2e_machines_slurm`).
-5. macOS and Windows builds, the install scripts, the build's release key.
+5. macOS and Windows builds, the install scripts, the build's release key
+   (built; the workflow's new rows and the PowerShell script are unrun, see
+   [gaps.md](gaps.md)).
 6. Codex and Antigravity plugin folders.
 7. The app: the moved code, the shared state folder, a version on its calls
    to the runtime.

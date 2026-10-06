@@ -32,10 +32,6 @@ _Started 2026-10-06, on the `client-library` branch._
   (`gone_early`) but has no test: the order can't be forced.
 - **A stop that fails while a start is under way** restores the start's
   state only roughly.
-- **A server on another platform than this computer can't be used yet.** The
-  link sends its own binary as the helper, so a Mac can't reach a Linux
-  server. Closed by build step 5 (the release key in the build, download and
-  SHA-256 check).
 
 ## The machines file
 
@@ -92,13 +88,12 @@ _Started 2026-10-06, on the `client-library` branch._
   `known_hosts`.
 - **The end reason read from the job's log** (used where `sacct` is off) is
   not exercised by a real test.
-- **The reason for a job cancelled from outside is sometimes not "cancelled".**
-  `e2e_slurm` failed once on that check (the client was told the job ended,
-  with another reason) and passed on the next six runs. `sacct` is off on
-  this workstation, so the reason comes from the job's state and its log,
-  and that probably races with Slurm marking the job. Not investigated. To
-  close: capture the reason string when it happens, and wait for the job's
-  final state before reading it.
+- **The reason a job ended could come back empty.** `e2e_slurm` failed about
+  one run in six: a job cancelled from outside was reported with no reason,
+  because the helper asked while Slurm still listed the job as running or
+  completing, and gave up after 1.5 s. The helper now waits up to 10 s for
+  the job's final state. The slow case did not come up again in eight runs,
+  so the fix is not shown by a run.
 - **A queued job has no id in the link's status until it is submitted by
   this link.** A link that re-attaches to a job already queued shows `queue`
   but no `job` until it runs, because the library's queued event carries no
@@ -116,6 +111,46 @@ _Started 2026-10-06, on the `client-library` branch._
   is unsupported. A key with a passphrase needs `ssh-add` first, and a new
   host needs one `ssh <host>` in a terminal. Planned: a sign-in page on the
   link's loopback port.
+
+## Releases and installing
+
+- **`install.ps1` has never run.** There is no PowerShell here. It is read
+  against PowerShell 5.1's behaviour only. To close: run it on Windows
+  against a fake release (`ENDEAVOR_RELEASE_URL`) and the real one.
+- **The workflow's macOS and Windows rows and the key check have never
+  run.** They run on the next push to `main`; the YAML parses and was read
+  through. The `darwin-x86_64` build is cross-built on an Apple Silicon
+  runner and its key is checked by searching the file for it, not by running
+  it. Nothing has run the macOS or Windows builds, so a Mac or Windows
+  binary may fail to link or start. Until a release holds them, the install
+  scripts and `endeavor update` on those platforms find no asset and say so.
+- **`endeavor update` on macOS and Windows has never run.** The logic is the
+  Linux code with other asset names, and the Windows rename-aside is tested
+  on Linux with the same function; `cfg(windows)` paths are compile-checked.
+  A stale `endeavor.exe.old` is removed only by a later `update` or install.
+- **The checksum file comes from the same release as the binary.** It guards
+  against a damaged or cut-short download and not against a tampered
+  release, and the same holds for the install scripts, `update` and the
+  fetched server helpers. To close: sign the release, or pin the key in the
+  script.
+- **A Mac or Windows computer reaching a Linux server is wired and not run.**
+  The release logic is tested with a fake release, but `link/run.rs`'s call
+  to it is not exercised across platforms, because the tests' ssh stand-in
+  always reports this computer's platform.
+- **A build whose key the release doesn't hold** (a branch built by hand with
+  the variable set, or `main` before the workflow finished) fails with
+  "couldn't download" when it needs a helper of another platform, and tries
+  again at the next connect.
+- **The kept helper is checked against the checksum recorded beside it.** Someone
+  who can write the cache folder can change both; it is owner-only.
+- **No helper for a Windows server or a platform other than the five.**
+  The server's `uname` is what is asked for, and the release has no Windows
+  server helper.
+- **Fetched helpers are never removed.** Each build's key adds a folder under
+  `<cache>/endeavor/helpers/` (about one binary each). To close: delete the
+  folders of other keys when a new one is fetched.
+- **The setup skill that installs the binary when it is missing** is not
+  built.
 
 ## Not checked
 
@@ -136,12 +171,6 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The machine tools
 
-- **`use_machine` without `folder` resets the session's folder.** A second
-  session that calls it for a machine the project already uses moves to the
-  server's home folder and the project forgets the folder it remembered. A
-  session that attaches on its own keeps the remembered folder. Left because
-  "no folder" means home by the tool's definition. To close: keep the
-  remembered folder when the machine is the project's and no folder is given.
 - **Julia is not known when a machine is added.** The helper has no call for
   it, so `add_machine` reports `julia: null` until the first runtime start.
 - **Adding a cluster takes two connections.** The first link connects as a
@@ -176,3 +205,13 @@ _Started 2026-10-06, on the `client-library` branch._
 - **A link of another build with a runtime on it** is used as it is and sent
   no start or attach. Not tested with a real older build, only with a link
   whose record names another build.
+
+## CI
+
+- **CI runs on every push, on Linux, macOS and Windows**, and was red on macOS
+  for most of this work without being looked at. It showed one product
+  fault the Linux runs could not: when a runtime's end was reported before
+  the connection dropped, the link forgot the reason on reconnecting and
+  said only "connected". Fixed; the order that shows it only happens on
+  macOS, so the test for it is CI's.
+

@@ -48,7 +48,7 @@ const KEY: &str = "4859266ddff1";
 const NEW: &[u8] = b"#!/bin/sh\necho 'endeavor 0.1.0 (build 0.1.0-00000000000000aa)'\n";
 
 fn sha(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    release::sha256_hex(bytes)
 }
 
 /// A release with NEW for linux-x86_64, whose checksum file says `sum`.
@@ -146,5 +146,46 @@ fn copies_the_app_or_cargo_installed_are_left_to_them() {
     here.platform = None;
     let error = update(&here).unwrap_err();
     assert!(error.starts_with("There's no prebuilt endeavor for this platform (") && error.ends_with(CARGO_INSTALL), "{error}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_running_binary_is_renamed_aside_where_it_cant_be_overwritten() {
+    let dir = scratch("aside");
+    let (exe, part) = (dir.join("endeavor.exe"), dir.join(".endeavor.part.1.exe"));
+    std::fs::write(&exe, "old").unwrap();
+    std::fs::write(&part, "new").unwrap();
+    put_in_place(&part, &exe, true).unwrap();
+    assert_eq!((std::fs::read(&exe).unwrap(), std::fs::read(dir.join("endeavor.exe.old")).unwrap()), (b"new".to_vec(), b"old".to_vec()));
+    assert!(!part.exists());
+
+    // A new binary that can't be moved in puts the old one back.
+    std::fs::remove_file(dir.join("endeavor.exe.old")).unwrap();
+    let error = put_in_place(&dir.join("missing"), &exe, true).unwrap_err();
+    assert!(error.starts_with(&format!("Couldn't replace {}", exe.display())), "{error}");
+    assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+    assert!(!dir.join("endeavor.exe.old").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_update_removes_the_old_binary_an_earlier_one_left_aside() {
+    let dir = scratch("leftover");
+    let here = here(&dir, release(&sha(NEW)));
+    let old = dir.join("bin/endeavor.old");
+    std::fs::write(&old, "from an earlier update").unwrap();
+    update(&here).unwrap();
+    assert!(!old.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_windows_update_asks_for_the_exe() {
+    let dir = scratch("windows");
+    let name = format!("endeavor-{KEY}-windows-x86_64.exe");
+    let mut here = here(&dir, serve(HashMap::from([("LATEST".to_owned(), format!("{KEY}\n").into_bytes()), (format!("endeavor-{KEY}.sha256"), format!("{}  {name}\n", sha(NEW)).into_bytes()), (name, NEW.to_vec())])));
+    here.platform = Some("windows-x86_64");
+    update(&here).unwrap();
+    assert_eq!(std::fs::read(&here.exe).unwrap(), NEW);
     let _ = std::fs::remove_dir_all(&dir);
 }

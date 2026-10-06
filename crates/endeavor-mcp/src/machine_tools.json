@@ -56,7 +56,7 @@
           "type": "array"
         },
         "folder": {
-          "description": "The session's folder on the machine: where new notebooks go and relative paths start. Defaults to the machine's home folder.",
+          "description": "The session's folder on the machine: where new notebooks go and relative paths start. Left out, it is the folder the project already remembers for this machine, else the machine's home folder.",
           "type": "string"
         },
         "gpus": {

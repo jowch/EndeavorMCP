@@ -611,6 +611,30 @@ fn a_second_front_in_the_same_project_comes_up_on_the_remembered_machine() {
 }
 
 #[test]
+fn use_machine_without_a_folder_keeps_the_folder_the_project_remembers_for_that_machine() {
+    let place = Place::new("remember-folder");
+    place.add_lab();
+    let (work, other) = (place.dir.join("home/work"), place.dir.join("home/other"));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let project = place.project.display().to_string();
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab", "folder": work.display().to_string() }));
+    first.finish();
+
+    let mut second = place.front();
+    second.initialize();
+    second.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(place.projects()[&project]["folder"], work.display().to_string().as_str(), "the project still remembers the folder");
+    let shell = second.ok("run_shell", json!({ "command": "pwd" }));
+    assert!(shell.to_string().contains(&work.display().to_string()), "the session is in the remembered folder: {shell}");
+
+    second.ok("use_machine", json!({ "machine": "lab", "folder": other.display().to_string() }));
+    assert_eq!(place.projects()[&project]["folder"], other.display().to_string().as_str(), "a folder that is given replaces it");
+}
+
+#[test]
 fn a_remembered_plain_server_is_started_when_nothing_runs_there() {
     let place = Place::new("remember-start");
     place.add_lab();

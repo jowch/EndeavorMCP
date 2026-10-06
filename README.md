@@ -23,7 +23,32 @@ You need Julia 1.11 or newer, or nothing: when no `julia` is on your login
 shell's `PATH`, Endeavor downloads its own pinned Julia (1.12.6) into
 `~/.cache/endeavor/` the first time.
 
-To build from source, install Rust 1.89 or newer, then run:
+On Linux and macOS:
+
+```
+curl -fsSL https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```
+irm https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.ps1 | iex
+```
+
+The script finds the newest build on the
+[Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers),
+checks its SHA-256, and installs it as `endeavor` in `~/.local/bin`
+(`%LOCALAPPDATA%\Endeavor\bin` on Windows), replacing a copy that is there.
+Pick another folder with `--dir` (`sh -s -- --dir FOLDER`) or by setting
+`ENDEAVOR_INSTALL_DIR` first. If the folder isn't on your `PATH`, the Linux
+and macOS script prints the line to add to your shell's startup file, and
+changes none itself; the Windows script adds the folder to your user `PATH`
+and says so. It needs no administrator rights and no `sudo`. It trusts the
+release the way `curl | sh` always does: the checksum file comes from the
+same release as the binary, so the check catches a damaged download and not a
+tampered release.
+
+To build from source instead, install Rust 1.89 or newer, then run:
 
 ```
 cargo install --git https://github.com/jowch/EndeavorMCP endeavor-mcp
@@ -35,12 +60,13 @@ all you install. On first use it unpacks the Julia code into
 versions' folders once no running Julia uses them and none has been used for
 a day.
 
-For Linux (x86_64 and aarch64) there are prebuilt binaries on the
-[Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers),
-built by the Helpers workflow for each change to the helper's source. Each
-file is named `endeavor-<key>-<platform>`, `endeavor-<key>.sha256` holds the
-checksums for that key, and `LATEST` names the newest key. Download it and
-check it (on aarch64, use `linux-aarch64`):
+To install by hand: the release has binaries for Linux (x86_64 and aarch64),
+macOS (x86_64 and aarch64) and Windows (x86_64), built by the Helpers
+workflow for each change to the helper's source. Each file is named
+`endeavor-<key>-<platform>` (`.exe` on Windows), `endeavor-<key>.sha256` holds
+the checksums for that key, and `LATEST` names the newest key. Download one
+and check it (the platforms are `linux-x86_64`, `linux-aarch64`,
+`darwin-x86_64`, `darwin-aarch64` and `windows-x86_64`):
 
 ```
 base=https://github.com/jowch/EndeavorMCP/releases/download/helpers
@@ -52,13 +78,22 @@ chmod +x endeavor-$key-linux-x86_64
 mv endeavor-$key-linux-x86_64 ~/.local/bin/endeavor
 ```
 
+On a Mac, `shasum -a 256 -c` replaces `sha256sum -c`.
+
 Binaries from before `serve` was added don't have it. Run
 `endeavor serve --help` to check. `endeavor --version` prints the version
-and the build, a hash of the source it was built from.
+and the build, a hash of the source it was built from; a release build adds
+a second line, `release <key>`, the release's key for that source. A Mac or
+Windows computer reaches a Linux server with the release build: when the
+agent adds the machine, `endeavor` fetches the Linux helper from the release
+by that key, checks its SHA-256 and keeps it in `~/.cache/endeavor/helpers/`
+(`%LOCALAPPDATA%\Endeavor\helpers` on Windows). A build from source has no
+key and can only send its own binary, so it reaches servers of its own
+platform.
 
 ## Update it
 
-On Linux, with a binary from the Helpers release, run:
+With a binary from the Helpers release (on Linux, macOS or Windows), run:
 
 ```
 endeavor update
@@ -67,15 +102,17 @@ endeavor update
 It downloads the newest build that `LATEST` names, checks it against the
 release's SHA-256 file, and puts it in place of the binary you ran. If you
 already have the newest build, it says so. It needs curl or wget, and write
-access to the binary's folder. Binaries from before `update` was added don't
-have it: download the newest one as in [Install it](#install-it).
+access to the binary's folder. On Windows the running `endeavor.exe` can't be
+overwritten, so the old one is renamed `endeavor.exe.old`, and the next
+update removes it. Binaries from before `update` was added don't have it:
+install again as in [Install it](#install-it), which also updates.
 
 Other installs update the way they were installed:
 
 - If you installed with `cargo install`, run the same `cargo install` line
   again. `endeavor update` prints it.
-- macOS and Windows have no prebuilt binaries, so reinstall with
-  `cargo install`. `endeavor update` says so.
+- A platform the release has no binary for (anything but the five above)
+  reinstalls with `cargo install`. `endeavor update` says so.
 - The copy the Endeavor app installs on a server (in
   `~/.cache/endeavor/<version>/`) updates with the app. `endeavor update`
   refuses to replace it.

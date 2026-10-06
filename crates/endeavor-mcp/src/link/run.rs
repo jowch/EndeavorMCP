@@ -67,6 +67,9 @@ struct Inner {
     /// What an attached or starting runtime had been asked for when the
     /// connection was lost: the next connection gets it back, if it is still there.
     resume: Option<Option<JobRequest>>,
+    /// Why the runtime had ended when the connection was lost, which the next
+    /// connection still says: it has nothing to bring back.
+    ended: Option<String>,
     /// A start is under way on this connection.
     starting: bool,
     /// Counts the stops, so the end of a start that one cut short is ignored.
@@ -180,6 +183,7 @@ pub(crate) fn main(argv: &[String]) -> ! {
             conn: 0,
             wanted: None,
             resume: None,
+            ended: None,
             starting: false,
             epoch: 0,
             connecting: false,
@@ -289,6 +293,7 @@ impl Shared {
             }
             i.starting = true;
             i.gone_early = false;
+            i.ended = None;
             i.state = State::Starting;
             i.error = None;
             i.queue = None;
@@ -482,6 +487,12 @@ fn supervise(shared: Arc<Shared>, inbox: Receiver<Msg>) -> ! {
                     i.state = State::Connected;
                     i.error = None;
                     i.step = Some(format!("Connected to {name}"));
+                    if i.resume.is_none()
+                        && let Some(why) = i.ended.take()
+                    {
+                        i.state = State::Failed;
+                        i.error = Some(why);
+                    }
                     // A start asked for while the connection was away is the newer wish.
                     i.resume.take().filter(|_| i.wanted.is_none())
                 });
@@ -573,7 +584,7 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
         if (os.to_owned(), arch.to_owned()) == this_platform() {
             std::env::current_exe().map_err(|e| format!("Couldn't find the endeavor program itself: {e}"))
         } else {
-            Err(format!("A helper for {os} {arch} servers isn't available yet in this version of Endeavor."))
+            crate::release::helper_for(os, arch, &Env::from_vars(&|name| std::env::var(name).ok()).helpers_dir())
         }
     };
     let options = Options { auth: Auth::Batch, root: shared.hooks.root.clone(), state: shared.hooks.state.clone(), depot: shared.hooks.depot.clone(), exit_idle: true, helper: &helper };
@@ -619,6 +630,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
                 }
                 shared.with(|i| {
                     i.resume = (i.runtime.is_some() || i.starting).then(|| i.wanted.take().or_else(|| i.resume.take()).unwrap_or(None));
+                    i.ended = (i.resume.is_none() && i.state == State::Failed).then(|| i.error.take()).flatten();
                     i.channel = None;
                     i.runtime = None;
                     i.starting = false;

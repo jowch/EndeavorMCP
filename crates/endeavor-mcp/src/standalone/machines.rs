@@ -996,7 +996,10 @@ impl Relay {
         }
         let server = self.find_machine(&key)?;
         let given = Given::parse(args)?;
-        let folder = text_arg(args, "folder")?;
+        let folder = match text_arg(args, "folder")? {
+            Some(folder) => Some(folder),
+            None => self.projects.get(&self.options.folder).ok().flatten().filter(|remembered| remembered.machine == server.id).and_then(|remembered| remembered.folder),
+        };
         if given.any() && server.cluster.is_none() {
             return Err(invalid(format!("{} isn't a Slurm cluster, so partition, cpus, memory_gb, hours, gpus, account and extra_sbatch_flags don't apply to it. Leave them out.", display_name(&server))));
         }

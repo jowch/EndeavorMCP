@@ -38,5 +38,11 @@ fn main() {
         }
         out.push_str("];\n");
     }
+    println!("cargo:rerun-if-env-changed=ENDEAVOR_RELEASE_KEY");
+    let key = std::env::var("ENDEAVOR_RELEASE_KEY").ok().filter(|k| !k.is_empty());
+    if let Some(key) = &key {
+        assert!(key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "ENDEAVOR_RELEASE_KEY is not a key: {key:?}");
+    }
+    out.push_str(&format!("pub const RELEASE_KEY: Option<&str> = {key:?};\n"));
     std::fs::write(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("embedded.rs"), out).unwrap();
 }

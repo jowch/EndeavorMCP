@@ -1,9 +1,12 @@
-# Builds endeavor for Linux (the helper Endeavor installs on servers, and
-# the standalone binary) and publishes it to the "helpers" release as
-# endeavor-<key>-<platform>, with endeavor-<key>.sha256; <key> is
-# scripts/helpers.sh --key, a hash of the helper's source. scripts/helpers.sh
-# downloads them from there. LATEST, uploaded after them, holds the newest key,
-# for people installing by hand and for `endeavor update`.
+# Builds endeavor for Linux, macOS and Windows (the helper Endeavor installs on
+# servers, and the standalone binary) and publishes it to the "helpers" release
+# as endeavor-<key>-<platform> (.exe on Windows), with endeavor-<key>.sha256;
+# <key> is scripts/helpers.sh --key, a hash of the helper's source. Every build
+# gets the key in ENDEAVOR_RELEASE_KEY, so `endeavor --version` can show it and
+# the link can fetch the Linux helper for a Mac or Windows computer.
+# scripts/helpers.sh downloads the Linux ones, and scripts/install.sh and
+# install.ps1 the newest build for a computer, from there. LATEST, uploaded
+# after them, holds the newest key, for those scripts and for `endeavor update`.
 name: Helpers
 
 on:
@@ -27,9 +30,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  key:
+    runs-on: ubuntu-24.04
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: key
+        run: echo "key=$(scripts/helpers.sh --key)" >> "$GITHUB_OUTPUT"
+
   build:
     name: ${{ matrix.platform }}
+    needs: key
     runs-on: ${{ matrix.runner }}
+    env:
+      ENDEAVOR_RELEASE_KEY: ${{ needs.key.outputs.key }}
     strategy:
       fail-fast: false
       matrix:
@@ -37,16 +52,29 @@ jobs:
           - platform: linux-x86_64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
+            ext: ""
+            can_run: true
           - platform: linux-aarch64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
-          # Off for now: Macs other than the one building the app.
-          # - platform: darwin-x86_64
-          #   runner: macos-15
-          #   target: x86_64-apple-darwin
-          # - platform: darwin-aarch64
-          #   runner: macos-15
-          #   target: aarch64-apple-darwin
+            ext: ""
+            can_run: true
+          # Built on Apple Silicon, which can't be counted on to run it.
+          - platform: darwin-x86_64
+            runner: macos-15
+            target: x86_64-apple-darwin
+            ext: ""
+            can_run: false
+          - platform: darwin-aarch64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            ext: ""
+            can_run: true
+          - platform: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+            can_run: true
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
@@ -54,18 +82,35 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p endeavor-mcp --target ${{ matrix.target }}
       - name: Stage
+        shell: bash
         run: |
           mkdir -p out
-          cp target/${{ matrix.target }}/release/endeavor out/
-          file out/endeavor || true
+          cp target/${{ matrix.target }}/release/endeavor${{ matrix.ext }} out/
+          file out/endeavor${{ matrix.ext }} || true
+      # The build must carry the key its file is named by.
+      - name: Check the key
+        shell: bash
+        run: |
+          binary=out/endeavor${{ matrix.ext }}
+          if [ "${{ matrix.can_run }}" = true ]; then
+            "$binary" --version
+            got=$("$binary" --version | sed -n 's/^release //p' | tr -d '\r')
+            if [ "$got" != "$ENDEAVOR_RELEASE_KEY" ]; then
+              echo "$binary reports the release key '$got', not $ENDEAVOR_RELEASE_KEY." >&2
+              exit 1
+            fi
+          elif ! grep -aqF "$ENDEAVOR_RELEASE_KEY" "$binary"; then
+            echo "$binary doesn't contain the release key $ENDEAVOR_RELEASE_KEY." >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}
-          path: out/endeavor
+          path: out/endeavor${{ matrix.ext }}
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [key, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -77,16 +122,22 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          KEY: ${{ needs.key.outputs.key }}
         run: |
-          key=$(scripts/helpers.sh --key)
+          key=$KEY
+          notes="endeavor for Linux, macOS and Windows, published by the Helpers workflow for each change to the helper's source. scripts/install.sh and scripts/install.ps1 install the newest build; scripts/helpers.sh downloads the Linux ones matching your checkout."
           mkdir -p publish
           for dir in dist/*/; do
             platform=$(basename "$dir")
-            cp "$dir/endeavor" "publish/endeavor-$key-$platform"
+            ext=
+            case $platform in windows-*) ext=.exe ;; esac
+            cp "$dir/endeavor$ext" "publish/endeavor-$key-$platform$ext"
           done
-          (cd publish && sha256sum endeavor-* > "endeavor-$key.sha256")
+          (cd publish && sha256sum endeavor-"$key"-* > "endeavor-$key.sha256")
+          cat "publish/endeavor-$key.sha256"
           gh release view helpers >/dev/null 2>&1 || gh release create helpers --prerelease --target "$GITHUB_SHA" \
-            --title "Server helpers" --notes "Runtime helpers for Linux servers, published by the Helpers workflow for each change to the helper's source. scripts/helpers.sh downloads the ones matching your checkout."
+            --title "Server helpers" --notes "$notes"
+          gh release edit helpers --notes "$notes"
           gh release upload helpers publish/* --clobber
           # A manual run on another branch builds that branch's helpers but doesn't make them the newest.
           if [ "$GITHUB_REF" = refs/heads/main ]; then

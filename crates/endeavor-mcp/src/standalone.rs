@@ -158,6 +158,14 @@ impl Env {
         self.cache_home.clone().unwrap_or_else(|| self.home.join(".cache")).join("endeavor/serve")
     }
 
+    /// Helpers fetched from the release for servers of other platforms (`release::fetch_helper`).
+    pub(crate) fn helpers_dir(&self) -> PathBuf {
+        if cfg!(windows) {
+            return self.home.join("helpers");
+        }
+        self.cache_home.clone().unwrap_or_else(|| self.home.join(".cache")).join("endeavor/helpers")
+    }
+
     /// The depot the app's server installs use, so packages installed for one
     /// serve the other; the trailing separator stacks the user's own depots
     /// (~/.julia) behind it, read-only.

@@ -23,13 +23,22 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
 - CI (`ci.yml`) builds and tests on Linux, macOS and Windows. `helpers.yml`
-  publishes the Linux binaries to the `helpers` release under a key computed
-  from the helper's source (`scripts/helpers.sh`), and `LATEST`, the newest
-  key, for builds from `main`.
-- `endeavor update` replaces a Linux binary from the Helpers release with the
-  newest build; `endeavor --version` prints the version and a build hash of
-  the source. `serve` and `mcp` say when the running Julia came from another
-  build (README, "Update it").
+  publishes the binaries for Linux, macOS and Windows to the `helpers` release
+  under a key computed from the helper's source (`scripts/helpers.sh`), and
+  `LATEST`, the newest key, for builds from `main`. Every build gets that key
+  (`ENDEAVOR_RELEASE_KEY`). The macOS and Windows rows have not run yet.
+- `scripts/install.sh` (tested against a fake release and the public one) and
+  `scripts/install.ps1` (not run) install the newest build.
+- `endeavor update` replaces the binary from the Helpers release with the
+  newest build on Linux, macOS and Windows (tested for Linux's logic and the
+  Windows rename on Linux; not run on a Mac or Windows). `endeavor --version`
+  prints the version and a build hash of the source, and on a release build
+  a second line, `release <key>`. `serve` and `mcp` say when the running Julia
+  came from another build (README, "Update it").
+- A Mac or Windows computer reaches a Linux server: the link fetches the
+  release's helper for the server's platform by the build's key, checks its
+  SHA-256 and keeps it (tested against a fake release; the link's wiring is
+  read, not run across platforms).
 
 ## Changing this repository and the app together
 
@@ -75,8 +84,8 @@ Not yet checked:
   following the `endeavor-machines` skill.
 
 - `endeavor update` replacing a binary with a newer build from the real
-  Helpers release. The first build with `update` is the newest one, so
-  nothing older can update yet. On 2026-10-04 the README's install steps
+  Helpers release, and on macOS and Windows. The first build with `update` is
+  the newest one, so nothing older can update yet. On 2026-10-04 the README's install steps
   fetched build `14eb0a67bda7` through `LATEST` in the Linux VM, the
   checksum passed, and `endeavor update` said it is up to date. The replace
   step is tested against a local server.

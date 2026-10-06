@@ -24,6 +24,7 @@ mod julia;
 pub mod link;
 mod mcp;
 mod notebooks;
+mod release;
 mod results;
 mod slurm;
 mod standalone;
@@ -39,7 +40,8 @@ pub use standalone::{Lease, lease, unpack};
 
 /// `runtime/` (the Julia side, which Endeavor installs on servers and runs on
 /// This Mac) and `plugin/` (the skills Endeavor loads as its Claude Code
-/// plugin), built into the binary (build.rs).
+/// plugin), built into the binary (build.rs), and the Helpers release's key
+/// this build was made for, when the release build recorded it.
 pub mod embedded {
     include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 }

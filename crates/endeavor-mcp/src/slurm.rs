@@ -78,7 +78,8 @@ impl Running {
         scancel(&self.job);
         forget(dir, &self.job);
         let (status, log_tail) = said.unwrap_or_else(|| ("exited".into(), log_tail(&dir.join("runtime.log"))));
-        ToApp::Died { status: reason.map(str::to_owned).unwrap_or(status), log_tail }
+        let status = reason.map(str::to_owned).unwrap_or(status);
+        ToApp::Died { status: if status.is_empty() { "exited".into() } else { status }, log_tail }
     }
 
     /// Ask the runtime to shut down through the relay, then cancel the job.
@@ -589,8 +590,9 @@ fn end_reason(job: &str, dir: &Path) -> Option<&'static str> {
         let output = Command::new(program).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
         output.status.success().then(|| String::from_utf8_lossy(&output.stdout).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_owned())
     };
-    // sacct can lag the job's end by a moment.
-    for _ in 0..3 {
+    // sacct can lag the job's end by a moment, and a job on its way out still
+    // reads RUNNING or COMPLETING, which hides why it ends, for a few seconds.
+    for tries in 0..20 {
         if let Some(state) = run("sacct", &["-j", job, "-X", "-n", "-P", "-o", "State"]) {
             if let Some(text) = s::ended_text(&state) {
                 return Some(text);
@@ -599,8 +601,13 @@ fn end_reason(job: &str, dir: &Path) -> Option<&'static str> {
                 return None;
             }
         }
-        if let Some(text) = run("squeue", &["-h", "-j", job, "-t", "all", "-o", "%T"]).as_deref().and_then(s::ended_text) {
+        let queued = run("squeue", &["-h", "-j", job, "-t", "all", "-o", "%T"]);
+        if let Some(text) = queued.as_deref().and_then(s::ended_text) {
             return Some(text);
+        }
+        let ending = queued.as_deref().is_some_and(|state| state.starts_with("RUNNING") || state.starts_with("COMPLETING"));
+        if tries >= 2 && !ending {
+            break;
         }
         std::thread::sleep(Duration::from_millis(500));
     }

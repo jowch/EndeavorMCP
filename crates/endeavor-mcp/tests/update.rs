@@ -1,6 +1,6 @@
 //! `endeavor update`, run as a user runs it, against a release served on
-//! 127.0.0.1 (`ENDEAVOR_RELEASE_URL`). The full update needs Linux, the only
-//! platform with prebuilt binaries; elsewhere it says to use cargo install.
+//! 127.0.0.1 (`ENDEAVOR_RELEASE_URL`). The full update needs a platform the
+//! release has binaries for; elsewhere it says to use cargo install.
 
 #![cfg(unix)]
 
@@ -18,6 +18,8 @@ fn platform() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some("linux-x86_64"),
         ("linux", "aarch64") => Some("linux-aarch64"),
+        ("macos", "x86_64") => Some("darwin-x86_64"),
+        ("macos", "aarch64") => Some("darwin-aarch64"),
         _ => None,
     }
 }

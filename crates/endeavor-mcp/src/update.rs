@@ -1,19 +1,16 @@
 //! `endeavor --version`, and `endeavor update`: replace this binary with the
 //! newest build on the Helpers release, the one its `LATEST` file names.
 //!
-//! Only Linux has prebuilt binaries. A copy the Endeavor app installed, or
-//! one cargo installed, is left to the app or to cargo.
+//! The release has binaries for Linux, macOS and Windows (`release::platform_name`).
+//! A copy the Endeavor app installed, or one cargo installed, is left to the
+//! app or to cargo.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
+use crate::release::{asset_name, checksum_for, download, sha256_of, this_platform_name};
+use crate::{embedded, release, standalone};
 
-use crate::{embedded, standalone};
-
-/// The Helpers release; `ENDEAVOR_RELEASE_URL` replaces it (tests serve one locally).
-const RELEASE: &str = "https://github.com/jowch/EndeavorMCP/releases/download/helpers";
-const RELEASE_ENV: &str = "ENDEAVOR_RELEASE_URL";
 const CARGO_INSTALL: &str = "cargo install --git https://github.com/jowch/EndeavorMCP endeavor-mcp";
 const USAGE: &str = "usage: endeavor update   replace this binary with the newest build from the Helpers release";
 
@@ -23,8 +20,12 @@ pub(crate) fn version_line() -> String {
     format!("endeavor {} (build {})", env!("CARGO_PKG_VERSION"), embedded::BUILD_VERSION)
 }
 
+/// `version_line`, and on a release build a second line, `release <key>`.
 pub(crate) fn print_version() -> ! {
     println!("{}", version_line());
+    if let Some(key) = embedded::RELEASE_KEY {
+        println!("release {key}");
+    }
     std::process::exit(0)
 }
 
@@ -46,17 +47,12 @@ impl Here {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         let exe = std::env::current_exe().and_then(|exe| exe.canonicalize()).map_err(|e| format!("Couldn't find this binary: {e}"))?;
         let home = std::env::home_dir().unwrap_or_default();
-        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-            ("linux", "x86_64") => Some("linux-x86_64"),
-            ("linux", "aarch64") => Some("linux-aarch64"),
-            _ => None,
-        };
         Ok(Here {
             exe,
-            platform,
+            platform: this_platform_name(),
             cargo_home: var("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from),
             home,
-            release: var(RELEASE_ENV).unwrap_or_else(|| RELEASE.into()),
+            release: release::base_url(),
             state_dir: standalone::default_state_dir(),
         })
     }
@@ -108,24 +104,21 @@ fn update(here: &Here) -> Result<String, String> {
         ));
     };
 
+    // A Windows update leaves the old binary beside the new one, since a running exe can't be replaced; it is gone once it isn't running.
+    let _ = std::fs::remove_file(aside_name(exe));
     let release = here.release.trim_end_matches('/');
     let key = String::from_utf8_lossy(&download(&format!("{release}/LATEST"), None)?).trim().to_owned();
     if key.is_empty() || !key.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("The release's LATEST file doesn't name a build ({key:?})."));
     }
-    let name = format!("endeavor-{key}-{platform}");
+    let name = asset_name(&key, platform);
     let sums = String::from_utf8_lossy(&download(&format!("{release}/endeavor-{key}.sha256"), None)?).into_owned();
-    let want = sums
-        .lines()
-        .filter_map(|line| line.split_once(char::is_whitespace))
-        .find(|(_, file)| file.trim().trim_start_matches('*') == name)
-        .map(|(sum, _)| sum.to_lowercase())
-        .ok_or_else(|| format!("The newest build ({key}) has no binary for {platform}."))?;
+    let want = checksum_for(&sums, &name).ok_or_else(|| format!("The newest build ({key}) has no binary for {platform}."))?;
     if sha256_of(exe)? == want {
         return Ok(format!("endeavor is up to date: {} is the newest build ({key}).", exe.display()));
     }
 
-    let part = dir.join(format!(".endeavor.part.{}", std::process::id()));
+    let part = dir.join(format!(".endeavor.part.{}{}", std::process::id(), if cfg!(windows) { ".exe" } else { "" }));
     let installed = install(&format!("{release}/{name}"), &part, &want, exe);
     let _ = std::fs::remove_file(&part);
     let new_build = installed?;
@@ -164,49 +157,39 @@ fn install(url: &str, part: &Path, sha256: &str, exe: &Path) -> Result<Option<St
         let line = String::from_utf8_lossy(&out.stdout).into_owned();
         Some(line.split_once("(build ")?.1.split_once(')')?.0.to_owned())
     });
-    // Atomic within one folder; a process running the old binary (a
-    // runtime's core) keeps the file it started from.
-    std::fs::rename(part, exe).map_err(|e| format!("Couldn't replace {}: {e}", exe.display()))?;
+    put_in_place(part, exe, cfg!(windows))?;
     Ok(build)
+}
+
+/// Where `put_in_place` moves a running binary that can't be overwritten.
+fn aside_name(exe: &Path) -> PathBuf {
+    let mut name = exe.file_name().unwrap_or_default().to_owned();
+    name.push(".old");
+    exe.with_file_name(name)
+}
+
+/// Make `part` the binary `exe`. A rename within one folder is atomic, and a
+/// process running the old binary (a runtime's core) keeps the file it
+/// started from. Windows can rename a running exe but not replace it, so with
+/// `aside` the old one is renamed out of the way first, and put back if the
+/// new one can't be moved in.
+fn put_in_place(part: &Path, exe: &Path, aside: bool) -> Result<(), String> {
+    let fail = |e: std::io::Error| format!("Couldn't replace {}: {e}", exe.display());
+    if !aside {
+        return std::fs::rename(part, exe).map_err(fail);
+    }
+    let old = aside_name(exe);
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(exe, &old).map_err(fail)?;
+    std::fs::rename(part, exe).map_err(|e| {
+        let _ = std::fs::rename(&old, exe);
+        fail(e)
+    })
 }
 
 /// Whether a runtime recorded in `dir` is running on this machine.
 fn running(dir: &Path) -> bool {
     crate::read_state(dir).is_some_and(|state| state.node == crate::hostname() && crate::pid_alive(state.pid, state.started))
-}
-
-/// `url`'s body, or with `to`, nothing, having written it there. With curl,
-/// or wget where there's no curl.
-fn download(url: &str, to: Option<&Path>) -> Result<Vec<u8>, String> {
-    let mut curl = Command::new("curl");
-    curl.args(["-fsSL", "--retry", "2"]);
-    let mut wget = Command::new("wget");
-    wget.arg("-q");
-    match to {
-        Some(path) => {
-            curl.arg("-o").arg(path);
-            wget.arg("-O").arg(path);
-        }
-        None => {
-            wget.args(["-O", "-"]);
-        }
-    }
-    let output = match curl.arg(url).output() {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => wget.arg(url).output().map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "endeavor update needs curl or wget, and neither is on the PATH.".to_owned(),
-            _ => format!("Couldn't start wget: {e}"),
-        })?,
-        other => other.map_err(|e| format!("Couldn't start curl: {e}"))?,
-    };
-    if !output.status.success() {
-        return Err(format!("Couldn't download {url} ({}).", String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    Ok(output.stdout)
-}
-
-fn sha256_of(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
-    Ok(Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect())
 }
 
 #[cfg(all(test, unix))]
