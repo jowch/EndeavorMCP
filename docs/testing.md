@@ -79,3 +79,25 @@ It takes about a minute and starts Julia twice:
    Ctrl-C ends the core and Julia's process group.
 2. `mcp` over stdio starts a runtime in the background. A second `mcp` with
    another folder shares it, and `stop` ends it.
+
+## The client library over real ssh
+
+`crates/endeavor-mcp/tests/e2e_client.rs` runs `endeavor_mcp::client` the way
+the link will: `ssh` with `Auth::Batch`, the helper installed into a folder of
+the test's own, the runtime started there, and the agent's MCP calls through
+the local listener's port. It needs a host this user can `ssh` to with a key,
+named in `ENDEAVOR_TEST_SSH_HOST` (`localhost` works), and prints `SKIPPED` and
+passes without it or without Julia. It finds Julia as `e2e_julia` does, which
+has to be at the same path on the host. The install folder, state folder and
+depot are under `target/tmp/e2e-client`; the depot is kept between runs, so
+the first run takes several minutes.
+
+```sh
+ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_client -- --ignored --nocapture
+```
+
+The test connects, expects the helper's hello, starts the runtime, does an MCP
+`initialize` and `tools/list` with the bearer token (and gets 401 with a wrong
+one), stops the runtime through the channel, and checks the channel ends as a
+detach and not as a drop. `tests/client.rs` covers the same code with a local
+`sh` for ssh and no Julia, in plain `cargo test`.

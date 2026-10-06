@@ -14,6 +14,7 @@
 
 mod askpass;
 mod asks;
+pub mod client;
 mod core;
 mod guard;
 mod guide;
