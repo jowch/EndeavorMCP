@@ -90,7 +90,9 @@ named in `ENDEAVOR_TEST_SSH_HOST` (`localhost` works), and prints `SKIPPED` and
 passes without it or without Julia. It finds Julia as `e2e_julia` does, which
 has to be at the same path on the host. The install folder, state folder and
 depot are under `target/tmp/e2e-client`; the depot is kept between runs, so
-the first run takes several minutes.
+the first run takes several minutes. Those are this checkout's paths, so the
+test is meant for `localhost` or a host that shares this filesystem: on any
+other host it would create them there.
 
 ```sh
 ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_client -- --ignored --nocapture
