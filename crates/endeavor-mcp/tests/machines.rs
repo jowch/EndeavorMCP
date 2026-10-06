@@ -311,7 +311,9 @@ fn list_machines_starts_no_link_and_add_machine_reports_and_saves_a_cluster() {
     assert_eq!(added["home"], place.dir.join("home").display().to_string());
     assert_eq!(added["slurm"], true);
     assert_eq!(added["partitions"], json!([{ "name": "shared", "default": true, "max_hours": 8.0, "cpus": 10, "memory_gb": 7 }]));
-    assert!(added["message"].as_str().unwrap().contains("It has Slurm. Partitions: shared (default) (up to 8 h, 10 CPUs and 7 GB a node)"), "{}", added["message"]);
+    assert!(added["message"].as_str().unwrap().contains("It has Slurm, and Julia runs in Slurm jobs there. Partitions: shared (default) (up to 8 h, 10 CPUs and 7 GB a node)"), "{}", added["message"]);
+    assert!(added["message"].as_str().unwrap().contains("call `add_machine` again with slurm false"), "the other way is offered: {}", added["message"]);
+    assert_eq!((added["cluster"].clone(), added["runs_in"].clone()), (json!(true), json!("slurm_jobs")));
 
     let saved = place.machines().find_by_name("hpc").unwrap().expect("saved");
     assert_eq!((saved.id.as_str(), saved.ssh_host.as_str(), saved.julia.as_deref()), ("hpc", "hpc", Some(julia.as_str())));
@@ -345,9 +347,52 @@ fn adding_a_plain_server_again_keeps_it_plain_even_when_slurm_is_there() {
     front.initialize();
     let added = front.ok("add_machine", json!({ "host": "lab" }));
     assert_eq!((added["slurm"].clone(), added["updated"].clone(), added["partitions"].as_array().map(Vec::len)), (json!(true), json!(true), Some(1)), "{added}");
-    assert!(added["message"].as_str().unwrap().contains("saved before as a plain server"), "{added}");
+    assert!(added["message"].as_str().unwrap().contains("saved before as a plain server") && added["message"].as_str().unwrap().contains("slurm true"), "{added}");
+    assert_eq!((added["cluster"].clone(), added["runs_in"].clone()), (json!(false), json!("directly")));
     assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "still a plain server");
     assert!(place.record("lab").exists(), "and its link goes on");
+}
+
+#[test]
+fn a_new_machine_with_slurm_tools_is_added_as_a_plain_server_when_slurm_is_false() {
+    let slurm = FakeSlurm::new("plain-by-choice");
+    let place = Place::with("plain-by-choice", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "slurm": "yes" }));
+    assert!(failed && text(&said).contains("slurm must be true"), "{said}");
+    assert!(place.machines().load().unwrap().is_empty());
+
+    let added = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "slurm": false }));
+    assert_eq!((added["slurm"].clone(), added["cluster"].clone(), added["runs_in"].clone(), added["updated"].clone()), (json!(true), json!(false), json!("directly"), json!(false)), "{added}");
+    let message = added["message"].as_str().unwrap();
+    assert!(message.contains("It has Slurm, but Julia runs on it directly and not in a job, as asked") && message.contains("`add_machine` again with slurm true"), "{message}");
+    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "saved as a plain server");
+    assert!(place.record("lab").exists(), "no second connection was needed");
+
+    // Used, it starts Julia directly: no job is submitted.
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!((used["state"].as_str(), used["ready"].clone()), (Some("ready"), json!(true)), "{used}");
+    assert_eq!(slurm.read("sbatch.args"), "", "nothing was submitted");
+
+    // Adding it again with nothing said leaves it as it was; saying slurm true while Julia runs there is refused.
+    let again = front.ok("add_machine", json!({ "host": "lab" }));
+    assert_eq!(again["cluster"], false, "{again}");
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "slurm": true }));
+    assert!(failed && text(&said).contains("Julia is running, or starting, on lab") && text(&said).contains("`stop_machine`"), "{said}");
+    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "unchanged");
+    assert_eq!(front.ok("list_notebooks", json!({})), json!([]), "and the session still works");
+
+    // With nothing running, it can be changed to a cluster, and back.
+    front.ok("stop_machine", json!({ "machine": "lab" }));
+    let cluster = front.ok("add_machine", json!({ "host": "lab", "slurm": true }));
+    assert_eq!((cluster["cluster"].clone(), cluster["updated"].clone()), (json!(true), json!(true)), "{cluster}");
+    assert!(cluster["message"].as_str().unwrap().contains("slurm false"), "{cluster}");
+    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_some());
+    let plain = front.ok("add_machine", json!({ "host": "lab", "slurm": false }));
+    assert_eq!(plain["cluster"], false, "{plain}");
+    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none());
 }
 
 #[test]
@@ -369,6 +414,121 @@ fn a_failing_add_machine_leaves_no_record_and_no_link() {
     assert!(failed);
     assert_eq!(place.machines().load().unwrap(), before);
     assert!(!place.record("failadd").exists(), "the link that failed is gone");
+}
+
+/// A place whose link waits for the file `go` before it connects, with Slurm's commands on the PATH.
+fn slow_place(name: &str, then: &str) -> (Place, FakeSlurm) {
+    let slurm = FakeSlurm::new(name);
+    let ask = format!("while [ ! -f {{dir}}/go ]; do sleep 0.1; done{then}");
+    let place = Place::with(name, &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string()), ("ENDEAVOR_START_WAIT_SECS", "2"), ("ENDEAVOR_LINK_ASK", &ask)]);
+    (place, slurm)
+}
+
+#[test]
+fn a_machine_whose_add_machine_is_still_connecting_is_not_added_until_a_second_call_has_connected() {
+    let (place, _slurm) = slow_place("provisional", "");
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!((first["state"].as_str(), first["saved"].clone()), (Some("connecting"), json!(true)), "{first}");
+    assert!(first["message"].as_str().unwrap().contains("isn't added until it has connected"), "{first}");
+    assert!(place.links_dir().join("lab/provisional").exists(), "marked, outside the record");
+    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none());
+
+    let listed = front.ok("list_machines", json!({}));
+    assert_eq!(listed["machines"][0]["state"], "not yet connected", "{listed}");
+    assert!(listed["machines"][0]["message"].as_str().unwrap().contains("`add_machine`"), "{listed}");
+    let (failed, said) = front.call("use_machine", json!({ "machine": "lab" }));
+    assert!(failed && text(&said).contains("never finished connecting") && text(&said).contains("`add_machine`"), "{said}");
+    let (failed, said) = front.call("stop_machine", json!({ "machine": "lab" }));
+    assert!(failed && text(&said).contains("never finished connecting"), "{said}");
+    assert_eq!(place.projects(), Value::Null);
+
+    // A project that remembers it doesn't go there.
+    std::fs::create_dir_all(place.dir.join("state-home/endeavor")).unwrap();
+    let remembered = json!({ place.project.display().to_string(): { "machine": "lab", "folder": null } });
+    std::fs::write(place.dir.join("state-home/endeavor/projects.json"), remembered.to_string()).unwrap();
+    let mut second = place.front();
+    second.initialize();
+    let (failed, contents) = second.contents("list_notebooks", json!({}));
+    assert!(!failed && contents[1].as_str().unwrap().contains("never finished connecting"), "{contents:?}");
+    assert_eq!(second.ok("pluto_session_status", json!({})).get("machine"), None, "this session is on this computer");
+    second.finish();
+
+    // The second call finishes it, and treats it as new: Slurm is found, so it is a cluster.
+    std::fs::write(place.dir.join("go"), "").unwrap();
+    let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!((done["state"].as_str(), done["updated"].clone(), done["cluster"].clone()), (Some("connected"), json!(false), json!(true)), "{done}");
+    assert!(!place.links_dir().join("lab/provisional").exists(), "the marker is gone");
+    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_some());
+    assert_eq!(place.machines().load().unwrap().len(), 1, "no second record");
+    let listed = front.ok("list_machines", json!({}));
+    assert_eq!((listed["machines"][0]["cluster"].clone(), listed["machines"][0]["state"].clone()), (json!(true), json!("no link running")), "{listed}");
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["state"], "needs_job", "{used}");
+}
+
+#[test]
+fn a_second_add_machine_that_fails_removes_the_machine_the_first_one_saved() {
+    let (place, _slurm) = slow_place("provisional-fails", "; echo 'Permission denied (publickey)' >&2; false");
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!(first["state"], "connecting", "{first}");
+    assert_eq!(place.machines().load().unwrap().len(), 1);
+    std::fs::write(place.dir.join("go"), "").unwrap();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert!(failed && text(&said).contains("Couldn't connect to lab") && text(&said).contains("Nothing was saved"), "{said}");
+    assert!(place.machines().load().unwrap().is_empty(), "the provisional record is removed, not restored");
+    assert!(!place.links_dir().join("lab/provisional").exists());
+    assert_eq!(front.ok("list_machines", json!({}))["machines"], json!([]));
+}
+
+#[test]
+fn a_use_machine_that_fails_leaves_the_session_its_key_and_the_project_as_they_were() {
+    let slurm = FakeSlurm::new("use-fails");
+    let place = Place::with("use-fails", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_lab();
+    place.add_hpc();
+    let local_file = place.project.join("local.jl");
+    std::fs::write(&local_file, "### A Pluto.jl notebook ###").unwrap();
+    place.local_bridge.set_notebooks(vec![notebook_json("bbbbbbbb-0000-0000-0000-000000000002", &local_file.display().to_string())]);
+    let mut front = place.front();
+    front.initialize();
+    front.ok("open_notebook", json!({ "path": local_file.display().to_string() }));
+    let bound = |front: &mut Front, path: &str| {
+        let listed = front.ok("list_notebooks", json!({}));
+        assert_eq!((listed[0]["path"].as_str(), listed[0]["this_session"].clone()), (Some(path), json!(true)), "the notebook is still this session's: {listed}");
+    };
+    bound(&mut front, &local_file.display().to_string());
+
+    for arguments in [
+        json!({ "machine": "hpc", "partition": "nope" }),
+        json!({ "machine": "hpc", "cpus": 4, "extra_sbatch_flags": ["--wrap=sleep 1"] }),
+        json!({ "machine": "hpc", "cpus": 4, "extra_sbatch_flags": ["normal"] }),
+        json!({ "machine": "lab", "cpus": 4 }),
+    ] {
+        let (failed, said) = front.call("use_machine", arguments.clone());
+        assert!(failed, "{arguments}: {said}");
+        bound(&mut front, &local_file.display().to_string());
+        assert_eq!(place.projects(), Value::Null, "nothing written for {arguments}");
+    }
+    assert!(!place.record("hpc").exists() && !place.record("lab").exists(), "no link was even started");
+    assert_eq!(slurm.read("sbatch.args"), "");
+
+    // On a machine, the same.
+    let path = place.notebook("machine.jl");
+    front.ok("use_machine", json!({ "machine": "lab" }));
+    front.ok("open_notebook", json!({ "path": path }));
+    bound(&mut front, &path);
+    let remembered = std::fs::read(place.dir.join("state-home/endeavor/projects.json")).unwrap();
+    let (failed, said) = front.call("use_machine", json!({ "machine": "hpc", "partition": "nope" }));
+    assert!(failed && text(&said).contains("There is no partition \"nope\""), "{said}");
+    bound(&mut front, &path);
+    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab");
+    assert_eq!(std::fs::read(place.dir.join("state-home/endeavor/projects.json")).unwrap(), remembered, "projects.json is byte for byte what it was");
 }
 
 #[test]
@@ -512,6 +672,12 @@ fn a_notebook_call_while_the_runtime_is_still_starting_returns_the_status_within
     let status = front.ok("pluto_session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["state"].as_str(), status["ready"].clone()), (Some("lab"), Some("starting"), json!(false)), "{status}");
     assert!(status["step"].is_string());
+
+    // Julia is on its way, so it is not stopped without the user's word: others may be waiting for it.
+    let refused = front.ok("stop_machine", json!({ "machine": "lab" }));
+    assert_eq!((refused["stopped"].clone(), refused["state"].clone()), (json!(false), json!("starting")), "{refused}");
+    assert!(refused["message"].as_str().unwrap().contains("Julia is starting on lab") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
+    assert_eq!(front.ok("pluto_session_status", json!({}))["state"], "starting", "nothing was cancelled");
 
     std::fs::remove_file(place.state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -710,8 +876,10 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     assert_eq!((asked["defaults"]["cpus"].clone(), asked["defaults"]["memory_gb"].clone(), asked["defaults"]["hours"].clone()), (json!(8), json!(32), json!(8.0)));
     assert!(asked["message"].as_str().unwrap().contains("nothing was submitted"), "{asked}");
     assert_eq!(slurm.read("sbatch.args"), "", "no job was submitted");
-    let (failed, said) = front.call("list_notebooks", json!({}));
-    assert!(failed && text(&said).contains("no job is running there") && text(&said).contains("Ask the user"), "{said}");
+    assert!(asked["message"].as_str().unwrap().contains("this session has not moved: it stays on this computer until `use_machine` is called"), "{asked}");
+    assert_eq!(place.projects(), Value::Null, "needs_job writes no project");
+    assert_eq!(front.ok("list_notebooks", json!({})), json!([]), "the session is still on this computer");
+    assert_eq!(front.ok("pluto_session_status", json!({})).get("machine"), None);
     assert_eq!(slurm.read("sbatch.args"), "", "a notebook call submits nothing either");
     let (failed, plain) = front.call("use_machine", json!({ "machine": "lab", "cpus": 4 }));
     assert!(failed && plain["message"].as_str().unwrap().contains("There is no machine"), "{plain}");
@@ -792,8 +960,12 @@ fn a_remembered_cluster_with_no_job_is_not_submitted_for_but_told_what_to_ask() 
     let mut first = place.front();
     first.initialize();
     first.ok("use_machine", json!({ "machine": "hpc" }));
-    assert_eq!(place.projects()[place.project.display().to_string()]["machine"], "hpc", "remembered even though no job was asked for");
+    assert_eq!(place.projects(), Value::Null, "not remembered while no job was asked for");
     first.finish();
+    // A project that remembers the cluster from when a job ran there.
+    let remembered = json!({ place.project.display().to_string(): { "machine": "hpc", "folder": null } });
+    std::fs::create_dir_all(place.dir.join("state-home/endeavor")).unwrap();
+    std::fs::write(place.dir.join("state-home/endeavor/projects.json"), remembered.to_string()).unwrap();
 
     let mut second = place.front();
     second.initialize();
@@ -803,6 +975,54 @@ fn a_remembered_cluster_with_no_job_is_not_submitted_for_but_told_what_to_ask() 
     assert_eq!(slurm.read("sbatch.args"), "", "nothing was submitted");
     let status = second.ok("pluto_session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["state"].as_str()), (Some("hpc"), Some("connected")), "{status}");
+}
+
+#[test]
+fn a_queued_job_is_cancelled_only_when_the_user_agreed() {
+    let slurm = FakeSlurm::new("cluster-queued-stop");
+    let place = Place::with("cluster-queued-stop", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_hpc();
+    let mut front = place.front();
+    front.initialize();
+    let queued = front.ok("use_machine", json!({ "machine": "hpc", "cpus": 4 }));
+    assert_eq!(queued["state"], "queued", "{queued}");
+
+    let refused = front.ok("stop_machine", json!({ "machine": "hpc" }));
+    assert_eq!((refused["stopped"].clone(), refused["job"]["id"].clone(), refused["queue"]["state"].clone()), (json!(false), json!("42"), json!("PENDING")), "{refused}");
+    let message = refused["message"].as_str().unwrap();
+    assert!(message.contains("the Slurm job 42 on hpc is pending (other jobs are ahead of it)") && message.contains("can't see which other sessions are waiting") && message.contains("force true"), "{message}");
+    assert_eq!(slurm.read("scancel.log"), "", "nothing was cancelled");
+    assert_eq!(front.ok("pluto_session_status", json!({}))["state"], "queued");
+
+    let stopped = front.ok("stop_machine", json!({ "machine": "hpc", "force": true }));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    assert_eq!(slurm.read("scancel.log").trim(), "42");
+}
+
+#[test]
+fn an_idle_link_from_another_build_is_replaced_before_a_remembered_cluster_is_asked_about_a_job() {
+    let slurm = FakeSlurm::new("build-cluster");
+    let place = Place::with("build-cluster", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_hpc();
+    let old = place.link("hpc");
+    wait_status(&old, "connected", |s| s.state == State::Connected);
+    let path = place.record("hpc");
+    let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    record["build"] = "an-older-build".into();
+    std::fs::write(&path, record.to_string()).unwrap();
+    std::fs::create_dir_all(place.dir.join("state-home/endeavor")).unwrap();
+    let remembered = json!({ place.project.display().to_string(): { "machine": "hpc", "folder": null } });
+    std::fs::write(place.dir.join("state-home/endeavor/projects.json"), remembered.to_string()).unwrap();
+
+    let mut front = place.front();
+    front.initialize();
+    let (failed, said) = front.call("list_notebooks", json!({}));
+    assert!(failed && text(&said).contains("no job is running there"), "{said}");
+    let now = place.link("hpc");
+    assert_ne!(now.pid, old.pid, "the old link was quit, and a link of this build asked");
+    assert_eq!(now.build, endeavor_mcp::embedded::BUILD_VERSION);
+    wait_for("the old link to end", || !pid_alive(old.pid as i32));
+    assert_eq!(slurm.read("sbatch.args"), "", "no job was submitted");
 }
 
 /// Slurm's commands as scripts over files in `target/tmp/machines-NAME-slurm`: the test moves a job

@@ -99,7 +99,7 @@ request with an Origin.
 | Call | What it does |
 |---|---|
 | `GET /link/status` | `state` (connecting, connected, starting, queued, ready, failed), the last `step`, an `error`, what the helper said (`hello`), the `runtime` once ready (the listener's port, the runtime's token, the page URL), and for a job its `job` and `queue` |
-| `POST /link/start` | `{"job": …, "only_running": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true |
+| `POST /link/start` | `{"job": …, "only_running": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true. A body with any other field is refused with HTTP 400, so that an older link never ignores a field a newer front adds. A front sends no start to a link of another build than its own: it replaces one that nothing hangs on, and uses one with a runtime as it is |
 | `POST /link/stop` | Stop the runtime for every client, and say why it didn't. The link stays connected |
 | `POST /link/quit` | Remove the record, detach and exit. The record goes first, so a front that asks for a link right after gets a new one |
 
@@ -490,7 +490,11 @@ folder, and that each loads the skills.
 - The job script quotes its values and `sbatch` gets an argument list. Two
   values the agent can supply still run on the server as given: extra
   `sbatch` flags, and the line that sets Julia up, which is shell code. Both
-  show in the harness's permission prompt.
+  show in the harness's permission prompt. Each extra flag must start with
+  `-` (a flag and its value are one entry, `--qos=normal`, so that a bare
+  word is never taken as the script), and `--wrap` (also as `--wr` or
+  `--wra`) and line breaks are refused, by the front and again by the helper
+  before it calls `sbatch`.
 - The helper sent to a server is checked against the release's SHA-256
   before it is kept. The app sends its bundled helper unchecked.
 

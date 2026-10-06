@@ -24,7 +24,9 @@
 //!   the runtime, or attach to the one running, in the background. The `Status`
 //!   at once. With `only_running` it attaches only if the helper says a runtime
 //!   runs, or a job waits, and otherwise starts nothing: the state is then
-//!   `connected` and `nothing_running` is true.
+//!   `connected` and `nothing_running` is true. A body with any other field is
+//!   refused (HTTP 400), so that a field a newer front adds is never silently
+//!   ignored by an older link.
 //! - `POST /link/stop`: stop the runtime for every client. The link stays connected.
 //! - `POST /link/quit`: detach, remove the record and exit. The record goes
 //!   first, so a front that asks for a link right after gets a new one.
@@ -60,7 +62,7 @@ const SILENT_TRIES: u32 = 5;
 const SILENT_PAUSE: Duration = Duration::from_millis(700);
 
 /// How long a call to the link may take, except a stop (`Link::stop`).
-const CALL_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const CALL_WAIT: Duration = Duration::from_secs(5);
 
 /// Where a link stands.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -228,6 +230,31 @@ pub struct Link {
     pub build: String,
 }
 
+/// A machine that `add_machine` has not connected to yet is marked by a file of this name in its
+/// link's folder: it is saved so that the link can start, but nothing was found out about it.
+const PROVISIONAL: &str = "provisional";
+
+/// Whether `machine` was saved by `add_machine` that has not connected to it yet.
+pub(crate) fn is_provisional(machine: &str) -> bool {
+    valid_id(machine).is_ok() && Spawn::here().is_ok_and(|spawn| spawn.dir(machine).join(PROVISIONAL).exists())
+}
+
+/// Mark `machine` as not connected to yet, or (`on` false) as connected.
+pub(crate) fn set_provisional(machine: &str, on: bool) -> Result<(), String> {
+    valid_id(machine)?;
+    let dir = Spawn::here()?.dir(machine);
+    let path = dir.join(PROVISIONAL);
+    if on {
+        crate::make_state_dir(&dir)?;
+        crate::core::write_private(&path, b"add_machine has not connected to this machine yet\n")
+    } else {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Couldn't remove {}: {e}", path.display())),
+            _ => Ok(()),
+        }
+    }
+}
+
 /// The running link for `machine`, if there is one that answers; no link is started.
 pub fn find(machine: &str) -> Result<Option<Link>, String> {
     valid_id(machine)?;
@@ -390,21 +417,36 @@ fn running(dir: &Path, machine: &str) -> Option<Link> {
 impl Link {
     /// Where the link stands.
     pub fn status(&self) -> Result<Status, String> {
-        self.call("GET", "/link/status", &[], CALL_WAIT)
+        self.status_within(CALL_WAIT)
+    }
+
+    /// `status`, with the call allowed `wait` at most.
+    pub fn status_within(&self, wait: Duration) -> Result<Status, String> {
+        self.call("GET", "/link/status", &[], wait)
     }
 
     /// Start the runtime, or attach to the one running, and return at once: poll
     /// `status` for the rest. A start under way, or a runtime attached, is not an
     /// error. `job` is what to submit on a cluster.
     pub fn start(&self, job: Option<JobRequest>) -> Result<Status, String> {
-        self.call("POST", "/link/start", &serde_json::to_vec(&serde_json::json!({ "job": job })).map_err(|e| e.to_string())?, CALL_WAIT)
+        self.start_within(job, CALL_WAIT)
+    }
+
+    /// `start`, with the call allowed `wait` at most.
+    pub fn start_within(&self, job: Option<JobRequest>, wait: Duration) -> Result<Status, String> {
+        self.call("POST", "/link/start", &serde_json::to_vec(&serde_json::json!({ "job": job })).map_err(|e| e.to_string())?, wait)
     }
 
     /// Attach to the runtime if one is running there (or, on a cluster, a job waits
     /// or runs), and start nothing otherwise: then the status says `nothing_running`.
     /// Returns at once, like `start`.
     pub fn attach(&self) -> Result<Status, String> {
-        self.call("POST", "/link/start", &serde_json::to_vec(&serde_json::json!({ "job": null, "only_running": true })).map_err(|e| e.to_string())?, CALL_WAIT)
+        self.attach_within(CALL_WAIT)
+    }
+
+    /// `attach`, with the call allowed `wait` at most.
+    pub fn attach_within(&self, wait: Duration) -> Result<Status, String> {
+        self.call("POST", "/link/start", &serde_json::to_vec(&serde_json::json!({ "job": null, "only_running": true })).map_err(|e| e.to_string())?, wait)
     }
 
     /// Stop the runtime for every client, and wait until it is gone (up to a minute

@@ -388,6 +388,11 @@ fn the_control_port_wants_the_token_a_loopback_host_and_no_origin() {
     assert_eq!((at("GET", "/link/nope"), at("GET", "/link/start"), at("POST", "/link/status")), (404, 405, 405));
     let bad = format!("POST /link/start HTTP/1.1\r\nHost: localhost\r\n{bearer}Content-Length: 12\r\n\r\n{{\"job\":\"no\"}}");
     assert_eq!(http(link.port, &bad).0, 400, "a job that isn't one");
+    let before = link.status().unwrap();
+    let unknown = r#"{"job":null,"only_running":true,"later_field":1}"#;
+    let (code, body) = http(link.port, &format!("POST /link/start HTTP/1.1\r\nHost: localhost\r\n{bearer}Content-Length: {}\r\n\r\n{unknown}", unknown.len()));
+    assert!(code == 400 && body.contains(r#"doesn't know the field \"later_field\""#) && body.contains("didn't start anything"), "a field this link doesn't know: {code} {body}");
+    assert_eq!(link.status().unwrap().state, before.state, "nothing was asked of it");
     assert_eq!(link.status().unwrap().machine, place.id, "none of that ended the link");
 }
 

@@ -820,8 +820,10 @@ struct Relay {
     changed: Condvar,
     /// This agent session's key (`X-Endeavor-Session`): the runtime gives each
     /// session one notebook, and tells sessions apart in its warnings. It is
-    /// new when the session moves to another runtime (`new_session`): a runtime
-    /// that has ended a key ignores it afterwards.
+    /// new when the session moves to another runtime (`switch`): a runtime
+    /// that has ended a key ignores it afterwards. It goes with `target`: read
+    /// and replaced only with that lock held (`placed`, `switch`), so that a call
+    /// never has one runtime's route and another's key.
     session: Mutex<String>,
     /// The first key, which the later ones are made from.
     session_base: String,
@@ -888,8 +890,14 @@ impl Relay {
         }
     }
 
+    /// The target and the session's key, as they are together.
+    fn placed(&self) -> (machines::Target, String) {
+        let target = self.target.lock().unwrap();
+        (target.clone(), self.session.lock().unwrap().clone())
+    }
+
     fn session(&self) -> String {
-        self.session.lock().unwrap().clone()
+        self.placed().1
     }
 
     fn write(&self, message: &str) {
@@ -945,13 +953,17 @@ impl Relay {
 
     /// Give the runtime this session's folder: the runtime may have been
     /// started from another folder.
+    /// Only while the session is on this computer: it is the key there that is told.
     fn tell_folder(&self, port: u16, token: &str) {
-        self.tell_session_folder(port, token, &self.options.folder.display().to_string());
+        let (target, session) = self.placed();
+        if matches!(target, machines::Target::Local { .. }) {
+            self.tell_session_folder(port, token, &session, &self.options.folder.display().to_string());
+        }
     }
 
-    /// Give the runtime on `port` this session's folder, which is `folder` there.
-    fn tell_session_folder(&self, port: u16, token: &str, folder: &str) {
-        let params = json!({ "owner": self.session(), "folder": folder });
+    /// Give the runtime on `port` the folder of session `session`, which is `folder` there.
+    fn tell_session_folder(&self, port: u16, token: &str, session: &str, folder: &str) {
+        let params = json!({ "owner": session, "folder": folder });
         if let Err(e) = Relay::tell(port, token, "endeavor/set_session_folder", params) {
             eprintln!("endeavor: couldn't give the runtime this session's folder: {e}");
         }
@@ -962,27 +974,29 @@ impl Relay {
     /// doesn't bind it again. Best effort, and it doesn't hold up the exit for
     /// more than a moment. The link stays.
     fn release(&self) {
-        let Some((port, token)) = self.current_runtime() else { return };
-        self.end_session(port, &token);
+        let Some((port, token, session)) = self.current_runtime() else { return };
+        self.end_session(port, &token, &session);
     }
 
-    /// End this session's key on the runtime at `port`, without waiting more than a moment.
-    fn end_session(&self, port: u16, token: &str) {
-        let (token, params) = (token.to_owned(), json!({ "owner": self.session() }));
+    /// End key `session` on the runtime at `port`, without waiting more than a moment.
+    fn end_session(&self, port: u16, token: &str, session: &str) {
+        let (token, params) = (token.to_owned(), json!({ "owner": session }));
         let (done, told) = mpsc::channel();
         std::thread::spawn(move || drop(done.send(Relay::tell(port, &token, "endeavor/end_session", params))));
         let _ = told.recv_timeout(Duration::from_millis(500));
     }
 
-    /// The port and token of the runtime this session is using, if it is up, without starting anything.
-    fn current_runtime(&self) -> Option<(u16, String)> {
-        match self.machine() {
-            Some(machine) => self.machine_runtime(&machine),
-            None => match &*self.status.lock().unwrap() {
-                Status::Ready { port, token } => Some((*port, token.clone())),
-                _ => None,
+    /// The port and token of the runtime this session is using, if it is up, and the session's key there, without starting anything.
+    fn current_runtime(&self) -> Option<(u16, String, String)> {
+        let (target, session) = self.placed();
+        let (port, token) = match &target {
+            machines::Target::Machine(machine) => self.machine_runtime(machine)?,
+            machines::Target::Local { .. } => match &*self.status.lock().unwrap() {
+                Status::Ready { port, token } => (*port, token.clone()),
+                _ => return None,
             },
-        }
+        };
+        Some((port, token, session))
     }
 
     /// The runtime's port and token, waiting up to `start_wait()` for a start;
@@ -1077,13 +1091,19 @@ impl Relay {
 
     /// POST one message to the runtime and give what it answers to `sink`.
     fn post(&self, route: &Route, body: &str, sink: &dyn Fn(String)) -> Result<(), Sent> {
+        self.post_within(route, body, sink, None)
+    }
+
+    /// `post`, where reading from the runtime gives up when it says nothing for `quiet`.
+    fn post_within(&self, route: &Route, body: &str, sink: &dyn Fn(String), quiet: Option<Duration>) -> Result<(), Sent> {
         let port = route.port;
         let token = &route.token;
         let socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)).map_err(Sent::NotConnected)?;
         let _ = socket.set_nodelay(true);
+        let _ = socket.set_read_timeout(quiet);
         let mut head = format!(
             "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nX-Endeavor-Session: {}\r\nContent-Length: {}\r\n",
-            self.session(),
+            route.session,
             body.len()
         );
         if let Some(host) = &route.host {
@@ -1165,10 +1185,14 @@ fn one_line(text: &str) -> String {
     }
 }
 
-/// Where a call goes: a runtime's port and token, and for a machine's runtime its name.
+/// Where a call goes: a runtime's port and token, and for a machine's runtime its name,
+/// with the session's key there. They are taken together, so a call that races a move of
+/// the session goes whole to the runtime it was routed to.
 pub(crate) struct Route {
     pub port: u16,
     pub token: String,
+    /// The session's key (`X-Endeavor-Session`).
+    pub session: String,
     /// The machine's name (`X-Endeavor-Host`). With it the runtime also gets
     /// the link's port as the browser's (`X-Endeavor-Browser-Port`), which is `port`.
     pub host: Option<String>,

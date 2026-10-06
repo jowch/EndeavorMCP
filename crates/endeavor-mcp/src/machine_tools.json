@@ -9,7 +9,7 @@
     "name": "list_machines"
   },
   {
-    "description": "Add a server or a cluster's login node that the user reaches over ssh, so that notebooks can run there. Connects with the user's own ssh configuration, keys and ssh agent (never a password: Endeavor can't ask for one, and neither should you), installs Endeavor's helper there if it is missing, saves the machine, and reports what it found: node name, home folder, whether Slurm is there, the partitions with their limits, and Julia if it is already known. Waits up to 45 seconds; if the connection is still being made it says so, and calling add_machine again with the same host continues. If it can't connect, nothing is saved and the result says what the user must do (usually `ssh-add` to put a key in the agent, or `ssh <host>` once in a terminal to accept the server's identity). Adding a machine that exists updates it. Add a machine only when the user asks for it.",
+    "description": "Add a server or a cluster's login node that the user reaches over ssh, so that notebooks can run there. Connects with the user's own ssh configuration, keys and ssh agent (never a password: Endeavor can't ask for one, and neither should you), installs Endeavor's helper there if it is missing, saves the machine, and reports what it found: node name, home folder, whether Slurm is there, the partitions with their limits, and Julia if it is already known. Whether Julia runs in Slurm jobs or directly on the machine is the user's choice: the slurm argument sets it. Left out, a new machine uses Slurm jobs when Slurm is there, and a machine added before keeps how it was saved; the result always says which is used (cluster, runs_in) and, when Slurm is there, that the other is available with slurm. Waits up to 45 seconds; if the connection is still being made it says so, and calling add_machine again with the same host continues: the machine is not usable until a call has connected. If it can't connect, nothing is saved and the result says what the user must do (usually `ssh-add` to put a key in the agent, or `ssh <host>` once in a terminal to accept the server's identity). Adding a machine that exists updates it; changing it between Slurm jobs and direct is refused while Julia runs there (stop_machine first). Add a machine only when the user asks for it.",
     "inputSchema": {
       "properties": {
         "host": {
@@ -23,6 +23,10 @@
         "name": {
           "description": "The name to use for the machine in these tools. Letters, digits, - _ and . only. Defaults to the host.",
           "type": "string"
+        },
+        "slurm": {
+          "description": "true: run Julia in Slurm jobs (an error if Slurm isn't on the machine). false: run Julia directly on the machine, even if Slurm is there. Left out: a new machine uses Slurm jobs if Slurm is there; a machine added before stays as it was saved. Ask the user when Slurm is there and they haven't said.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -33,7 +37,7 @@
     "name": "add_machine"
   },
   {
-    "description": "Put this session's notebooks on a machine: \"local\" is this computer, any other value is a machine's name from list_machines. Connects, then attaches to the Julia runtime already running there, starts one, or on a Slurm cluster submits a job for it. Returns within 45 seconds with the state. ready: the result has browser_url (the link to give the user), the node, and whether a runtime was already running there. starting or queued: the runtime is not up yet; the result has the job's id and the queue's state and reason, and pluto_session_status shows progress. On a cluster with no job running and no resources given, nothing is submitted: the result has needs_job true and the machine's default resources, and you ask the user to confirm them (or choose others) and call use_machine again with them. The resources you give are saved as the machine's defaults. The session starts with no notebook on the new machine (a session's notebook stays on the machine it was made on); the project remembers the machine and folder for later sessions. Switch machines, and submit jobs, only when the user asks. From here on list_folder, read_file and run_shell run on that machine, and notebook paths are that machine's.",
+    "description": "Put this session's notebooks on a machine: \"local\" is this computer, any other value is a machine's name from list_machines. Connects, then attaches to the Julia runtime already running there, starts one, or on a Slurm cluster submits a job for it. Returns within 45 seconds with the state. ready: the result has browser_url (the link to give the user), the node, and whether a runtime was already running there. starting or queued: the runtime is not up yet; the result has the job's id and the queue's state and reason, and pluto_session_status shows progress. On a cluster with no job running and no resources given, nothing is submitted and the session does not move (it stays where it was, and the project is not changed): the result has needs_job true and the machine's default resources, and you ask the user to confirm them (or choose others) and call use_machine again with them. A call that fails changes nothing: the session stays where it was. The resources you give are saved as the machine's defaults. The session starts with no notebook on the new machine (a session's notebook stays on the machine it was made on); the project remembers the machine and folder for later sessions. Switch machines, and submit jobs, only when the user asks. From here on list_folder, read_file and run_shell run on that machine, and notebook paths are that machine's.",
     "inputSchema": {
       "properties": {
         "account": {
@@ -45,7 +49,7 @@
           "type": "integer"
         },
         "extra_sbatch_flags": {
-          "description": "Cluster only: more flags for sbatch, each as one string such as \"--constraint=a100\". They run as given.",
+          "description": "Cluster only: more flags for sbatch, each as one string that starts with \"-\", a flag and its value together, such as \"--constraint=a100\" (not \"--constraint\", \"a100\"). They run as given, except that --wrap and line breaks are refused.",
           "items": {
             "type": "string"
           },
@@ -56,7 +60,7 @@
           "type": "string"
         },
         "gpus": {
-          "description": "Cluster only: GPUs for the job, as a count, or a Slurm gres string such as \"gpu:a100:2\".",
+          "description": "Cluster only: GPUs for the job, as a count, or a Slurm gres string such as \"gpu:a100:2\". 0 means no GPU and clears a saved default. Saved as the machine's default.",
           "type": [
             "integer",
             "string"
@@ -87,7 +91,7 @@
     "name": "use_machine"
   },
   {
-    "description": "Stop the Julia runtime on a machine (\"local\" is this computer) for every client that uses it, and on a cluster cancel its job. It ends all the notebooks running there, the user's too, and anyone else's. First it checks for other sessions that were active in a notebook in the last 15 minutes; if there is one and force is not true, it stops nothing and the result names who (the client's label, how long ago, which notebook): tell the user, and call again with force true only if they agree. Stop the runtime only when the user asks, such as to give a cluster node back. This session stays pointed at the machine: a later notebook call says it was stopped, and use_machine starts it again.",
+    "description": "Stop the Julia runtime on a machine (\"local\" is this computer) for every client that uses it, and on a cluster cancel its job. It ends all the notebooks running there, the user's too, and anyone else's. First it checks for other sessions that were active in a notebook in the last 15 minutes; if there is one and force is not true, it stops nothing and the result names who (the client's label, how long ago, which notebook): tell the user, and call again with force true only if they agree. Without force it also stops nothing when Julia is still starting or a Slurm job is queued (the result names the job and its queue state), because other sessions waiting for it can't be seen; and when it can't check who else is active (the runtime doesn't answer): in each case ask the user, and use force true only if they agree. Stop the runtime only when the user asks, such as to give a cluster node back. This session stays pointed at the machine: a later notebook call says it was stopped, and use_machine starts it again.",
     "inputSchema": {
       "properties": {
         "force": {

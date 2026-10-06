@@ -122,18 +122,15 @@ fn the_machine_tools_over_real_ssh() {
     assert!(listed["ssh_hosts_not_added"].is_array());
     assert!(!work.join("state-home/endeavor/links").exists(), "no link yet");
 
-    let added = front.ok("add_machine", json!({ "host": host, "name": "e2e-machines", "julia": julia.display().to_string() }));
+    // The host may have Slurm, as a workstation or login node may; this test runs Julia there directly, not in a job.
+    let added = front.ok("add_machine", json!({ "host": host, "name": "e2e-machines", "julia": julia.display().to_string(), "slurm": false }));
     eprintln!("[{:?}] add_machine: {}", started.elapsed(), added["message"]);
     assert_eq!((added["state"].as_str(), added["saved"].clone()), (Some("connected"), json!(true)), "{added}");
     assert!(added["node"].as_str().is_some_and(|n| !n.is_empty()) && added["home"].as_str().is_some_and(|h| h.starts_with('/')), "{added}");
+    assert_eq!((added["cluster"].clone(), added["runs_in"].clone()), (json!(false), json!("directly")), "{added}");
     let machines_file = MachinesFile::at(work.join("config/endeavor/machines.json"));
-    let mut record = machines_file.find_by_name("e2e-machines").unwrap().expect("the machine is saved");
-    assert_eq!(record.cluster.is_some(), added["slurm"] == true, "a machine with Slurm is saved as a cluster: {added}");
-    if record.cluster.take().is_some() {
-        // The host has Slurm, as a workstation or login node may, and this test runs Julia there directly, not in a job.
-        // The link that connected for it ended when the record became a cluster's.
-        machines_file.save(record).unwrap();
-    }
+    let record = machines_file.find_by_name("e2e-machines").unwrap().expect("the machine is saved");
+    assert!(record.cluster.is_none(), "saved as a plain server, whether or not Slurm is there: {added}");
     let installed = root.join(endeavor_mcp::embedded::BUILD_VERSION);
     assert!(installed.join("endeavor").is_file(), "the helper is installed in {}", installed.display());
 

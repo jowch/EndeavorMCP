@@ -1004,6 +1004,32 @@ fn queued(helper: &Helper) -> String {
 }
 
 #[test]
+fn extra_sbatch_flags_that_could_change_what_runs_are_not_submitted() {
+    let dir = state_dir("slurm-extra-flags");
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let mut helper = slurm.helper(&dir, &julia);
+    helper.hello();
+    for (extra, why) in [(["--wrap=sleep 1"], "--wrap"), (["--wra=x"], "--wrap"), (["normal"], "doesn't start with"), (["--x\ny"], "line break")] {
+        let mut job = small_job().unwrap();
+        job.resources.extra = extra.map(String::from).to_vec();
+        helper.send(ToHelper::StartRuntime { job: Some(job) });
+        let ToApp::StartFailed { message } = helper.after_progress() else { panic!("expected StartFailed") };
+        assert!(message.starts_with("The job wasn't submitted:") && message.contains(why), "{message}");
+    }
+    assert_eq!(slurm.read("sbatch.args"), "", "nothing reached sbatch");
+    let mut job = small_job().unwrap();
+    job.resources.extra = vec!["--qos=normal".into(), "-N1".into()];
+    helper.send(ToHelper::StartRuntime { job: Some(job) });
+    assert!(matches!(helper.after_progress(), ToApp::FoundJulia { .. }));
+    assert_eq!(helper.next(), ToApp::Submitted { job: "42".into(), summary: "2 CPUs · 8 GB · 30 min".into() });
+    assert!(slurm.read("sbatch.args").contains("--time=30 --qos=normal -N1"), "{}", slurm.read("sbatch.args"));
+    helper.send(ToHelper::Stop);
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
 fn a_stop_while_the_job_is_queued_is_told_to_the_others_and_a_late_cleanup_spares_the_next_job() {
     let dir = state_dir("slurm-late");
     let julia = fake_julia(&dir);

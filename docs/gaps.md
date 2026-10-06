@@ -126,11 +126,6 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The machine tools
 
-- **Any host with Slurm's client tools is added as a cluster.** The helper
-  reports Slurm when `sinfo` is found, so a workstation that only has the
-  tools installed becomes a cluster record, and `add_machine` has no way to
-  say otherwise. To close: an argument on `add_machine` to choose, with the
-  detected answer as the default and the report saying which was used.
 - **Julia is not known when a machine is added.** The helper has no call for
   it, so `add_machine` reports `julia: null` until the first runtime start.
 - **Adding a cluster takes two connections.** The first link connects as a
@@ -141,4 +136,27 @@ _Started 2026-10-06, on the `client-library` branch._
 - **One run of the failing-`add_machine` test failed** while waiting for the
   link to end. The wait was changed and it did not recur in 13 runs; the
   cause was not found.
-- **Not yet reviewed.** The code review of this step has not been run.
+- **Saved extra `sbatch` flags written as a flag and a separate value** (`"--qos"`,
+  `"normal"`), from a pasted line in an earlier build or by hand, are refused
+  at submit time with a message to write `--qos=normal`. `parse_salloc` now
+  writes one entry, but records already saved are not rewritten.
+- **Changing a machine between Slurm jobs and direct** drops the saved job
+  defaults (partition, resources, account) and is refused only while the
+  link shows a runtime, a start or a job. A runtime or job the link doesn't
+  know of is not seen.
+- **A link call or `ensure` that runs past a tool call's 45 s** is given up
+  on, and the work goes on in the background (it only starts or asks a
+  link).
+- **`stop_machine` waits 5 s** for the runtime's list of notebooks, and
+  without `force` refuses when it doesn't come. A runtime busy for longer than
+  that needs `force`.
+- **Not run against a host with no Slurm.** On this workstation the helper
+  finds Slurm in `/usr/bin`, so the "no Slurm" message and `slurm: true`
+  without Slurm are covered by unit tests of the decision only.
+- **The races behind the route/key pairing, `stopped` and the ops lock** have
+  no test that forces them. The pairing is tested as a snapshot taken before
+  a move, the lock by a call that waits out its deadline, and the order in
+  `stop_local` by reading.
+- **A link of another build with a runtime on it** is used as it is and sent
+  no start or attach. Not tested with a real older build, only with a link
+  whose record names another build.

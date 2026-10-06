@@ -217,14 +217,26 @@ with `endeavor/set_session_folder` each time it attaches to a runtime there.
 When the session moves to another runtime the front ends its key on the old
 one (`endeavor/end_session`) and makes a new key, since a runtime that has ended
 a key ignores it afterwards, and a notebook binding means nothing on another
-runtime. A session starts with no notebook on the machine it moves to.
+runtime. A session starts with no notebook on the machine it moves to. A call's
+route (port, token, host) and the session's key are taken together and a move
+replaces both together, so a call that races a move goes whole to the old
+runtime or whole to the new one. `use_machine` does everything that can fail,
+and the request to start or attach, first; only when the request was taken does
+the session move, its old key end and the project remember the machine. A call
+that fails, and `needs_job`, leave the session, its key and `projects.json` as
+they were.
+
+Each machine tool call has one 45 s deadline from the moment it arrives. Waiting
+for the one machine tool call that may run at a time, finding or starting the
+link and every call to it come out of it; a call that can't get the lock in time
+says another call is still running and has changed nothing.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `list_machines` | none | `machines`: each `{name, host, cluster, state, this_session}` (`state` is `no link running` or the link's: `connecting`, `connected`, `starting`, `queued`, `ready`, `failed`, with `error`); `local` `{name, state, this_session}`; `this_session.machine`; `ssh_hosts_not_added`; `message`. Starts nothing |
-| `add_machine` | `host` (an ssh alias or `user@host[:port]`, through `valid_host`), `name`, `julia` | `{machine, host, state, saved, updated, node, home, os, arch, slurm, partitions: [{name, default, max_hours, cpus, memory_gb}], scratch, julia, message}`. `state` is `connecting` when 45 s ran out; call again. Julia is null until a runtime has been started there once |
-| `use_machine` | `machine` (a name, or `"local"`), `folder`; on a cluster `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | `{machine, state, ready, message, …}`. `ready`: `browser_url`, `node`, `folder`, `already_running`, and for a cluster `job` `{id, summary, node, ends_at, ends_in_minutes}`. `starting`, `queued`: `step`, `queue` `{state, reason, reason_text}`, `job`. `needs_job`: a cluster with nothing running and no resources given; `defaults`, `partitions`; nothing was submitted |
-| `stop_machine` | `machine`, `force` | `{machine, stopped, message}`; refused with `other_sessions` `[{client, active_seconds_ago, notebook}]` when another session was active in the last 15 minutes and `force` isn't true |
+| `add_machine` | `host` (an ssh alias or `user@host[:port]`, through `valid_host`), `name`, `julia`, `slurm` (boolean) | `{machine, host, state, saved, updated, node, home, os, arch, slurm, cluster, runs_in, partitions: [{name, default, max_hours, cpus, memory_gb}], scratch, julia, message}`. `slurm` is whether Slurm was found; `cluster` and `runs_in` (`slurm_jobs` or `directly`) are what is used. `state` is `connecting` when 45 s ran out; call again. Julia is null until a runtime has been started there once |
+| `use_machine` | `machine` (a name, or `"local"`), `folder`; on a cluster `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | `{machine, state, ready, message, …}`. `ready`: `browser_url`, `node`, `folder`, `already_running`, and for a cluster `job` `{id, summary, node, ends_at, ends_in_minutes}`. `starting`, `queued`: `step`, `queue` `{state, reason, reason_text}`, `job`. `needs_job`: a cluster with nothing running and no resources given; `defaults`, `partitions`; nothing was submitted and the session did not move. `gpus` 0 is no GPU (it overrides and clears the saved default); each `extra_sbatch_flags` entry starts with `-`, and `--wrap` and line breaks are refused |
+| `stop_machine` | `machine`, `force` | `{machine, stopped, message}`; refused without `force` with `other_sessions` `[{client, active_seconds_ago, notebook}]` when another session was active in the last 15 minutes; with `state` `starting`/`queued`, `job` and `queue` when Julia is starting or a job is queued (waiting sessions can't be seen); or as an error when the runtime doesn't answer the check for 5 s |
 
 `use_machine` and `pluto_session_status` use the link's own words for what is
 going on, and no call waits longer than 45 seconds (`ENDEAVOR_START_WAIT_SECS`
@@ -238,7 +250,7 @@ waited for.
 **What a project remembers.** `<state home>/endeavor/projects.json`, which the
 binary owns, maps a project folder (the front's `--folder`, canonical) to
 `{machine, folder}`. It is written whole and renamed, owner-only, under a lock.
-`use_machine` writes it; `"local"` removes the entry. A front that starts in a
+`use_machine` writes it once its request was taken; `"local"` removes the entry. A front that starts in a
 project with an entry targets that machine and starts nothing. On its first
 runtime call it asks the link to attach only to a runtime that is already
 there (`only_running`): a plain server then starts one if none runs, and a
@@ -257,9 +269,25 @@ link for its status every four minutes (`ENDEAVOR_FRONT_PING_SECS` for tests),
 which counts as activity, so the link's 8 hours run from the end of the last
 session. A link that is gone is started again by the next call and attached to
 whatever runs. A link of another build than the front's is quit and started
-again by `use_machine` only when no runtime hangs on it (a new link has a new
-port, and the browser's page would break); otherwise it is kept and the result
-says so.
+again only when no runtime hangs on it (a new link has a new port, and the
+browser's page would break); otherwise it is kept and the result says so. One
+function applies that rule to every link a front gets, for the tools and for a
+notebook call, before any start or attach is sent; a link of another build that
+is kept is sent no start, since it may not know `only_running` and would start
+what was only to be attached to. The link refuses a start request with a field
+it doesn't know (HTTP 400).
+
+**Plain or cluster.** The user chooses whether Julia runs in Slurm jobs or
+directly on the machine, since a host can have Slurm's tools without being a
+cluster. `add_machine`'s `slurm` argument sets it: true needs Slurm there,
+false runs directly, and left out a new machine takes what was detected and a
+machine connected before keeps how it was saved. A machine whose first
+`add_machine` was still connecting is saved but marked (an empty `provisional`
+file in the link's folder, removed when a call has connected): a later
+`add_machine` treats it as new, a failure removes it, `list_machines` shows it
+as `not yet connected`, and `use_machine`, `stop_machine` and a project that
+remembers it refuse it. Changing a machine between the two is refused while
+the link has a runtime, a start or a job.
 
 ## Approval
 

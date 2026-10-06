@@ -92,6 +92,26 @@ impl Resources {
     }
 }
 
+/// Why `flag` can't be an extra flag for `sbatch`, if it can't: it must start with `-` (a bare
+/// word would be taken as the script to run, so a flag and its value are one entry, as
+/// `--constraint=a100` or `-N2`), hold no line break or NUL, and not be `--wrap`, which gives
+/// `sbatch` a command to run in place of the script. `sbatch` takes an unambiguous start of a
+/// long option for the option, so `--wr` and `--wra` count as `--wrap`.
+pub fn check_extra_flag(flag: &str) -> Result<(), String> {
+    let shown = flag.escape_debug();
+    if !flag.starts_with('-') {
+        return Err(format!("\"{shown}\" doesn't start with \"-\": a bare word would be taken as the script to run. Write a flag and its value as one entry, such as \"--constraint=a100\"."));
+    }
+    if flag.contains(['\n', '\r', '\0']) {
+        return Err(format!("\"{shown}\" holds a line break or NUL character, which a flag can't have."));
+    }
+    let name = flag.split_once('=').map_or(flag, |(name, _)| name);
+    if name.len() >= 4 && "--wrap".starts_with(name) {
+        return Err(format!("\"{shown}\" is --wrap, which gives sbatch a command to run in place of Endeavor's script, so it isn't allowed."));
+    }
+    Ok(())
+}
+
 /// "45 min", "8 h", "1 h 30 min"
 pub fn duration_text(minutes: u32) -> String {
     match (minutes / 60, minutes % 60) {
@@ -113,6 +133,12 @@ pub struct JobRequest {
 }
 
 impl JobRequest {
+    /// `sbatch_args`, or why the extra flags can't be passed on (`check_extra_flag`).
+    pub fn checked_sbatch_args(&self) -> Result<Vec<String>, String> {
+        self.resources.extra.iter().try_for_each(|flag| check_extra_flag(flag))?;
+        Ok(self.sbatch_args())
+    }
+
     pub fn sbatch_args(&self) -> Vec<String> {
         let mut args = self.resources.sbatch_args();
         if let Some(account) = &self.account {
@@ -325,10 +351,13 @@ pub fn parse_salloc(line: &str, base: &Resources) -> Result<(Resources, Option<S
         if ["--pty", "--x11", "-I", "--immediate", "--no-shell"].contains(&flag.as_str()) {
             continue;
         }
-        r.extra.push(word.clone());
         let boolean = BOOLEAN_FLAGS.contains(&flag.as_str());
         if inline.is_none() && !boolean && words.peek().is_some_and(|next| !next.starts_with('-')) && !looks_like_command(words.peek().unwrap()) {
-            r.extra.push(words.next().unwrap());
+            // One entry for a flag and its value: a bare word in `extra` would be taken for the script.
+            let value = words.next().unwrap();
+            r.extra.push(if flag.starts_with("--") { format!("{flag}={value}") } else { format!("{flag}{value}") });
+        } else {
+            r.extra.push(word.clone());
         }
         any = true;
     }
@@ -512,7 +541,9 @@ mod tests {
         assert_eq!((r.cpus, r.mem_gb, r.minutes), (16, 64, 2880));
         assert_eq!(r.gres.as_deref(), Some("gpu:a100:1"));
         assert_eq!(account.as_deref(), Some("mylab"));
-        assert_eq!(r.extra, ["--qos", "normal", "--exclusive", "-N1"]);
+        assert_eq!(r.extra, ["--qos=normal", "--exclusive", "-N1"]);
+        let (r, _) = parse_salloc("salloc -c2 -C a100 -w node1 --reservation=r1", &base).unwrap();
+        assert_eq!(r.extra, ["-Ca100", "-wnode1", "--reservation=r1"]);
 
         let (r, _) = parse_salloc("--partition=short --cpus-per-task=2 --mem 16000 --time=30", &base).unwrap();
         assert_eq!((r.partition.as_deref(), r.cpus, r.mem_gb, r.minutes), (Some("short"), 2, 16, 30));
@@ -523,6 +554,22 @@ mod tests {
         assert!(parse_salloc("salloc -c lots", &base).is_err());
         assert!(parse_salloc("hello there", &base).is_err());
         assert!(parse_salloc("salloc -p 'unclosed", &base).is_err());
+    }
+
+    #[test]
+    fn extra_flags_must_be_flags_and_cannot_run_a_command() {
+        for flag in ["--constraint=a100", "-N2", "--exclusive", "--", "--w=x", "--wait", "--wckey=k", "--wrapper"] {
+            assert!(check_extra_flag(flag).is_ok(), "{flag}");
+        }
+        for flag in ["normal", "", "--wrap=sleep 1", "--wrap", "--wra=x", "--wr", "--wrap=", "--a\nb", "-x\0", "--qos=a\rb"] {
+            assert!(check_extra_flag(flag).is_err(), "{flag:?}");
+        }
+        assert!(check_extra_flag("normal").unwrap_err().contains("bare word"));
+        let mut request = JobRequest::default();
+        request.resources.extra = vec!["--qos".into(), "normal".into()];
+        assert!(request.checked_sbatch_args().unwrap_err().contains("\"normal\" doesn't start with"));
+        request.resources.extra = vec!["--qos=normal".into()];
+        assert_eq!(request.checked_sbatch_args().unwrap().last().map(String::as_str), Some("--qos=normal"));
     }
 
     #[test]

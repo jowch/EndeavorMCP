@@ -118,8 +118,21 @@ fn resources_given_go_over_the_saved_defaults_within_the_partitions_limits() {
     assert_eq!((resources.minutes, resources.cpus, resources.mem_gb), (240, 16, 64), "kept to what the partition offers");
 
     assert!(!Given::parse(&json!({ "machine": "hpc", "folder": "/x" })).unwrap().any(), "a folder is not a resource");
-    assert_eq!(Given::parse(&json!({ "gpus": "gpu:a100:1" })).unwrap().gres.as_deref(), Some("gpu:a100:1"));
-    assert_eq!(Given::parse(&json!({ "gpus": 0 })).unwrap().gres, None);
+    assert_eq!(Given::parse(&json!({ "gpus": "gpu:a100:1" })).unwrap().gres, Some(Some("gpu:a100:1".to_owned())));
+}
+
+#[test]
+fn zero_gpus_clears_the_saved_gpus_and_counts_as_a_resource_given() {
+    let mut with_gpus = cluster();
+    with_gpus.resources.gres = Some("gpu:2".into());
+    let none = Given::parse(&json!({ "gpus": 0 })).unwrap();
+    assert_eq!(none.gres, Some(None));
+    assert!(none.any(), "0 is given, so a cluster with no job is not asked about");
+    let (resources, _) = none.over(&with_gpus).unwrap();
+    assert_eq!(resources.gres, None, "it overrides the saved default");
+    let (resources, _) = Given::parse(&json!({ "cpus": 2 })).unwrap().over(&with_gpus).unwrap();
+    assert_eq!(resources.gres.as_deref(), Some("gpu:2"), "left out, the default stays");
+    assert!(!resources.sbatch_args().iter().all(|a| !a.starts_with("--gres")));
 }
 
 #[test]
@@ -132,7 +145,14 @@ fn resources_that_make_no_sense_are_refused() {
     assert!(said(json!({ "cpus": "many" })).contains("cpus must be a whole number"));
     assert!(said(json!({ "gpus": "gpu 1" })).contains("gpus must be a count"));
     assert!(said(json!({ "extra_sbatch_flags": "--x" })).contains("must be a list of strings"));
-    assert!(said(json!({ "extra_sbatch_flags": ["--x\ny"] })).contains("must be a list of strings"));
+    assert!(said(json!({ "extra_sbatch_flags": [3] })).contains("must be a list of strings"));
+    assert!(said(json!({ "extra_sbatch_flags": ["--x\ny"] })).contains("line break or NUL"));
+    assert!(said(json!({ "extra_sbatch_flags": ["--x\u{0}y"] })).contains("line break or NUL"));
+    assert!(said(json!({ "extra_sbatch_flags": ["--x\ty"] })).contains("control characters"));
+    assert!(said(json!({ "extra_sbatch_flags": ["--qos", "normal"] })).contains("\"normal\" doesn't start with \"-\""));
+    assert!(said(json!({ "extra_sbatch_flags": ["--wrap=sleep 1"] })).contains("--wrap"));
+    assert!(said(json!({ "extra_sbatch_flags": ["--wrap"] })).contains("--wrap"));
+    assert!(said(json!({ "extra_sbatch_flags": ["--wra=x"] })).contains("--wrap"));
     assert!(said(json!({ "account": "a\nb" })).contains("account can't hold control characters"));
     assert!(said(json!({ "account": 3 })).contains("account must be a string"));
 }
@@ -178,8 +198,9 @@ fn another_session_counts_as_active_for_fifteen_minutes() {
 }
 
 #[test]
-fn a_cluster_with_no_job_and_no_resources_gets_its_defaults_to_confirm() {
-    let said = needs_job("hpc", &cluster());
+fn a_cluster_with_no_job_and_no_resources_gets_its_defaults_to_confirm_and_the_session_stays() {
+    let relay = Relay::new(options(), "s".into(), Box::new(std::io::sink()));
+    let said = relay.needs_job("hpc", &cluster());
     assert_eq!((said["needs_job"].clone(), said["state"].clone(), said["ready"].clone()), (json!(true), json!("needs_job"), json!(false)));
     assert_eq!(said["defaults"]["cpus"], 8);
     assert_eq!(said["defaults"]["hours"], 8.0);
@@ -187,6 +208,102 @@ fn a_cluster_with_no_job_and_no_resources_gets_its_defaults_to_confirm() {
     assert_eq!(said["partitions"][0]["name"], "shared");
     let message = said["message"].as_str().unwrap();
     assert!(message.contains("nothing was submitted") && message.contains("Ask the user to confirm") && message.contains("machine \"hpc\""), "{message}");
+    assert!(message.contains("this session has not moved: it stays on this computer until `use_machine` is called"), "{message}");
+    let server = Server { id: "lab".into(), name: "Lab".into(), ssh_host: "lab".into(), ..Default::default() };
+    *relay.target.lock().unwrap() = Target::Machine(Machine::new(&server, None));
+    assert!(relay.needs_job("hpc", &cluster())["message"].as_str().unwrap().contains("it stays on Lab until"));
+}
+
+#[test]
+fn slurm_is_chosen_by_the_argument_else_by_what_was_saved_else_by_what_was_found() {
+    let plain = Server { id: "lab".into(), ..Default::default() };
+    let on_cluster = Server { cluster: Some(Cluster::default()), ..plain.clone() };
+    assert_eq!(choose_mode(None, None, true), Ok(true), "a new machine with Slurm is a cluster");
+    assert_eq!(choose_mode(None, None, false), Ok(false));
+    assert_eq!(choose_mode(Some(false), None, true), Ok(false), "plain by choice, though Slurm is there");
+    assert_eq!(choose_mode(Some(true), None, true), Ok(true));
+    assert!(choose_mode(Some(true), None, false).unwrap_err().contains("found no Slurm"));
+    assert!(choose_mode(Some(true), Some(&plain), false).is_err());
+    assert_eq!(choose_mode(None, Some(&plain), true), Ok(false), "a machine saved as plain stays plain");
+    assert_eq!(choose_mode(None, Some(&on_cluster), true), Ok(true));
+    assert_eq!(choose_mode(None, Some(&on_cluster), false), Ok(true), "unchanged even when Slurm isn't found this time");
+    assert_eq!(choose_mode(Some(true), Some(&plain), true), Ok(true), "changed by asking");
+    assert_eq!(choose_mode(Some(false), Some(&on_cluster), true), Ok(false));
+}
+
+#[test]
+fn stopping_without_force_a_start_that_is_under_way_names_what_would_be_cancelled() {
+    let mut queued = status(State::Queued);
+    queued.job = Some(JobInfo { id: "4242".into(), ..Default::default() });
+    queued.queue = Some(QueueInfo { state: "PENDING".into(), reason: "Priority".into() });
+    let said = waiting_result("hpc", &queued);
+    let message = said["message"].as_str().unwrap();
+    assert_eq!((said["stopped"].clone(), said["job"]["id"].clone(), said["state"].clone()), (json!(false), json!("4242"), json!("queued")));
+    assert!(message.contains("the Slurm job 4242 on hpc is pending (other jobs are ahead of it)") && message.contains("can't see which other sessions are waiting") && message.contains("force true"), "{message}");
+    let said = waiting_result("lab", &status(State::Starting));
+    assert!(said["message"].as_str().unwrap().contains("Julia is starting on lab") && said["job"].is_null(), "{said}");
+}
+
+#[test]
+fn a_route_keeps_the_key_it_was_taken_with_when_the_session_moves() {
+    let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
+    let (before, key_before) = relay.placed();
+    assert!(matches!(before, Target::Local { stopped: false }));
+    let server = Server { id: "lab".into(), name: "Lab".into(), ssh_host: "lab".into(), ..Default::default() };
+    let (left, old, ended) = relay.switch(Target::Machine(Machine::new(&server, None)));
+    assert!((matches!(left, Target::Local { .. }), old.as_str(), ended) == (true, key_before.as_str(), true));
+    let (after, key_after) = relay.placed();
+    assert!(matches!(&after, Target::Machine(m) if m.id == "lab"));
+    assert_ne!(key_after, key_before, "a new key goes with the new target");
+    let (_, again, ended) = relay.switch(Target::Machine(Machine::new(&server, Some("/work".into()))));
+    assert_eq!((again.as_str(), ended), (key_after.as_str(), false), "the same machine keeps its key");
+    assert_eq!(relay.session(), key_after);
+    let (_, _, ended) = relay.switch(Target::Local { stopped: false });
+    assert!(ended);
+    assert_ne!(relay.session(), key_after);
+    let local_key = relay.session();
+    let (_, _, ended) = relay.switch(Target::Local { stopped: false });
+    assert!(!ended && relay.session() == local_key, "this computer to this computer is the same runtime");
+    *relay.target.lock().unwrap() = Target::Local { stopped: true };
+    let (_, _, ended) = relay.switch(Target::Local { stopped: false });
+    assert!(ended, "a runtime that was stopped starts a new session");
+}
+
+#[test]
+fn a_tool_call_that_cannot_get_the_lock_in_time_changes_nothing() {
+    let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
+    let key = relay.session();
+    let _busy = relay.ops.lock().unwrap();
+    let started = Instant::now();
+    let slow = Deadline::after(Duration::from_millis(300));
+    for result in [
+        relay.use_machine(&json!({ "machine": "local" }), slow),
+        relay.stop_machine(&json!({ "machine": "local" }), slow),
+        relay.add_machine(&json!({ "host": "lab" }), slow),
+    ] {
+        let said = result.unwrap_err();
+        assert!(said.contains("Another machine tool call is still running") && said.contains("changed nothing"), "{said}");
+    }
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    assert!(matches!(relay.placed(), (Target::Local { stopped: false }, session) if session == key));
+}
+
+#[test]
+fn a_runtime_that_never_answers_the_check_for_other_sessions_is_given_up_on() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let holder = std::thread::spawn(move || {
+        let (socket, _) = silent.accept().unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        drop(socket);
+    });
+    let relay = Relay::new(options(), "s".into(), Box::new(std::io::sink()));
+    let route = Route { port, token: "t".into(), session: "s".into(), host: None };
+    let started = Instant::now();
+    let said = relay.recent_others(&route, Duration::from_millis(400)).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    assert!(said.starts_with("Nothing was stopped: couldn't check who else is active there (the runtime didn't answer in time)") && said.contains("`force: true`"), "{said}");
+    holder.join().unwrap();
 }
 
 #[test]

@@ -259,6 +259,7 @@ pub fn cancel_recorded(dir: &Path) {
 /// submit it. The job's id.
 fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, String> {
     let dir = &args.state_dir;
+    let flags = request.checked_sbatch_args().map_err(|why| format!("The job wasn't submitted: {why}"))?;
     let (julia, version) = julia::find(&args.julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame())))?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
     token(dir)?;
@@ -292,7 +293,7 @@ fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest) -> Result<String, S
     let output = Command::new("sbatch")
         .args(["--parsable", "--job-name=endeavor", "--nodes=1", "--ntasks=1", "--open-mode=append"])
         .arg(format!("--output={}", log.display()))
-        .args(request.sbatch_args())
+        .args(flags)
         .arg(&script_path)
         .stdin(Stdio::null())
         .output()

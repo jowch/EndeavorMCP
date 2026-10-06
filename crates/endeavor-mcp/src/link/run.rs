@@ -830,6 +830,10 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
                 (None, false)
             } else {
                 let Ok(asked) = serde_json::from_slice::<Value>(&body) else { return reply(&mut connection, "400 Bad Request", &json!({ "error": "the body isn't JSON" })) };
+                if let Some(unknown) = asked.as_object().and_then(|fields| fields.keys().find(|key| !matches!(key.as_str(), "job" | "only_running"))) {
+                    let said = format!("This link doesn't know the field \"{unknown}\" in a start request, so it didn't start anything.");
+                    return reply(&mut connection, "400 Bad Request", &json!({ "error": said }));
+                }
                 let Ok(job) = serde_json::from_value::<Option<JobRequest>>(asked.get("job").cloned().unwrap_or(Value::Null)) else {
                     return reply(&mut connection, "400 Bad Request", &json!({ "error": "job isn't a job request" }));
                 };
