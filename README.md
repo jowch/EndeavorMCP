@@ -116,6 +116,8 @@ Other installs update the way they were installed:
 - The copy the Endeavor app installs on a server (in
   `~/.cache/endeavor/<version>/`) updates with the app. `endeavor update`
   refuses to replace it.
+- The copy a plugin fetched (in `~/.local/share/endeavor/bin/<key>/`) updates
+  with the plugin. `endeavor update` refuses to replace it.
 
 A Julia that's already running keeps running from the build that started
 it. `endeavor update`, `serve` and `mcp` tell you when the running Julia
@@ -236,9 +238,10 @@ agent can try again. The first start installs packages and takes a few
 minutes.
 
 **Claude Code plugin.** This repository is a plugin marketplace. Its
-`endeavor` plugin (`claude-plugin/`) carries the skills and runs
-`endeavor mcp --skills plugin --folder ${CLAUDE_PROJECT_DIR}`. Put
-`endeavor` on your `PATH`, then:
+`endeavor` plugin (`claude-plugin/`) carries the skills and a launcher
+that gets the `endeavor` binary on first start, then runs
+`endeavor mcp --skills plugin --folder ${CLAUDE_PROJECT_DIR}`. Installing the
+plugin is the only step:
 
 ```
 claude plugin marketplace add jowch/EndeavorMCP
@@ -382,7 +385,10 @@ recent notebook starts it and runs it.
   plugin (unpacked from the crate, like `runtime/`), and the binary serves the
   same files through `notebook_guide`.
 - `claude-plugin/` and `.claude-plugin/marketplace.json`: the standalone
-  Claude Code plugin, which runs `endeavor mcp` with the skills.
+  Claude Code plugin, which runs `endeavor mcp` with the skills through a
+  launcher that fetches the binary. `codex-plugin/` and `antigravity-plugin/`
+  are the same for the other agents, and `scripts/plugins.sh` keeps their
+  copies in step.
 - `scripts/helpers.sh` and `scripts/build-helpers.sh`: get or build the Linux
   binaries. The Helpers workflow publishes them to the
   [Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers).

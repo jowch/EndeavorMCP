@@ -162,15 +162,53 @@ _Started 2026-10-06, on the `client-library` branch._
   lists only the builds it published, so a macOS or Windows build published
   by an earlier run of the same key stops being found until the next
   successful run. The Linux builds are always in it.
-- **The setup skill that installs the binary when it is missing** is not
-  built.
+- **The plugin's launcher has never run on Windows.** `install.sh` knows Git
+  Bash's `uname` (tested with a fake one), but whether Claude Code can start
+  a `sh` script as an MCP command on Windows is undocumented. To close: try
+  it under Git Bash, and give Windows a `.cmd` or PowerShell launcher if not.
+- **The Codex and Antigravity plugin folders were built to their
+  documentation and tried on no real install.** Codex's page shows no stdio
+  entry and no variable for an MCP command (`${PLUGIN_ROOT}` is documented for
+  hooks only); Antigravity's gives no shape for `mcp_config.json`. Whether
+  they start the server in the project folder, expand the variable, and load
+  the skills is unknown. To close: install each and call a tool.
+- **The pinned key can only be set after a release from `main` holds that
+  build.** Until then `release-key` is empty and the plugin takes the newest
+  build. Unpinned, a start uses the build it already has and does not ask the
+  network; only Claude Code's `SessionStart` hook (`--fetch-only`) looks for a
+  newer one, so in Codex and Antigravity an unpinned plugin keeps the first
+  build it fetched until the folder is deleted. To close: pin the key when
+  releasing.
+- **Skills in a plugin can be newer than the pinned binary's embedded copy.**
+  The binary's own `notebook_guide` and the skills in the plugin can then
+  disagree about the tools. To catch it: have `mcp --skills plugin` compare a
+  hash of the plugin's skills, passed by the launcher, with its embedded
+  `PLUGIN_VERSION`, and say so in its instructions; or check in CI that
+  `release-key` names a build embedding the same `plugin/skills`.
+- **Uninstalling a plugin leaves the binary** in `~/.local/share/endeavor/bin/`.
+  Old builds there are never removed, since a running session may use one and
+  the launcher can't tell which. About 30 MB each. To close: delete all but
+  the pinned and the newest at a start, when no `endeavor` from there is
+  running.
+- **The first start can outlast the agent's 30 s limit.** The download goes
+  on in the background only if the agent doesn't kill the launcher's children;
+  either way the next start finishes or redoes it, and `endeavor-setup` tells
+  the agent to ask the user to reconnect. Claude Code's hook usually avoids it,
+  unless it doesn't run before the server starts (undocumented).
+- **A launcher killed while it holds the lock** leaves a lock the next start
+  takes over once its owner's pid is gone. A pid reused by another process
+  keeps the lock for the 25 s a start waits, and that start then fails with a
+  message to reconnect.
+- **`endeavor-setup` is also in the app's embedded plugin**, where it is
+  never needed, since the app starts the server. It is left out of
+  `notebook_guide`.
 
 ## Not checked
 
 - **Codex and Antigravity** facts in the design come from their
   documentation: the manifest and MCP file names, that a plugin's server
   starts in the project folder, the tool timeout, and that each loads the
-  skills.
+  skills (see "Releases and installing" for the plugin folders).
 - **Gatekeeper and SmartScreen** behaviour for a binary installed with
   `curl`.
 - **The app's side of sharing a runtime** is read from its code, not run:
@@ -262,3 +300,12 @@ _Started 2026-10-06, on the `client-library` branch._
   said only "connected". Fixed; the order that shows it only happens on
   macOS, so the test for it is CI's.
 
+
+## Tests
+
+- **A failed or interrupted test run can leave its fake runtime behind.** One
+  run left a fake `endeavor core` from the `machines` tests under
+  `target/tmp`, which had to be ended by hand. The tests clean up when they
+  pass; a panic or a kill skips that. To close: have each test's place end
+  what it started when it is dropped, and check for leftovers at the start
+  of a run.

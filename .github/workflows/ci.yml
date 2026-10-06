@@ -29,6 +29,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: rustup toolchain install
+      - name: Plugin copies
+        if: runner.os == 'Linux'
+        run: sh scripts/plugins.sh check
       - name: Build
         run: cargo build --locked --workspace --all-targets
       - name: Test

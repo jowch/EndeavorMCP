@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "endeavor",
+  "version": "0.1.0",
+  "description": "Live Pluto (Julia) notebooks your agent edits and runs, which you watch in a browser.",
+  "homepage": "https://github.com/jowch/EndeavorMCP",
+  "license": "MIT",
+  "author": {
+    "name": "Jonathan Chen"
+  }
+}

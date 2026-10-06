@@ -160,7 +160,10 @@ mod tests {
                     folders.push(path);
                 } else if path.extension().is_some_and(|e| e == "md") {
                     let parts: Vec<String> = path.strip_prefix(root).unwrap().components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-                    on_disk.push(parts.join("/"));
+                    // Only useful when this server isn't running, so it isn't served.
+                    if parts[0] != "endeavor-setup" {
+                        on_disk.push(parts.join("/"));
+                    }
                 }
             }
         }

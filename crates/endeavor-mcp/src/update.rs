@@ -3,7 +3,7 @@
 //!
 //! The release has binaries for Linux, macOS and Windows (`release::platform_name`).
 //! A copy the Endeavor app installed, or one cargo installed, is left to the
-//! app or to cargo.
+//! app, to cargo or to a plugin.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,6 +37,8 @@ struct Here {
     platform: Option<&'static str>,
     home: PathBuf,
     cargo_home: PathBuf,
+    /// Where the plugins' launcher keeps binaries: `<data>/endeavor/bin`.
+    plugin_bin: PathBuf,
     release: String,
     /// Where a runtime from the old build would be recorded.
     state_dir: PathBuf,
@@ -51,6 +53,7 @@ impl Here {
             exe,
             platform: this_platform_name(),
             cargo_home: var("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from),
+            plugin_bin: var("XDG_DATA_HOME").map_or_else(|| home.join(".local/share"), PathBuf::from).join("endeavor/bin"),
             home,
             release: release::base_url(),
             state_dir: standalone::default_state_dir(),
@@ -95,6 +98,9 @@ fn update(here: &Here) -> Result<String, String> {
     }
     if same(dir, &here.cargo_home.join("bin")) {
         return Err(format!("This copy of endeavor was installed with cargo. Update it the same way:\n    {CARGO_INSTALL}"));
+    }
+    if dir.parent().is_some_and(|d| same(d, &here.plugin_bin)) {
+        return Err(format!("This copy of endeavor ({}) belongs to the endeavor plugin, which pins this build and fetches another when the plugin is updated. Update the plugin instead.", exe.display()));
     }
     let Some(platform) = here.platform else {
         return Err(format!(

@@ -1,0 +1,5 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "endeavor",
+  "description": "Live Pluto (Julia) notebooks your agent edits and runs, which you watch in a browser."
+}

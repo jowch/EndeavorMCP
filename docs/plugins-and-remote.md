@@ -13,7 +13,8 @@ untested._
 
 - One binary, `endeavor`, and one plugin per harness. The plugin holds the
   skills and one MCP entry, `endeavor mcp`, over stdio.
-- You install the plugin and the binary. The agent does the rest through
+- You install the plugin; the plugin fetches the binary the first time it
+  starts. The agent does the rest through
   tools: adds a server, starts a runtime there or submits a Slurm job, and gives
   you the browser link. There is no configuration file to edit and no tunnel
   to open.
@@ -23,8 +24,9 @@ untested._
 - A runtime is shared: the app and the plugin, from any of your computers,
   attach to the same runtime on a server. Several sessions can work in one
   notebook, as in the app today.
-- First version: login with ssh keys only, and the binary installed with an
-  install script that downloads it from the GitHub release.
+- First version: login with ssh keys only, and the binary fetched from the
+  GitHub release by the plugin's launcher (or by hand with the install
+  script).
 
 ## Decided
 
@@ -34,7 +36,9 @@ untested._
 | Who sets a server up | The agent, through tools. No file the user edits |
 | Sign-in | Your ssh configuration, keys and agent. No password prompt in the first version |
 | Installing on a server | Only after the user agreed. Installing the plugin is the agreement to the binary on your own computer; the helper on a server, an update of it, and Endeavor's own Julia there each need a question first, the helper's first and Julia's only if none is found (built). Looking at what is there needs none beyond the harness's prompt for the tool call. The tools take `install: true` only after the user said yes |
-| Installing the binary | `scripts/install.sh` or `scripts/install.ps1`, run from the web, downloading from the GitHub release (built). npm later, once there are version tags |
+| Installing the binary | The plugin does it: its launcher is the MCP command, and on first start it downloads the build the plugin pins from the GitHub release. Installing the plugin is the user's agreement to that. `scripts/install.sh` or `scripts/install.ps1`, run from the web, is the fallback (built). npm later, once there are version tags |
+| Where the plugin's binary lives | `${XDG_DATA_HOME:-~/.local/share}/endeavor/bin/<key>/endeavor`, the same for every agent and every platform (`endeavor.exe` under Git Bash on Windows), so Claude Code, Codex and Antigravity share one download. Not the helpers cache, which prunes other keys |
+| Which build a plugin runs | The key in `release-key` beside the launcher. Empty or missing: the newest build |
 | Signing | Not needed for a `curl` install; wait |
 | State folder | One on each machine, yours included, for `serve`, `mcp`, the plugin and the app: the one `serve` uses today. The app stops choosing its own |
 | The list of machines | One file the binary owns: `machines.json`, a list of the app's server records, in `$XDG_CONFIG_HOME/endeavor/` (default `~/.config/endeavor/`, on macOS too), and in `%APPDATA%\Endeavor\` on Windows (built). The app will read and write it there |
@@ -272,6 +276,30 @@ it with the relay.
   calls need a version ([endeavor-mcp.md](endeavor-mcp.md), "The control
   API").
 
+- The library API changed in the last two commits:
+  - `client::Options.allow_install` is required: whether a connection may
+    install the helper. The app passes `true`, since it asks its user itself.
+  - `bootstrap_script(version, exit_idle)` takes no install flag. The script
+    never installs on its own: when this build's helper is missing it writes
+    nothing on the server and reports, and an install happens only when the
+    connection then sends the helper.
+  - A connection that may not install ends with `NeedsInstall` (platform, the
+    folder, whether it is an update, what is running, and `bytes: Option<u64>`,
+    known only for this computer's platform) instead of installing.
+    `Running` is `Process { pid, checked }` or `Job { id, listed }`, where
+    `checked` and `listed` say whether the script verified it or only read it
+    from the record.
+  - `ToHelper::StartRuntime` has `download_julia`; absent means true. A helper
+    that finds no Julia and may not download answers `ToApp::NoJulia` with an
+    `offer` saying what it could download. `connect --no-julia-download` is
+    gone.
+  - `client::start_with(..., download_julia, ...)` returns
+    `Result<Runtime, StartError>`; `StartError::NoJulia` carries the offer.
+    `client::start` is `start_with` with the download allowed and the error as
+    a string.
+  - `ToApp::NotStopped` answers a `Stop` that didn't end the runtime, and
+    `Channel::stop()` returns a `Result`.
+
 Read from the code, not run.
 
 ## Several sessions in one notebook
@@ -495,29 +523,89 @@ fetched with `curl` carries no quarantine mark, so Gatekeeper and SmartScreen
 shouldn't check it, and the Rust linker signs Apple Silicon binaries ad hoc.
 Untested.
 
-When the binary is missing, the MCP server fails to start but the skills
-still load. A setup skill tells the agent to run the install line with the
-user's approval, then to ask them to reconnect (not built).
+**Built, not run on a real agent:** the plugin's launcher, below.
+
+When the launcher can't get the binary, it exits with one line saying what
+failed and the manual install line. The server then fails to start, but the
+skills still load, and the `endeavor-setup` skill tells the agent to ask the
+user to reconnect and, with their go-ahead, to run the install line.
+
+### The launcher
+
+`scripts/endeavor-mcp.sh` is the MCP command in every plugin, run as
+`sh <plugin>/launch/endeavor-mcp.sh <arguments>`. It finds the binary for the
+plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
+
+- **Build.** The first line of `launch/release-key`. With a key, that build is
+  fetched if missing and never replaced. With none, the newest one already
+  there (`bin/.newest`) is run with no network use; the network is asked only
+  when none is there, and by `--fetch-only`.
+- **Fetching** is the plugin's own copy of `install.sh` with `--quiet --into
+  <bin> [--key <key>]`: the download and its checksum check, then a rename
+  into `<bin>/<key>/`, so a binary there is always complete. `--quiet` sends
+  everything to stderr. Stdout belongs to the MCP server, so nothing is
+  printed there before the exec.
+- **Two starts at once** take a lock (`mkdir <bin>/.lock`, holding the owner's
+  pid). The second waits up to 25 s for the first, then uses its binary. A
+  lock whose owner is gone is taken over.
+- **A download cut short** (the agent kills a server that takes over 30 s)
+  leaves at most a temporary folder in `<bin>`, never a partial binary. The
+  next start downloads again and removes temporary folders older than an hour.
+- **Failure** is non-zero with a last line starting `endeavor:`.
+- `--fetch-only` only gets the binary. Claude Code's `SessionStart` hook runs
+  it in the background so the download is usually done before the server
+  starts.
+- `ENDEAVOR_BIN` names a binary to run instead (`docs/testing.md`).
+- `endeavor update` leaves a binary in `<bin>` alone. A newer build comes with
+  a newer plugin.
+
+`install.sh` also knows Git Bash on Windows (`uname -s` `MINGW*`, `MSYS*` or
+`CYGWIN*`: `windows-x86_64` and the `.exe` name).
 
 ## Plugins
 
-One plugin per harness with the same content: the skills and the stdio
-entry. `claude-plugin/` exists and is checked live.
+One plugin per harness with the same content: the skills, the launcher and one
+stdio entry that runs it. `claude-plugin/` is checked live with the launcher
+replaced by `ENDEAVOR_BIN`. `codex-plugin/` and `antigravity-plugin/` are built
+to what their documentation says and tried on no real install.
 
 | | Claude Code | Codex | Antigravity |
 |---|---|---|---|
 | Manifest | `.claude-plugin/plugin.json` | `plugin.json` at the root | `plugin.json` at the root |
 | MCP file | `.mcp.json` | `mcp.json` | `mcp_config.json` |
-| Skills | `skills/` | `skills/` | `skills/` |
+| Command | `sh ${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh ${PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh -c` that finds the plugin in `~/.gemini/antigravity-cli/plugins/endeavor` and runs the launcher |
+| Skills | `skills/` (a link) | `skills/` (a copy) | `skills/` (a copy) |
+| Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
 | Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add` | `agy plugin install <folder>` |
 | Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | the folder `mcp` starts in | the folder `mcp` starts in |
 
-`plugin/skills/` stays the one copy of the skills. Each harness's folder
-points at it; where a harness doesn't follow the link, a script copies the
-skills in and CI checks the copies match.
+Each plugin folder holds `launch/endeavor-mcp.sh`, `launch/install.sh` and
+`launch/release-key`. The command is `sh` with the script as its argument, so
+it doesn't depend on the file's execute bit.
 
-To check: that Codex and Antigravity start a plugin's server in the project
-folder, and that each loads the skills.
+One source for each part: `plugin/skills/` for the skills, `scripts/` for the
+launcher, `install.sh` and `release-key`. `scripts/plugins.sh sync` writes the
+copies and `check` fails if any differs; CI runs `check`. `claude-plugin/skills`
+stays a link to `../plugin/skills`, which works there; the other two folders
+hold copies, since those agents may not follow a link out of the plugin.
+`release-key` is not in `plugin/`, because that folder is hashed into the
+build's key.
+
+**What the documentation says.** Codex
+([developers.openai.com/plugins/build/plugins](https://developers.openai.com/plugins/build/plugins)):
+`plugin.json` at the root, `skills/<name>/SKILL.md`, MCP servers in `mcp.json`
+with `mcpServers`, `PLUGIN_ROOT` and `PLUGIN_DATA` for lifecycle hooks. It
+shows no stdio entry, so the entry is by analogy with the HTTP one. Antigravity
+([antigravity.google/docs/plugins](https://antigravity.google/docs/plugins)):
+`plugin.json`, `mcp_config.json`, `hooks.json`, `skills/`, installed to
+`~/.gemini/antigravity-cli/plugins/<name>/`. It gives no shape for
+`mcp_config.json` or `hooks.json`, so the file uses the `mcpServers` shape the
+others use, and no variable is assumed.
+
+To check: that Codex expands `${PLUGIN_ROOT}` in an MCP entry, that Codex and
+Antigravity accept the entries, start a plugin's server in the project folder,
+and load the skills, and that Claude Code's `SessionStart` hook runs before the
+server starts (if not, the first start downloads, as in the other agents).
 
 ## Windows
 
@@ -580,7 +668,11 @@ folder, and that each loads the skills.
 5. macOS and Windows builds, the install scripts, the build's release key
    (built; the workflow's new rows and the PowerShell script are unrun, see
    [gaps.md](gaps.md)).
-6. Codex and Antigravity plugin folders.
+6. The plugin gets the binary itself: the launcher, the Claude Code plugin
+   using it, Codex and Antigravity plugin folders (built to their documentation
+   and unverified), the `endeavor-setup` skill, and `endeavor update` leaving a
+   plugin's binary alone. The pinned key is set after the first release from
+   `main`.
 7. The app: the moved code, the shared state folder, a version on its calls
    to the runtime.
 

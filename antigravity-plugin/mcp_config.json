@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "endeavor": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "d=$HOME/.gemini/antigravity-cli/plugins/endeavor; [ -d \"$d\" ] || d=$HOME/.gemini/config/plugins/endeavor; exec sh \"$d/launch/endeavor-mcp.sh\" \"$@\"",
+        "sh",
+        "--skills",
+        "plugin"
+      ]
+    }
+  }
+}

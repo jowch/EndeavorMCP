@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(sh \"${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh\" --fetch-only </dev/null >/dev/null 2>&1 &)"
+          }
+        ]
+      }
+    ]
+  }
+}

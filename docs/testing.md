@@ -6,6 +6,20 @@ the MCP server or `serve`. Endeavor's own checks, including the smoke test in
 the app, are in
 [Endeavor's testing.md](https://github.com/jowch/Endeavor/blob/main/docs/testing.md).
 
+## Trying the plugin before a release
+
+The plugin's launcher gets its binary from the Helpers release, which holds no
+build of a branch. `ENDEAVOR_BIN` names a binary to run instead:
+
+```sh
+ENDEAVOR_BIN=$PWD/target/debug/endeavor claude --plugin-dir claude-plugin
+```
+
+The launcher then runs `$ENDEAVOR_BIN mcp ...` and fetches nothing. Run
+`scripts/plugins.sh sync` first if `scripts/` or `plugin/skills/` changed;
+`scripts/plugins.sh check` (which CI runs) fails when a plugin folder's copy
+differs.
+
 ## Runtime tests against real Julia
 
 `crates/endeavor-mcp/tests/e2e_julia.rs` starts the helper and the core
