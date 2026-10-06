@@ -17,9 +17,10 @@
 # and with no --key BASE/.newest is set to the key LATEST named. --quiet
 # writes everything to stderr, since stdout belongs to the MCP server.
 #
-# ENDEAVOR_RELEASE_URL replaces the release's address (for tests; file:// works).
-# The checksum file comes from the same release as the binary, so the check
-# catches a damaged download and not a tampered release.
+# ENDEAVOR_RELEASE_URL replaces the release's address (for tests and
+# development; file:// works). The checksum file comes from the same release as
+# the binary, so the check catches a damaged download and not a tampered
+# release.
 set -eu
 
 release=${ENDEAVOR_RELEASE_URL:-https://github.com/jowch/EndeavorMCP/releases/download/helpers}
@@ -32,6 +33,13 @@ quiet=
 fail() {
   echo "install.sh: $*" >&2
   exit 1
+}
+
+# A build's key is hexadecimal; it is used as a folder name.
+is_key() {
+  case $1 in
+    '' | *[!0-9a-fA-F]*) return 1 ;;
+  esac
 }
 
 while [ $# -gt 0 ]; do
@@ -68,9 +76,9 @@ while [ $# -gt 0 ]; do
 done
 
 [ -z "$quiet" ] || exec 1>&2
-case $key in
-  *[!0-9a-fA-F]*) fail "--key '$key' isn't a build's key." ;;
-esac
+if [ -n "$key" ] && ! is_key "$key"; then
+  fail "--key '$key' isn't a build's key."
+fi
 default_dir=
 if [ -n "$into" ]; then
   dir=$into
@@ -106,6 +114,32 @@ if [ "$os" = windows ]; then
   suffix=.exe
 fi
 
+# limited SECONDS COMMAND...: COMMAND, given up on after SECONDS. Without
+# `timeout`, a watchdog ends it and then ends itself and its sleep.
+limited() {
+  secs=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+    return
+  fi
+  "$@" &
+  job=$!
+  (
+    trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+    sleep "$secs" &
+    nap=$!
+    wait "$nap"
+    kill "$job" 2>/dev/null
+  ) >/dev/null 2>&1 &
+  dog=$!
+  status=0
+  wait "$job" || status=$?
+  kill "$dog" 2>/dev/null || true
+  wait "$dog" 2>/dev/null || true
+  return "$status"
+}
+
 # fetch URL [FILE]: the body to FILE, or to stdout. A connection that doesn't
 # open in 15 s is given up on, and so is a file that takes over 15 minutes
 # (a build is about 30 MB). curl follows a redirect only to https; wget has no
@@ -118,7 +152,7 @@ fetch() {
       curl -fsSL --retry 2 --connect-timeout 15 --max-time 60 --proto-redir =https "$1"
     fi
   elif command -v wget >/dev/null 2>&1; then
-    if [ $# -ge 2 ]; then wget -q --tries=3 --connect-timeout=15 --timeout=60 -O "$2" "$1"; else wget -q --tries=3 --connect-timeout=15 --timeout=60 -O - "$1"; fi
+    if [ $# -ge 2 ]; then limited 900 wget -q --tries=3 --connect-timeout=15 --timeout=60 -O "$2" "$1"; else limited 60 wget -q --tries=3 --connect-timeout=15 --timeout=60 -O - "$1"; fi
   else
     fail "this needs curl or wget, and neither is on the PATH."
   fi
@@ -139,20 +173,23 @@ tmp=$(mktemp -d "$dir/.endeavor-install.XXXXXX") || fail "couldn't write in $dir
 trap 'rm -rf "$tmp"' EXIT
 trap 'rm -rf "$tmp"; exit 1' INT TERM HUP
 
+# The folder's .newest names the build the plugin runs when it isn't pinned.
+set_newest() {
+  printf '%s\n' "$key" >"$into/.newest.$$" && mv -f "$into/.newest.$$" "$into/.newest" || fail "couldn't write $into/.newest."
+}
+
 newest=
 if [ -z "$key" ]; then
   key=$(fetch "$release/LATEST") || fail "couldn't download $release/LATEST."
   key=$(printf '%s' "$key" | tr -d ' \t\r\n')
-  case $key in
-    '' | *[!0-9a-fA-F]*) fail "the release's LATEST file doesn't name a build ('$key')." ;;
-  esac
+  is_key "$key" || fail "the release's LATEST file doesn't name a build ('$key')."
   newest=1
 fi
 
 if [ -n "$into" ]; then
   dir=$into/$key
   if [ -x "$dir/$exe" ]; then
-    [ -z "$newest" ] || printf '%s\n' "$key" >"$into/.newest"
+    [ -z "$newest" ] || set_newest
     exit 0
   fi
   mkdir -p "$dir" || fail "couldn't create $dir."
@@ -173,7 +210,7 @@ chmod 755 "$tmp/$exe"
 mv -f "$tmp/$exe" "$dir/$exe" || fail "couldn't replace $dir/$exe."
 
 if [ -n "$into" ]; then
-  [ -z "$newest" ] || printf '%s\n' "$key" >"$into/.newest"
+  [ -z "$newest" ] || set_newest
   [ -n "$quiet" ] || echo "Installed endeavor (build $key, $platform) in $dir/$exe"
   exit 0
 fi

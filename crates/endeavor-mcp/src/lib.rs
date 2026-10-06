@@ -30,6 +30,7 @@ mod slurm;
 mod standalone;
 mod stopped;
 mod update;
+mod xdg;
 #[cfg(windows)]
 mod winproc;
 

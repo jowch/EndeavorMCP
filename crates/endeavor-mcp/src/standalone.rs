@@ -107,11 +107,11 @@ impl Env {
         #[cfg(windows)]
         let home = var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default().join("Endeavor");
         #[cfg(not(windows))]
-        let home = var("HOME").map(PathBuf::from).or_else(std::env::home_dir).unwrap_or_default();
+        let home = crate::xdg::absolute_var(read, "HOME").or_else(|| std::env::home_dir().filter(|h| h.is_absolute())).unwrap_or_default();
         Env {
             home,
-            state_home: var("XDG_STATE_HOME").map(PathBuf::from),
-            cache_home: var("XDG_CACHE_HOME").map(PathBuf::from),
+            state_home: crate::xdg::absolute_var(read, "XDG_STATE_HOME"),
+            cache_home: crate::xdg::absolute_var(read, "XDG_CACHE_HOME"),
             scratch: var("SCRATCH").filter(|s| s.starts_with('/')),
             cwd: std::env::current_dir().unwrap_or_default(),
             node: crate::hostname(),

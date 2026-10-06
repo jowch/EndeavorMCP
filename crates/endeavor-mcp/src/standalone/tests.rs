@@ -410,3 +410,20 @@ fn without_the_plugin_the_handshake_points_to_the_guide() {
     let read_only = |name: &str| lines[1]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
     assert_eq!([read_only("list_machines"), read_only("add_machine"), read_only("use_machine"), read_only("stop_machine")], [true, false, false, false]);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_relative_xdg_or_home_variable_is_ignored() {
+    let read = |name: &str| match name {
+        "HOME" => Some("/home/ada".to_owned()),
+        "XDG_STATE_HOME" => Some("state".to_owned()),
+        "XDG_CACHE_HOME" => Some("/var/cache/ada".to_owned()),
+        _ => None,
+    };
+    let env = Env::from_vars(&read);
+    assert_eq!(env.projects_path(), Path::new("/home/ada/.local/state/endeavor/projects.json"));
+    assert_eq!(env.links_dir(), Path::new("/home/ada/.local/state/endeavor/links"));
+    assert_eq!(env.helpers_dir(), Path::new("/var/cache/ada/endeavor/helpers"));
+    let relative_home = Env::from_vars(&|name| (name == "HOME").then(|| "home/ada".to_owned()));
+    assert!(relative_home.home.is_absolute() || relative_home.home.as_os_str().is_empty(), "{:?}", relative_home.home);
+}

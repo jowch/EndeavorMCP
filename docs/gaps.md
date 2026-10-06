@@ -174,11 +174,16 @@ _Started 2026-10-06, on the `client-library` branch._
   the skills is unknown. To close: install each and call a tool.
 - **The pinned key can only be set after a release from `main` holds that
   build.** Until then `release-key` is empty and the plugin takes the newest
-  build. Unpinned, a start uses the build it already has and does not ask the
-  network; only Claude Code's `SessionStart` hook (`--fetch-only`) looks for a
-  newer one, so in Codex and Antigravity an unpinned plugin keeps the first
-  build it fetched until the folder is deleted. To close: pin the key when
-  releasing.
+  build. Unpinned, a start uses the build it already has, and looks for a
+  newer one in the background at most once a day (and Claude Code's
+  `SessionStart` hook does at startup), so a newer build applies from the
+  start after it is found. If the agent kills the launcher's children, the
+  background check may never finish, and it is retried only the next day. To
+  close: pin the key when releasing.
+- **The pinned-key file could also carry the SHA-256 of each platform's
+  binary.** The plugin's check would then be independent of the release, and
+  would close "The checksum file comes from the same release as the binary"
+  for plugin installs. Not built, because no release holds this build yet.
 - **Skills in a plugin can be newer than the pinned binary's embedded copy.**
   The binary's own `notebook_guide` and the skills in the plugin can then
   disagree about the tools. To catch it: have `mcp --skills plugin` compare a
@@ -196,9 +201,18 @@ _Started 2026-10-06, on the `client-library` branch._
   the agent to ask the user to reconnect. Claude Code's hook usually avoids it,
   unless it doesn't run before the server starts (undocumented).
 - **A launcher killed while it holds the lock** leaves a lock the next start
-  takes over once its owner's pid is gone. A pid reused by another process
-  keeps the lock for the 25 s a start waits, and that start then fails with a
-  message to reconnect.
+  takes over once its owner's pid is gone, or once the lock is 20 minutes old
+  whatever its pid says. Until then a start waits up to 25 s and fails with a
+  message to reconnect. Two starts that take over one stale lock at the same
+  moment are told apart by a rename, but a start that judged the old lock
+  stale just as another made a new one can move the new one aside (it puts it
+  back unless a third start has made one); the worst result is a second
+  download, since each download has its own temporary folder.
+- **`ENDEAVOR_RELEASE_URL` is honoured by the launcher and the hook.** A
+  hostile value in one session can run whatever it points at in that session,
+  but it can't leave anything for others: the binary goes to
+  `bin-from/<its address>/`, which a normal start never reads. The variable
+  is for tests and development.
 - **`endeavor-setup` is also in the app's embedded plugin**, where it is
   never needed, since the app starts the server. It is left out of
   `notebook_guide`.
@@ -309,3 +323,10 @@ _Started 2026-10-06, on the `client-library` branch._
   pass; a panic or a kill skips that. To close: have each test's place end
   what it started when it is dropped, and check for leftovers at the start
   of a run.
+- **The launcher's tests don't pass under `busybox sh`.** Four launcher tests
+  and one install test fail there because busybox runs its own built-in
+  `uname`, `mkdir`, `timeout` and `wget` and ignores the fakes the tests put
+  on the `PATH`. The scripts themselves were not run by hand under busybox.
+- **`endeavor mcp` starts the runtime when it starts**, not at the first
+  notebook call, so a session that never uses a notebook still starts Julia
+  on this computer. To weigh in the architecture review.

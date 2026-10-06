@@ -536,10 +536,22 @@ user to reconnect and, with their go-ahead, to run the install line.
 `sh <plugin>/launch/endeavor-mcp.sh <arguments>`. It finds the binary for the
 plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
 
+- **Where.** `${XDG_DATA_HOME:-~/.local/share}/endeavor/bin/`, with
+  `XDG_DATA_HOME` counting only if it is an absolute path and `HOME` required
+  to be one otherwise (the launcher fails plainly without). With
+  `ENDEAVOR_RELEASE_URL` set (tests and development) the folder is
+  `bin-from/<checksum of the address>/` beside `bin/`, so such a release never
+  puts a binary where a normal start would run it, and `bin/.newest` is
+  never written from it.
 - **Build.** The first line of `launch/release-key`. With a key, that build is
   fetched if missing and never replaced. With none, the newest one already
-  there (`bin/.newest`) is run with no network use; the network is asked only
-  when none is there, and by `--fetch-only`.
+  there (`bin/.newest`, which must be a hex key like the others, else it is
+  ignored) is run with no network use; the network is asked when none is
+  there, by `--fetch-only`, and once a day after a start: the launcher
+  starts a `--fetch-only` of its own in the background (stdin, stdout and
+  stderr away from it, so it neither delays the server nor writes to its
+  output), recorded by `bin/.checked`. The result applies from the next
+  start. Claude Code's hook and the other harnesses thus converge.
 - **Fetching** is the plugin's own copy of `install.sh` with `--quiet --into
   <bin> [--key <key>]`: the download and its checksum check, then a rename
   into `<bin>/<key>/`, so a binary there is always complete. `--quiet` sends
@@ -547,17 +559,26 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
   printed there before the exec.
 - **Two starts at once** take a lock (`mkdir <bin>/.lock`, holding the owner's
   pid). The second waits up to 25 s for the first, then uses its binary. A
-  lock whose owner is gone is taken over.
+  lock whose owner is gone, or that is over 20 minutes old (a pid can name an
+  unrelated process), is taken over by renaming it aside, which only one
+  start's rename does. A lock folder that can't be made at all (the data
+  folder can't be written) fails at once and names the folder. A start
+  removes only a lock holding its own pid.
+- **Standard output.** The launcher moves stdout to stderr as its first act
+  and gives it back to the server at the exec, so no command it or
+  `install.sh` runs can write there.
 - **A download cut short** (the agent kills a server that takes over 30 s)
   leaves at most a temporary folder in `<bin>`, never a partial binary. The
   next start downloads again and removes temporary folders older than an hour.
 - **Failure** is non-zero with a last line starting `endeavor:`.
-- `--fetch-only` only gets the binary. Claude Code's `SessionStart` hook runs
-  it in the background so the download is usually done before the server
-  starts.
+- `--fetch-only` only gets the binary. Claude Code's `SessionStart` hook
+  (matcher `startup`, so not on resume, clear or compact) runs it in the
+  background so the download is usually done before the server starts.
+- Without `curl`, `install.sh` uses `wget` under `timeout`, or under a
+  watchdog of its own, so a download over 15 minutes is given up on.
 - `ENDEAVOR_BIN` names a binary to run instead (`docs/testing.md`).
-- `endeavor update` leaves a binary in `<bin>` alone. A newer build comes with
-  a newer plugin.
+- `endeavor update` leaves a binary in `<bin>` (or `bin-from/…`) alone and
+  says the plugin manages it, and how to fetch the newest now.
 
 `install.sh` also knows Git Bash on Windows (`uname -s` `MINGW*`, `MSYS*` or
 `CYGWIN*`: `windows-x86_64` and the `.exe` name).

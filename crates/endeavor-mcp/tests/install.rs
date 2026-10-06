@@ -1,6 +1,7 @@
 //! `scripts/install.sh` run as a user runs it, against a release that is a
 //! folder under `target/tmp` (`ENDEAVOR_RELEASE_URL=file://…`), with `HOME`
-//! there too.
+//! there too. `ENDEAVOR_TEST_SH` names the shell that runs the script (default
+//! `sh`).
 
 #![cfg(unix)]
 
@@ -54,8 +55,10 @@ impl Place {
 
     fn run(&self, args: &[&str], env: &[(&str, String)]) -> (bool, String, String) {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.sh");
-        let mut command = Command::new("sh");
-        command.arg(script).args(args).env("HOME", self.home()).env("ENDEAVOR_RELEASE_URL", format!("file://{}", self.dir.join("release").display())).env_remove("ENDEAVOR_INSTALL_DIR");
+        let shell = std::env::var("ENDEAVOR_TEST_SH").unwrap_or_else(|_| "sh".into());
+        let mut words = shell.split_whitespace();
+        let mut command = Command::new(words.next().unwrap());
+        command.args(words).arg(script).args(args).env("HOME", self.home()).env("ENDEAVOR_RELEASE_URL", format!("file://{}", self.dir.join("release").display())).env_remove("ENDEAVOR_INSTALL_DIR");
         for (name, value) in env {
             command.env(name, value);
         }

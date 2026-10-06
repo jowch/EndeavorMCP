@@ -20,6 +20,13 @@ The launcher then runs `$ENDEAVOR_BIN mcp ...` and fetches nothing. Run
 `scripts/plugins.sh check` (which CI runs) fails when a plugin folder's copy
 differs.
 
+`ENDEAVOR_RELEASE_URL` replaces the release's address in `install.sh` and the
+launcher. It is for tests and development only: the launcher keeps what it
+fetches from such a release in `bin-from/<address>/`, apart from the folder a
+normal start uses. `ENDEAVOR_TEST_SH` makes `tests/launcher.rs` and
+`tests/install.rs` run the scripts under another shell (`dash`, `bash`,
+`busybox sh`).
+
 ## Runtime tests against real Julia
 
 `crates/endeavor-mcp/tests/e2e_julia.rs` starts the helper and the core

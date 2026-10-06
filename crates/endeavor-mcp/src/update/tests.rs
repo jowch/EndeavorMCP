@@ -144,7 +144,10 @@ fn copies_the_app_cargo_or_a_plugin_installed_are_left_to_them() {
 
     here.exe = here.plugin_bin.join("0123456789ab/endeavor");
     let error = update(&here).unwrap_err();
-    assert!(error.contains("belongs to the endeavor plugin") && error.ends_with("Update the plugin instead."), "{error}");
+    assert!(error.contains("belongs to the Endeavor plugin, which manages it") && error.contains("at the start of a Claude Code session"), "{error}");
+    assert!(error.contains("endeavor-mcp.sh") && error.contains("--fetch-only") && !error.contains("pins this build"), "{error}");
+    here.exe = here.plugin_bin.with_file_name("bin-from/123-45/0123456789ab/endeavor");
+    assert!(update(&here).unwrap_err().contains("belongs to the Endeavor plugin"));
 
     here.exe = dir.join("bin/endeavor");
     here.platform = None;

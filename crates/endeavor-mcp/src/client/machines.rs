@@ -145,7 +145,8 @@ pub fn machines_path(var: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     if cfg!(windows) {
         return set("APPDATA").unwrap_or_default().join("Endeavor").join("machines.json");
     }
-    let config = set("XDG_CONFIG_HOME").filter(|p| p.is_absolute()).or_else(|| set("HOME").or_else(std::env::home_dir).map(|home| home.join(".config")));
+    let config = crate::xdg::absolute_var(var, "XDG_CONFIG_HOME")
+        .or_else(|| crate::xdg::absolute_var(var, "HOME").or_else(|| std::env::home_dir().filter(|h| h.is_absolute())).map(|home| home.join(".config")));
     config.unwrap_or_default().join("endeavor").join("machines.json")
 }
 
