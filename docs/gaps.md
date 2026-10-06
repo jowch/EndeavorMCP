@@ -92,7 +92,8 @@ _Started 2026-10-06, on the `client-library` branch._
   one run in six: a job cancelled from outside was reported with no reason,
   because the helper asked while Slurm still listed the job as running or
   completing, and gave up after 1.5 s. The helper now waits up to 10 s for
-  the job's final state. The slow case did not come up again in eight runs,
+  the job's final state, except when the runtime already said how it ended
+  (then it tries three times, 1.5 s, as before). The slow case did not come up again in eight runs,
   so the fix is not shown by a run.
 - **A queued job has no id in the link's status until it is submitted by
   this link.** A link that re-attaches to a job already queued shows `queue`
@@ -127,7 +128,8 @@ _Started 2026-10-06, on the `client-library` branch._
 - **`endeavor update` on macOS and Windows has never run.** The logic is the
   Linux code with other asset names, and the Windows rename-aside is tested
   on Linux with the same function; `cfg(windows)` paths are compile-checked.
-  A stale `endeavor.exe.old` is removed only by a later `update` or install.
+  The old binary moved aside (`endeavor.exe.old-<pid>`) is removed only by a
+  later `update` or install, once nothing runs from it.
 - **The checksum file comes from the same release as the binary.** It guards
   against a damaged or cut-short download and not against a tampered
   release, and the same holds for the install scripts, `update` and the
@@ -146,9 +148,20 @@ _Started 2026-10-06, on the `client-library` branch._
 - **No helper for a Windows server or a platform other than the five.**
   The server's `uname` is what is asked for, and the release has no Windows
   server helper.
-- **Fetched helpers are never removed.** Each build's key adds a folder under
-  `<cache>/endeavor/helpers/` (about one binary each). To close: delete the
-  folders of other keys when a new one is fetched.
+- **Fetched helpers of other builds are removed** when a helper is fetched or
+  reused, with no regard for a link of an older build that is about to
+  send one: its connect fails ("couldn't open") and the next connect
+  fetches it again. On Windows a folder holding a locked file stays until a
+  later fetch.
+- **Downloads follow redirects to plain http under wget and PowerShell 5.1.**
+  curl is pinned to https for redirects; `wget` (used only where there is no
+  curl) and `Invoke-WebRequest` on 5.1 have no such switch, and only get time
+  limits. The SHA-256 check still applies, though it comes from the same
+  release. To close: follow redirects by hand and refuse a non-https one.
+- **A partly failed Helpers run replaces the checksum file** with one that
+  lists only the builds it published, so a macOS or Windows build published
+  by an earlier run of the same key stops being found until the next
+  successful run. The Linux builds are always in it.
 - **The setup skill that installs the binary when it is missing** is not
   built.
 

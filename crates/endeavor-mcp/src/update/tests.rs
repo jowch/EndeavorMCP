@@ -156,26 +156,49 @@ fn a_running_binary_is_renamed_aside_where_it_cant_be_overwritten() {
     std::fs::write(&exe, "old").unwrap();
     std::fs::write(&part, "new").unwrap();
     put_in_place(&part, &exe, true).unwrap();
-    assert_eq!((std::fs::read(&exe).unwrap(), std::fs::read(dir.join("endeavor.exe.old")).unwrap()), (b"new".to_vec(), b"old".to_vec()));
+    let aside = aside_name(&exe);
+    assert_eq!(aside, dir.join(format!("endeavor.exe.old-{}", std::process::id())));
+    assert_eq!((std::fs::read(&exe).unwrap(), std::fs::read(&aside).unwrap()), (b"new".to_vec(), b"old".to_vec()));
     assert!(!part.exists());
 
     // A new binary that can't be moved in puts the old one back.
-    std::fs::remove_file(dir.join("endeavor.exe.old")).unwrap();
+    std::fs::remove_file(&aside).unwrap();
     let error = put_in_place(&dir.join("missing"), &exe, true).unwrap_err();
     assert!(error.starts_with(&format!("Couldn't replace {}", exe.display())), "{error}");
     assert_eq!(std::fs::read(&exe).unwrap(), b"new");
-    assert!(!dir.join("endeavor.exe.old").exists());
+    assert!(!aside.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn an_update_removes_the_old_binary_an_earlier_one_left_aside() {
+fn asides_are_cleared_only_where_binaries_are_moved_aside() {
     let dir = scratch("leftover");
+    let exe = dir.join("endeavor.exe");
+    let names = ["endeavor.exe.old", "endeavor.exe.old-123", "endeavor.exe.old-4567"];
+    let others = ["endeavor.exe", "endeavor.exe.oldest", "endeavor.exe.part", "other.exe.old-1"];
+    for name in names.iter().chain(&others) {
+        std::fs::write(dir.join(name), "x").unwrap();
+    }
+    let left = || {
+        let mut found: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        found.sort();
+        found
+    };
+    clear_asides(&exe, false);
+    assert_eq!(left().len(), names.len() + others.len(), "not on Linux or macOS, where `endeavor.old` may be the user's");
+    clear_asides(&exe, true);
+    assert_eq!(left(), ["endeavor.exe", "endeavor.exe.oldest", "endeavor.exe.part", "other.exe.old-1"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_update_leaves_a_file_named_old_beside_the_binary() {
+    let dir = scratch("keeps-old");
     let here = here(&dir, release(&sha(NEW)));
     let old = dir.join("bin/endeavor.old");
-    std::fs::write(&old, "from an earlier update").unwrap();
+    std::fs::write(&old, "the user's own").unwrap();
     update(&here).unwrap();
-    assert!(!old.exists());
+    assert_eq!(std::fs::read(&old).unwrap(), b"the user's own");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

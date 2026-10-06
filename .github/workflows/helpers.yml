@@ -35,9 +35,23 @@ jobs:
     outputs:
       key: ${{ steps.key.outputs.key }}
     steps:
+      # build.rs embeds runtime/ and plugin/ as checked in; Windows would check them out with CRLF, and the key covers LF.
+      - name: Git
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
       - uses: actions/checkout@v4
       - id: key
-        run: echo "key=$(scripts/helpers.sh --key)" >> "$GITHUB_OUTPUT"
+        shell: bash
+        run: |
+          set -e
+          key=$(scripts/helpers.sh --key)
+          if [ -z "$key" ]; then
+            echo "scripts/helpers.sh --key printed no key." >&2
+            exit 1
+          fi
+          echo "key=$key" >> "$GITHUB_OUTPUT"
 
   build:
     name: ${{ matrix.platform }}
@@ -76,10 +90,20 @@ jobs:
             ext: .exe
             can_run: true
     steps:
+      # build.rs embeds runtime/ and plugin/ as checked in; Windows would check them out with CRLF, and the key covers LF.
+      - name: Git
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
       - uses: actions/checkout@v4
       - name: Toolchain
-        run: rustup target add ${{ matrix.target }}
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
       - name: Build
+        shell: bash
         run: cargo build --release --locked -p endeavor-mcp --target ${{ matrix.target }}
       - name: Stage
         shell: bash
@@ -92,6 +116,10 @@ jobs:
         shell: bash
         run: |
           binary=out/endeavor${{ matrix.ext }}
+          if [ -z "$ENDEAVOR_RELEASE_KEY" ]; then
+            echo "The build has no release key." >&2
+            exit 1
+          fi
           if [ "${{ matrix.can_run }}" = true ]; then
             "$binary" --version
             got=$("$binary" --version | sed -n 's/^release //p' | tr -d '\r')
@@ -109,12 +137,21 @@ jobs:
           path: out/endeavor${{ matrix.ext }}
           if-no-files-found: error
 
+  # Publishes the legs that built, as long as both Linux ones did (the app's
+  # servers need them), and ends red if any leg failed.
   publish:
     needs: [key, build]
+    if: ${{ !cancelled() && needs.key.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      # build.rs embeds runtime/ and plugin/ as checked in; Windows would check them out with CRLF, and the key covers LF.
+      - name: Git
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
@@ -124,7 +161,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           KEY: ${{ needs.key.outputs.key }}
         run: |
+          set -e
           key=$KEY
+          if [ -z "$key" ]; then
+            echo "There is no release key." >&2
+            exit 1
+          fi
+          for platform in linux-x86_64 linux-aarch64; do
+            if [ ! -f "dist/$platform/endeavor" ]; then
+              echo "The $platform build is missing, so nothing is published." >&2
+              exit 1
+            fi
+          done
           notes="endeavor for Linux, macOS and Windows, published by the Helpers workflow for each change to the helper's source. scripts/install.sh and scripts/install.ps1 install the newest build; scripts/helpers.sh downloads the Linux ones matching your checkout."
           mkdir -p publish
           for dir in dist/*/; do
@@ -144,3 +192,8 @@ jobs:
             echo "$key" > LATEST
             gh release upload helpers LATEST --clobber
           fi
+      - name: Fail if a build failed
+        if: ${{ needs.build.result != 'success' }}
+        run: |
+          echo "A build failed (the Linux builds were published, and so was any other that succeeded)." >&2
+          exit 1

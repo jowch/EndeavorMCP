@@ -1,3 +1,8 @@
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
+
 use super::*;
 
 const KEY: &str = "0123456789ab";
@@ -11,6 +16,35 @@ fn scratch(name: &str) -> PathBuf {
     dir.canonicalize().unwrap()
 }
 
+/// The `file://` address of `path` as curl wants it: on Windows `file:///D:/a/x`,
+/// from `D:\a\x` or the canonical `\\?\D:\a\x`, and `file://server/share/x` from a UNC path.
+fn file_url(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let path = match path.strip_prefix("//?/UNC/") {
+        Some(unc) => format!("//{unc}"),
+        None => path.strip_prefix("//?/").map_or(path.clone(), str::to_owned),
+    };
+    let encoded: String = path.bytes().map(|b| if b.is_ascii_alphanumeric() || b"/:-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    match encoded.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => format!("file:///{encoded}"),
+        _ if encoded.starts_with("//") => format!("file:{encoded}"),
+        _ => format!("file://{encoded}"),
+    }
+}
+
+/// The address of a folder on this computer.
+fn folder_url(folder: &Path) -> String {
+    file_url(&folder.display().to_string())
+}
+
+#[test]
+fn file_addresses_are_valid_on_every_platform() {
+    assert_eq!(file_url("/mnt/a b/target/tmp/x"), "file:///mnt/a%20b/target/tmp/x");
+    assert_eq!(file_url(r"\\?\D:\a\EndeavorMCP\target\tmp\release"), "file:///D:/a/EndeavorMCP/target/tmp/release");
+    assert_eq!(file_url(r"C:\Users\me\x y"), "file:///C:/Users/me/x%20y");
+    assert_eq!(file_url(r"\\?\UNC\server\share\release"), "file://server/share/release");
+}
+
 /// A release as a folder, with `HELPER` for linux-aarch64 whose checksum file says `sum`; its `file://` address.
 fn release(dir: &Path, sum: &str) -> String {
     let folder = dir.join("release");
@@ -18,7 +52,7 @@ fn release(dir: &Path, sum: &str) -> String {
     let name = asset_name(KEY, "linux-aarch64");
     std::fs::write(folder.join(format!("endeavor-{KEY}.sha256")), format!("{}  endeavor-{KEY}-linux-x86_64\n{sum}  {name}\n", sha256_hex(b"other"))).unwrap();
     std::fs::write(folder.join(name), HELPER).unwrap();
-    format!("file://{}", folder.display())
+    folder_url(&folder)
 }
 
 /// Everything under `dir`, as relative paths.
@@ -46,7 +80,7 @@ fn the_helper_is_fetched_checked_and_kept_for_the_owner() {
     assert_eq!(kept, cache.join(KEY).join("linux-aarch64/endeavor"));
     assert_eq!(std::fs::read(&kept).unwrap(), HELPER);
     assert_eq!(std::fs::read_to_string(cache.join(KEY).join("linux-aarch64/endeavor.sha256")).unwrap(), sha256_hex(HELPER));
-    assert_eq!(files(&cache), [KEY, &format!("{KEY}/linux-aarch64"), &format!("{KEY}/linux-aarch64/endeavor"), &format!("{KEY}/linux-aarch64/endeavor.sha256")]);
+    assert_eq!(files(&cache), [KEY, &format!("{KEY}/linux-aarch64"), &format!("{KEY}/linux-aarch64/endeavor"), &format!("{KEY}/linux-aarch64/endeavor.lock"), &format!("{KEY}/linux-aarch64/endeavor.sha256")]);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -68,7 +102,7 @@ fn a_kept_helper_is_used_again_without_downloading_unless_it_changed() {
     std::fs::write(&first, "changed on disk").unwrap();
     let error = fetch_helper("linux", "aarch64", Some(KEY), &url, &cache).unwrap_err();
     assert!(error.starts_with("Couldn't get the helper for linux aarch64 servers from the release"), "{error}");
-    assert!(!first.exists(), "a kept file that no longer matches is deleted");
+    assert_eq!(std::fs::read(&first).unwrap(), b"changed on disk", "a kept file is only replaced by a checked download");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -78,7 +112,7 @@ fn a_download_that_fails_its_checksum_is_refused_and_nothing_is_kept() {
     let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(b"something else")));
     let error = fetch_helper("linux", "aarch64", Some(KEY), &url, &cache).unwrap_err();
     assert!(error.contains("doesn't match its checksum") && error.ends_with("It was deleted."), "{error}");
-    assert_eq!(files(&cache), [KEY, &format!("{KEY}/linux-aarch64")]);
+    assert_eq!(files(&cache), [KEY, &format!("{KEY}/linux-aarch64"), &format!("{KEY}/linux-aarch64/endeavor.lock")]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -126,4 +160,86 @@ fn a_checksum_file_is_read_as_sha256sum_writes_it() {
     assert_eq!(checksum_for(sums, "endeavor-k-linux-x86_64").as_deref(), Some("ab12"));
     assert_eq!(checksum_for(sums, "endeavor-k-windows-x86_64.exe").as_deref(), Some("cd34"));
     assert_eq!(checksum_for(sums, "endeavor-k-linux-aarch64"), None);
+}
+
+/// A release served on 127.0.0.1 that counts the requests for each path.
+fn serve(files: HashMap<String, Vec<u8>>) -> (String, Arc<Mutex<HashMap<String, usize>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(HashMap::new()));
+    let counts = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let (files, counts) = (files.clone(), counts.clone());
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let path = request.split_whitespace().nth(1).unwrap_or("/").trim_start_matches('/').to_owned();
+                *counts.lock().unwrap().entry(path.clone()).or_default() += 1;
+                let mut stream = stream;
+                match files.get(&path) {
+                    Some(body) => {
+                        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                        let _ = stream.write_all(body);
+                    }
+                    None => drop(write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")),
+                }
+            });
+        }
+    });
+    (url, seen)
+}
+
+#[test]
+fn helpers_fetched_at_once_are_downloaded_once_and_all_valid() {
+    let dir = scratch("concurrent");
+    let cache = dir.join("cache");
+    let name = asset_name(KEY, "linux-aarch64");
+    let sums = format!("{}  {name}\n", sha256_hex(HELPER));
+    let (url, seen) = serve(HashMap::from([(format!("endeavor-{KEY}.sha256"), sums.into_bytes()), (name.clone(), HELPER.to_vec())]));
+    let paths: Vec<_> = (0..6)
+        .map(|_| {
+            let (url, cache) = (url.clone(), cache.clone());
+            std::thread::spawn(move || fetch_helper("linux", "aarch64", Some(KEY), &url, &cache))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|t| t.join().unwrap().unwrap())
+        .collect();
+    for path in &paths {
+        assert_eq!(path, &cache.join(KEY).join("linux-aarch64/endeavor"));
+        assert_eq!(std::fs::read(path).unwrap(), HELPER);
+    }
+    assert_eq!(seen.lock().unwrap().get(&name), Some(&1), "{:?}", seen.lock().unwrap());
+    assert!(files(&cache).iter().all(|f| !f.contains(".part")), "{:?}", files(&cache));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_folders_of_other_keys_are_removed_when_a_helper_is_fetched_or_reused() {
+    let dir = scratch("prune");
+    let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
+    let older = cache.join("ffffffffffff/linux-aarch64");
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::write(older.join("endeavor"), "old").unwrap();
+    fetch_helper("linux", "aarch64", Some(KEY), &url, &cache).unwrap();
+    assert!(!cache.join("ffffffffffff").exists());
+
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::remove_dir_all(dir.join("release")).unwrap();
+    let kept = fetch_helper("linux", "aarch64", Some(KEY), &url, &cache).unwrap();
+    assert!(kept.exists() && !cache.join("ffffffffffff").exists());
+
+    // A failed fetch leaves the others alone.
+    std::fs::create_dir_all(&older).unwrap();
+    fetch_helper("linux", "aarch64", Some("eeeeeeeeeeee"), &url, &cache).unwrap_err();
+    assert!(older.exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -69,12 +69,19 @@ case $arch in
 esac
 platform=$os-$arch
 
-# fetch URL [FILE]: the body to FILE, or to stdout.
+# fetch URL [FILE]: the body to FILE, or to stdout. A connection that doesn't
+# open in 15 s is given up on, and so is a file that takes over 15 minutes
+# (a build is about 30 MB). curl follows a redirect only to https; wget has no
+# such limit.
 fetch() {
   if command -v curl >/dev/null 2>&1; then
-    if [ $# -ge 2 ]; then curl -fsSL --retry 2 -o "$2" "$1"; else curl -fsSL --retry 2 "$1"; fi
+    if [ $# -ge 2 ]; then
+      curl -fsSL --retry 2 --connect-timeout 15 --max-time 900 --proto-redir =https -o "$2" "$1"
+    else
+      curl -fsSL --retry 2 --connect-timeout 15 --max-time 60 --proto-redir =https "$1"
+    fi
   elif command -v wget >/dev/null 2>&1; then
-    if [ $# -ge 2 ]; then wget -q -O "$2" "$1"; else wget -q -O - "$1"; fi
+    if [ $# -ge 2 ]; then wget -q --tries=3 --connect-timeout=15 --timeout=60 -O "$2" "$1"; else wget -q --tries=3 --connect-timeout=15 --timeout=60 -O - "$1"; fi
   else
     fail "this needs curl or wget, and neither is on the PATH."
   fi

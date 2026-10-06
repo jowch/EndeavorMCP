@@ -72,7 +72,7 @@ impl Running {
         self.link.kill();
         let reason = match stopped::why(dir, stopped::Of::Runtime(self.pid)) {
             Some(how) => Some(stopped_text(how)),
-            None => end_reason(&self.job, dir),
+            None => end_reason(&self.job, dir, !said.as_ref().is_some_and(|(status, _)| exited_by_itself(status))),
         };
         // The job ends with Julia (its script execs it); make sure.
         scancel(&self.job);
@@ -388,7 +388,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
                 if let Some(how) = stopped::why(dir, stopped::Of::Job(job)) {
                     break Err(ToApp::StartFailed { message: format!("The start was stopped. {}", stopped_text(how)) });
                 }
-                let reason = end_reason(job, dir).unwrap_or("Its Slurm job ended.");
+                let reason = end_reason(job, dir, true).unwrap_or("Its Slurm job ended.");
                 let tail = log_tail(&dir.join("runtime.log"));
                 let said = tail.iter().rev().find(|l| !l.trim().is_empty()).map(|l| format!(" Its last output: {}", l.trim())).unwrap_or_default();
                 forget(dir, job);
@@ -583,16 +583,25 @@ fn scancel(job: &str) {
     let _ = Command::new("scancel").arg(job).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
+/// Whether a runtime's exit status says it exited on its own, with a code. A
+/// signal (or an exit nobody saw) may be Slurm ending the job, which the job's
+/// state says and the status doesn't.
+fn exited_by_itself(status: &str) -> bool {
+    status.starts_with("exit status:")
+}
+
 /// Why `job` ended, if Slurm (or its last words in the log) says: `sacct`,
-/// else `squeue` while it still lists finished jobs, else the log.
-fn end_reason(job: &str, dir: &Path) -> Option<&'static str> {
+/// else `squeue` while it still lists finished jobs, else the log. A job
+/// that still reads RUNNING or COMPLETING is waited for, up to 10 s, if
+/// `patient`.
+fn end_reason(job: &str, dir: &Path, patient: bool) -> Option<&'static str> {
     let run = |program: &str, args: &[&str]| -> Option<String> {
         let output = Command::new(program).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
         output.status.success().then(|| String::from_utf8_lossy(&output.stdout).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_owned())
     };
     // sacct can lag the job's end by a moment, and a job on its way out still
     // reads RUNNING or COMPLETING, which hides why it ends, for a few seconds.
-    for tries in 0..20 {
+    for tries in 0..if patient { 20 } else { 3 } {
         if let Some(state) = run("sacct", &["-j", job, "-X", "-n", "-P", "-o", "State"]) {
             if let Some(text) = s::ended_text(&state) {
                 return Some(text);
@@ -713,4 +722,16 @@ fn exec(mut command: Command) -> std::io::Error {
 #[cfg(windows)]
 fn exec(_command: Command) -> std::io::Error {
     std::io::ErrorKind::Unsupported.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_exit_with_a_code_is_the_runtimes_own() {
+        assert!(exited_by_itself("exit status: 1"));
+        assert!(!exited_by_itself("signal: 15 (SIGTERM)"));
+        assert!(!exited_by_itself("exited"));
+    }
 }

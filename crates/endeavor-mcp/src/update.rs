@@ -104,8 +104,7 @@ fn update(here: &Here) -> Result<String, String> {
         ));
     };
 
-    // A Windows update leaves the old binary beside the new one, since a running exe can't be replaced; it is gone once it isn't running.
-    let _ = std::fs::remove_file(aside_name(exe));
+    clear_asides(exe, cfg!(windows));
     let release = here.release.trim_end_matches('/');
     let key = String::from_utf8_lossy(&download(&format!("{release}/LATEST"), None)?).trim().to_owned();
     if key.is_empty() || !key.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -161,11 +160,25 @@ fn install(url: &str, part: &Path, sha256: &str, exe: &Path) -> Result<Option<St
     Ok(build)
 }
 
-/// Where `put_in_place` moves a running binary that can't be overwritten.
+/// Where `put_in_place` moves a running binary that can't be overwritten: a
+/// name of its own, since an earlier one may still be running from its aside.
 fn aside_name(exe: &Path) -> PathBuf {
     let mut name = exe.file_name().unwrap_or_default().to_owned();
-    name.push(".old");
+    name.push(format!(".old-{}", std::process::id()));
     exe.with_file_name(name)
+}
+
+/// With `aside` (Windows), remove the binaries earlier updates moved aside
+/// that no process is running from any more; a running one can't be removed.
+fn clear_asides(exe: &Path, aside: bool) {
+    let Some((dir, name)) = aside.then(|| exe.parent().zip(exe.file_name())).flatten() else { return };
+    let prefix = format!("{}.old", name.to_string_lossy());
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let found = entry.file_name().to_string_lossy().into_owned();
+        if found == prefix || found.strip_prefix(&prefix).is_some_and(|rest| rest.starts_with('-')) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Make `part` the binary `exe`. A rename within one folder is atomic, and a
