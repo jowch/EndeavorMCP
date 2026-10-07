@@ -33,6 +33,21 @@ use serde::{Deserialize, Serialize};
 /// A frame larger than this is corrupt input, not a message.
 pub const MAX_FRAME: usize = 16 << 20;
 
+/// The number of this protocol: the frames, [`ToApp`] and [`ToHelper`]. The
+/// helper says it in [`ToApp::Hello`]. Raise it when a client and a helper of the
+/// previous number can no longer work together: a message or field one of them
+/// needs and the other would not understand, or one whose meaning changed.
+/// Adding an optional field or a message that an old peer may ignore does not
+/// raise it. A helper that says no number (`Hello` without `protocol`) is 0.
+///
+/// 1: `StartRuntime` and `Stop` carry an `id` and every answer to one names it.
+/// The id-less forms are gone, not kept beside the new ones: a client and its
+/// helper are always one build (the bootstrap runs `<root>/<build>/endeavor`, and
+/// a local helper is the client's own binary), so they change together. The
+/// Endeavor app has its own copy of the client, pinned to an older helper
+/// build, and is unaffected until it adopts this library.
+pub const PROTOCOL: u32 = 1;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
     Open { id: u32 },
@@ -118,6 +133,9 @@ fn invalid(message: String) -> io::Error {
 pub enum ToApp {
     /// The helper is up. File requests work from now on.
     Hello {
+        /// The helper's [`PROTOCOL`]; absent from a helper that predates it, so 0.
+        #[serde(default)]
+        protocol: u32,
         version: String,
         /// The machine the helper runs on.
         node: String,
@@ -130,7 +148,9 @@ pub enum ToApp {
         #[serde(default)]
         uploads: bool,
     },
-    /// A line of the runtime's log while it starts, or of Julia's download.
+    /// A line of the runtime's log while it starts, or of Julia's download. A
+    /// start's progress (this, `FoundJulia`, `Submitted`, `Queued`) names no
+    /// id: only one start is under way at a time, and the answer that ends it names it.
     Progress { line: String },
     /// The julia the helper starts the runtime with (sent only when it starts one).
     FoundJulia { path: String, version: String },
@@ -139,8 +159,10 @@ pub enum ToApp {
     /// The job waits in the queue: its state (PENDING, CONFIGURING) and Slurm's
     /// reason; then once, state RUNNING and (as `reason`) the node it got.
     Queued { job: String, state: String, reason: String },
-    /// The runtime is up and streams can open.
+    /// The runtime is up and streams can open: the answer to the `StartRuntime`
+    /// with this id. (The relay on a job's node, which has no request, says it with id 0.)
     Ready {
+        id: u32,
         /// How the runtime was started: "process" or "slurm".
         launcher: String,
         /// The machine the runtime runs on.
@@ -154,22 +176,29 @@ pub enum ToApp {
         #[serde(default)]
         job: Option<slurm::Job>,
     },
-    /// The runtime couldn't start (running on another node, …); the helper
-    /// stays connected, so `StartRuntime` can try again.
-    StartFailed { message: String },
-    /// No Julia was found, and the `StartRuntime` didn't allow downloading one:
+    /// The runtime couldn't start (running on another node, …): the answer to the
+    /// `StartRuntime` with this id. The helper stays connected, so
+    /// `StartRuntime` can try again.
+    StartFailed { id: u32, message: String },
+    /// No Julia was found, and the `StartRuntime` with this id didn't allow downloading one:
     /// nothing was started or downloaded. `offer` says what a download would
     /// be (the version, its size, and where it would go). The helper stays
     /// connected, so `StartRuntime` can try again, allowing the download.
-    NoJulia { offer: String },
-    /// The runtime exited; the helper stays connected.
+    NoJulia { id: u32, offer: String },
+    /// The runtime exited while the `StartRuntime` with this id waited for it:
+    /// that start's answer. A runtime that exits later is `Died`.
+    StartDied { id: u32, status: String, log_tail: Vec<String> },
+    /// A `Stop` ended the `StartRuntime` with this id before it was ready: that
+    /// start's answer, sent before the `Stopped` that answers the `Stop`.
+    StartCancelled { id: u32 },
+    /// The runtime exited, with no request waiting for it; the helper stays connected.
     Died { status: String, log_tail: Vec<String> },
-    /// The runtime stopped as the app asked; the helper stays connected.
-    Stopped,
+    /// The runtime stopped as the `Stop` with this id asked; the helper stays connected.
+    Stopped { id: u32 },
     /// The runtime did not stop, and why; it is as it was and the helper stays
     /// connected. The helper answers each `Stop` with one `Stopped` or one
-    /// `NotStopped`.
-    NotStopped { message: String },
+    /// `NotStopped`, naming its id.
+    NotStopped { id: u32, message: String },
     /// Another client took over this runtime; the helper exits.
     Replaced,
     /// The answer to `ToHelper::Files` with the same id.
@@ -185,6 +214,10 @@ pub enum ToHelper {
     /// Attach to the runtime, starting it if it isn't running. On a cluster,
     /// `job` says what to submit.
     ///
+    /// `id` is the client's own; the answer names it (see `ToApp`), and the helper
+    /// answers each request once. Ids are the client's to keep apart: one in use
+    /// by a request still waiting must not be used again.
+    ///
     /// `download_julia` false says the helper must not download Julia: when it
     /// finds none it answers `NoJulia`. Absent means true, as before the field
     /// existed, and a true is not sent. A helper from before the field would
@@ -192,6 +225,7 @@ pub enum ToHelper {
     /// its own build: the bootstrap script runs `<root>/<build>/endeavor` and
     /// installs that first if it is missing, so the helper is never another build's.
     StartRuntime {
+        id: u32,
         #[serde(default)]
         job: Option<slurm::JobRequest>,
         #[serde(default = "allowed", skip_serializing_if = "is_allowed")]
@@ -199,7 +233,8 @@ pub enum ToHelper {
     },
     /// Stop the runtime and stay connected: the attached one, else the one
     /// recorded in the state folder, or on a cluster the job waiting for it.
-    Stop,
+    /// A start under way ends with its own answer, then this is answered.
+    Stop { id: u32 },
     /// Exit and leave the runtime running.
     Detach,
     Files { id: u32, request: files::Request },
@@ -214,6 +249,14 @@ fn is_allowed(allowed: &bool) -> bool {
 }
 
 impl ToApp {
+    /// The id of the request this answers, if it answers one.
+    pub fn answers(&self) -> Option<u32> {
+        match self {
+            ToApp::Ready { id, .. } | ToApp::StartFailed { id, .. } | ToApp::NoJulia { id, .. } | ToApp::StartDied { id, .. } | ToApp::StartCancelled { id } | ToApp::Stopped { id } | ToApp::NotStopped { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
+
     pub fn frame(&self) -> Frame {
         Frame::Control(serde_json::to_vec(self).expect("serializable"))
     }
@@ -252,7 +295,7 @@ mod tests {
             Frame::Data { id: 7, bytes: Vec::new() },
             Frame::Data { id: 8, bytes: (0..=255).cycle().take(70_000).collect() },
             Frame::Close { id: 7 },
-            ToHelper::Stop.frame(),
+            ToHelper::Stop { id: 1 }.frame(),
             ToApp::Died { status: "signal: 9".into(), log_tail: vec!["a".into(), "b".into()] }.frame(),
         ]
     }
@@ -287,6 +330,7 @@ mod tests {
     #[test]
     fn control_messages_are_tagged_json() {
         let ready = ToApp::Ready {
+            id: 4,
             launcher: "process".into(),
             node: "labbox3".into(),
             pid: 81234,
@@ -304,19 +348,26 @@ mod tests {
         assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Detach"}"#).unwrap(), ToHelper::Detach);
         assert_eq!(serde_json::from_str::<ToApp>(r#"{"type":"Replaced"}"#).unwrap(), ToApp::Replaced);
-        let not_stopped = ToApp::NotStopped { message: "Julia was not stopped.".into() };
+        let not_stopped = ToApp::NotStopped { id: 2, message: "Julia was not stopped.".into() };
         let Frame::Control(json) = not_stopped.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&json).unwrap()["type"], "NotStopped");
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), not_stopped);
-        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime"}"#).unwrap(), ToHelper::StartRuntime { job: None, download_julia: true });
-        let forbidden = ToHelper::StartRuntime { job: None, download_julia: false };
-        assert_eq!(serde_json::to_string(&forbidden).unwrap(), r#"{"type":"StartRuntime","job":null,"download_julia":false}"#);
-        assert_eq!(serde_json::to_string(&ToHelper::StartRuntime { job: None, download_julia: true }).unwrap(), r#"{"type":"StartRuntime","job":null}"#, "what an older helper gets");
-        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","download_julia":false}"#).unwrap(), forbidden);
-        let no_julia = ToApp::NoJulia { offer: "Julia 1.12.6, about 190 MB".into() };
+        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","id":5}"#).unwrap(), ToHelper::StartRuntime { id: 5, job: None, download_julia: true });
+        let forbidden = ToHelper::StartRuntime { id: 5, job: None, download_julia: false };
+        assert_eq!(serde_json::to_string(&forbidden).unwrap(), r#"{"type":"StartRuntime","id":5,"job":null,"download_julia":false}"#);
+        assert_eq!(serde_json::to_string(&ToHelper::StartRuntime { id: 5, job: None, download_julia: true }).unwrap(), r#"{"type":"StartRuntime","id":5,"job":null}"#, "what an older helper gets");
+        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","id":5,"download_julia":false}"#).unwrap(), forbidden);
+        let no_julia = ToApp::NoJulia { id: 5, offer: "Julia 1.12.6, about 190 MB".into() };
         let Frame::Control(json) = no_julia.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), no_julia);
+        assert_eq!(ToApp::Stopped { id: 3 }.answers(), Some(3));
+        assert_eq!(ToApp::StartCancelled { id: 4 }.answers(), Some(4));
+        assert_eq!(ToApp::Died { status: String::new(), log_tail: Vec::new() }.answers(), None);
+        assert_eq!(ToApp::Progress { line: String::new() }.answers(), None);
+        let hello = ToApp::Hello { protocol: PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: true };
+        let Frame::Control(json) = hello.frame() else { panic!() };
+        assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), hello);
         let old_hello = r#"{"type":"Hello","version":"0.1.0","node":"labbox3","home":"/home/ada"}"#;
-        assert!(matches!(serde_json::from_str::<ToApp>(old_hello).unwrap(), ToApp::Hello { slurm: false, uploads: false, .. }), "a helper from before uploads");
+        assert!(matches!(serde_json::from_str::<ToApp>(old_hello).unwrap(), ToApp::Hello { protocol: 0, slurm: false, uploads: false, .. }), "a helper from before uploads and the protocol number");
     }
 }

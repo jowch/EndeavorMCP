@@ -78,10 +78,10 @@ impl Failure {
     }
 
     /// What the helper tells its client.
-    pub fn into_app(self) -> wire::ToApp {
+    pub fn into_unstarted(self) -> crate::Unstarted {
         match self {
-            Failure::Missing(offer) => wire::ToApp::NoJulia { offer },
-            Failure::Failed(message) => wire::ToApp::StartFailed { message },
+            Failure::Missing(offer) => crate::Unstarted::NoJulia(offer),
+            Failure::Failed(message) => crate::Unstarted::Failed(message),
         }
     }
 }

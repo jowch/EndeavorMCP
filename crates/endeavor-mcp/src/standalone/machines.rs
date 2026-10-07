@@ -81,7 +81,7 @@ impl Deadline {
         link.status_within(self.left().clamp(Duration::from_secs(1), link::CALL_WAIT))
     }
 
-    /// A start or attach request to `link`, sent whatever its build: `Relay::ask` is the one that holds back.
+    /// A start or attach request to `link`, sent whatever its protocol: `Relay::ask` is the one that holds back.
     fn send(self, link: &Link, ask: Ask, install: bool) -> Result<link::Status, String> {
         match ask {
             Ask::Attach => link.attach_within(install, self.call_wait()?),
@@ -299,7 +299,7 @@ fn needs_install_result(name: &str, status: &link::Status, tool: &str) -> Value 
     result
 }
 
-/// A link whose build isn't this front's is replaced (quit, then started again) only when no
+/// A link whose protocol isn't this front's is replaced (quit, then started again) only when no
 /// runtime hangs on it, since a new link has another port and the user's browser page would break.
 fn replaceable(status: &link::Status) -> bool {
     status.runtime.is_none() && matches!(status.state, State::Connecting | State::Connected | State::Failed | State::NeedsInstall)
@@ -669,12 +669,13 @@ impl Relay {
     }
 
     /// The rule for a link, which every path to a link goes through before it asks for a runtime.
-    /// A link from another build is replaced (quit, then started again) only when no runtime
-    /// hangs on it (`replaceable`), since a new link has another port and the user's browser page
-    /// would break. Else it is used as it is, and the third is why; `ask` sends it no start,
-    /// since it may not know `only_running`. `status` is the link's.
+    /// A link of the same control protocol is used fully, whatever its build. One of another
+    /// protocol is replaced (quit, then started again) only when no runtime hangs on it
+    /// (`replaceable`), since a new link has another port and the user's browser page would
+    /// break. Else it is used as it is, and the third is why; `ask` sends it no start, since it
+    /// may not know `only_running`. `status` is the link's.
     fn link_rule(&self, id: &str, name: &str, link: Link, status: link::Status, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
-        if link.build == crate::embedded::BUILD_VERSION {
+        if link.protocol == link::PROTOCOL {
             return Ok((link, status, None));
         }
         let (link, status) = if replaceable(&status) {
@@ -685,21 +686,21 @@ impl Relay {
         } else {
             (link, status)
         };
-        if link.build == crate::embedded::BUILD_VERSION {
+        if link.protocol == link::PROTOCOL {
             return Ok((link, status, None));
         }
         let note = format!(
-            "The link to {name} was started by another build of endeavor ({}) and goes on, because a runtime is in use through it and a new link would change the address of the user's browser page. It is replaced when it ends.",
+            "The link to {name} was started by another build of endeavor ({}) that works differently from this one, and goes on, because a runtime is in use through it and a new link would change the address of the user's browser page. It is replaced when it ends.",
             link.build
         );
         Ok((link, status, Some(note)))
     }
 
-    /// Ask `link` to start the runtime or attach to it. A link from another build gets nothing: it
+    /// Ask `link` to start the runtime or attach to it. A link of another protocol gets nothing: it
     /// may not know `only_running`, and would then start what was only to be attached to (on a
     /// cluster, a job nobody agreed to). False when nothing was sent. Every start goes through here.
     pub(super) fn ask(&self, link: &Link, ask: Ask, install: bool, deadline: Deadline) -> Result<bool, String> {
-        if link.build != crate::embedded::BUILD_VERSION {
+        if link.protocol != link::PROTOCOL {
             return Ok(false);
         }
         deadline.send(link, ask, install)?;

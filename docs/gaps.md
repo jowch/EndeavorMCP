@@ -44,8 +44,16 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Stopping and the client
 
-- **Two `Stop`s sent from two threads at once**: queueing and sending are
-  one step now, with no test, since it needs a controlled race.
+- **A stop that gave up waiting** drops the helper's late answer, since its
+  id is no longer waited for. The runtime is watched again at that point, so a
+  late refusal leaves it watched; a late success sends no death notice.
+- **A second `Stop` said while a stop waits for the start lock** is answered
+  by its own run after the first, so it may wait for the lock again (up to the
+  stop limit) where it used to share the first's answer.
+- **A second `StartRuntime` while one is under way** is answered
+  `StartFailed` ("already starting"), not queued.
+- **A start's progress messages name no id.** Only one start is under way at
+  a time, and the answer that ends it names its id.
 - **A dropped channel closes the helper's input** instead of sending
   `Detach`. Intended: the helper then applies its own rule
   (`--quit-with-client`). Two effects to know: partly written uploads are

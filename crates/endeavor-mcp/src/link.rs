@@ -10,7 +10,7 @@
 //! `ensure_with_install`). It reads the machine from the machines file
 //! (`client::MachinesFile`) and keeps, in `<state home>/endeavor/links/ID/`:
 //!
-//! - `link.json`: its pid, control port, token and build. Present while it runs.
+//! - `link.json`: its pid, control port, token, build and control `PROTOCOL`. Present while it runs.
 //! - `link.lock`: held by `ensure` while it looks for a link or starts one.
 //! - `link.log`: what the link and its `ssh` said.
 //!
@@ -65,6 +65,16 @@ mod run;
 mod tests;
 
 pub(crate) use run::main;
+
+/// The number of the link's control interface: its endpoints, bodies and `Status`.
+/// It is in `link.json` and in `Status`, and a front uses a link fully (sends it starts,
+/// attaches and installs) when the link's number is its own, whatever build the
+/// link is from. Raise it when a front and a link of the previous number can no
+/// longer work together: a request the old one would misread, an answer it
+/// needs that the new one lacks, or a changed meaning. An optional field or an
+/// endpoint an old peer may ignore doesn't raise it. A record or status with no
+/// number is 0. It is apart from `wire::PROTOCOL`, which is the link's own talk with its helper.
+pub const PROTOCOL: u32 = 1;
 
 /// How long `ensure` waits for a new link to answer.
 const START_WAIT: Duration = Duration::from_secs(10);
@@ -154,6 +164,9 @@ pub struct Status {
     /// The link process and the build it is from.
     pub pid: u32,
     pub build: String,
+    /// The link's control `PROTOCOL`; 0 when the link says none.
+    #[serde(default)]
+    pub protocol: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -229,6 +242,8 @@ struct Record {
     port: u16,
     token: String,
     build: String,
+    #[serde(default)]
+    protocol: u32,
 }
 
 /// How `ensure` starts a link: the program, and variables added to the
@@ -274,10 +289,12 @@ pub struct Link {
     pub port: u16,
     pub token: String,
     pub pid: u32,
-    /// The build it is from. `ensure` uses a running link whatever its build; a
-    /// front that needs its own can `quit` the old one and `ensure` again,
-    /// which gives the browser a new port.
+    /// The build it is from, for showing. `ensure` uses a running link whatever
+    /// its build or protocol; a front that needs another can `quit` the old one
+    /// and `ensure` again, which gives the browser a new port.
     pub build: String,
+    /// Its control `PROTOCOL`; 0 for a record with none.
+    pub protocol: u32,
 }
 
 /// A machine that `add_machine` has not connected to yet is marked by a file of this name in its
@@ -461,7 +478,7 @@ fn look(dir: &Path, machine: &str) -> Found {
     if record.machine != machine || !crate::pid_alive(record.pid as i32, record.started) {
         return Found::None;
     }
-    let link = Link { machine: machine.to_owned(), port: record.port, token: record.token, pid: record.pid, build: record.build };
+    let link = Link { machine: machine.to_owned(), port: record.port, token: record.token, pid: record.pid, build: record.build, protocol: record.protocol };
     match link.status() {
         Ok(status) if status.machine == machine && status.pid == link.pid => Found::Link(link),
         _ => Found::Silent(link.pid),

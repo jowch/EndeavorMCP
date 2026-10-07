@@ -5,6 +5,7 @@ use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,7 @@ pub struct Helper {
     pub stdin: Stdin,
     pub mux: Arc<Mux>,
     pub control: Receiver<ToApp>,
+    ids: AtomicU32,
 }
 
 /// The helper's stdin, which a test can close while the mux still holds it.
@@ -45,7 +47,7 @@ impl Helper {
         std::thread::spawn(move || {
             let _ = m.run(stdout, |_, _| {}, |json| drop(tx.send(serde_json::from_slice(json).unwrap())));
         });
-        Helper { process, stdin, mux, control }
+        Helper { process, stdin, mux, control, ids: AtomicU32::new(1) }
     }
 
     pub fn next(&self) -> ToApp {
@@ -75,8 +77,22 @@ impl Helper {
     /// Hello, then ask for the runtime: its answer.
     pub fn start_runtime(&self) -> ToApp {
         self.hello();
-        self.send(ToHelper::StartRuntime { job: None, download_julia: true });
+        self.request_start(None, true);
         self.next()
+    }
+
+    /// Ask for the runtime: the request's id.
+    pub fn request_start(&self, job: Option<wire::slurm::JobRequest>, download_julia: bool) -> u32 {
+        let id = self.ids.fetch_add(1, Ordering::Relaxed);
+        self.send(ToHelper::StartRuntime { id, job, download_julia });
+        id
+    }
+
+    /// Ask for a stop: the request's id.
+    pub fn request_stop(&self) -> u32 {
+        let id = self.ids.fetch_add(1, Ordering::Relaxed);
+        self.send(ToHelper::Stop { id });
+        id
     }
 
     pub fn send(&self, message: ToHelper) {

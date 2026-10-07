@@ -197,6 +197,8 @@ fn one_link_serves_every_front_and_reaches_ready() {
     let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(place.record()).unwrap()).unwrap();
     assert_eq!((on_disk["pid"].as_u64(), on_disk["port"].as_u64(), on_disk["token"].as_str()), (Some(link.pid as u64), Some(link.port as u64), Some(link.token.as_str())));
     assert_eq!(on_disk["build"], endeavor_mcp::embedded::BUILD_VERSION);
+    assert_eq!((on_disk["protocol"].as_u64(), link.protocol), (Some(endeavor_mcp::link::PROTOCOL as u64), endeavor_mcp::link::PROTOCOL));
+    assert_eq!(link.status().unwrap().protocol, endeavor_mcp::link::PROTOCOL);
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(place.record()).unwrap().permissions().mode() & 0o777, 0o600);
 

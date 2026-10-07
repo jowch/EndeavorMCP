@@ -71,7 +71,7 @@ impl Drop for Runtime {
 impl Runtime {
     /// Ask for the runtime and wait until it's ready, however long Julia takes.
     fn start(&mut self) {
-        self.helper.send(ToHelper::StartRuntime { job: None, download_julia: true });
+        self.helper.request_start(None, true);
         let mut log = Vec::new();
         loop {
             match self.helper.next_within(Duration::from_secs(900)) {
@@ -85,10 +85,10 @@ impl Runtime {
 
     /// Stop the runtime, as the app's Restart Julia does first.
     fn stop(&self) {
-        self.helper.send(ToHelper::Stop);
+        let stop = self.helper.request_stop();
         loop {
             match self.helper.next_within(Duration::from_secs(60)) {
-                ToApp::Stopped => return,
+                ToApp::Stopped { id } if id == stop => return,
                 ToApp::Progress { .. } => {}
                 other => panic!("expected Stopped, got {other:?}"),
             }

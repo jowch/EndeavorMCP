@@ -12,6 +12,12 @@ fn ids_that_cannot_be_folders_on_every_system_are_refused() {
 }
 
 #[test]
+fn a_record_with_no_protocol_number_reads_as_0() {
+    let old = r#"{"machine": "lab", "pid": 7, "port": 1, "token": "t", "build": "b"}"#;
+    assert_eq!(serde_json::from_str::<Record>(old).unwrap().protocol, 0);
+}
+
+#[test]
 fn a_status_from_a_newer_link_still_reads() {
     let newer = r#"{
         "machine": "lab", "name": "lab", "state": "hibernating", "pid": 7, "build": "newer",
@@ -27,6 +33,7 @@ fn a_status_from_a_newer_link_still_reads() {
     assert_eq!((helper.bytes, helper.running), (None, None), "a size and a runtime of a shape this build doesn't know are left out");
     assert_eq!(status.hello.map(|h| (h.node, h.slurm)), Some(("n".to_owned(), false)), "what is missing has its default");
     assert_eq!(status.job.map(|j| j.id), Some("9".to_owned()));
+    assert_eq!(status.protocol, 0, "a status with no protocol number is older than any");
     // The words of the states this build knows are the ones it always had.
     for (word, state) in [("connecting", State::Connecting), ("needs_install", State::NeedsInstall), ("ready", State::Ready)] {
         assert_eq!(serde_json::from_str::<State>(&format!("\"{word}\"")).unwrap(), state);

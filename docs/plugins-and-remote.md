@@ -96,7 +96,7 @@ the library does (batch sign-in), sends its own binary as the helper when the
 server's platform is this computer's (and else the release's helper for that
 platform, see [Installing the binary](#installing-the-binary)), and starts the one loopback port that
 relays to the runtime. It keeps `links/<id>/link.json` (its pid, control
-port, token and build), `link.lock` and `link.log` in the state folder
+port, token, build and control protocol number), `link.lock` and `link.log` in the state folder
 (`~/.local/state/endeavor`, `%LOCALAPPDATA%\Endeavor` on Windows). The control
 interface is HTTP on a loopback port of its own, with the token from
 `link.json` as a bearer token. It refuses a Host that isn't loopback and any
@@ -105,7 +105,7 @@ request with an Origin.
 | Call | What it does |
 |---|---|
 | `GET /link/status` | `state` (connecting, connected, starting, queued, ready, failed), the last `step`, an `error`, what the helper said (`hello`), the `runtime` once ready (the listener's port, the runtime's token, the page URL), and for a job its `job` and `queue` |
-| `POST /link/start` | `{"job": …, "only_running": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true. A body with any other field is refused with HTTP 400, so that an older link never ignores a field a newer front adds. A front sends no start to a link of another build than its own: it replaces one that nothing hangs on, and uses one with a runtime as it is |
+| `POST /link/start` | `{"job": …, "only_running": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true. A body with any other field is refused with HTTP 400, so that an older link never ignores a field a newer front adds. A front uses a link of its own control protocol number (`link::PROTOCOL`, in `link.json` and the status; a missing number is 0) fully, whatever its build. To a link of another protocol it sends no start: it replaces one that nothing hangs on, and uses one with a runtime as it is |
 | `POST /link/stop` | Stop the runtime for every client, and say why it didn't. The link stays connected |
 | `POST /link/quit` | Remove the record, detach and exit. The record goes first, so a front that asks for a link right after gets a new one |
 
@@ -157,7 +157,7 @@ it has ended, and a notebook binding means nothing on another runtime.
 **What the front does with the link (built).** The front asks its link for its
 status every four minutes while its target is a machine, so the 8 hours count
 from the end of the last session. A call that finds the link gone starts it
-again and attaches to what runs. A link of another build than the front's is
+again and attaches to what runs. A link of another control protocol than the front's is
 used as it is, except that `use_machine` quits it and starts a new one when no
 runtime is attached through it (the new link has another port, and an open
 browser page would break); with a runtime attached it keeps the old link and the
@@ -238,9 +238,16 @@ in the queue, so a second helper waits for the same job.
 the idle stop and a job's time limit end a runtime. `stop_machine` is for
 when you ask, such as to give a cluster node back. It first says which
 other sessions were active lately, and the clients still attached are told
-the runtime was stopped from another connection. The helper answers each
-stop with `Stopped` or `NotStopped` and why, and the client waits 60 s for
-that. A stop waits 20 s for
+the runtime was stopped from another connection. Every `Stop` and `StartRuntime` carries an id the client chooses, and the
+helper answers each once, naming it: `Stopped` or `NotStopped` and why, and for
+a start `Ready`, `StartFailed`, `NoJulia`, `StartDied` or `StartCancelled`. A
+stop that ends a start under way is answered with its own `Stopped`, and the
+start with `StartCancelled`. The client waits 60 s for a stop's answer, and an
+answer that comes after it gave up is dropped by its id. The helper's `Hello`
+carries `wire::PROTOCOL`, which is raised when a client and a helper of the
+previous number can no longer work together. Client and helper change
+together (the helper is always this build's), and the Endeavor app's own copy
+of the client, pinned to an older helper, is unaffected until it adopts this library. A stop waits 20 s for
 `start.lock`, so it does not stop a runtime that another helper is still
 starting; it says so instead.
 
@@ -297,8 +304,9 @@ it with the relay.
     `Result<Runtime, StartError>`; `StartError::NoJulia` carries the offer.
     `client::start` is `start_with` with the download allowed and the error as
     a string.
-  - `ToApp::NotStopped` answers a `Stop` that didn't end the runtime, and
-    `Channel::stop()` returns a `Result`.
+  - `ToApp::NotStopped { id, .. }` answers a `Stop` that didn't end the runtime, and
+    `Channel::stop()` returns a `Result`. Requests carry ids and every answer
+    names one (`ToApp::answers`); `client::Hello` has the helper's `protocol`.
 
 Read from the code, not run.
 

@@ -15,6 +15,7 @@ the session that built it._
 
 - **Now, before the skills trial and the app:** P1, P2, P4 (with the
   `machines.json` fixes), N3, N4, and P5a.
+- **P1 is done:** request ids on `Stop` and `StartRuntime`, `wire::PROTOCOL` in `Hello`, and `link::PROTOCOL` in `link.json` and the status; fronts compare the protocol, not the build.
 - **P5b: no question on this computer.** Installing the plugin is the
   agreement to Julia and the packages it needs here. The question stays for
   servers.

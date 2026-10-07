@@ -268,11 +268,11 @@ attaches as for any start. If not it starts nothing, and the status is
 link for its status every four minutes (`ENDEAVOR_FRONT_PING_SECS` for tests),
 which counts as activity, so the link's 8 hours run from the end of the last
 session. A link that is gone is started again by the next call and attached to
-whatever runs. A link of another build than the front's is quit and started
+whatever runs. A link of another control protocol than the front's (`link::PROTOCOL`; a link of another build with the same protocol is used fully) is quit and started
 again only when no runtime hangs on it (a new link has a new port, and the
 browser's page would break); otherwise it is kept and the result says so. One
 function applies that rule to every link a front gets, for the tools and for a
-notebook call, before any start or attach is sent; a link of another build that
+notebook call, before any start or attach is sent; a link of another protocol that
 is kept is sent no start, since it may not know `only_running` and would start
 what was only to be attached to. The link refuses a start request with a field
 it doesn't know (HTTP 400). A front reads a status from a newer link: a state

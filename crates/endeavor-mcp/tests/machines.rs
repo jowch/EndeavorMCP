@@ -854,13 +854,14 @@ fn a_link_that_is_gone_is_started_again_by_the_next_call_and_attaches_to_the_run
 }
 
 #[test]
-fn a_link_from_another_build_is_replaced_only_when_nothing_hangs_on_it() {
+fn a_link_of_another_protocol_is_replaced_only_when_nothing_hangs_on_it() {
     let place = Place::new("build");
     place.add_lab();
     let other_build = |place: &Place| {
         let path = place.record("lab");
         let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         record["build"] = "an-older-build".into();
+        record["protocol"] = 0.into();
         std::fs::write(&path, record.to_string()).unwrap();
     };
     let idle = place.link("lab");
@@ -880,6 +881,92 @@ fn a_link_from_another_build_is_replaced_only_when_nothing_hangs_on_it() {
     assert_eq!(used["state"], "ready");
     assert!(used["message"].as_str().unwrap().contains("another build of endeavor (an-older-build)"), "{used}");
     assert_eq!(place.link("lab").pid, now.pid, "the same link, and so the same browser port");
+}
+
+#[test]
+fn a_link_of_another_build_with_the_same_protocol_is_used_fully_and_is_not_replaced() {
+    let place = Place::new("same-protocol");
+    place.add_lab();
+    let idle = place.link("lab");
+    wait_status(&idle, "connected", |s| s.state == State::Connected);
+    let path = place.record("lab");
+    let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(record["protocol"], endeavor_mcp::link::PROTOCOL);
+    record["build"] = "an-older-build".into();
+    std::fs::write(&path, record.to_string()).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["state"], "ready", "the link was sent the start: {used}");
+    assert!(!used.to_string().contains("another build"), "{used}");
+    let now = place.link("lab");
+    assert_eq!(now.pid, idle.pid, "the same link");
+    assert_eq!(now.build, "an-older-build");
+}
+
+/// A stand-in for a link that is busy (its state is `queued`, which is not replaceable) and keeps
+/// the requests it is sent: its record is written for `machine`, with `protocol`.
+struct FakeLink {
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// The process its record names, which the place ends with the links it finds.
+    process: std::process::Child,
+}
+
+impl FakeLink {
+    fn start(place: &Place, machine: &str, protocol: u32) -> FakeLink {
+        let process = Command::new("sleep").arg("600").spawn().unwrap();
+        let pid = process.id();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let status = json!({
+            "machine": machine, "name": machine, "state": "queued", "step": null, "error": null, "hello": null, "runtime": null,
+            "job": { "id": "7" }, "queue": { "state": "PENDING", "reason": "Priority" }, "pid": pid, "build": "an-older-build", "protocol": protocol,
+        });
+        let requests: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let heard = requests.clone();
+        std::thread::spawn(move || {
+            for connection in listener.incoming() {
+                let Ok(mut connection) = connection else { return };
+                let mut buffer = [0; 4096];
+                let n = connection.read(&mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                heard.lock().unwrap().push(request.lines().next().unwrap_or_default().to_owned());
+                let body = status.to_string();
+                let _ = write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        let record = json!({ "machine": machine, "pid": pid, "port": port, "token": "t", "build": "an-older-build", "protocol": protocol });
+        std::fs::create_dir_all(place.record(machine).parent().unwrap()).unwrap();
+        std::fs::write(place.record(machine), record.to_string()).unwrap();
+        FakeLink { requests, process }
+    }
+
+    fn starts(&self) -> usize {
+        self.requests.lock().unwrap().iter().filter(|line| line.starts_with("POST /link/start")).count()
+    }
+}
+
+impl Drop for FakeLink {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+
+#[test]
+fn a_link_of_the_same_protocol_is_sent_a_start_and_one_of_another_is_not() {
+    for (protocol, sent) in [(endeavor_mcp::link::PROTOCOL, true), (0, false)] {
+        let place = Place::new(&format!("start-protocol-{protocol}"));
+        place.add_lab();
+        let link = FakeLink::start(&place, "lab", protocol);
+        let mut front = place.front();
+        front.initialize();
+        let _ = front.call("use_machine", json!({ "machine": "lab" }));
+        assert_eq!(link.starts() > 0, sent, "protocol {protocol}: {:?}", link.requests.lock().unwrap());
+        // The place ends the local runtime by its record, which is written after the front answers.
+        wait_for("the local runtime to record itself", || recorded_pid(&place.local_state).is_some());
+        front.finish();
+    }
 }
 
 #[test]
@@ -1034,7 +1121,7 @@ fn a_queued_job_is_cancelled_only_when_the_user_agreed() {
 }
 
 #[test]
-fn an_idle_link_from_another_build_is_replaced_before_a_remembered_cluster_is_asked_about_a_job() {
+fn an_idle_link_of_another_protocol_is_replaced_before_a_remembered_cluster_is_asked_about_a_job() {
     let slurm = FakeSlurm::new("build-cluster");
     let place = Place::with("build-cluster", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
     place.add_hpc();
@@ -1043,6 +1130,7 @@ fn an_idle_link_from_another_build_is_replaced_before_a_remembered_cluster_is_as
     let path = place.record("hpc");
     let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     record["build"] = "an-older-build".into();
+    record["protocol"] = 0.into();
     std::fs::write(&path, record.to_string()).unwrap();
     std::fs::create_dir_all(place.dir.join("state-home/endeavor")).unwrap();
     let remembered = json!({ place.project.display().to_string(): { "machine": "hpc", "folder": null } });
@@ -1332,13 +1420,14 @@ fn the_agreement_to_the_helper_is_not_one_to_download_julia() {
 }
 
 #[test]
-fn add_machine_leaves_a_link_of_another_build_with_a_runtime_alone_and_replaces_an_idle_one() {
+fn add_machine_leaves_a_link_of_another_protocol_with_a_runtime_alone_and_replaces_an_idle_one() {
     let place = Place::new("add-build");
     place.add_lab();
     let other_build = |place: &Place| {
         let path = place.record("lab");
         let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         record["build"] = "an-older-build".into();
+        record["protocol"] = 0.into();
         std::fs::write(&path, record.to_string()).unwrap();
     };
     let julia = place.julia.display().to_string();

@@ -433,7 +433,7 @@ fn the_collected_stderr_survives_a_line_that_is_not_utf8() {
 fn a_cancel_holds_ssh_while_the_helper_lives_and_lets_go_once_it_has_exited() {
     use std::os::unix::fs::PermissionsExt;
     let dir = crate::client::scratch("cancel-pid");
-    std::fs::write(dir.join("frames"), ToApp::Hello { version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false }.frame().encode()).unwrap();
+    std::fs::write(dir.join("frames"), ToApp::Hello { protocol: wire::PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false }.frame().encode()).unwrap();
     // Says hello, then stays until the client sends it anything (a detach).
     let script = dir.join("helper");
     std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", dir.join("frames").display())).unwrap();

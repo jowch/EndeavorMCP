@@ -84,14 +84,14 @@ impl Running {
 
     /// Ask the runtime to shut down through the relay, then cancel the job.
     /// The caller holds the start lock.
-    pub fn stop(self, rx: &mpsc::Receiver<Event>, said: &mut Said) {
+    pub fn stop(self, rx: &mpsc::Receiver<Event>, later: &mut VecDeque<Event>) {
         let generation = self.link.generation;
-        if self.link.send(&ToHelper::Stop).is_ok() {
+        if self.link.send(&ToHelper::Stop { id: 0 }).is_ok() {
             let deadline = Instant::now() + Duration::from_secs(20);
             while let Some(left) = deadline.checked_duration_since(Instant::now()) {
                 match rx.recv_timeout(left) {
-                    Ok(Event::Node(g, ToApp::Stopped | ToApp::Died { .. })) | Ok(Event::NodeGone(g)) if g == generation => break,
-                    Ok(event) => said.note(event),
+                    Ok(Event::Node(g, ToApp::Stopped { .. } | ToApp::Died { .. })) | Ok(Event::NodeGone(g)) if g == generation => break,
+                    Ok(event) => defer(later, event),
                     Err(_) => break,
                 }
             }
@@ -151,7 +151,7 @@ impl Link {
 /// decides and submits, so two helpers never submit two jobs, and let go
 /// before the wait in the queue: a helper that comes in meanwhile finds
 /// `job.json` and waits for the same job.
-pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, parts: &Parts, request: JobRequest, download_julia: bool) -> Result<Attached, ToApp> {
+pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, parts: &Parts, request: JobRequest, download_julia: bool) -> Result<Attached, Unstarted> {
     let starting = lock_start(args, mux, rx, parts)?;
     let dir = &args.state_dir;
     if let Some(attached) = running(args, mux, events)? {
@@ -177,8 +177,8 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &
 }
 
 /// The runtime recorded as running in a job, attached to through a relay on its node.
-fn running(args: &Args, mux: &Arc<Mux>, events: &Sender<Event>) -> Result<Option<Attached>, ToApp> {
-    let failed = |message: String| ToApp::StartFailed { message };
+fn running(args: &Args, mux: &Arc<Mux>, events: &Sender<Event>) -> Result<Option<Attached>, Unstarted> {
+    let failed = Unstarted::Failed;
     let dir = &args.state_dir;
     if let Some(state) = read_state(dir).filter(|s| s.launcher == "slurm")
         && let Some(job) = state.job.clone()
@@ -257,12 +257,12 @@ pub fn cancel_recorded(dir: &Path) {
 
 /// Find Julia (here, on the shared filesystem), write the job script and
 /// submit it. The job's id.
-fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest, download_julia: bool) -> Result<String, ToApp> {
-    let flags = request.checked_sbatch_args().map_err(|why| ToApp::StartFailed { message: format!("The job wasn't submitted: {why}") })?;
+fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest, download_julia: bool) -> Result<String, Unstarted> {
+    let flags = request.checked_sbatch_args().map_err(|why| Unstarted::Failed(format!("The job wasn't submitted: {why}")))?;
     let (julia, version) = julia::find(&args.julia, download_julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame())))
-        .map_err(julia::Failure::into_app)?;
+        .map_err(julia::Failure::into_unstarted)?;
     let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
-    submit_job(args, mux, request, flags, &julia).map_err(|message| ToApp::StartFailed { message })
+    submit_job(args, mux, request, flags, &julia).map_err(Unstarted::Failed)
 }
 
 /// Write the job script for the Julia at `julia` and submit it. The job's id.
@@ -321,7 +321,7 @@ fn submit_job(args: &Args, mux: &Arc<Mux>, request: &JobRequest, flags: Vec<Stri
 /// Wait for the job to start and its runtime to come up, telling the app how
 /// it's queued, then connect to it. Stop cancels the job; the app leaving
 /// leaves it queued, for the next connect.
-fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, job: &str) -> Result<(State, Running), ToApp> {
+fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, job: &str) -> Result<(State, Running), Unstarted> {
     let dir = &args.state_dir;
     let ready = Arc::new(AtomicBool::new(false));
     let log_done = Arc::new(Exit::default());
@@ -329,13 +329,17 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
     let mut last: Option<(String, String)> = None;
     let result = loop {
         match rx.recv_timeout(poll()) {
-            Ok(Event::App(ToHelper::Stop)) => {
+            Ok(Event::App(ToHelper::Stop { id })) => {
                 stopped::mark(dir, stopped::Of::Job(job), stopped::How::Connection);
                 scancel(job);
                 forget(dir, job);
-                break Err(ToApp::Stopped);
+                break Err(Unstarted::Stopped(id));
             }
             Ok(Event::App(ToHelper::Detach) | Event::Eof) => std::process::exit(0),
+            Ok(Event::App(ToHelper::StartRuntime { id, .. })) => {
+                busy(mux, id);
+                continue;
+            }
             Ok(_) => continue,
             Err(RecvTimeoutError::Disconnected) => unreachable!("the watchers hold senders"),
             Err(RecvTimeoutError::Timeout) => {}
@@ -381,9 +385,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
                         Err(e) => {
                             scancel(job);
                             forget(dir, job);
-                            break Err(ToApp::StartFailed {
-                                message: format!("Julia started on {} (job {job}), but Endeavor couldn't reach it there, so the job was cancelled. {e}", state.node),
-                            });
+                            break Err(Unstarted::Failed(format!("Julia started on {} (job {job}), but Endeavor couldn't reach it there, so the job was cancelled. {e}", state.node)));
                         }
                     }
                 }
@@ -391,13 +393,13 @@ fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender
             // Completing, or gone from the queue.
             _ => {
                 if let Some(how) = stopped::why(dir, stopped::Of::Job(job)) {
-                    break Err(ToApp::StartFailed { message: format!("The start was stopped. {}", stopped_text(how)) });
+                    break Err(Unstarted::Failed(format!("The start was stopped. {}", stopped_text(how))));
                 }
                 let reason = end_reason(job, dir, true).unwrap_or("Its Slurm job ended.");
                 let tail = log_tail(&dir.join("runtime.log"));
                 let said = tail.iter().rev().find(|l| !l.trim().is_empty()).map(|l| format!(" Its last output: {}", l.trim())).unwrap_or_default();
                 forget(dir, job);
-                break Err(ToApp::StartFailed { message: format!("{reason} Julia wasn't ready yet.{said}") });
+                break Err(Unstarted::Failed(format!("{reason} Julia wasn't ready yet.{said}")));
             }
         }
     };
@@ -545,7 +547,7 @@ fn spawn_relay(mut command: Command, mux: &Arc<Mux>, events: &Sender<Event>) -> 
         match first.recv_timeout(left) {
             Ok(ToApp::Hello { .. } | ToApp::Progress { .. }) => {}
             Ok(ToApp::Ready { .. }) => break Ok(()),
-            Ok(ToApp::StartFailed { message } | ToApp::Error { message }) => break Err(message),
+            Ok(ToApp::StartFailed { message, .. } | ToApp::Error { message }) => break Err(message),
             Ok(other) => break Err(format!("it said {other:?}")),
             Err(RecvTimeoutError::Timeout) => break Err(format!("no answer in {} s", RELAY_TIMEOUT.as_secs())),
             Err(RecvTimeoutError::Disconnected) => {
@@ -660,16 +662,17 @@ pub fn relay_main(argv: &[String]) -> ! {
     let mux = stdout_mux();
     let (events, rx) = mpsc::channel();
     let home = wire::files::home().display().to_string();
-    let _ = mux.send(&ToApp::Hello { version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false }.frame());
+    let _ = mux.send(&ToApp::Hello { protocol: wire::PROTOCOL, version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false }.frame());
     let here = hostname();
     let state = read_state(&dir).filter(|s| s.node == here && alive(s)).and_then(|s| Some((s.port?, s)));
     let Some((port, state)) = state else {
-        let _ = mux.send(&ToApp::StartFailed { message: format!("Julia isn't running on {here}.") }.frame());
+        let _ = mux.send(&ToApp::StartFailed { id: 0, message: format!("Julia isn't running on {here}.") }.frame());
         std::process::exit(1);
     };
     let runtime = Runtime::recorded(&state, &dir, &events);
     relay_stdin(mux.clone(), Arc::new(RwLock::new(Route::Local(port))), events, Arc::new(wire::files::answer), Parts::default());
     let ready = ToApp::Ready {
+        id: 0,
         launcher: state.launcher.clone(),
         node: state.node.clone(),
         pid: state.pid as u32,
@@ -680,14 +683,15 @@ pub fn relay_main(argv: &[String]) -> ! {
     let _ = mux.send(&ready.frame());
     loop {
         match rx.recv().expect("senders live as long as their threads") {
-            Event::App(ToHelper::Stop) => {
+            Event::App(ToHelper::Stop { id }) => {
                 runtime.stop(Some(&state));
-                let _ = mux.send(&ToApp::Stopped.frame());
+                let _ = mux.send(&ToApp::Stopped { id }.frame());
                 std::process::exit(0);
             }
             Event::App(ToHelper::Detach) | Event::Eof => std::process::exit(0),
             Event::Exited(pid, status) if pid == state.pid => {
-                let _ = mux.send(&runtime.died(status).frame());
+                let (status, log_tail) = runtime.died(status);
+                let _ = mux.send(&ToApp::Died { status, log_tail }.frame());
                 std::process::exit(0);
             }
             _ => {}

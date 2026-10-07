@@ -220,7 +220,7 @@ pub(crate) fn main(argv: &[String]) -> ! {
         idle,
         hooks: Hooks::read(),
     });
-    let record = Record { machine: id.clone(), pid: std::process::id(), started, port, token, build: crate::embedded::BUILD_VERSION.to_owned() };
+    let record = Record { machine: id.clone(), pid: std::process::id(), started, port, token, build: crate::embedded::BUILD_VERSION.to_owned(), protocol: super::PROTOCOL };
     let text = serde_json::to_string(&record).unwrap_or_default();
     crate::core::write_private(&dir.join("link.json"), text.as_bytes()).unwrap_or_else(|e| fail(e));
     eprintln!("The link to {id} listens for control on 127.0.0.1:{port}, and relays on 127.0.0.1:{}.", shared.listener.port());
@@ -261,6 +261,7 @@ impl Shared {
             needs_install: i.needs.clone(),
             pid: std::process::id(),
             build: crate::embedded::BUILD_VERSION.to_owned(),
+            protocol: super::PROTOCOL,
         })
     }
 
