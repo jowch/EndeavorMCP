@@ -119,7 +119,8 @@ impl Place {
 
     /// The running link of machine `id`, started if there is none (a front would too).
     fn link(&self, id: &str) -> Link {
-        ensure_with(&self.spawn, id).expect("a link")
+        let server = self.machines().find_by_id(id).unwrap().unwrap_or_else(|| panic!("{id} is in the machines file"));
+        ensure_with(&self.spawn, &server).expect("a link")
     }
 
     fn record(&self, id: &str) -> PathBuf {
@@ -416,7 +417,7 @@ fn a_failing_add_machine_leaves_no_record_and_no_link() {
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "name": "failadd", "julia": place.julia.display().to_string() }));
     let message = text(&said);
     assert!(failed && message.contains("Couldn't connect to lab") && message.contains("Nothing was saved") && message.contains("never ask them for a password"), "{said}");
-    assert!(place.machines().load().unwrap().is_empty(), "no record");
+    assert!(!place.machines().path().exists(), "no record, no file");
     assert!(!place.record("failadd").exists());
     wait_for("the helper to go", || place.helpers().is_empty());
 
@@ -429,6 +430,53 @@ fn a_failing_add_machine_leaves_no_record_and_no_link() {
     assert!(!place.record("failadd").exists(), "the link that failed is gone");
 }
 
+#[test]
+fn fields_the_front_does_not_know_survive_adding_and_updating_machines() {
+    let place = Place::new("unknown-fields");
+    let julia = place.julia.display().to_string();
+    let path = place.machines().path().to_owned();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let before = json!({
+        "schema": 1, "app": {"theme": "dark"},
+        "machines": [
+            {"id": "lab", "name": "lab", "ssh_host": "lab", "julia": julia, "color": "red"},
+            {"id": "other", "name": "other", "ssh_host": "other", "color": "blue", "tags": ["a"]},
+        ],
+    });
+    std::fs::write(&path, before.to_string()).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    let raw = || serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+    let added = front.ok("add_machine", json!({ "host": "box", "name": "box", "julia": julia }));
+    assert_eq!(added["state"], "connected", "{added}");
+    let now = raw();
+    assert_eq!((now["app"].clone(), now["machines"][0]["color"].clone(), now["machines"][1]["tags"].clone()), (json!({"theme": "dark"}), json!("red"), json!(["a"])), "{now}");
+    assert_eq!(now["machines"][2]["id"], "box");
+
+    let updated = front.ok("add_machine", json!({ "host": "lab", "name": "lab", "julia": julia, "install": false }));
+    assert_eq!((updated["state"].as_str(), updated["updated"].clone()), (Some("connected"), json!(true)), "{updated}");
+    let now = raw();
+    assert_eq!((now["app"].clone(), now["machines"][0]["color"].clone(), now["machines"][1]["color"].clone()), (json!({"theme": "dark"}), json!("red"), json!("blue")), "{now}");
+}
+
+#[test]
+fn a_machines_file_of_a_newer_schema_is_listed_and_not_rewritten() {
+    let place = Place::new("newer-schema");
+    let path = place.machines().path().to_owned();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let content = json!({ "schema": 2, "machines": [{"id": "lab", "name": "lab", "ssh_host": "lab", "julia": place.julia.display().to_string()}] }).to_string();
+    std::fs::write(&path, &content).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    let listed = front.ok("list_machines", json!({}));
+    assert_eq!(listed["machines"][0]["name"], "lab", "{listed}");
+    let (failed, said) = front.call("add_machine", json!({ "host": "box", "name": "box" }));
+    assert!(failed && text(&said).contains("A newer Endeavor wrote"), "{said}");
+    assert!(place.helpers().is_empty(), "it didn't connect before it found out");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content, "untouched");
+}
+
 /// A place whose link waits for the file `go` before it connects, with Slurm's commands on the PATH.
 fn slow_place(name: &str, then: &str) -> (Place, FakeSlurm) {
     let slurm = FakeSlurm::new(name);
@@ -438,44 +486,36 @@ fn slow_place(name: &str, then: &str) -> (Place, FakeSlurm) {
 }
 
 #[test]
-fn a_machine_whose_add_machine_is_still_connecting_is_not_added_until_a_second_call_has_connected() {
-    let (place, _slurm) = slow_place("provisional", "");
+fn an_add_machine_that_is_still_connecting_saves_nothing_until_a_second_call_has_connected() {
+    let (place, _slurm) = slow_place("connecting", "");
     let mut front = place.front();
     front.initialize();
     let julia = place.julia.display().to_string();
     let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
-    assert_eq!((first["state"].as_str(), first["saved"].clone()), (Some("connecting"), json!(true)), "{first}");
-    assert!(first["message"].as_str().unwrap().contains("isn't added until it has connected"), "{first}");
-    assert!(place.links_dir().join("lab/provisional").exists(), "marked, outside the record");
-    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none());
+    assert_eq!((first["state"].as_str(), first["saved"].clone()), (Some("connecting"), json!(false)), "{first}");
+    assert!(first["message"].as_str().unwrap().contains("saved when it has connected"), "{first}");
+    assert!(!place.machines().path().exists(), "nothing in the machines file");
+    assert!(place.links_dir().join("lab/server.json").exists(), "the link holds the record");
 
-    let listed = front.ok("list_machines", json!({}));
-    assert_eq!(listed["machines"][0]["state"], "not yet connected", "{listed}");
-    assert!(listed["machines"][0]["message"].as_str().unwrap().contains("`add_machine`"), "{listed}");
+    assert_eq!(front.ok("list_machines", json!({}))["machines"], json!([]));
     let (failed, said) = front.call("use_machine", json!({ "machine": "lab" }));
-    assert!(failed && text(&said).contains("never finished connecting") && text(&said).contains("`add_machine`"), "{said}");
-    let (failed, said) = front.call("stop_machine", json!({ "machine": "lab" }));
-    assert!(failed && text(&said).contains("never finished connecting"), "{said}");
+    assert!(failed && said["error"] == "machine_not_found", "{said}");
     assert_eq!(place.projects(), Value::Null);
 
-    // A project that remembers it doesn't go there.
-    std::fs::create_dir_all(place.dir.join("state-home/endeavor")).unwrap();
-    let remembered = json!({ place.project.display().to_string(): { "machine": "lab", "folder": null } });
-    std::fs::write(place.dir.join("state-home/endeavor/projects.json"), remembered.to_string()).unwrap();
-    let mut second = place.front();
-    second.initialize();
-    let (failed, contents) = second.contents("list_notebooks", json!({}));
-    assert!(!failed && contents[1].as_str().unwrap().contains("never finished connecting"), "{contents:?}");
-    assert_eq!(second.ok("pluto_session_status", json!({})).get("machine"), None, "this session is on this computer");
-    second.finish();
+    // Other settings while it is still connecting replace the link, which was made for the first ones.
+    let before = std::fs::read_to_string(place.record("lab")).unwrap();
+    let other = front.ok("add_machine", json!({ "host": "lab2", "name": "lab", "julia": julia }));
+    assert_eq!((other["state"].as_str(), other["saved"].clone()), (Some("connecting"), json!(false)), "{other}");
+    assert_ne!(std::fs::read_to_string(place.record("lab")).unwrap(), before, "a new link");
+    assert!(std::fs::read_to_string(place.links_dir().join("lab/server.json")).unwrap().contains("lab2"));
+    assert!(!place.machines().path().exists());
 
-    // The second call finishes it, and treats it as new: Slurm is found, so it is a cluster.
+    // The next call finishes it, and treats it as new: Slurm is found, so it is a cluster.
     std::fs::write(place.dir.join("go"), "").unwrap();
-    let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    let done = front.ok("add_machine", json!({ "host": "lab2", "name": "lab", "julia": julia }));
     assert_eq!((done["state"].as_str(), done["updated"].clone(), done["cluster"].clone()), (Some("connected"), json!(false), json!(true)), "{done}");
-    assert!(!place.links_dir().join("lab/provisional").exists(), "the marker is gone");
+    assert_eq!(place.machines().load().unwrap().len(), 1, "one record");
     assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_some());
-    assert_eq!(place.machines().load().unwrap().len(), 1, "no second record");
     let listed = front.ok("list_machines", json!({}));
     assert_eq!((listed["machines"][0]["cluster"].clone(), listed["machines"][0]["state"].clone()), (json!(true), json!("no link running")), "{listed}");
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
@@ -483,19 +523,18 @@ fn a_machine_whose_add_machine_is_still_connecting_is_not_added_until_a_second_c
 }
 
 #[test]
-fn a_second_add_machine_that_fails_removes_the_machine_the_first_one_saved() {
-    let (place, _slurm) = slow_place("provisional-fails", "; echo 'Permission denied (publickey)' >&2; false");
+fn a_second_add_machine_that_fails_leaves_the_machines_file_as_it_was() {
+    let (place, _slurm) = slow_place("connecting-fails", "; echo 'Permission denied (publickey)' >&2; false");
     let mut front = place.front();
     front.initialize();
     let julia = place.julia.display().to_string();
     let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
     assert_eq!(first["state"], "connecting", "{first}");
-    assert_eq!(place.machines().load().unwrap().len(), 1);
+    assert!(!place.machines().path().exists());
     std::fs::write(place.dir.join("go"), "").unwrap();
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia }));
     assert!(failed && text(&said).contains("Couldn't connect to lab") && text(&said).contains("Nothing was saved"), "{said}");
-    assert!(place.machines().load().unwrap().is_empty(), "the provisional record is removed, not restored");
-    assert!(!place.links_dir().join("lab/provisional").exists());
+    assert!(!place.machines().path().exists(), "no file was made");
     assert_eq!(front.ok("list_machines", json!({}))["machines"], json!([]));
 }
 
@@ -1318,7 +1357,7 @@ fn add_machine_only_looks_until_told_to_install() {
     front.initialize();
     let julia = place.julia.display().to_string();
     let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
-    assert_eq!((first["state"].as_str(), first["needs_install"].clone(), first["saved"].clone()), (Some("needs_install"), json!(true), json!(true)), "{first}");
+    assert_eq!((first["state"].as_str(), first["needs_install"].clone(), first["saved"].clone()), (Some("needs_install"), json!(true), json!(false)), "{first}");
     assert_eq!(first["install"]["items"][0]["kind"], "helper", "{first}");
     assert_eq!(first["install"]["running"], json!({ "process": core_pid }), "{first}");
     let message = first["message"].as_str().unwrap();
@@ -1326,11 +1365,11 @@ fn add_machine_only_looks_until_told_to_install() {
     assert!(message.contains(&place.dir.join("root").display().to_string()), "where it would go: {message}");
     assert!(!place.dir.join("root").exists(), "nothing was installed");
     assert!(place.helpers().is_empty());
-    // Saved but not added.
-    assert!(place.links_dir().join("lab/provisional").exists());
-    assert_eq!(front.ok("list_machines", json!({}))["machines"][0]["state"], "not yet connected");
+    // Nothing is saved: the second call has the same arguments and the link holds the record.
+    assert!(!place.machines().path().exists());
+    assert_eq!(front.ok("list_machines", json!({}))["machines"], json!([]));
     let (failed, said) = front.call("use_machine", json!({ "machine": "lab" }));
-    assert!(failed && text(&said).contains("never finished connecting"), "{said}");
+    assert!(failed && said["error"] == "machine_not_found", "{said}");
     assert!(!place.dir.join("root").exists());
 
     // Asking again without the agreement looks again and changes nothing.
@@ -1344,7 +1383,7 @@ fn add_machine_only_looks_until_told_to_install() {
     let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
     assert_eq!((done["state"].as_str(), done["saved"].clone()), (Some("connected"), json!(true)), "{done}");
     assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
-    assert!(!place.links_dir().join("lab/provisional").exists());
+    assert_eq!(place.machines().load().unwrap().iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["lab"]);
     assert_eq!(front.ok("list_machines", json!({}))["machines"][0]["name"], "lab");
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "install": "yes" }));
     assert!(failed && text(&said).contains("install must be true or false"), "{said}");

@@ -148,7 +148,7 @@ ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_link -- -
 
 The test goes through these steps:
 
-1. `link::ensure` starts a link from a machines file that has one machine, and
+1. `link::ensure` starts a link with a machine's record, and
    a second `ensure` gets the same link. Its status reaches `connected`, with
    the helper's hello and the helper installed in the test's folder.
 2. `POST /link/start`: the status reaches `ready`, with the listener's port

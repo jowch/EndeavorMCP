@@ -16,7 +16,7 @@ use wire::files::{Reply, Request, RuntimeState};
 use wire::slurm::JobRequest;
 
 use super::{FoundInfo, HelloInfo, InstallInfo, JobInfo, QueueInfo, Record, RuntimeInfo, State, Status, valid_id};
-use crate::client::{Auth, CLOSED, Cancel, Channel, ConnectError, Event, Listener, MachinesFile, Messages, Notice, Options, Server, StartError, StartOptions, Transport, connect, start, this_platform};
+use crate::client::{Auth, CLOSED, Cancel, Channel, ConnectError, Event, Listener, Messages, Notice, Options, Server, StartError, StartOptions, Transport, connect, start, this_platform};
 use crate::http::{self, Framing, Head};
 use crate::standalone::Env;
 
@@ -105,7 +105,8 @@ struct Shared {
     token: String,
     inbox: Sender<Msg>,
     listener: Arc<Listener>,
-    machines: MachinesFile,
+    /// The record the link was started with.
+    server: Server,
     inner: Mutex<Inner>,
     /// The connect under way, which a quit cancels.
     cancel: Mutex<Arc<Cancel>>,
@@ -156,12 +157,14 @@ pub(crate) fn main(argv: &[String]) -> ! {
     let env = Env::from_vars(&|name| std::env::var(name).ok());
     let dir = env.links_dir().join(&id);
     crate::make_state_dir(&dir).unwrap_or_else(|e| fail(e));
-    let machines = MachinesFile::here();
-    let server = match machines.find_by_id(&id) {
-        Ok(Some(server)) => server,
-        Ok(None) => fail(format!("There is no machine {id} in {}.", machines.path().display())),
-        Err(e) => fail(e),
+    let server_path = dir.join(super::SERVER_FILE);
+    let server: Server = match std::fs::read_to_string(&server_path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{} isn't a machine record: {e}", server_path.display()))),
+        Err(e) => fail(format!("Couldn't read {}, which the front writes before it starts a link: {e}", server_path.display())),
     };
+    if server.id != id {
+        fail(format!("{} is the record of {}, not of {id}.", server_path.display(), server.id));
+    }
     if let Some(running) = super::running(&dir, &id)
         && running.pid != std::process::id()
     {
@@ -188,7 +191,7 @@ pub(crate) fn main(argv: &[String]) -> ! {
         token: token.clone(),
         inbox,
         listener,
-        machines,
+        server,
         inner: Mutex::new(Inner {
             id: id.clone(),
             name,
@@ -666,16 +669,9 @@ fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
     shared.listener.disconnected();
 }
 
-/// Connect to the machine: its record is read again, so a change in the file is used.
+/// Connect to the machine with the record the link was started with.
 fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
-    let wrong = |message: String| ConnectError { message, retry: false, needs: None };
-    let id = shared.with(|i| i.id.clone());
-    let server = shared
-        .machines
-        .find_by_id(&id)
-        .map_err(wrong)?
-        .ok_or_else(|| wrong(format!("{id} isn't in the list of machines ({}) any more.", shared.machines.path().display())))?;
-    shared.with(|i| i.name = display_name(&server));
+    let server = shared.server.clone();
     let helper = |os: &str, arch: &str| -> Result<PathBuf, String> {
         if (os.to_owned(), arch.to_owned()) == this_platform() {
             std::env::current_exe().map_err(|e| format!("Couldn't find the endeavor program itself: {e}"))

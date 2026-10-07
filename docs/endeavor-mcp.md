@@ -342,13 +342,13 @@ engine needs at one place (`prepare` in `src/lib.rs`).
 directly on the machine, since a host can have Slurm's tools without being a
 cluster. `add_machine`'s `slurm` argument sets it: true needs Slurm there,
 false runs directly, and left out a new machine takes what was detected and a
-machine connected before keeps how it was saved. A machine whose first
-`add_machine` was still connecting is saved but marked (an empty `provisional`
-file in the link's folder, removed when a call has connected): a later
-`add_machine` treats it as new, a failure removes it, `list_machines` shows it
-as `not yet connected`, and `use_machine`, `stop_machine` and a project that
-remembers it refuse it. Changing a machine between the two is refused while
-the link has a runtime, a start or a job.
+machine connected before keeps how it was saved. `add_machine` gives the
+link the machine's record when it starts it and writes `machines.json` only
+after the connect has succeeded: a call that is still connecting, that needs the
+helper installed, or that fails leaves the file as it was, and the agent calls
+`add_machine` again with the same arguments. An updated machine keeps its old
+record until the new settings have connected. Changing a machine between the
+two is refused while the link has a runtime, a start or a job.
 
 ## Approval
 

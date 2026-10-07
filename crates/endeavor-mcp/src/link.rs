@@ -7,9 +7,13 @@
 //!
 //! A link is `endeavor link --machine ID [--install]`, started by `ensure` and
 //! not by hand (`--install`: the helper may be installed at once, as for
-//! `ensure_with_install`). It reads the machine from the machines file
-//! (`client::MachinesFile`) and keeps, in `<state home>/endeavor/links/ID/`:
+//! `ensure_with_install`). The front gives it the machine's record (`client::Server`)
+//! by writing `server.json` in the link's folder before it starts it, and the link
+//! keeps that record for as long as it runs, also when it reconnects: the machines
+//! file is not read, and a machine need not be in it. Its folder is
+//! `<state home>/endeavor/links/ID/`:
 //!
+//! - `server.json`: the record the link was started with. Written by `ensure` when it starts a link, never while one runs.
 //! - `link.json`: its pid, control port, token, build and control `PROTOCOL`. Present while it runs.
 //! - `link.lock`: held by `ensure` while it looks for a link or starts one.
 //! - `link.log`: what the link and its `ssh` said.
@@ -57,6 +61,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use wire::slurm::{JobRequest, Partition};
 
+use crate::client::Server;
 use crate::standalone::Env;
 
 mod run;
@@ -333,29 +338,14 @@ pub struct Link {
     pub protocol: u32,
 }
 
-/// A machine that `add_machine` has not connected to yet is marked by a file of this name in its
-/// link's folder: it is saved so that the link can start, but nothing was found out about it.
-const PROVISIONAL: &str = "provisional";
+/// The file in a link's folder that holds the record it was started with.
+pub(crate) const SERVER_FILE: &str = "server.json";
 
-/// Whether `machine` was saved by `add_machine` that has not connected to it yet.
-pub(crate) fn is_provisional(machine: &str) -> bool {
-    valid_id(machine).is_ok() && Spawn::here().is_ok_and(|spawn| spawn.dir(machine).join(PROVISIONAL).exists())
-}
-
-/// Mark `machine` as not connected to yet, or (`on` false) as connected.
-pub(crate) fn set_provisional(machine: &str, on: bool) -> Result<(), String> {
-    valid_id(machine)?;
-    let dir = Spawn::here()?.dir(machine);
-    let path = dir.join(PROVISIONAL);
-    if on {
-        crate::make_state_dir(&dir)?;
-        crate::core::write_private(&path, b"add_machine has not connected to this machine yet\n")
-    } else {
-        match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Couldn't remove {}: {e}", path.display())),
-            _ => Ok(()),
-        }
-    }
+/// The record the running link of `machine` was started with, if its folder has one that reads.
+pub(crate) fn handed(machine: &str) -> Option<Server> {
+    valid_id(machine).ok()?;
+    let text = std::fs::read_to_string(Spawn::here().ok()?.dir(machine).join(SERVER_FILE)).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// The running link for `machine`, if there is one that answers; no link is started.
@@ -364,25 +354,27 @@ pub fn find(machine: &str) -> Result<Option<Link>, String> {
     Ok(running(&Spawn::here()?.dir(machine), machine))
 }
 
-/// The link for `machine` (an id in the machines file), started if none runs.
-pub fn ensure(machine: &str) -> Result<Link, String> {
-    ensure_with(&Spawn::here()?, machine)
+/// The link for `server`, started with this record if none runs. A link that runs keeps the
+/// record it was started with, whatever `server` says: `handed` shows it.
+pub fn ensure(server: &Server) -> Result<Link, String> {
+    ensure_with(&Spawn::here()?, server)
 }
 
 /// `ensure`, starting the link with `spawn`.
-pub fn ensure_with(spawn: &Spawn, machine: &str) -> Result<Link, String> {
-    ensure_with_install(spawn, machine, false)
+pub fn ensure_with(spawn: &Spawn, server: &Server) -> Result<Link, String> {
+    ensure_with_install(spawn, server, false)
 }
 
 /// `ensure`, and a link that has to be started may install the helper on the
 /// machine at once (`install`, the user's agreement), so that it connects once.
 /// One that runs already is not asked: `Link::install` does that.
-pub fn ensure_install(machine: &str, install: bool) -> Result<Link, String> {
-    ensure_with_install(&Spawn::here()?, machine, install)
+pub fn ensure_install(server: &Server, install: bool) -> Result<Link, String> {
+    ensure_with_install(&Spawn::here()?, server, install)
 }
 
 /// `ensure_install`, starting the link with `spawn`.
-pub fn ensure_with_install(spawn: &Spawn, machine: &str, install: bool) -> Result<Link, String> {
+pub fn ensure_with_install(spawn: &Spawn, server: &Server, install: bool) -> Result<Link, String> {
+    let machine = server.id.as_str();
     valid_id(machine)?;
     let dir = spawn.dir(machine);
     crate::make_state_dir(&dir)?;
@@ -412,6 +404,8 @@ pub fn ensure_with_install(spawn: &Spawn, machine: &str, install: bool) -> Resul
         }
     }
     let _ = std::fs::remove_file(dir.join("link.json"));
+    let record = serde_json::to_vec(server).map_err(|e| e.to_string())?;
+    crate::core::write_private(&dir.join(SERVER_FILE), &record)?;
     let log_path = dir.join("link.log");
     let log = crate::owner_only(std::fs::OpenOptions::new().write(true).create(true).truncate(true))
         .open(&log_path)

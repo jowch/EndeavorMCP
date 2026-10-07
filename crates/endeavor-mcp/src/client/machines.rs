@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use wire::slurm::{JobRequest, Partition, Resources};
 
 /// How long a notebook may sit idle before the runtime stops it.
@@ -38,6 +39,9 @@ pub struct Server {
     pub idle_stop: Option<IdleStop>,
     /// Set for a cluster: Julia runs in a Slurm job.
     pub cluster: Option<Cluster>,
+    /// Fields of the record that this version doesn't know, kept when the file is rewritten.
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 /// A cluster's Slurm settings.
@@ -84,6 +88,12 @@ impl Server {
             None => ["process".into(), "state".into()],
             Some(_) => ["slurm".into(), format!("cluster-{}", self.id)],
         }
+    }
+
+    /// Whether a connection made from `other` is the one this record asks for: the same address,
+    /// Julia and launcher. The rest of the record (names, job defaults, partitions) doesn't change a connection.
+    pub fn same_connection(&self, other: &Server) -> bool {
+        self.id == other.id && self.ssh_host == other.ssh_host && self.port == other.port && self.julia == other.julia && self.cluster.is_some() == other.cluster.is_some()
     }
 
     /// The SSH host as typed: `host`, or `host:port`. An IPv6 address, whose
@@ -150,13 +160,32 @@ pub fn machines_path(var: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     config.unwrap_or_default().join("endeavor").join("machines.json")
 }
 
-/// The one file that lists the machines: a JSON array of `Server` records,
-/// which the app reads and writes as well. It is written whole to a temporary
-/// file that is then renamed, readable by this user only. A file that can't be
-/// read or parsed is an error that names it, and is never replaced.
-/// Fields of a record that `Server` doesn't have are dropped when it is rewritten.
+/// The one file that lists the machines, which the app reads and writes as well:
+/// `{"schema": 1, "machines": [Server, ...]}`. A bare list of records, the shape
+/// before the schema number, is read as schema 1 and written as an object.
+/// It is written whole to a temporary file that is then renamed, readable by this
+/// user only. A file that can't be read or parsed is an error that names it, and is
+/// never replaced. Fields this version doesn't know, in the file or in a record,
+/// are kept when it is rewritten. A file with a higher schema number is read but
+/// never written.
 pub struct MachinesFile {
     path: PathBuf,
+}
+
+/// The schema number this version reads and writes.
+pub const SCHEMA: u64 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct Contents {
+    #[serde(default = "current_schema")]
+    schema: u64,
+    machines: Vec<Server>,
+    #[serde(flatten)]
+    other: Map<String, Value>,
+}
+
+fn current_schema() -> u64 {
+    SCHEMA
 }
 
 impl MachinesFile {
@@ -175,12 +204,32 @@ impl MachinesFile {
 
     /// Every machine, in the order they were added; none if there is no file yet.
     pub fn load(&self) -> Result<Vec<Server>, String> {
+        Ok(self.read()?.machines)
+    }
+
+    /// An error if the file can't be changed: it can't be read, or a newer Endeavor wrote it.
+    pub fn check_writable(&self) -> Result<(), String> {
+        self.check_schema(&self.read()?)
+    }
+
+    fn check_schema(&self, contents: &Contents) -> Result<(), String> {
+        if contents.schema > SCHEMA {
+            return Err(format!("A newer Endeavor wrote the list of machines in {} (schema {}; this Endeavor knows {SCHEMA}), so this one doesn't change it. Update Endeavor.", self.path.display(), contents.schema));
+        }
+        Ok(())
+    }
+
+    fn read(&self) -> Result<Contents, String> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Contents { schema: SCHEMA, machines: Vec::new(), other: Map::new() }),
             Err(e) => return Err(format!("Couldn't read the list of machines in {}: {e}", self.path.display())),
         };
-        serde_json::from_str(&text).map_err(|e| format!("The list of machines in {} isn't valid ({e}). Fix or remove the file; Endeavor won't overwrite it.", self.path.display()))
+        let invalid = |e: serde_json::Error| format!("The list of machines in {} isn't valid ({e}). Fix or remove the file; Endeavor won't overwrite it.", self.path.display());
+        match serde_json::from_str::<Value>(&text).map_err(invalid)? {
+            Value::Array(machines) => Ok(Contents { schema: SCHEMA, machines: serde_json::from_value(Value::Array(machines)).map_err(invalid)?, other: Map::new() }),
+            other => serde_json::from_value(other).map_err(invalid),
+        }
     }
 
     pub fn find_by_id(&self, id: &str) -> Result<Option<Server>, String> {
@@ -202,7 +251,10 @@ impl MachinesFile {
     /// Add `server`, or replace the one with its id where it stands.
     pub fn save(&self, server: Server) -> Result<(), String> {
         self.change(|servers| match servers.iter_mut().find(|s| s.id == server.id) {
-            Some(known) => *known = server,
+            Some(known) => {
+                let other = std::mem::take(&mut known.other);
+                *known = Server { other, ..server };
+            }
             None => servers.push(server),
         })
         .map(|_| ())
@@ -232,9 +284,10 @@ impl MachinesFile {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let mut servers = self.load()?;
-        let result = change(&mut servers);
-        let text = serde_json::to_string_pretty(&servers).map_err(|e| e.to_string())?;
+        let mut contents = self.read()?;
+        self.check_schema(&contents)?;
+        let result = change(&mut contents.machines);
+        let text = serde_json::to_string_pretty(&contents).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension(format!("json.tmp{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         crate::owner_only(std::fs::OpenOptions::new().write(true).create_new(true))

@@ -41,7 +41,7 @@ untested._
 | Which build a plugin runs | The key in `release-key` beside the launcher. Empty or missing: the newest build |
 | Signing | Not needed for a `curl` install; wait |
 | State folder | One on each machine, yours included, for `serve`, `mcp`, the plugin and the app: the one `serve` uses today. The app stops choosing its own |
-| The list of machines | One file the binary owns: `machines.json`, a list of the app's server records, in `$XDG_CONFIG_HOME/endeavor/` (default `~/.config/endeavor/`, on macOS too), and in `%APPDATA%\Endeavor\` on Windows (built). The app will read and write it there |
+| The list of machines | One file the binary owns: `machines.json`, `{"schema": 1, "machines": [...]}` with the app's server records, in `$XDG_CONFIG_HOME/endeavor/` (default `~/.config/endeavor/`, on macOS too), and in `%APPDATA%\Endeavor\` on Windows (built). The app will read and write it there. A bare list of records, the first shape, is read and rewritten as the object. Fields a build doesn't know, in the file or in a record, are kept when it rewrites the file. A file with a higher `schema` than a build knows is read and never rewritten: its writing tools answer that a newer Endeavor wrote it. A machine is written only after a connect has succeeded |
 | State folder on a cluster | `~/.local/state/endeavor/cluster`, the same from every login node (built). The app's own is `~/.cache/endeavor/cluster-<id>` until it moves |
 | Jobs on a cluster | One at a time for each user. A second client attaches to the job as the first one asked for it, and is told its size |
 | Several clients on one runtime | Allowed. No client makes another exit |
@@ -91,13 +91,16 @@ a lock when there is none. The app keeps its own connection; the two don't
 disturb each other (see [Sharing a runtime](#sharing-a-runtime)).
 
 **The link, as built.** `endeavor link --machine <id>` is a hidden command; a
-front starts it with `link::ensure(<id>)`, which returns the link's control
-port and token. The link reads the machine from the machines file, connects as
+front starts it with `link::ensure(<server record>)`, which returns the link's control
+port and token. The front writes the record to `links/<id>/server.json` (owner-only) before
+it starts the link, which reads it once and keeps it, also when it reconnects: it doesn't read
+the machines file, and the machine need not be in it. A front that changes a machine's
+connection settings quits the link and starts a new one. The link connects as
 the library does (batch sign-in), sends its own binary as the helper when the
 server's platform is this computer's (and else the release's helper for that
 platform, see [Installing the binary](#installing-the-binary)), and starts the one loopback port that
 relays to the runtime. It keeps `links/<id>/link.json` (its pid, control
-port, token, build and control protocol number), `link.lock` and `link.log` in the state folder
+port, token, build and control protocol number), `server.json`, `link.lock` and `link.log` in the state folder
 (`~/.local/state/endeavor`, `%LOCALAPPDATA%\Endeavor` on Windows). The control
 interface is HTTP on a loopback port of its own, with the token from
 `link.json` as a bearer token. It refuses a Host that isn't loopback and any
@@ -396,7 +399,7 @@ app moves its pin ([status.md](status.md)).
 2. It calls `add_machine("hoffman2")`. The link connects and looks. If the
    server lacks this build's helper it installs nothing: the result is
    `needs_install` (what would be copied, where, about how big, whether a
-   runtime already runs there), the machine is saved but not added, and the agent
+   runtime already runs there), nothing is saved yet, and the agent
    asks you. If you agree it calls again with `install: true`; the link
    sends the helper, and reports the machine's node and home folder,
    whether Slurm is there, and the partitions with their limits. That report

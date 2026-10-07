@@ -101,15 +101,15 @@ impl Deadline {
         link.install(self.call_wait()?)
     }
 
-    fn ensure(self, id: &str) -> Result<Link, String> {
-        let id = id.to_owned();
-        self.run(move || link::ensure(&id))?
+    fn ensure(self, server: &Server) -> Result<Link, String> {
+        let server = server.clone();
+        self.run(move || link::ensure(&server))?
     }
 
     /// `ensure`, and a link that has to be started may install the helper at once.
-    fn ensure_install(self, id: &str, install: bool) -> Result<Link, String> {
-        let id = id.to_owned();
-        self.run(move || link::ensure_install(&id, install))?
+    fn ensure_install(self, server: &Server, install: bool) -> Result<Link, String> {
+        let server = server.clone();
+        self.run(move || link::ensure_install(&server, install))?
     }
 
     fn find(self, id: &str) -> Result<Option<Link>, String> {
@@ -294,6 +294,15 @@ fn needs_install_result(name: &str, status: &link::Status, tool: &str) -> Value 
         result["stopped"] = false.into();
     }
     result
+}
+
+/// End the link of `id` that `add_machine` started and could not use, unless a runtime is on it.
+fn quit_unless_in_use(id: &str) {
+    if let Ok(Some(link)) = link::find(id)
+        && link.status(link::CALL_WAIT).is_ok_and(|status| replaceable(&status))
+    {
+        let _ = link.quit();
+    }
 }
 
 /// A link whose protocol isn't this front's is replaced (quit, then started again) only when no
@@ -559,12 +568,6 @@ impl Relay {
         };
         let Some(remembered) = remembered else { return };
         match self.machines.find_by_id(&remembered.machine) {
-            Ok(Some(server)) if link::is_provisional(&server.id) => {
-                *self.notice.lock().unwrap() = Some(format!(
-                    "This project last used the machine \"{}\", but `add_machine` never finished connecting to it, so this session uses this computer. Call `add_machine` with its host again to finish.",
-                    display_name(&server)
-                ));
-            }
             Ok(Some(server)) => {
                 eprintln!("endeavor: this project uses the machine {}", display_name(&server));
                 *self.target.lock().unwrap() = Target::Machine(Machine::new(&server, remembered.folder));
@@ -650,15 +653,16 @@ impl Relay {
 
     /// The machine's link and what it says, started if there is none or it has gone, after `link_rule`.
     fn machine_link(&self, machine: &Machine, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
+        let server = self.machines.find_by_id(&machine.id)?.ok_or_else(|| format!("{} isn't in the list of machines ({}) any more.", machine.name, self.machines.path().display()))?;
         let (link, status) = match machine.link.clone().and_then(|link| deadline.status(&link).ok().map(|status| (link, status))) {
             Some(found) => found,
             None => {
-                let link = deadline.ensure(&machine.id)?;
+                let link = deadline.ensure(&server)?;
                 let status = deadline.status(&link)?;
                 (link, status)
             }
         };
-        let (link, status, note) = self.link_rule(&machine.id, &machine.name, link, status, deadline)?;
+        let (link, status, note) = self.link_rule(&server, link, status, deadline)?;
         if machine.link.as_ref() != Some(&link) {
             self.update_machine(&machine.id, |m| m.link = Some(link.clone()));
         }
@@ -671,13 +675,13 @@ impl Relay {
     /// (`replaceable`), since a new link has another port and the user's browser page would
     /// break. Else it is used as it is, and the third is why; `ask` sends it no start, since it
     /// may not know `only_running`. `status` is the link's.
-    fn link_rule(&self, id: &str, name: &str, link: Link, status: link::Status, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
+    fn link_rule(&self, server: &Server, link: Link, status: link::Status, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
         if link.protocol == link::PROTOCOL {
             return Ok((link, status, None));
         }
         let (link, status) = if replaceable(&status) {
             let _ = link.quit();
-            let fresh = deadline.ensure(id)?;
+            let fresh = deadline.ensure(server)?;
             let status = deadline.status(&fresh)?;
             (fresh, status)
         } else {
@@ -686,6 +690,7 @@ impl Relay {
         if link.protocol == link::PROTOCOL {
             return Ok((link, status, None));
         }
+        let name = display_name(server);
         let note = format!(
             "The link to {name} was started by another build of endeavor ({}) that works differently from this one, and goes on, because a runtime is in use through it and a new link would change the address of the user's browser page. It is replaced when it ends.",
             link.build
@@ -819,12 +824,6 @@ impl Relay {
         let machines: Vec<Value> = servers
             .iter()
             .map(|server| {
-                if link::is_provisional(&server.id) {
-                    return json!({
-                        "name": display_name(server), "host": server.ssh_target(), "cluster": false, "state": "not yet connected", "this_session": false,
-                        "message": "`add_machine` didn't finish connecting to it. Call `add_machine` with the same host to finish; until then it can't be used.",
-                    });
-                }
                 let status = link::find(&server.id).ok().flatten().and_then(|l| l.status(link::CALL_WAIT).ok());
                 let state = status.as_ref().map_or("no link running", |s| state_word(s.state));
                 let mut entry = json!({ "name": display_name(server), "host": server.ssh_target(), "cluster": server.cluster.is_some(), "state": state, "this_session": mine.as_deref() == Some(server.id.as_str()) });
@@ -872,78 +871,51 @@ impl Relay {
             Some(Value::Bool(slurm)) => Some(*slurm),
             Some(_) => return Err(invalid("slurm must be true (run Julia in Slurm jobs) or false (run it directly on the machine)")),
         };
+        self.machines.check_writable()?;
         let servers = self.machines.load()?;
         let by_name = |n: &str| servers.iter().find(|s| s.name.eq_ignore_ascii_case(n)).cloned();
         let existing = match &given_name {
             Some(name) => by_name(name),
             None => by_name(&name).or_else(|| servers.iter().find(|s| s.ssh_host == host && s.port == port).cloned()),
         };
-        // A record that an earlier call saved and never connected to is new again, except that its id is kept.
-        let prior = existing.clone().filter(|e| !link::is_provisional(&e.id));
+        let prior = existing.clone();
         let mut record = match &existing {
             Some(existing) => existing.clone(),
             None => Server { id: new_id(&name, &servers)?, name: name.clone(), ..Default::default() },
         };
-        let moved = existing.as_ref().is_some_and(|e| e.ssh_host != host || e.port != port || julia.as_ref().is_some_and(|j| e.julia.as_ref() != Some(j)));
         record.ssh_host = host;
         record.port = port;
         if julia.is_some() {
             record.julia = julia;
         }
-        if prior.is_none() {
-            link::set_provisional(&record.id, true)?;
-        }
-        if let Err(e) = self.machines.save(record.clone()) {
-            if prior.is_none() {
-                let _ = link::set_provisional(&record.id, false);
-            }
-            return Err(e);
-        }
-        let restore = |this: &Relay| {
-            let _ = match &prior {
-                Some(before) => this.machines.save(before.clone()),
-                None => this.machines.remove(&record.id).map(|_| ()),
-            };
-            if prior.is_none() {
-                let _ = link::set_provisional(&record.id, false);
-            }
-        };
-        // A link with a runtime on it, or starting one, is left running: it is not the add's to end.
-        let undo = |this: &Relay| {
-            restore(this);
-            if let Ok(Some(link)) = link::find(&record.id)
-                && link.status(link::CALL_WAIT).is_ok_and(|status| replaceable(&status))
-            {
-                let _ = link.quit();
-            }
-        };
-        // A link that failed before, or that was made for another address, connects afresh.
-        if let Ok(Some(old)) = deadline.find(&record.id).inspect_err(|_| undo(self))
-            && (moved || old.status(link::CALL_WAIT).is_ok_and(|s| s.state == State::Failed))
+        // The record is saved only once it has connected: until then the link holds it, and a machine that never connects leaves nothing behind.
+        // A link that failed before, or that was started for other settings, connects afresh.
+        if let Some(old) = deadline.find(&record.id)?
+            && (link::handed(&record.id).is_some_and(|handed| !handed.same_connection(&record)) || old.status(link::CALL_WAIT).is_ok_and(|s| s.state == State::Failed))
         {
             let _ = old.quit();
         }
-        let link = deadline.ensure_install(&record.id, install).inspect_err(|_| undo(self))?;
-        let first = deadline.status(&link).inspect_err(|_| undo(self))?;
-        let (link, _, kept) = self.link_rule(&record.id, &record.name, link, first, deadline).inspect_err(|_| undo(self))?;
+        let link = deadline.ensure_install(&record, install)?;
+        let first = deadline.status(&link)?;
+        let (link, _, kept) = self.link_rule(&record, link, first, deadline)?;
         let mut notes: Vec<String> = kept.into_iter().collect();
         if install && notes.is_empty() {
-            deadline.install(&link).inspect_err(|_| undo(self))?;
+            deadline.install(&link)?;
         } else if install {
             notes.push("`install: true` wasn't passed on to that link, which has a runtime in use.".into());
         }
-        let mut status = deadline.status(&link).inspect_err(|_| undo(self))?;
+        let mut status = deadline.status(&link)?;
         let status = loop {
             match status.state {
                 State::NeedsInstall if status.needs_install.as_ref().is_some_and(link::InstallInfo::needs_helper) => {
                     let mut result = needs_install_result(&record.name, &status, "add_machine");
                     result["host"] = record.ssh_target().into();
-                    result["saved"] = true.into();
-                    result["message"] = format!("{} The machine is saved, but it isn't added until it has connected, and `use_machine` refuses it until then.", result["message"].as_str().unwrap_or_default()).into();
+                    result["saved"] = false.into();
+                    result["message"] = format!("{} The machine is saved when it has connected, and not before.", result["message"].as_str().unwrap_or_default()).into();
                     return Ok(result);
                 }
                 State::Failed => {
-                    undo(self);
+                    quit_unless_in_use(&record.id);
                     return Err(format!(
                         "Couldn't connect to {}: {}\nNothing was saved. This is for the user to fix in a terminal (never ask them for a password or passphrase here, and don't run ssh yourself), then call `add_machine` again.",
                         record.ssh_target(),
@@ -952,15 +924,15 @@ impl Relay {
                 }
                 State::Connecting if deadline.spent() => {
                     return Ok(json!({
-                        "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": true,
+                        "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": false,
                         "step": status.step,
-                        "message": format!("Still connecting to {}. Call `add_machine` again with the same host to continue. The machine is saved, but it isn't added until it has connected, and `use_machine` refuses it until then.", record.ssh_target()),
+                        "message": format!("Still connecting to {}. Call `add_machine` again with the same host to continue. The machine is saved when it has connected, and not before.", record.ssh_target()),
                     }));
                 }
                 State::Connecting => {
                     std::thread::sleep(POLL);
                     if !deadline.spent() {
-                        status = deadline.status(&link).inspect_err(|_| undo(self))?;
+                        status = deadline.status(&link)?;
                     }
                 }
                 _ => break status,
@@ -972,12 +944,11 @@ impl Relay {
         let cluster = match choose_mode(slurm, prior.as_ref(), found) {
             Ok(cluster) => cluster,
             Err(why) => {
-                undo(self);
+                quit_unless_in_use(&record.id);
                 return Err(format!("{why}\nNothing was saved."));
             }
         };
         if prior.as_ref().is_some_and(|p| p.cluster.is_some() != cluster) && (status.runtime.is_some() || status.job.is_some() || matches!(status.state, State::Starting | State::Queued | State::Ready)) {
-            restore(self);
             return Err(format!(
                 "Julia is running, or starting, on {} through the way it is saved now. Changing between running Julia in Slurm jobs and running it directly would leave that one where `stop_machine` can't reach it. Nothing was changed. Call `stop_machine` first (with the user's agreement), then call `add_machine` again.",
                 display_name(&record)
@@ -987,15 +958,15 @@ impl Relay {
         while cluster && status.hello.as_ref().is_some_and(|h| h.slurm && h.partitions.is_none()) && !deadline.spent() {
             std::thread::sleep(POLL);
             if !deadline.spent() {
-                status = deadline.status(&link).inspect_err(|_| undo(self))?;
+                status = deadline.status(&link)?;
             }
         }
         let hello = status.hello.clone().unwrap_or_default();
         if cluster && hello.slurm && hello.partitions.is_none() && record.cluster.as_ref().is_none_or(|c| c.partitions.is_empty()) {
             return Ok(json!({
-                "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": true,
+                "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": false,
                 "step": status.step,
-                "message": format!("Connected to {}, but Slurm hasn't listed its partitions yet. Call `add_machine` again with the same host to continue. The machine is saved, but it isn't added until it has connected, and `use_machine` refuses it until then.", record.ssh_target()),
+                "message": format!("Connected to {}, but Slurm hasn't listed its partitions yet. Call `add_machine` again with the same host to continue. The machine is saved when it has connected, and not before.", record.ssh_target()),
             }));
         }
         if cluster {
@@ -1015,7 +986,6 @@ impl Relay {
             record.cluster = None;
         }
         self.machines.save(record.clone())?;
-        link::set_provisional(&record.id, false)?;
         if record.cluster.is_some() != connected_as_cluster {
             // It connected the other way: the next connection starts the helper for how it is saved now.
             let _ = link.quit();
@@ -1070,10 +1040,6 @@ impl Relay {
     /// A machine named in a call: a saved name or id.
     fn find_machine(&self, key: &str) -> Result<Server, String> {
         match self.machines.find(key)? {
-            Some(server) if link::is_provisional(&server.id) => Err(format!(
-                "{} was saved by `add_machine`, which never finished connecting to it, so it can't be used yet. Call `add_machine` with its host again to finish.",
-                display_name(&server)
-            )),
             Some(server) => Ok(server),
             None => {
                 let names: Vec<String> = self.machines.load()?.iter().map(display_name).collect();
@@ -1085,9 +1051,9 @@ impl Relay {
 
     /// The machine's link and its status, started if there is none, after `link_rule`; the third is a note for the result.
     fn link_for_use(&self, server: &Server, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
-        let link = deadline.ensure(&server.id)?;
+        let link = deadline.ensure(server)?;
         let status = deadline.status(&link)?;
-        self.link_rule(&server.id, &display_name(server), link, status, deadline)
+        self.link_rule(server, link, status, deadline)
     }
 
     /// Wait up to `deadline` for the link to settle: ready, queued, failed, found nothing running, or

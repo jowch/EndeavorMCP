@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 #[test]
 fn reads_the_ssh_host_field() {
@@ -204,4 +205,75 @@ fn the_apps_entries_load_with_fields_this_version_lacks() {
     std::fs::write(&path, r#"[{"id":"server-1","name":"lab","ssh_host":"lab","port":2222,"julia":"module load julia","idle_stop":"week","later":true}]"#).unwrap();
     let server = MachinesFile::at(&path).find("lab").unwrap().unwrap();
     assert_eq!((server.port, server.julia.as_deref(), server.idle_stop), (Some(2222), Some("module load julia"), Some(IdleStop::Week)));
+}
+
+fn raw(path: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn the_file_is_an_object_with_a_schema_and_a_bare_list_still_reads() {
+    let dir = crate::client::scratch("machines-shape");
+    let path = dir.join("machines.json");
+    let file = MachinesFile::at(&path);
+    file.save(machine("server-1", "lab")).unwrap();
+    assert_eq!(raw(&path)["schema"], 1);
+    assert_eq!(raw(&path)["machines"][0]["id"], "server-1");
+
+    std::fs::write(&path, r#"[{"id":"server-1","name":"lab","ssh_host":"lab","later":1}]"#).unwrap();
+    assert_eq!(file.find("lab").unwrap().unwrap().id, "server-1", "a bare list reads");
+    file.save(machine("server-2", "box")).unwrap();
+    let written = raw(&path);
+    assert_eq!((written["schema"].clone(), written["machines"][0]["later"].clone()), (json!(1), json!(1)), "written as an object, keeping the fields");
+    for broken in ["{}", r#"{"schema":1}"#, r#"{"schema":"one","machines":[]}"#, r#"{"machines":{}}"#] {
+        std::fs::write(&path, broken).unwrap();
+        assert!(file.load().unwrap_err().contains("isn't valid"), "{broken}");
+    }
+}
+
+#[test]
+fn fields_this_version_lacks_survive_a_rewrite_and_go_with_a_removed_machine() {
+    let dir = crate::client::scratch("machines-unknown");
+    let path = dir.join("machines.json");
+    let file = MachinesFile::at(&path);
+    let before = json!({
+        "schema": 1, "theme": {"dark": true},
+        "machines": [
+            {"id": "a", "name": "a", "ssh_host": "a", "color": "red", "tags": ["x"]},
+            {"id": "b", "name": "b", "ssh_host": "b", "color": "blue"},
+        ],
+    });
+    std::fs::write(&path, before.to_string()).unwrap();
+
+    file.save(machine("c", "c")).unwrap();
+    let now = raw(&path);
+    assert_eq!(now["theme"], json!({"dark": true}));
+    assert_eq!((now["machines"][0]["color"].clone(), now["machines"][0]["tags"].clone(), now["machines"][1]["color"].clone()), (json!("red"), json!(["x"]), json!("blue")), "{now}");
+
+    let mut changed = file.find_by_id("a").unwrap().unwrap();
+    changed.port = Some(2222);
+    file.save(changed).unwrap();
+    let now = raw(&path);
+    assert_eq!((now["machines"][0]["port"].clone(), now["machines"][0]["color"].clone(), now["machines"][1]["color"].clone()), (json!(2222), json!("red"), json!("blue")), "{now}");
+    // A record built anew for a known id keeps the file's own extra fields.
+    file.save(machine("b", "b")).unwrap();
+    assert_eq!(raw(&path)["machines"][1]["color"], "blue");
+
+    assert_eq!(file.remove("a"), Ok(true));
+    let now = raw(&path);
+    assert!(!now.to_string().contains("red") && now["theme"] == json!({"dark": true}) && now["machines"][0]["color"] == "blue", "{now}");
+}
+
+#[test]
+fn a_file_of_a_newer_schema_is_read_and_never_written() {
+    let dir = crate::client::scratch("machines-newer");
+    let path = dir.join("machines.json");
+    let file = MachinesFile::at(&path);
+    let text = r#"{"schema":2,"machines":[{"id":"a","name":"a","ssh_host":"a","new_thing":{"x":1}}],"extra":true}"#;
+    std::fs::write(&path, text).unwrap();
+    assert_eq!(file.find("a").unwrap().unwrap().id, "a");
+    for error in [file.save(machine("b", "b")).unwrap_err(), file.remove("a").unwrap_err(), file.check_writable().unwrap_err()] {
+        assert!(error.contains("newer Endeavor") && error.contains(&path.display().to_string()), "{error}");
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "untouched");
 }

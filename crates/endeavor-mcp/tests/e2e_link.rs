@@ -24,7 +24,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use common::{find_julia, pid_alive, wait_for};
-use endeavor_mcp::client::{MachinesFile, Server};
+use endeavor_mcp::client::Server;
 use endeavor_mcp::link::{CALL_WAIT, Link, Spawn, State, ensure_with};
 use serde_json::{Value, json};
 
@@ -122,9 +122,8 @@ fn the_link_over_real_ssh() {
     let _ends = Ends { state: state.clone(), links };
     eprintln!("host: {host}, julia: {}", julia.display());
 
-    let machines = MachinesFile::at(work.join("config/endeavor/machines.json"));
-    machines.save(Server { id: "e2e-link".into(), name: host.clone(), ssh_host: host.clone(), julia: Some(julia.display().to_string()), ..Default::default() }).unwrap();
-    // HOME stays the user's own, where ssh finds its keys; the link's files and the machines file are ours.
+    let server = Server { id: "e2e-link".into(), name: host.clone(), ssh_host: host.clone(), julia: Some(julia.display().to_string()), ..Default::default() };
+    // HOME stays the user's own, where ssh finds its keys; the link's files are ours.
     let env = [
         ("XDG_STATE_HOME", work.join("state-home").display().to_string()),
         ("XDG_CONFIG_HOME", work.join("config").display().to_string()),
@@ -135,8 +134,8 @@ fn the_link_over_real_ssh() {
     ];
     let spawn = Spawn { exe: PathBuf::from(env!("CARGO_BIN_EXE_endeavor")), env: env.into_iter().map(|(k, v)| (k.to_owned(), v)).collect() };
 
-    let link = ensure_with(&spawn, "e2e-link").expect("a link");
-    assert_eq!(ensure_with(&spawn, "e2e-link").unwrap(), link, "a second front reuses it");
+    let link = ensure_with(&spawn, &server).expect("a link");
+    assert_eq!(ensure_with(&spawn, &server).unwrap(), link, "a second front reuses it");
     let looked = wait_status(&link, "the helper missing", Duration::from_secs(120), |s| s.state == State::NeedsInstall);
     assert!(looked.needs_install.is_some() && !root.join(endeavor_mcp::embedded::BUILD_VERSION).exists(), "a look installs nothing");
     link.install(CALL_WAIT).expect("install");

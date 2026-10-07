@@ -35,10 +35,16 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The machines file
 
-- **Rewriting `machines.json` drops fields `Server` doesn't have.** Harmless
-  while only this binary writes it. Must be fixed before the app shares the
-  file, or one side loses the other's additions. To close: keep unknown
-  fields when rewriting.
+- **A link keeps the machine record it was started with.** A change to a
+  machine in `machines.json` that the front didn't make (the app's, or a hand
+  edit) reaches a running link only when the link is replaced: it ends after
+  8 hours idle, or `add_machine` with other settings quits it. Julia
+  settings and addresses are the ones that matter; job defaults are read by
+  the front.
+- **An `add_machine` that is still connecting leaves a link running with a
+  record that is in no list.** It ends with the idle limit; the next
+  `add_machine` for the same name reuses it, or replaces it when the settings
+  differ.
 - **Machine ids must be lower-case.** A hand-edited id with capitals is
   refused. Generated ids are lower-case already.
 

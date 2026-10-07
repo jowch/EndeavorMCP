@@ -16,7 +16,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use common::{FakeBridge, TOKEN, pid_alive, serving_julia, wait_for};
-use endeavor_mcp::client::{MachinesFile, Server};
+use endeavor_mcp::client::Server;
 use endeavor_mcp::link::{CALL_WAIT, Link, Spawn, State, Status, ensure_with};
 use serde_json::{Value, json};
 
@@ -24,6 +24,8 @@ use serde_json::{Value, json};
 struct Place {
     dir: PathBuf,
     id: String,
+    /// The record the link is started with. No machines file is written: the link needs none.
+    server: Server,
     /// The helper's state folder, where its runtime keeps `runtime.json`.
     state: PathBuf,
     spawn: Spawn,
@@ -47,10 +49,7 @@ impl Place {
         let julia = serving_julia(&state, &bridge);
         std::fs::write(state.join("token"), TOKEN).unwrap();
         let id = format!("lab-{name}");
-        let config = dir.join("config");
-        MachinesFile::at(config.join("endeavor/machines.json"))
-            .save(Server { id: id.clone(), name: "lab".into(), ssh_host: "lab".into(), julia: Some(julia.display().to_string()), ..Default::default() })
-            .unwrap();
+        let server = Server { id: id.clone(), name: "lab".into(), ssh_host: "lab".into(), julia: Some(julia.display().to_string()), ..Default::default() };
         let path = |name: &str| dir.join(name).display().to_string();
         let mut env: Vec<(String, String)> = [
             ("HOME", path("home")),
@@ -70,7 +69,7 @@ impl Place {
             env.push((name.to_string(), value.replace("{dir}", &dir.display().to_string())));
         }
         let spawn = Spawn { exe: PathBuf::from(env!("CARGO_BIN_EXE_endeavor")), env };
-        Place { dir, id, state, spawn, _bridge: bridge }
+        Place { dir, id, server, state, spawn, _bridge: bridge }
     }
 
     /// The link, with the user's agreement to install the helper given.
@@ -82,7 +81,7 @@ impl Place {
 
     /// The link as `ensure` starts it: it looks and installs nothing.
     fn look(&self) -> Link {
-        ensure_with(&self.spawn, &self.id).expect("a link")
+        ensure_with(&self.spawn, &self.server).expect("a link")
     }
 
     fn record(&self) -> PathBuf {
@@ -184,8 +183,8 @@ fn one_link_serves_every_front_and_reaches_ready() {
     let place = Place::new("ready");
     // Fronts that start together get one link.
     let links: Vec<Link> = std::thread::scope(|scope| {
-        let (spawn, id) = (&place.spawn, &place.id);
-        let starts: Vec<_> = (0..4).map(|_| scope.spawn(|| ensure_with(spawn, id).expect("a link"))).collect();
+        let (spawn, server) = (&place.spawn, &place.server);
+        let starts: Vec<_> = (0..4).map(|_| scope.spawn(|| ensure_with(spawn, server).expect("a link"))).collect();
         starts.into_iter().map(|s| s.join().unwrap()).collect()
     });
     assert!(links.iter().all(|l| l == &links[0]), "{links:?}");
@@ -295,6 +294,11 @@ fn the_connection_comes_back_on_the_same_port() {
     let link = place.ensure();
     link.start(None, false, CALL_WAIT).unwrap();
     let before = ready(&link).runtime.unwrap();
+    let config = place.dir.join("config/endeavor/machines.json");
+    assert!(!config.exists(), "the link ran with no machines file");
+    // A record of the same id in the file that would not connect: a reconnect keeps the record the link was started with.
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, json!({ "schema": 1, "machines": [{ "id": place.id, "name": "lab", "ssh_host": "elsewhere", "julia": "/no/such/julia" }] }).to_string()).unwrap();
     let helpers = place.helpers();
     assert!(!helpers.is_empty());
     for pid in &helpers {
@@ -420,12 +424,22 @@ fn a_failed_connect_is_reported_once_and_tried_again_only_when_asked() {
 }
 
 #[test]
-fn a_link_for_a_machine_that_is_not_listed_says_so() {
-    let place = Place::new("unlisted");
-    let error = ensure_with(&place.spawn, "lab-other").expect_err("no such machine");
-    assert!(error.contains("There is no machine lab-other") && error.contains("machines.json"), "{error}");
-    let error = ensure_with(&place.spawn, "../escape").expect_err("not an id");
+fn a_record_whose_id_is_not_an_id_is_refused() {
+    let place = Place::new("bad-id");
+    let error = ensure_with(&place.spawn, &Server { id: "../escape".into(), ..place.server.clone() }).expect_err("not an id");
     assert!(error.contains("isn't a machine id"), "{error}");
+}
+
+#[test]
+fn a_link_started_by_hand_without_a_record_says_so() {
+    let place = Place::new("no-record");
+    let folder = place.dir.join("state-home/endeavor/links").join(&place.id);
+    std::fs::create_dir_all(&folder).unwrap();
+    let env = place.spawn.env.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+    let out = Command::new(&place.spawn.exe).args(["link", "--machine", &place.id]).envs(env).output().unwrap();
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("server.json") && said.contains("front writes"), "{said}");
 }
 
 #[test]
@@ -489,7 +503,7 @@ fn a_link_that_lives_and_does_not_answer_is_not_replaced() {
     std::fs::create_dir_all(place.record().parent().unwrap()).unwrap();
     let record = json!({ "machine": place.id, "pid": std::process::id(), "port": port, "token": "t", "build": "x" });
     std::fs::write(place.record(), record.to_string()).unwrap();
-    let error = ensure_with(&place.spawn, &place.id).expect_err("nothing answers");
+    let error = ensure_with(&place.spawn, &place.server).expect_err("nothing answers");
     // Removed before anything can fail: cleaning up ends the pid in the record.
     let kept = place.record().exists();
     std::fs::remove_file(place.record()).unwrap();
@@ -513,7 +527,7 @@ fn a_link_that_never_answers_is_ended_by_the_front_that_started_it() {
     std::fs::write(&script, format!("#!/bin/sh\necho $$ > {}/never.pid\nexec sleep 600\n", place.dir.display())).unwrap();
     std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let spawn = Spawn { exe: script, env: place.spawn.env.clone() };
-    let error = ensure_with(&spawn, &place.id).expect_err("no answer");
+    let error = ensure_with(&spawn, &place.server).expect_err("no answer");
     assert!(error.contains("didn't answer"), "{error}");
     let pid: i32 = std::fs::read_to_string(place.dir.join("never.pid")).unwrap().trim().parse().unwrap();
     wait_for("the child to be ended", || !pid_alive(pid));
@@ -535,24 +549,6 @@ fn a_start_asked_for_while_connecting_does_not_make_another_attempt() {
     wait_for("a second attempt", || attempts() == 2);
     wait_status(&link, "failed again", |s| s.state == State::Failed);
     assert_eq!(attempts(), 2);
-}
-
-#[test]
-fn a_connection_that_cannot_come_back_tells_the_listener() {
-    let place = Place::new("given-up");
-    let link = place.ensure();
-    link.start(None, false, CALL_WAIT).unwrap();
-    let runtime = ready(&link).runtime.unwrap();
-    // The machine leaves the list, so the next connect can't work and isn't tried again.
-    MachinesFile::at(place.dir.join("config/endeavor/machines.json")).remove(&place.id).unwrap();
-    for pid in place.helpers() {
-        // SAFETY: plain syscall, on the helper this test's link started.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-    let status = wait_status(&link, "failed", |s| s.state == State::Failed);
-    assert!(status.error.is_some_and(|e| e.contains("isn't in the list")));
-    let said = tool(runtime.port, &runtime.token, "list_notebooks", None);
-    assert!(said.as_str().is_some_and(|text| text.contains("Call use_machine") && !text.contains("by itself")), "{said}");
 }
 
 #[test]
