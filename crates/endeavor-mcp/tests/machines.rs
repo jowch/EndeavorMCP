@@ -173,6 +173,10 @@ fn recorded_pid(state: &Path) -> Option<i32> {
     serde_json::from_str::<Value>(&text).ok()?["pid"].as_i64().map(|p| p as i32).filter(|&p| p > 1)
 }
 
+fn read_record(state: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(state.join("runtime.json")).expect("a runtime record")).unwrap()
+}
+
 fn read_json_port(state: &Path) -> u16 {
     let text = std::fs::read_to_string(state.join("runtime.json")).expect("a runtime record");
     serde_json::from_str::<Value>(&text).unwrap()["port"].as_u64().expect("a port in the record") as u16
@@ -741,6 +745,9 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     let status = front.ok("pluto_session_status", json!({}));
     assert_eq!(url_port(&status["browser_url"]), port, "the connection's port, which the user's browser reaches");
     assert_eq!(status["machine"], "lab");
+    assert_eq!((&status["exits_when_idle"], &status["idle_stop_hours"], status.get("message")), (&json!(true), &json!(48.0), None), "a runtime a session starts exits when idle: {status}");
+    assert_eq!(read_record(&place.state)["exits_when_idle"], true);
+    assert!(used["message"].as_str().is_some_and(|m| !m.contains("keeps running")), "{used}");
     let folder = front.ok("list_folder", json!({ "path": place.project.display().to_string() }));
     assert!(folder.to_string().contains("machine.jl"), "{folder}");
     let shell = front.ok("run_shell", json!({ "command": "pwd; echo on-the-machine" }));
@@ -754,6 +761,7 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     assert_eq!(listed[0]["path"], local_file.display().to_string(), "this computer's notebooks: {listed}");
     let local_port = url_port(&front.ok("pluto_session_status", json!({}))["browser_url"]);
     assert_ne!(local_port, port);
+    assert_eq!(read_record(&place.local_state)["exits_when_idle"], true, "so does the one `mcp` starts on this computer");
     assert!(front.ok("pluto_session_status", json!({})).get("machine").is_none());
     let (failed, refused) = front.call("list_folder", json!({ "path": "/" }));
     assert!(failed && refused["message"].as_str().unwrap().contains("only for sessions on a server"), "{refused}");
@@ -765,6 +773,37 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     assert_eq!((again["state"].as_str(), again["already_running"].clone()), (Some("ready"), json!(true)), "{again}");
     let (failed, unknown) = front.call("use_machine", json!({ "machine": "nowhere" }));
     assert!(failed && unknown["message"].as_str().unwrap().contains("There is no machine \"nowhere\". Machines: lab."), "{unknown}");
+}
+
+#[test]
+fn a_runtime_that_was_not_started_to_exit_when_idle_says_so_when_a_session_uses_it() {
+    let place = Place::new("keeps-running");
+    place.add_lab();
+    let core = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_endeavor"))
+            .arg("core")
+            .arg("--state-dir")
+            .arg(&place.state)
+            .arg("--julia")
+            .arg(&place.julia)
+            .args(["--runtime", "/nonexistent", "--depot", "/nonexistent"])
+            .env("ENDEAVOR_TOKEN", TOKEN)
+            .env("ENDEAVOR_LAUNCHER", "process")
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+    );
+    wait_for("the runtime's record", || place.state.join("runtime.json").exists());
+    assert_eq!(read_record(&place.state)["pid"], core.0.id());
+    assert_eq!(read_record(&place.state)["exits_when_idle"], false);
+    let mut front = place.front();
+    front.initialize();
+
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["already_running"], true, "{used}");
+    assert!(used["message"].as_str().unwrap().ends_with(" It keeps running when idle until it is stopped."), "{used}");
+    let status = front.ok("pluto_session_status", json!({}));
+    assert_eq!((&status["exits_when_idle"], &status["idle_stop_hours"], status.get("message")), (&json!(false), &json!(48.0), None), "{status}");
 }
 
 #[test]

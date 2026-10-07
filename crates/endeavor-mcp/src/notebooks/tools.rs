@@ -8,6 +8,7 @@
 //! names its kind (see `mcp::tool_error`).
 
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -60,13 +61,21 @@ impl Notebooks {
             "find_symbol_references" => t.find_symbol("references"),
             "validate_cell" => t.validate_cell(),
             "search_code" => t.search_code(),
-            "pluto_session_status" => self.call("status", json!({})),
+            "pluto_session_status" => self.session_status(),
             "open_notebook" => t.open_notebook(folder),
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
         }?;
         Ok(Reply::Json(result))
+    }
+
+    /// The engine's status, with the idle limit now in force (0: never) and whether the runtime ends itself when idle.
+    fn session_status(&self) -> Result<Value, String> {
+        let mut status = self.call("status", json!({}))?;
+        status["idle_stop_hours"] = self.idle_limit_hours().into();
+        status["exits_when_idle"] = self.exits_when_idle.load(Ordering::Relaxed).into();
+        Ok(status)
     }
 
     /// An edit that was to run after (`run_after`), when the user chose not

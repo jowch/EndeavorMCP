@@ -32,7 +32,7 @@ use crate::asks::{Answer, Ask, Outcome};
 use crate::guide;
 use crate::host_tools;
 use crate::http::{self, Head};
-use crate::notebooks::{self, Julia, Notebooks, Reply};
+use crate::notebooks::{self, IDLE_HOURS, Julia, Notebooks, Reply};
 use crate::results::Results;
 
 /// Protocol versions this server understands, most recent first: `initialize`
@@ -258,12 +258,12 @@ impl Bridge {
             }
             "endeavor/set_idle_limit" => {
                 let hours = match params.get("hours") {
-                    Some(Value::Number(n)) => n.as_f64().unwrap_or(48.0),
+                    Some(Value::Number(n)) => n.as_f64().unwrap_or(IDLE_HOURS),
                     Some(Value::Bool(b)) => *b as u8 as f64,
-                    _ => 48.0,
+                    _ => IDLE_HOURS,
                 };
                 self.notebooks.set_idle_limit(hours);
-                let shown = params.get("hours").map_or("48".into(), julia_string);
+                let shown = params.get("hours").map_or(IDLE_HOURS.to_string(), julia_string);
                 eprintln!("[ Info: Idle notebooks stop after: {}", if hours == 0.0 { "never".into() } else { format!("{shown} hours") });
             }
             "endeavor/stop_notebook" => {

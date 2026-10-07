@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -30,6 +31,12 @@ use crate::mcp::{WRITE_TOOLS, julia_string, to_json};
 pub use tools::Reply;
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
+
+/// Hours without activity after which a notebook stops, unless the caller sets another.
+pub const IDLE_HOURS: f64 = 48.0;
+
+/// What a client is told of a runtime that doesn't end when idle.
+pub const KEEPS_RUNNING: &str = "It keeps running when idle until it is stopped.";
 
 /// How often to look for idle notebooks. ENDEAVOR_IDLE_CHECK_SECS: tests look
 /// more often than every five minutes.
@@ -250,6 +257,8 @@ pub struct Notebooks {
     events: Mutex<Events>,
     /// The app build this runtime came from, which the app compares with its own.
     pub build: OnceLock<String>,
+    /// Whether the runtime ends itself once no notebook has been open for the idle limit (`core::exit_when_idle`).
+    pub exits_when_idle: AtomicBool,
     /// Runs waiting for the user's answer.
     pub asks: Asks,
 }
@@ -456,10 +465,11 @@ impl Notebooks {
             asks: Asks::new(clock()),
             upstream,
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),
+            exits_when_idle: AtomicBool::new(false),
         }
     }
 

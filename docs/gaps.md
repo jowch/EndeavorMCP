@@ -150,11 +150,18 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Idle exit
 
-- **A runtime a front's connection starts exits when idle**, as one `mcp` starts does
-  (`connect --exit-idle`): once no notebook has been open for the idle
-  limit. A runtime the app starts on a server stays up. If the app attaches
-  to a runtime started this way and leaves it with no notebook open for 48
-  hours, it ends under the app. Not yet confirmed as the wanted behaviour.
+- **The app's runtime on a server stays up when idle**, since the app does not
+  pass `--exit-idle`. A runtime a session started exits when idle, so an app
+  that attaches to one and leaves it with no notebook open for 48 hours sees
+  it end. `runtime.json` and `pluto_session_status` now say which kind it is.
+- **A runtime already running keeps the idle settings it started with.** `mcp
+  --idle-stop` and a changed `ENDEAVOR_IDLE_HOURS` do not reach it;
+  `endeavor/set_idle_limit` does. A runtime that exits when idle waits for the
+  limit it has now.
+- **The helper's `ToApp::Ready` does not carry `exits_when_idle`.** The front
+  asks the runtime (`pluto_session_status`) when `use_machine` attaches to one
+  that was already running, and says nothing if the runtime is older and does
+  not answer with the field.
 - **`ENDEAVOR_IDLE_CHECK_SECS` panics on a negative or non-finite value.** It
   is a variable for tests.
 

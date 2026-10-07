@@ -135,7 +135,8 @@ fn starts_julia_and_writes_its_own_runtime_json() {
     assert!(core.port != bridge.port && core.port != bridge.pluto_port, "the core's own port");
     let mut keys: Vec<&str> = state.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort();
-    assert_eq!(keys, ["build", "job", "launcher", "node", "pid", "port", "started", "token"], "nothing of Pluto's");
+    assert_eq!(keys, ["build", "exits_when_idle", "job", "launcher", "node", "pid", "port", "started", "token"], "nothing of Pluto's");
+    assert_eq!(state["exits_when_idle"], false, "started without ENDEAVOR_EXIT_IDLE");
     assert_eq!((state["token"].as_str(), state["launcher"].as_str()), (Some(TOKEN), Some("process")));
     assert_eq!(state["build"].as_str(), Some("1.0.0-abc"), "the build it was started from");
     let mode = std::fs::metadata(dir.join("runtime.json")).unwrap().permissions().mode();
@@ -971,6 +972,33 @@ fn a_standalone_runtime_has_a_folder_a_fixed_port_and_host_tools_for_every_sessi
     };
     assert_eq!(ran("pwd"), format!("{}\n", folder.display()), "in the runtime's folder");
     assert_eq!(ran("echo \"$ENDEAVOR_FOLDER|$ENDEAVOR_PORT|$ENDEAVOR_HOST_TOOLS\""), "||\n", "none of the runtime's settings");
+}
+
+#[test]
+fn the_runtime_says_whether_it_ends_when_idle_and_what_idle_limit_it_has() {
+    let status = |core: &Core| -> serde_json::Value {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "pluto_session_status", "arguments": {} } });
+        let reply: serde_json::Value = serde_json::from_str(&mcp(core, &message.to_string(), &[]).1).unwrap();
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let dir = state_dir("core-exits-when-idle");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_EXIT_IDLE", "1")]);
+    assert_eq!(read_json(&dir.join("runtime.json"))["exits_when_idle"], true);
+    let said = status(&core);
+    assert_eq!((&said["exits_when_idle"], &said["idle_stop_hours"], said.get("message")), (&serde_json::json!(true), &serde_json::json!(48.0), None), "{said}");
+    for (hours, shown) in [("2.5", 2.5), ("0", 0.0), ("true", 1.0)] {
+        app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_idle_limit","params":{{"hours":{hours}}}}}"#));
+        assert_eq!(status(&core)["idle_stop_hours"], shown, "after {hours}");
+    }
+    drop(core);
+
+    let dir = state_dir("core-keeps-running");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_IDLE_HOURS", "6")]);
+    assert_eq!(read_json(&dir.join("runtime.json"))["exits_when_idle"], false);
+    let said = status(&core);
+    assert_eq!((&said["exits_when_idle"], &said["idle_stop_hours"], said.get("message")), (&serde_json::json!(false), &serde_json::json!(6.0), None), "{said}");
 }
 
 #[test]

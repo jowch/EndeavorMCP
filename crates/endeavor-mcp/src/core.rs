@@ -21,6 +21,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -73,9 +74,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 /// ENDEAVOR_FOLDER, the notebooks' folder, which makes it a standalone
 /// runtime; ENDEAVOR_PORT, a fixed port; ENDEAVOR_HOST_TOOLS, the host name
 /// under which every session gets the host tools; and ENDEAVOR_IDLE_HOURS, the
-/// idle stop. ENDEAVOR_EXIT_IDLE, to end the runtime once no notebook has
-/// been open for that long, works with or without a folder: a client asks for
-/// it on a runtime `connect` starts.
+/// idle stop (48 hours when not set). ENDEAVOR_EXIT_IDLE, to end the runtime
+/// once no notebook has been open for that long, works with or without a
+/// folder: a client asks for it on a runtime it starts in the background.
+/// `runtime.json` says whether it was set.
 pub fn main(argv: &[String]) -> ! {
     let args = parse_args(argv).unwrap_or_else(|e| {
         eprintln!("{e}\n{USAGE}");
@@ -130,6 +132,7 @@ pub fn main(argv: &[String]) -> ! {
     if let Ok(build) = std::env::var("ENDEAVOR_BUILD") {
         let _ = bridge.notebooks.build.set(build);
     }
+    bridge.notebooks.exits_when_idle.store(exit_idle, Ordering::Relaxed);
     let served = Arc::new(Served { bridge, pluto: OnceLock::new(), cookie });
     accept(listener, served.clone());
 
@@ -137,7 +140,7 @@ pub fn main(argv: &[String]) -> ! {
         if let Some(status) = julia.try_wait().unwrap_or(None) {
             break status;
         }
-        if let Some(ready) = julia_ready(&julia_state, &args.state_dir, port, &served.bridge, &mut starting) {
+        if let Some(ready) = julia_ready(&julia_state, &args.state_dir, port, &served.bridge, exit_idle, &mut starting) {
             let _ = served.pluto.set(ready.pluto);
             let _ = served.bridge.julia.port.set(ready.bridge_port);
             if let Some(hours) = idle_hours {
@@ -202,8 +205,8 @@ struct JuliaReady {
 
 /// Once Julia has written its state and its bridge answers, write
 /// `runtime.json` for the helper: the core's pid and its one `port`, and
-/// Julia's launcher, node and job. Pluto's port and secret stay out of it.
-fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge, starting: &mut Option<File>) -> Option<JuliaReady> {
+/// Julia's launcher, node and job, and whether it ends itself when idle. Pluto's port and secret stay out of it.
+fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge, exit_idle: bool, starting: &mut Option<File>) -> Option<JuliaReady> {
     let token = &bridge.token;
     let julia: Value = serde_json::from_str(&std::fs::read_to_string(julia_state).ok()?).ok()?;
     let port_of = |key: &str| julia[key].as_u64().and_then(|p| u16::try_from(p).ok());
@@ -225,7 +228,7 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge,
     let started: Option<u64> = None;
     let mut state = json!({
         "launcher": julia["launcher"], "node": julia["node"], "job": julia["job"],
-        "pid": std::process::id(), "started": started, "port": port, "token": token,
+        "pid": std::process::id(), "started": started, "port": port, "token": token, "exits_when_idle": exit_idle,
     });
     if let Some(standalone) = &bridge.standalone {
         state["folder"] = standalone.folder.clone().into();

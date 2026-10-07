@@ -115,7 +115,7 @@ What came out differently from the design above, or wasn't settled by it:
   (`guard.rs`, for a runtime from another build) does the same, and now sees
   every connection, Pluto's included; each request on a connection is still
   checked, and an upgraded connection was checked at its upgrade.
-- **`runtime.json`** is `{launcher, node, pid, started, port, token, job}`.
+- **`runtime.json`** is `{launcher, node, pid, started, port, token, job, exits_when_idle}`.
   Pluto's port and secret and Julia's bridge port stay in `julia.json`,
   between the core and Julia. Julia's side needed no change: it already ran
   Pluto and its bridge on ports the core picked.
@@ -219,6 +219,7 @@ package `endeavor-mcp`; it was `endeavor-remote` until the rename.
 - **Idle.** `--idle-stop` sets the notebooks' idle stop. A runtime `mcp`
   started also ends itself once no notebook has been open that long
   (`core::exit_when_idle`); one `serve` started stays until Ctrl-C.
+  `runtime.json` says which (`exits_when_idle`).
 - **Opening a notebook from disk** runs nothing, from the tools or from
   Pluto's start page (checked in `tests/e2e_serve.rs`); Pluto's
   **Run notebook code** runs it.

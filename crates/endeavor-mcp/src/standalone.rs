@@ -52,10 +52,6 @@ options:
   --state-dir DIR      the runtime's state (default ~/.local/state/endeavor/serve/<host>)
 ";
 
-/// Hours a notebook may sit unused before it stops (and, for a runtime `mcp`
-/// started, how long the runtime stays up with no notebook open): the app's default.
-const IDLE_HOURS: f64 = 48.0;
-
 /// How long a relayed call, and each machine tool, waits for a runtime that is
 /// still starting before it says so, under the time agents give a tool call.
 /// `ENDEAVOR_START_WAIT_SECS` sets it (the tests do).
@@ -179,7 +175,7 @@ impl Env {
 pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     let (command, rest) = argv.split_first().ok_or("expected serve, mcp or stop")?;
     let (mut state_dir, mut julia, mut depot, mut folder, mut port) = (None, None::<julia::Source>, None, None, 0);
-    let (mut host_tools, mut idle_hours, mut skills_plugin) = (false, IDLE_HOURS, false);
+    let (mut host_tools, mut idle_hours, mut skills_plugin) = (false, crate::notebooks::IDLE_HOURS, false);
     let mut args = rest.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or(format!("{arg} needs a value"));

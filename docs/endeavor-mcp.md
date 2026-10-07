@@ -262,6 +262,23 @@ loopback port on the user's computer) gives a link that works there. Without the
 with one that isn't a port, only a runtime started by `serve` or `mcp` adds a
 `browser_url`, on its own port, as before.
 
+**How a runtime ends when idle.** A notebook with no activity for the idle
+limit stops: 48 hours unless the caller sets another (`--idle-stop`,
+`ENDEAVOR_IDLE_HOURS`, or `endeavor/set_idle_limit` while it runs; 0 never).
+It is the same everywhere. A runtime a client starts in the background
+(`mcp` on this computer, a session on a server or cluster) is also started to
+end once no notebook has been open for that long (`ENDEAVOR_EXIT_IDLE`, which
+`endeavor connect --exit-idle` sets); `serve` is not. `runtime.json` records
+which it is as `"exits_when_idle": true|false`, written when the runtime is
+ready; a record without it is from before and says nothing. The limit itself
+is not in the file, since it can change: `pluto_session_status` carries
+`idle_stop_hours` (the limit now in force, 0 for never) and `exits_when_idle`.
+`use_machine` adds "It keeps running when idle until it is stopped." to its
+message when it attaches to a runtime that was already running and does not
+end by itself; it asks
+the runtime, so an older runtime that doesn't say gets no sentence. The app
+reads `runtime.json` and calls the runtime in the same way.
+
 ## The machine tools
 
 _Built 2026-10-06, in `endeavor mcp` only._

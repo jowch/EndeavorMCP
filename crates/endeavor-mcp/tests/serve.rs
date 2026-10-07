@@ -26,6 +26,8 @@ fn serve(dir: &Path, bridge: &FakeBridge) -> Child {
         .arg("--folder")
         .arg(dir)
         .env("XDG_CACHE_HOME", dir.join("cache"))
+        .env("XDG_STATE_HOME", dir.join("state-home"))
+        .env("XDG_CONFIG_HOME", dir.join("config"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -51,7 +53,9 @@ fn stop_from_another_terminal_ends_serve_without_an_error() {
     let dir = state_dir("serve-stop");
     let bridge = FakeBridge::start(&dir);
     let serve = serve(&dir, &bridge);
-    let core = read_json(&dir.join("runtime.json"))["pid"].as_i64().unwrap();
+    let record = read_json(&dir.join("runtime.json"));
+    let core = record["pid"].as_i64().unwrap();
+    assert_eq!(record["exits_when_idle"], false, "serve runs until it is stopped");
 
     let stop = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--state-dir").arg(&dir).output().unwrap();
     assert_eq!(String::from_utf8(stop.stdout).unwrap(), format!("Stopped Julia (pid {core}).\n"));

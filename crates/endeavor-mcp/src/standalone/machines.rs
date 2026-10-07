@@ -473,6 +473,15 @@ fn partition_text(p: &Partition) -> String {
     format!("{}{} ({limit}, {} CPUs and {} GB a node)", p.name, if p.default { " (default)" } else { "" }, p.cpus, p.mem_gb())
 }
 
+/// What to tell of a runtime that was already running and doesn't end itself when idle. A runtime that doesn't say gets nothing said.
+fn keeps_running(runtime: &RuntimeInfo) -> Option<&'static str> {
+    let params = json!({ "name": "pluto_session_status", "arguments": {} });
+    let (200, body) = Relay::tell(runtime.port, &runtime.token, "tools/call", params, Some(Instant::now() + CHECK_WAIT)).ok()? else { return None };
+    let reply: Value = serde_json::from_slice(&body).ok()?;
+    let status: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str()?).ok()?;
+    (status["exits_when_idle"] == false).then_some(crate::notebooks::KEEPS_RUNNING)
+}
+
 /// A machine's name as the tools take it: letters, digits, `-`, `_` and `.`, starting and ending with a letter or digit.
 fn valid_name(name: &str) -> Result<(), String> {
     let plain = !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) && name.starts_with(|c: char| c.is_ascii_alphanumeric()) && name.ends_with(|c: char| c.is_ascii_alphanumeric());
@@ -1195,6 +1204,8 @@ impl Relay {
         }
         let home = reached.status.hello.as_ref().map(|h| h.home.clone());
         let route = self.ready(&target, runtime, home.as_deref());
+        let said = (runtime.reattached || was_ready).then(|| keeps_running(runtime)).flatten().map(|said| format!(" {said}")).unwrap_or_default();
+        let notes = format!("{notes}{said}");
         let mut result = json!({
             "machine": name,
             "state": "ready",

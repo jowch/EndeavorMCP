@@ -37,7 +37,7 @@ section._
 
 ## The revision (decided 2026-10-07)
 
-Steps 1 to 4 of the order of work below are built; steps 5 and 6 are not. It was
+Steps 1 to 5 of the order of work below are built; step 6 is not. It was
 decided after three review rounds found most of their faults in two places:
 between the front and the link process it used, and where the front started
 this computer's runtime with code of its own beside the helper's.
@@ -91,9 +91,9 @@ harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ─�
   (`stale_read`) and the check before a run (`run_conflict`) are what keep
   two sessions from undoing each other, and they stay. The note that named
   cells another session changed lately (`other_session`) is gone as well.
-- **One rule ends a notebook: the idle limit.** It is the same on this
-  computer and on a server, whoever started the runtime, and it is recorded
-  with the runtime. The app's "local notebooks quit with the app" is not
+- **One rule ends a notebook: the idle limit** (built). It is the same on this
+  computer and on a server, whoever started the runtime, and the runtime says
+  which kind it is. The app's "local notebooks quit with the app" is not
   needed; the app can attach and detach as the plugin does.
 
 **What went (step 3).**
@@ -206,6 +206,18 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    latest did (`endeavor/recent_sessions`, which records no call), and
    refuses without `force` when there is one.
 5. One idle rule, recorded in `runtime.json`.
+   _Built 2026-10-07._ A notebook with no activity for the idle limit stops,
+   48 hours unless a caller sets another (`notebooks::IDLE_HOURS`, the only
+   place the default is written), on every kind of start. A runtime a client
+   starts in the background (`mcp` on this computer, a `Session` on a server
+   or cluster) is started to exit once no notebook has been open for that
+   long; `serve` is not. The core writes `"exits_when_idle": true|false` to
+   `runtime.json` (absent in a record from before: not known). The live limit
+   is not in the file, since `endeavor/set_idle_limit` changes it:
+   `pluto_session_status` carries `idle_stop_hours` and `exits_when_idle`, and
+   `use_machine` adds the sentence "It keeps running when idle until it is
+   stopped." when it attaches to a runtime that was already running and does
+   not exit by itself.
 6. One local state folder for the app and the plugin, with the paths module.
 
 **Decided on the open points (2026-10-07).**
@@ -232,7 +244,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
   exit: you started it on purpose where you can see it. A runtime that
   `mcp` or a server connection starts exits once no notebook has been open
   for the idle limit. `runtime.json` records which it is, so every client
-  can say (step 5).
+  can say (built).
 
 ## Decided
 
@@ -254,7 +266,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 | Several agent sessions on one notebook | Allowed, as in the app today. No owner and no takeover |
 | Who holds the connection to a server | Each `endeavor mcp`, in process, as the app does (built 2026-10-07). There is no background process |
 | This computer | The front calls the one find-or-start function the helper also calls (built 2026-10-07) |
-| When a session ends | Planned (2026-10-07): nothing is said and nothing is listed. The idle limit is the only thing that ends a notebook, the same everywhere |
+| When a session ends | Nothing is said and nothing is listed. The idle limit is the only thing that ends a notebook, the same everywhere (built 2026-10-07) |
 | Windows | A target soon, so nothing macOS-only in the design |
 
 ## Two roles on your computer
@@ -346,13 +358,16 @@ be a folder's name on every system.
   ends it closes the session, and the page address stops working. The app's
   connection lasts as long as the app runs.
 - A front or an app that goes away detaches. It never stops the runtime.
-- The runtime's idle stop is the core's, as today: 48 hours unless set
-  otherwise, for the whole runtime, by whoever started it.
-- A runtime a session starts also ends once no notebook has been open for that
-  long (`endeavor connect --exit-idle`, like one `mcp` starts), so a runtime
-  nobody uses doesn't stay up for good. Attaching to a running runtime
-  changes nothing about it. On a cluster the flag goes to the core in the job,
-  and the job's time limit ends it too.
+- One rule ends a notebook: no activity for the idle limit, 48 hours unless
+  set otherwise (`endeavor/set_idle_limit`, `--idle-stop`), for the whole
+  runtime, on this computer and on a server, whoever started it.
+- A runtime a client starts in the background (`mcp` here, a session on a
+  server or cluster, with `endeavor connect --exit-idle`) also ends once no
+  notebook has been open for that long, so a runtime nobody uses doesn't stay
+  up for good. `serve` runs in your terminal until you stop it and does not.
+  Attaching to a running runtime changes nothing about it, and
+  `pluto_session_status` says which kind it is. On a cluster the flag goes to
+  the core in the job, and the job's time limit ends it too.
 
 **The token.** The helper sends the runtime's token when the runtime is
 ready. The session keeps it in memory, and the front adds it to each
