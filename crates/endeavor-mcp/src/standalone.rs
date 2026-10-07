@@ -832,18 +832,18 @@ impl Relay {
     }
 
     /// Tell the runtime something about this session, as the app does for its
-    /// sessions with `/endeavor/call`. It gives up when the runtime says nothing for `quiet`.
-    fn tell(port: u16, token: &str, method: &str, params: Value, quiet: Option<Duration>) -> io::Result<(u16, Vec<u8>)> {
+    /// sessions with `/endeavor/call`. It fails with `TimedOut` if the exchange isn't done by `deadline`.
+    fn tell(port: u16, token: &str, method: &str, params: Value, deadline: Option<Instant>) -> io::Result<(u16, Vec<u8>)> {
         let body = to_json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }));
         let bearer = format!("Bearer {token}");
         let headers = [("Authorization", bearer.as_str()), ("Content-Type", "application/json")];
-        crate::http::post_within(port, crate::CALL, &headers, body.as_bytes(), quiet)
+        crate::http::post_by(port, crate::CALL, &headers, body.as_bytes(), deadline)
     }
 
-    /// Give the runtime on `port` the folder of session `session`, which is `folder` there: the
+    /// Give the runtime on `port` this session's folder, which is `folder` there: the
     /// runtime may have been started from another folder.
-    fn tell_session_folder(&self, port: u16, token: &str, session: &str, folder: &str) {
-        let params = json!({ "owner": session, "folder": folder });
+    fn tell_session_folder(&self, port: u16, token: &str, folder: &str) {
+        let params = json!({ "owner": self.session, "folder": folder });
         if let Err(e) = Relay::tell(port, token, "endeavor/set_session_folder", params, None) {
             eprintln!("endeavor: couldn't give the runtime this session's folder: {e}");
         }
@@ -929,19 +929,13 @@ impl Relay {
 
     /// POST one message to the runtime and give what it answers to `sink`.
     fn post(&self, route: &Route, body: &str, sink: &dyn Fn(String)) -> Result<(), Sent> {
-        self.post_within(route, body, sink, None)
-    }
-
-    /// `post`, where reading from the runtime gives up when it says nothing for `quiet`.
-    fn post_within(&self, route: &Route, body: &str, sink: &dyn Fn(String), quiet: Option<Duration>) -> Result<(), Sent> {
         let port = route.port;
         let token = &route.token;
         let socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)).map_err(Sent::NotConnected)?;
         let _ = socket.set_nodelay(true);
-        let _ = socket.set_read_timeout(quiet);
         let mut head = format!(
             "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nX-Endeavor-Session: {}\r\nContent-Length: {}\r\n",
-            route.session,
+            self.session,
             body.len()
         );
         if let Some(host) = &route.host {
@@ -1019,14 +1013,12 @@ fn one_line(text: &str) -> String {
     }
 }
 
-/// Where a call goes: a runtime's port and token, and for a machine's runtime its name,
-/// with the session's key there. They are taken together, so a call that races a move of
-/// the session goes whole to the runtime it was routed to.
+/// Where a call goes: a runtime's port and token, and for a machine's runtime its name.
+/// They are taken together, so a call that races a move of the session goes whole to the
+/// runtime it was routed to.
 pub(crate) struct Route {
     pub port: u16,
     pub token: String,
-    /// The session's key (`X-Endeavor-Session`).
-    pub session: String,
     /// The machine's name (`X-Endeavor-Host`). With it the runtime also gets
     /// the connection's port as the browser's (`X-Endeavor-Browser-Port`), which is `port`.
     pub host: Option<String>,

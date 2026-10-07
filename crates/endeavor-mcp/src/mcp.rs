@@ -254,7 +254,7 @@ impl Bridge {
             }
             "endeavor/recent_sessions" => {
                 let within = params["within_seconds"].as_f64().ok_or_else(|| "ArgumentError: invalid_argument::within_seconds must be a number".to_owned());
-                return Some(answer(within.map(|within| self.notebooks.recent_sessions(&text("owner", ""), within))));
+                return Some(answer(within.and_then(|within| self.notebooks.recent_sessions(&text("owner", ""), within))));
             }
             "endeavor/set_idle_limit" => {
                 let hours = match params.get("hours") {

@@ -395,27 +395,37 @@ _Started 2026-10-06, on the `client-library` branch._
   called lately, and without `force` refuses when it doesn't come. A runtime
   busy for longer than that needs `force`. A runtime started by a build from
   before `endeavor/recent_sessions` doesn't know the question, so it is
-  refused the same way until it is restarted or `force` is given.
-- **A session that has left still counts for 15 minutes.** Nothing signs a
-  session out, so `stop_machine` without `force` is refused for 15 minutes
-  after another session's last tool call, whether it is still there or not. It
-  asks the user, who can say to go ahead.
-- **A session that returns to a runtime has its old notebook there.** It keeps
-  one key for its whole run, so on a machine or on this computer it worked in
-  before, it is still bound to the notebook it made there (`list_notebooks`
-  shows `this_session`), and `one_notebook` refuses a different one. Its
-  results say it has no notebook there "unless it worked in one there before".
+  refused the same way until it is restarted or `force` is given. So is an
+  answer that is not well formed, or a call that has no time left.
+- **A session that has left still counts for 15 minutes while its notebook is
+  open.** Nothing signs a session out, so `stop_machine` without `force` is
+  refused for 15 minutes after the last tool call of another session that
+  works in a notebook that is still open, whether the session is still there
+  or not. It asks the user, who can say to go ahead. A session that only asked
+  for status, or whose notebook has closed, does not hold up a stop.
+- **A session that returns to a runtime is still in its old notebook there if
+  that is still open.** It keeps one key for its whole run, so on a machine or
+  on this computer it worked in before, `list_notebooks` shows `this_session`
+  for that notebook, and `one_notebook` refuses a different one. If the
+  notebook has closed or idle-stopped meanwhile, the binding is dropped when
+  it is next found out, and the session can make or open another.
 - **A session that goes away leaves its run policy and folder in the
   runtime's memory** until the runtime ends: the sign-out cleared them, and
   the 7-day forgetting does not. They are a few strings for each session.
   A session the app drops does not clear them either, since the app's call
   (`endeavor/end_session`) is gone.
+- **A front from before this change, with a runtime from after it, loses the
+  `stop_machine` check without saying so.** It reads `other_sessions` from
+  `list_notebooks`, which is gone, so it sees no other session and stops
+  without asking. Nothing was released before this change, so there is no
+  code for it.
 - **Not run against a host with no Slurm.** On this workstation the helper
   finds Slurm in `/usr/bin`, so the "no Slurm" message and `slurm: true`
   without Slurm are covered by unit tests of the decision only.
-- **The races behind the route/key pairing, `active` and the ops lock** have
-  no test that forces them. The pairing is tested as a snapshot taken before
-  a move, the lock by a call that waits out its deadline, and the order in
+- **The races behind the move counter, `active` and the ops lock** have
+  no test that forces them. The counter is tested as a comparison of the
+  target before and after a move away and back, the lock by a call that waits
+  out its deadline, and the order in
   `stop_machine` (the target is marked stopped before the runtime is ended) by
   reading.
 

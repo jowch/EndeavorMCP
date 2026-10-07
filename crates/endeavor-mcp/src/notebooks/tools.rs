@@ -453,6 +453,9 @@ impl Call<'_> {
         let bound = self.nbs.bound(self.owner);
         let paths: Vec<String> = snapshots.iter().map(|nb| canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone())).collect();
         let own = |at: usize| bound.as_ref().is_some_and(|bound| paths[at] == *bound);
+        if let Some(bound) = bound.as_ref().filter(|bound| !paths.contains(bound)) {
+            self.nbs.unbind(self.owner, bound);
+        }
         let mut state = self.nbs.state.lock().unwrap();
         Ok(Value::Array(snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()))
     }

@@ -635,6 +635,12 @@ impl Relay {
         }
     }
 
+    /// `use_machine` sets the target, which counts as a move even to where the session is.
+    fn point_at(&self, next: Target) {
+        let mut target = self.target.lock().unwrap();
+        *target = Target { moves: target.moves + 1, ..next };
+    }
+
     /// The project's remembered machine becomes the target, without starting anything.
     pub(super) fn target_from_project(&self) {
         let remembered = match self.projects.get(&self.options.folder) {
@@ -718,7 +724,7 @@ impl Relay {
 
     /// Whether the session is no longer where `target` had it, with `provider`: the reason, if so.
     fn moved(&self, now: &Target, target: &Target, provider: &Arc<dyn Provider>) -> Option<NotReady> {
-        if now.id != target.id {
+        if now.id != target.id || now.moves != target.moves {
             return Some(NotReady::plain("This session moved to another machine while the call waited. Try the call again."));
         }
         if !self.held(now).is_some_and(|now| std::ptr::addr_eq(Arc::as_ptr(&now), Arc::as_ptr(provider))) {
@@ -749,11 +755,11 @@ impl Relay {
         if target.told != Some(runtime.pid) {
             let folder = target.folder.clone().or_else(|| home.filter(|h| !h.is_empty()).map(str::to_owned));
             if let Some(folder) = folder {
-                self.tell_session_folder(runtime.port, &runtime.token, &self.session, &folder);
+                self.tell_session_folder(runtime.port, &runtime.token, &folder);
             }
             self.update_target(&target.id, |t| t.told = Some(runtime.pid));
         }
-        Route { port: runtime.port, token: runtime.token.clone(), session: self.session.clone(), host: target.host() }
+        Route { port: runtime.port, token: runtime.token.clone(), host: target.host() }
     }
 
     /// For a project's remembered cluster with no job: what to ask the user before submitting one.
@@ -1079,8 +1085,8 @@ impl Relay {
     }
 
     /// Put the session on a machine, or on this computer. Everything that can fail, and the request to
-    /// start or attach, comes first; only when the request was taken does the session move, its key on
-    /// the old runtime end, and the project remember the machine. Whatever fails before that leaves all
+    /// start or attach, comes first; only when the request was taken does the session move and the
+    /// project remember the machine. Whatever fails before that leaves all
     /// of it as it was.
     fn use_machine(self: &Arc<Self>, args: &Value, deadline: Deadline) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
@@ -1132,7 +1138,7 @@ impl Relay {
             Outcome::Failed(_) => return Err(format!("{}{}", not_ready_message(&name, &reached), notes.iter().map(|n| format!(" {n}")).collect::<String>())),
             _ => {}
         }
-        *self.target.lock().unwrap() = Target::new(&server, folder.clone());
+        self.point_at(Target::new(&server, folder.clone()));
         if let Some((resources, account)) = saved_resources {
             let mut saved = server.clone();
             if let Some(c) = saved.cluster.as_mut() {
@@ -1197,7 +1203,7 @@ impl Relay {
             "folder": target.folder.clone().or(home),
         });
         if target.is_local() {
-            result["message"] = format!("This session works on this computer again. The host tools (`list_folder`, `read_file`, `run_shell`) don't apply here: use your own file and shell tools. The session has no notebook here yet, unless it worked in one here before (`list_notebooks` shows it); `new_notebook` or `open_notebook` makes one.{notes}").into();
+            result["message"] = format!("This session works on this computer again. The host tools (`list_folder`, `read_file`, `run_shell`) don't apply here: use your own file and shell tools. The session has no notebook here yet, unless it is still in one it made here that is open (`list_notebooks` shows `this_session`); `new_notebook` or `open_notebook` makes one.{notes}").into();
             return Ok(result);
         }
         result["node"] = runtime.node.clone().into();
@@ -1209,7 +1215,7 @@ impl Relay {
         let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Julia started there" };
         let ends = job_json(&reached.status).and_then(|j| j["ends_in_minutes"].as_u64()).map(|m| format!(" The job ends in {}.", wire::slurm::duration_text(m as u32))).unwrap_or_default();
         result["message"] = format!(
-            "{on} (node {}). Give the user this address to watch the notebooks: {}.{ends}{} This session has no notebook on {name} yet, unless it worked in one there before (`list_notebooks` shows it): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
+            "{on} (node {}). Give the user this address to watch the notebooks: {}.{ends}{} This session has no notebook on {name} yet, unless it is still in one it made there that is open (`list_notebooks` shows `this_session`): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
             runtime.node,
             result["browser_url"].as_str().unwrap_or_default(),
             reach_text(server, runtime)
@@ -1277,20 +1283,26 @@ impl Relay {
         }))
     }
 
-    /// The other sessions that called a tool lately. The runtime has `quiet` to answer; if it doesn't,
-    /// or can't be asked, the error says so, and that `force` stops anyway.
+    /// The other sessions active lately. The runtime has `quiet` to answer in all; anything but a
+    /// well-formed answer is an error that says so, and that `force` stops anyway.
     fn recent_others(&self, port: u16, token: &str, quiet: Duration) -> Result<Others, String> {
         let unknown = |why: String| format!("Nothing was stopped: couldn't check who else is active there ({why}). Stopping ends everyone's notebooks there, so call `stop_machine` again with `force: true` only if the user agrees to stop it anyway.");
+        if quiet.is_zero() {
+            return Err(unknown("no time was left to ask".into()));
+        }
         let params = json!({ "owner": self.session, "within_seconds": RECENT_SECONDS });
-        let (status, body) = Relay::tell(port, token, "endeavor/recent_sessions", params, Some(quiet)).map_err(|e| {
+        let (status, body) = Relay::tell(port, token, "endeavor/recent_sessions", params, Some(Instant::now() + quiet)).map_err(|e| {
             unknown(match e.kind() {
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => "the runtime didn't answer in time".to_owned(),
                 _ => e.to_string(),
             })
         })?;
         let reply: Value = serde_json::from_slice(&body).map_err(|e| unknown(format!("{status}: {e}")))?;
-        let others = reply.get("result").ok_or_else(|| unknown(reply["error"]["message"].as_str().unwrap_or("no answer").to_owned()))?;
-        Ok(Others { count: others["count"].as_u64().unwrap_or(0), seconds_ago: others["active_seconds_ago"].as_u64().unwrap_or(0) })
+        let malformed = || unknown(format!("{status}: {}", reply["error"]["message"].as_str().unwrap_or("no usable answer")));
+        let found = reply.get("result").filter(|_| status == 200).ok_or_else(malformed)?;
+        let count = found["count"].as_u64().ok_or_else(malformed)?;
+        let seconds_ago = if count == 0 { 0 } else { found["active_seconds_ago"].as_u64().ok_or_else(malformed)? };
+        Ok(Others { count, seconds_ago })
     }
 
     /// For a cluster with no job and no resources given: what to ask the user before submitting one. The session stays where it is.

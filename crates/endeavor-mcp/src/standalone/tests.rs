@@ -397,7 +397,7 @@ fn a_notification_is_passed_on_and_gets_no_answer() {
     assert_eq!(seen.lock().unwrap()[0].1, r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#);
     assert!(out.lines().is_empty());
     relay.handle("not json");
-    relay.tell_session_folder(port, "t0k", "stdio-7", &relay.options.folder.display().to_string());
+    relay.tell_session_folder(port, "t0k", &relay.options.folder.display().to_string());
     let (head, body) = &seen.lock().unwrap()[1];
     assert_eq!(head.target(), "/endeavor/call");
     assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/set_session_folder","params":{"folder":"/home/ada/project","owner":"stdio-7"}}"#);

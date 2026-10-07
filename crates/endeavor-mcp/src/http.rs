@@ -7,6 +7,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
@@ -319,14 +320,34 @@ pub fn write_chunk(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
 /// POST `body` to `path` on the loopback server at `port`, on a connection of
 /// its own: the response's status and whole body.
 pub fn post(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> io::Result<(u16, Vec<u8>)> {
-    post_within(port, path, headers, body, None)
+    post_by(port, path, headers, body, None)
 }
 
-/// `post`, giving up when the server says nothing for `quiet`.
-pub fn post_within(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], quiet: Option<std::time::Duration>) -> io::Result<(u16, Vec<u8>)> {
-    let upstream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), std::time::Duration::from_secs(5))?;
+/// A socket whose reads fail with `TimedOut` once `deadline` has passed, each read
+/// waiting only for what is left.
+struct Timed<'a> {
+    socket: &'a TcpStream,
+    deadline: Option<Instant>,
+}
+
+impl Read for Timed<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            self.socket.set_read_timeout(Some(left))?;
+        }
+        self.socket.read(buf)
+    }
+}
+
+/// `post`, which fails with `TimedOut` if the whole exchange isn't done by `deadline`.
+pub fn post_by(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadline: Option<Instant>) -> io::Result<(u16, Vec<u8>)> {
+    let connect = deadline.map_or(Duration::from_secs(5), |deadline| deadline.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_secs(5)));
+    let upstream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), connect)?;
     let _ = upstream.set_nodelay(true);
-    let _ = upstream.set_read_timeout(quiet);
     let mut head = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
     for (name, value) in headers {
         // A value can't end the header early.
@@ -337,7 +358,7 @@ pub fn post_within(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8],
     let mut out = &upstream;
     out.write_all(head.as_bytes())?;
     out.write_all(body)?;
-    let mut reader = BufReader::new(&upstream);
+    let mut reader = BufReader::new(Timed { socket: &upstream, deadline });
     let response = loop {
         let response = Head::read(&mut reader)?.ok_or(io::ErrorKind::UnexpectedEof)?;
         if !(100..200).contains(&response.status()) {

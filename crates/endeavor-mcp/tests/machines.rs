@@ -1500,13 +1500,8 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     assert_eq!((used["state"].as_str(), used["already_running"].clone(), used["job"]["id"].as_str()), (Some("ready"), json!(true), Some("42")), "{used}");
     assert!(used["message"].as_str().unwrap().contains("The job ends in"), "{used}");
 
-    // The first session went without saying so, and its last call was lately.
-    let refused = second.ok("stop_machine", json!({ "machine": "hpc" }));
-    assert_eq!((refused["stopped"].clone(), refused["active_sessions"].clone()), (json!(false), json!(1)), "{refused}");
-    assert_eq!(slurm.read("scancel.log"), "", "nothing was cancelled");
-
-    // Stopping cancels the job.
-    let stopped = second.ok("stop_machine", json!({ "machine": "hpc", "force": true }));
+    // Stopping cancels the job. The first session only asked for the status, so it holds nothing up.
+    let stopped = second.ok("stop_machine", json!({ "machine": "hpc" }));
     assert_eq!(stopped["stopped"], true, "{stopped}");
     assert_eq!(slurm.read("scancel.log").trim(), "42");
     assert!(stopped["message"].as_str().unwrap().contains("Slurm job was cancelled"));

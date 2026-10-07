@@ -31,7 +31,7 @@ Only after the user agrees to what the result names, call the same tool again wi
    If it returns `needs_install`, see above. `install: true` here covers the helper only.
    Whether Julia runs in Slurm jobs or directly on the machine is the user's choice. When the machine has Slurm and the user hasn't said, ask: a workstation can have Slurm's tools without being a cluster. Pass `slurm: true` (jobs) or `slurm: false` (directly). Left out, a new machine with Slurm gets jobs; one added before stays as it was saved. The result says which it used (`cluster`, `runs_in`) and how to change it; changing is refused while Julia runs there.
 3. `use_machine(machine)`: puts this session on it and starts or attaches to the Julia there. On a plain server that is all. On a cluster with no job running it submits nothing and returns `needs_job` with the saved default resources, and the session stays where it was: propose the resources to the user (for example "8 CPUs, 32 GB, 8 hours on `shared`?"), and once they agree call `use_machine` again with those values (`gpus: 0` means no GPU; `extra_sbatch_flags` entries are one string each, such as `"--constraint=a100"`). Never submit a job the user hasn't agreed to. A call that fails leaves the session where it was.
-4. Tell the user the `browser_url`, and on a cluster the queue state and when the job ends. Then work as in **endeavor-notebooks**: the session starts with no notebook on the new machine, so create or open one there.
+4. Tell the user the `browser_url`, and on a cluster the queue state and when the job ends. Then work as in **endeavor-notebooks**: the session has no notebook on a machine it hasn't worked on, so create or open one there. On one it worked on before it is still in its notebook there if that is open (`list_notebooks` shows `this_session`).
 
 ## Waiting
 
@@ -48,7 +48,7 @@ Endeavor signs in with the user's own ssh keys and ssh agent. Never ask for a pa
 ## Stopping and other people
 
 - `stop_machine` ends the runtime for every client, and on a cluster cancels the job. Call it only when the user asks, such as to give a node back.
-- If another session made a tool call on the machine in the last 15 minutes, it refuses and says how many and how long ago the latest was. Tell the user; call again with `force: true` only if they say to go ahead.
+- If another session working in an open notebook on the machine made a tool call in the last 15 minutes, it refuses and says how many and how long ago the latest was. Tell the user; call again with `force: true` only if they say to go ahead.
 - It also refuses, without `force`, while Julia is still starting or a job is queued (it names the job), since sessions waiting for it can't be seen, and when it can't check who else is active. Same rule: tell the user, and use `force: true` only if they agree. On this computer a start can't be cancelled: wait until Julia is up, then stop it.
 - After a stop the session stays pointed at the machine. Notebook calls say it was stopped; `use_machine` starts it again.
 

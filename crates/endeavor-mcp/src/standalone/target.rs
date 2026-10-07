@@ -68,11 +68,13 @@ pub(super) struct Target {
     pub told: Option<u32>,
     /// The last notebook call that needed a runtime reported a failure, so the next one asks to try again.
     pub failed: bool,
+    /// How many times `use_machine` has set the target: a call that waited sees that it did, even if the session is back where it was.
+    pub moves: u64,
 }
 
 impl Target {
     pub(super) fn new(server: &Server, folder: Option<String>) -> Target {
-        Target { id: server.id.clone(), name: server.display_name(), folder, active: true, told: None, failed: false }
+        Target { id: server.id.clone(), name: server.display_name(), folder, active: true, told: None, failed: false, moves: 0 }
     }
 
     pub(super) fn local(folder: &std::path::Path) -> Target {

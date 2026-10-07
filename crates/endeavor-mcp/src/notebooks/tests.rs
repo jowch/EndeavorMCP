@@ -1253,7 +1253,7 @@ fn recent_sessions_are_the_other_sessions_that_called_within_the_time_given() {
     let paths = temp_notebooks("others", 2);
     s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
     s.call("c", "open_notebook", json!({ "path": &paths[1] })).unwrap();
-    let recent = |owner: &str, within: f64| s.notebooks.recent_sessions(owner, within);
+    let recent = |owner: &str, within: f64| s.notebooks.recent_sessions(owner, within).unwrap();
     assert_eq!(recent("a", 900.0), json!({ "count": 0, "active_seconds_ago": null }), "a session with no call is not active");
 
     s.call("b", "open_notebook", json!({ "path": &paths[0] })).unwrap();
@@ -1268,17 +1268,24 @@ fn recent_sessions_are_the_other_sessions_that_called_within_the_time_given() {
     assert_eq!(recent("a", 60.0), json!({ "count": 1, "active_seconds_ago": 10 }), "b called longer ago than that");
     assert_eq!(recent("", 900.0)["count"], 2, "the app's calls have no session, so every session is another");
 
-    // A session the app bound has made no call.
+    // A session the app bound has made no call; one that is bound to no notebook doesn't count however lately it called;
+    // nor does one whose notebook has closed.
     s.notebooks.bind("app", &paths[0]);
+    s.notebooks.note_call("unbound");
     assert_eq!(recent("a", 900.0)["count"], 2);
+    s.engine.notebooks.lock().unwrap().retain(|nb| nb.path != paths[1]);
+    assert_eq!(recent("a", 900.0), json!({ "count": 1, "active_seconds_ago": 135 }), "c's notebook is closed, and b called 135 s ago");
+    assert!(s.notebooks.state.lock().unwrap().seen.contains_key("unbound"));
+    s.call("c", "open_notebook", json!({ "path": &paths[1] })).unwrap();
+    s.notebooks.note_call("c");
 
-    // Records go with the binding, and a week after the last call.
+    // Clearing a binding keeps the record of the last call, which goes a week after it.
     s.notebooks.bind("b", "");
-    assert!(!s.notebooks.state.lock().unwrap().seen.contains_key("b"));
-    assert_eq!(recent("a", 900.0)["count"], 1);
+    assert!(s.notebooks.state.lock().unwrap().seen.contains_key("b"));
+    assert_eq!(recent("a", 900.0)["count"], 1, "b works in no notebook now");
     s.notebooks.note_call("");
     assert!(!s.notebooks.state.lock().unwrap().seen.contains_key(""), "a call with no session isn't recorded");
-    assert_eq!(s.notebooks.state.lock().unwrap().seen.len(), 3, "a, c and the app's bound session");
+    assert_eq!(s.notebooks.state.lock().unwrap().seen.len(), 5, "a, b, c, unbound and the app's bound session");
 
     // A week after its last call, or after it was bound if it made none, a session is forgotten.
     s.seconds(6.0 * 24.0 * 3600.0);
@@ -1286,6 +1293,33 @@ fn recent_sessions_are_the_other_sessions_that_called_within_the_time_given() {
     s.seconds(2.0 * 24.0 * 3600.0);
     assert_eq!(recent("c", 1.0e9), json!({ "count": 1, "active_seconds_ago": 172800 }));
     assert_eq!(s.notebooks.state.lock().unwrap().seen.len(), 1, "c and the app's session went 8 days ago, a 2");
+}
+
+#[test]
+fn a_binding_to_a_notebook_that_is_no_longer_open_is_no_binding_and_one_that_is_open_stays() {
+    let s = setup();
+    let paths = temp_notebooks("returned", 3);
+    s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.call("b", "open_notebook", json!({ "path": &paths[1] })).unwrap();
+    let close = |path: &str| s.engine.notebooks.lock().unwrap().retain(|nb| nb.path != path);
+    let mine = |owner: &str| s.call(owner, "list_notebooks", json!({})).unwrap().as_array().unwrap().iter().filter(|nb| nb["this_session"] == true).count();
+    assert_eq!((mine("a"), mine("b")), (1, 1));
+
+    // `a`'s notebook is closed while it is away: it can make another, and open one.
+    close(&paths[0]);
+    assert!(s.call("a", "open_notebook", json!({ "path": &paths[2] })).is_ok());
+    assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[2]));
+    // The same, found by `list_notebooks` instead of by the refusal.
+    close(&paths[2]);
+    assert_eq!(mine("a"), 0);
+    assert_eq!(s.notebooks.bound("a"), None);
+    assert!(s.call("a", "new_notebook", json!({})).is_ok());
+
+    // `b`'s is still open: it is still in it, and is held to it.
+    assert_eq!(mine("b"), 1);
+    let refused = s.call("b", "open_notebook", json!({ "path": &paths[0] })).unwrap_err();
+    assert!(refused.contains("one_notebook::") && refused.contains(&paths[1]), "{refused}");
+    assert_eq!(s.notebooks.bound("b").as_ref(), Some(&paths[1]));
 }
 
 #[test]

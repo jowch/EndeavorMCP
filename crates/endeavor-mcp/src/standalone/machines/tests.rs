@@ -1,3 +1,5 @@
+use std::io::{BufReader, Write};
+
 use super::*;
 use crate::client::{JobInfo, QueueInfo};
 use crate::standalone::{Command, Env, Options, parse};
@@ -255,6 +257,23 @@ fn stopping_without_force_a_start_that_is_under_way_names_what_would_be_cancelle
 }
 
 #[test]
+fn a_call_that_waited_sees_that_the_session_moved_away_and_back() {
+    let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
+    let provider: Arc<dyn Provider> = relay.local.clone();
+    let before = relay.current();
+    assert!(relay.moved(&relay.current(), &before, &provider).is_none());
+    let server = Server { id: "lab".into(), name: "Lab".into(), ssh_host: "lab".into(), ..Default::default() };
+    relay.point_at(Target::new(&server, None));
+    relay.point_at(Target::local(&relay.options.folder.join("other")));
+    let now = relay.current();
+    assert_eq!((now.id.as_str(), now.moves), (before.id.as_str(), 2), "the same machine, another folder");
+    let said = relay.moved(&now, &before, &provider).unwrap();
+    assert!(said.message.contains("moved to another machine while the call waited"), "{}", said.message);
+    relay.update_target(&now.id, |t| t.failed = true);
+    assert_eq!(relay.current().moves, 2, "a change that is no move is not counted");
+}
+
+#[test]
 fn a_tool_call_that_cannot_get_the_lock_in_time_changes_nothing() {
     let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
     let _busy = relay.ops.lock().unwrap();
@@ -288,6 +307,66 @@ fn a_runtime_that_never_answers_the_check_for_other_sessions_is_given_up_on() {
     assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
     assert!(said.starts_with("Nothing was stopped: couldn't check who else is active there (the runtime didn't answer in time)") && said.contains("`force: true`"), "{said}");
     holder.join().unwrap();
+}
+
+#[test]
+fn the_check_for_other_sessions_is_not_made_when_no_time_is_left_and_ends_with_the_time_given() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let relay = Relay::new(options(), "s".into(), Box::new(std::io::sink()));
+    let said = relay.recent_others(port, "t", Duration::ZERO).unwrap_err();
+    assert!(said.contains("no time was left to ask") && said.contains("`force: true`"), "{said}");
+    assert!(silent.set_nonblocking(true).is_ok() && silent.accept().is_err(), "no connection was made");
+
+    // A runtime that answers a little, slowly, is cut off by the time for the whole answer.
+    silent.set_nonblocking(false).unwrap();
+    let dripper = std::thread::spawn(move || {
+        let (mut socket, _) = silent.accept().unwrap();
+        let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(100));
+            if socket.write_all(b"x").is_err() {
+                break;
+            }
+        }
+    });
+    let started = Instant::now();
+    let said = relay.recent_others(port, "t", Duration::from_millis(400)).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    assert!(said.contains("the runtime didn't answer in time"), "{said}");
+    dripper.join().unwrap();
+}
+
+/// A runtime that answers `/endeavor/call` once with `status` and `body`.
+fn answering(status: &str, body: &str) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let reply = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let head = crate::http::Head::read(&mut reader).unwrap().unwrap();
+        crate::http::read_body(&mut reader, head.request_body().unwrap()).unwrap();
+        socket.write_all(reply.as_bytes()).unwrap();
+    });
+    port
+}
+
+#[test]
+fn only_a_well_formed_answer_to_the_check_for_other_sessions_lets_a_stop_go_on() {
+    let relay = Relay::new(options(), "s".into(), Box::new(std::io::sink()));
+    let ask = |status: &str, body: &str| relay.recent_others(answering(status, body), "t", Duration::from_secs(5));
+    let said = ask("200 OK", r#"{"jsonrpc":"2.0","id":1,"result":{}}"#).unwrap_err();
+    assert!(said.starts_with("Nothing was stopped: couldn't check who else is active there (200:") && said.contains("`force: true`"), "{said}");
+    assert!(ask("200 OK", r#"{"result":{"count":"2"}}"#).is_err(), "a count that is no number");
+    assert!(ask("200 OK", r#"{"result":{"count":1}}"#).is_err(), "someone active, and no time given");
+    assert!(ask("500 Internal Server Error", r#"{"result":{"count":0,"active_seconds_ago":null}}"#).unwrap_err().contains("500:"), "a status that is not 200");
+    assert!(ask("200 OK", r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#).unwrap_err().contains("Method not found"));
+    assert!(ask("200 OK", "{}").is_err());
+    let none = ask("200 OK", r#"{"result":{"count":0,"active_seconds_ago":null}}"#).unwrap();
+    assert_eq!((none.count, none.seconds_ago), (0, 0));
+    let some = ask("200 OK", r#"{"result":{"count":2,"active_seconds_ago":30}}"#).unwrap();
+    assert_eq!((some.count, some.seconds_ago), (2, 30));
 }
 
 #[test]

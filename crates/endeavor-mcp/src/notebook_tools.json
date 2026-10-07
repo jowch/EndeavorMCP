@@ -486,7 +486,7 @@
     "name": "pluto_session_status"
   },
   {
-    "description": "Open an existing notebook file the user named, and make it this session's notebook. It opens in safe preview: no code runs until the user allows it. If the file is already open, the session joins that notebook as it is (`already_open`) and nothing runs. Fails with `one_notebook` if the session already has another notebook.",
+    "description": "Open an existing notebook file the user named, and make it this session's notebook. It opens in safe preview: no code runs until the user allows it. If the file is already open, the session joins that notebook as it is (`already_open`) and nothing runs. Fails with `one_notebook` if the session already works in another notebook that is open.",
     "inputSchema": {
       "properties": {
         "path": {
@@ -506,7 +506,7 @@
     "name": "open_notebook"
   },
   {
-    "description": "Create an empty notebook and make it this session's notebook, ready to run. Use it instead of writing a notebook file yourself: the runtime owns the file. It starts with one empty cell, whose id is in `cell_ids`: edit that cell first. Never overwrites a file. Fails with `one_notebook` if the session already has a notebook.",
+    "description": "Create an empty notebook and make it this session's notebook, ready to run. Use it instead of writing a notebook file yourself: the runtime owns the file. It starts with one empty cell, whose id is in `cell_ids`: edit that cell first. Never overwrites a file. Fails with `one_notebook` if the session already works in a notebook that is open.",
     "inputSchema": {
       "properties": {
         "path": {

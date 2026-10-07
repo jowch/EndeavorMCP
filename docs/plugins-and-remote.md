@@ -199,8 +199,10 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    cell's change record. The front no longer ends its key anywhere, and has
    one key for its whole run: a key ended on the old runtime was what made a
    new one necessary, and a binding on a runtime a session returns to is the
-   notebook it made there. `stop_machine` asks the runtime for how many other
-   sessions made a tool call in the last 15 minutes and how long ago the
+   notebook it made there if that is still open (a binding to a notebook that
+   is closed counts as none). `stop_machine` asks the runtime for how many
+   other sessions working in an open notebook made a tool call in the last 15
+   minutes and how long ago the
    latest did (`endeavor/recent_sessions`, which records no call), and
    refuses without `force` when there is one.
 5. One idle rule, recorded in `runtime.json`.
@@ -362,8 +364,10 @@ outlives a dropped `ssh`, so the agent keeps its notebook when the
 connection is made again. The key is the same on every runtime the session
 uses, and nothing ends it. Each runtime binds a key to a notebook of its own,
 so a binding means nothing on another runtime. Coming back to a runtime the
-session worked on, the key finds the notebook it made there: it works on that
-notebook, and the one-notebook rule holds as it did before it left. The
+session worked on, the key finds the notebook it made there if that is still
+open: it works on that notebook, and the one-notebook rule holds as it did
+before it left. If the notebook was closed meanwhile, the binding counts as
+none and the session may make or open another. The
 front said "a new key (`<first key>-N`)" before: it was needed only because a
 runtime ignored a key it had ended, and the old key also made the front's own
 earlier session look like another one to the check before a stop.
@@ -460,8 +464,8 @@ in the queue, so a second helper waits for the same job.
 the idle stop and a job's time limit end a runtime. `stop_machine` is for
 when you ask, such as to give a cluster node back. Stopping ends other
 clients' work, which reading before writing does not guard, so it first
-refuses, without `force`, when another session made a tool call in the last
-15 minutes, and says how many and how long ago the latest did; and the
+refuses, without `force`, when another session working in an open notebook
+made a tool call in the last 15 minutes, and says how many and how long ago the latest did; and the
 clients still attached are told the runtime was stopped from another
 connection. Every `Stop` and `StartRuntime` carries an id the client chooses, and the
 helper answers each once, naming it: `Stopped` or `NotStopped` and why, and for
@@ -666,7 +670,7 @@ needs a new job, the result says so and the agent asks you.
 | `list_machines` | Saved machines with their state, and ssh `Host` names not yet added |
 | `add_machine` | Connect to an ssh alias, report and save what was found; installs the helper only with `install: true`, which the user agreed to |
 | `use_machine` | Put this session on a machine (or back on this computer), with a folder and, on a cluster, resources. Attaches to the runtime there, starts it, or submits the job |
-| `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Refuses first, without `force`, when another session made a tool call in the last 15 minutes, and says how many and how long ago. Needs this build's helper there, so it can ask to install it too |
+| `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Refuses first, without `force`, when another session working in an open notebook made a tool call in the last 15 minutes, and says how many and how long ago. Needs this build's helper there, so it can ask to install it too |
 
 `open_notebook` joins a notebook that is already open. `list_notebooks` and
 `pluto_session_status` gain the machine, the job and its end time.

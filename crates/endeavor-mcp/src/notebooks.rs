@@ -752,7 +752,6 @@ impl Notebooks {
         let mut state = self.state.lock().unwrap();
         if path.is_empty() {
             state.bindings.remove(owner);
-            state.seen.remove(owner);
         } else {
             state.bindings.insert(owner.to_owned(), canonical_path(path).unwrap_or_else(|_| path.to_owned()));
             state.record_bound(owner, now);
@@ -769,14 +768,20 @@ impl Notebooks {
         state.record(owner, now).last_call = Some(now);
     }
 
-    /// The sessions other than `owner` that made a tool call in the last
-    /// `within` seconds: how many, and how long ago the latest did.
-    pub fn recent_sessions(&self, owner: &str, within: f64) -> Value {
+    /// The sessions other than `owner` that work in a notebook that is open and made a
+    /// tool call in the last `within` seconds: how many, and how long ago the latest did.
+    pub fn recent_sessions(&self, owner: &str, within: f64) -> Result<Value, String> {
+        let open: Vec<String> = self.snapshots()?.into_iter().map(|nb| canonical_path(&nb.path).unwrap_or(nb.path)).collect();
         let now = self.now();
         let mut state = self.state.lock().unwrap();
         state.forget_old(now);
-        let ago: Vec<f64> = state.seen.iter().filter(|(session, _)| session.as_str() != owner).filter_map(|(_, seen)| seen.last_call).map(|last| (now - last).max(0.0)).filter(|ago| *ago <= within).collect();
-        json!({ "count": ago.len(), "active_seconds_ago": ago.iter().copied().reduce(f64::min).map(|ago| ago as u64) })
+        let ago: Vec<f64> = (state.bindings.iter())
+            .filter(|(session, path)| session.as_str() != owner && open.contains(path))
+            .filter_map(|(session, _)| state.seen.get(session)?.last_call)
+            .map(|last| (now - last).max(0.0))
+            .filter(|ago| *ago <= within)
+            .collect();
+        Ok(json!({ "count": ago.len(), "active_seconds_ago": ago.iter().copied().reduce(f64::min).map(|ago| ago as u64) }))
     }
 
     pub fn bound(&self, owner: &str) -> Option<String> {
@@ -794,14 +799,27 @@ impl Notebooks {
         }
     }
 
+    /// Drop the session's binding to `path`, a notebook that is no longer open.
+    fn unbind(&self, owner: &str, path: &str) {
+        let mut state = self.state.lock().unwrap();
+        if state.bindings.get(owner).is_some_and(|bound| bound == path) {
+            state.bindings.remove(owner);
+        }
+    }
+
     /// Why a session may not make this call: it works on another notebook.
-    /// Other notebooks stay readable.
+    /// Other notebooks stay readable. A notebook that is no longer open is not one it works on.
     pub fn refusal(&self, owner: &str, tool: &str, arguments: &Value, folder: Option<&str>) -> Option<String> {
         if owner.is_empty() {
             return None;
         }
         let bound = self.bound(owner)?;
         let refuse = |what: &str| {
+            // An engine that can't say leaves the binding.
+            if self.snapshots().is_ok_and(|open| !open.iter().any(|nb| canonical_path(&nb.path).is_ok_and(|p| p == bound))) {
+                self.unbind(owner, &bound);
+                return None;
+            }
             Some(format!(
                 "ArgumentError: one_notebook::This session works on one notebook, {bound}, so it can't {what}. \
                  You can still read other notebooks as plain .jl files. \
