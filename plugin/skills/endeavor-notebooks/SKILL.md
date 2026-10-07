@@ -20,7 +20,7 @@ The notebook is reactive. Running a cell also runs every cell that depends on it
 
 - **Engine.** Each engine limits what one cell may hold, and code that would be fine in a script fails. Read the engine's reference before you write a cell. Pluto (Julia, `.jl`): [reference/pluto.md](reference/pluto.md).
 - **Host.** You are in the Endeavor app unless the server's instructions say the notebooks run without it. In the app, read [reference/app.md](reference/app.md): prompts name the notebook, and the user approves runs. Without the app, skip it; `new_notebook` and `open_notebook` return `browser_url`, which you give to the user so they can watch.
-- **On a server.** If the machine tools put this session on a server, the notebook's files are there: use `list_folder`, `read_file` and `run_shell`, not your own file tools.
+- **On a server.** When the notebook runs on a server, its files are there. Use `list_folder`, `read_file` and `run_shell` for them; your own file tools see the user's computer, and may find a copy of the project there and show no error.
 
 ## One notebook per session
 
@@ -35,7 +35,7 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
 1. **Read.** An edit is accepted only for a cell you have read as it is now. `read_required` and `stale_read` mean read it and try again; `stale_read` means someone changed it since, so see what they did before you overwrite it. `read_notebook_code` reads every cell it returns, but leaves prose cells out unless `include_markdown=true`. `add_cell` needs a read of the cell it goes after. A cell you just added or edited counts as read.
 2. **Stage.** `edit_cell`, `edit_cells` and `add_cell` change code without running it. Staged cells are listed in `pending_run`, and `read_cell` shows them `stale`: the output is from the old code.
 3. **Run once.** `submit_changes` runs everything staged, with dependents. Run once per batch of edits, not per edit, so expensive cells downstream run once. Don't end a turn with cells staged unless the user asked for that, since the notebook would show output that doesn't match its code.
-4. **Check.** A run returns at once. Read the cells again until `running` and `queued` are false, or pass `wait_for_completion=true` for a run that takes seconds (it waits at most 60). Then look at `errored`, `error` and the output before you report.
+4. **Check.** A run returns at once. Read the cells again until `running` and `queued` are false, or pass `wait_for_completion=true` for a run that takes seconds (it waits at most 60, and its result has each cell's output under `outputs.changed`). Then look at `errored`, `error` and the output before you report.
 
 `delete_cell`, `move_cell` and `fold_cell` are not staged. Deleting reruns the cell's dependents and can't be undone.
 
@@ -43,11 +43,11 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
 
 - For tables and other rich values, `output` only names the type and `output_text` has the value as text. Read that; don't edit the cell to print it.
 - For a plot, call `view_cell_output` and look at it before you say it is right. Code that runs can still draw the wrong thing.
-- Fold cells that hold only prose (`add_cell` with `folded=true`, or `fold_cell`), so the reader sees the rendered text and not its source. Folding changes display only.
+- Fold cells that hold only prose (`add_cell` with `folded=true`, or `fold_cell`), so the reader sees the rendered text and not its source.
 
 ## Safe preview
 
-A notebook opened from a file runs nothing until the user allows it, because its code may not be theirs (`execution_allowed` is false). Edits and `submit_changes` still stage, and the result warns `execution_blocked`: nothing ran. The warning names `allow_execution`, but call that only when the user asked you to run the notebook. Otherwise say the outputs are not current, and that they can run it from the notebook or ask you to. A new notebook is not in safe preview.
+A notebook opened from a file runs nothing until the user allows it, because its code may not be theirs (`execution_allowed` is false). Edits and `submit_changes` still stage, and the result warns `execution_blocked`: nothing ran. The warning names `allow_execution`, but call that only when the user asked you to run the notebook. Otherwise say the outputs are not current, and that they can run it from the notebook or ask you to.
 
 ## Other sessions in the notebook
 

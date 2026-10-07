@@ -217,6 +217,32 @@ _Started 2026-10-06, on the `client-library` branch._
   never needed, since the app starts the server. It is left out of
   `notebook_guide`.
 
+## The skills
+
+- **`endeavor-machines` still names `pluto-session`.** Its step 4 says "work
+  as in **pluto-session**" and its last line links `../pluto-session/SKILL.md`.
+  The three Pluto skills are now `endeavor-notebooks`, so a plugin agent
+  follows a dead link, and `notebook_guide` answers `not_found` for that topic
+  (it lists the topics that exist). Left because the machines skill was being
+  changed elsewhere when the notebook skill was rewritten. To close: name
+  `endeavor-notebooks` in both places. The same file says "helper", which an
+  agent should not have to read.
+- **Two messages from the code disagree with the notebook skill.** The
+  `execution_blocked` warning (`notebooks/tools.rs`) ends "call
+  allow_execution to exit safe preview", where the skill says to call it only
+  when the user asked. The `risky_source` error (`Adapter.jl`) says "notebook
+  pane", which only the app has. The skill says which to follow. To close:
+  reword both.
+- **The notebook skill is untried.** No agent session has run against
+  `endeavor-notebooks` or the shorter tool descriptions, and no rule that was
+  cut has been tested for whether a current model needs it. To close: the
+  trial in the skills audit, old text against new.
+- **`notebook_guide` does not include the engine's reference.** An agent
+  without skills gets the notebook skill, then has to ask for
+  `endeavor-notebooks/reference/pluto.md` before its first cell. Every
+  notebook is Pluto today, so this is one more call each session. Left so
+  that the guide needs no change when a second engine arrives.
+
 ## Not checked
 
 - **Codex and Antigravity** facts in the design come from their
