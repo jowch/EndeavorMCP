@@ -312,7 +312,12 @@ fn ready_relay(port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool
     let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "token": "t0k", "port": port });
     std::fs::write(dir.join("runtime.json"), record.to_string()).unwrap();
     let (relay, out) = relay(skills_plugin, dir);
-    assert!(matches!(target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO), crate::client::Outcome::Ready(_)));
+    match target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO) {
+        crate::client::Outcome::Ready(_) => {}
+        crate::client::Outcome::Failed(why) => panic!("the recorded runtime wasn't found: {why}"),
+        crate::client::Outcome::NothingRunning => panic!("the recorded runtime wasn't found: nothing running"),
+        _ => panic!("the recorded runtime wasn't found"),
+    }
     // The first call to a runtime tells it the session's folder.
     assert!(relay.route(machines::Need::Look).is_ok());
     seen.lock().unwrap().clear();
