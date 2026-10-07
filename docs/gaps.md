@@ -227,13 +227,7 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The skills
 
-- **`endeavor-machines` still names `pluto-session`.** Its step 4 says "work
-  as in **pluto-session**" and its last line links `../pluto-session/SKILL.md`.
-  The three Pluto skills are now `endeavor-notebooks`, so a plugin agent
-  follows a dead link, and `notebook_guide` answers `not_found` for that topic
-  (it lists the topics that exist). Left because the machines skill was being
-  changed elsewhere when the notebook skill was rewritten. To close: name
-  `endeavor-notebooks` in both places. The same file says "helper", which an
+- **`endeavor-machines` says "helper".** The file says "helper", which an
   agent should not have to read.
 - **Two messages from the code disagree with the notebook skill.** The
   `execution_blocked` warning (`notebooks/tools.rs`) ends "call
