@@ -106,6 +106,13 @@ fn only_a_link_nothing_hangs_on_is_replaced() {
 }
 
 #[test]
+fn a_link_of_the_previous_protocol_with_an_old_shaped_status_is_replaceable() {
+    let old = json!({ "machine": "lab", "name": "lab", "state": "needs_install", "pid": 7, "build": "b", "needs_install": { "what": "julia", "helper": null } });
+    let status = link::Status::read(old, link::PROTOCOL - 1).unwrap();
+    assert!(replaceable(&status));
+}
+
+#[test]
 fn resources_given_go_over_the_saved_defaults_within_the_partitions_limits() {
     let args = json!({ "machine": "hpc", "cpus": 4, "hours": 1.5, "gpus": 2, "partition": "gpu", "account": "lab", "extra_sbatch_flags": ["--constraint=a100"] });
     let given = Given::parse(&args).unwrap();
@@ -375,7 +382,8 @@ fn the_question_is_built_from_the_items_including_a_kind_it_has_never_seen() {
     let julia = wire::Item { kind: wire::KIND_RUNTIME.into(), name: "Julia 1.12.6".into(), size_mb: Some(289), place: None };
     let both = needing(vec![julia, r], None);
     let said = install_text("lab", &both, "use_machine");
-    assert!(said.contains("Julia 1.12.6 (about 289 MB) and R 4.5.1 (about 120 MB, into /home/ada/.cache/endeavor/r)"), "{said}");
+    assert!(said.contains("Julia 1.12.6 wasn't found on lab. Endeavor can download its own copy (about 289 MB). Endeavor needs to install R 4.5.1 (about 120 MB, into /home/ada/.cache/endeavor/r) on lab."), "{said}");
+    assert!(said.contains("`install: true` for this call only"), "{said}");
     assert!(said.contains("`module load julia`"), "the known kind adds its note: {said}");
 }
 

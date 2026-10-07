@@ -295,17 +295,20 @@ _Started 2026-10-06, on the `client-library` branch._
 - **A link of another build that has a runtime on it is not sent `install`.**
   `add_machine` says so in its result, and the user has to end the runtime, or
   wait for the link to end, to install through a new link.
-- **A status of another link protocol is read only as far as `State::Unknown`
-  and ignored fields go.** The front reads such a status to decide whether to
-  replace the link. A protocol bump that changes the shape of a field it
-  decodes (`needs_install`, `hello`, `runtime`) makes that read fail, and
-  `ensure` then reports the link as not answering. Nothing was released with
-  protocol 1, so no front or link of another number exists yet.
+- **A link of another protocol is read only for its machine, pid, state, runtime,
+  job and queue.** Its `state` reads as `unknown` when this build doesn't know
+  the word, and a field whose shape changed is dropped, not an error. That is
+  enough to decide whether to replace the link (nothing hangs on it and its
+  state is `connecting`, `connected`, `failed` or `needs_install`); an
+  `unknown` state is never replaced. What such a link wanted installed
+  (`needs_install`) is not shown.
 - **Julia is not known when a machine is added.** The helper has no call for
   it, so `add_machine` reports `found: []` until the first runtime start.
 - **Only Julia is installed through the item list.** The engine name picks
   what a start needs at one `match` (`prepare` in `src/lib.rs`); there is no
   registry. `machines.json`'s `julia` field is still Julia's.
+- **`StartOptions::engine` is a string.** A misspelt engine name is caught only
+  by the helper, when the start is asked for, not when the options are built.
 - **With the helper missing, the question can't name the runtime.** The
   helper is what looks for Julia, so the first question names the helper only;
   `use_machine`'s one yes then covers Julia too, and a start that finds Julia

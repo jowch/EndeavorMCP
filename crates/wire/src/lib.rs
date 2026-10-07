@@ -63,11 +63,18 @@ pub struct Item {
     pub place: Option<String>,
 }
 
+impl Item {
+    /// "about 289 MB, into /home/ada/.cache/endeavor/julia-1.12.6", or nothing of what isn't known.
+    fn details(&self) -> String {
+        self.size_mb.map(|mb| format!("about {mb} MB")).into_iter().chain(self.place.as_ref().map(|place| format!("into {place}"))).collect::<Vec<_>>().join(", ")
+    }
+}
+
 impl std::fmt::Display for Item {
     /// "Julia 1.12.6 (about 289 MB, into /home/ada/.cache/endeavor/julia-1.12.6)".
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let details: Vec<String> = self.size_mb.map(|mb| format!("about {mb} MB")).into_iter().chain(self.place.as_ref().map(|place| format!("into {place}"))).collect();
-        if details.is_empty() { write!(f, "{}", self.name) } else { write!(f, "{} ({})", self.name, details.join(", ")) }
+        let details = self.details();
+        if details.is_empty() { write!(f, "{}", self.name) } else { write!(f, "{} ({details})", self.name) }
     }
 }
 
@@ -78,6 +85,18 @@ pub fn items_text(items: &[Item]) -> String {
         [only] => only.to_string(),
         [rest @ .., last] => format!("{} and {last}", rest.iter().map(Item::to_string).collect::<Vec<_>>().join(", ")),
     }
+}
+
+/// What is missing on `machine`, a sentence for each item. A runtime that wasn't found: "Julia 1.12.6
+/// wasn't found on lab. Endeavor can download its own copy (about 289 MB, into /x)." Any other:
+/// "Endeavor needs to install R 4.5.1 (about 120 MB) on lab."
+pub fn needs_text(items: &[Item], machine: &str) -> String {
+    let sentence = |item: &Item| match (item.kind == KIND_RUNTIME, item.details()) {
+        (true, details) if details.is_empty() => format!("{} wasn't found on {machine}. Endeavor can download its own copy.", item.name),
+        (true, details) => format!("{} wasn't found on {machine}. Endeavor can download its own copy ({details}).", item.name),
+        (false, _) => format!("Endeavor needs to install {item} on {machine}."),
+    };
+    items.iter().map(sentence).collect::<Vec<_>>().join(" ")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

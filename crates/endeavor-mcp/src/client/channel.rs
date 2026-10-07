@@ -86,7 +86,7 @@ impl StartError {
     /// The words for an error, whichever it is.
     pub fn message(self) -> String {
         match self {
-            StartError::NeedsInstall(items) => format!("Endeavor needs to install {} on that machine, and installing wasn't allowed.", wire::items_text(&items)),
+            StartError::NeedsInstall(items) => format!("{} Installing wasn't allowed, and an agreement to it (`StartOptions::install`) is for one start only.", wire::needs_text(&items, "that machine")),
             StartError::Failed(message) => message,
         }
     }
@@ -366,6 +366,7 @@ impl Channel {
                     break Runtime { port: listener.port(), mcp_url: listener.mcp_url(), page_url: listener.page_url(&token), token, pid, reattached, node, job };
                 }
                 Ok(ToApp::StartFailed { message, .. } | ToApp::Error { message }) => return Err(failed(message)),
+                Ok(ToApp::NeedsInstall { items, .. }) if items.is_empty() => return Err(failed("The helper says the start needs something installed, but not what.".into())),
                 Ok(ToApp::NeedsInstall { items, .. }) => return Err(StartError::NeedsInstall(items)),
                 Ok(ToApp::StartDied { status, log_tail, .. }) => {
                     let how = died_reason(&status, &[]);

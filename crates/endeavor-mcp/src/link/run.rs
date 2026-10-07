@@ -55,7 +55,8 @@ struct Wish {
     /// On a cluster, what to submit.
     job: Option<JobRequest>,
     /// The helper may install what this start needs: the `install` of the
-    /// request, and not what was agreed for an earlier one.
+    /// request, and not what was agreed for an earlier one. Never for a start
+    /// that only attaches.
     install: bool,
 }
 
@@ -405,7 +406,7 @@ impl Shared {
             if i.runtime.is_some() || i.starting {
                 return true;
             }
-            i.wanted = Some(Wish { job, install });
+            i.wanted = Some(Wish { job, install: install && !only_running });
             i.resume = None;
             i.check_first = only_running;
             i.nothing_running = false;
@@ -776,7 +777,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
                             i.wanted = None;
                             i.state = State::NeedsInstall;
                             i.error = None;
-                            i.step = Some(format!("{} needs installing on {}", wire::items_text(&items), i.name));
+                            i.step = Some(format!("{} Waiting for the user's yes, which is for this start only.", wire::needs_text(&items, &i.name)));
                             i.needs = Some(InstallInfo { items, helper: None });
                         });
                         shared.listener.restart_failed();

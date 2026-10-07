@@ -107,7 +107,8 @@ pub enum State {
     #[serde(rename = "needs_install")]
     NeedsInstall,
     /// A state this build doesn't know, from a link of another control `PROTOCOL`:
-    /// not ready. A front still reads such a status to decide whether to replace the link.
+    /// not ready, and not replaceable. A link of another protocol is read only for
+    /// the fields of `Status` this build can read (`Status::read`).
     #[serde(other)]
     Unknown,
 }
@@ -117,8 +118,8 @@ pub enum State {
 pub struct InstallInfo {
     /// What is needed, in the order it would be installed.
     pub items: Vec<wire::Item>,
-    /// When Endeavor's helper is one of the items: the platform, where it would
-    /// go, its size and what runs there already.
+    /// Set exactly when Endeavor's helper is one of the items: the platform, where it
+    /// would go, its size and what runs there already.
     pub helper: Option<crate::client::NeedsInstall>,
 }
 
@@ -131,7 +132,7 @@ impl InstallInfo {
 
     /// Whether the helper is among them.
     pub fn needs_helper(&self) -> bool {
-        self.items.iter().any(|item| item.kind == wire::KIND_HELPER)
+        self.helper.is_some()
     }
 }
 
@@ -165,6 +166,41 @@ pub struct Status {
     /// The link process and the build it is from.
     pub pid: u32,
     pub build: String,
+}
+
+impl Status {
+    /// A status as a link of control `protocol` sent it. One of this build's protocol is
+    /// read whole. One of another protocol may have changed the shape of any field, so
+    /// `machine` and `pid` are required, a state it doesn't know reads as `Unknown`,
+    /// and each other field is kept only if it reads: a front must still be able to
+    /// tell whether such a link has a runtime and can be replaced.
+    pub(crate) fn read(reply: serde_json::Value, protocol: u32) -> Result<Status, String> {
+        if protocol == PROTOCOL {
+            return serde_json::from_value(reply).map_err(|e| e.to_string());
+        }
+        let field = |key: &str| reply.get(key).filter(|v| !v.is_null());
+        let text = |key: &str| field(key).and_then(|v| v.as_str()).map(str::to_owned);
+        fn get<T: serde::de::DeserializeOwned>(field: Option<&serde_json::Value>) -> Option<T> {
+            field.and_then(|v| serde_json::from_value(v.clone()).ok())
+        }
+        let machine = text("machine").ok_or("no machine")?;
+        let pid = field("pid").and_then(|v| v.as_u64()).and_then(|pid| u32::try_from(pid).ok()).ok_or("no pid")?;
+        Ok(Status {
+            name: text("name").unwrap_or_else(|| machine.clone()),
+            machine,
+            state: get(field("state")).unwrap_or(State::Unknown),
+            step: text("step"),
+            error: text("error"),
+            hello: get(field("hello")),
+            runtime: get(field("runtime")),
+            job: get(field("job")),
+            queue: get(field("queue")),
+            nothing_running: field("nothing_running").and_then(|v| v.as_bool()).unwrap_or(false),
+            needs_install: get(field("needs_install")),
+            pid,
+            build: text("build").unwrap_or_default(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -496,7 +532,8 @@ fn running(dir: &Path, machine: &str) -> Option<Link> {
 impl Link {
     /// Where the link stands. The call is allowed `wait` at most.
     pub fn status(&self, wait: Duration) -> Result<Status, String> {
-        self.call("GET", "/link/status", &[], wait)
+        let reply = self.call("GET", "/link/status", &[], wait)?;
+        Status::read(reply, self.protocol).map_err(|e| format!("The link to {} sent something unreadable: {e}", self.machine))
     }
 
     /// Start the runtime, or attach to the one running, and return at once: poll

@@ -34,6 +34,8 @@ mod xdg;
 #[cfg(windows)]
 mod winproc;
 
+/// The wire crate, for the types in this crate's signatures (`wire::Item`, `wire::KIND_RUNTIME`, `wire::ENGINE_PLUTO`).
+pub use wire;
 pub use core::serve_unreachable;
 pub use guard::serve_guarded;
 pub use mcp::{NOTEBOOK_TOOLS_JSON, asks_first, changes_notebook, is_tool, runs_code};

@@ -163,7 +163,7 @@ pub struct Options<'a> {
     /// The user agreed that Endeavor installs its helper on the server. Without
     /// it a server that lacks this build's helper is only looked at, and
     /// `connect` ends with `ConnectError::needs`. The app, which asks its user
-    /// itself, passes true. (What a start needs is asked for by each start, `StartOptions::install`.)
+    /// itself, passes true. (What a start needs is asked for by each start, `StartOptions::install`; `test` uses this for both.)
     pub allow_install: bool,
     /// The helper binary to send to a server whose `uname -s` is `os` and
     /// `uname -m` is `arch`, as `linux` and `x86_64` (`arm64` as `aarch64`).
@@ -548,7 +548,9 @@ pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions
 
 /// Test connection: connect, check the runtime answers through a listener,
 /// then stop it (or leave it running if it already was). On a cluster, only
-/// ask Slurm about itself: starting Julia there means a job.
+/// ask Slurm about itself: starting Julia there means a job. What the start needs
+/// installed is installed only if `options.allow_install`; else the test fails
+/// naming it.
 pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(), String> {
     let (channel, _) = connect(server, transport, options, cancel, on).map_err(|e| e.message)?;
     if server.cluster.is_some() {
@@ -563,7 +565,7 @@ pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &
         };
     }
     let listener = test_listener()?;
-    let runtime = start(&channel, &listener, &StartOptions { install: true, ..StartOptions::default() }, on, |_| {}).map_err(|e| or_cancelled(cancel, e.message()))?;
+    let runtime = start(&channel, &listener, &StartOptions { install: options.allow_install, ..StartOptions::default() }, on, |_| {}).map_err(|e| or_cancelled(cancel, e.message()))?;
     let answered = bridge_ping(listener.port(), &runtime.token);
     let stopped = if runtime.reattached { Ok(()) } else { channel.stop() };
     channel.detach();

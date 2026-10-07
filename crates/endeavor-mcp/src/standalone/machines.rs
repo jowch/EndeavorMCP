@@ -238,7 +238,7 @@ fn install_text(name: &str, status: &link::Status, tool: &str) -> String {
         "stop_machine" => format!("`stop_machine` again with machine \"{name}\" (and the same other arguments)"),
         _ => format!("`use_machine` again with machine \"{name}\" (and the same other arguments)"),
     };
-    let mut text = format!("Endeavor needs to install {} on {name}.", wire::items_text(&info.items));
+    let mut text = wire::needs_text(&info.items, name);
     if let Some(helper) = &info.helper {
         let update = if helper.update { " A helper of an older version is installed there already (this is an update); it stays beside the new one." } else { "" };
         let attach = "installing the helper doesn't touch it, and the helper is what lets Endeavor attach to it.";
@@ -258,7 +258,7 @@ fn install_text(name: &str, status: &link::Status, tool: &str) -> String {
         text.push_str(&format!(" It is Endeavor's helper program and its runtime files ({} {}).{needed}{later}{update}{running}", helper.os, helper.arch));
     }
     if info.items.iter().any(|item| item.kind == wire::KIND_RUNTIME) {
-        text.push_str(&format!(" Or, if Julia is on {name}, call `add_machine` with its host and `julia` set to the path of the julia program, or to a shell line such as `module load julia`, and it is used instead."));
+        text.push_str(&format!(" Or, if Julia is on {name}, call `add_machine` with its host and `julia` set to the path of the julia program, or to a shell line such as `module load julia`, and it is used instead. The download is part of `install: true` for this call only."));
     }
     format!("{text} Ask the user whether Endeavor may do that. Only if they agree, call {again} and `install: true`.")
 }

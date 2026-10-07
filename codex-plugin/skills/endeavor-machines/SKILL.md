@@ -59,7 +59,7 @@ Details of each tool and its result: [machine-tools.md](reference/machine-tools.
 
 | Mistake | Fix |
 |---------|-----|
-| Set `install: true` before the user agreed | Install nothing without a yes to the specific thing the result names |
+| Set `install: true` before the user agreed | Install nothing without a yes. One yes to `use_machine` covers what that start needs, including Julia if none is found; a later call asks again |
 | `use_machine` with made-up resources on a cluster | Show the user the defaults it returned and have them confirm or change them |
 | Let a machine with Slurm tools become a cluster without asking | Ask whether Julia should run in Slurm jobs, and pass `slurm` |
 | Read a server's files with `Read` or `Bash` | `read_file` and `run_shell`; your own tools see the user's computer |

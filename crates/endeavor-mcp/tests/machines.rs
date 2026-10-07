@@ -1343,7 +1343,7 @@ fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
     let first = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!((first["state"].as_str(), first["install"]["items"][0]["kind"].as_str()), (Some("needs_install"), Some("runtime")), "{first}");
     let message = text(&first);
-    assert!(message.contains("needs to install Julia") && message.contains("MB") && message.contains("`julia`") && message.contains("`install: true`"), "{message}");
+    assert!(message.contains("wasn't found on lab") && message.contains("download its own copy") && message.contains("MB") && message.contains("`julia`") && message.contains("`install: true` for this call only"), "{message}");
     assert!(!tried.exists(), "nothing was downloaded");
     assert_eq!(place.projects(), Value::Null);
     assert_eq!(front.ok("pluto_session_status", json!({})).get("machine"), None, "the session stays where it was");
@@ -1392,7 +1392,7 @@ fn the_agreement_to_the_helper_from_add_machine_is_not_one_to_install_what_a_sta
     let first = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!((first["state"].as_str(), first["install"]["items"][0]["kind"].as_str()), (Some("needs_install"), Some("runtime")), "{first}");
     let message = text(&first);
-    assert!(message.contains("needs to install Julia") && message.contains("MB") && message.contains("`install: true`"), "{message}");
+    assert!(message.contains("wasn't found on lab") && message.contains("download its own copy") && message.contains("MB") && message.contains("`install: true` for this call only"), "{message}");
     assert_eq!(tries(), 0, "nothing was downloaded");
     assert_eq!(place.projects(), Value::Null, "the project doesn't remember it");
 
@@ -1413,7 +1413,7 @@ fn the_agreement_to_the_helper_from_add_machine_is_not_one_to_install_what_a_sta
     let mut second = place.front();
     second.initialize();
     let (failed, said) = second.call("list_notebooks", json!({}));
-    assert!(failed && text(&said).contains("needs to install Julia"), "{said}");
+    assert!(failed && text(&said).contains("wasn't found on lab"), "{said}");
     assert_eq!(tries(), 1, "a remembered project's call downloads nothing");
     second.finish();
     front.finish();
