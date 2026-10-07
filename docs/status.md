@@ -13,9 +13,10 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
   on servers (`endeavor connect`, `endeavor core`), the standalone command
   (`endeavor serve`, `endeavor mcp`, `endeavor stop`, see the
   [README](../README.md)), and the Slurm relay.
-- The link (`endeavor link`, `link::ensure`) is built and tested with a local
-  shell for ssh and, over real ssh and Julia, in `e2e_link`
-  ([plugins-and-remote.md](plugins-and-remote.md)). The machine tools in
+- The connection library (`client::Session`) is built and tested with a local
+  shell for ssh (`tests/session.rs`) and, over real ssh and Julia, in
+  `e2e_client` ([plugins-and-remote.md](plugins-and-remote.md)). There is no
+  background process for a server. The machine tools in
   `mcp` (`list_machines`, `add_machine`, `use_machine`, `stop_machine`), what a
   project remembers (`projects.json`) and the `endeavor-machines` skill are
   built and tested with a local shell for ssh, a stand-in Julia and fake
@@ -35,9 +36,9 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
   prints the version and a build hash of the source, and on a release build
   a second line, `release <key>`. `serve` and `mcp` say when the running Julia
   came from another build (README, "Update it").
-- A Mac or Windows computer reaches a Linux server: the link fetches the
+- A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
-  SHA-256 and keeps it (tested against a fake release; the link's wiring is
+  SHA-256 and keeps it (tested against a fake release; the wiring is
   read, not run across platforms).
 
 ## Changing this repository and the app together

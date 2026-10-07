@@ -9,11 +9,11 @@ remote code ([remote-sessions.md](https://github.com/jowch/Endeavor/blob/main/do
 Facts about Codex and Antigravity come from their documentation and are
 untested._
 
-_Revised 2026-10-07: see [The revision](#the-revision-decided-2026-10-07-planned).
-It replaces the link process and the front's own local launcher. Until the
-code follows, the sections below describe what is built, and say where the
-revision changes them. Where they say the link connects, runs `ssh`, sends
-the helper or fetches one, the front does that after the revision._
+_Revised 2026-10-07: see [The revision](#the-revision-decided-2026-10-07).
+It removed the link process, a background process for each server, and the
+front's own local launcher. Steps 1 to 3 of it are built and the sections
+below describe them; the later steps are marked where they change a
+section._
 
 ## Summary
 
@@ -34,12 +34,12 @@ the helper or fetches one, the front does that after the revision._
   GitHub release by the plugin's launcher (or by hand with the install
   script).
 
-## The revision (decided 2026-10-07, planned)
+## The revision (decided 2026-10-07)
 
-Steps 1 and 2 of the order of work below are built, and the front's half of step 3 (below); the rest of this section is not. It was decided after three review rounds
-found most of their faults in two places: between the front and the link,
-and where the front starts this computer's runtime with code of its own
-beside the helper's.
+Steps 1 to 3 of the order of work below are built; steps 4 to 6 are not. It was
+decided after three review rounds found most of their faults in two places:
+between the front and the link process it used, and where the front started
+this computer's runtime with code of its own beside the helper's.
 
 **What matters, and what does not.** A runtime and its notebooks keep
 running when a session ends, crashes or goes quiet, on this computer and on
@@ -57,7 +57,7 @@ harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ─�
                          └── this computer: the runtime, found or started directly
 ```
 
-- **No link.** Each `endeavor mcp` holds its own `ssh` and helper for the
+- **No link process.** Each `endeavor mcp` holds its own `ssh` and helper for the
   machine its session is on, through the client library, as the app does.
   Several sessions on one server each have their own connection; many
   helpers attach to one runtime, as built.
@@ -74,8 +74,9 @@ harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ─�
   nothing running, needs install (what), failed (why) or still working
   (which step). The front no longer works an outcome out from state words.
 - **One kind of target in the front.** This computer and a server differ
-  only in how the runtime's address is obtained. There is one status, one
-  way to use a machine and one way to stop its runtime.
+  only in how the runtime's address is obtained and how it is stopped
+  (`Provider`, `standalone/target.rs`). There is one status, one way to use a
+  machine and one way to stop its runtime.
 - **Sessions come and go without ceremony.** A client attaches, works and
   goes quiet. Nothing says "I'm done": `endeavor/end_session` and the
   record of ended sessions go. The runtime keeps, for each session, the
@@ -92,7 +93,7 @@ harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ─�
   with the runtime. The app's "local notebooks quit with the app" is not
   needed; the app can attach and detach as the plugin does.
 
-**What goes.**
+**What went (step 3).**
 
 - The link process: `endeavor link`, its control port and token,
   `link.json`, `link.lock`, `link.log`, `server.json`, `link::PROTOCOL`,
@@ -102,12 +103,14 @@ harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ─�
   comparison, ending the link of a machine that was never saved, and the
   second target type for this computer (`Target::Local`, `use_local`,
   `stop_local`, the front's own start and attach).
-- In the runtime: `end_session`, the ended list, the other-sessions list.
 
-Rough size, an estimate from reading: about 1,000 to 1,400 lines of source
-go, with `tests/link.rs` and `e2e_link`. About 600 lines of the link (the
-connect, retry and re-attach rules) are not removed but move into the
-library. The larger gain is fewer places that decide.
+**What goes (step 4).** In the runtime: `end_session`, the ended list, the
+other-sessions list.
+
+Step 3 took 801 lines of source out net (1,299 deleted, 498 added), and 771
+lines of tests with them. About 600 lines of the link (the connect, retry and
+re-attach rules) moved into the library in step 2. The larger gain is fewer
+places that decide.
 
 **What stays.** The helper, the wire protocol with request ids, the process
 and Slurm launchers and `job.json`, the client library's `ssh` and channel,
@@ -151,24 +154,30 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    node, job), `Queued`, `NothingRunning`, `NeedsInstall`, `Failed` or
    `StillWorking(step)`; it returns as soon as that is known, and a later call
    with the same want goes on from there. `status()`, `stop()`,
-   `allow_install()` and `close()` are the rest. The link process is now this
-   type plus the record, the control port, the idle limit and the stop signals;
-   the front still reads the link's states, which step 3 replaces.
+   `allow_install()` and `close()` are the rest. The link process was this
+   type plus the record, the control port, the idle limit and the stop signals.
 3. The front holds its connections in process and has one kind of target.
    The link and the front's code for it are deleted. `Ready` gains the
    runtime's port (it has none today), so that results can name it.
-   _First half built 2026-10-07:_ `endeavor mcp` holds one `client::Session`
-   for each machine it uses, made by `standalone::open_session` (the one
-   place a session is set up; the link process calls it too), and closes them
-   when its input ends, leaving every runtime running. The machine tools and
-   the notebook calls ask the session and read its `Outcome`; nothing in the
-   front starts, finds or talks to a link process. `list_machines` shows the
-   state only of the machines this front is connected to and connects to
-   nothing. `ToApp::Ready` has `port` (`#[serde(default)]`, protocol still 1),
-   and `use_machine` and `pluto_session_status` give it as `remote_port`, with
-   `ssh -L` for a plain server. Still to do in this step: delete `endeavor
-   link`, `src/link.rs`, `tests/link.rs` and `tests/e2e_link.rs`, and merge
-   this computer and a server into one target type.
+   _Built 2026-10-07._ `endeavor mcp` holds one `client::Session` for each
+   machine it uses, made by `standalone::open_session` (the one place a
+   session is set up), and closes them when its input ends, leaving every
+   runtime running. `endeavor link`, `src/link.rs` and their tests are gone.
+   A target is one type (`Target`, `standalone/target.rs`) whose runtime comes
+   from a `Provider`: `Local` calls `runtime::find_or_start`, `look` and `end`
+   directly, and a machine's is its `Session`. Both answer with the same
+   `client::Outcome` (this computer never with `NeedsInstall` or `Queued`).
+   The machine tools and the notebook calls ask the provider and read its
+   `Outcome`; there is one use, one stop, one route and one status. A runtime
+   that has gone is treated alike: a notebook call that needs one starts one
+   when nothing runs, on this computer and on a plain server (a cluster asks
+   for a job), and `list_notebooks` and `pluto_session_status` never start
+   one. `list_machines` shows the state only of the machines this front is
+   connected to and connects to nothing. `ToApp::Ready` has `port`
+   (`#[serde(default)]`, protocol still 1), and `use_machine` and
+   `pluto_session_status` give it as `remote_port`, with `ssh -L` for a
+   plain server. The test variables that were the link's (`ENDEAVOR_TEST_SHELL`,
+   `_ROOT`, `_STATE`, `_DEPOT`, `_ASK`) are read where the session is made.
 4. The session records: no `end_session`, no other-sessions list; the
    skills and tool descriptions follow.
 5. One idle rule, recorded in `runtime.json`.
@@ -218,21 +227,23 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 | Jobs on a cluster | One at a time for each user. A second client attaches to the job as the first one asked for it, and is told its size |
 | Several clients on one runtime | Allowed. No client makes another exit |
 | Several agent sessions on one notebook | Allowed, as in the app today. No owner and no takeover |
-| Who holds the connection to a server | Each `endeavor mcp`, in process, as the app does (built 2026-10-07). The link process is still in the code, and no front uses it |
-| This computer | Planned (2026-10-07): the front calls the one find-or-start function the helper also calls. Built today: the front has its own |
+| Who holds the connection to a server | Each `endeavor mcp`, in process, as the app does (built 2026-10-07). There is no background process |
+| This computer | The front calls the one find-or-start function the helper also calls (built 2026-10-07) |
 | When a session ends | Planned (2026-10-07): nothing is said and nothing is listed. The idle limit is the only thing that ends a notebook, the same everywhere |
 | Windows | A target soon, so nothing macOS-only in the design |
 
-## Three roles
+## Two roles on your computer
 
-_Built as described here. The revision removes the link: the front holds
-the connection itself. The runtime and the helper are unchanged._
+_Built as described here._
 
 | Role | Command | Where | State |
 |---|---|---|---|
-| Front | `endeavor mcp` | your computer, one for each agent session | built |
+| Front (the stdio server) | `endeavor mcp` | your computer, one for each agent session | built |
 | Runtime | the core (`endeavor core`) and the engines behind it | where the notebooks run | built for Pluto |
-| Link | a background process, one for each server | your computer | built; the front calls it |
+
+On a server a third process, the helper (`endeavor connect`), runs over the
+front's `ssh` and ends with it. Nothing runs in the background for the
+plugin: a runtime outlives the session, and nothing else does.
 
 **The runtime is the core, not Julia.** The core is one Rust process on a
 machine. It owns the port, the sessions and who works in which notebook,
@@ -245,119 +256,115 @@ engine. Today the core starts Julia with itself and the two stop together.
 ```text
 Your computer                                        Server or login node        Compute node
 
-harness ── stdio ── endeavor mcp ─┐
-harness ── stdio ── endeavor mcp ─┼─ 127.0.0.1:PORT ── link ── ssh ── endeavor connect ── (relay) ── the runtime
+harness ── stdio ── endeavor mcp ─┬─ 127.0.0.1:PORT ── ssh ── endeavor connect ── (relay) ── the runtime
 browser ──────────────────────────┘
 ```
 
 - **On this computer** the front starts a runtime, or finds the one already
   recorded in the state folder, when a call first needs it, not when the
-  front starts. No link is involved.
-- **On a server** the front asks the link for it. The link runs
-  `ssh <alias> endeavor connect`, and opens one loopback port on your
-  computer. Every connection to that port becomes a stream to the runtime's
-  port on the server. The agent's calls and Pluto's page both use it, so
-  `browser_url` works without a tunnel of your own.
+  front starts. It calls the one find-or-start function in `runtime.rs` that
+  the helper and `serve` call; no child process stands between.
+- **On a server** the front holds a `client::Session` for the machine. The
+  session runs `ssh <alias> endeavor connect` and opens one loopback port on
+  your computer. Every connection to that port becomes a stream to the
+  runtime's port on the server. The agent's calls and Pluto's page both use
+  it, so `browser_url` works without a tunnel of your own.
 - **On a cluster** the helper on the login node submits the job and passes
   the streams to a relay on the job's node (`slurm.rs`, built).
 
-**One link for each server.** Every agent session starts its own front. The
-fronts on one computer share one link, so there is one `ssh`, one sign-in
-and one browser address for a server. A front finds the link through a file
-in a local state folder, as `mcp` finds `runtime.json`, and starts it under
-a lock when there is none. The app keeps its own connection; the two don't
+**One connection for each session and server.** Every agent session starts
+its own front, and each holds its own `ssh`, sign-in and loopback port for a
+server. Many helpers attach to one runtime, so a second session on a server
+works in the same runtime and the same notebooks as the first; only the
+browser address differs. The app keeps its own connection; the two don't
 disturb each other (see [Sharing a runtime](#sharing-a-runtime)).
 
-**The link, as built.** The connecting, retrying and re-attaching below are
-`client::Session`'s (see step 2 of the revision); the link process adds the
-record, the control port, the idle limit and the stop signals. `endeavor link --machine <id>` is a hidden command; a
-front starts it with `link::ensure(<server record>)`, which returns the link's control
-port and token. The front writes the record to `links/<id>/server.json` (owner-only) before
-it starts the link, which reads it once and keeps it, also when it reconnects: it doesn't read
-the machines file, and the machine need not be in it. A tool that asks for a link
-whose record has other connection settings, or none, quits it and starts a new one
-(or refuses, when Julia is in use through it). The link connects as
-the library does (batch sign-in), sends its own binary as the helper when the
+**The connection, as built.** `client::Session` (`src/client/session.rs`)
+holds one machine's connection and what hangs on it: sign-in, starting the
+helper, starting the runtime or attaching to it, getting the connection back
+when it drops, and the one loopback port. It does its work in a thread of its
+own, which ends when the session is closed or dropped. The front makes it with
+`standalone::open_session`: batch sign-in, its own binary as the helper when the
 server's platform is this computer's (and else the release's helper for that
-platform, see [Installing the binary](#installing-the-binary)), and starts the one loopback port that
-relays to the runtime. It keeps `links/<id>/link.json` (its pid, control
-port, token, build and control protocol number), `server.json`, `link.lock` and `link.log` in the state folder
-(`~/.local/state/endeavor`, `%LOCALAPPDATA%\Endeavor` on Windows). The control
-interface is HTTP on a loopback port of its own, with the token from
-`link.json` as a bearer token. It refuses a Host that isn't loopback and any
-request with an Origin.
+platform, see [Installing the binary](#installing-the-binary)). The front keeps
+the settings a session was made with. A tool that asks for a machine whose
+saved settings have other connection settings replaces the session, or
+refuses when Julia is in use through it.
 
 | Call | What it does |
 |---|---|
-| `GET /link/status` | `state` (connecting, connected, starting, queued, ready, failed), the last `step`, an `error`, what the helper said (`hello`), the `runtime` once ready (the listener's port, the runtime's token, the page URL), and for a job its `job` and `queue` |
-| `POST /link/start` | `{"job": …, "only_running": bool, "install": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true. `install` is the user's agreement to what this start needs (the helper if missing, then whatever the start finds it needs). A front uses a link of its own control protocol number (`link::PROTOCOL`, in `link.json`; a missing number is 0) fully, whatever its build. To a link of another protocol it sends no start: it replaces one that nothing hangs on, and uses one with a runtime as it is |
-| `POST /link/stop` | Stop the runtime for every client, and say why it didn't. The link stays connected |
-| `POST /link/quit` | Remove the record, detach and exit. The record goes first, so a front that asks for a link right after gets a new one |
+| `ensure(Want::Attach { install }, wait)` | Attach to a runtime that runs, or a job that waits or runs, and start nothing otherwise: the outcome is `NothingRunning` |
+| `ensure(Want::Start { job, install }, wait)` | Start the runtime, or attach to the one running. Returns as soon as the outcome is known: `Ready` (the listener's port, the runtime's token, the page address, pid, node, job), `Queued`, `NeedsInstall` (what), `Failed` (why) or `StillWorking` (which step, when `wait` ran out). A later call with the same want goes on from there. `install` is the user's agreement to what the start needs (the helper if missing, then whatever the start finds it needs) |
+| `status()` | The state (connecting, connected, starting, queued, ready, failed, needs_install), the last step, an error, what the helper said, the runtime once ready, and for a job its job and queue |
+| `stop()` | Stop the runtime for every client, and say why it didn't. The connection stays |
+| `allow_install()` | The user agreed to the helper alone, without a start |
+| `close()` | Detach and end the session's thread and port. The runtime goes on |
 
-When the connection drops, the link connects again (waiting 1 s, then more,
+When the connection drops, the session connects again (waiting 1 s, then more,
 up to 30 s apart, for 10 minutes; a name that doesn't resolve or a network
 that is down is retried too) and attaches to the runtime it had, if the
 helper says it is still running or its job still waits, on the same listener
 port. A start that the drop cut short is taken up again the same way. A
-runtime that is gone is not started again: the state is `failed` and says
-so. A failed sign-in or host key is not retried, nor is giving up after 10
-minutes: the state is `failed` with the message, the listener tells the agent
-to call `use_machine`, and the next start tries again. A first connect that
-fails is reported once and not retried. The link starts the runtime with
-`--exit-idle`.
+runtime that is gone is not started again by the reconnect: the state is
+`failed` and says so. A failed sign-in or host key is not retried, nor is
+giving up after 10 minutes: the state is `failed` with the message, the
+listener tells the agent to call `use_machine`, and the next ask tries again.
+A first connect that fails is reported once and not retried. The session
+starts the runtime with `--exit-idle`.
 
-A front that finds a link whose process lives but doesn't answer waits a few
-seconds, then reports that the link isn't answering. It doesn't start a second
-one. A machine's id is lower-case letters, digits, `-`, `_` and `.`, since it
-is the link's folder name on every system.
+A machine's id is lower-case letters, digits, `-`, `_` and `.`, since it may
+be a folder's name on every system.
 
 **How long things last.** These are separate:
 
-- The link stays for 8 hours after the last agent session, so the browser
-  page keeps working, then exits. It is the plugin's only; the app's
+- A session's connection lasts as long as its front: when the front's input
+  ends it closes the session, and the page address stops working. The app's
   connection lasts as long as the app runs.
-- A link or an app that goes away detaches. It never stops the runtime.
+- A front or an app that goes away detaches. It never stops the runtime.
 - The runtime's idle stop is the core's, as today: 48 hours unless set
   otherwise, for the whole runtime, by whoever started it.
-- A runtime the link starts also ends once no notebook has been open for that
+- A runtime a session starts also ends once no notebook has been open for that
   long (`endeavor connect --exit-idle`, like one `mcp` starts), so a runtime
   nobody uses doesn't stay up for good. Attaching to a running runtime
   changes nothing about it. On a cluster the flag goes to the core in the job,
   and the job's time limit ends it too.
-- The link counts every control request as activity, and ends 8 hours after
-  the last one. Pluto's page and the agent's calls through its port aren't
-  control requests, so a front calls `status` while its session lasts.
 
 **The token.** The helper sends the runtime's token when the runtime is
-ready. The link keeps it in its state folder (readable only by you), and the
-front adds it to each request, as it does for a local runtime.
+ready. The session keeps it in memory, and the front adds it to each
+request, as it does for a runtime on this computer.
 
-**The session.** The front makes a session key for its run and sends it on
+**The session key.** The front makes a key for its run and sends it on
 every request, with the server's name once it uses a server. The front
-outlives a dropped `ssh`, so the agent keeps its notebook when the link
-reconnects. When the session moves to another runtime, the front ends its key
-on the old one and makes a new one (`<first key>-N`): a runtime ignores a key
-it has ended, and a notebook binding means nothing on another runtime.
+outlives a dropped `ssh`, so the agent keeps its notebook when the
+connection is made again. When the session moves to another runtime, the front
+ends its key on the old one and makes a new one (`<first key>-N`): a runtime
+ignores a key it has ended, and a notebook binding means nothing on another
+runtime.
 
-**What the front does with the link (built).** The front asks its link for its
-status every four minutes while its target is a machine, so the 8 hours count
-from the end of the last session. A call that finds the link gone starts it
-again and attaches to what runs. A link of another control protocol than the front's is
-used as it is, except that `use_machine` quits it and starts a new one when no
-runtime is attached through it (the new link has another port, and an open
-browser page would break); with a runtime attached it keeps the old link and the
-result says so. When the front's input ends it ends its key on the runtime it is
-on and leaves the link running.
+**What the front does with a target (built).** The front holds one session
+for each machine it uses (`Connections`, `standalone/machines.rs`), made by
+the first call that needs it. A call goes to the session's target, which is one
+type for this computer and for a machine (`Target`, `standalone/target.rs`):
+its `Provider` gives the runtime's port and token (`ensure`, `settled`,
+`status`, `stop`). This computer's provider finds or starts the runtime in the
+state folder; a machine's is its session. A call that needs a runtime asks
+whether one runs, and starts one when none does, on this computer and on a
+plain server alike. A cluster is not started without a job the user agreed to:
+the call fails with a message that says what to ask. `list_notebooks` and
+`pluto_session_status` use a runtime that runs and start none. A runtime that
+`stop_machine` ended is not started again by a call until `use_machine`. When
+the front's input ends it ends its key on the runtime it is on and closes its
+sessions, leaving every runtime running.
 
 **What a project remembers (built).** `projects.json` in the local state folder
-(`<state home>/endeavor/`, next to `links/`; `%LOCALAPPDATA%\Endeavor` on
+(`<state home>/endeavor/`; `%LOCALAPPDATA%\Endeavor` on
 Windows) maps a project folder, the front's `--folder` as a canonical path, to
 `{machine, folder}`: the machine's id and the folder there. It is written whole
 and renamed, owner-only, under a lock, as `machines.json` is. `use_machine`
 writes it, and `"local"` removes the entry. A front that starts in such a project
-targets the machine and starts nothing; its first runtime call asks the link to
-attach only to a runtime that is there (`only_running`). With none: a plain
-server starts one, and a cluster submits nothing, so the call fails with a
+targets the machine and starts nothing; its first call attaches to a runtime
+that is there (`Want::Attach`). With none, a call that needs one starts it on a plain
+server, and a cluster submits nothing, so the call fails with a
 message that names the machine, the defaults and `use_machine`. A machine that
 is no longer in the machines file is dropped from the session, and the first
 result says so.
@@ -380,8 +387,7 @@ makes another older one exit.
   server stops it, and a later `serve` finds it.
 - The app on your laptop and the plugin on your workstation reach the same
   runtime and the same open notebooks.
-- Your own `ssh -L` and browser tab keep working. The link (with the
-  revision: the front) listens on a
+- Your own `ssh -L` and browser tab keep working. The front listens on a
   port of its own on your computer, and the runtime's port takes any number
   of connections that carry the token.
 
@@ -451,7 +457,7 @@ do the same, and the first marks the stop as made from a connection.
 **A runtime from another build** is used, as `serve` and `mcp` do today.
 `use_machine` and `pluto_session_status` say that the runtime there is from
 another version of endeavor and that restarting it gets the latest changes.
-The link sends its own build's helper, so those two always match, and the
+The front sends its own build's helper, so those two always match, and the
 helper reaches the runtime over its port. The front answers the tool list
 from its own build, so a tool or argument newer than the runtime fails with
 the runtime's own error. Only a runtime from before one port per runtime is
@@ -508,8 +514,6 @@ it with the relay.
     carries the items, `StartError::message()` the words. `StartOptions::default()`
     is no job, `ENGINE_PLUTO` and no install. `client::connect` returns
     `ConnectError` (`message`, `retry`, `needs`); there is no string-only twin.
-    `link::Link`'s `status`, `start`, `install` and `attach` take the wait as
-    their last argument (`link::CALL_WAIT` is the usual one).
   - `ToApp::NotStopped { id, .. }` answers a `Stop` that didn't end the runtime, and
     `Channel::stop()` returns a `Result`. Requests carry ids and every answer
     names one (`ToApp::answers`); `client::Hello` has the helper's `protocol`.
@@ -570,10 +574,10 @@ threads and blocking I/O, as here, and no new dependencies):
 Written again without the GUI: the connect and retry rules (about 300 lines
 of `connection.rs`).
 
-New: the link process (built), the machine tools, and getting the helper to
-send (built). The link sends its own binary when the server is the same
-platform as your computer, and else fetches the release's helper for the
-server's platform.
+New: `client::Session` and the target's providers (built), the machine tools,
+and getting the helper to send (built). The front sends its own binary when
+the server is the same platform as your computer, and else fetches the
+release's helper for the server's platform.
 
 The app keeps its copy until it switches to the moved code. That is a change
 in both repositories: it lands here, the Helpers release builds, then the
@@ -585,17 +589,17 @@ app moves its pin ([status.md](status.md)).
 
 1. The agent calls `list_machines`: the machines you've added, and the `Host`
    names in `~/.ssh/config`.
-2. It calls `add_machine("hoffman2")`. The link connects and looks. If the
+2. It calls `add_machine("hoffman2")`. The front connects and looks. If the
    server lacks this build's helper it installs nothing: the result is
    `needs_install` (what would be copied, where, about how big, whether a
    runtime already runs there), nothing is saved yet, and the agent
-   asks you. If you agree it calls again with `install: true`; the link
+   asks you. If you agree it calls again with `install: true`; the front
    sends the helper, and reports the machine's node and home folder,
    whether Slurm is there, and the partitions with their limits. That report
    becomes the saved record. Julia isn't looked for until the first runtime
    starts there (the helper has no call for it), so the report has it as null
    until then. A machine that turns out to have Slurm is saved as a cluster
-   and its link is quit, so the next connection starts the helper for Slurm.
+   and its connection is ended, so the next one starts the helper for Slurm.
    The same question comes with `use_machine` and `stop_machine` when a plugin
    update left the server with an older helper (an update, which sits beside the
    old one). Julia is part of the same question when it is known: if no Julia
@@ -615,13 +619,11 @@ app moves its pin ([status.md](status.md)).
 queued. `pluto_session_status` then gives the queue state, Slurm's reason in
 plain words, and once the runtime is up, when the job ends. No call waits
 longer than 45 seconds (Codex's tool timeout defaults to 60), and a queued job
-is not waited for. The time waited is not given: the link doesn't know when a
-job was submitted by an earlier connection. (With the revision the front
-holds the connection, and the same holds for it.)
+is not waited for. The time waited is not given: the front doesn't know when a
+job was submitted by an earlier connection.
 
 **The notebook.** `browser_url` is on your computer's loopback and stays the
-same while the link runs. (With the revision: while the session is
-connected.)
+same while the session is connected.
 
 **The next session.** The project remembers its machine and folder. If the
 runtime is still up, the first tool call attaches without asking. If it
@@ -672,7 +674,7 @@ defaults.
 
 ## Sign-in
 
-The link (with the revision: the front) runs the system `ssh` with the alias, keepalives and batch mode.
+The front runs the system `ssh` with the alias, keepalives and batch mode.
 `ssh` applies your configuration, keys and agent. Endeavor reads only the
 `Host` names from `~/.ssh/config`, never a key, and stores no password or
 key path. It leaves host-key checking as you have it.
@@ -686,9 +688,8 @@ message that says what to do:
 | A host never connected to before | `ssh <host>` once in a terminal, to accept its key |
 | A server that asks for a password or a code on every login | Unsupported in the first version |
 
-Later, for the third case: a sign-in page on the link's loopback port (with
-the revision there is no link; where the page lives is open), the
-same on macOS, Linux and Windows. The answer goes from the page to `ssh` and
+Later, for the third case: a sign-in page, the same on macOS, Linux and
+Windows. Where it lives is open, since no background process serves it. The answer goes from the page to `ssh` and
 never through the agent. Behind the page, macOS and Linux use askpass, which
 the binary already is. Windows askpass has been unreliable, so Windows needs
 a tested choice between askpass and running `ssh` under a pseudo-terminal.
@@ -717,11 +718,11 @@ The plugin's entry is `endeavor mcp`, found on the `PATH`.
   `build.rs` records it as `embedded::RELEASE_KEY`, and `endeavor --version`
   prints it as a second line, `release <key>`, after the first line it
   always had. A build without the variable has no key.
-- `endeavor update` works on all five platforms (`release.rs`, which the link
+- `endeavor update` works on all five platforms (`release.rs`, which `endeavor mcp`
   shares for downloads and checksums). On Windows the running exe is renamed
   to `endeavor.exe.old` and the new one put in its place; the next update
   deletes the old one.
-- When the server's platform isn't this computer's, the link fetches
+- When the server's platform isn't this computer's, the front fetches
   `endeavor-<key>-<platform>` from the release, checks it against
   `endeavor-<key>.sha256` from the same release, and keeps it as
   `<cache>/endeavor/helpers/<key>/<platform>/endeavor` (`~/.cache` by
@@ -730,13 +731,13 @@ The plugin's entry is `endeavor mcp`, found on the `PATH`.
   kept file once its SHA-256 matches the one recorded, with no download. A
   build without a release key says that a helper for that platform needs a
   release build. A download that fails or doesn't match is deleted, the
-  link's state is `failed` with the message, and nothing retries it. The
+  session's state is `failed` with the message, and nothing retries it. The
   release's names for platforms are in one place (`release::platform_name`);
   a server that reports another platform (or Windows) is refused with "no
   runtime helper for <os> <arch> servers". Servers are reached by `uname`'s
   words, so macOS servers are `darwin-*`.
-- When the server is the same platform as this computer, the link sends its
-  own binary, as before.
+- When the server is the same platform as this computer, the front sends its
+  own binary.
 
 **Not run:** the PowerShell script (no PowerShell here), the workflow's new
 rows (they run on the next push to `main`), `endeavor update` on macOS and
@@ -862,17 +863,17 @@ server starts (if not, the first start downloads, as in the other agents).
 
 ## Safety
 
-- Nothing is installed on a server without the user's agreement. The link
+- Nothing is installed on a server without the user's agreement. The front
   connects with installs not allowed (the bootstrap script only reports the
   platform, whether this build's helper is there, and, with `sh`, `cat`, `kill`,
   `ps` and `squeue`, whether a runtime or a job is recorded in the state folder
   the helper would use), and starts with `install` false. The
-  agreement to the helper is for one link process: it lasts for its reconnects,
-  and a new link starts without it, which is harmless since the helper is
-  installed by then. (With the revision: for one session's connection.) The agreement to what a start needs (Julia's download) is
+  agreement to the helper is for one session's connection: it lasts for its
+  reconnects, and a new session starts without it, which is harmless since the
+  helper is installed by then. The agreement to what a start needs (Julia's download) is
   for one start and is not kept. The app, which asks its user itself, passes
   `allow_install` true and starts with `install` true.
-- Both ends stay on loopback. The link's port needs the token, as a
+- Both ends stay on loopback. The front's port for a machine needs the token, as a
   runtime's does.
 - `add_machine` takes an ssh alias: letters, digits, `.`, `-`, `_` and an
   optional `user@`, never starting with `-`. `ssh` gets an argument list
@@ -903,8 +904,9 @@ server starts (if not, the first start downloads, as in the other agents).
    login.
 2. Helpers attach without making each other exit (built). Opening an open
    notebook joins it, and the core shows a notebook's other sessions.
-3. The link process (built) and the machine tools in `mcp` (built), with the
-   `endeavor-machines` skill.
+3. The machine tools in `mcp` (built), with the `endeavor-machines` skill.
+   They first reached a server through a link process, which the revision
+   (item 7) removed.
 4. The Slurm path through the tools (built against fake Slurm, and checked on
    real Slurm: the helper's side in `e2e_slurm`, the whole path through
    `endeavor mcp` in `e2e_machines_slurm`).
@@ -917,8 +919,8 @@ server starts (if not, the first start downloads, as in the other agents).
    plugin's binary alone. The pinned key is set after the first release from
    `main`.
 7. The revision of 2026-10-07, in the order given in
-   [The revision](#the-revision-decided-2026-10-07-planned). It comes before
-   the app, which then takes the library as revised.
+   [The revision](#the-revision-decided-2026-10-07); steps 1 to 3 are built.
+   It comes before the app, which then takes the library as revised.
 8. The app: the moved code, the shared state folder, a version on its calls
    to the runtime, and attaching and detaching as the plugin does.
 

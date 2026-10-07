@@ -53,10 +53,6 @@ pub enum State {
     /// asking again with `install`, or `Session::allow_install` for the helper, goes on.
     #[serde(rename = "needs_install")]
     NeedsInstall,
-    /// A state this build doesn't know, from a link of another control protocol:
-    /// not ready, and not replaceable. A session never has it.
-    #[serde(other)]
-    Unknown,
 }
 
 /// What Endeavor wants to install on the machine, and what it found there.

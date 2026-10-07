@@ -63,6 +63,20 @@ impl Place {
     fn julia_ran(&self) -> bool {
         self.state.join("julia.args").exists()
     }
+
+    /// The pid of the runtime's core, once it runs.
+    fn runtime(&self) -> Option<i32> {
+        let state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(self.state.join("runtime.json")).ok()?).ok()?;
+        state["pid"].as_i64().map(|p| p as i32)
+    }
+
+    /// End the helpers of the machine, as a network failure would.
+    fn drop_connection(&self) {
+        for pid in self.helpers() {
+            // SAFETY: plain syscall, on a helper this test's session started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
 }
 
 impl Drop for Place {
@@ -355,4 +369,122 @@ fn closing_during_a_connect_cancels_it_and_starts_nothing() {
     assert!(began.elapsed() < Duration::from_secs(10), "the connect was cancelled");
     assert!(matches!(session.ensure(Want::Attach { install: false }, Duration::ZERO), Outcome::Failed(why) if why.contains("closed")));
     assert!(place.helpers().is_empty() && !place.julia_ran());
+}
+
+#[test]
+fn a_stop_ends_the_runtime_and_a_start_after_it_works_on_the_same_port() {
+    let place = Place::new("stop-start");
+    let session = place.session();
+    let first = ready(session.ensure(start(), LONG));
+    session.stop().expect("stop");
+    assert!(!pid_alive(first.pid as i32), "the runtime is gone");
+    let status = session.status();
+    assert_eq!((status.state, status.runtime), (State::Connected, None));
+    assert!(!place.helpers().is_empty(), "the connection stays");
+    let second = ready(session.ensure(start(), LONG));
+    assert_eq!(second.port, first.port, "the same listener");
+    assert!(!second.reattached && second.pid != first.pid);
+    session.stop().expect("stop");
+    assert!(session.stop().is_ok(), "nothing runs, and the helper says so");
+}
+
+#[test]
+fn a_stop_during_a_start_is_no_failure() {
+    let place = Place::new("stop-starting");
+    let hold = place.state.join("hold");
+    std::fs::write(&hold, "").unwrap();
+    let session = place.session();
+    assert!(matches!(session.ensure(start(), Duration::from_millis(1500)), Outcome::StillWorking(_)));
+    wait_for("Julia to be asked for", || place.julia_ran());
+    session.stop().expect("stop");
+    std::fs::remove_file(&hold).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let status = session.status();
+    assert_eq!((status.state, status.error, status.runtime), (State::Connected, None, None));
+}
+
+#[test]
+fn a_runtime_that_ended_while_the_connection_was_lost_is_told_and_not_started_again() {
+    let place = Place::new("ended-away");
+    let session = place.session();
+    let before = ready(session.ensure(start(), LONG));
+    // SAFETY: plain syscall, on the runtime this test's session started.
+    unsafe { libc::kill(-(before.pid as i32), libc::SIGKILL) };
+    place.drop_connection();
+    wait_for("the end to be told", || session.status().state == State::Failed);
+    let Outcome::Failed(why) = session.ensure(start(), LONG) else { panic!("it ended") };
+    assert!(why.contains("Julia on lab"), "{why}");
+    assert!(!pid_alive(before.pid as i32) && place.runtime().is_none_or(|pid| pid == before.pid as i32), "nothing started a new one");
+    // Asked again, it starts a new one.
+    let mut next = None;
+    wait_for("a new runtime", || {
+        next = Some(session.ensure(start(), Duration::from_millis(200)));
+        matches!(next, Some(Outcome::Ready(_)))
+    });
+    assert_ne!(ready(next.unwrap()).pid, before.pid);
+}
+
+#[test]
+fn a_connection_lost_while_the_runtime_starts_is_resumed_after_the_reconnect() {
+    // Connecting waits while `gate` exists, so that the runtime is up before the connection is back.
+    let place = Place::new("lost-starting");
+    let (hold, gate) = (place.state.join("hold"), place.dir.join("gate"));
+    std::fs::write(&hold, "").unwrap();
+    let session = place.session_with(true, Some(format!("while [ -e {} ]; do sleep 0.1; done", gate.display())));
+    assert!(matches!(session.ensure(start(), Duration::from_millis(1500)), Outcome::StillWorking(_)));
+    wait_for("Julia to be asked for", || place.julia_ran());
+    std::fs::write(&gate, "").unwrap();
+    place.drop_connection();
+    wait_for("the connection lost", || session.status().state == State::Connecting);
+    std::fs::remove_file(&hold).unwrap();
+    wait_for("the runtime to come up without the client", || place.runtime().is_some());
+    std::fs::remove_file(&gate).unwrap();
+    let runtime = ready(session.ensure(start(), LONG));
+    assert_eq!((Some(runtime.pid as i32), runtime.reattached), (place.runtime(), true));
+}
+
+#[test]
+fn asking_again_while_connecting_makes_no_other_attempt() {
+    let place = Place::new("asked-again");
+    let asked = place.dir.join("asked");
+    let attempts = || std::fs::read_to_string(&asked).map_or(0, |text| text.lines().count());
+    // The sign-in takes 2 s and then fails.
+    let session = place.session_with(true, Some(format!("echo x >> {}; sleep 2; exit 1", asked.display())));
+    for _ in 0..5 {
+        let _ = session.ensure(start(), Duration::ZERO);
+    }
+    wait_for("the failure", || session.status().state == State::Failed);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(attempts(), 1);
+}
+
+#[test]
+fn a_reconnect_installs_the_helper_again_when_it_was_agreed_to_and_asks_when_it_was_not() {
+    let place = Place::new("reinstall");
+    let root = place.dir.join("root");
+    let session = place.session();
+    let before = ready(session.ensure(start(), LONG));
+    // The helper goes from the machine and the connection with it: the reconnect installs it again, with no new question.
+    let lost = place.helpers();
+    std::fs::remove_dir_all(&root).unwrap();
+    place.drop_connection();
+    wait_for("the helper to change", || place.helpers().iter().all(|p| !lost.contains(p)) && !place.helpers().is_empty());
+    assert!(root.join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists(), "installed again by the reconnect");
+    assert_eq!(ready(session.ensure(start(), LONG)).pid, before.pid);
+
+    // An agreement given to a start with the helper there is for what the start needs, and is not kept for the helper.
+    let place = Place::new("agreement-not-kept");
+    let root = place.dir.join("root");
+    common::install_helper(&root);
+    let session = place.session_with(false, None);
+    wait_for("the connection", || session.status().state == State::Connected);
+    ready(session.ensure(start(), LONG));
+    std::fs::remove_dir_all(&root).unwrap();
+    place.drop_connection();
+    wait_for("the question", || session.status().state == State::NeedsInstall);
+    assert!(session.status().needs_install.is_some_and(|needs| needs.needs_helper()));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!root.exists(), "nothing was installed without a question");
+    session.allow_install();
+    ready(session.ensure(Want::Attach { install: false }, LONG));
 }

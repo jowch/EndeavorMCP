@@ -74,7 +74,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 /// runtime; ENDEAVOR_PORT, a fixed port; ENDEAVOR_HOST_TOOLS, the host name
 /// under which every session gets the host tools; and ENDEAVOR_IDLE_HOURS, the
 /// idle stop. ENDEAVOR_EXIT_IDLE, to end the runtime once no notebook has
-/// been open for that long, works with or without a folder: the link asks for
+/// been open for that long, works with or without a folder: a client asks for
 /// it on a runtime `connect` starts.
 pub fn main(argv: &[String]) -> ! {
     let args = parse_args(argv).unwrap_or_else(|e| {
@@ -254,8 +254,8 @@ fn set_pluto_folder(julia_port: u16, token: &str, folder: &str) {
 }
 
 /// End the runtime once no notebook has been open for the idle limit (none
-/// when it's 0): a runtime the stdio form or a link started in the background
-/// has no one to stop it.
+/// when it's 0): a runtime the stdio form or a server connection started in the
+/// background has no one to stop it.
 fn exit_when_idle(served: Arc<Served>, julia_port: u16) {
     std::thread::spawn(move || {
         let notebooks = &served.bridge.notebooks;

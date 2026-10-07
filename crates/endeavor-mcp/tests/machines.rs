@@ -1,6 +1,6 @@
 //! The machine tools of `endeavor mcp` (the front), driven over stdio as an
 //! agent's harness drives it, against the helper with a local `sh` standing in
-//! for ssh (`ENDEAVOR_LINK_SHELL`), a stand-in Julia under the real core, and
+//! for ssh (`ENDEAVOR_TEST_SHELL`), a stand-in Julia under the real core, and
 //! fake Slurm commands for a cluster. The front holds its connection to each
 //! machine itself; what the tests look at is the tools' results, the helper
 //! processes, the runtime and the machines and projects files. No sshd, Julia
@@ -79,10 +79,10 @@ impl Place {
             ("XDG_STATE_HOME", path("state-home")),
             ("XDG_CONFIG_HOME", path("config")),
             ("XDG_CACHE_HOME", path("cache")),
-            ("ENDEAVOR_LINK_SHELL", "1".into()),
-            ("ENDEAVOR_LINK_ROOT", path("root")),
-            ("ENDEAVOR_LINK_STATE", state.display().to_string()),
-            ("ENDEAVOR_LINK_DEPOT", path("depot")),
+            ("ENDEAVOR_TEST_SHELL", "1".into()),
+            ("ENDEAVOR_TEST_ROOT", path("root")),
+            ("ENDEAVOR_TEST_STATE", state.display().to_string()),
+            ("ENDEAVOR_TEST_DEPOT", path("depot")),
             ("ENDEAVOR_START_WAIT_SECS", "30".into()),
             ("ENDEAVOR_SLURM_POLL_MS", "100".into()),
         ]
@@ -404,7 +404,7 @@ fn a_new_machine_with_slurm_tools_is_added_as_a_plain_server_when_slurm_is_false
 
 #[test]
 fn a_failing_add_machine_leaves_no_record_and_no_connection() {
-    let place = Place::with("failadd", &[("ENDEAVOR_LINK_ASK", "echo 'Permission denied (publickey)' >&2; false")]);
+    let place = Place::with("failadd", &[("ENDEAVOR_TEST_ASK", "echo 'Permission denied (publickey)' >&2; false")]);
     let mut front = place.front();
     front.initialize();
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "name": "failadd", "julia": place.julia.display().to_string() }));
@@ -614,7 +614,7 @@ fn attempts(place: &Place) -> usize {
 fn slow_place(name: &str, then: &str) -> (Place, FakeSlurm) {
     let slurm = FakeSlurm::new(name);
     let ask = format!("echo x >> {{dir}}/attempts; touch {{dir}}/asking; while [ ! -f {{dir}}/go ]; do sleep 0.1; done{then}");
-    let place = Place::with(name, &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string()), ("ENDEAVOR_START_WAIT_SECS", "2"), ("ENDEAVOR_LINK_ASK", &ask)]);
+    let place = Place::with(name, &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string()), ("ENDEAVOR_START_WAIT_SECS", "2"), ("ENDEAVOR_TEST_ASK", &ask)]);
     (place, slurm)
 }
 
@@ -831,9 +831,11 @@ fn a_remembered_plain_server_is_started_when_nothing_runs_there() {
 
     let mut second = place.front();
     second.initialize();
-    let listed = second.ok("list_notebooks", json!({}));
-    assert_eq!(listed, json!([]));
-    assert!(place.runtime().is_some_and(pid_alive), "it started the runtime there, as asked last time");
+    assert_eq!(second.ok("list_notebooks", json!({})), json!([]));
+    assert!(place.runtime().is_none(), "a query starts nothing");
+    let path = place.notebook("a.jl");
+    second.ok("open_notebook", json!({ "path": path }));
+    assert!(place.runtime().is_some_and(pid_alive), "a notebook call started the runtime there, as asked last time");
 }
 
 #[test]
@@ -1068,7 +1070,7 @@ fn a_dropped_connection_is_made_again_in_the_same_front_on_the_same_browser_addr
 
 #[test]
 fn one_front_uses_two_machines_each_with_its_own_connection_and_runtime() {
-    let place = Place::bare("two", &[("ENDEAVOR_LINK_ROOT", "{dir}/root-{id}"), ("ENDEAVOR_LINK_STATE", "{dir}/runtime-state-{id}")]);
+    let place = Place::bare("two", &[("ENDEAVOR_TEST_ROOT", "{dir}/root-{id}"), ("ENDEAVOR_TEST_STATE", "{dir}/runtime-state-{id}")]);
     let second_state = place.dir.join("runtime-state-lab2");
     let state_of = |id: &str| place.dir.join(format!("runtime-state-{id}"));
     std::fs::create_dir_all(state_of("lab")).unwrap();
@@ -1287,18 +1289,21 @@ fn a_recorded_runtime_that_cannot_be_used_is_an_error_for_the_two_queries_and_st
         std::fs::write(place.local_state.join("runtime.json"), record.to_string()).unwrap();
     };
     let mut sleeper = Command::new("sleep").arg("600").spawn().unwrap();
+    // The status answers with the state and why; the listing fails with the same words.
+    let why = |front: &mut Front, tool: &str| {
+        let (failed, said) = front.call(tool, json!({}));
+        assert_eq!(failed, tool == "list_notebooks", "{tool}: {said}");
+        if failed { text(&said).to_owned() } else { said["message"].as_str().unwrap().to_owned() }
+    };
     for tool in ["pluto_session_status", "list_notebooks"] {
         record("another-node", sleeper.id(), Some(1));
-        let (failed, said) = front.call(tool, json!({}));
-        assert!(failed && text(&said).contains("running on another-node"), "{tool}: {said}");
+        assert!(why(&mut front, tool).contains("running on another-node"), "{tool}");
         record(&this_host(), sleeper.id(), None);
-        let (failed, said) = front.call(tool, json!({}));
-        assert!(failed && text(&said).contains("older version"), "{tool}: {said}");
+        assert!(why(&mut front, tool).contains("older version"), "{tool}");
     }
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     record(&this_host(), sleeper.id(), Some(port));
-    let (failed, said) = front.call("pluto_session_status", json!({}));
-    assert!(failed && text(&said).contains("isn't answering"), "{said}");
+    assert!(why(&mut front, "pluto_session_status").contains("isn't answering"));
     assert!(core_of(&place).is_empty(), "no runtime was started");
     let _ = sleeper.kill();
     let _ = sleeper.wait();
@@ -1326,7 +1331,7 @@ fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call
     let started = Instant::now();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
     assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
-    assert!(failed && text(&said).contains("still starting") && text(&said).contains("Try again"), "{said}");
+    assert!(failed && text(&said).contains("Julia is starting on local") && text(&said).contains("`pluto_session_status`"), "{said}");
     assert!(place.local_runtime().is_none());
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1335,7 +1340,7 @@ fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call
         if !failed {
             break;
         }
-        assert!(text(&said).contains("still starting"), "{said}");
+        assert!(text(&said).contains("Julia is starting on local"), "{said}");
         assert!(Instant::now() < deadline, "{said}");
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -1382,7 +1387,7 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     let mut first = start_front(&place, &short);
     first.initialize();
     let (failed, said) = first.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("still starting"), "{said}");
+    assert!(failed && text(&said).contains("Julia is starting on local"), "{said}");
     let started = core_of(&place);
     assert_eq!(started.len(), 1, "{started:?}");
     first.finish();
@@ -1391,8 +1396,15 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     // A front that comes while the start is still under way waits for it and starts none.
     let mut second = start_front(&place, &short);
     second.initialize();
+    let status = second.ok("pluto_session_status", json!({}));
+    assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("starting"), json!(false)), "another process's start is a start: {status}");
+    let refused = second.ok("stop_machine", json!({ "machine": "local" }));
+    assert!(refused["stopped"] == false && refused["message"].as_str().unwrap().contains("Julia is starting on local"), "{refused}");
+    let (failed, said) = second.call("stop_machine", json!({ "machine": "local", "force": true }));
+    assert!(failed && text(&said).contains("still starting"), "a stop leaves another process's start alone: {said}");
+    assert_eq!(core_of(&place), started);
     let (failed, said) = second.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("still starting"), "{said}");
+    assert!(failed && text(&said).contains("Julia is starting on local"), "{said}");
     assert_eq!(core_of(&place), started, "no second runtime was started");
     let (failed, said) = second.call("stop_machine", json!({ "machine": "local", "force": true }));
     assert!(failed && text(&said).contains("still starting"), "a stop leaves a start under way alone: {said}");
@@ -1404,7 +1416,7 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
         if !failed {
             break;
         }
-        assert!(text(&said).contains("still starting"), "{said}");
+        assert!(text(&said).contains("Julia is starting on local"), "{said}");
         assert!(Instant::now() < deadline, "{said}");
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -1760,7 +1772,7 @@ fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
 
 #[test]
 fn add_machine_with_install_connects_once_and_without_it_does_not_install() {
-    let place = Place::bare("install-once", &[("ENDEAVOR_LINK_ASK", "echo connect >> {dir}/connects")]);
+    let place = Place::bare("install-once", &[("ENDEAVOR_TEST_ASK", "echo connect >> {dir}/connects")]);
     let mut front = place.front();
     front.initialize();
     let julia = place.julia.display().to_string();
@@ -1815,7 +1827,8 @@ fn the_agreement_to_the_helper_from_add_machine_is_not_one_to_install_what_a_sta
     std::fs::write(place.dir.join("state-home/endeavor/projects.json"), remembered.to_string()).unwrap();
     let mut second = place.front();
     second.initialize();
-    let (failed, said) = second.call("list_notebooks", json!({}));
+    assert_eq!(second.ok("list_notebooks", json!({})), json!([]), "a query starts nothing");
+    let (failed, said) = second.call("open_notebook", json!({ "path": "a.jl" }));
     assert!(failed && text(&said).contains("wasn't found on lab"), "{said}");
     assert_eq!(tries(), 1, "a remembered project's call downloads nothing");
     second.finish();

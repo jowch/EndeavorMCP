@@ -81,7 +81,7 @@ pub fn state_dir(name: &str) -> PathBuf {
 }
 
 /// What a connect installs on a server, put under `root` as it would be: this build's
-/// helper and `runtime/`, so that a link finds them there and asks nothing.
+/// helper and `runtime/`, so that a connect finds them there and asks nothing.
 pub fn install_helper(root: &Path) {
     let dir = root.join(endeavor_mcp::embedded::BUILD_VERSION);
     std::fs::create_dir_all(&dir).unwrap();

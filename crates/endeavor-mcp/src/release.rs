@@ -1,6 +1,6 @@
 //! The Helpers release on GitHub: its address, downloading from it and
 //! checking SHA-256, the platform names its files use, and the helper for a
-//! server whose platform isn't this computer's. `update` and the link use it.
+//! server whose platform isn't this computer's. `update` and `endeavor mcp` use it.
 //!
 //! The checksum file comes from the same release as the binary, so a check
 //! catches a corrupt or cut-short download and not a release that was

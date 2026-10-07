@@ -156,7 +156,7 @@ pub struct Caller {
     /// What the client calls itself (`X-Endeavor-Client`), for other sessions to see.
     pub client: Option<String>,
     /// The port the user's browser reaches this runtime on (`X-Endeavor-Browser-Port`), when
-    /// it isn't the runtime's own: a link's loopback port. The links in results use it.
+    /// it isn't the runtime's own: a session's loopback port. The links in results use it.
     pub browser_port: Option<u16>,
     /// The caller is the stdio front (`endeavor mcp`), which also lists the host
     /// tools and the machine tools, and answers the machine tools itself.
@@ -428,7 +428,7 @@ impl Bridge {
 
     /// Without the app, the user watches notebooks in a browser: the results
     /// that name a notebook, or the session, carry the link to it. A caller
-    /// that says which port its browser uses (through a link) gets it on any
+    /// that says which port its browser uses (`X-Endeavor-Browser-Port`) gets it on any
     /// runtime; otherwise only a standalone runtime adds one, with its own port.
     fn add_browser_url(&self, tool: &str, caller: &Caller, result: &mut Value) {
         let Some(port) = caller.browser_port.or_else(|| self.standalone.as_ref().map(|s| s.port)) else { return };

@@ -116,27 +116,36 @@ long-running core (the helper's `runtime.json` and lock already do this), so
 notebooks keep running between client sessions.
 
 The stdio form starts the local runtime at the first call that needs it, not
-at launch (`Relay::runtime` takes `Status::Idle` to a start). Only a `tools/call`
-of a tool this build has starts it. A session on this computer needs it for:
-every notebook tool and `keep_notebook_alive`, and `use_machine` with
-`"local"`. It does not for `initialize`, `ping`, `tools/list`, `notebook_guide`
-(the front answers it from the guide it embeds, with the runtime's check that
-`arguments` is an object; on a machine the call goes to that machine's runtime),
-the host tools (the front refuses them for a session on this computer, with the
-runtime's text), `list_machines`, `add_machine`, `stop_machine`, or a session
-whose project is on a machine. While no runtime is `Ready`, a notification is
-dropped, a request that is not a `tools/call` gets JSON-RPC -32601, and a
-`tools/call` of an unknown tool gets the runtime's `unknown_tool` result; with a
-runtime up all of these are forwarded as before. `list_notebooks` and
-`pluto_session_status` attach to a runtime already running here as a start does
-(`attach`: the same checks and messages, under the start lock for at most 3 s
-and the machine tools' `ops` lock, the session's folder told before the runtime
-is published, the notebooks line printed) and otherwise answer without starting
-one: `[]`, and `{pluto: "not running", notebooks: [], message}`. A record that
-can't be used (another node, no port, a process that doesn't answer) is an
-error, not "not running". After a failed call they take this path again. The
-first call that starts it waits as a start at launch did: up to `start_wait()`
-(45 s), then a "still starting, try again" failure, and the start goes on.
+at launch. This computer's runtime is a `Provider` (`Local`, `src/standalone/target.rs`)
+beside a machine's `Session`, behind one target type; both answer with a
+`client::Outcome`. Only a `tools/call` of a tool this build has starts a runtime. A
+session needs one for: every notebook tool and `keep_notebook_alive`, and
+`use_machine` with `"local"`. It does not for `initialize`, `ping`, `tools/list`,
+`notebook_guide` (the front answers it from the guide it embeds, with the
+runtime's check that `arguments` is an object; on a machine the call goes to that
+machine's runtime), the host tools (the front refuses them for a session on this
+computer, with the runtime's text), `list_machines`, `add_machine`,
+`stop_machine`, or a session whose project is on a machine. While the target's
+runtime isn't up, a notification is dropped, a request that is not a
+`tools/call` gets JSON-RPC -32601, and a `tools/call` of an unknown tool gets
+the runtime's `unknown_tool` result; with a runtime up all of these are
+forwarded as before. A notebook call that finds none running starts one, on this
+computer and on a plain server alike; on a cluster it asks for a job instead.
+`list_notebooks` and `pluto_session_status` use a runtime that is running (the
+provider's `Want::Attach`: this computer's looks in the state folder, the
+session's asks the helper; the session's folder is told to the runtime before
+the call goes through, and the notebooks line is printed) and otherwise answer
+without starting one: `[]`, and `{pluto: "not running", notebooks: [], message}`
+(on a machine with `machine` added). A record that can't be used (another node,
+no port, a process that doesn't answer) is a failure, not "not running": the
+status tool answers with `state` `failed` and the reason, and `list_notebooks`
+fails with it. A start another process has under way is a start under way, not
+"nothing runs". After a failed call the next one looks again. The first call that
+starts a runtime waits up to `start_wait()` (45 s), then fails with "Julia is
+starting on local ... call `pluto_session_status`", and the start goes on in a
+thread of the provider. A runtime that has gone (its process ended, or another
+client replaced it) is found out by the next call, which looks at the record
+before it uses the one it has.
 
 The helper, `serve` and the front find or start the runtime with one function
 (`runtime::find_or_start`), look at what is running with one (`runtime::look`)
@@ -282,7 +291,9 @@ wait that runs out is a result that says what step it is at and to call again.
 `stop_machine` with `"local"` takes `start.lock` first, as the helper's stop does,
 and waits for it up to 20 s (`ENDEAVOR_STOP_LOCK_SECS` sets it for tests); the lock is
 held only for a look and a spawn, so it does not wait behind a whole start. If the lock
-isn't had, or Julia is still starting, it stops nothing and says so (an error). It marks
+isn't had it stops nothing and says so (an error). A start under way, this session's or
+another process's, is not stopped: without `force` the result names what would be cancelled,
+and with `force` it is an error that says Julia is still starting. It marks
 the stop as made from a connection, so a client that finds the runtime gone is told "It
 was stopped from another connection." `endeavor stop` waits for the lock in the same way
 and keeps its own words ("It was stopped with `endeavor stop`.").
@@ -312,8 +323,8 @@ binary owns, maps a project folder (the front's `--folder`, canonical) to
 `use_machine` writes it once its request was taken; `"local"` removes the entry. A front that starts in a
 project with an entry targets that machine and starts nothing. On its first
 runtime call it makes a connection to that machine and attaches only to a
-runtime that is already there (`Want::Attach`): a plain server then starts one
-if none runs, and a cluster submits nothing, and says so with the defaults to
+runtime that is already there (`Want::Attach`): a notebook call on a plain server then starts one
+if none runs, `list_notebooks` and `pluto_session_status` start none, and a cluster submits nothing, and says so with the defaults to
 ask the user about.
 An entry whose machine is gone from the machines file is ignored, and the first
 result says so once.

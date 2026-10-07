@@ -140,9 +140,9 @@ fn the_machine_tools_over_real_slurm() {
             .env("XDG_STATE_HOME", work.join("state-home"))
             .env("XDG_CONFIG_HOME", work.join("config"))
             .env("XDG_CACHE_HOME", work.join("cache"))
-            .env("ENDEAVOR_LINK_ROOT", &root)
-            .env("ENDEAVOR_LINK_STATE", &state)
-            .env("ENDEAVOR_LINK_DEPOT", &depot_path)
+            .env("ENDEAVOR_TEST_ROOT", &root)
+            .env("ENDEAVOR_TEST_STATE", &state)
+            .env("ENDEAVOR_TEST_DEPOT", &depot_path)
             .env("ENDEAVOR_START_WAIT_SECS", "45")
             .current_dir(&project);
         let mut front = Front::spawn(command);

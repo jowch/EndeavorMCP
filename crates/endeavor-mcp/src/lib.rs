@@ -21,7 +21,6 @@ mod guide;
 mod host_tools;
 mod http;
 mod julia;
-pub mod link;
 mod mcp;
 mod notebooks;
 mod release;
@@ -181,7 +180,6 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some("node-start") => slurm::node_start_main(&argv[1..]),
         Some("core") => core::main(&argv[1..]),
         Some("serve" | "mcp" | "stop") => standalone::main(&argv),
-        Some("link") => link::main(&argv[1..]),
         Some("--version" | "-V" | "version") => update::print_version(),
         Some("update") => update::main(&argv[1..]),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.

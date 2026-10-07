@@ -110,7 +110,7 @@ It takes about a minute and starts Julia twice:
 ## The client library over real ssh
 
 `crates/endeavor-mcp/tests/e2e_client.rs` runs `endeavor_mcp::client` the way
-the link will: `ssh` with `Auth::Batch`, the helper installed into a folder of
+a session does: `ssh` with `Auth::Batch`, the helper installed into a folder of
 the test's own, the runtime started there, and the agent's MCP calls through
 the local listener's port. It needs a host this user can `ssh` to with a key,
 named in `ENDEAVOR_TEST_SSH_HOST` (`localhost` works), and prints `SKIPPED` and
@@ -131,66 +131,43 @@ one), stops the runtime through the channel, and checks the channel ends as a
 detach and not as a drop. `tests/client.rs` covers the same code with a local
 `sh` for ssh and no Julia, in plain `cargo test`.
 
-## The link over real ssh
+## The connection library with a local `sh`
 
-`crates/endeavor-mcp/tests/e2e_link.rs` runs `endeavor link`, the process one
-front shares for each machine, over real `ssh` and real Julia. It needs the
-same host as `e2e_client` (`ENDEAVOR_TEST_SSH_HOST`, a key login, Julia at the
-same path there) and prints `SKIPPED` and passes without them. It uses
-`e2e_client`'s depot (`target/tmp/e2e-client/depot`), so run that test first or
-expect several minutes. The link's records, the machines file, and the
-helper's install and state folders are under `target/tmp/e2e-link`; `HOME`
-stays yours, so `ssh` finds its keys.
+`crates/endeavor-mcp/tests/session.rs` drives `client::Session`, the one type
+that connects, starts or attaches, retries and attaches again, against the
+helper binary with a local `sh` for ssh (`Transport::Shell`) and the stand-in
+Julia under the real core, in plain `cargo test`, with every folder under
+`target/tmp`:
 
-```sh
-ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_link -- --ignored --nocapture
-```
-
-The test goes through these steps:
-
-1. `link::ensure` starts a link with a machine's record, and
-   a second `ensure` gets the same link. Its status reaches `connected`, with
-   the helper's hello and the helper installed in the test's folder.
-2. `POST /link/start`: the status reaches `ready`, with the listener's port
-   and the runtime's token.
-3. Through the listener's port, with `X-Endeavor-Browser-Port`, `new_notebook`
-   and `pluto_session_status` return a `browser_url` on that port.
-4. The page, as a browser reaches it: the link in `browser_url` sets the cookie,
-   and Pluto's page loads over HTTP.
-5. `POST /link/stop` ends the runtime and the link stays connected. `POST
-   /link/quit` ends the link. No link, helper or runtime process is left, and
-   `runtime.json` and `link.json` are gone.
-
-`crates/endeavor-mcp/tests/link.rs` covers the link with a local `sh` for ssh
-(`ENDEAVOR_LINK_SHELL`) and the stand-in Julia under the real core, in plain
-`cargo test`, with every folder under `target/tmp`:
-
-- Four fronts that call `ensure` at once get one link, and a later one reuses
-  it. Its record is owner-only. The status goes from `connected` to `ready`,
-  and a call through the listener's port, with the runtime's token and
-  `X-Endeavor-Browser-Port`, gets a `browser_url` on that port.
-- A stop ends the runtime and not the link; the listener then says to call
-  `use_machine`; a start after it gives a new runtime on the same port.
-- The helper killed: the link connects again, on the same listener port, and
-  attaches to the same runtime. A runtime that ended meanwhile is not started
-  again.
-- Idle exit (`ENDEAVOR_LINK_IDLE_SECS`), `quit` and SIGTERM each remove the
-  record, end the helper and leave the runtime running. A new link attaches to
-  it.
-- The control port refuses a wrong token, a request with an Origin, and a Host
-  that isn't loopback.
-- A connect that fails is reported once, not retried until the next start.
+- `ensure` answers `Ready` with the listener's port, and again the same; an
+  attach with nothing running says so and starts nothing; an attach never
+  replaces a start, and a start is never told that nothing runs.
+- A machine without the helper needs the user's agreement, and the agreement
+  (given to a start that waits for it, or alone) installs it. A reconnect
+  installs it again when it was agreed to; an agreement given to a start with
+  the helper there is for what the start needs and is not kept for the helper.
+- A failed sign-in is told once and tried again by the call after that; asking
+  again while connecting makes no other attempt.
+- A start that takes long answers `StillWorking`, and the next call gets it.
+- A stop ends the runtime and not the connection, and a start after it works on
+  the same port; a stop during a start is no failure.
+- The helper killed: the connection is made again on the same listener port and
+  attaches to the same runtime; a start the drop cut short is resumed after the
+  reconnect; a runtime that ended meanwhile is told and not started again.
+- Closing, or dropping the session, ends its thread, helper and port and stops
+  nothing, also during a start or a connect; two sessions in one process leave
+  each other alone.
 
 ## The machine tools
 
 `crates/endeavor-mcp/tests/machines.rs` drives `endeavor mcp` over stdio as an
 agent's harness does, in plain `cargo test`: the helper with a local `sh`
-for ssh (`ENDEAVOR_LINK_SHELL`; the front holds its own connection), the stand-in Julia under the real core, fake
+for ssh (`ENDEAVOR_TEST_SHELL`; the front holds its own connection), the stand-in Julia under the real core, fake
 `sbatch`, `squeue`, `scancel`, `srun` and `sinfo` for a cluster, and a second
 runtime for "this computer". The front gets nothing but its own variables: HOME,
 `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are folders under
 `target/tmp`, which is also where `list_machines` finds the ssh config (it
-reads `$HOME/.ssh/config`), and `ENDEAVOR_LINK_ROOT`, `_STATE` and `_DEPOT`
+reads `$HOME/.ssh/config`), and `ENDEAVOR_TEST_ROOT`, `_STATE` and `_DEPOT`
 keep the helper's folders there (`{id}` in them is the machine's id, for a test
 that uses two machines). `ENDEAVOR_START_WAIT_SECS` shortens the front's waits. A machine with Slurm
 installed reports `slurm: true` to every helper (`wire::slurm::has` looks in
@@ -204,24 +181,30 @@ tests save their machines. It covers:
 - `use_machine` to ready; notebook calls reach the machine's runtime with the
   host header and the connection's browser port; `list_folder`, `read_file` and
   `run_shell` work there and refuse after `use_machine("local")`.
-- A second front in the project comes up on the remembered machine; a plain
-  server with nothing running is started; a remembered machine that is gone
-  is said once.
+- A second front in the project comes up on the remembered machine; a notebook
+  call on a plain server with nothing running starts a runtime there, and a
+  status or list call starts none; a remembered machine that is gone is said
+  once.
 - A call while the runtime is held starting returns the status within the limit.
 - A cluster: no job is submitted without resources, with them the queue state
   and reason show in `pluto_session_status`, then the job's node and end
   time; a remembered cluster with no job submits nothing; `stop_machine`
   cancels the job.
 - `stop_machine` names another session that was active, stops with `force`,
-  and a later call says to call `use_machine`; the same for this computer.
+  and a later call says to call `use_machine`; the same for this computer,
+  which is one kind of target with a machine.
+- This computer's runtime starts at the first notebook call and not before,
+  a second front finds it, a start goes on without the front that asked for
+  it, a record that can't be used is a failure and starts none, and a stop
+  waits for a start under way.
 - Leaving a machine or the front's exit ends its session there and leaves the
   runtime; a new front attaches to it with the notebook still open; a dropped
   connection is made again on the same browser address; one front uses two
   machines, each with its own connection and runtime; `remote_port` is the
   runtime's recorded port.
 
-`tests/link.rs` also covers the link's `only_running` start. The same path over
-real ssh and Julia is `e2e_machines.rs`, ignored like `e2e_link`:
+The same path over real ssh and Julia is `e2e_machines.rs`, ignored like the
+other `e2e_` tests:
 
 ```sh
 ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines -- --ignored --nocapture
@@ -230,8 +213,9 @@ ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines 
 It uses `e2e_client`'s depot, and `HOME` stays yours so `ssh` finds its keys.
 Through `endeavor mcp` it runs `add_machine`, `use_machine`, `new_notebook`, a
 cell (`42`), `read_file` and `run_shell` on the server, fetches the
-`browser_url` over HTTP, and `stop_machine`, and checks that nothing is left
-running.
+`browser_url` over HTTP, kills the helper to see the connection made again on
+the same address with the runtime and notebook still there, and `stop_machine`,
+and checks that nothing is left running.
 
 The same path on a cluster is `e2e_machines_slurm.rs`, which also needs Slurm on
 the host (`localhost` on a single-node cluster) and submits one job of 1 CPU,
@@ -245,7 +229,7 @@ Through `endeavor mcp` it runs `add_machine` with `slurm: true` (the partitions
 and their limits), `use_machine` with no resources (`needs_job`, nothing in
 `squeue`), then with resources (the job's id, node and end time), a cell that
 reads `SLURM_JOB_ID` and `run_shell` on the node, and the page through the
-link's port. A second and a third `endeavor mcp` in the same project attach to
+front's port. A second and a third `endeavor mcp` in the same project attach to
 the same job with no `use_machine` and no second job; the job outlives each
 front; `stop_machine` is refused while another session is active and with
 `force` the job leaves `squeue`. The job's id is recorded so a failed step

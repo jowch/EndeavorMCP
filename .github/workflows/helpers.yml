@@ -3,7 +3,7 @@
 # as endeavor-<key>-<platform> (.exe on Windows), with endeavor-<key>.sha256;
 # <key> is scripts/helpers.sh --key, a hash of the helper's source. Every build
 # gets the key in ENDEAVOR_RELEASE_KEY, so `endeavor --version` can show it and
-# the link can fetch the Linux helper for a Mac or Windows computer.
+# `endeavor mcp` can fetch the Linux helper for a Mac or Windows computer.
 # scripts/helpers.sh downloads the Linux ones, and scripts/install.sh and
 # install.ps1 the newest build for a computer, from there. LATEST, uploaded
 # after them, holds the newest key, for those scripts and for `endeavor update`.

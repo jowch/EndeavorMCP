@@ -7,7 +7,7 @@ an entry when it is fixed.
 
 _Started 2026-10-06, on the `client-library` branch._
 
-## The link
+## The connection library
 
 - **A start cut short by a lost connection is reported as "not running".**
   After a reconnect the session only re-attaches to a runtime the helper can
@@ -19,33 +19,24 @@ _Started 2026-10-06, on the `client-library` branch._
 - **The test for a connection lost during a start doesn't force the order
   of messages that caused the bug.** It passes on the old code too. The fix
   is covered by reading, not by the test.
-- **A stale link record whose pid was reused.** On Unix `pid_alive` ignores
-  the start time, so `ensure` sees a live pid that doesn't answer and says
-  the link isn't answering, until `link.json` is removed. To close: check
-  the recorded start time on Unix as on Windows.
 - **A runtime that dies in the moment its start succeeds** is handled
   (`Run::Gone`, in `client/session.rs`) but has no test: the order can't be forced.
 - **A stop that fails while a start is under way** restores the start's
   state only roughly.
-
-## The connection library
-
 - **`Outcome::Queued` has no test.** The fake helper has no Slurm, so the
-  queued outcome is read from the code and from the link's e2e Slurm tests.
+  queued outcome is read from the code and from the e2e Slurm tests.
 - **A closed session leaves three kinds of thread to end by themselves:** the
   one that waits for the helper to go, a start that was under way, and the
   one that asks Slurm for the partitions. They end when the helper does, but
   `close` doesn't join them.
-- **A session writes its progress and failures to stderr** (`eprintln!`), as
-  the link did into `link.log`. A caller that holds sessions in its own process
-  gets them on its stderr.
-- **`close` can take longer than the link took to exit.** It waits for the
-  supervisor, which may be inside a call to the helper that takes up to 60 s
-  (`Channel::files` in `reattach`), where the link exited within 5 s.
-  `reattach` looks at the closing flag between its tries only.
+- **A session writes its progress and failures to stderr** (`eprintln!`). A
+  caller that holds sessions in its own process gets them on its stderr.
+- **`close` can take up to a minute.** It waits for the supervisor, which may
+  be inside a call to the helper that takes up to 60 s (`Channel::files` in
+  `reattach`). `reattach` looks at the closing flag between its tries only.
 - **Adopting `Session` in the app needs three settings it fixes now:** the
   wording of the listener's messages (`Config::messages` names MCP tools in the
-  link's case; the default speaks in the app's words), batch sign-in only
+  front's case; the default speaks in the app's words), batch sign-in only
   (`Auth::Batch`) and `exit_idle: true` for a runtime this session starts. Each
   would become a `Config` field.
 - **A start that ended `NeedsInstall` and is begun again when the agreement
@@ -54,8 +45,6 @@ _Started 2026-10-06, on the `client-library` branch._
 - **An attach is checked again after a reconnect.** Its wish stays an attach,
   so the helper is asked once more whether a runtime runs, where a start would
   be resumed on the reconnect's own check alone.
-- **`POST /link/start` with `only_running` drops `job`.** An attach carries none;
-  the link's start did keep it in the wish, where it was never used.
 
 ## The front's connections
 
@@ -80,13 +69,18 @@ _Started 2026-10-06, on the `client-library` branch._
   to say whether a runtime is there, so the first `pluto_session_status` of a
   session on a remembered machine can take that long over a slow network. It
   never waits for a start.
-- **A failure that settled is kept** by a remembered machine's connection, as
-  the link kept it: notebook calls and the status tool report it, and only
-  `use_machine` (or a new `add_machine`) tries again. A runtime that died is
-  reported as "isn't available" on every call until `use_machine` starts it again.
-- **The test variables keep their `ENDEAVOR_LINK_` names** (`SHELL`, `ROOT`,
-  `STATE`, `DEPOT`, `ASK`); `{id}` in the last four stands for the machine's
-  id, so that two machines in one test don't share a runtime.
+- **A failure that settled is kept** by a machine's connection: notebook calls
+  and the status tool report it, and only `use_machine` (or a new
+  `add_machine`) tries again. A runtime that died is reported as "isn't
+  available" on every call until `use_machine` starts it again. On this
+  computer a failed start is told to one call and the next call starts again:
+  the two providers settle differently.
+- **A machine whose id is `local`** (only by editing `machines.json` by hand: `add_machine` refuses the name) is taken for this computer, and the tools can't reach it.
+- **On this computer a stop never cancels a start under way,** with `force`
+  either (it says Julia is still starting); on a machine `force` cancels it.
+- **The test variables are `ENDEAVOR_TEST_SHELL`, `_ROOT`, `_STATE`, `_DEPOT` and
+  `_ASK`**; `{id}` in the last four stands for the machine's id, so that two
+  machines in one test don't share a runtime. They work in release builds.
 
 ## The machines file
 
@@ -119,9 +113,6 @@ _Started 2026-10-06, on the `client-library` branch._
   not see a start under way and start a second runtime. A recorded runtime of
   another node is still refused by name (`runtime.json`); this is only for a
   start with no record yet.
-- **`stop_machine` for this computer while this session's own start is under
-  way** says Julia is still starting (the same answer as for another
-  process's start), and stops nothing.
 - **A helper started with `--quit-with-client` stops, when its input ends
   during a start, only a runtime it started itself.** One it was waiting for
   (another process began it) is left to finish. Once it is attached, the end
@@ -162,7 +153,7 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Windows
 
-- **Compile-checked only.** The link's detached start, its console handler,
+- **Compile-checked only.** The runtime's detached start, its console handler,
   the `taskkill` cancel path and the machines and projects file locations
   have never run on Windows.
 
@@ -399,17 +390,18 @@ _Started 2026-10-06, on the `client-library` branch._
 - **Not run against a host with no Slurm.** On this workstation the helper
   finds Slurm in `/usr/bin`, so the "no Slurm" message and `slurm: true`
   without Slurm are covered by unit tests of the decision only.
-- **The races behind the route/key pairing, `stopped` and the ops lock** have
+- **The races behind the route/key pairing, `active` and the ops lock** have
   no test that forces them. The pairing is tested as a snapshot taken before
   a move, the lock by a call that waits out its deadline, and the order in
-  `stop_local` by reading.
+  `stop_machine` (the target is marked stopped before the runtime is ended) by
+  reading.
 
 ## CI
 
 - **CI runs on every push, on Linux, macOS and Windows**, and was red on macOS
   for most of this work without being looked at. It showed one product
   fault the Linux runs could not: when a runtime's end was reported before
-  the connection dropped, the link forgot the reason on reconnecting and
+  the connection dropped, the connection forgot the reason on reconnecting and
   said only "connected". Fixed; the order that shows it only happens on
   macOS, so the test for it is CI's.
 
@@ -439,8 +431,3 @@ _Started 2026-10-06, on the `client-library` branch._
 - **`list_machines` says "not running" for a local runtime recorded on another
   node** (a state folder shared between computers). A notebook call then says
   where it is running. To close: a third state for "running on another node".
-- **`pluto_session_status` says "not running" (and `list_notebooks` returns `[]`)
-  while another process is starting the runtime.** The start's record
-  (`runtime.json`) is written when Julia is up, and the front doesn't look at
-  the start lock when there is no record. The next call after the start
-  finds it. To close: report a held `start.lock` as starting.

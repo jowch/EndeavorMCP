@@ -983,7 +983,7 @@ fn results_carry_a_browser_url_on_the_port_a_caller_names() {
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{reply}"))).unwrap()
     };
     assert_eq!(status(&[("X-Endeavor-Session", "7")]).get("browser_url"), None, "without the header, a runtime the app or a helper started has none");
-    assert_eq!(status(&[("X-Endeavor-Browser-Port", "45678")])["browser_url"], format!("http://localhost:45678/?token={TOKEN}"), "through a link, whatever started the runtime");
+    assert_eq!(status(&[("X-Endeavor-Browser-Port", "45678")])["browser_url"], format!("http://localhost:45678/?token={TOKEN}"), "through a front's connection, whatever started the runtime");
     for bad in ["0", "65536", "-1", "http", ""] {
         assert_eq!(status(&[("X-Endeavor-Browser-Port", bad)]).get("browser_url"), None, "{bad:?}");
     }

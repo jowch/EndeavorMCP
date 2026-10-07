@@ -104,9 +104,9 @@ fn the_machine_tools_over_real_ssh() {
         .env("XDG_STATE_HOME", work.join("state-home"))
         .env("XDG_CONFIG_HOME", work.join("config"))
         .env("XDG_CACHE_HOME", work.join("cache"))
-        .env("ENDEAVOR_LINK_ROOT", &root)
-        .env("ENDEAVOR_LINK_STATE", &state)
-        .env("ENDEAVOR_LINK_DEPOT", &depot_path)
+        .env("ENDEAVOR_TEST_ROOT", &root)
+        .env("ENDEAVOR_TEST_STATE", &state)
+        .env("ENDEAVOR_TEST_DEPOT", &depot_path)
         .env("ENDEAVOR_START_WAIT_SECS", "45")
         .current_dir(&project);
     let mut front = Front::spawn(command);
@@ -185,7 +185,35 @@ fn the_machine_tools_over_real_ssh() {
     assert!(body.contains("Pluto"), "{}", &body[..body.len().min(300)]);
     eprintln!("[{:?}] the page answers", started.elapsed());
 
+    // The connection drops, as it does when the network fails: the front makes it again, the address the
+    // user has open stays the same, and it attaches to the runtime that kept running.
     let runtime_pid = std::fs::read_to_string(state.join("runtime.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["pid"].as_i64()).expect("the runtime's record") as i32;
+    let pids = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).split_whitespace().filter_map(|p| p.parse::<i32>().ok()).collect::<Vec<_>>();
+    let lost = pids(helpers(&state));
+    assert!(!lost.is_empty(), "the front is connected");
+    for pid in &lost {
+        // SAFETY: plain syscall, on a helper (or the ssh to it) of this test's own front, found by its state folder.
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+    wait_for("the connection to be made again", || {
+        let now = pids(helpers(&state));
+        !now.is_empty() && now.iter().all(|pid| !lost.contains(pid))
+    });
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let again = loop {
+        let (failed, again) = front.call("pluto_session_status", json!({}));
+        if !failed && again.get("browser_url").is_some() {
+            break again;
+        }
+        assert!(Instant::now() < deadline, "{again}\n{:?}", front.said());
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(again["browser_url"].as_str(), Some(page.as_str()), "the address the user has open is the same: {again}");
+    assert!(pid_alive(runtime_pid), "the runtime kept running");
+    let read = front.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": cell }));
+    assert_eq!((&read["output"], &read["errored"]), (&json!("42"), &json!(false)), "the notebook is still there after the connection came back: {read}");
+    eprintln!("[{:?}] the connection was made again", started.elapsed());
+
     let stopped = front.ok("stop_machine", json!({ "machine": "e2e-machines" }));
     assert_eq!(stopped["stopped"], true, "{stopped}");
     wait_for("the runtime to end", || !pid_alive(runtime_pid));

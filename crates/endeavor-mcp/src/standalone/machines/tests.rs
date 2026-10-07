@@ -226,7 +226,7 @@ fn a_cluster_with_no_job_and_no_resources_gets_its_defaults_to_confirm_and_the_s
     assert!(message.contains("nothing was submitted") && message.contains("Ask the user to confirm") && message.contains("machine \"hpc\""), "{message}");
     assert!(message.contains("this session has not moved: it stays on this computer until `use_machine` is called"), "{message}");
     let server = Server { id: "lab".into(), name: "Lab".into(), ssh_host: "lab".into(), ..Default::default() };
-    *relay.target.lock().unwrap() = Target::Machine(Machine::new(&server, None));
+    *relay.target.lock().unwrap() = Target::new(&server, None);
     assert!(relay.needs_job("hpc", &cluster())["message"].as_str().unwrap().contains("it stays on Lab until"));
 }
 
@@ -263,26 +263,24 @@ fn stopping_without_force_a_start_that_is_under_way_names_what_would_be_cancelle
 #[test]
 fn a_route_keeps_the_key_it_was_taken_with_when_the_session_moves() {
     let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
+    let folder = relay.options.folder.clone();
     let (before, key_before) = relay.placed();
-    assert!(matches!(before, Target::Local { stopped: false }));
+    assert!(before.is_local() && before.active);
     let server = Server { id: "lab".into(), name: "Lab".into(), ssh_host: "lab".into(), ..Default::default() };
-    let (left, old, ended) = relay.switch(Target::Machine(Machine::new(&server, None)));
-    assert!((matches!(left, Target::Local { .. }), old.as_str(), ended) == (true, key_before.as_str(), true));
+    let (left, old, ended) = relay.switch(Target::new(&server, None));
+    assert!((left.is_local(), old.as_str(), ended) == (true, key_before.as_str(), true));
     let (after, key_after) = relay.placed();
-    assert!(matches!(&after, Target::Machine(m) if m.id == "lab"));
+    assert_eq!(after.id, "lab");
     assert_ne!(key_after, key_before, "a new key goes with the new target");
-    let (_, again, ended) = relay.switch(Target::Machine(Machine::new(&server, Some("/work".into()))));
+    let (_, again, ended) = relay.switch(Target::new(&server, Some("/work".into())));
     assert_eq!((again.as_str(), ended), (key_after.as_str(), false), "the same machine keeps its key");
     assert_eq!(relay.session(), key_after);
-    let (_, _, ended) = relay.switch(Target::Local { stopped: false });
+    let (_, _, ended) = relay.switch(Target::local(&folder));
     assert!(ended);
     assert_ne!(relay.session(), key_after);
     let local_key = relay.session();
-    let (_, _, ended) = relay.switch(Target::Local { stopped: false });
+    let (_, _, ended) = relay.switch(Target::local(&folder));
     assert!(!ended && relay.session() == local_key, "this computer to this computer is the same runtime");
-    *relay.target.lock().unwrap() = Target::Local { stopped: true };
-    let (_, _, ended) = relay.switch(Target::Local { stopped: false });
-    assert!(ended, "a runtime that was stopped starts a new session");
 }
 
 #[test]
@@ -301,7 +299,8 @@ fn a_tool_call_that_cannot_get_the_lock_in_time_changes_nothing() {
         assert!(said.contains("Another machine tool call is still running") && said.contains("changed nothing"), "{said}");
     }
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-    assert!(matches!(relay.placed(), (Target::Local { stopped: false }, session) if session == key));
+    let (target, session) = relay.placed();
+    assert!(target.is_local() && target.active && session == key);
 }
 
 #[test]
@@ -351,7 +350,7 @@ fn the_status_of_a_session_on_a_machine_names_the_machine() {
     let reply = json!({ "jsonrpc": "2.0", "id": 1, "result": { "content": [{ "type": "text", "text": "{\"browser_url\":\"http://localhost:1/\",\"notebooks\":[]}" }], "isError": false } }).to_string();
     assert_eq!(relay.decorate(&message, Some("pluto_session_status"), reply.clone()), reply, "on this computer it is left as it is");
     let server = Server { id: "lab".into(), name: "Lab".into(), ssh_host: "lab".into(), ..Default::default() };
-    *relay.target.lock().unwrap() = Target::Machine(Machine::new(&server, None));
+    *relay.target.lock().unwrap() = Target::new(&server, None);
     let decorated: Value = serde_json::from_str(&relay.decorate(&message, Some("pluto_session_status"), reply)).unwrap();
     let fields: Value = serde_json::from_str(decorated["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!((fields["machine"].as_str(), fields["browser_url"].as_str(), fields["job"].clone()), (Some("Lab"), Some("http://localhost:1/"), Value::Null));
@@ -360,8 +359,8 @@ fn the_status_of_a_session_on_a_machine_names_the_machine() {
 #[test]
 fn a_call_to_a_stopped_computer_says_to_call_use_machine() {
     let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
-    *relay.target.lock().unwrap() = Target::Local { stopped: true };
-    let Err(unready) = relay.route(true) else { panic!("a stopped runtime has no route") };
+    relay.target.lock().unwrap().active = false;
+    let Err(unready) = relay.route(Need::Start) else { panic!("a stopped runtime has no route") };
     assert!(unready.message.contains("stop_machine") && unready.message.contains("`use_machine` with machine \"local\""), "{}", unready.message);
 }
 

@@ -298,19 +298,31 @@ fn fake_core() -> (u16, Arc<Mutex<Vec<(Head, String)>>>) {
     (port, seen)
 }
 
-fn ready_relay(port: u16, skills_plugin: bool) -> (Arc<Relay>, Out) {
+fn relay(skills_plugin: bool, state_dir: PathBuf) -> (Arc<Relay>, Out) {
     let Ok(Command::Mcp(mut options)) = parsed("mcp") else { panic!() };
     options.skills_plugin = skills_plugin;
+    options.state_dir = state_dir;
     let out = Out::default();
-    let relay = Arc::new(Relay::new(options, "stdio-7".into(), Box::new(out.clone())));
-    *relay.status.lock().unwrap() = Status::Ready { port, token: "t0k".into() };
+    (Arc::new(Relay::new(options, "stdio-7".into(), Box::new(out.clone()))), out)
+}
+
+/// A relay on this computer whose runtime is the stand-in on `port`, found as a recorded one is.
+fn ready_relay(port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool) -> (Arc<Relay>, Out) {
+    let dir = crate::client::scratch(&format!("relay-{port}"));
+    let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "token": "t0k", "port": port });
+    std::fs::write(dir.join("runtime.json"), record.to_string()).unwrap();
+    let (relay, out) = relay(skills_plugin, dir);
+    assert!(matches!(target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO), crate::client::Outcome::Ready(_)));
+    // The first call to a runtime tells it the session's folder.
+    assert!(relay.route(machines::Need::Look).is_ok());
+    seen.lock().unwrap().clear();
     (relay, out)
 }
 
 #[test]
 fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     let (port, seen) = fake_core();
-    let (relay, out) = ready_relay(port, true);
+    let (relay, out) = ready_relay(port, &seen, true);
     relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claude-code\u0007"}}}"#);
     relay.handle(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
     let lines = out.lines();
@@ -338,24 +350,25 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
 #[test]
 fn a_front_whose_agent_has_gone_ends_its_session_in_the_runtime() {
     let (port, seen) = fake_core();
-    let (relay, _) = ready_relay(port, true);
+    let (relay, _) = ready_relay(port, &seen, true);
     relay.release();
-    let seen = seen.lock().unwrap();
-    let (head, body) = &seen[0];
+    let calls = seen.lock().unwrap();
+    let (head, body) = &calls[0];
     assert_eq!(head.target(), "/endeavor/call");
     assert_eq!(head.header("Authorization"), Some("Bearer t0k"));
     assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/end_session","params":{"owner":"stdio-7"}}"#);
-    assert_eq!(seen.len(), 1);
-    drop(seen);
-    // Before the runtime is up there is nothing to tell.
-    *relay.status.lock().unwrap() = Status::Starting(String::new());
+    assert_eq!(calls.len(), 1);
+    drop(calls);
+    // Once the runtime is gone there is nothing to tell.
+    std::fs::remove_file(relay.options.state_dir.join("runtime.json")).unwrap();
     relay.release();
+    assert_eq!(seen.lock().unwrap().len(), 1);
 }
 
 #[test]
 fn an_agent_that_gives_no_name_is_endeavor_mcp() {
     let (port, seen) = fake_core();
-    let (relay, _) = ready_relay(port, true);
+    let (relay, _) = ready_relay(port, &seen, true);
     relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
     assert_eq!(seen.lock().unwrap()[0].0.header("X-Endeavor-Client"), crate::mcp::clean_label(&format!("endeavor mcp on {}", crate::hostname())).as_deref());
@@ -364,7 +377,7 @@ fn an_agent_that_gives_no_name_is_endeavor_mcp() {
 #[test]
 fn the_relay_passes_on_an_event_stream_event_by_event() {
     let (port, seen) = fake_core();
-    let (relay, out) = ready_relay(port, false);
+    let (relay, out) = ready_relay(port, &seen, false);
     relay.handle(r#"{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"sse","arguments":{},"_meta":{"progressToken":"p"}}}"#);
     assert_eq!(
         out.lines(),
@@ -382,12 +395,12 @@ fn the_relay_passes_on_an_event_stream_event_by_event() {
 #[test]
 fn a_notification_is_passed_on_and_gets_no_answer() {
     let (port, seen) = fake_core();
-    let (relay, out) = ready_relay(port, false);
+    let (relay, out) = ready_relay(port, &seen, false);
     relay.handle(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#);
     assert_eq!(seen.lock().unwrap()[0].1, r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#);
     assert!(out.lines().is_empty());
     relay.handle("not json");
-    relay.tell_folder(port, "t0k");
+    relay.tell_session_folder(port, "t0k", "stdio-7", &relay.options.folder.display().to_string());
     let (head, body) = &seen.lock().unwrap()[1];
     assert_eq!(head.target(), "/endeavor/call");
     assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/set_session_folder","params":{"folder":"/home/ada/project","owner":"stdio-7"}}"#);
@@ -396,7 +409,7 @@ fn a_notification_is_passed_on_and_gets_no_answer() {
 
 #[test]
 fn without_the_plugin_the_handshake_points_to_the_guide() {
-    let (relay, out) = ready_relay(1, false);
+    let (relay, out) = relay(false, crate::client::scratch("relay-handshake"));
     relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
     let lines: Vec<Value> = out.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
@@ -422,7 +435,6 @@ fn a_relative_xdg_or_home_variable_is_ignored() {
     };
     let env = Env::from_vars(&read);
     assert_eq!(env.projects_path(), Path::new("/home/ada/.local/state/endeavor/projects.json"));
-    assert_eq!(env.links_dir(), Path::new("/home/ada/.local/state/endeavor/links"));
     assert_eq!(env.helpers_dir(), Path::new("/var/cache/ada/endeavor/helpers"));
     let relative_home = Env::from_vars(&|name| (name == "HOME").then(|| "home/ada".to_owned()));
     assert!(relative_home.home.is_absolute() || relative_home.home.as_os_str().is_empty(), "{:?}", relative_home.home);
