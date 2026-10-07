@@ -12,7 +12,8 @@ untested._
 _Revised 2026-10-07: see [The revision](#the-revision-decided-2026-10-07-planned).
 It replaces the link process and the front's own local launcher. Until the
 code follows, the sections below describe what is built, and say where the
-revision changes them._
+revision changes them. Where they say the link connects, runs `ssh`, sends
+the helper or fetches one, the front does that after the revision._
 
 ## Summary
 
@@ -123,7 +124,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
   running. A new session gives a new address.
 - Between sessions you can forward the port yourself: results will name the
   runtime's port on the server, so `ssh -L <port>:127.0.0.1:<port> <host>`
-  and the link with its token reach it. On a cluster the runtime is on a
+  and the browser address with its token reach it. On a cluster the runtime is on a
   compute node behind the login node, and there is no supported way to open
   the page between sessions.
 - Several sessions on one server mean several `ssh` connections, and each
@@ -138,7 +139,8 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 2. Connect, retry and re-attach as one library type that answers with an
    outcome.
 3. The front holds its connections in process and has one kind of target.
-   The link and the front's code for it are deleted.
+   The link and the front's code for it are deleted. `Ready` gains the
+   runtime's port (it has none today), so that results can name it.
 4. The session records: no `end_session`, no other-sessions list; the
    skills and tool descriptions follow.
 5. One idle rule, recorded in `runtime.json`.
@@ -156,6 +158,9 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
   before Windows is offered.
 - A session that ends while a runtime is still starting: checked for
   neither this computer nor a server.
+- The later sign-in page for servers that ask for a password or a code was
+  to be on the link's port. Without a link it would be on a port the front
+  opens for the sign-in, or in the harness's own prompt; not chosen.
 
 ## Decided
 
@@ -335,7 +340,8 @@ makes another older one exit.
   server stops it, and a later `serve` finds it.
 - The app on your laptop and the plugin on your workstation reach the same
   runtime and the same open notebooks.
-- Your own `ssh -L` and browser tab keep working. The link listens on a
+- Your own `ssh -L` and browser tab keep working. The link (with the
+  revision: the front) listens on a
   port of its own on your computer, and the runtime's port takes any number
   of connections that carry the token.
 
@@ -361,7 +367,9 @@ end of the helper's input closes without a Stop or Detach, which happens
 when the app crashes. It stops the runtime for every client, as Stop does, so
 it is only for an app on the same computer. An ordinary quit is the app's
 own Stop or Detach. Not built: the app should detach instead of stopping
-when `other_sessions` shows another session was active lately.
+when `other_sessions` shows another session was active lately. (Changes
+with the revision: there is no such list, and the app detaches when it
+quits; the idle limit ends its notebooks.)
 
 **The package folder locally.** On servers the app and `serve` already use
 the same one. On your own computer they differ (the app's is in its data
@@ -377,7 +385,8 @@ in the queue, so a second helper waits for the same job.
 **Stopping the runtime stops it for everyone.** It is not part of ordinary work:
 the idle stop and a job's time limit end a runtime. `stop_machine` is for
 when you ask, such as to give a cluster node back. It first says which
-other sessions were active lately, and the clients still attached are told
+other sessions were active lately (not with the revision, which has no such
+list), and the clients still attached are told
 the runtime was stopped from another connection. Every `Stop` and `StartRuntime` carries an id the client chooses, and the
 helper answers each once, naming it: `Stopped` or `NotStopped` and why, and for
 a start `Ready`, `StartFailed`, `NeedsInstall`, `StartDied` or `StartCancelled`. A
@@ -419,9 +428,11 @@ it with the relay.
 - It uses the shared state folder, on servers and on your computer, and one
   package folder locally.
 - Quitting detaches, and stops the local runtime only when `other_sessions`
-  shows no other session was active lately.
+  shows no other session was active lately. (Changes with the revision:
+  quitting only detaches.)
 - It no longer hears "In use from another connection": nothing makes it
-  exit. It can show a notebook's other sessions instead.
+  exit. It can show a notebook's other sessions instead. (Not with the
+  revision.)
 - Its rule for a runtime from another build compares builds for equality,
   so it would hold back runs in Ask to run whenever the plugin's build
   started the runtime. It should ask what the runtime can do.
@@ -564,7 +575,8 @@ queued. `pluto_session_status` then gives the queue state, Slurm's reason in
 plain words, and once the runtime is up, when the job ends. No call waits
 longer than 45 seconds (Codex's tool timeout defaults to 60), and a queued job
 is not waited for. The time waited is not given: the link doesn't know when a
-job was submitted by an earlier connection.
+job was submitted by an earlier connection. (With the revision the front
+holds the connection, and the same holds for it.)
 
 **The notebook.** `browser_url` is on your computer's loopback and stays the
 same while the link runs. (With the revision: while the session is
@@ -583,11 +595,12 @@ needs a new job, the result says so and the agent asks you.
 | `list_machines` | Saved machines with their state, and ssh `Host` names not yet added |
 | `add_machine` | Connect to an ssh alias, report and save what was found; installs the helper only with `install: true`, which the user agreed to |
 | `use_machine` | Put this session on a machine (or back on this computer), with a folder and, on a cluster, resources. Attaches to the runtime there, starts it, or submits the job |
-| `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Says first who else was active. Needs this build's helper there, so it can ask to install it too |
+| `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Says first who else was active (not with the revision). Needs this build's helper there, so it can ask to install it too |
 
 `open_notebook` joins a notebook that is already open. `list_notebooks` and
 `pluto_session_status` gain a notebook's other sessions and when each was
-last active, and the machine, the job and its end time.
+last active (these go with the revision), and the machine, the job and its
+end time.
 
 `list_folder`, `read_file` and `run_shell` run on the server. The runtime
 lists and allows them only for a session that names its server, so the
@@ -618,7 +631,7 @@ defaults.
 
 ## Sign-in
 
-The link runs the system `ssh` with the alias, keepalives and batch mode.
+The link (with the revision: the front) runs the system `ssh` with the alias, keepalives and batch mode.
 `ssh` applies your configuration, keys and agent. Endeavor reads only the
 `Host` names from `~/.ssh/config`, never a key, and stores no password or
 key path. It leaves host-key checking as you have it.
@@ -632,7 +645,8 @@ message that says what to do:
 | A host never connected to before | `ssh <host>` once in a terminal, to accept its key |
 | A server that asks for a password or a code on every login | Unsupported in the first version |
 
-Later, for the third case: a sign-in page on the link's loopback port, the
+Later, for the third case: a sign-in page on the link's loopback port (with
+the revision there is no link; where the page lives is open), the
 same on macOS, Linux and Windows. The answer goes from the page to `ssh` and
 never through the agent. Behind the page, macOS and Linux use askpass, which
 the binary already is. Windows askpass has been unreliable, so Windows needs
@@ -814,7 +828,7 @@ server starts (if not, the first start downloads, as in the other agents).
   the helper would use), and starts with `install` false. The
   agreement to the helper is for one link process: it lasts for its reconnects,
   and a new link starts without it, which is harmless since the helper is
-  installed by then. The agreement to what a start needs (Julia's download) is
+  installed by then. (With the revision: for one session's connection.) The agreement to what a start needs (Julia's download) is
   for one start and is not kept. The app, which asks its user itself, passes
   `allow_install` true and starts with `install` true.
 - Both ends stay on loopback. The link's port needs the token, as a
