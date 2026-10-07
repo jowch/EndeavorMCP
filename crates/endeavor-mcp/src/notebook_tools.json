@@ -1,6 +1,6 @@
 [
   {
-    "description": "List all notebooks currently open in the Pluto session, with each one's run state: pending_run (ids of edited cells not yet run), running (ids of cells queued or running, in notebook order), and execution_allowed (whether Pluto will run code now: false in safe preview, and while the notebook process is stopped, restarting, or crashed). Other Endeavor sessions' notebooks are listed too: this_session is true only for this session's own notebook, and other_sessions lists the other sessions working in each notebook, each with client (what its client calls itself, or null) and active_seconds_ago (seconds since its last tool call, or null if it has made none). If no notebook has this_session true, this session has no notebook yet; when the user asks for notebook work, create one with new_notebook yourself instead of asking them to open or create one, and don't change another session's notebook unless the user asks you to work in it (open_notebook on its path does that). Does not count as reading any cell.",
+    "description": "List the notebooks open in the runtime, with each one's run state. `this_session` marks this session's notebook; if none has it, the session has no notebook yet and `new_notebook` makes one. `other_sessions` lists the other sessions working in a notebook, each with `client` and `active_seconds_ago` (seconds since its last tool call). `pending_run` is the edited cells not yet run, `running` the cells queued or running, and `execution_allowed` is false in safe preview or while the notebook's process is stopped. Don't change a notebook whose `this_session` is false unless the user asks you to work in it.",
     "inputSchema": {
       "properties": {},
       "required": [],
@@ -9,15 +9,13 @@
     "name": "list_notebooks"
   },
   {
-    "description": "Return the code, output, stale flag, and structured error (when errored) of a single cell. When Pluto shows the output as something other than text (HTML, tables, arrays, dicts, Markdown, plots), output only names its type and output_text has the value as Julia prints it as text (a DataFrame as a table with its numbers), cut at 16 KB; read the numbers from output_text rather than changing the cell to print them. Errored cells include an error object with kind, hint, and fixes when Pluto recognizes the failure (e.g. pluto_multi_expression).",
+    "description": "Read one cell: its code, its output, and whether it is running, queued, errored, folded or `stale` (edited and not yet run). Counts as the read an edit needs. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`.",
     "inputSchema": {
       "properties": {
         "cell_id": {
-          "description": "The cell UUID.",
           "type": "string"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -30,15 +28,13 @@
     "name": "read_cell"
   },
   {
-    "description": "See a cell's output as an image (PNG): plots, figures, rendered images. Use to check what a visual output actually looks like; read_cell only describes non-text outputs. Needs the notebook to be running code (not safe preview) unless the output already is a PNG, and waits while the notebook's worker is busy running cells. Outputs with no PNG form (Markdown, HTML, text) fail with no_image; use read_cell for those. Renders over 4 MB fail with image_too_large.",
+    "description": "See a cell's output as an image (PNG). Use it to check what a plot or figure looks like; `read_cell` only describes images. The notebook must be running code (not in safe preview), and the call waits while cells run. Fails with `no_image` when the output has no image form (text, Markdown, HTML): use `read_cell` for those.",
     "inputSchema": {
       "properties": {
         "cell_id": {
-          "description": "The cell UUID.",
           "type": "string"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -51,23 +47,21 @@
     "name": "view_cell_output"
   },
   {
-    "description": "Replace the code in a cell. Requires a prior read_cell or read_notebook_code on this cell. Stages the edit by default (run_after=false); call submit_changes to run staged cells. After a successful edit, the server records a read receipt for the new code (satisfies read guard for your own staged edits only).",
+    "description": "Replace a cell's code. The cell must have been read (`read_cell` or `read_notebook_code`) since it last changed, or the call fails with `read_required` or `stale_read`. The edit is staged, not run: `submit_changes` runs staged cells.",
     "inputSchema": {
       "properties": {
         "cell_id": {
-          "description": "The cell UUID.",
           "type": "string"
         },
         "code": {
-          "description": "New cell code.",
+          "description": "The cell's whole new code.",
           "type": "string"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         },
         "run_after": {
-          "description": "Run the cell after updating (non-blocking). Default: false.",
+          "description": "Run the cell right after the edit, without waiting for it. Default: false.",
           "type": "boolean"
         }
       },
@@ -81,19 +75,17 @@
     "name": "edit_cell"
   },
   {
-    "description": "Batch stage cell code edits. Each cell must have been read first. All-or-nothing on read guard failure. Never runs cells; call submit_changes to execute staged edits. After success, read receipts are updated for each edited cell.",
+    "description": "Replace the code of several cells in one call. Each must have been read first; if one has not, no cell is changed. Never runs them: `submit_changes` does.",
     "inputSchema": {
       "properties": {
         "cells": {
-          "description": "Array of {cell_id, code} objects to stage.",
+          "description": "The edits, as {cell_id, code} objects.",
           "items": {
             "properties": {
               "cell_id": {
-                "description": "The cell UUID.",
                 "type": "string"
               },
               "code": {
-                "description": "New cell code.",
                 "type": "string"
               }
             },
@@ -106,7 +98,6 @@
           "type": "array"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -119,27 +110,25 @@
     "name": "edit_cells"
   },
   {
-    "description": "Insert a new cell into the notebook. after_cell_id is required when the notebook is not empty; that anchor cell must have been read first. Records a read receipt for the new cell (same as edit_cell).",
+    "description": "Add a cell after `after_cell_id`, which must have been read first; leave it out only in an empty notebook. The new cell is staged, not run, and counts as read. Returns its `cell_id`.",
     "inputSchema": {
       "properties": {
         "after_cell_id": {
-          "description": "Insert after this cell UUID; required when notebook is non-empty.",
+          "description": "The cell to add after.",
           "type": "string"
         },
         "code": {
-          "description": "Initial cell code.",
           "type": "string"
         },
         "folded": {
-          "description": "Hide the new cell's code, showing only its output (Pluto fold). Use for markdown/prose cells. Default: false.",
+          "description": "Hide the cell's code and show only its output. Use it for prose cells. Default: false.",
           "type": "boolean"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         },
         "run_after": {
-          "description": "Run the new cell after inserting (non-blocking). Default: false.",
+          "description": "Run the cell right after adding it, without waiting for it. Default: false.",
           "type": "boolean"
         }
       },
@@ -152,15 +141,13 @@
     "name": "add_cell"
   },
   {
-    "description": "Delete a cell from the notebook. Cells that depend on it re-run, so this runs notebook code. Irreversible within the session.",
+    "description": "Delete a cell. Cells that depend on it run again, so this runs notebook code, and it can't be undone.",
     "inputSchema": {
       "properties": {
         "cell_id": {
-          "description": "The cell UUID to delete.",
           "type": "string"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -173,19 +160,17 @@
     "name": "delete_cell"
   },
   {
-    "description": "Run a specific cell (Shift+Enter). Default wait_for_completion=false queues the run and returns immediately (poll read_cell); pass true only when a synchronous result is required on a durable session.",
+    "description": "Run one cell and the cells that depend on it, whether or not it was edited. After edits, use `submit_changes` instead. Returns at once unless `wait_for_completion` is true; read the cell for its result.",
     "inputSchema": {
       "properties": {
         "cell_id": {
-          "description": "The cell UUID.",
           "type": "string"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Block until the cell finishes. Default: false (non-blocking; preferred for stdio-bound sessions).",
+          "description": "Wait until the run finishes, at most 60 seconds. Default: false.",
           "type": "boolean"
         }
       },
@@ -198,26 +183,25 @@
     "name": "execute_cell"
   },
   {
-    "description": "Run all staged (dirty) cells, like Cmd+S in Pluto. Runs reactive dependents automatically. Explicit cell_ids must be in pending_run unless force=true. Default wait_for_completion=false queues the run and clears pending_run in the background; poll read_cell / read_notebook_code for completion. Pass true only when a synchronous result is required on a durable session.",
+    "description": "Run the cells staged by edits (`pending_run`) and the cells that depend on them. Call it once after a batch of edits. Returns at once unless `wait_for_completion` is true; read the cells for their results. In safe preview nothing runs and the result warns `execution_blocked`.",
     "inputSchema": {
       "properties": {
         "cell_ids": {
-          "description": "Optional subset of cell IDs to run; defaults to all pending staged cells.",
+          "description": "Run only these staged cells. Default: every staged cell.",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
         "force": {
-          "description": "Allow running cell_ids not in pending_run. Default: false.",
+          "description": "Allow `cell_ids` that are not staged. Default: false.",
           "type": "boolean"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Block until cells finish. Default: false (non-blocking; preferred for stdio-bound sessions).",
+          "description": "Wait until the run finishes, at most 60 seconds. Default: false.",
           "type": "boolean"
         }
       },
@@ -229,15 +213,14 @@
     "name": "submit_changes"
   },
   {
-    "description": "Re-run all cells in the notebook in dependency order. Clears pending_run when execution finishes. Default wait_for_completion=false queues the run; pass true to block until done. Prefer submit_changes for staged agent edits.",
+    "description": "Run every cell in the notebook again, in dependency order. This can take long in a large notebook: after edits, `submit_changes` runs only what changed.",
     "inputSchema": {
       "properties": {
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Block until all cells finish. Default: false.",
+          "description": "Wait until the run finishes, at most 60 seconds. Default: false.",
           "type": "boolean"
         }
       },
@@ -249,19 +232,17 @@
     "name": "run_all_cells"
   },
   {
-    "description": "Reorder a cell relative to another. Pass an empty string for after_cell_id to move to the top.",
+    "description": "Move a cell to just after another one. This changes the order on the page only; nothing runs.",
     "inputSchema": {
       "properties": {
         "after_cell_id": {
-          "description": "Move after this cell UUID; pass \"\" to move to top.",
+          "description": "The cell to move after; \"\" moves it to the top.",
           "type": "string"
         },
         "cell_id": {
-          "description": "The cell UUID to move.",
           "type": "string"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -275,19 +256,17 @@
     "name": "move_cell"
   },
   {
-    "description": "Fold or unfold a cell: folded hides the code editor and shows only the output (Pluto's eye toggle). Metadata only; nothing runs. Persisted in the notebook file.",
+    "description": "Fold or unfold a cell. A folded cell shows only its output, with its code hidden; use it for prose cells. Display only: nothing runs. Saved in the notebook file.",
     "inputSchema": {
       "properties": {
         "cell_id": {
-          "description": "The cell UUID.",
           "type": "string"
         },
         "folded": {
-          "description": "true to hide the code, false to show it.",
+          "description": "true hides the code, false shows it.",
           "type": "boolean"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -301,19 +280,18 @@
     "name": "fold_cell"
   },
   {
-    "description": "Return the notebook as a single code string with cell markers. Default order is execution (dependency) order; use order=visual for UI layout order. Counts as a read of every cell it returns, for edit_cell, edit_cells, and add_cell's after_cell_id. Leaves out Pluto's package-environment cells and, unless include_markdown=true, md\"...\" cells.",
+    "description": "Read the whole notebook as one string, each cell under a marker line with its id. Counts as a read of every cell it returns. Prose (Markdown) cells are left out unless `include_markdown` is true, and the engine's own package cells always are.",
     "inputSchema": {
       "properties": {
         "include_markdown": {
-          "description": "Include markdown cells as # md: prefixed blocks. Default: false.",
+          "description": "Include prose cells, each marked `# md:`. Default: false.",
           "type": "boolean"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         },
         "order": {
-          "description": "Cell ordering for projection. Default: execution.",
+          "description": "`execution` (the default): the order the cells run in. `visual`: their order on the page.",
           "enum": [
             "execution",
             "visual"
@@ -329,11 +307,10 @@
     "name": "read_notebook_code"
   },
   {
-    "description": "Return cell IDs in visual (UI) order.",
+    "description": "Return the cell ids in page order.",
     "inputSchema": {
       "properties": {
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -345,11 +322,10 @@
     "name": "get_cell_order"
   },
   {
-    "description": "Return cell IDs in execution (dependency) order.",
+    "description": "Return the cell ids in the order the cells run.",
     "inputSchema": {
       "properties": {
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -361,15 +337,13 @@
     "name": "get_execution_order"
   },
   {
-    "description": "Return upstream cell IDs and referenced symbols for a cell. For reactivity debugging, not the default edit workflow.",
+    "description": "Return the cells a cell depends on (`upstream`) and the names it uses (`symbols`).",
     "inputSchema": {
       "properties": {
         "cell_id": {
-          "description": "The cell UUID.",
           "type": "string"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -382,15 +356,13 @@
     "name": "get_cell_dependencies"
   },
   {
-    "description": "Return downstream cell IDs that would re-run if this cell changes (transitive). For reactivity debugging.",
+    "description": "Return the cells that run again when this cell changes, directly or through other cells (`downstream`).",
     "inputSchema": {
       "properties": {
         "cell_id": {
-          "description": "The cell UUID.",
           "type": "string"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -403,15 +375,13 @@
     "name": "get_cell_dependents"
   },
   {
-    "description": "Find cells where a symbol is defined (semantic analysis). For debugging, not default workflow.",
+    "description": "Find the cells that define a name.",
     "inputSchema": {
       "properties": {
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         },
         "symbol": {
-          "description": "Symbol name to look up.",
           "type": "string"
         }
       },
@@ -424,15 +394,13 @@
     "name": "find_symbol_definitions"
   },
   {
-    "description": "Find cells that reference a symbol (semantic analysis). Differs from search_code text search.",
+    "description": "Find the cells that use a name, from analysis of the code; `search_code` matches text instead.",
     "inputSchema": {
       "properties": {
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         },
         "symbol": {
-          "description": "Symbol name to look up.",
           "type": "string"
         }
       },
@@ -445,19 +413,17 @@
     "name": "find_symbol_references"
   },
   {
-    "description": "Validate proposed cell code (parse + single-expression rules) before edit_cell. Does not mutate the notebook.",
+    "description": "Check proposed code for a cell against the engine's parse rules, without changing the notebook. Returns `valid` and `errors`.",
     "inputSchema": {
       "properties": {
         "cell_id": {
-          "description": "The cell UUID (used for parse context).",
+          "description": "The cell the code is for.",
           "type": "string"
         },
         "code": {
-          "description": "Proposed cell code to validate.",
           "type": "string"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -471,15 +437,14 @@
     "name": "validate_cell"
   },
   {
-    "description": "Text search across all cell codes. Returns snippets; unlike find_symbol_references, matches comments and shadowed names.",
+    "description": "Search the text of every cell's code, comments and strings included. Returns the matching cells, each with a snippet.",
     "inputSchema": {
       "properties": {
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         },
         "query": {
-          "description": "Substring to search for.",
+          "description": "The text to find.",
           "type": "string"
         }
       },
@@ -492,15 +457,14 @@
     "name": "search_code"
   },
   {
-    "description": "Use only when the user asks to keep the notebook running. Notebooks otherwise stop after a stretch with no tool calls, edits, or running cells (the user sets how long). keep=true exempts this notebook until you call it with keep=false or the notebook is stopped.",
+    "description": "Keep a notebook running while it is idle. Otherwise a notebook stops after a stretch with no tool calls, edits or running cells (the user sets how long). Call it only when the user asks.",
     "inputSchema": {
       "properties": {
         "keep": {
-          "description": "true keeps it running; false lets it stop when idle again.",
+          "description": "true keeps it running until this is set back to false or the notebook is stopped.",
           "type": "boolean"
         },
         "notebook_id": {
-          "description": "The notebook UUID.",
           "type": "string"
         }
       },
@@ -513,7 +477,7 @@
     "name": "keep_notebook_alive"
   },
   {
-    "description": "Return whether Pluto is running, open notebooks, and (when managed) session_id plus mcp/pluto URLs.",
+    "description": "Return whether the runtime is running and which notebooks are open, with the sessions working in each. When the runtime is on a server or cluster, also what state it is in there. Use it when a notebook tool says the runtime isn't ready.",
     "inputSchema": {
       "properties": {},
       "required": [],
@@ -522,15 +486,15 @@
     "name": "pluto_session_status"
   },
   {
-    "description": "Load a .jl notebook file into the live Pluto session (user-confirmed path). Default safe preview (no auto-run); set run_notebook=true to queue a single non-blocking full run; don't also call run_all_cells, which would run it twice. If the path is already open, this session joins that notebook as it is: the result says already_open, nothing runs, safe preview stays as it was, and run_notebook is ignored. Each session works on one notebook: once it has one, opening a different path is refused (read other notebooks as plain .jl files instead).",
+    "description": "Open an existing notebook file the user named, and make it this session's notebook. It opens in safe preview: no code runs until the user allows it. If the file is already open, the session joins that notebook as it is (`already_open`) and nothing runs. Fails with `one_notebook` if the session already has another notebook.",
     "inputSchema": {
       "properties": {
         "path": {
-          "description": "Filesystem path to the notebook .jl file.",
+          "description": "The notebook file; a relative path is inside the session's folder.",
           "type": "string"
         },
         "run_notebook": {
-          "description": "Queue a non-blocking full run after open. Default: false (safe preview).",
+          "description": "Run the whole notebook once after opening, without waiting. Set it only when the user asked to run it. Default: false.",
           "type": "boolean"
         }
       },
@@ -542,11 +506,11 @@
     "name": "open_notebook"
   },
   {
-    "description": "Create a new empty notebook file (written by Pluto itself) and load it into the live Pluto session, ready to run (no safe preview: it has no code yet). It starts with one empty cell, whose id is in cell_ids: edit it for the first cell. Use this instead of writing a .jl file by hand. Omit path to get a Pluto-named file in the session's folder; an existing file is never overwritten (use open_notebook for that). Each session works on one notebook: if it already has one, this is refused. If the session has none yet and the user asks for notebook work, call this yourself; don't ask the user to open or create a notebook. For a new analysis step, add a section to the current notebook rather than creating another.",
+    "description": "Create an empty notebook and make it this session's notebook, ready to run. Use it instead of writing a notebook file yourself: the runtime owns the file. It starts with one empty cell, whose id is in `cell_ids`: edit that cell first. Never overwrites a file. Fails with `one_notebook` if the session already has a notebook.",
     "inputSchema": {
       "properties": {
         "path": {
-          "description": "Optional filesystem path for the new .jl file; a relative path is inside the session's folder. Must not exist yet; its directory must.",
+          "description": "Where to create it, ending in `.jl`; a relative path is inside the session's folder. The file must not exist yet and its folder must. Default: a generated name in the session's folder.",
           "type": "string"
         }
       },
@@ -556,15 +520,14 @@
     "name": "new_notebook"
   },
   {
-    "description": "Exit safe preview on an open notebook (same as the user clicking \"Run notebook code\" in the pane). Use when the user explicitly asks to run the notebook. Default run_notebook=true queues a single non-blocking full run (poll read_cell for completion). run_notebook=false exits the gate without queuing a run; later runs also run any cells they depend on that have never run.",
+    "description": "Take a notebook out of safe preview so that its code can run, as the user can from the notebook itself. Call it only when the user asked you to run the notebook: its code may not be theirs. By default it then runs the whole notebook once, without waiting.",
     "inputSchema": {
       "properties": {
         "notebook_id": {
-          "description": "Notebook UUID.",
           "type": "string"
         },
         "run_notebook": {
-          "description": "Queue a non-blocking full run after allowing execution. Default: true. false exits safe preview only.",
+          "description": "false leaves safe preview without running anything; a later run also runs the cells it needs that never ran. Default: true.",
           "type": "boolean"
         }
       },

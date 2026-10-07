@@ -264,7 +264,7 @@ args = ["mcp"]
 
 `mcp` puts new notebooks in the folder it starts in. If your agent starts MCP
 servers in another folder, add `"--folder", "/path/to/project"` to `args`.
-Without the plugin, the agent gets a `notebook_guide` tool with
+Without the plugin, the agent gets a `notebook_guide` tool that serves
 the same skills, and the server's instructions tell it to read the guide
 first.
 
@@ -362,8 +362,9 @@ recent notebook starts it and runs it.
   approval. There is no Plan, Ask or Manual mode and no run card.
 - There is no notebook pane, no annotation mode and no "Point to the chat".
   Pluto's page in the browser is the view.
-- The skills mark which parts hold in the app and which without it. The
-  server's instructions tell the agent that it is working without the app.
+- The notebook skill keeps what holds only in the app in its own file
+  (`reference/app.md`). The server's instructions tell the agent that it is
+  working without the app, so it skips that file.
 - Each agent connection is one session with one notebook, as in the app:
   the first notebook it creates or opens. Over HTTP the session is the
   `Mcp-Session-Id` that `initialize` gives the agent's MCP client; the stdio
@@ -381,7 +382,7 @@ recent notebook starts it and runs it.
 - `crates/wire`: the protocol between Endeavor and the helper.
 - `runtime/`: the Julia side (`boot.jl` and the `EndeavorRuntime` package),
   built into the binary.
-- `plugin/`: the Pluto skills. Endeavor loads this folder as its Claude Code
+- `plugin/`: the skills. Endeavor loads this folder as its Claude Code
   plugin (unpacked from the crate, like `runtime/`), and the binary serves the
   same files through `notebook_guide`.
 - `claude-plugin/` and `.claude-plugin/marketplace.json`: the standalone

@@ -232,7 +232,7 @@ fn the_binary_carries_plugin_folder() {
     let cache = scratch("plugin");
     let plugin = unpack(&cache, embedded::PLUGIN_VERSION, embedded::PLUGIN_FILES).unwrap().join("plugin");
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin");
-    for path in [".claude-plugin/plugin.json", "skills/pluto-session/SKILL.md", "skills/pluto-semantics/reference/grammar.md"] {
+    for path in [".claude-plugin/plugin.json", "skills/endeavor-notebooks/SKILL.md", "skills/endeavor-notebooks/reference/pluto.md"] {
         assert_eq!(std::fs::read(plugin.join(path)).unwrap(), std::fs::read(source.join(path)).unwrap(), "{path}");
     }
     assert_ne!(embedded::PLUGIN_VERSION, embedded::RUNTIME_VERSION);

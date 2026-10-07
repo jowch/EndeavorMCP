@@ -1,4 +1,4 @@
-//! Endeavor's Pluto skills (`plugin/skills`) for agents that don't load the
+//! Endeavor's skills (`plugin/skills`) for agents that don't load the
 //! Claude Code plugin: the `notebook_guide` tool serves them, and the server's
 //! MCP `instructions` say to call it first. A session whose agent loads the
 //! plugin says so with `X-Endeavor-Skills: plugin` and gets neither.
@@ -8,24 +8,17 @@ use serde_json::{Value, json};
 pub const TOOL: &str = "notebook_guide";
 
 /// Each skill file by its path under `plugin/skills`.
-const FILES: [(&str, &str); 16] = [
-    ("pluto-session/SKILL.md", include_str!("../../../plugin/skills/pluto-session/SKILL.md")),
-    ("pluto-workflow/SKILL.md", include_str!("../../../plugin/skills/pluto-workflow/SKILL.md")),
-    ("pluto-semantics/SKILL.md", include_str!("../../../plugin/skills/pluto-semantics/SKILL.md")),
-    ("pluto-session/reference/lifecycle-tools.md", include_str!("../../../plugin/skills/pluto-session/reference/lifecycle-tools.md")),
-    ("pluto-workflow/reference/annotations.md", include_str!("../../../plugin/skills/pluto-workflow/reference/annotations.md")),
-    ("pluto-workflow/reference/edit-loop.md", include_str!("../../../plugin/skills/pluto-workflow/reference/edit-loop.md")),
-    ("pluto-workflow/reference/errors.md", include_str!("../../../plugin/skills/pluto-workflow/reference/errors.md")),
-    ("pluto-workflow/reference/pluto-mental-model.md", include_str!("../../../plugin/skills/pluto-workflow/reference/pluto-mental-model.md")),
-    ("pluto-workflow/reference/safe-preview.md", include_str!("../../../plugin/skills/pluto-workflow/reference/safe-preview.md")),
-    ("pluto-semantics/reference/agent-examples.md", include_str!("../../../plugin/skills/pluto-semantics/reference/agent-examples.md")),
-    ("pluto-semantics/reference/cell-structure.md", include_str!("../../../plugin/skills/pluto-semantics/reference/cell-structure.md")),
-    ("pluto-semantics/reference/error-kinds.md", include_str!("../../../plugin/skills/pluto-semantics/reference/error-kinds.md")),
-    ("pluto-semantics/reference/grammar.md", include_str!("../../../plugin/skills/pluto-semantics/reference/grammar.md")),
-    ("pluto-semantics/reference/reactivity.md", include_str!("../../../plugin/skills/pluto-semantics/reference/reactivity.md")),
+const FILES: [(&str, &str); 6] = [
+    (NOTEBOOKS, include_str!("../../../plugin/skills/endeavor-notebooks/SKILL.md")),
+    ("endeavor-notebooks/reference/pluto.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/pluto.md")),
+    ("endeavor-notebooks/reference/app.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/app.md")),
+    ("endeavor-notebooks/reference/errors.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/errors.md")),
     ("endeavor-machines/SKILL.md", include_str!("../../../plugin/skills/endeavor-machines/SKILL.md")),
     ("endeavor-machines/reference/machine-tools.md", include_str!("../../../plugin/skills/endeavor-machines/reference/machine-tools.md")),
 ];
+
+/// The skill the guide is, when asked for no topic.
+const NOTEBOOKS: &str = "endeavor-notebooks/SKILL.md";
 
 /// Points an agent without the plugin's skills to the guide.
 const READ_GUIDE: &str = "Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
@@ -35,10 +28,12 @@ how to find this session's notebook, the read-edit-run loop, when the user must 
 const APP: &str = "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat.";
 
 /// What a runtime without the app (`endeavor serve` or `mcp`) tells every
-/// agent: the skills say where that setting differs, and this names it.
+/// agent: the skill keeps what holds only in the app apart, and this says
+/// which side the agent is on.
 pub const STANDALONE: &str = "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
 the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
-Where Endeavor's notes on these tools say \"in the app\" or \"without the app\", follow the parts for working without the app.";
+`new_notebook` and `open_notebook` return `browser_url`: give it to the user. \
+Skip what Endeavor's notes on these tools say holds only in the Endeavor app.";
 
 /// What `endeavor mcp` adds to what it tells every agent: it has the machine tools.
 pub const MACHINES: &str = "This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
@@ -61,12 +56,12 @@ pub fn instructions(standalone: bool, has_skills: bool, machines: bool) -> Optio
 pub fn schema() -> Value {
     json!({
         "name": TOOL,
-        "description": "How to work in Endeavor's Pluto notebooks with these tools. Call it once, with no arguments, before your first other notebook tool call in a session, and follow it. \
-It names further topics (paths ending in .md); call it again with `topic` set to one of them when you need that detail.",
+        "description": "How to work in Endeavor's notebooks with these tools. Call it once, with no arguments, before your first other notebook tool call in a session, and follow it. \
+It names further topics (paths ending in .md): call it again with `topic` set to one when it says to read it.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "topic": { "type": "string", "description": "A topic the guide names, such as \"pluto-workflow/reference/errors.md\". Leave it out for the guide itself." }
+                "topic": { "type": "string", "description": "A topic the guide names, such as \"endeavor-notebooks/reference/pluto.md\". Leave it out for the guide itself." }
             },
         },
     })
@@ -87,22 +82,15 @@ pub fn read(arguments: &Value) -> Result<String, String> {
     }
 }
 
-/// The three skills in the order a session needs them.
+/// The notebook skill, and how to ask for what it and the machine tools point to.
 fn whole() -> String {
-    let mut out = String::from(
-        "# Working in Endeavor's notebooks\n\n\
-         This guide has three parts: pluto-session (finding or creating this session's notebook), \
-         pluto-workflow (reading, editing and running cells) and pluto-semantics (how to lay out cells). \
-         A part names another in bold, such as **pluto-workflow**. Links to .md paths are further topics: \
-         call `notebook_guide` with `topic` set to the path when you need one.\n\
-         Tool names such as `Read`, `Bash` or `Write` refer to your own file and shell tools, whatever they are called.\n",
-    );
-    for (path, text) in FILES.iter().filter(|(p, _)| p.ends_with("/SKILL.md") && p.starts_with("pluto-")) {
-        out.push_str("\n---\n\n");
-        out.push_str(&served(path, text));
-    }
-    out.push_str("\n---\n\nIf you have the tool `list_machines`, the notebooks can run on a server or cluster: call `notebook_guide` with `topic` set to `endeavor-machines` for how.\n");
-    out
+    let (path, text) = FILES.iter().find(|(p, _)| *p == NOTEBOOKS).expect("the notebook skill is in FILES");
+    format!(
+        "Links to .md paths in this guide are further topics: call `notebook_guide` with `topic` set to the path when the guide says to read one.\n\n\
+         {}\n---\n\n\
+         If you have the tool `list_machines`, the notebooks can run on a server or cluster: call `notebook_guide` with `topic` set to `endeavor-machines` for how.\n",
+        served(path, text)
+    )
 }
 
 /// A skill file without its front matter, with its links rewritten as topics.
@@ -174,26 +162,27 @@ mod tests {
     }
 
     #[test]
-    fn the_guide_has_each_skill_and_its_links_are_topics() {
+    fn the_guide_is_the_notebook_skill_and_its_links_are_topics() {
         let guide = read(&json!({})).unwrap();
-        for heading in ["# Pluto session orientation", "# Pluto workflow (cell editing)", "# Pluto cell semantics"] {
-            assert!(guide.contains(heading), "{heading}");
+        assert!(guide.contains("\n# Working in a live notebook\n"), "{guide}");
+        assert!(!guide.contains("\nname: endeavor-"), "front matter left in");
+        for topic in ["pluto", "app", "errors"] {
+            assert!(guide.contains(&format!("[reference/{topic}.md](endeavor-notebooks/reference/{topic}.md)")), "{topic}");
         }
-        assert!(!guide.contains("\nname: pluto-"), "front matter left in");
-        assert!(guide.contains("[annotations.md](pluto-workflow/reference/annotations.md)"));
-        assert!(guide.contains("[pluto-workflow](pluto-workflow)"));
-        assert!(guide.contains("(pluto-semantics/reference/cell-structure.md)"));
+        assert!(!guide.contains("# In the Endeavor app") && !guide.contains("# Pluto notebooks"), "references are read when asked for");
         for link in guide.split("](").skip(1).filter_map(|l| l.split_once(')')).map(|(t, _)| t).filter(|t| !t.contains("://")) {
             assert!(read(&json!({ "topic": link })).is_ok(), "the guide links to {link}, which isn't a topic");
         }
+        assert!(read(&json!({ "topic": "endeavor-machines" })).is_ok(), "the topic the guide's last line names");
     }
 
     #[test]
     fn reads_one_topic() {
-        let errors = read(&json!({ "topic": "pluto-workflow/reference/errors.md" })).unwrap();
-        assert_eq!(errors, served("pluto-workflow/reference/errors.md", FILES[6].1));
-        assert!(read(&json!({ "topic": "pluto-semantics" })).unwrap().starts_with("# Pluto cell semantics"));
+        let errors = read(&json!({ "topic": "endeavor-notebooks/reference/errors.md" })).unwrap();
+        assert_eq!(errors, served("endeavor-notebooks/reference/errors.md", FILES[3].1));
+        assert!(errors.contains("[app.md](endeavor-notebooks/reference/app.md)"), "a reference's link to another is a topic too");
+        assert!(read(&json!({ "topic": "endeavor-notebooks" })).unwrap().starts_with("# Working in a live notebook"));
         let missing = read(&json!({ "topic": "nope.md" })).unwrap_err();
-        assert!(missing.starts_with("ArgumentError: not_found::No guide topic 'nope.md'. Topics: pluto-session/SKILL.md"), "{missing}");
+        assert!(missing.starts_with("ArgumentError: not_found::No guide topic 'nope.md'. Topics: endeavor-notebooks/SKILL.md"), "{missing}");
     }
 }
