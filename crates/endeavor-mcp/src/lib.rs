@@ -71,7 +71,7 @@ use serde_json::{Value, json};
 use wire::relay::Mux;
 use wire::files::RuntimeState;
 use wire::slurm::JobRequest;
-use runtime::{Hooks, Outcome, Up, Waiting, Want};
+use runtime::{Ended, Hooks, Looked, Outcome, Up, Waiting, Want};
 use wire::{Frame, ToApp, ToHelper};
 
 const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
@@ -452,7 +452,7 @@ impl Attached {
         *routes.write().unwrap() = Route::None;
         match &self.how {
             How::Process(runtime, _) => {
-                if !stop_marked(&args.state_dir, Some(&self.state), runtime, stopped::How::Connection) {
+                if !stop_marked(&args.state_dir, &self.state, runtime, stopped::How::Connection) {
                     *routes.write().unwrap() = self.route();
                     return Err(Box::new((self, STILL_RUNNING.into())));
                 }
@@ -472,12 +472,12 @@ const STILL_RUNNING: &str = "Julia was not stopped: it is still running.";
 
 /// Stop `runtime`, leaving a note for the other clients of how it was stopped
 /// (see `stopped`), and taking the note back if it is still alive. Whether it
-/// is gone. `state` is the runtime's record when it has one; a runtime still starting has none.
-fn stop_marked(dir: &Path, state: Option<&State>, runtime: &Runtime, how: stopped::How) -> bool {
-    let of = stopped::Of::Runtime(runtime.pid);
+/// is gone.
+fn stop_marked(dir: &Path, state: &State, runtime: &Runtime, how: stopped::How) -> bool {
+    let of = stopped::Of::Runtime(state.pid);
     stopped::mark(dir, of, how);
-    runtime.stop(state);
-    let gone = !pid_alive(runtime.pid, runtime.started_at());
+    runtime.stop(Some(state));
+    let gone = !pid_alive(state.pid, state.started);
     if !gone {
         stopped::unmark(dir, of);
     }
@@ -628,7 +628,7 @@ impl<'a> Client<'a> {
                 self.parts.discard();
                 std::process::exit(0)
             }
-            Heard::Eof if self.args.quit_with_client && waiting == Waiting::Ready => return false,
+            Heard::Eof if self.args.quit_with_client && waiting != Waiting::Lock => return false,
             Heard::Eof => std::process::exit(0),
             Heard::Quiet | Heard::Event => {}
         }
@@ -649,24 +649,18 @@ impl<'a> Client<'a> {
             Outcome::Failed(message) => Unstarted::Failed(message),
             Outcome::NeedsInstall(items) => Unstarted::NeedsInstall(items),
             Outcome::Died { status, log_tail } => Unstarted::Died { status, log_tail },
-            Outcome::Unusable(runtime::Unusable::OtherNode(node)) => Unstarted::Failed(runtime::other_node_text(&node)),
-            Outcome::Unusable(runtime::Unusable::Older) => Unstarted::Failed(OLDER_RUNTIME.into()),
+            Outcome::Unusable(Looked::OtherNode(state)) => Unstarted::Failed(runtime::other_node_text(&state.node)),
+            Outcome::Unusable(_) => Unstarted::Failed(OLDER_RUNTIME.into()),
             Outcome::Cancelled => self.cancelled(),
             Outcome::Ready(_) => unreachable!("a runtime is not an unstarted one"),
         }
     }
 
-    /// Take the start lock to start a runtime. While another helper holds it (a start can take minutes)
-    /// the client is told once, and what it sends is still served.
+    /// Take the start lock, with what the client said while a stop waited heard first. While another
+    /// helper holds it the client is told once, and what it sends is still served.
     fn lock_start(&mut self) -> Result<File, Unstarted> {
         self.hear_kept()?;
-        let dir = &self.args.state_dir;
-        let waited = standalone::wait_for_start_lock(dir, standalone::start_lock_limit(), || if self.wait(Duration::from_millis(200), Waiting::Lock) { Ok(()) } else { Err(()) });
-        waited.map_err(|wait| match wait {
-            standalone::Wait::Failed(message) => Unstarted::Failed(message),
-            standalone::Wait::TimedOut => Unstarted::Failed(standalone::start_lock_gave_up(dir)),
-            standalone::Wait::Interrupted(()) => self.cancelled(),
-        })
+        runtime::take_start_lock(&self.args.state_dir, self).map_err(|outcome| self.unstarted(outcome))
     }
 }
 
@@ -680,7 +674,7 @@ impl Hooks for Client<'_> {
     }
 
     fn wait(&mut self, wait: Duration, waiting: Waiting) -> bool {
-        if waiting == Waiting::Lock && !self.told {
+        if waiting != Waiting::Ready && !self.told {
             self.progress("Another connection is starting Julia here; waiting for it.".into());
             self.told = true;
         }
@@ -707,44 +701,33 @@ fn lock_stop(dir: &Path, inbox: &mut Inbox, limit: Duration) -> Result<File, Str
     })
 }
 
-/// Attach to the runtime in the state folder, or start one (`runtime::find_or_start`). The start lock
-/// is held until the runtime is ready, so helpers asked at once start one runtime and the rest attach
-/// to it. The error is the app's answer: why it couldn't start, or that it died while starting.
+/// Attach to the runtime in the state folder, or start one (`runtime::find_or_start`). Helpers asked at
+/// once start one runtime and the rest attach to it. The error is the app's answer: why it couldn't
+/// start, or that it died while starting.
 fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, engine: &str, install: bool) -> Result<Attached, Unstarted> {
     let mut client = Client::new(args, mux, inbox, parts);
     client.hear_kept()?;
     let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events };
     match runtime::find_or_start(&want, &mut client) {
-        Outcome::Ready(Up { state, port, started }) => {
-            let reattached = started.is_none();
-            let runtime = started.unwrap_or_else(|| Runtime::recorded(&state, &args.state_dir, events));
-            Ok(Attached { how: How::Process(runtime, port), state, reattached })
-        }
+        Outcome::Ready(Up { state, port, runtime, started }) => Ok(Attached { how: How::Process(runtime, port), state, reattached: !started }),
         other => Err(client.unstarted(other)),
     }
 }
 
 /// Stop the runtime recorded in the state folder without attaching to it (on
 /// a cluster, cancel its job, or the job waiting for a node): the app's Stop
-/// for a host it only browsed. Waits for a start in progress, so it ends that
-/// runtime. Without the start lock, or for a runtime this helper may not stop,
-/// nothing is stopped: why.
+/// for a host it only browsed. Without the start lock, for a runtime this helper
+/// may not stop, or for one that is still starting, nothing is stopped: why.
 fn stop_recorded(args: &Args, inbox: &mut Inbox, events: &Sender<Event>) -> Result<(), String> {
     let dir = &args.state_dir;
     let _starting = lock_stop(dir, inbox, standalone::stop_lock_limit())?;
     match args.launcher {
-        Launcher::Process => {
-            let runtime = match runtime::look(dir, args.any_node) {
-                runtime::Looked::OtherNode(state) => return Err(format!("Julia was not stopped. {}", runtime::other_node_text(&state.node))),
-                runtime::Looked::Running(state, _) | runtime::Looked::Older(state) => Some((Runtime::recorded(&state, dir, events), Some(state))),
-                runtime::Looked::Silent(_) | runtime::Looked::NotRunning => runtime::starting(dir, events).map(|(runtime, _)| (runtime, None)),
-            };
-            if let Some((runtime, state)) = runtime
-                && !stop_marked(dir, state.as_ref(), &runtime, stopped::How::Connection)
-            {
-                return Err(STILL_RUNNING.into());
-            }
-        }
+        Launcher::Process => match runtime::end(dir, args.any_node, stopped::How::Connection, events) {
+            Ended::NotRunning | Ended::Stopped(_) => {}
+            Ended::Elsewhere(node) => return Err(format!("Julia was not stopped. {}", runtime::other_node_text(&node))),
+            Ended::Alive(_) => return Err(STILL_RUNNING.into()),
+            Ended::Starting => return Err(runtime::STILL_STARTING.into()),
+        },
         Launcher::Slurm => slurm::cancel_recorded(dir),
     }
     Ok(())
@@ -763,8 +746,8 @@ fn check(dir: &Path, launcher: Launcher, any_node: bool) -> RuntimeState {
     if launcher == Launcher::Slurm {
         return slurm::check(dir);
     }
-    match runtime::look(dir, any_node) {
-        runtime::Looked::NotRunning | runtime::Looked::Silent(_) => RuntimeState::NotRunning,
+    match runtime::look(dir, any_node, true) {
+        runtime::Looked::NotRunning | runtime::Looked::Dead(_) | runtime::Looked::Silent(_) => RuntimeState::NotRunning,
         runtime::Looked::OtherNode(state) | runtime::Looked::Older(state) => RuntimeState::Running { node: state.node, notebooks: None, job: None },
         runtime::Looked::Running(state, port) => RuntimeState::Running { notebooks: open_notebooks(port, &state.token), node: state.node, job: None },
     }
@@ -806,29 +789,14 @@ impl Runtime {
 
     /// The runtime `state` records, which some earlier helper started.
     fn recorded(state: &State, state_dir: &Path, events: &Sender<Event>) -> Runtime {
-        Runtime::watching(state.pid, state.started, state_dir, events)
-    }
-
-    /// The runtime of process `pid` (started at `started`, see `State`), which some earlier client started.
-    fn watching(pid: i32, started: Option<u64>, state_dir: &Path, events: &Sender<Event>) -> Runtime {
+        let exit = Exit::watch_pid(state.pid, state.started, events.clone());
         Runtime {
-            pid,
+            pid: state.pid,
             #[cfg(windows)]
-            started,
-            exit: Exit::watch_pid(pid, started, events.clone()),
+            started: state.started,
+            exit,
             state_dir: state_dir.to_path_buf(),
         }
-    }
-
-    /// When the process started, where that tells it from a later one with its pid (`State::started`).
-    #[cfg(windows)]
-    fn started_at(&self) -> Option<u64> {
-        self.started
-    }
-
-    #[cfg(not(windows))]
-    fn started_at(&self) -> Option<u64> {
-        None
     }
 
     /// It exited: clean up after it and say so, and if another connection
@@ -925,16 +893,12 @@ impl Exit {
         exit
     }
 
-    /// A runtime some earlier helper started isn't our child: poll it, until it is gone or no one
-    /// holds its `Exit` any more.
+    /// A runtime some earlier helper started isn't our child: poll it.
     fn watch_pid(pid: i32, started: Option<u64>, events: Sender<Event>) -> Arc<Exit> {
         let exit = Arc::new(Exit::default());
         let e = exit.clone();
         std::thread::spawn(move || {
             while pid_alive(pid, started) {
-                if Arc::strong_count(&e) == 1 {
-                    return;
-                }
                 std::thread::sleep(Duration::from_millis(500));
             }
             e.set(pid, "exited".into(), &events);
@@ -1119,9 +1083,8 @@ fn parse_state(v: &Value) -> Option<State> {
     })
 }
 
-/// Remove `runtime.json` if it still describes the runtime `pid`, and the note that it is starting.
+/// Remove `runtime.json` if it still describes the runtime `pid`.
 fn remove_state(dir: &Path, pid: i32) {
-    runtime::clear_starting(dir, pid);
     let path = dir.join("runtime.json");
     let current = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
     if current.is_none_or(|v| v["pid"].as_i64() == Some(pid as i64)) {

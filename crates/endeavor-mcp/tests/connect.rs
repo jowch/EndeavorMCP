@@ -427,39 +427,133 @@ fn a_stop_ends_a_start_and_so_does_the_end_of_input_where_the_runtime_goes_with_
     assert_eq!(helper.after_progress(), ToApp::StartCancelled { id: 1 });
     assert_eq!(helper.next(), ToApp::Stopped { id: stop });
     common::wait_for("the core to end", || !common::pid_alive(core));
-    assert!(!dir.join("starting.json").exists() && !dir.join("runtime.json").exists());
+    assert!(!dir.join("runtime.json").exists());
 
     let mut helper = held_start(&dir, &julia, &["--quit-with-client"]);
     let core = cores.pids()[0];
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
     common::wait_for("the core to end", || !common::pid_alive(core));
-    assert!(!dir.join("starting.json").exists());
 }
 
-#[test]
-fn endeavor_stop_waits_for_the_start_lock_and_ends_a_start_whose_client_has_gone() {
-    let dir = state_dir("start-stop-cli");
+/// `dir` with a fake Julia that is held back, and the guard that ends the cores started in it.
+fn held_dir(name: &str) -> (PathBuf, Cores, PathBuf) {
+    let dir = state_dir(name);
     let cores = Cores(dir.clone());
     let bridge = common::FakeBridge::start(&dir);
     let julia = common::serving_julia(&dir, &bridge);
     std::fs::write(dir.join("token"), TOKEN).unwrap();
     std::fs::write(dir.join("hold"), "").unwrap();
+    (dir, cores, julia)
+}
+
+/// A binary of ours run in `dir`'s own folders.
+fn endeavor(dir: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+    command.args(args).arg("--state-dir").arg(dir);
+    for var in ["HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"] {
+        command.env(var, dir.join("home"));
+    }
+    command
+}
+
+#[test]
+fn a_stop_during_a_start_whose_client_has_gone_stops_nothing_and_says_it_is_still_starting() {
+    let (dir, cores, julia) = held_dir("start-stop-cli");
     let mut helper = held_start(&dir, &julia, &[]);
     let core = cores.pids()[0];
     helper.send(ToHelper::Detach);
     helper.exits();
-    let stop = || Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["stop", "--state-dir"]).arg(&dir).env("ENDEAVOR_STOP_LOCK_SECS", "1").env("HOME", dir.join("home")).env("XDG_STATE_HOME", dir.join("home")).env("XDG_CONFIG_HOME", dir.join("home")).env("XDG_CACHE_HOME", dir.join("home")).output().unwrap();
 
+    // The lock the stop needs is held for a moment only, and the stop waits for it a while.
     let held = hold_start_lock(&dir);
-    let refused = stop();
+    let refused = endeavor(&dir, &["stop"]).env("ENDEAVOR_STOP_LOCK_SECS", "1").output().unwrap();
     assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("Julia was not stopped"), "{refused:?}");
-    assert!(common::pid_alive(core));
     drop(held);
-    let stopped = stop();
+
+    let refused = endeavor(&dir, &["stop"]).output().unwrap();
+    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("still starting"), "{refused:?}");
+    let mut other = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    other.hello();
+    let stop = other.request_stop();
+    let ToApp::NotStopped { id, message } = other.next() else { panic!("expected NotStopped") };
+    assert_eq!(id, stop);
+    assert!(message.contains("still starting"), "{message}");
+    assert!(common::pid_alive(core) && cores.pids() == [core], "nothing was stopped");
+
+    // It comes up, and is then found and stopped as usual.
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    other.request_start(None, true);
+    let ToApp::Ready { pid, reattached, .. } = after_start(&other) else { panic!("expected Ready") };
+    assert_eq!((pid as i32, reattached), (core, true));
+    let stopped = endeavor(&dir, &["stop"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&stopped.stdout), format!("Stopped Julia (pid {core}).\n"));
     common::wait_for("the core to end", || !common::pid_alive(core));
-    assert!(!dir.join("starting.json").exists());
+    other.stdin.0.lock().unwrap().take();
+    other.exits();
+}
+
+#[test]
+fn a_core_killed_while_starting_leaves_the_next_client_to_start_a_new_one_at_once() {
+    let (dir, cores, julia) = held_dir("start-killed");
+    let first = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    // SAFETY: plain syscall, on the core this test's helper started.
+    unsafe { libc::kill(core, libc::SIGKILL) };
+    assert!(matches!(first.after_progress(), ToApp::StartDied { .. }));
+    std::fs::remove_file(dir.join("hold")).unwrap();
+
+    let second = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    second.hello();
+    let began = std::time::Instant::now();
+    second.request_start(None, true);
+    let ToApp::Ready { pid, reattached, .. } = after_start(&second) else { panic!("expected Ready") };
+    assert!(pid as i32 != core && !reattached, "a new runtime, started by the second helper");
+    assert!(began.elapsed() < Duration::from_secs(10), "{:?}", began.elapsed());
+    assert_eq!(cores.pids(), [pid as i32]);
+}
+
+#[test]
+fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_and_leaving_does_not_stop_it() {
+    let (dir, cores, julia) = held_dir("start-waiters");
+    let mut first = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    first.send(ToHelper::Detach);
+    first.exits();
+
+    // A waiter that is stopped, one whose input ends under `--quit-with-client`, and `serve` interrupted: none of them started it.
+    let stopped = held_start(&dir, &julia, &[]);
+    let stop = stopped.request_stop();
+    assert_eq!(stopped.after_progress(), ToApp::StartCancelled { id: 1 });
+    assert_eq!(stopped.next(), ToApp::Stopped { id: stop });
+    let mut quitting = held_start(&dir, &julia, &["--quit-with-client"]);
+    quitting.stdin.0.lock().unwrap().take();
+    quitting.exits();
+    let mut serve = endeavor(&dir, &["serve", "--julia", "/nonexistent/julia", "--depot", "/opt/depot:"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(700));
+    // SAFETY: plain syscall, on the `serve` this test started.
+    unsafe { libc::kill(serve.id() as i32, libc::SIGINT) };
+    let (code, said) = ended(serve);
+    assert!(code == Some(1) && said.trim_end().ends_with("endeavor: Stopped before Julia was ready."), "{code:?} {said}");
+    assert!(common::pid_alive(core) && cores.pids() == [core], "the start went on");
+
+    // Two more wait, and both get that core.
+    let (mut second, mut third) = (held_start(&dir, &julia, &[]), held_start(&dir, &julia, &[]));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(cores.pids(), [core], "no other core is started beside it");
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    for helper in [&second, &third] {
+        let ToApp::Ready { pid, reattached, .. } = after_start(helper) else { panic!("expected Ready") };
+        assert_eq!((pid as i32, reattached), (core, true));
+    }
+    assert_eq!(cores.pids(), [core]);
+    let stop = second.request_stop();
+    assert_eq!(second.next(), ToApp::Stopped { id: stop });
+    let ToApp::Died { .. } = third.next() else { panic!("expected Died") };
+    for helper in [&mut second, &mut third] {
+        helper.stdin.0.lock().unwrap().take();
+        helper.exits();
+    }
 }
 
 /// `endeavor serve` in `dir`, once it has found the runtime there.

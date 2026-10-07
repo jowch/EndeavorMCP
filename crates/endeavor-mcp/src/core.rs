@@ -14,7 +14,7 @@
 //! Windows the core puts itself in a Job Object before starting Julia, so
 //! Julia and its workers end when the core does.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
@@ -87,6 +87,8 @@ pub fn main(argv: &[String]) -> ! {
     };
     let token = std::env::var("ENDEAVOR_TOKEN").unwrap_or_else(|_| fail("ENDEAVOR_TOKEN is not set".into()));
     let launcher = std::env::var("ENDEAVOR_LAUNCHER").unwrap_or_else(|_| "process".into());
+    // Held until `runtime.json` is written (`julia_ready`), so that a client can tell a start under way from one that died.
+    let mut starting = Some(crate::runtime::hold_starting(&args.state_dir).unwrap_or_else(|e| fail(format!("Couldn't lock {}: {e}", args.state_dir.display()))));
     #[cfg(unix)]
     let (stop_signals, inherited_mask) = block_stop_signals();
     // The runtime is the `runtime/` inside the folder `unpack` made.
@@ -135,7 +137,7 @@ pub fn main(argv: &[String]) -> ! {
         if let Some(status) = julia.try_wait().unwrap_or(None) {
             break status;
         }
-        if let Some(ready) = julia_ready(&julia_state, &args.state_dir, port, &served.bridge) {
+        if let Some(ready) = julia_ready(&julia_state, &args.state_dir, port, &served.bridge, &mut starting) {
             let _ = served.pluto.set(ready.pluto);
             let _ = served.bridge.julia.port.set(ready.bridge_port);
             if let Some(hours) = idle_hours {
@@ -201,7 +203,7 @@ struct JuliaReady {
 /// Once Julia has written its state and its bridge answers, write
 /// `runtime.json` for the helper: the core's pid and its one `port`, and
 /// Julia's launcher, node and job. Pluto's port and secret stay out of it.
-fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge) -> Option<JuliaReady> {
+fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge, starting: &mut Option<File>) -> Option<JuliaReady> {
     let token = &bridge.token;
     let julia: Value = serde_json::from_str(&std::fs::read_to_string(julia_state).ok()?).ok()?;
     let port_of = |key: &str| julia[key].as_u64().and_then(|p| u16::try_from(p).ok());
@@ -235,8 +237,8 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge)
         eprintln!("endeavor core: {e}");
         return None;
     }
-    // Whoever started this core and has gone leaves the note that it is starting.
-    crate::runtime::clear_starting(state_dir, std::process::id() as i32);
+    // Let go after the record is written: whoever sees the lock free and no record knows the start died.
+    drop(starting.take());
     Some(ready)
 }
 

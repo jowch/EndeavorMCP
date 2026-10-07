@@ -139,16 +139,21 @@ first call that starts it waits as a start at launch did: up to `start_wait()`
 (45 s), then a "still starting, try again" failure, and the start goes on.
 
 The helper, `serve` and the front find or start the runtime with one function
-(`runtime::find_or_start`) and look at what is running with one (`runtime::look`).
-A start, once begun, finishes without the process that asked for it: the core
-is its own session and records itself in `runtime.json` when Julia is ready, so
-a front that exits meanwhile leaves it going. Until then `starting.json` in the
-state folder names the core, and a client that takes the start lock finds it
-there and waits for it instead of starting another. Only an explicit stop
-ends a start: a `Stop` to the helper (answered `StartCancelled`), Ctrl-C in
-`serve`, or `endeavor stop`. The one exception is a helper given
-`--quit-with-client`, which stops a runtime it is waiting for when its input
-ends, as it does one it is attached to.
+(`runtime::find_or_start`), look at what is running with one (`runtime::look`)
+and stop it with one (`runtime::end`). A start, once begun, finishes without the
+process that asked for it. The core is its own session. As the first thing it
+does it holds `starting.lock` in the state folder, and lets go only after it has
+written `runtime.json`; the OS lets go if it dies. The process that spawned it
+holds `start.lock` for the look and the spawn, until the core holds its own lock,
+and waits for the runtime without it. A client that takes `start.lock` and finds
+no usable record but `starting.lock` held waits for that runtime, and looks again
+when the lock comes free (the record is written first, so "free and no record"
+means that start died; it then starts its own). A client that waits never stops
+the start of another process: a `Stop` to the helper, Ctrl-C in `serve`, the end
+of input and `--quit-with-client` end only a start this process spawned. A stop
+(`endeavor stop`, `stop_machine` for this computer, the helper's Stop for a
+runtime it is not attached to) finds no record and `starting.lock` held, and
+stops nothing: it says Julia is still starting and to try again once it is up.
 
 ## Session identity
 
@@ -274,12 +279,12 @@ says another call is still running and has changed nothing.
 | `stop_machine` | `machine`, `force`, `install` (boolean, only after the user agreed) | `{machine, stopped, message}`; `needs_install` (`stopped` false) when the machine has only an older build's helper, since stopping needs this build's: the same `install` as above, and nothing was stopped; refused without `force` with `other_sessions` `[{client, active_seconds_ago, notebook}]` when another session was active in the last 15 minutes; with `state` `starting`/`queued`, `job` and `queue` when Julia is starting or a job is queued (waiting sessions can't be seen); or as an error when the runtime doesn't answer the check for 5 s |
 
 `stop_machine` with `"local"` takes `start.lock` first, as the helper's stop does,
-and waits for it up to 20 s (`ENDEAVOR_STOP_LOCK_SECS` sets it for tests), so it
-doesn't stop a runtime another process is still starting; if the lock isn't had
-it stops nothing and says so (an error). It marks the stop as made from a connection,
-so a client that finds the runtime gone is told "It was stopped from another
-connection." `endeavor stop` waits for the lock in the same way and keeps its own
-words ("It was stopped with `endeavor stop`.").
+and waits for it up to 20 s (`ENDEAVOR_STOP_LOCK_SECS` sets it for tests); the lock is
+held only for a look and a spawn, so it does not wait behind a whole start. If the lock
+isn't had, or Julia is still starting, it stops nothing and says so (an error). It marks
+the stop as made from a connection, so a client that finds the runtime gone is told "It
+was stopped from another connection." `endeavor stop` waits for the lock in the same way
+and keeps its own words ("It was stopped with `endeavor stop`.").
 
 `use_machine` and `pluto_session_status` use the link's own words for what is
 going on, and no call waits longer than 45 seconds (`ENDEAVOR_START_WAIT_SECS`

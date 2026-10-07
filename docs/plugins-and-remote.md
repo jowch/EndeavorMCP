@@ -137,9 +137,10 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 
 1. One find-or-start function, used by the helper, `serve` and the front.
    Stopping the local runtime takes `start.lock`, which it does not today.
-   _Built 2026-10-07:_ `runtime::find_or_start` and `runtime::look`; the
-   local stop, `stop_machine` and `endeavor stop`, take the lock; a start
-   outlives the client that asked for it (below).
+   _Built 2026-10-07:_ `runtime::find_or_start`, `runtime::look` and
+   `runtime::end`; the local stop, `stop_machine` and `endeavor stop`, take
+   `start.lock` (held for a look and a spawn) and say so when Julia is still
+   starting; a start outlives the client that asked for it (below).
 2. Connect, retry and re-attach as one library type that answers with an
    outcome.
 3. The front holds its connections in process and has one kind of target.
@@ -165,10 +166,10 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 - A start, once begun, finishes without the client that asked for it, so
   the next session finds the runtime. Built and tested in step 1, for this
   computer and for a server that runs it as a process: the core is its own
-  session and `starting.json` names it until it records itself, so a client
-  that comes meanwhile waits for it. A Slurm job was already left queued.
-  A helper started with `--quit-with-client` still stops a runtime it waits
-  for when its input ends.
+  session and holds `starting.lock` until it records itself, so a client
+  that comes meanwhile waits for it and never stops it. A Slurm job was
+  already left queued. A helper started with `--quit-with-client` still
+  stops a runtime it started itself when its input ends.
 
 - `endeavor serve` runs in your terminal until you stop it and has no idle
   exit: you started it on purpose where you can see it. A runtime that

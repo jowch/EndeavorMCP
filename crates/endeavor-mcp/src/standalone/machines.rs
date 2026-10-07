@@ -19,6 +19,7 @@ use super::{Relay, Route, Status as Local, start_wait, tool_failure};
 use crate::client::{Cluster, Running, Server, ssh_config_hosts};
 use crate::link::{self, Link, State};
 use crate::mcp::{browser_link, to_json, tool_error};
+use crate::runtime::Ended;
 
 /// A tool call's result that is `text`.
 pub(super) fn text_result(text: &str) -> Value {
@@ -907,7 +908,7 @@ impl Relay {
             Target::Local { stopped } => (*stopped, true),
             Target::Machine(_) => (false, false),
         };
-        let running = crate::runtime::look(&self.options.state_dir, false).alive().is_some();
+        let running = crate::runtime::look(&self.options.state_dir, false, false).alive().is_some();
         let local_state = match (stopped, running) {
             (true, _) => "stopped from this session",
             (false, true) => "running",
@@ -1407,7 +1408,10 @@ impl Relay {
         let dir = &self.options.state_dir;
         // First, so that a start another process has under way is waited for, not missed by the look below.
         let _starting = super::stop_lock(dir)?;
-        let Some(state) = crate::runtime::look(dir, false).alive() else {
+        let Some(state) = crate::runtime::look(dir, false, false).alive() else {
+            if crate::runtime::starting(dir) {
+                return Err(crate::runtime::STILL_STARTING.into());
+            }
             return Ok(json!({ "machine": LOCAL, "stopped": false, "message": "Julia isn't running on this computer, so there is nothing to stop." }));
         };
         if !force && let Some(port) = state.port {
@@ -1436,19 +1440,20 @@ impl Relay {
                 *stopped = false;
             }
         };
-        match super::end_runtime_locked(dir, crate::stopped::How::Connection) {
-            super::Ended::Stopped(_) | super::Ended::NotRunning => {}
-            super::Ended::Alive(pid) => {
+        let (events, _) = mpsc::channel();
+        match crate::runtime::end(dir, false, crate::stopped::How::Connection, &events) {
+            Ended::Stopped(_) | Ended::NotRunning => {}
+            Ended::Alive(pid) => {
                 unmark();
                 return Err(format!("Julia (pid {pid}) is still running after the stop."));
             }
-            super::Ended::Elsewhere(node) => {
+            Ended::Elsewhere(node) => {
                 unmark();
                 return Err(format!("The Julia recorded here runs on {node}, not on this computer."));
             }
-            super::Ended::Busy(why) => {
+            Ended::Starting => {
                 unmark();
-                return Err(why);
+                return Err(crate::runtime::STILL_STARTING.into());
             }
         }
         // Only the runtime that was stopped: another thread may have started a new one meanwhile.

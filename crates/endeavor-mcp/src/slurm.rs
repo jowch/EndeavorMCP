@@ -657,7 +657,7 @@ pub fn relay_main(argv: &[String]) -> ! {
     let (events, rx) = mpsc::channel();
     let home = wire::files::home().display().to_string();
     let _ = mux.send(&ToApp::Hello { protocol: wire::PROTOCOL, version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false }.frame());
-    let runtime::Looked::Running(state, port) = runtime::look(&dir, false) else {
+    let runtime::Looked::Running(state, port) = runtime::look(&dir, false, true) else {
         let _ = mux.send(&ToApp::StartFailed { id: 0, message: format!("Julia isn't running on {}.", hostname()) }.frame());
         std::process::exit(1);
     };

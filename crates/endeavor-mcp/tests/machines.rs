@@ -1403,6 +1403,9 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     let (failed, said) = second.call("open_notebook", json!({ "path": path }));
     assert!(failed && text(&said).contains("still starting"), "{said}");
     assert_eq!(core_of(&place), started, "no second runtime was started");
+    let (failed, said) = second.call("stop_machine", json!({ "machine": "local", "force": true }));
+    assert!(failed && text(&said).contains("still starting"), "a stop leaves a start under way alone: {said}");
+    assert_eq!(core_of(&place), started);
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
