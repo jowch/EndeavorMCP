@@ -245,10 +245,10 @@ fn http(port: u16, request: &str) -> (u16, String) {
 }
 
 /// Another agent session's tool call, straight to a runtime's port. The tool's result.
-fn other_agent(port: u16, token: &str, session: &str, client: &str, name: &str, arguments: Value) -> Value {
+fn other_agent(port: u16, token: &str, session: &str, name: &str, arguments: Value) -> Value {
     let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } }).to_string();
     let request = format!(
-        "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nX-Endeavor-Session: {session}\r\nX-Endeavor-Client: {client}\r\nContent-Length: {}\r\n\r\n{message}",
+        "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nX-Endeavor-Session: {session}\r\nContent-Length: {}\r\n\r\n{message}",
         message.len()
     );
     let (code, body) = http(port, &request);
@@ -911,15 +911,14 @@ fn stop_machine_refuses_when_another_session_was_active_and_stops_with_force() {
     front.initialize();
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
     let port = url_port(&used["browser_url"]);
-    let opened = other_agent(port, TOKEN, "someone-else", "Codex on the-lab", "open_notebook", json!({ "path": path }));
+    let opened = other_agent(port, TOKEN, "someone-else", "open_notebook", json!({ "path": path }));
     assert_eq!(opened["notebook_id"], NOTEBOOK, "{opened}");
 
     let refused = front.ok("stop_machine", json!({ "machine": "lab" }));
     assert_eq!(refused["stopped"], false);
-    assert_eq!(refused["other_sessions"][0]["client"], "Codex on the-lab");
-    assert_eq!(refused["other_sessions"][0]["notebook"], path);
-    assert!(refused["other_sessions"][0]["active_seconds_ago"].as_u64().is_some_and(|s| s < 60));
-    assert!(refused["message"].as_str().unwrap().contains("Codex on the-lab") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
+    assert_eq!(refused["active_sessions"], 1);
+    assert!(refused["active_seconds_ago"].as_u64().is_some_and(|s| s < 60));
+    assert!(refused["message"].as_str().unwrap().contains("another session was active on lab") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
     assert!(pid_alive(place.runtime().unwrap()), "nothing was stopped");
     assert_eq!(front.ok("list_notebooks", json!({}))[0]["path"], path, "and the session still works");
 
@@ -957,10 +956,10 @@ fn stop_machine_works_on_this_computer_with_the_same_check() {
     let local = place.local_runtime().unwrap();
     // Another session works there.
     let port = std::fs::read_to_string(place.local_state.join("runtime.json")).map(|t| serde_json::from_str::<Value>(&t).unwrap()).unwrap()["port"].as_u64().unwrap() as u16;
-    other_agent(port, TOKEN, "someone-else", "Claude Code on the-desk", "open_notebook", json!({ "path": path.display().to_string() }));
+    other_agent(port, TOKEN, "someone-else", "open_notebook", json!({ "path": path.display().to_string() }));
 
     let refused = front.ok("stop_machine", json!({ "machine": "local" }));
-    assert_eq!((refused["stopped"].clone(), refused["other_sessions"][0]["client"].clone()), (json!(false), json!("Claude Code on the-desk")), "{refused}");
+    assert_eq!((refused["stopped"].clone(), refused["active_sessions"].clone()), (json!(false), json!(1)), "{refused}");
     assert!(pid_alive(local));
     let stopped = front.ok("stop_machine", json!({ "machine": "local", "force": true }));
     assert_eq!(stopped["stopped"], true, "{stopped}");
@@ -976,7 +975,7 @@ fn stop_machine_works_on_this_computer_with_the_same_check() {
 }
 
 #[test]
-fn leaving_a_machine_or_ending_the_front_ends_its_session_there_and_leaves_the_runtime() {
+fn a_session_keeps_its_key_across_machines_and_its_notebook_where_it_made_it() {
     let place = Place::new("sessions");
     place.add_lab();
     let path = place.notebook("a.jl");
@@ -985,27 +984,17 @@ fn leaving_a_machine_or_ending_the_front_ends_its_session_there_and_leaves_the_r
     front.ok("use_machine", json!({ "machine": "lab" }));
     let joined = front.ok("open_notebook", json!({ "path": path }));
     assert_eq!(joined["already_open"], true, "{joined}");
-    // Another agent, straight to the runtime's own port.
-    let others = || other_agent(place.runtime_port(), TOKEN, "watcher", "Watcher", "list_notebooks", json!({}))[0]["other_sessions"].clone();
-    let seen = others();
-    assert_eq!(seen.as_array().unwrap().len(), 1, "{seen}");
-    // A label is cut at 80 characters, which a long host name passes.
-    let label: String = format!("Test Agent on {}", this_host()).chars().take(80).collect();
-    assert_eq!(seen[0]["client"], label.trim_end());
+    assert_eq!(front.ok("list_notebooks", json!({}))[0]["this_session"], true);
 
-    // Moving to this computer ends the key there; the new session has no notebook of its own.
+    // On this computer the session has no notebook; back on the machine it still has the one it made there.
     front.ok("use_machine", json!({ "machine": "local" }));
-    assert_eq!(others(), json!([]), "the session ended on the machine");
     front.ok("use_machine", json!({ "machine": "lab" }));
     let listed = front.ok("list_notebooks", json!({}));
-    assert_eq!(listed[0]["this_session"], false, "a new session, so it isn't bound to the notebook any more: {listed}");
-    front.ok("open_notebook", json!({ "path": path }));
-    assert_eq!(others().as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["this_session"], true, "the same key, so the same binding: {listed}");
 
-    // The front's own end ends its session, lets go of the machine, and leaves the runtime.
+    // The front's end tells the runtime nothing: it lets go of the machine and leaves the runtime.
     let runtime = place.runtime().unwrap();
     front.finish();
-    wait_for("the session to end on the machine", || others() == json!([]));
     assert!(pid_alive(runtime));
     wait_for("the connection to end", || place.helpers().is_empty());
 }
@@ -1511,8 +1500,13 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     assert_eq!((used["state"].as_str(), used["already_running"].clone(), used["job"]["id"].as_str()), (Some("ready"), json!(true), Some("42")), "{used}");
     assert!(used["message"].as_str().unwrap().contains("The job ends in"), "{used}");
 
+    // The first session went without saying so, and its last call was lately.
+    let refused = second.ok("stop_machine", json!({ "machine": "hpc" }));
+    assert_eq!((refused["stopped"].clone(), refused["active_sessions"].clone()), (json!(false), json!(1)), "{refused}");
+    assert_eq!(slurm.read("scancel.log"), "", "nothing was cancelled");
+
     // Stopping cancels the job.
-    let stopped = second.ok("stop_machine", json!({ "machine": "hpc" }));
+    let stopped = second.ok("stop_machine", json!({ "machine": "hpc", "force": true }));
     assert_eq!(stopped["stopped"], true, "{stopped}");
     assert_eq!(slurm.read("scancel.log").trim(), "42");
     assert!(stopped["message"].as_str().unwrap().contains("Slurm job was cancelled"));

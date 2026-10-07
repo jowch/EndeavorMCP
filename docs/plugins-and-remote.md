@@ -11,7 +11,8 @@ untested._
 
 _Revised 2026-10-07: see [The revision](#the-revision-decided-2026-10-07).
 It removed the link process, a background process for each server, and the
-front's own local launcher. Steps 1 to 3 of it are built and the sections
+front's own local launcher and the end-of-session and other-sessions
+records. Steps 1 to 4 of it are built and the sections
 below describe them; the later steps are marked where they change a
 section._
 
@@ -36,7 +37,7 @@ section._
 
 ## The revision (decided 2026-10-07)
 
-Steps 1 to 3 of the order of work below are built; steps 4 to 6 are not. It was
+Steps 1 to 4 of the order of work below are built; steps 5 and 6 are not. It was
 decided after three review rounds found most of their faults in two places:
 between the front and the link process it used, and where the front started
 this computer's runtime with code of its own beside the helper's.
@@ -77,17 +78,19 @@ harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ─�
   only in how the runtime's address is obtained and how it is stopped
   (`Provider`, `standalone/target.rs`). There is one status, one way to use a
   machine and one way to stop its runtime.
-- **Sessions come and go without ceremony.** A client attaches, works and
-  goes quiet. Nothing says "I'm done": `endeavor/end_session` and the
-  record of ended sessions go. The runtime keeps, for each session, the
-  notebook it works in, what it has read, and the time of its last call,
-  which is used only to forget a session after 7 days.
-- **No list of other sessions.** `other_sessions` and `active_seconds_ago`
-  go from `list_notebooks` and `pluto_session_status`, and the skill no
-  longer tells the agent to mention them. Reading before writing
+- **Sessions come and go without ceremony** (built). A client attaches,
+  works and goes quiet. Nothing says "I'm done": `endeavor/end_session` and
+  the record of ended sessions are gone. The runtime keeps, for each
+  session, the notebook it works in, what it has read, and the time of its
+  last call, which is used to forget a session after 7 days and by the check
+  `stop_machine` makes before it stops a runtime.
+- **No list of other sessions** (built). `other_sessions` and
+  `active_seconds_ago` are gone from `list_notebooks` and
+  `pluto_session_status`, with the label a client sent, and the skill no
+  longer tells the agent to mention other sessions. Reading before writing
   (`stale_read`) and the check before a run (`run_conflict`) are what keep
-  two sessions from undoing each other, and they stay. The note that names
-  cells another session changed lately (`other_session`) goes as well.
+  two sessions from undoing each other, and they stay. The note that named
+  cells another session changed lately (`other_session`) is gone as well.
 - **One rule ends a notebook: the idle limit.** It is the same on this
   computer and on a server, whoever started the runtime, and it is recorded
   with the runtime. The app's "local notebooks quit with the app" is not
@@ -104,13 +107,16 @@ harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ─�
   second target type for this computer (`Target::Local`, `use_local`,
   `stop_local`, the front's own start and attach).
 
-**What goes (step 4).** In the runtime: `end_session`, the ended list, the
-other-sessions list.
+**What went (step 4).** In the runtime: `end_session`, the ended list, the
+other-sessions list and the label it needed, and the note about cells another
+session changed. In the front: ending its key when its input ends, when the
+session moves and when `stop_machine` looks at another runtime, the new key
+for each runtime, and the agent's name that went with the label.
 
-Step 3 took 801 lines of source out net (1,299 deleted, 498 added), and 771
-lines of tests with them. About 600 lines of the link (the connect, retry and
-re-attach rules) moved into the library in step 2. The larger gain is fewer
-places that decide.
+Step 4 took 233 lines of source out net (330 deleted, 97 added), and 143 lines
+of tests with them (222 deleted, 79 added). The runtime and the front now share
+no sign-out and no label, and `stop_machine`'s question to the runtime is
+a count and a time instead of the whole list of notebooks.
 
 **What stays.** The helper, the wire protocol with request ids, the process
 and Slurm launchers and `job.json`, the client library's `ssh` and channel,
@@ -187,13 +193,23 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    `_ROOT`, `_STATE`, `_DEPOT`, `_ASK`) are read where the session is made.
 4. The session records: no `end_session`, no other-sessions list; the
    skills and tool descriptions follow.
+   _Built 2026-10-07._ The runtime no longer has `endeavor/end_session`, the
+   ended list, `other_sessions`, the client label (`X-Endeavor-Client`, the
+   name from `initialize`), the `other_session` warning or the time on a
+   cell's change record. The front no longer ends its key anywhere, and has
+   one key for its whole run: a key ended on the old runtime was what made a
+   new one necessary, and a binding on a runtime a session returns to is the
+   notebook it made there. `stop_machine` asks the runtime for how many other
+   sessions made a tool call in the last 15 minutes and how long ago the
+   latest did (`endeavor/recent_sessions`, which records no call), and
+   refuses without `force` when there is one.
 5. One idle rule, recorded in `runtime.json`.
 6. One local state folder for the app and the plugin, with the paths module.
 
 **Decided on the open points (2026-10-07).**
 
 - The note that names cells another session changed in the last two minutes
-  (`other_session`) goes too. It is added for any cell of the notebook, not
+  (`other_session`) went too. It is added for any cell of the notebook, not
   only the ones a session works on, and reading before writing already
   covers those.
 - Codex on Windows is not supported for now: it puts an MCP server in a job
@@ -343,10 +359,14 @@ request, as it does for a runtime on this computer.
 **The session key.** The front makes a key for its run and sends it on
 every request, with the server's name once it uses a server. The front
 outlives a dropped `ssh`, so the agent keeps its notebook when the
-connection is made again. When the session moves to another runtime, the front
-ends its key on the old one and makes a new one (`<first key>-N`): a runtime
-ignores a key it has ended, and a notebook binding means nothing on another
-runtime.
+connection is made again. The key is the same on every runtime the session
+uses, and nothing ends it. Each runtime binds a key to a notebook of its own,
+so a binding means nothing on another runtime. Coming back to a runtime the
+session worked on, the key finds the notebook it made there: it works on that
+notebook, and the one-notebook rule holds as it did before it left. The
+front said "a new key (`<first key>-N`)" before: it was needed only because a
+runtime ignored a key it had ended, and the old key also made the front's own
+earlier session look like another one to the check before a stop.
 
 **What the front does with a target (built).** The front holds one session
 for each machine it uses (`Connections`, `standalone/machines.rs`), made by
@@ -421,10 +441,9 @@ runtime already running from it is found and not started twice.
 end of the helper's input closes without a Stop or Detach, which happens
 when the app crashes. It stops the runtime for every client, as Stop does, so
 it is only for an app on the same computer. An ordinary quit is the app's
-own Stop or Detach. Not built: the app should detach instead of stopping
-when `other_sessions` shows another session was active lately. (Changes
-with the revision: there is no such list, and the app detaches when it
-quits; the idle limit ends its notebooks.)
+own Stop or Detach. Not built: the app only detaches when it quits (there
+is no list of other sessions to decide by); the idle limit ends its
+notebooks.
 
 **The package folder locally.** On servers the app and `serve` already use
 the same one. On your own computer they differ (the app's is in its data
@@ -439,10 +458,12 @@ in the queue, so a second helper waits for the same job.
 
 **Stopping the runtime stops it for everyone.** It is not part of ordinary work:
 the idle stop and a job's time limit end a runtime. `stop_machine` is for
-when you ask, such as to give a cluster node back. It first says which
-other sessions were active lately (not with the revision, which has no such
-list), and the clients still attached are told
-the runtime was stopped from another connection. Every `Stop` and `StartRuntime` carries an id the client chooses, and the
+when you ask, such as to give a cluster node back. Stopping ends other
+clients' work, which reading before writing does not guard, so it first
+refuses, without `force`, when another session made a tool call in the last
+15 minutes, and says how many and how long ago the latest did; and the
+clients still attached are told the runtime was stopped from another
+connection. Every `Stop` and `StartRuntime` carries an id the client chooses, and the
 helper answers each once, naming it: `Stopped` or `NotStopped` and why, and for
 a start `Ready`, `StartFailed`, `NeedsInstall`, `StartDied` or `StartCancelled`. A
 stop that ends a start under way is answered with its own `Stopped`, and the
@@ -483,12 +504,12 @@ it with the relay.
 
 - It uses the shared state folder, on servers and on your computer, and one
   package folder locally.
-- Quitting detaches, and stops the local runtime only when `other_sessions`
-  shows no other session was active lately. (Changes with the revision:
-  quitting only detaches.)
+- Quitting only detaches.
 - It no longer hears "In use from another connection": nothing makes it
-  exit. It can show a notebook's other sessions instead. (Not with the
-  revision.)
+  exit. The runtime has no list of other sessions to show instead.
+- It does not call `endeavor/end_session` (gone: an unknown method) or read
+  `other_sessions` (gone from `list_notebooks` and `pluto_session_status`). A
+  session it drops is left to go quiet; the runtime forgets it after 7 days.
 - Its rule for a runtime from another build compares builds for equality,
   so it would hold back runs in Ask to run whenever the plugin's build
   started the runtime. It should ask what the runtime can do.
@@ -551,11 +572,9 @@ Built:
   how a new agent session picks up yesterday's notebook. The app's own calls
   get the same result: it lists first and only opens what isn't open, so it
   never relied on the error.
-- **Who else is there** (goes with the revision; only the time of a
-  session's last call is kept). The core records each session's last call and a
-  label its client sends ("Claude Code on jc-workstation"). `list_notebooks`
-  and `pluto_session_status` show a notebook's other sessions and how lately
-  each was active, so an agent can say that someone else is working there
+- **Who else is there** is not shown: the core keeps only the time of each
+  session's last call, to forget a session after 7 days and for the check
+  before `stop_machine` stops a runtime
   ([endeavor-mcp.md](endeavor-mcp.md#session-identity)).
 
 Each session still works in one notebook (`one_notebook`), as today.
@@ -647,12 +666,10 @@ needs a new job, the result says so and the agent asks you.
 | `list_machines` | Saved machines with their state, and ssh `Host` names not yet added |
 | `add_machine` | Connect to an ssh alias, report and save what was found; installs the helper only with `install: true`, which the user agreed to |
 | `use_machine` | Put this session on a machine (or back on this computer), with a folder and, on a cluster, resources. Attaches to the runtime there, starts it, or submits the job |
-| `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Says first who else was active (not with the revision). Needs this build's helper there, so it can ask to install it too |
+| `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Refuses first, without `force`, when another session made a tool call in the last 15 minutes, and says how many and how long ago. Needs this build's helper there, so it can ask to install it too |
 
 `open_notebook` joins a notebook that is already open. `list_notebooks` and
-`pluto_session_status` gain a notebook's other sessions and when each was
-last active (these go with the revision), and the machine, the job and its
-end time.
+`pluto_session_status` gain the machine, the job and its end time.
 
 `list_folder`, `read_file` and `run_shell` run on the server. The runtime
 lists and allows them only for a session that names its server, so the
@@ -672,8 +689,8 @@ defaults.
   Julia) without asking: a `needs_install` result says what it would do; set
   `install: true` only after the user agreed to that. Julia's download is a
   separate question from the helper's, asked again for each start that needs it.
-- When another session was active in your notebook lately, say so before
-  you change it. (Goes with the revision.)
+- Several agents can work in one notebook; when a write or a run is refused
+  with `stale_read` or `run_conflict`, read the cells again and retry.
 - Never ask for a password or passphrase, and never run `ssh` with one.
 - On a server, files are there: use `list_folder`, `read_file` and
   `run_shell`. A project checked out on both machines has the same paths in
@@ -912,7 +929,8 @@ server starts (if not, the first start downloads, as in the other agents).
 1. Move the client code here as a library. Test it against a server with key
    login.
 2. Helpers attach without making each other exit (built). Opening an open
-   notebook joins it, and the core shows a notebook's other sessions.
+   notebook joins it. (The core also showed a notebook's other sessions; the
+   revision removed that.)
 3. The machine tools in `mcp` (built), with the `endeavor-machines` skill.
    They first reached a server through a link process, which the revision
    (item 7) removed.
@@ -928,7 +946,7 @@ server starts (if not, the first start downloads, as in the other agents).
    plugin's binary alone. The pinned key is set after the first release from
    `main`.
 7. The revision of 2026-10-07, in the order given in
-   [The revision](#the-revision-decided-2026-10-07); steps 1 to 3 are built.
+   [The revision](#the-revision-decided-2026-10-07); steps 1 to 4 are built.
    It comes before the app, which then takes the library as revised.
 8. The app: the moved code, the shared state folder, a version on its calls
    to the runtime, and attaching and detaching as the plugin does.

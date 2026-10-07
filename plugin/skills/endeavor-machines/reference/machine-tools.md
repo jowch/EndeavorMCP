@@ -5,7 +5,7 @@
 | `list_machines` | The added machines, `"local"`, which one this session uses, and `Host` names in `~/.ssh/config` not added yet | Starts no connection; safe anytime. A machine has a state only while this session is connected to it; otherwise it says `not connected`, which doesn't say whether Julia runs there |
 | `add_machine(host, name?, julia?, slurm?, install?)` | Connect to an ssh alias or `user@host`, report and save what was found | Waits up to 45 s. Existing machine: updates it. Failure: nothing saved. Installs the helper only with `install: true`, after the user agreed; it never downloads Julia |
 | `use_machine(machine, folder?, …)` | Put this session on a machine, or back on `"local"` | Cluster resources below. Remembered by the project |
-| `stop_machine(machine, force?, install?)` | Stop the runtime there for every client | Refuses and names who when another session was active in the last 15 minutes. Needs this plugin's helper on the machine: if only an older one is there it returns `needs_install` and stops nothing |
+| `stop_machine(machine, force?, install?)` | Stop the runtime there for every client | Refuses and says how many when another session made a tool call in the last 15 minutes. Needs this plugin's helper on the machine: if only an older one is there it returns `needs_install` and stops nothing |
 
 `machine` is a name from `list_machines`, or `"local"` for the user's own computer. A tool that fails says why in `message`.
 
@@ -41,7 +41,7 @@ A call that fails (a bad argument or partition, a machine that can't be reached)
 
 ## stop_machine
 
-Result `stopped` true, or false with a `message` telling you to ask the user: `other_sessions` (each `client`, `active_seconds_ago`, `notebook`) when another session was active lately; `state` `starting` or `queued` with `job` and `queue` when Julia is on its way or a job waits (stopping cancels it for any session waiting). It is an error, naming `force: true`, when it can't find out who else is active. `force: true` stops anyway, only after the user agreed.
+Result `stopped` true, or false with a `message` telling you to ask the user: `active_sessions` and `active_seconds_ago` (how many other sessions made a tool call in the last 15 minutes, and how long ago the latest did) when there were any; `state` `starting` or `queued` with `job` and `queue` when Julia is on its way or a job waits (stopping cancels it for any session waiting). It is an error, naming `force: true`, when it can't find out who else is active. `force: true` stops anyway, only after the user agreed.
 
 ## Local
 

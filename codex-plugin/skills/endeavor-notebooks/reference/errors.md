@@ -38,7 +38,6 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `execution_timeout` | A waited run returned with the named cell still running or queued. Rare: a waited run blocks until the run ends. Read the cell later |
 | `also_ran` | The run also ran the named cells: ones your cells depend on that had never run |
 | `already_ran` | The user ran your staged cells before your run reached them, so they were not run a second time. The outputs are from that run |
-| `other_session` | Another session changed the named cells in the last two minutes. Read them before relying on them |
 | `run_conflict` | From `add_cell` or `edit_cell` with `run_after`: the edit was made and staged, not run. Read the named cells, then `submit_changes` |
 
 A cell that failed is not a tool error: `read_cell` shows `errored` and an `error` object whose `kind` depends on the engine.

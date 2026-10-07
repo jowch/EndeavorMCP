@@ -48,9 +48,8 @@ Endeavor signs in with the user's own ssh keys and ssh agent. Never ask for a pa
 ## Stopping and other people
 
 - `stop_machine` ends the runtime for every client, and on a cluster cancels the job. Call it only when the user asks, such as to give a node back.
-- If another session was active in a notebook on the machine in the last 15 minutes, it refuses and names who. Tell the user; call again with `force: true` only if they say to go ahead.
+- If another session made a tool call on the machine in the last 15 minutes, it refuses and says how many and how long ago the latest was. Tell the user; call again with `force: true` only if they say to go ahead.
 - It also refuses, without `force`, while Julia is still starting or a job is queued (it names the job), since sessions waiting for it can't be seen, and when it can't check who else is active. Same rule: tell the user, and use `force: true` only if they agree. On this computer a start can't be cancelled: wait until Julia is up, then stop it.
-- Before you change a notebook, `list_notebooks` shows `other_sessions`; if one was active in the last few minutes, say so first.
 - After a stop the session stays pointed at the machine. Notebook calls say it was stopped; `use_machine` starts it again.
 
 Details of each tool and its result: [machine-tools.md](reference/machine-tools.md).

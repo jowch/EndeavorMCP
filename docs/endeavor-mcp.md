@@ -234,23 +234,24 @@ calls, which carry no session, get the same result. A session already bound
 to another notebook is still refused (`one_notebook`).
 
 Each session also leaves a record: when it last made a tool call (a held
-`/endeavor/events` stream doesn't count) and a label for its client. The label
-is the `X-Endeavor-Client` header, else, for a client that got an
-`Mcp-Session-Id`, the `clientInfo.name` from its `initialize`. It is cut to
-printable characters, trimmed and at most 80 long. `endeavor mcp` sends
-"<agent's name, else endeavor mcp> on <host name>". `list_notebooks` and
-`pluto_session_status` give each notebook `other_sessions`: an entry for each
-other session bound to it, `{client, active_seconds_ago}`, with null for
-what isn't known. A session has a record from when it is bound, makes a
-tool call or is given an id, and only sessions with a record are listed.
-The record goes when the binding is cleared, and a week after the session's
-last call (after it was made, if there was none). `endeavor mcp` sends
-`endeavor/end_session` with its key when the agent's input ends. The core
-unbinds the session and drops its record, folder and run policy, and from
-then on a call of that session still under way binds nothing and leaves no
-record. The key is unique to the process, so an ended session never returns;
-the core forgets that it ended a week later. A front that is killed can't
-send it, so its session drops out after the week.
+`/endeavor/events` stream doesn't count). A session has a record from when it
+is bound or makes a tool call. The record goes when the binding is cleared, and
+a week after the session's last call (after it was bound, if it made none),
+with the binding. Nothing else is kept about a session but the notebook it
+works in and what it has read (for `stale_read` and `run_conflict`): there is
+no sign-out, no label for the client, and no list of other sessions in
+`list_notebooks` or `pluto_session_status`. A session whose agent has gone
+just stops calling. A call still under way when it goes may bind it to a
+notebook; that is forgotten a week after its last call like any other.
+
+One thing reads the records besides forgetting: `stop_machine` asks the runtime
+(`endeavor/recent_sessions`, with `owner` and `within_seconds`) how many
+sessions other than `owner` made a tool call within that time, and how long ago
+the latest did: `{count, active_seconds_ago}` (null when none). The question
+records no call. `endeavor/end_session` is gone, as are `other_sessions` and
+`active_seconds_ago` in the results of `list_notebooks` and
+`pluto_session_status`, the `X-Endeavor-Client` header and the `other_session`
+warning.
 
 **Where the browser reaches the runtime.** The results that name a notebook or
 the session (`new_notebook`, `open_notebook`, `pluto_session_status`) carry a
@@ -278,17 +279,17 @@ the runtime `X-Endeavor-Host: <name>` (so it lists and allows the host tools
 for this session) and `X-Endeavor-Browser-Port: <the connection's port on this computer>`
 (see [Session identity](#session-identity)), and gives it the session's folder
 with `endeavor/set_session_folder` each time it attaches to a runtime there.
-When the session moves to another runtime the front ends its key on the old
-one (`endeavor/end_session`) and makes a new key, since a runtime that has ended
-a key ignores it afterwards, and a notebook binding means nothing on another
-runtime. A session starts with no notebook on the machine it moves to. A call's
-route (port, token, host) and the session's key are taken together and a move
-replaces both together, so a call that races a move goes whole to the old
-runtime or whole to the new one. `use_machine` does everything that can fail,
-and the request to start or attach, first; only when the request was taken does
-the session move, its old key end and the project remember the machine. A call
-that fails, and `needs_job`, leave the session, its key and `projects.json` as
-they were.
+The session keeps its key when it moves to another runtime, and nothing is
+told to the old one: a notebook binding is each runtime's own, so a session
+starts with no notebook on a machine it has not worked on, and finds the
+notebook it made on one it comes back to (that runtime still has its binding,
+unless the runtime was restarted or the record was forgotten after a week). A
+call's route (port, token, host) is taken from the target when the call is
+made, so a call that races a move goes whole to the old runtime or whole to
+the new one. `use_machine` does everything that can fail, and the request to
+start or attach, first; only when the request was taken does the session move
+and the project remember the machine. A call that fails, and `needs_job`,
+leave the session and `projects.json` as they were.
 
 Each machine tool call has one 45 s deadline from the moment it arrives. Waiting
 for the one machine tool call that may run at a time and every wait for a machine
@@ -301,7 +302,7 @@ wait that runs out is a result that says what step it is at and to call again.
 | `list_machines` | none | `machines`: each `{name, host, cluster, state, this_session}` (`state` is `not connected`, or, for a machine this session is connected to, the connection's: `connecting`, `connected`, `starting`, `queued`, `ready`, `failed`, `needs_install`, with `error`); `local` `{name, state, this_session}`; `this_session.machine`; `ssh_hosts_not_added`; `message`. Starts nothing and connects to nothing: a machine this process has no connection to is listed as saved, `not connected`, which says nothing about whether Julia runs there |
 | `add_machine` | `host` (an ssh alias or `user@host[:port]`, through `valid_host`), `name`, `julia`, `slurm` (boolean), `install` (boolean, only after the user agreed; covers the helper only) | `{machine, host, state, saved, updated, node, home, os, arch, slurm, cluster, runs_in, partitions: [{name, default, max_hours, cpus, memory_gb}], scratch, found, message}`. `slurm` is whether Slurm was found; `cluster` and `runs_in` (`slurm_jobs` or `directly`) are what is used. `state` is `connecting` when 45 s ran out; call again. `needs_install` when this build's helper isn't on the machine and `install` wasn't given: `install` `{items: [{kind: "helper", name, size_mb, place}], os, arch, update, running}` (`size_mb` is null for a server of another platform than this computer's; `running` is `{process}` or `{slurm_job}` when a runtime is recorded and alive there, and `{process_recorded}` or `{slurm_job_recorded}` when it is recorded and alive but `ps` or `squeue` couldn't say more, else null), `saved` true (not added), and a `message` that tells the agent to ask the user. `found` (`[{name, version, path}]`, Julia once a runtime has been started there) is empty until then |
 | `use_machine` | `machine` (a name, or `"local"`), `folder`, `install` (boolean, only after the user agreed); on a cluster `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | `{machine, state, ready, message, …}`. `ready`: `browser_url` (works while this session is connected), `node`, `remote_port` (the runtime's own port on `node`; null when an older helper didn't say), `folder`, `already_running`, and for a cluster `job` `{id, summary, node, ends_at, ends_in_minutes}`. `starting`, `queued`: `step`, `queue` `{state, reason, reason_text}`, `job`. `needs_job`: a cluster with nothing running and no resources given; `defaults`, `partitions`; nothing was submitted and the session did not move. `needs_install`: the machine lacks this build's helper (an update when an older one is there), or what the start needs, such as Julia when none was found (`install` `{items: [{kind, name, size_mb, place}], …}`); nothing was installed and the session did not move; call again with `install: true` after the user agreed. One yes covers everything this call needs, the helper and then Julia if none is found; the helper's agreement from `add_machine` covers the helper only. `gpus` 0 is no GPU (it overrides and clears the saved default); each `extra_sbatch_flags` entry starts with `-`, and `--wrap` and line breaks are refused |
-| `stop_machine` | `machine`, `force`, `install` (boolean, only after the user agreed) | `{machine, stopped, message}`; `needs_install` (`stopped` false) when the machine has only an older build's helper, since stopping needs this build's: the same `install` as above, and nothing was stopped; refused without `force` with `other_sessions` `[{client, active_seconds_ago, notebook}]` when another session was active in the last 15 minutes; with `state` `starting`/`queued`, `job` and `queue` when Julia is starting or a job is queued (waiting sessions can't be seen); or as an error when the runtime doesn't answer the check for 5 s |
+| `stop_machine` | `machine`, `force`, `install` (boolean, only after the user agreed) | `{machine, stopped, message}`; `needs_install` (`stopped` false) when the machine has only an older build's helper, since stopping needs this build's: the same `install` as above, and nothing was stopped; refused without `force` with `active_sessions` and `active_seconds_ago` (how many other sessions made a tool call in the last 15 minutes, and how long ago the latest did); with `state` `starting`/`queued`, `job` and `queue` when Julia is starting or a job is queued (waiting sessions can't be seen); or as an error when the runtime doesn't answer the check for 5 s |
 
 `stop_machine` with `"local"` takes `start.lock` first, as the helper's stop does,
 and waits for it up to 20 s (`ENDEAVOR_STOP_LOCK_SECS` sets it for tests); the lock is

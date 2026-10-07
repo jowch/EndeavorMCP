@@ -198,19 +198,13 @@ fn a_new_machine_gets_its_name_as_its_id_or_the_next_free_one() {
 }
 
 #[test]
-fn another_session_counts_as_active_for_fifteen_minutes() {
-    let listed = json!([
-        { "path": "/a.jl", "other_sessions": [{ "client": "Claude Code on lab", "active_seconds_ago": 600 }, { "client": null, "active_seconds_ago": 5 }] },
-        { "path": "/b.jl", "other_sessions": [{ "client": "old", "active_seconds_ago": 901 }, { "client": "never", "active_seconds_ago": null }] },
-        { "path": "/c.jl" },
-    ]);
-    let recent = recent_sessions(&listed);
-    assert_eq!(recent, vec![json!({ "client": null, "active_seconds_ago": 5, "notebook": "/a.jl" }), json!({ "client": "Claude Code on lab", "active_seconds_ago": 600, "notebook": "/a.jl" })]);
-    let said = others_result("hpc", recent);
-    assert_eq!(said["stopped"], false);
+fn stopping_refuses_with_how_many_sessions_were_active_and_how_long_ago() {
+    let said = others_result("hpc", &Others { count: 2, seconds_ago: 600 });
+    assert_eq!((said["stopped"].clone(), said["active_sessions"].clone(), said["active_seconds_ago"].clone()), (json!(false), json!(2), json!(600)));
     let message = said["message"].as_str().unwrap();
-    assert!(message.contains("an unnamed client (less than a minute ago) in /a.jl") && message.contains("Claude Code on lab (10 min ago) in /a.jl") && message.contains("force true"), "{message}");
-    assert!(recent_sessions(&json!([])).is_empty());
+    assert!(message.contains("2 other sessions were active on hpc in the last 15 minutes, the latest 10 min ago") && message.contains("force true"), "{message}");
+    let message = others_result("hpc", &Others { count: 1, seconds_ago: 5 })["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("another session was active on hpc") && message.contains("the latest less than a minute ago"), "{message}");
 }
 
 #[test]
@@ -261,32 +255,8 @@ fn stopping_without_force_a_start_that_is_under_way_names_what_would_be_cancelle
 }
 
 #[test]
-fn a_route_keeps_the_key_it_was_taken_with_when_the_session_moves() {
-    let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
-    let folder = relay.options.folder.clone();
-    let (before, key_before) = relay.placed();
-    assert!(before.is_local() && before.active);
-    let server = Server { id: "lab".into(), name: "Lab".into(), ssh_host: "lab".into(), ..Default::default() };
-    let (left, old, ended) = relay.switch(Target::new(&server, None));
-    assert!((left.is_local(), old.as_str(), ended) == (true, key_before.as_str(), true));
-    let (after, key_after) = relay.placed();
-    assert_eq!(after.id, "lab");
-    assert_ne!(key_after, key_before, "a new key goes with the new target");
-    let (_, again, ended) = relay.switch(Target::new(&server, Some("/work".into())));
-    assert_eq!((again.as_str(), ended), (key_after.as_str(), false), "the same machine keeps its key");
-    assert_eq!(relay.session(), key_after);
-    let (_, _, ended) = relay.switch(Target::local(&folder));
-    assert!(ended);
-    assert_ne!(relay.session(), key_after);
-    let local_key = relay.session();
-    let (_, _, ended) = relay.switch(Target::local(&folder));
-    assert!(!ended && relay.session() == local_key, "this computer to this computer is the same runtime");
-}
-
-#[test]
 fn a_tool_call_that_cannot_get_the_lock_in_time_changes_nothing() {
     let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
-    let key = relay.session();
     let _busy = relay.ops.lock().unwrap();
     let started = Instant::now();
     let slow = Deadline::after(Duration::from_millis(300));
@@ -299,8 +269,8 @@ fn a_tool_call_that_cannot_get_the_lock_in_time_changes_nothing() {
         assert!(said.contains("Another machine tool call is still running") && said.contains("changed nothing"), "{said}");
     }
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-    let (target, session) = relay.placed();
-    assert!(target.is_local() && target.active && session == key);
+    let target = relay.current();
+    assert!(target.is_local() && target.active);
 }
 
 #[test]
@@ -313,9 +283,8 @@ fn a_runtime_that_never_answers_the_check_for_other_sessions_is_given_up_on() {
         drop(socket);
     });
     let relay = Relay::new(options(), "s".into(), Box::new(std::io::sink()));
-    let route = Route { port, token: "t".into(), session: "s".into(), host: None };
     let started = Instant::now();
-    let said = relay.recent_others(&route, Duration::from_millis(400)).unwrap_err();
+    let said = relay.recent_others(port, "t", Duration::from_millis(400)).unwrap_err();
     assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
     assert!(said.starts_with("Nothing was stopped: couldn't check who else is active there (the runtime didn't answer in time)") && said.contains("`force: true`"), "{said}");
     holder.join().unwrap();
@@ -412,7 +381,7 @@ fn this_computer_is_called_this_computer_in_what_an_agent_reads() {
         not_ready_message("local", &reached(Outcome::NothingRunning, status(State::Connected))),
         not_ready_message("local", &reached(Outcome::Failed("no julia".into()), status(State::Failed))),
         waiting_result("local", &status(State::Starting))["message"].as_str().unwrap().to_owned(),
-        others_result("local", vec![json!({ "client": "Claude Code", "active_seconds_ago": 5, "notebook": "a.jl" })])["message"].as_str().unwrap().to_owned(),
+        others_result("local", &Others { count: 1, seconds_ago: 5 })["message"].as_str().unwrap().to_owned(),
     ];
     for said in &said {
         assert!(said.contains("this computer") && !said.contains("on local"), "{said}");
@@ -474,7 +443,7 @@ fn a_notebook_call_reports_a_failed_start_once_and_the_next_one_tries_again_and_
     let first = route(Need::Start);
     assert!(first.message.contains("isn't available") && first.message.contains("this computer"), "{}", first.message);
     let tried = runs();
-    assert!(tried > 0 && relay.placed().0.failed);
+    assert!(tried > 0 && relay.current().failed);
 
     let status = route(Need::Peek);
     let reached = status.reached.expect("the status tool says how it stands");
@@ -482,7 +451,7 @@ fn a_notebook_call_reports_a_failed_start_once_and_the_next_one_tries_again_and_
     assert!(route(Need::Look).message.contains("isn't available"));
     assert!(route(Need::Peek).message.contains("isn't available"), "a query doesn't use up the report");
     assert_eq!(runs(), tried, "no query tried again");
-    assert!(relay.placed().0.failed);
+    assert!(relay.current().failed);
 
     assert!(route(Need::Start).message.contains("isn't available"));
     assert!(runs() > tried, "the notebook call after the report tried again");

@@ -6,8 +6,8 @@
 //!
 //! A session is on this computer or on one machine. Its calls go to the
 //! runtime there, a machine's with `X-Endeavor-Host` and `X-Endeavor-Browser-Port`.
-//! When the session moves to another runtime its key on the old one is ended and
-//! it gets a new key, so nothing of its one-notebook binding carries over.
+//! The session keeps one key on every runtime it uses; each runtime binds the
+//! key to a notebook of its own.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
@@ -30,7 +30,7 @@ pub(super) fn text_result(text: &str) -> Value {
 /// What `use_machine` and `stop_machine` call this computer.
 pub(super) const LOCAL: &str = "local";
 
-/// Another session counts as active in a notebook if it called a tool this lately.
+/// Another session counts as active if it called a tool this lately.
 const RECENT_SECONDS: u64 = 15 * 60;
 
 /// How long a runtime may say nothing to the question of who else is active before `stop_machine` gives up on it.
@@ -635,30 +635,6 @@ impl Relay {
         }
     }
 
-    /// The runtime's port and token on `target`, if its provider says it is up. Starts nothing.
-    pub(super) fn runtime_of(&self, target: &Target) -> Option<(u16, String)> {
-        let runtime = self.held(target)?.status().runtime?;
-        Some((runtime.port, runtime.token))
-    }
-
-    /// The session moves to `next`. The target and the session's key are replaced together, by a
-    /// key the runtime hasn't ended unless the session stays on the runtime it is on. What it left:
-    /// the target, the key it had there, and whether the key is to be ended there (`leave`).
-    pub(super) fn switch(&self, next: Target) -> (Target, String, bool) {
-        let mut target = self.target.lock().unwrap();
-        let stays = target.id == next.id;
-        let previous = std::mem::replace(&mut *target, next);
-        let mut session = self.session.lock().unwrap();
-        let before = std::mem::take(&mut *session);
-        *session = if stays {
-            before.clone()
-        } else {
-            let n = self.sessions.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            format!("{}-{n}", self.session_base)
-        };
-        (previous, before, !stays)
-    }
-
     /// The project's remembered machine becomes the target, without starting anything.
     pub(super) fn target_from_project(&self) {
         let remembered = match self.projects.get(&self.options.folder) {
@@ -689,7 +665,7 @@ impl Relay {
     /// is not, since it needs a job the user agreed to. A failure is kept for every call; only a call that
     /// needs a runtime and has reported it asks to try again.
     pub(super) fn route(&self, need: Need, deadline: Deadline) -> Result<Route, NotReady> {
-        let (target, key) = self.placed();
+        let target = self.current();
         let name = target.name.clone();
         if !target.active {
             return Err(self.stopped(&target));
@@ -708,7 +684,7 @@ impl Relay {
             // Checked and issued under the target's lock, which `stop_machine` also takes to mark the runtime stopped: a stop can't come between.
             let issued = {
                 let now = self.target.lock().unwrap();
-                if let Some(unready) = self.moved(&now, &target, &key, &provider) {
+                if let Some(unready) = self.moved(&now, &target, &provider) {
                     return Err(unready);
                 }
                 provider.ensure(Want::Start { job: None, install: false }, Duration::ZERO, false)
@@ -716,7 +692,7 @@ impl Relay {
             outcome = if matches!(issued, Outcome::StillWorking(_)) { provider.ensure(Want::Start { job: None, install: false }, deadline.left(), false) } else { issued };
         }
         // Another tool call may have moved the session, replaced the connection or stopped the runtime during the wait.
-        if let Some(unready) = self.moved(&self.target.lock().unwrap(), &target, &key, &provider) {
+        if let Some(unready) = self.moved(&self.target.lock().unwrap(), &target, &provider) {
             return Err(unready);
         }
         if need == Need::Start {
@@ -726,7 +702,7 @@ impl Relay {
         // A start another process has under way is not "nothing runs".
         let outcome = if matches!(outcome, Outcome::NothingRunning) && status.state == State::Starting { Outcome::StillWorking(String::new()) } else { outcome };
         match outcome {
-            Outcome::Ready(runtime) => Ok(self.ready(&target, &runtime, status.hello.as_ref().map(|h| h.home.as_str()), &key)),
+            Outcome::Ready(runtime) => Ok(self.ready(&target, &runtime, status.hello.as_ref().map(|h| h.home.as_str()))),
             Outcome::NothingRunning if provider.cluster() => Err(NotReady::of(&name, Outcome::NothingRunning, status, self.needs_job_message(&target))),
             Outcome::NothingRunning => {
                 let message = format!("Julia on {} isn't running. It starts at the first notebook tool call, which then takes a few minutes the first time.", place(&name));
@@ -740,9 +716,9 @@ impl Relay {
         }
     }
 
-    /// Whether the session is no longer where `target` and `key` had it, with `provider`: the reason, if so.
-    fn moved(&self, now: &Target, target: &Target, key: &str, provider: &Arc<dyn Provider>) -> Option<NotReady> {
-        if now.id != target.id || *self.session.lock().unwrap() != key {
+    /// Whether the session is no longer where `target` had it, with `provider`: the reason, if so.
+    fn moved(&self, now: &Target, target: &Target, provider: &Arc<dyn Provider>) -> Option<NotReady> {
+        if now.id != target.id {
             return Some(NotReady::plain("This session moved to another machine while the call waited. Try the call again."));
         }
         if !self.held(now).is_some_and(|now| std::ptr::addr_eq(Arc::as_ptr(&now), Arc::as_ptr(provider))) {
@@ -769,15 +745,15 @@ impl Relay {
 
     /// Where calls to `target`'s runtime go, once it is ready; the session's folder is told to it once.
     /// `home` is the machine's home folder, which is the session's folder when `use_machine` gave none.
-    fn ready(&self, target: &Target, runtime: &RuntimeInfo, home: Option<&str>, session: &str) -> Route {
+    fn ready(&self, target: &Target, runtime: &RuntimeInfo, home: Option<&str>) -> Route {
         if target.told != Some(runtime.pid) {
             let folder = target.folder.clone().or_else(|| home.filter(|h| !h.is_empty()).map(str::to_owned));
             if let Some(folder) = folder {
-                self.tell_session_folder(runtime.port, &runtime.token, session, &folder);
+                self.tell_session_folder(runtime.port, &runtime.token, &self.session, &folder);
             }
             self.update_target(&target.id, |t| t.told = Some(runtime.pid));
         }
-        Route { port: runtime.port, token: runtime.token.clone(), session: session.to_owned(), host: target.host() }
+        Route { port: runtime.port, token: runtime.token.clone(), session: self.session.clone(), host: target.host() }
     }
 
     /// For a project's remembered cluster with no job: what to ask the user before submitting one.
@@ -834,7 +810,7 @@ impl Relay {
     }
 
     fn add_machine_fields(&self, reply: &mut Value) -> bool {
-        let (machine, _) = self.placed();
+        let machine = self.current();
         if machine.is_local() {
             return false;
         }
@@ -895,7 +871,7 @@ impl Relay {
 
     fn list_machines(&self) -> Result<Value, String> {
         let servers = self.machines.load()?;
-        let (target, _) = self.placed();
+        let target = self.current();
         let machines: Vec<Value> = servers
             .iter()
             .map(|server| {
@@ -1156,10 +1132,7 @@ impl Relay {
             Outcome::Failed(_) => return Err(format!("{}{}", not_ready_message(&name, &reached), notes.iter().map(|n| format!(" {n}")).collect::<String>())),
             _ => {}
         }
-        let (previous, before, ended) = self.switch(Target::new(&server, folder.clone()));
-        if ended {
-            self.leave(&previous, &before);
-        }
+        *self.target.lock().unwrap() = Target::new(&server, folder.clone());
         if let Some((resources, account)) = saved_resources {
             let mut saved = server.clone();
             if let Some(c) = saved.cluster.as_mut() {
@@ -1202,13 +1175,6 @@ impl Relay {
         self.machines.save(current)
     }
 
-    /// End key `session` on the runtime `target` has, if it is up. Best effort.
-    fn leave(&self, target: &Target, session: &str) {
-        if let Some((port, token)) = self.runtime_of(target) {
-            self.end_session(port, &token, session);
-        }
-    }
-
     fn use_result(&self, server: &Server, reached: Reached, was_ready: bool, notes: Vec<String>) -> Result<Value, String> {
         let name = server.display_name();
         let notes = if notes.is_empty() { String::new() } else { format!(" {}", notes.join(" ")) };
@@ -1217,12 +1183,12 @@ impl Relay {
             result["this_session"] = true.into();
             return Ok(result);
         };
-        let (target, session) = self.placed();
+        let target = self.current();
         if target.id != server.id {
             return Err("The session moved to another machine.".into());
         }
         let home = reached.status.hello.as_ref().map(|h| h.home.clone());
-        let route = self.ready(&target, runtime, home.as_deref(), &session);
+        let route = self.ready(&target, runtime, home.as_deref());
         let mut result = json!({
             "machine": name,
             "state": "ready",
@@ -1231,7 +1197,7 @@ impl Relay {
             "folder": target.folder.clone().or(home),
         });
         if target.is_local() {
-            result["message"] = format!("This session works on this computer again. The host tools (`list_folder`, `read_file`, `run_shell`) don't apply here: use your own file and shell tools. The session has no notebook yet; `new_notebook` or `open_notebook` makes one.{notes}").into();
+            result["message"] = format!("This session works on this computer again. The host tools (`list_folder`, `read_file`, `run_shell`) don't apply here: use your own file and shell tools. The session has no notebook here yet, unless it worked in one here before (`list_notebooks` shows it); `new_notebook` or `open_notebook` makes one.{notes}").into();
             return Ok(result);
         }
         result["node"] = runtime.node.clone().into();
@@ -1243,7 +1209,7 @@ impl Relay {
         let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Julia started there" };
         let ends = job_json(&reached.status).and_then(|j| j["ends_in_minutes"].as_u64()).map(|m| format!(" The job ends in {}.", wire::slurm::duration_text(m as u32))).unwrap_or_default();
         result["message"] = format!(
-            "{on} (node {}). Give the user this address to watch the notebooks: {}.{ends}{} This session has no notebook on {name} yet: create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
+            "{on} (node {}). Give the user this address to watch the notebooks: {}.{ends}{} This session has no notebook on {name} yet, unless it worked in one there before (`list_notebooks` shows it): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
             runtime.node,
             result["browser_url"].as_str().unwrap_or_default(),
             reach_text(server, runtime)
@@ -1278,16 +1244,9 @@ impl Relay {
             return Ok(waiting_result(&name, &status));
         }
         if !force && let Some(runtime) = status.runtime.as_ref() {
-            let key = self.session();
-            let route = Route { port: runtime.port, token: runtime.token.clone(), session: key.clone(), host: Target::new(&server, None).host() };
-            let on_this = self.placed().0.id == server.id;
-            let others = self.recent_others(&route, deadline.left().min(CHECK_WAIT));
-            if !on_this {
-                self.end_session(route.port, &route.token, &key);
-            }
-            let others = others?;
-            if !others.is_empty() {
-                return Ok(others_result(&name, others));
+            let others = self.recent_others(runtime.port, &runtime.token, deadline.left().min(CHECK_WAIT))?;
+            if others.count > 0 {
+                return Ok(others_result(&name, &others));
             }
         }
         // Marked before the runtime is ended, so that a notebook call meanwhile doesn't start it again (`route` checks and starts under the same lock). A stop that fails puts it back, whenever it fails.
@@ -1318,31 +1277,20 @@ impl Relay {
         }))
     }
 
-    /// The other sessions that were active in a notebook lately: who, how long ago, and which notebook.
-    /// The runtime has `quiet` to answer; if it doesn't, or can't be asked, the error says so, and that `force` stops anyway.
-    fn recent_others(&self, route: &Route, quiet: Duration) -> Result<Vec<Value>, String> {
-        let call = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }).to_string();
-        let answer: Mutex<Option<Value>> = Mutex::new(None);
-        let sink = |reply: String| {
-            if let Ok(reply) = serde_json::from_str::<Value>(&reply)
-                && reply.get("result").is_some()
-            {
-                *answer.lock().unwrap() = Some(reply);
-            }
-        };
+    /// The other sessions that called a tool lately. The runtime has `quiet` to answer; if it doesn't,
+    /// or can't be asked, the error says so, and that `force` stops anyway.
+    fn recent_others(&self, port: u16, token: &str, quiet: Duration) -> Result<Others, String> {
         let unknown = |why: String| format!("Nothing was stopped: couldn't check who else is active there ({why}). Stopping ends everyone's notebooks there, so call `stop_machine` again with `force: true` only if the user agrees to stop it anyway.");
-        self.post_within(route, &call, &sink, Some(quiet)).map_err(|e| {
-            unknown(match e {
-                super::Sent::NotConnected(e) | super::Sent::Failed(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => "the runtime didn't answer in time".to_owned(),
-                super::Sent::NotConnected(e) | super::Sent::Failed(e) => e.to_string(),
+        let params = json!({ "owner": self.session, "within_seconds": RECENT_SECONDS });
+        let (status, body) = Relay::tell(port, token, "endeavor/recent_sessions", params, Some(quiet)).map_err(|e| {
+            unknown(match e.kind() {
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => "the runtime didn't answer in time".to_owned(),
+                _ => e.to_string(),
             })
         })?;
-        let reply = answer.into_inner().unwrap().ok_or_else(|| unknown("no answer".into()))?;
-        if reply["result"]["isError"] == true {
-            return Err(unknown(reply["result"]["content"][0]["text"].as_str().unwrap_or_default().to_owned()));
-        }
-        let listed: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap_or("[]")).map_err(|e| unknown(e.to_string()))?;
-        Ok(recent_sessions(&listed))
+        let reply: Value = serde_json::from_slice(&body).map_err(|e| unknown(format!("{status}: {e}")))?;
+        let others = reply.get("result").ok_or_else(|| unknown(reply["error"]["message"].as_str().unwrap_or("no answer").to_owned()))?;
+        Ok(Others { count: others["count"].as_u64().unwrap_or(0), seconds_ago: others["active_seconds_ago"].as_u64().unwrap_or(0) })
     }
 
     /// For a cluster with no job and no resources given: what to ask the user before submitting one. The session stays where it is.
@@ -1350,7 +1298,7 @@ impl Relay {
         let defaults = resources_json(&cluster.resources, cluster.account.as_deref());
         let partitions: Vec<Value> = cluster.partitions.iter().map(partition_json).collect();
         let partition = cluster.resources.partition.as_deref().map_or("the cluster's default partition".to_owned(), |p| format!("partition {p}"));
-        let (target, _) = self.placed();
+        let target = self.current();
         let stays = if target.is_local() { "this computer" } else { &target.name };
         json!({
             "machine": name,
@@ -1419,34 +1367,23 @@ fn choose_mode(slurm: Option<bool>, prior: Option<&Server>, found: bool) -> Resu
     }
 }
 
-/// Sessions in `listed` (the result of `list_notebooks`) that were active in a notebook in the last `RECENT_SECONDS`.
-fn recent_sessions(listed: &Value) -> Vec<Value> {
-    let mut others: Vec<(u64, Value)> = Vec::new();
-    for notebook in listed.as_array().into_iter().flatten() {
-        for session in notebook["other_sessions"].as_array().into_iter().flatten() {
-            if let Some(ago) = session["active_seconds_ago"].as_u64().filter(|ago| *ago <= RECENT_SECONDS) {
-                others.push((ago, json!({ "client": session["client"], "active_seconds_ago": ago, "notebook": notebook["path"] })));
-            }
-        }
-    }
-    others.sort_by_key(|(ago, _)| *ago);
-    others.into_iter().map(|(_, other)| other).collect()
+/// What the runtime says of the other sessions that called a tool in the last `RECENT_SECONDS`.
+#[derive(Debug)]
+struct Others {
+    count: u64,
+    seconds_ago: u64,
 }
 
-fn others_result(name: &str, others: Vec<Value>) -> Value {
-    let who: Vec<String> = others
-        .iter()
-        .map(|o| {
-            let minutes = o["active_seconds_ago"].as_u64().unwrap_or(0) / 60;
-            let ago = if minutes == 0 { "less than a minute ago".to_owned() } else { format!("{minutes} min ago") };
-            format!("{} ({ago}) in {}", o["client"].as_str().unwrap_or("an unnamed client"), o["notebook"].as_str().unwrap_or("a notebook"))
-        })
-        .collect();
+fn others_result(name: &str, others: &Others) -> Value {
+    let minutes = others.seconds_ago / 60;
+    let ago = if minutes == 0 { "less than a minute ago".to_owned() } else { format!("{minutes} min ago") };
+    let who = if others.count == 1 { "another session was".to_owned() } else { format!("{} other sessions were", others.count) };
     json!({
         "machine": name,
         "stopped": false,
-        "other_sessions": others,
-        "message": format!("Nothing was stopped: another session was active on {} in the last 15 minutes: {}. Stopping ends their notebooks too. Tell the user, and call `stop_machine` again with force true only if they agree.", place(name), who.join("; ")),
+        "active_sessions": others.count,
+        "active_seconds_ago": others.seconds_ago,
+        "message": format!("Nothing was stopped: {who} active on {} in the last 15 minutes, the latest {ago}. Stopping ends their notebooks too. Tell the user, and call `stop_machine` again with force true only if they agree.", place(name)),
     })
 }
 

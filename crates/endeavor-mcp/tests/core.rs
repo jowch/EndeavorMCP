@@ -405,7 +405,7 @@ fn an_agent_without_the_session_header_is_told_apart_by_its_mcp_session_id() {
 }
 
 #[test]
-fn sessions_join_an_open_notebook_and_see_each_other_with_their_labels() {
+fn sessions_join_an_open_notebook_and_the_runtime_says_how_many_called_lately() {
     let dir = state_dir("core-join");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
@@ -425,27 +425,28 @@ fn sessions_join_an_open_notebook_and_see_each_other_with_their_labels() {
         let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), caller).1).unwrap();
         serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
     };
-    let others = |caller: &[(&str, &str)]| call(caller, "list_notebooks", serde_json::json!({}))[0]["other_sessions"].clone();
+    let recent = |owner: &str| -> serde_json::Value {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/recent_sessions", "params": { "owner": owner, "within_seconds": 900 } });
+        serde_json::from_str::<serde_json::Value>(&app_call(&core, &body.to_string())).unwrap()["result"].clone()
+    };
 
-    // The first session opens the notebook; the second, which names itself in a header, joins it.
+    // The first session opens the notebook; the second joins it.
     let one = [("Mcp-Session-Id", plain.as_str())];
     let opened = call(&one, "open_notebook", serde_json::json!({ "path": path }));
     assert_eq!((&opened["notebook_id"], opened.get("already_open")), (&serde_json::json!(id), Some(&serde_json::json!(true))), "the notebook was open already");
-    let two = [("X-Endeavor-Session", "stdio-1"), ("X-Endeavor-Client", "  Claude Code on jc-workstation\u{7} ")];
+    let two = [("X-Endeavor-Session", "stdio-1")];
     let joined = call(&two, "open_notebook", serde_json::json!({ "path": path, "run_notebook": true }));
     assert_eq!((&joined["notebook_id"], &joined["already_open"], &joined["ran"]), (&serde_json::json!(id), &serde_json::json!(true), &serde_json::json!(false)));
     let marked = call(&two, "list_notebooks", serde_json::json!({}));
     assert_eq!(marked[0]["this_session"], true);
 
-    assert_eq!(others(&two), serde_json::json!([{ "client": "codex-cli", "active_seconds_ago": 0 }]), "named by its initialize");
-    assert_eq!(others(&one), serde_json::json!([{ "client": "Claude Code on jc-workstation", "active_seconds_ago": 0 }]), "named by its header, cleaned");
-
-    // A call with no session sees every session, and a long label is cut.
-    let nothing = call(&[], "list_notebooks", serde_json::json!({}));
-    assert_eq!(nothing[0]["other_sessions"].as_array().unwrap().len(), 2);
-    let long = "x".repeat(200);
-    let _ = call(&[("X-Endeavor-Session", "stdio-1"), ("X-Endeavor-Client", long.as_str())], "list_notebooks", serde_json::json!({}));
-    assert_eq!(others(&one)[0]["client"].as_str().unwrap().len(), 80);
+    // Each is another to the other; the app, which has no session, finds both; neither leaves a record for the check itself.
+    for (owner, count) in [("stdio-1", 1), (plain.as_str(), 1), ("", 2), ("nobody", 2)] {
+        let said = recent(owner);
+        assert!((said["count"].as_u64(), said["active_seconds_ago"].as_u64().map(|s| s < 5)) == (Some(count), Some(true)), "{owner:?}: {said}");
+    }
+    let refused = app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/recent_sessions","params":{"owner":"a"}}"#);
+    assert!(refused.contains("within_seconds must be a number"), "{refused}");
 }
 
 #[test]

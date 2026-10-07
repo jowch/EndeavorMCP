@@ -53,9 +53,9 @@ the test goes through these steps in order:
 4. `list_notebooks` marks `this_session` right for two sessions. A second
    notebook for the same session is refused, and so is a change to the other
    session's notebook.
-5. A fourth session that names its client opens the first session's
+5. A fourth session opens the first session's
    notebook by path. It joins: the same `notebook_id`, `already_open`, nothing
-   run again. Each session sees the other in `other_sessions`, and the
+   run again, and both see it as `this_session`. The
    `/endeavor/call` `open_notebook` of the app gets the notebook the same way.
 6. The run policy. `endeavor/run_preview` says what an asked run would run,
    including a dependent cell. Plan mode refuses edits and runs but allows
@@ -101,7 +101,7 @@ It takes about a minute and starts Julia twice:
    header, makes a notebook in the project folder, runs a cell and reads it.
    A notebook from disk opens in safe preview, through the tools and through
    Pluto's `/open`. A second agent opens the first one's notebook by path and
-   joins it, and each sees the other in `other_sessions`; an agent also joins
+   joins it; an agent also joins
    the notebook opened from the browser. The browser link sets the cookie and
    Pluto's page loads. Ctrl-C ends the core and Julia's process group.
 2. `mcp` over stdio starts a runtime in the background. A second `mcp` with
@@ -192,15 +192,15 @@ tests save their machines. It covers:
   and reason show in `pluto_session_status`, then the job's node and end
   time; a remembered cluster with no job submits nothing; `stop_machine`
   cancels the job.
-- `stop_machine` names another session that was active, stops with `force`,
+- `stop_machine` says another session was active, stops with `force`,
   and a later call says to call `use_machine`; the same for this computer,
   which is one kind of target with a machine.
 - This computer's runtime starts at the first notebook call and not before,
   a second front finds it, a start goes on without the front that asked for
   it, a record that can't be used is a failure and starts none, and a stop
   waits for a start under way.
-- Leaving a machine or the front's exit ends its session there and leaves the
-  runtime; a new front attaches to it with the notebook still open; a dropped
+- A session keeps its key when it moves and finds its notebook where it made
+  it; the front's exit tells the runtime nothing and leaves it running; a new front attaches to it with the notebook still open; a dropped
   connection is made again on the same browser address; one front uses two
   machines, each with its own connection and runtime; `remote_port` is the
   runtime's recorded port.
@@ -233,7 +233,7 @@ and their limits), `use_machine` with no resources (`needs_job`, nothing in
 reads `SLURM_JOB_ID` and `run_shell` on the node, and the page through the
 front's port. A second and a third `endeavor mcp` in the same project attach to
 the same job with no `use_machine` and no second job; the job outlives each
-front; `stop_machine` is refused while another session is active and with
+front; `stop_machine` is refused while another session has called lately and with
 `force` the job leaves `squeue`. The job's id is recorded so a failed step
 cancels it.
 

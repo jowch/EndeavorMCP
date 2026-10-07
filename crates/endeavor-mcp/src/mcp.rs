@@ -153,8 +153,6 @@ pub struct Caller {
     /// The agent loads Endeavor's skills itself (Claude Code's plugin), so it
     /// gets no guide.
     pub has_skills: bool,
-    /// What the client calls itself (`X-Endeavor-Client`), for other sessions to see.
-    pub client: Option<String>,
     /// The port the user's browser reaches this runtime on (`X-Endeavor-Browser-Port`), when
     /// it isn't the runtime's own: a session's loopback port. The links in results use it.
     pub browser_port: Option<u16>,
@@ -163,7 +161,7 @@ pub struct Caller {
     pub front: bool,
 }
 
-/// A client's label as other sessions see it: printable characters only,
+/// A name that goes in a header or a message: printable characters only,
 /// trimmed, at most `LABEL_MAX` of them. None if nothing is left.
 pub(crate) fn clean_label(text: &str) -> Option<String> {
     let label: String = text.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(LABEL_MAX).collect();
@@ -177,9 +175,8 @@ impl Caller {
     fn of(request: &Head) -> Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
         let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
-        let client = request.header("X-Endeavor-Client").and_then(clean_label);
         let browser_port = request.header("X-Endeavor-Browser-Port").and_then(|port| port.trim().parse().ok()).filter(|&port| port != 0);
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", client, browser_port, front: false }
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false }
     }
 }
 
@@ -255,12 +252,9 @@ impl Bridge {
                 self.notebooks.bind(&owner, &notebook);
                 eprintln!("[ Info: Session {owner} notebook: {}", if notebook.is_empty() { "(none)" } else { &notebook });
             }
-            "endeavor/end_session" => {
-                let owner = text("owner", "");
-                self.notebooks.end_session(&owner);
-                self.policies.lock().unwrap().remove(&owner);
-                self.folders.lock().unwrap().remove(&owner);
-                eprintln!("[ Info: Session {owner} ended");
+            "endeavor/recent_sessions" => {
+                let within = params["within_seconds"].as_f64().ok_or_else(|| "ArgumentError: invalid_argument::within_seconds must be a number".to_owned());
+                return Some(answer(within.map(|within| self.notebooks.recent_sessions(&text("owner", ""), within))));
             }
             "endeavor/set_idle_limit" => {
                 let hours = match params.get("hours") {
@@ -325,15 +319,7 @@ impl Bridge {
         {
             caller.host = host;
         }
-        // A client without a key gets one, and is labelled as it says it is.
-        let issued = |id: &str, initialize: &Value| {
-            let named = initialize["params"]["clientInfo"]["name"].as_str().and_then(clean_label);
-            if let Some(label) = caller.client.clone().or(named) {
-                self.notebooks.issued(id, &label);
-            }
-        };
-        let issue_session: Option<Issue> = caller.owner.is_empty().then_some(&issued);
-        post(request, reader, client, request.keeps_alive(), issue_session, |message, gone| self.dispatch(message, &caller, gone))
+        post(request, reader, client, request.keeps_alive(), caller.owner.is_empty(), |message, gone| self.dispatch(message, &caller, gone))
     }
 
     /// The reply to one JSON-RPC message, if it gets one. `gone`, called
@@ -344,7 +330,7 @@ impl Bridge {
         }
         answer(message, caller, self.standalone.is_some(), |params| {
             let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone };
-            self.notebooks.note_call(&caller.owner, caller.client.as_deref());
+            self.notebooks.note_call(&caller.owner);
             let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);
@@ -554,22 +540,19 @@ fn closed(_socket: &TcpStream) -> bool {
     false
 }
 
-/// Told the `Mcp-Session-Id` a new session gets, and its `initialize`.
-type Issue<'a> = &'a dyn Fn(&str, &Value);
-
 /// Serve one `POST /mcp`: one JSON-RPC message in; a request gets `reply`'s
 /// answer in this response, a notification or a response from the client gets
 /// `202 Accepted` with no body. `reply` is given the message and a check to
 /// call while its answer waits on the user (`Held::waiting`). With
 /// `issue_session`, the reply to `initialize` gives the client a new
-/// `Mcp-Session-Id`, which `issue_session` is told with that message.
+/// `Mcp-Session-Id`.
 /// Whether the connection can carry another request.
 pub(crate) fn post(
     request: &Head,
     reader: &mut BufReader<TcpStream>,
     client: &mut TcpStream,
     keep_alive: bool,
-    issue_session: Option<Issue>,
+    issue_session: bool,
     reply: impl FnOnce(&Value, &dyn Fn() -> bool) -> Option<String>,
 ) -> io::Result<bool> {
     let body = http::read_body(reader, request.request_body()?)?;
@@ -590,11 +573,7 @@ pub(crate) fn post(
         http::write_chunk(client, b"")?;
         return Ok(keep_alive);
     }
-    let session = issue_session.filter(|_| message["method"] == "initialize").and_then(|issue| {
-        let id = new_session_id()?;
-        issue(&id, &message);
-        Some(id)
-    });
+    let session = (issue_session && message["method"] == "initialize").then(new_session_id).flatten();
     let headers: Vec<(&str, &str)> = session.iter().map(|id| ("Mcp-Session-Id", id.as_str())).collect();
     match reply {
         Some(reply) => http::respond_with(client, "200 OK", Some("application/json"), &headers, reply.as_bytes(), keep_alive)?,

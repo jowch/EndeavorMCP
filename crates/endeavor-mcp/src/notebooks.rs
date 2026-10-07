@@ -86,7 +86,6 @@ impl Upstream for Julia {
 /// A change to a cell through the tools.
 struct Change {
     owner: String,
-    time: f64,
     seq: u64,
 }
 
@@ -192,28 +191,19 @@ struct State {
     /// The app binds a session started from an existing notebook; otherwise
     /// the first notebook the session opens or creates binds it.
     bindings: HashMap<String, String>,
-    /// What each agent session's client calls itself and when it last made a
-    /// tool call, for `list_notebooks` to show a notebook's other sessions.
-    /// Made when a session is bound, makes a call or is given an id; dropped
-    /// with its binding, or `SESSION_KEPT` after its last call or its binding
-    /// (and then its binding goes too).
+    /// When each agent session last made a tool call, for `recent_sessions` and
+    /// to forget sessions that went quiet. Made when a session is bound or
+    /// makes a call; dropped with its binding, or `SESSION_KEPT` after its
+    /// last call or its binding (and then its binding goes too).
     seen: HashMap<String, Seen>,
-    /// Sessions whose agent has gone (`end_session`), when each ended. Their
-    /// calls still under way bind and record nothing; the key is never used
-    /// again, so the entry goes `SESSION_KEPT` later.
-    ended: HashMap<String, f64>,
 }
 
 struct Seen {
-    client: Option<String>,
     /// The time of its last `tools/call`; nothing else counts.
     last_call: Option<f64>,
     /// When the record was made.
     since: f64,
 }
-
-/// A session, when it last made a call, and what its client calls itself.
-type Other<'a> = (&'a String, Option<f64>, Option<&'a String>);
 
 /// How long a session's record outlasts its last call.
 const SESSION_KEPT: f64 = 7.0 * 24.0 * 3600.0;
@@ -224,7 +214,7 @@ impl State {
         if !self.seen.contains_key(owner) {
             self.forget_old(now);
         }
-        self.seen.entry(owner.to_owned()).or_insert(Seen { client: None, last_call: None, since: now })
+        self.seen.entry(owner.to_owned()).or_insert(Seen { last_call: None, since: now })
     }
 
     /// A session is bound or opens a notebook: its record is kept from now on, whether it was old or not.
@@ -232,10 +222,8 @@ impl State {
         self.record(owner, now).since = now;
     }
 
-    /// Drop the records of sessions that haven't called in a week, and their
-    /// bindings, and the sessions that ended that long ago.
+    /// Drop the records of sessions that haven't called in a week, and their bindings.
     fn forget_old(&mut self, now: f64) {
-        self.ended.retain(|_, ended| now - *ended < SESSION_KEPT);
         let bindings = &mut self.bindings;
         self.seen.retain(|session, seen| {
             let kept = now - seen.last_call.unwrap_or(f64::MIN).max(seen.since) < SESSION_KEPT;
@@ -468,7 +456,7 @@ impl Notebooks {
             asks: Asks::new(clock()),
             upstream,
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new(), ended: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: 48.0, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),
@@ -762,9 +750,6 @@ impl Notebooks {
     pub fn bind(&self, owner: &str, path: &str) {
         let now = self.now();
         let mut state = self.state.lock().unwrap();
-        if state.ended.contains_key(owner) {
-            return;
-        }
         if path.is_empty() {
             state.bindings.remove(owner);
             state.seen.remove(owner);
@@ -774,67 +759,24 @@ impl Notebooks {
         }
     }
 
-    /// The session's agent has gone: it is unbound and forgotten, and what it
-    /// still has under way binds and records nothing.
-    pub fn end_session(&self, owner: &str) {
+    /// A session makes a tool call.
+    pub fn note_call(&self, owner: &str) {
         if owner.is_empty() {
             return;
         }
         let now = self.now();
         let mut state = self.state.lock().unwrap();
-        state.bindings.remove(owner);
-        state.seen.remove(owner);
-        state.ended.insert(owner.to_owned(), now);
+        state.record(owner, now).last_call = Some(now);
     }
 
-    /// A new `Mcp-Session-Id` was given to a client that names itself `label`.
-    pub fn issued(&self, owner: &str, label: &str) {
-        let now = self.now();
-        let mut state = self.state.lock().unwrap();
-        if state.ended.contains_key(owner) {
-            return;
-        }
-        state.record(owner, now).client = Some(label.to_owned());
-    }
-
-    /// A session makes a tool call, as the client named in `label` if it says.
-    pub fn note_call(&self, owner: &str, label: Option<&str>) {
-        if owner.is_empty() {
-            return;
-        }
-        let now = self.now();
-        let mut state = self.state.lock().unwrap();
-        if state.ended.contains_key(owner) {
-            return;
-        }
-        let seen = state.record(owner, now);
-        seen.last_call = Some(now);
-        if let Some(label) = label {
-            seen.client = Some(label.to_owned());
-        }
-    }
-
-    /// The sessions other than `owner` that have a record, by the canonical
-    /// path of the notebook each works on: `{client, active_seconds_ago}` each,
-    /// the most recently active first.
-    fn other_sessions(&self, owner: &str) -> HashMap<String, Vec<Value>> {
+    /// The sessions other than `owner` that made a tool call in the last
+    /// `within` seconds: how many, and how long ago the latest did.
+    pub fn recent_sessions(&self, owner: &str, within: f64) -> Value {
         let now = self.now();
         let mut state = self.state.lock().unwrap();
         state.forget_old(now);
-        let mut by_path: HashMap<&String, Vec<Other>> = HashMap::new();
-        for (session, path) in &state.bindings {
-            if let Some(seen) = state.seen.get(session).filter(|_| session.as_str() != owner) {
-                by_path.entry(path).or_default().push((session, seen.last_call, seen.client.as_ref()));
-            }
-        }
-        by_path
-            .into_iter()
-            .map(|(path, mut others)| {
-                others.sort_by(|a, b| b.1.unwrap_or(f64::MIN).total_cmp(&a.1.unwrap_or(f64::MIN)).then_with(|| a.0.cmp(b.0)));
-                let listed = others.iter().map(|(_, last, client)| json!({ "client": client, "active_seconds_ago": last.map(|last| (now - last).max(0.0) as u64) })).collect();
-                (path.clone(), listed)
-            })
-            .collect()
+        let ago: Vec<f64> = state.seen.iter().filter(|(session, _)| session.as_str() != owner).filter_map(|(_, seen)| seen.last_call).map(|last| (now - last).max(0.0)).filter(|ago| *ago <= within).collect();
+        json!({ "count": ago.len(), "active_seconds_ago": ago.iter().copied().reduce(f64::min).map(|ago| ago as u64) })
     }
 
     pub fn bound(&self, owner: &str) -> Option<String> {
@@ -847,9 +789,6 @@ impl Notebooks {
             let path = canonical_path(path).unwrap_or_else(|_| path.to_owned());
             let now = self.now();
             let mut state = self.state.lock().unwrap();
-            if state.ended.contains_key(owner) {
-                return;
-            }
             state.bindings.entry(owner.to_owned()).or_insert(path);
             state.record_bound(owner, now);
         }

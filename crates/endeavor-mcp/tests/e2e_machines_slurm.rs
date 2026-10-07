@@ -261,15 +261,14 @@ fn the_machine_tools_over_real_slurm() {
         }
     };
 
-    // A second session in the project attaches to the same job with no `use_machine`, and sees the first.
+    // A second session in the project attaches to the same job with no `use_machine`, and sees the first one's notebook.
     let mut two = front();
     let attached = up(&mut two);
     eprintln!("[{:?}] second front's pluto_session_status: {attached}", started.elapsed());
     assert_eq!((attached["machine"].as_str(), attached["job"]["id"].as_str(), attached["job"]["node"].as_str()), (Some("e2e-slurm"), Some(job.as_str()), Some(node)), "{attached}");
     assert!(attached["job"]["ends_in_minutes"].as_u64().is_some_and(|m| (10..=15).contains(&m)), "the job's end is known to a front that attached to a running job: {attached}");
     let seen_by_two = two.ok("list_notebooks", json!({}));
-    let nb = seen_by_two.as_array().and_then(|l| l.iter().find(|nb| nb["notebook_id"] == json!(notebook))).unwrap_or_else(|| panic!("{seen_by_two}"));
-    assert_eq!(nb["other_sessions"].as_array().map(Vec::len), Some(1), "the first session is listed: {nb}");
+    assert!(seen_by_two.as_array().is_some_and(|l| l.iter().any(|nb| nb["notebook_id"] == json!(notebook))), "{seen_by_two}");
     assert_eq!(squeue(&[]).iter().filter(|l| !before.contains(l)).count(), 1, "still one job");
     let again = two.ok("use_machine", json!({ "machine": "e2e-slurm" }));
     eprintln!("second front's use_machine: {again}");
@@ -297,8 +296,8 @@ fn the_machine_tools_over_real_slurm() {
     let refused = three.ok("stop_machine", json!({ "machine": "e2e-slurm" }));
     eprintln!("[{:?}] stop_machine without force: {refused}", started.elapsed());
     assert_eq!(refused["stopped"], json!(false), "{refused}");
-    assert!(refused["other_sessions"].as_array().is_some_and(|s| !s.is_empty() && s.iter().all(|o| o["notebook"] == json!(notebook_path))), "{refused}");
-    assert!(refused["message"].as_str().unwrap().contains("Test Agent") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
+    assert!(refused["active_sessions"].as_u64().is_some_and(|n| n >= 1), "{refused}");
+    assert!(refused["message"].as_str().unwrap().contains("active on") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
     assert_eq!(listed(&job).len(), 1, "nothing was cancelled");
     four.finish();
 

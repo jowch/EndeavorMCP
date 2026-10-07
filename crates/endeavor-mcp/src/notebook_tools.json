@@ -1,6 +1,6 @@
 [
   {
-    "description": "List the notebooks open in the runtime, with each one's run state. `this_session` marks this session's notebook; if none has it, the session has no notebook yet and `new_notebook` makes one. `other_sessions` lists the other sessions working in a notebook, each with `client` and `active_seconds_ago` (seconds since its last tool call). `pending_run` is the edited cells not yet run, `running` the cells queued or running, and `execution_allowed` is false in safe preview or while the notebook's process is stopped. Don't change a notebook whose `this_session` is false unless the user asks you to work in it.",
+    "description": "List the notebooks open in the runtime, with each one's run state. `this_session` marks this session's notebook; if none has it, the session has no notebook yet and `new_notebook` makes one. `pending_run` is the edited cells not yet run, `running` the cells queued or running, and `execution_allowed` is false in safe preview or while the notebook's process is stopped. Don't change a notebook whose `this_session` is false unless the user asks you to work in it.",
     "inputSchema": {
       "properties": {},
       "required": [],
@@ -477,7 +477,7 @@
     "name": "keep_notebook_alive"
   },
   {
-    "description": "Return whether the runtime is running and which notebooks are open, with the sessions working in each. When the runtime is on a server or cluster, also what state it is in there. Use it when a notebook tool says the runtime isn't ready.",
+    "description": "Return whether the runtime is running and which notebooks are open. When the runtime is on a server or cluster, also what state it is in there. Use it when a notebook tool says the runtime isn't ready.",
     "inputSchema": {
       "properties": {},
       "required": [],

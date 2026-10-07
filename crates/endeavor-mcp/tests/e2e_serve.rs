@@ -266,7 +266,7 @@ fn serve_and_mcp_without_the_app() {
         assert_eq!(agent.this_session(), vec![("analysis.jl".to_owned(), true), ("copy.jl".to_owned(), false)]);
     });
 
-    step("a second agent opens the first one's notebook by path, joins it, and each sees the other", || {
+    step("a second agent opens the first one's notebook by path, joins it", || {
         let mut joiner = Agent::new(port, &token);
         joiner.initialize();
         let analysis = folder.join("analysis.jl").display().to_string();
@@ -275,16 +275,6 @@ fn serve_and_mcp_without_the_app() {
         assert_eq!(joined["execution_allowed"], true, "as it was, not run again: {joined}");
         assert_eq!(joiner.this_session(), vec![("analysis.jl".to_owned(), true), ("copy.jl".to_owned(), false)]);
         assert_eq!(agent.this_session(), vec![("analysis.jl".to_owned(), true), ("copy.jl".to_owned(), false)], "still the first agent's");
-        let others = |agent: &mut Agent| {
-            let listed = agent.ok("list_notebooks", json!({}));
-            listed.as_array().unwrap().iter().find(|nb| nb["path"] == json!(analysis)).unwrap()["other_sessions"].clone()
-        };
-        for who in [&mut agent, &mut joiner] {
-            let seen = others(who);
-            assert_eq!(seen.as_array().unwrap().len(), 1, "the other one: {seen}");
-            assert_eq!(seen[0]["client"], "e2e", "named by its initialize: {seen}");
-            assert!(seen[0]["active_seconds_ago"].as_u64().is_some_and(|s| s < 60), "{seen}");
-        }
     });
 
     step("the browser link sets the cookie and opens Pluto's page", || {

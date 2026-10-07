@@ -761,17 +761,10 @@ fn stop(dir: &Path) -> ! {
 /// relayed to the runtime's `/mcp` and the answers written to stdout.
 struct Relay {
     options: Options,
-    /// This agent session's key (`X-Endeavor-Session`): the runtime gives each
-    /// session one notebook, and tells sessions apart in its warnings. It is
-    /// new when the session moves to another runtime (`switch`): a runtime
-    /// that has ended a key ignores it afterwards. It goes with `target`: read
-    /// and replaced only with that lock held (`placed`, `switch`), so that a call
-    /// never has one runtime's route and another's key.
-    session: Mutex<String>,
-    /// The first key, which the later ones are made from.
-    session_base: String,
-    /// How many keys the front has made.
-    sessions: std::sync::atomic::AtomicU64,
+    /// This agent session's key (`X-Endeavor-Session`): each runtime gives the
+    /// session one notebook under it, and tells sessions apart by it. The same
+    /// key goes to every runtime the session uses.
+    session: String,
     /// Where this session's notebooks run.
     target: Mutex<Target>,
     /// This computer's runtime, which the target is when it is on this computer.
@@ -788,8 +781,6 @@ struct Relay {
     protocol: Mutex<Option<String>>,
     /// The runtime's `Mcp-Session-Id`, if it gives one.
     mcp_session: Mutex<Option<String>>,
-    /// The agent's name from `initialize`, which the runtime shows to other sessions.
-    agent: Mutex<Option<String>>,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -808,7 +799,6 @@ fn relay(options: Options) -> ! {
         let relay = relay.clone();
         std::thread::spawn(move || relay.handle(&line));
     }
-    relay.release();
     relay.connections.close_all();
     std::process::exit(0)
 }
@@ -819,9 +809,7 @@ impl Relay {
             target: Mutex::new(Target::local(&options.folder)),
             local: Arc::new(Local::new(options.clone())),
             options,
-            session_base: session.clone(),
-            session: Mutex::new(session),
-            sessions: std::sync::atomic::AtomicU64::new(0),
+            session,
             connections: machines::Connections::default(),
             ops: Mutex::new(()),
             notice: Mutex::new(None),
@@ -829,19 +817,12 @@ impl Relay {
             projects: projects::Projects::at(Env::here().projects_path()),
             protocol: Mutex::default(),
             mcp_session: Mutex::default(),
-            agent: Mutex::default(),
             out: Mutex::new(out),
         }
     }
 
-    /// The target and the session's key, as they are together.
-    fn placed(&self) -> (Target, String) {
-        let target = self.target.lock().unwrap();
-        (target.clone(), self.session.lock().unwrap().clone())
-    }
-
-    fn session(&self) -> String {
-        self.placed().1
+    fn current(&self) -> Target {
+        self.target.lock().unwrap().clone()
     }
 
     fn write(&self, message: &str) {
@@ -851,40 +832,21 @@ impl Relay {
     }
 
     /// Tell the runtime something about this session, as the app does for its
-    /// sessions with `/endeavor/call`.
-    fn tell(port: u16, token: &str, method: &str, params: Value) -> io::Result<(u16, Vec<u8>)> {
+    /// sessions with `/endeavor/call`. It gives up when the runtime says nothing for `quiet`.
+    fn tell(port: u16, token: &str, method: &str, params: Value, quiet: Option<Duration>) -> io::Result<(u16, Vec<u8>)> {
         let body = to_json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }));
         let bearer = format!("Bearer {token}");
         let headers = [("Authorization", bearer.as_str()), ("Content-Type", "application/json")];
-        crate::http::post(port, crate::CALL, &headers, body.as_bytes())
+        crate::http::post_within(port, crate::CALL, &headers, body.as_bytes(), quiet)
     }
 
     /// Give the runtime on `port` the folder of session `session`, which is `folder` there: the
     /// runtime may have been started from another folder.
     fn tell_session_folder(&self, port: u16, token: &str, session: &str, folder: &str) {
         let params = json!({ "owner": session, "folder": folder });
-        if let Err(e) = Relay::tell(port, token, "endeavor/set_session_folder", params) {
+        if let Err(e) = Relay::tell(port, token, "endeavor/set_session_folder", params, None) {
             eprintln!("endeavor: couldn't give the runtime this session's folder: {e}");
         }
-    }
-
-    /// The agent has gone: let the runtime end this session, so other sessions
-    /// don't see it as still working in a notebook, and a call still under way
-    /// doesn't bind it again. Best effort, and it doesn't hold up the exit for
-    /// more than a moment.
-    fn release(&self) {
-        let (target, session) = self.placed();
-        if let Some((port, token)) = self.runtime_of(&target) {
-            self.end_session(port, &token, &session);
-        }
-    }
-
-    /// End key `session` on the runtime at `port`, without waiting more than a moment.
-    fn end_session(&self, port: u16, token: &str, session: &str) {
-        let (token, params) = (token.to_owned(), json!({ "owner": session }));
-        let (done, told) = mpsc::channel();
-        std::thread::spawn(move || drop(done.send(Relay::tell(port, &token, "endeavor/end_session", params))));
-        let _ = told.recv_timeout(Duration::from_millis(500));
     }
 
     fn handle(self: &Arc<Self>, line: &str) {
@@ -896,7 +858,6 @@ impl Relay {
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
         if let Some(reply) = crate::mcp::answer_locally(&message, self.options.skills_plugin) {
             if message["method"] == "initialize" {
-                *self.agent.lock().unwrap() = message["params"]["clientInfo"]["name"].as_str().and_then(crate::mcp::clean_label);
                 let negotiated: Value = serde_json::from_str(&reply).unwrap_or_default();
                 *self.protocol.lock().unwrap() = negotiated["result"]["protocolVersion"].as_str().map(str::to_owned);
             }
@@ -911,7 +872,7 @@ impl Relay {
             return self.machine_tool(&message, tool, deadline);
         }
         let help = !self.options.skills_plugin;
-        let (target, _) = self.placed();
+        let target = self.current();
         // On this computer the front answers what needs no runtime.
         if target.is_local() && let Some(tool) = tool.as_deref().filter(|tool| *tool == crate::guide::TOOL || crate::host_tools::NAMES.contains(tool)) {
             if id.is_none() {
@@ -988,10 +949,6 @@ impl Relay {
         }
         if self.options.skills_plugin {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
-        }
-        let agent = self.agent.lock().unwrap().clone().unwrap_or_else(|| "endeavor mcp".into());
-        if let Some(label) = crate::mcp::clean_label(&format!("{agent} on {}", crate::hostname())) {
-            head.push_str(&format!("X-Endeavor-Client: {label}\r\n"));
         }
         if let Some(version) = &*self.protocol.lock().unwrap() {
             head.push_str(&format!("MCP-Protocol-Version: {version}\r\n"));

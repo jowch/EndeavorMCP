@@ -391,9 +391,25 @@ _Started 2026-10-06, on the `client-library` branch._
   defaults (partition, resources, account) and is refused only while the
   connection shows a runtime, a start or a job. A runtime or job it doesn't
   know of is not seen.
-- **`stop_machine` waits 5 s** for the runtime's list of notebooks, and
-  without `force` refuses when it doesn't come. A runtime busy for longer than
-  that needs `force`.
+- **`stop_machine` waits 5 s** for the runtime to say how many other sessions
+  called lately, and without `force` refuses when it doesn't come. A runtime
+  busy for longer than that needs `force`. A runtime started by a build from
+  before `endeavor/recent_sessions` doesn't know the question, so it is
+  refused the same way until it is restarted or `force` is given.
+- **A session that has left still counts for 15 minutes.** Nothing signs a
+  session out, so `stop_machine` without `force` is refused for 15 minutes
+  after another session's last tool call, whether it is still there or not. It
+  asks the user, who can say to go ahead.
+- **A session that returns to a runtime has its old notebook there.** It keeps
+  one key for its whole run, so on a machine or on this computer it worked in
+  before, it is still bound to the notebook it made there (`list_notebooks`
+  shows `this_session`), and `one_notebook` refuses a different one. Its
+  results say it has no notebook there "unless it worked in one there before".
+- **A session that goes away leaves its run policy and folder in the
+  runtime's memory** until the runtime ends: the sign-out cleared them, and
+  the 7-day forgetting does not. They are a few strings for each session.
+  A session the app drops does not clear them either, since the app's call
+  (`endeavor/end_session`) is gone.
 - **Not run against a host with no Slurm.** On this workstation the helper
   finds Slurm in `/usr/bin`, so the "no Slurm" message and `slurm: true`
   without Slurm are covered by unit tests of the decision only.

@@ -348,13 +348,11 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     let (head, body) = &seen[0];
     assert_eq!(body, r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
     let header = |name| head.header(name).unwrap_or("(none)");
-    let client = header("X-Endeavor-Client").to_owned();
     assert_eq!(
         [header("Authorization"), header("X-Endeavor-Session"), header("X-Endeavor-Skills"), header("MCP-Protocol-Version"), header("Accept")],
         ["Bearer t0k", "stdio-7", "plugin", "2025-03-26", "application/json, text/event-stream"]
     );
     assert_eq!(head.target(), "/mcp");
-    assert_eq!(Some(client), crate::mcp::clean_label(&format!("claude-code on {}", crate::hostname())), "the agent's own name, and where it runs");
 }
 
 #[cfg(unix)]
@@ -371,33 +369,6 @@ fn a_runtime_replaced_by_another_process_is_noticed_and_the_new_one_is_found() {
     assert_eq!(target::Provider::status(&*relay.local).state, crate::client::State::Connected, "the one that was attached to is forgotten");
     let crate::client::Outcome::Ready(after) = target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO, false) else { panic!("the new runtime wasn't found") };
     assert_eq!((after.pid, after.token.as_str()), (other, "other"));
-}
-
-#[test]
-fn a_front_whose_agent_has_gone_ends_its_session_in_the_runtime() {
-    let (port, seen) = fake_core();
-    let (relay, _) = ready_relay(port, &seen, true);
-    relay.release();
-    let calls = seen.lock().unwrap();
-    let (head, body) = &calls[0];
-    assert_eq!(head.target(), "/endeavor/call");
-    assert_eq!(head.header("Authorization"), Some("Bearer t0k"));
-    assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/end_session","params":{"owner":"stdio-7"}}"#);
-    assert_eq!(calls.len(), 1);
-    drop(calls);
-    // Once the runtime is gone there is nothing to tell.
-    std::fs::remove_file(relay.options.state_dir.join("runtime.json")).unwrap();
-    relay.release();
-    assert_eq!(seen.lock().unwrap().len(), 1);
-}
-
-#[test]
-fn an_agent_that_gives_no_name_is_endeavor_mcp() {
-    let (port, seen) = fake_core();
-    let (relay, _) = ready_relay(port, &seen, true);
-    relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
-    relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
-    assert_eq!(seen.lock().unwrap()[0].0.header("X-Endeavor-Client"), crate::mcp::clean_label(&format!("endeavor mcp on {}", crate::hostname())).as_deref());
 }
 
 #[test]

@@ -319,8 +319,14 @@ pub fn write_chunk(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
 /// POST `body` to `path` on the loopback server at `port`, on a connection of
 /// its own: the response's status and whole body.
 pub fn post(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> io::Result<(u16, Vec<u8>)> {
+    post_within(port, path, headers, body, None)
+}
+
+/// `post`, giving up when the server says nothing for `quiet`.
+pub fn post_within(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], quiet: Option<std::time::Duration>) -> io::Result<(u16, Vec<u8>)> {
     let upstream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), std::time::Duration::from_secs(5))?;
     let _ = upstream.set_nodelay(true);
+    let _ = upstream.set_read_timeout(quiet);
     let mut head = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
     for (name, value) in headers {
         // A value can't end the header early.

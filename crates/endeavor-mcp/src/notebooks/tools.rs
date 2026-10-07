@@ -14,12 +14,10 @@ use serde_json::{Map, Value, json};
 
 use super::{Change, GraphQuery, Notebooks, Snapshot, absolute_path, canonical_path, uuid_value};
 use crate::host_tools::julia_repr;
-use crate::mcp::{WRITE_TOOLS, julia_string};
+use crate::mcp::julia_string;
 
 /// How long a waited-for run may take, per cell.
 pub(super) const TIMEOUT_SECONDS: f64 = 60.0;
-/// How long another session's change to a notebook is worth a warning.
-const OTHER_SESSION_SECONDS: f64 = 120.0;
 /// Claude accepts images up to about 5 MB; plots are typically tens of KB.
 const MAX_IMAGE_BYTES: usize = 4_000_000;
 /// How `read_notebook_code` starts each cell, as Pluto's file does.
@@ -40,7 +38,7 @@ impl Notebooks {
     /// where `new_notebook` puts notebooks and relative paths start.
     pub fn tool(&self, owner: &str, name: &str, args: &Value, folder: Option<&str>) -> Result<Reply, String> {
         let t = Call { nbs: self, owner, args };
-        let mut result = match name {
+        let result = match name {
             "list_notebooks" => t.list_notebooks(),
             "read_cell" => t.read_cell(),
             "view_cell_output" => return t.view_cell_output(),
@@ -62,28 +60,12 @@ impl Notebooks {
             "find_symbol_references" => t.find_symbol("references"),
             "validate_cell" => t.validate_cell(),
             "search_code" => t.search_code(),
-            "pluto_session_status" => self.call("status", json!({})).map(|mut status| {
-                if let Some(notebooks) = status["notebooks"].as_array_mut() {
-                    let paths: Vec<String> = notebooks.iter().map(|nb| nb["path"].as_str().map_or_else(String::new, |path| canonical_path(path).unwrap_or_else(|_| path.to_owned()))).collect();
-                    t.add_other_sessions(notebooks, &paths);
-                }
-                status
-            }),
+            "pluto_session_status" => self.call("status", json!({})),
             "open_notebook" => t.open_notebook(folder),
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
         }?;
-        if WRITE_TOOLS.contains(&name)
-            && let Value::Object(result) = &mut result
-            && let Some(id) = args.get("notebook_id").and_then(|id| super::parse_uuid(&julia_string(id)))
-            && let Some(warning) = self.other_session_warning(&id, owner)
-        {
-            let warnings = result.entry("warnings").or_insert_with(|| json!([]));
-            if let Value::Array(warnings) = warnings {
-                warnings.push(warning.into());
-            }
-        }
         Ok(Reply::Json(result))
     }
 
@@ -168,25 +150,6 @@ impl Notebooks {
             .cloned()
             .collect())
     }
-
-    /// Another session's changes to the notebook in the last two minutes, if any.
-    fn other_session_warning(&self, id: &str, owner: &str) -> Option<String> {
-        if owner.is_empty() {
-            return None;
-        }
-        let now = (self.clock)();
-        let state = self.state.lock().unwrap();
-        let mut recent: Vec<(&String, &Change)> =
-            state.notebooks.get(id)?.changes.iter().filter(|(_, ch)| other_owner(ch, owner) && now - ch.time <= OTHER_SESSION_SECONDS).collect();
-        recent.sort_by_key(|(_, ch)| ch.seq);
-        let (_, last) = recent.last()?;
-        let ago = (now - last.time).round_ties_even() as i64;
-        let cells: Vec<&str> = recent.iter().map(|(id, _)| id.as_str()).collect();
-        Some(format!(
-            "other_session::Another Endeavor session changed {} in this notebook {ago} s ago. Read cells before relying on them.",
-            cells.join(", ")
-        ))
-    }
 }
 
 fn other_owner(change: &Change, owner: &str) -> bool {
@@ -233,12 +196,11 @@ impl Call<'_> {
 
     /// The owner changed a cell through the tools.
     fn note_changed(&self, id: &str, cell: &str) {
-        let now = self.now();
         let mut state = self.nbs.state.lock().unwrap();
         state.seq += 1;
         let seq = state.seq;
         let notebook = state.notebooks.entry(id.to_owned()).or_default();
-        notebook.changes.insert(cell.to_owned(), Change { owner: self.owner.to_owned(), time: now, seq });
+        notebook.changes.insert(cell.to_owned(), Change { owner: self.owner.to_owned(), seq });
     }
 
     /// An edit needs the owner to have read the cell's current code.
@@ -486,26 +448,13 @@ impl Call<'_> {
         out
     }
 
-    /// Tell each notebook which other sessions work in it. `paths` are the
-    /// notebooks' canonical paths.
-    fn add_other_sessions(&self, notebooks: &mut [Value], paths: &[String]) {
-        let others = self.nbs.other_sessions(self.owner);
-        for (notebook, path) in notebooks.iter_mut().zip(paths) {
-            notebook["other_sessions"] = others.get(path).cloned().unwrap_or_default().into();
-        }
-    }
-
     fn list_notebooks(&self) -> Result<Value, String> {
         let snapshots = self.nbs.snapshots()?;
         let bound = self.nbs.bound(self.owner);
         let paths: Vec<String> = snapshots.iter().map(|nb| canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone())).collect();
         let own = |at: usize| bound.as_ref().is_some_and(|bound| paths[at] == *bound);
-        let mut listed: Vec<Value> = {
-            let mut state = self.nbs.state.lock().unwrap();
-            snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()
-        };
-        self.add_other_sessions(&mut listed, &paths);
-        Ok(Value::Array(listed))
+        let mut state = self.nbs.state.lock().unwrap();
+        Ok(Value::Array(snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()))
     }
 
     fn read_cell(&self) -> Result<Value, String> {

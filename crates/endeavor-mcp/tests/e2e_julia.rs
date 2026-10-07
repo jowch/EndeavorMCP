@@ -34,7 +34,7 @@ const MAC: &[(&str, &str)] = &[("X-Endeavor-Session", "1")];
 const SERVER: &[(&str, &str)] = &[("X-Endeavor-Session", "2"), ("X-Endeavor-Host", "lab")];
 const THIRD: &[(&str, &str)] = &[("X-Endeavor-Session", "3")];
 /// A session that names its client, which joins session 1's notebook.
-const JOINER: &[(&str, &str)] = &[("X-Endeavor-Session", "4"), ("X-Endeavor-Client", "Claude Code on a-laptop")];
+const JOINER: &[(&str, &str)] = &[("X-Endeavor-Session", "4")];
 
 /// A folder of the test's own, emptied.
 fn fresh(path: PathBuf) -> PathBuf {
@@ -358,24 +358,9 @@ fn the_runtime_end_to_end() {
         let joined = rt.ok(JOINER, "open_notebook", json!({ "path": path, "run_notebook": true }));
         assert_eq!((&joined["notebook_id"], &joined["path"], &joined["already_open"], &joined["ran"]), (&json!(notebook), &json!(path), &json!(true), &json!(false)), "{joined}");
         assert_eq!((&joined["execution_allowed"], &joined["process_status"]), (&json!(true), &json!("ready")), "as the notebook was, not run again: {joined}");
-        let seen_by = |rt: &mut Runtime, caller| {
-            let list = rt.notebooks(caller);
-            let nb = list.iter().find(|nb| nb["notebook_id"] == notebook.as_str()).unwrap().clone();
-            (nb["this_session"].clone(), nb["other_sessions"].clone())
-        };
-        let (mine, others) = seen_by(&mut rt, MAC);
-        assert_eq!(mine, json!(true), "still session 1's");
-        assert_eq!(others.as_array().unwrap().len(), 1, "{others}");
-        assert_eq!(others[0]["client"], json!("Claude Code on a-laptop"));
-        assert!(others[0]["active_seconds_ago"].as_u64().is_some_and(|s| s < 60), "{others}");
-        let (mine, others) = seen_by(&mut rt, JOINER);
-        assert_eq!(mine, json!(true), "and now session 4's");
-        assert_eq!(others.as_array().unwrap().len(), 1, "{others}");
-        assert_eq!(others[0]["client"], json!(null), "session 1 named no client");
-        assert!(others[0]["active_seconds_ago"].as_u64().is_some_and(|s| s < 60), "{others}");
-        let status = rt.ok(JOINER, "pluto_session_status", json!({}));
-        let own = status["notebooks"].as_array().unwrap().iter().find(|nb| nb["notebook_id"] == notebook.as_str()).unwrap().clone();
-        assert_eq!(own["other_sessions"].as_array().unwrap().len(), 1, "{status}");
+        let mine = |rt: &mut Runtime, caller| rt.notebooks(caller).iter().find(|nb| nb["notebook_id"] == notebook.as_str()).unwrap()["this_session"].clone();
+        assert_eq!(mine(&mut rt, MAC), json!(true), "still session 1's");
+        assert_eq!(mine(&mut rt, JOINER), json!(true), "and now session 4's");
         let list = rt.notebooks(JOINER);
         let elsewhere = list.iter().find(|nb| nb["notebook_id"] != notebook.as_str()).unwrap()["path"].as_str().unwrap().to_owned();
         let again = rt.tool(JOINER, "open_notebook", json!({ "path": elsewhere })).expect_err("it still works on one notebook");

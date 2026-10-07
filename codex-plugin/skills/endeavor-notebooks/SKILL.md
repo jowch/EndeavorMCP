@@ -51,6 +51,6 @@ A notebook opened from a file runs nothing until the user allows it, because its
 
 ## Other sessions in the notebook
 
-Several agents can work in one notebook. `list_notebooks` gives `other_sessions` with `active_seconds_ago`; if one was active in the last few minutes, tell the user before you change the notebook. Leave a notebook with `this_session` false alone unless the user asks you to work in it. An `other_session` warning names cells another session just changed: read them before relying on them. `run_conflict` means nothing ran because your cells depend on such cells: read the cells it names, then run again.
+Several agents can work in one notebook. When a write is refused with `stale_read`, or a run with `run_conflict`, another session changed those cells: read them again, then retry. Leave a notebook with `this_session` false alone unless the user asks you to work in it.
 
 For any other error code or warning, see [reference/errors.md](reference/errors.md).
