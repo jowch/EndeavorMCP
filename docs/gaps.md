@@ -158,10 +158,6 @@ _Started 2026-10-06, on the `client-library` branch._
   --idle-stop` and a changed `ENDEAVOR_IDLE_HOURS` do not reach it;
   `endeavor/set_idle_limit` does. A runtime that exits when idle waits for the
   limit it has now.
-- **The helper's `ToApp::Ready` does not carry `exits_when_idle`.** The front
-  asks the runtime (`pluto_session_status`) when `use_machine` attaches to one
-  that was already running, and says nothing if the runtime is older and does
-  not answer with the field.
 - **`ENDEAVOR_IDLE_CHECK_SECS` panics on a negative or non-finite value.** It
   is a variable for tests.
 

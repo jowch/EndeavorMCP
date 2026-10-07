@@ -747,7 +747,6 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     assert_eq!(status["machine"], "lab");
     assert_eq!((&status["exits_when_idle"], &status["idle_stop_hours"], status.get("message")), (&json!(true), &json!(48.0), None), "a runtime a session starts exits when idle: {status}");
     assert_eq!(read_record(&place.state)["exits_when_idle"], true);
-    assert!(used["message"].as_str().is_some_and(|m| !m.contains("keeps running")), "{used}");
     let folder = front.ok("list_folder", json!({ "path": place.project.display().to_string() }));
     assert!(folder.to_string().contains("machine.jl"), "{folder}");
     let shell = front.ok("run_shell", json!({ "command": "pwd; echo on-the-machine" }));
@@ -773,37 +772,6 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     assert_eq!((again["state"].as_str(), again["already_running"].clone()), (Some("ready"), json!(true)), "{again}");
     let (failed, unknown) = front.call("use_machine", json!({ "machine": "nowhere" }));
     assert!(failed && unknown["message"].as_str().unwrap().contains("There is no machine \"nowhere\". Machines: lab."), "{unknown}");
-}
-
-#[test]
-fn a_runtime_that_was_not_started_to_exit_when_idle_says_so_when_a_session_uses_it() {
-    let place = Place::new("keeps-running");
-    place.add_lab();
-    let core = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_endeavor"))
-            .arg("core")
-            .arg("--state-dir")
-            .arg(&place.state)
-            .arg("--julia")
-            .arg(&place.julia)
-            .args(["--runtime", "/nonexistent", "--depot", "/nonexistent"])
-            .env("ENDEAVOR_TOKEN", TOKEN)
-            .env("ENDEAVOR_LAUNCHER", "process")
-            .process_group(0)
-            .spawn()
-            .unwrap(),
-    );
-    wait_for("the runtime's record", || place.state.join("runtime.json").exists());
-    assert_eq!(read_record(&place.state)["pid"], core.0.id());
-    assert_eq!(read_record(&place.state)["exits_when_idle"], false);
-    let mut front = place.front();
-    front.initialize();
-
-    let used = front.ok("use_machine", json!({ "machine": "lab" }));
-    assert_eq!(used["already_running"], true, "{used}");
-    assert!(used["message"].as_str().unwrap().ends_with(" It keeps running when idle until it is stopped."), "{used}");
-    let status = front.ok("pluto_session_status", json!({}));
-    assert_eq!((&status["exits_when_idle"], &status["idle_stop_hours"], status.get("message")), (&json!(false), &json!(48.0), None), "{status}");
 }
 
 #[test]

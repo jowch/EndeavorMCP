@@ -8,7 +8,6 @@
 //! names its kind (see `mcp::tool_error`).
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -73,8 +72,11 @@ impl Notebooks {
     /// The engine's status, with the idle limit now in force (0: never) and whether the runtime ends itself when idle.
     fn session_status(&self) -> Result<Value, String> {
         let mut status = self.call("status", json!({}))?;
-        status["idle_stop_hours"] = self.idle_limit_hours().into();
-        status["exits_when_idle"] = self.exits_when_idle.load(Ordering::Relaxed).into();
+        if let Value::Object(fields) = &mut status {
+            let hours = self.idle_limit_hours();
+            fields.insert("idle_stop_hours".into(), if hours.is_finite() && hours > 0.0 { hours } else { 0.0 }.into());
+            fields.insert("exits_when_idle".into(), self.exits_when_idle.into());
+        }
         Ok(status)
     }
 

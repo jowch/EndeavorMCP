@@ -987,7 +987,7 @@ fn the_runtime_says_whether_it_ends_when_idle_and_what_idle_limit_it_has() {
     assert_eq!(read_json(&dir.join("runtime.json"))["exits_when_idle"], true);
     let said = status(&core);
     assert_eq!((&said["exits_when_idle"], &said["idle_stop_hours"], said.get("message")), (&serde_json::json!(true), &serde_json::json!(48.0), None), "{said}");
-    for (hours, shown) in [("2.5", 2.5), ("0", 0.0), ("true", 1.0)] {
+    for (hours, shown) in [("2.5", 2.5), ("0", 0.0), ("true", 1.0), ("-3", 0.0)] {
         app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_idle_limit","params":{{"hours":{hours}}}}}"#));
         assert_eq!(status(&core)["idle_stop_hours"], shown, "after {hours}");
     }

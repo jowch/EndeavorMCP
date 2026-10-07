@@ -272,12 +272,9 @@ end once no notebook has been open for that long (`ENDEAVOR_EXIT_IDLE`, which
 which it is as `"exits_when_idle": true|false`, written when the runtime is
 ready; a record without it is from before and says nothing. The limit itself
 is not in the file, since it can change: `pluto_session_status` carries
-`idle_stop_hours` (the limit now in force, 0 for never) and `exits_when_idle`.
-`use_machine` adds "It keeps running when idle until it is stopped." to its
-message when it attaches to a runtime that was already running and does not
-end by itself; it asks
-the runtime, so an older runtime that doesn't say gets no sentence. The app
-reads `runtime.json` and calls the runtime in the same way.
+`idle_stop_hours` (the limit now in force; 0 for never, also for a negative
+or non-finite one) and `exits_when_idle`. A runtime with `exits_when_idle` true
+and `idle_stop_hours` 0 never ends. The app reads `runtime.json` and calls the runtime in the same way.
 
 ## The machine tools
 

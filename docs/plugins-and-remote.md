@@ -214,10 +214,8 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    long; `serve` is not. The core writes `"exits_when_idle": true|false` to
    `runtime.json` (absent in a record from before: not known). The live limit
    is not in the file, since `endeavor/set_idle_limit` changes it:
-   `pluto_session_status` carries `idle_stop_hours` and `exits_when_idle`, and
-   `use_machine` adds the sentence "It keeps running when idle until it is
-   stopped." when it attaches to a runtime that was already running and does
-   not exit by itself.
+   `pluto_session_status` carries `idle_stop_hours` (0 never ends it, even with
+   `exits_when_idle` true) and `exits_when_idle`.
 6. One local state folder for the app and the plugin, with the paths module.
 
 **Decided on the open points (2026-10-07).**
