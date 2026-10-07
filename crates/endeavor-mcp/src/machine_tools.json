@@ -1,6 +1,6 @@
 [
   {
-    "description": "List the machines this session could work on: the ones the user has added (name, ssh host, whether it is a Slurm cluster, and its state while this session is connected to it: connecting, connected, starting, queued, ready or failed; \"not connected\" says nothing about whether Julia runs there), \"local\" for this computer, which one this session uses now, and the Host names from the user's ~/.ssh/config that are not added yet. Starts no connection and runs no ssh. Call it before add_machine or use_machine when the user names a server.",
+    "description": "List the machines this session can use: the ones the user added (name, ssh host, Slurm cluster or not, and a state only while this session is connected to it; `not connected` says nothing about whether Julia runs there), \"local\" (this computer), which one this session uses, and the ssh Host names not added yet. Starts no connection. Call it before add_machine or use_machine when the user names a server.",
     "inputSchema": {
       "properties": {},
       "required": [],
@@ -9,7 +9,7 @@
     "name": "list_machines"
   },
   {
-    "description": "Add a server or a cluster's login node that the user reaches over ssh, so that notebooks can run there. Connects with the user's own ssh configuration, keys and ssh agent (never a password: Endeavor can't ask for one, and neither should you), looks at what is there and installs nothing unless install is true, saves the machine, and reports what it found: node name, home folder, whether Slurm is there, the partitions with their limits, and Julia if it is already known. Whether Julia runs in Slurm jobs or directly on the machine is the user's choice: the slurm argument sets it. Left out, a new machine uses Slurm jobs when Slurm is there, and a machine added before keeps how it was saved; the result always says which is used (cluster, runs_in) and, when Slurm is there, that the other is available with slurm. Waits up to 45 seconds; if the connection is still being made it says so, and calling add_machine again with the same host continues: a new machine is saved only once a call has connected, and an existing one keeps its saved settings until the new ones have connected. If it can't connect, nothing is saved and the result says what the user must do (usually `ssh-add` to put a key in the agent, or `ssh <host>` once in a terminal to accept the server's identity). If Endeavor's helper isn't installed there, nothing is installed: the result is needs_install, with what would be installed, where, its size and whether Julia already runs there; ask the user, and call again with install true only if they agree. install covers Endeavor's helper only: this call never downloads Julia. Adding a machine that exists updates it; changing it between Slurm jobs and direct is refused while Julia runs there (stop_machine first). Add a machine only when the user asks for it.",
+    "description": "Add a server or Slurm cluster login node that the user reaches over ssh (or update one added before), so notebooks can run there. Only when the user asks. It uses the user's own ssh keys and agent: never ask for or type a password. If it can't connect, nothing is saved; pass on what the result says the user must do. It installs nothing unless `install` is true, and never installs Julia: if Endeavor's program is missing there the result is `needs_install`, naming what, where and how large; ask the user, and call again with `install` true only if they agree. Waits up to 45 seconds; if it says it is still connecting, call again with the same host.",
     "inputSchema": {
       "properties": {
         "host": {
@@ -17,19 +17,19 @@
           "type": "string"
         },
         "install": {
-          "description": "true: Endeavor may install its helper on the machine (a few files in one folder; not Julia). Only after the user agreed to what the needs_install result said. Never set it on a first call.",
+          "description": "true: Endeavor may install its program there (a few files in one folder; not Julia). Only after the user agreed to what `needs_install` named; never on a first call.",
           "type": "boolean"
         },
         "julia": {
-          "description": "Where Julia is on the machine, if Endeavor should not look for it itself: a path to the julia program, or a shell line that puts it on the PATH, such as `module load julia`. The line runs on the machine as given.",
+          "description": "Where Julia is, if Endeavor should not look for it: a path to the julia program, or a shell line that puts it on the PATH, such as `module load julia`.",
           "type": "string"
         },
         "name": {
-          "description": "The name to use for the machine in these tools. Letters, digits, - _ and . only. Defaults to the host.",
+          "description": "Name for the machine in these tools: letters, digits, - _ and . only. Defaults to the host.",
           "type": "string"
         },
         "slurm": {
-          "description": "true: run Julia in Slurm jobs (an error if Slurm isn't on the machine). false: run Julia directly on the machine, even if Slurm is there. Left out: a new machine uses Slurm jobs if Slurm is there; a machine added before stays as it was saved. Ask the user when Slurm is there and they haven't said.",
+          "description": "true: run Julia in Slurm jobs (an error without Slurm). false: run it directly, even if Slurm is there. Left out: a new machine uses jobs if Slurm is there; one added before stays as saved. Ask the user when Slurm is there and they haven't said. Refused while Julia runs there.",
           "type": "boolean"
         }
       },
@@ -41,11 +41,11 @@
     "name": "add_machine"
   },
   {
-    "description": "Put this session's notebooks on a machine: \"local\" is this computer, any other value is a machine's name from list_machines. Connects, then attaches to the Julia runtime already running there, starts one, or on a Slurm cluster submits a job for it. Returns within 45 seconds with the state. ready: the result has browser_url (the address to give the user, which works while this session is connected), the node, remote_port (the runtime's own port on that machine, to forward by hand once the session has ended), and whether a runtime was already running there. starting or queued: the runtime is not up yet; the result has the job's id and the queue's state and reason, and pluto_session_status shows progress. On a cluster with no job running and no resources given, nothing is submitted and the session does not move (it stays where it was, and the project is not changed): the result has needs_job true and the machine's default resources, and you ask the user to confirm them (or choose others) and call use_machine again with them. If the machine lacks Endeavor's helper (for this version of the plugin) or what a start needs, such as Julia, nothing is installed: the result is needs_install, with install.items (kind, name, size_mb, place) naming what would be installed; ask the user, and call again with install true only if they agree, and the session does not move. One yes covers everything this call needs, including what it finds it needs once the helper is there (Julia, if none is found). A yes given to add_machine covers the helper only. install covers only this call. A call that fails changes nothing: the session stays where it was. The resources you give are saved as the machine's defaults. The session has no notebook on the new machine unless it is still in the one it made there before, if that is still open (a session's notebook stays on the machine it was made on, and a session works in one notebook on each machine); the project remembers the machine and folder for later sessions. Switch machines, and submit jobs, only when the user asks. From here on list_folder, read_file and run_shell run on that machine, and notebook paths are that machine's.",
+    "description": "Put this session's notebooks on a machine from list_machines, or back on \"local\". It attaches to the Julia already running there, starts it, or on a Slurm cluster submits a job for it. Only when the user asks. Returns within 45 seconds with a `state`. `ready`: give the user `browser_url` (it works while this session is connected); `remote_port` is Julia's own port on the machine, which the user can forward by hand after this session ends. `starting`, `queued`: not up yet; check `pluto_session_status`. `needs_job`: a cluster with no job running and no resources given; nothing was submitted. Show the user the `defaults` and call again with the resources they agree to; never submit a job with resources they have not agreed to. `needs_install`: ask the user, and call again with `install` true only if they agree to what the result names. A failed call, `needs_job` and `needs_install` leave the session where it was. Afterwards `list_folder`, `read_file` and `run_shell` act on that machine, and the session has no notebook there until it makes or opens one.",
     "inputSchema": {
       "properties": {
         "account": {
-          "description": "Cluster only: the Slurm account to charge. Saved as the machine's default.",
+          "description": "Cluster only: the Slurm account to charge.",
           "type": "string"
         },
         "cpus": {
@@ -53,33 +53,33 @@
           "type": "integer"
         },
         "extra_sbatch_flags": {
-          "description": "Cluster only: more flags for sbatch, each as one string that starts with \"-\", a flag and its value together, such as \"--constraint=a100\" (not \"--constraint\", \"a100\"). They run as given, except that --wrap and line breaks are refused.",
+          "description": "Cluster only: more sbatch flags, each one string with flag and value together, such as \"--constraint=a100\".",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
         "folder": {
-          "description": "The session's folder on the machine: where new notebooks go and relative paths start. Left out, it is the folder the project already remembers for this machine, else the machine's home folder.",
+          "description": "The session's folder on the machine: where new notebooks go and relative paths start. Default: the project's remembered folder for it, else its home.",
           "type": "string"
         },
         "gpus": {
-          "description": "Cluster only: GPUs for the job, as a count, or a Slurm gres string such as \"gpu:a100:2\". 0 means no GPU and clears a saved default. Saved as the machine's default.",
+          "description": "Cluster only: a count, or a Slurm gres string such as \"gpu:a100:2\". 0 means no GPU.",
           "type": [
             "integer",
             "string"
           ]
         },
         "hours": {
-          "description": "Cluster only: the job's time limit in hours (a fraction is fine). The job, and the notebooks in it, end then.",
+          "description": "Cluster only: the job's time limit in hours; the job and its notebooks end then.",
           "type": "number"
         },
         "install": {
-          "description": "true: Endeavor may install on the machine what the needs_install result named, and whatever else this call then needs (such as Julia, if none is found there). Only after the user agreed to that. It isn't kept for later calls. Never set it on a first call.",
+          "description": "true: Endeavor may install what `needs_install` named, and what this call then needs (such as Julia). Only after the user agreed; this call only; never on a first call.",
           "type": "boolean"
         },
         "machine": {
-          "description": "\"local\" for this computer, or a machine's name from list_machines.",
+          "description": "\"local\", or a machine's name from list_machines.",
           "type": "string"
         },
         "memory_gb": {
@@ -87,7 +87,7 @@
           "type": "integer"
         },
         "partition": {
-          "description": "Cluster only: the Slurm partition. Defaults to the machine's saved default, else the cluster's.",
+          "description": "Cluster only: the Slurm partition. Default: the machine's saved one.",
           "type": "string"
         }
       },
@@ -99,19 +99,19 @@
     "name": "use_machine"
   },
   {
-    "description": "Stop the Julia runtime on a machine (\"local\" is this computer) for every client that uses it, and on a cluster cancel its job. It ends all the notebooks running there, the user's too, and anyone else's. First it checks whether another session working in an open notebook made a tool call in the last 15 minutes; if one did and force is not true, it stops nothing and the result says how many were active and how long ago the latest was (active_sessions, active_seconds_ago): tell the user, and call again with force true only if they agree. Without force it also stops nothing when Julia is still starting or a Slurm job is queued (the result names the job and its queue state), because other sessions waiting for it can't be seen; and when it can't check who else is active (the runtime doesn't answer): in each case ask the user, and use force true only if they agree. On this computer a start can't be cancelled at all: wait until Julia is up, then stop it. Stop the runtime only when the user asks, such as to give a cluster node back. This session stays pointed at the machine: a later notebook call says it was stopped, and use_machine starts it again. Stopping needs this version of Endeavor's helper on the machine: if it is missing the result is needs_install and nothing is stopped; ask the user, and call again with install true only if they agree.",
+    "description": "Stop the Julia runtime on a machine (\"local\" is this computer) for every client, and on a cluster cancel its job. This ends all notebooks running there, other people's too. Only when the user asks. Without `force` it stops nothing, and says why, if another session was active in the last 15 minutes, Julia is still starting or a job is queued, or it can't check: tell the user, and call again with `force` true only if they agree. A start on this computer can't be cancelled. If Endeavor's program there is missing or too old, the result is `needs_install`: ask the user, and set `install` only if they agree. This session stays pointed at the machine; `use_machine` starts it again.",
     "inputSchema": {
       "properties": {
         "force": {
-          "description": "Stop even though another session was active lately. Only after the user agreed.",
+          "description": "Stop even though another session was active lately or Julia is still starting. Only after the user agreed.",
           "type": "boolean"
         },
         "install": {
-          "description": "true: Endeavor may install its helper on the machine, which stopping needs when only an older version of it is there. Only after the user agreed to what the needs_install result said. Never set it on a first call.",
+          "description": "true: Endeavor may install its program there, which stopping needs (missing, or only an older version there). Only after the user agreed to what `needs_install` named; never on a first call.",
           "type": "boolean"
         },
         "machine": {
-          "description": "\"local\" for this computer, or a machine's name from list_machines.",
+          "description": "\"local\", or a machine's name from list_machines.",
           "type": "string"
         }
       },
