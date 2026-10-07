@@ -26,7 +26,8 @@ use serde_json::{Value, json};
 
 use crate::http::Head;
 use crate::mcp::to_json;
-use crate::{Args, Launcher, Runtime, State, embedded, julia};
+use crate::runtime::{self, Hooks, Looked, Outcome, Up, Waiting, Want};
+use crate::{Args, Launcher, Runtime, embedded, julia, stopped};
 
 mod machines;
 mod projects;
@@ -378,19 +379,6 @@ pub fn lease(dir: &Path) -> Option<Lease> {
     Some(Lease { _marker: marker })
 }
 
-/// A runtime this process can reach: its state, and the process if this one started it.
-struct Up {
-    state: State,
-    port: u16,
-    started: Option<Runtime>,
-}
-
-/// The runtime recorded in `dir` when it runs on this computer and its process is alive,
-/// whether or not it answers.
-fn running_here(dir: &Path) -> Option<State> {
-    crate::read_state(dir).filter(|s| s.node == crate::hostname() && crate::pid_alive(s.pid, s.started))
-}
-
 fn runtime_args(options: &Options, exit_idle: bool) -> Args {
     Args {
         state_dir: options.state_dir.clone(),
@@ -406,40 +394,49 @@ fn runtime_args(options: &Options, exit_idle: bool) -> Args {
     }
 }
 
-/// The runtime running from the state folder, if it answers here.
-fn reuse(args: &Args) -> Result<Option<Up>, String> {
-    let Some(state) = crate::existing(args)? else { return Ok(None) };
-    let port = state.port.ok_or("The Julia running here was started by an older version of Endeavor. Stop it with `endeavor stop`, then try again.")?;
-    Ok(Some(Up { state, port, started: None }))
+/// What `serve` and `mcp` say while a start goes on: its lines to `progress`, and the wait ends when `cancelled` says so.
+struct Saying<'a> {
+    progress: &'a dyn Fn(&str),
+    cancelled: &'a dyn Fn() -> bool,
 }
 
-/// The runtime running from the state folder, or a new one, once it answers.
-/// `progress` hears the start's log; `cancelled` ends a start early.
-fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Up, String> {
-    let dir = &options.state_dir;
-    crate::make_state_dir(dir)?;
-    // One start at a time: the stdio form runs once per agent session.
-    let _starting = start_lock(dir)?;
-    let mut args = runtime_args(options, exit_idle);
-    if let Some(up) = reuse(&args)? {
-        return Ok(up);
+impl Hooks for Saying<'_> {
+    fn progress(&mut self, line: String) {
+        (self.progress)(&line);
     }
-    crate::stopped::clear(dir);
-    args.runtime = unpack_runtime(&options.cache)?;
-    let (julia, version) = julia::find(&options.julia, true, &|line| progress(&line)).map_err(julia::Failure::message)?;
-    progress(&format!("Starting Julia {version} ({julia})"));
-    let token = crate::token(dir)?;
-    let child = crate::start(&args, &julia, &token)?;
-    let (events, _) = mpsc::channel();
-    let runtime = Runtime::child(child, dir, &events);
-    match wait_ready(&runtime, progress, cancelled) {
-        Ok((state, port)) => Ok(Up { state, port, started: Some(runtime) }),
-        Err(e) => {
-            runtime.kill();
-            Err(e)
-        }
+
+    fn found(&mut self, version: &str, path: &str) {
+        (self.progress)(&format!("Starting Julia {version} ({path})"));
+    }
+
+    fn wait(&mut self, wait: Duration, _: Waiting) -> bool {
+        std::thread::sleep(wait);
+        !(self.cancelled)()
     }
 }
+
+/// The runtime running from the state folder, or a new one, once it answers (`runtime::find_or_start`).
+/// `progress` hears the start's log; `cancelled` ends a start early, and a runtime that was starting with it.
+fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Up, String> {
+    let args = runtime_args(options, exit_idle);
+    let (events, _) = mpsc::channel();
+    let want = Want { args: &args, engine: wire::ENGINE_PLUTO, install: true, runtime: &|| unpack_runtime(&options.cache), events: &events };
+    match runtime::find_or_start(&want, &mut Saying { progress, cancelled }) {
+        Outcome::Ready(up) => Ok(up),
+        Outcome::Unusable(runtime::Unusable::OtherNode(node)) => Err(runtime::other_node_text(&node)),
+        Outcome::Unusable(runtime::Unusable::Older) => Err(OLDER_RUNTIME_HERE.into()),
+        Outcome::NeedsInstall(items) => Err(items.into_iter().next().map_or_else(String::new, |item| julia::Failure::Missing(item).message())),
+        Outcome::Failed(message) => Err(message),
+        Outcome::Died { status, log_tail } => {
+            let tail = log_tail[log_tail.len().saturating_sub(8)..].join("\n");
+            Err(format!("Julia stopped while starting ({status}). The end of {}:\n{tail}", options.state_dir.join("runtime.log").display()))
+        }
+        Outcome::Cancelled => Err("Stopped before Julia was ready.".into()),
+    }
+}
+
+/// Why a runtime from a build before one port per runtime can't be used here.
+const OLDER_RUNTIME_HERE: &str = "The Julia running here was started by an older version of Endeavor. Stop it with `endeavor stop`, then try again.";
 
 /// How long `attach` waits for another process that holds the start lock.
 const ATTACH_LOCK_WAIT: Duration = Duration::from_secs(3);
@@ -461,17 +458,13 @@ fn attach(options: &Options) -> Result<Option<Up>, String> {
         Wait::TimedOut => format!("Another process is still starting or reusing Julia in {}. Try again shortly.", dir.display()),
         Wait::Interrupted(never) => match never {},
     })?;
-    let args = runtime_args(options, true);
-    let Some(state) = crate::read_state(dir) else { return Ok(None) };
-    if state.node == crate::hostname() {
-        if !crate::pid_alive(state.pid, state.started) {
-            return Ok(None);
-        }
-        if !crate::alive(&state) {
-            return Err(format!("Julia on this computer (pid {}) is running but isn't answering. Try again in a moment.", state.pid));
-        }
+    match runtime::look(dir, false) {
+        Looked::NotRunning => Ok(None),
+        Looked::Running(state, port) => Ok(Some(Up { state, port, started: None })),
+        Looked::OtherNode(state) => Err(runtime::other_node_text(&state.node)),
+        Looked::Older(_) => Err(OLDER_RUNTIME_HERE.into()),
+        Looked::Silent(state) => Err(format!("Julia on this computer (pid {}) is running but isn't answering. Try again in a moment.", state.pid)),
     }
-    reuse(&args)
 }
 
 /// The core's environment for a standalone runtime (see `core::main`).
@@ -546,15 +539,15 @@ pub(crate) fn wait_for_start_lock<E>(dir: &Path, limit: Duration, mut pause: imp
     Ok(file)
 }
 
-/// Hold `DIR/start.lock` until dropped, waiting for another process's start.
-pub(crate) fn start_lock(dir: &Path) -> Result<std::fs::File, String> {
+/// Hold `DIR/start.lock` to stop the runtime, waiting up to `stop_lock_limit()` for a start under way.
+pub(crate) fn stop_lock(dir: &Path) -> Result<std::fs::File, String> {
     let pause = || {
         std::thread::sleep(Duration::from_millis(200));
         Ok::<(), std::convert::Infallible>(())
     };
-    wait_for_start_lock(dir, start_lock_limit(), pause).map_err(|wait| match wait {
+    wait_for_start_lock(dir, stop_lock_limit(), pause).map_err(|wait| match wait {
         Wait::Failed(message) => message,
-        Wait::TimedOut => start_lock_gave_up(dir),
+        Wait::TimedOut => stop_lock_gave_up(dir),
         Wait::Interrupted(never) => match never {},
     })
 }
@@ -566,44 +559,6 @@ pub(crate) fn stop_lock_gave_up(dir: &Path) -> String {
         dir.display(),
         dir.join("start.lock").display()
     )
-}
-
-/// Follow the log of a runtime we started until it writes its state and
-/// answers on its port.
-fn wait_ready(runtime: &Runtime, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<(State, u16), String> {
-    let log_path = runtime.state_dir.join("runtime.log");
-    let mut log = None;
-    let mut line = String::new();
-    loop {
-        if log.is_none() {
-            log = std::fs::File::open(&log_path).ok().map(BufReader::new);
-        }
-        while let Some(reader) = &mut log {
-            match reader.read_line(&mut line) {
-                Ok(n) if n > 0 && line.ends_with('\n') => {
-                    progress(&crate::redact_secret(line.trim_end()));
-                    line.clear();
-                }
-                _ => break,
-            }
-        }
-        if let Some(status) = runtime.exit.status() {
-            let tail = crate::log_tail(&log_path);
-            let tail = tail[tail.len().saturating_sub(8)..].join("\n");
-            return Err(format!("Julia stopped while starting ({status}). The end of {}:\n{tail}", log_path.display()));
-        }
-        if cancelled() {
-            return Err("Stopped before Julia was ready.".into());
-        }
-        if let Some(state) = crate::read_state(&runtime.state_dir)
-            && state.pid == runtime.pid
-            && let Some(port) = state.port
-            && crate::answers(port, &state.token)
-        {
-            return Ok((state, port));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
 }
 
 /// How to reach a runtime, for `connection_text`.
@@ -828,25 +783,44 @@ enum Ended {
     Stopped(i32),
     /// Still running after the stop (its pid).
     Alive(i32),
+    /// The start lock was not had in time, so nothing was stopped: why.
+    Busy(String),
 }
 
-/// End the runtime recorded in `dir`, as `endeavor stop` does.
-fn end_runtime(dir: &Path) -> Ended {
-    let Some(state) = crate::read_state(dir) else { return Ended::NotRunning };
-    let here = crate::hostname();
-    if state.node != here {
-        return Ended::Elsewhere(state.node);
+/// End the runtime recorded in `dir`, leaving a note of `how` for the clients still attached. It waits
+/// for a start under way (the start lock), so a runtime that is still starting is stopped when it is
+/// done, not in the middle.
+fn end_runtime(dir: &Path, how: stopped::How) -> Ended {
+    match stop_lock(dir) {
+        Ok(_starting) => end_runtime_locked(dir, how),
+        Err(why) => Ended::Busy(why),
     }
-    if !crate::pid_alive(state.pid, state.started) {
-        crate::remove_state(dir, state.pid);
-        return Ended::NotRunning;
-    }
+}
+
+/// `end_runtime`, for a caller that holds the start lock.
+fn end_runtime_locked(dir: &Path, how: stopped::How) -> Ended {
     let (events, _) = mpsc::channel();
-    if crate::stop_marked(dir, &state, &Runtime::recorded(&state, dir, &events), crate::stopped::How::Stop) { Ended::Stopped(state.pid) } else { Ended::Alive(state.pid) }
+    match runtime::look(dir, false) {
+        Looked::OtherNode(state) => Ended::Elsewhere(state.node),
+        Looked::Running(state, _) | Looked::Older(state) | Looked::Silent(state) => {
+            if crate::stop_marked(dir, Some(&state), &Runtime::recorded(&state, dir, &events), how) { Ended::Stopped(state.pid) } else { Ended::Alive(state.pid) }
+        }
+        Looked::NotRunning => {
+            if let Some(state) = crate::read_state(dir) {
+                crate::remove_state(dir, state.pid);
+            }
+            // A start whose client has gone is still under way.
+            match runtime::starting(dir, &events) {
+                Some((runtime, _)) if crate::stop_marked(dir, None, &runtime, how) => Ended::Stopped(runtime.pid),
+                Some((runtime, _)) => Ended::Alive(runtime.pid),
+                None => Ended::NotRunning,
+            }
+        }
+    }
 }
 
 fn stop(dir: &Path) -> ! {
-    match end_runtime(dir) {
+    match end_runtime(dir, stopped::How::Stop) {
         Ended::NotRunning => println!("No Julia is running from {}.", dir.display()),
         Ended::Elsewhere(node) => {
             eprintln!("The Julia recorded in {} runs on {node}, not here ({}). Stop it there.", dir.display(), crate::hostname());
@@ -854,6 +828,10 @@ fn stop(dir: &Path) -> ! {
         }
         Ended::Alive(pid) => {
             eprintln!("Julia (pid {pid}) is still running.");
+            std::process::exit(1);
+        }
+        Ended::Busy(why) => {
+            eprintln!("{why}");
             std::process::exit(1);
         }
         Ended::Stopped(pid) => println!("Stopped Julia (pid {pid})."),

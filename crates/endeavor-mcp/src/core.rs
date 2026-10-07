@@ -235,6 +235,8 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge)
         eprintln!("endeavor core: {e}");
         return None;
     }
+    // Whoever started this core and has gone leaves the note that it is starting.
+    crate::runtime::clear_starting(state_dir, std::process::id() as i32);
     Some(ready)
 }
 

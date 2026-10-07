@@ -152,7 +152,8 @@ impl Link {
 /// before the wait in the queue: a helper that comes in meanwhile finds
 /// `job.json` and waits for the same job.
 pub fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, request: JobRequest, engine: &str, install: bool) -> Result<Attached, Unstarted> {
-    let starting = lock_start(args, mux, inbox, parts)?;
+    let mut client = Client::new(args, mux, &mut *inbox, parts);
+    let starting = client.lock_start()?;
     let dir = &args.state_dir;
     if let Some(attached) = running(args, mux, events)? {
         return Ok(attached);
@@ -167,7 +168,7 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Ev
             Some(attached) => return Ok(attached),
             None => {
                 stopped::clear(dir);
-                submit(args, mux, &request, engine, install)?
+                submit(args, &mut client, &request, engine, install)?
             }
         },
     };
@@ -257,10 +258,10 @@ pub fn cancel_recorded(dir: &Path) {
 
 /// Find Julia (here, on the shared filesystem), write the job script and
 /// submit it. The job's id.
-fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest, engine: &str, install: bool) -> Result<String, Unstarted> {
+fn submit(args: &Args, client: &mut Client, request: &JobRequest, engine: &str, install: bool) -> Result<String, Unstarted> {
     let flags = request.checked_sbatch_args().map_err(|why| Unstarted::Failed(format!("The job wasn't submitted: {why}")))?;
-    let julia = crate::prepare(args, mux, engine, install)?;
-    submit_job(args, mux, request, flags, &julia).map_err(Unstarted::Failed)
+    let julia = runtime::find_julia(&args.julia, engine, install, client).map_err(|outcome| client.unstarted(outcome))?;
+    submit_job(args, client.mux, request, flags, &julia).map_err(Unstarted::Failed)
 }
 
 /// Write the job script for the Julia at `julia` and submit it. The job's id.
@@ -334,7 +335,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, 
                 break Err(Unstarted::Stopped(id));
             }
             Heard::Detach | Heard::Eof => std::process::exit(0),
-            Heard::Event(_) => continue,
+            Heard::Event => continue,
             Heard::Quiet => {}
         }
         let q = match squeue(job) {
@@ -656,10 +657,8 @@ pub fn relay_main(argv: &[String]) -> ! {
     let (events, rx) = mpsc::channel();
     let home = wire::files::home().display().to_string();
     let _ = mux.send(&ToApp::Hello { protocol: wire::PROTOCOL, version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false }.frame());
-    let here = hostname();
-    let state = read_state(&dir).filter(|s| s.node == here && alive(s)).and_then(|s| Some((s.port?, s)));
-    let Some((port, state)) = state else {
-        let _ = mux.send(&ToApp::StartFailed { id: 0, message: format!("Julia isn't running on {here}.") }.frame());
+    let runtime::Looked::Running(state, port) = runtime::look(&dir, false) else {
+        let _ = mux.send(&ToApp::StartFailed { id: 0, message: format!("Julia isn't running on {}.", hostname()) }.frame());
         std::process::exit(1);
     };
     let runtime = Runtime::recorded(&state, &dir, &events);

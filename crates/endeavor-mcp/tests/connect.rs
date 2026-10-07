@@ -335,6 +335,133 @@ fn helpers_asked_to_start_at_once_start_one_runtime_that_serve_then_finds() {
     again.exits();
 }
 
+/// The cores started for `dir`, ended by pid when the test is over.
+struct Cores(PathBuf);
+
+impl Cores {
+    fn pids(&self) -> Vec<i32> {
+        let found = Command::new("pgrep").arg("-f").arg("--").arg(format!("core --state-dir {}", self.0.display())).output().unwrap();
+        String::from_utf8_lossy(&found.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect()
+    }
+}
+
+impl Drop for Cores {
+    fn drop(&mut self) {
+        for pid in self.pids() {
+            // SAFETY: plain syscalls, on a core this test started (its own process group) and what it started.
+            unsafe {
+                libc::kill(-pid, libc::SIGTERM);
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+    }
+}
+
+/// A helper that has asked for a runtime whose Julia is held back, and heard the first line of its log.
+fn held_start(dir: &Path, julia: &Path, flags: &[&str]) -> Helper {
+    let home = dir.join("home").display().to_string();
+    let env = [("HOME", home.as_str()), ("XDG_STATE_HOME", home.as_str()), ("XDG_CONFIG_HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str())];
+    let helper = Helper::start_with(dir, &[&["--julia", julia.to_str().unwrap()], flags].concat(), &env);
+    helper.hello();
+    helper.request_start(None, true);
+    loop {
+        if matches!(helper.next(), ToApp::Progress { line } if line == "booting") {
+            return helper;
+        }
+    }
+}
+
+/// `leave` ends the client of a start that is held back; the core goes on, and a helper that asks while it is still
+/// starting waits for it and attaches to it.
+fn a_start_outlives_its_client(name: &str, leave: impl FnOnce(&mut Helper)) {
+    let dir = state_dir(name);
+    let cores = Cores(dir.clone());
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let mut first = held_start(&dir, &julia, &[]);
+    let started = cores.pids();
+    assert_eq!(started.len(), 1, "{started:?}");
+    leave(&mut first);
+    first.exits();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(common::pid_alive(started[0]) && !dir.join("runtime.json").exists(), "the start goes on without its client");
+
+    let mut second = held_start(&dir, &julia, &[]);
+    std::thread::sleep(Duration::from_millis(700));
+    assert_eq!(cores.pids(), started, "no second runtime is started beside the one starting");
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    let ToApp::Ready { pid, reattached, .. } = after_start(&second) else { panic!("expected Ready") };
+    assert_eq!((pid as i32, reattached), (started[0], true));
+    assert_eq!(cores.pids(), started);
+    assert_eq!(common::read_json(&dir.join("runtime.json"))["pid"].as_i64(), Some(started[0] as i64), "it recorded itself");
+    let stop = second.request_stop();
+    assert_eq!(second.next(), ToApp::Stopped { id: stop });
+    second.stdin.0.lock().unwrap().take();
+    second.exits();
+}
+
+#[test]
+fn a_start_goes_on_when_the_client_detaches() {
+    a_start_outlives_its_client("start-detach", |helper| helper.send(ToHelper::Detach));
+}
+
+#[test]
+fn a_start_goes_on_when_the_clients_input_ends() {
+    a_start_outlives_its_client("start-eof", |helper| drop(helper.stdin.0.lock().unwrap().take()));
+}
+
+#[test]
+fn a_stop_ends_a_start_and_so_does_the_end_of_input_where_the_runtime_goes_with_its_client() {
+    let dir = state_dir("start-cancelled");
+    let cores = Cores(dir.clone());
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    std::fs::write(dir.join("hold"), "").unwrap();
+
+    let helper = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    let stop = helper.request_stop();
+    assert_eq!(helper.after_progress(), ToApp::StartCancelled { id: 1 });
+    assert_eq!(helper.next(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    assert!(!dir.join("starting.json").exists() && !dir.join("runtime.json").exists());
+
+    let mut helper = held_start(&dir, &julia, &["--quit-with-client"]);
+    let core = cores.pids()[0];
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    assert!(!dir.join("starting.json").exists());
+}
+
+#[test]
+fn endeavor_stop_waits_for_the_start_lock_and_ends_a_start_whose_client_has_gone() {
+    let dir = state_dir("start-stop-cli");
+    let cores = Cores(dir.clone());
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let mut helper = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    helper.send(ToHelper::Detach);
+    helper.exits();
+    let stop = || Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["stop", "--state-dir"]).arg(&dir).env("ENDEAVOR_STOP_LOCK_SECS", "1").env("HOME", dir.join("home")).env("XDG_STATE_HOME", dir.join("home")).env("XDG_CONFIG_HOME", dir.join("home")).env("XDG_CACHE_HOME", dir.join("home")).output().unwrap();
+
+    let held = hold_start_lock(&dir);
+    let refused = stop();
+    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("Julia was not stopped"), "{refused:?}");
+    assert!(common::pid_alive(core));
+    drop(held);
+    let stopped = stop();
+    assert_eq!(String::from_utf8_lossy(&stopped.stdout), format!("Stopped Julia (pid {core}).\n"));
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    assert!(!dir.join("starting.json").exists());
+}
+
 /// `endeavor serve` in `dir`, once it has found the runtime there.
 fn serve_in(dir: &Path) -> Child {
     let mut serve = Command::new(env!("CARGO_BIN_EXE_endeavor"))

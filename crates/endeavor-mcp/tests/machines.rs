@@ -1352,6 +1352,73 @@ fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call
     front.finish();
 }
 
+/// Hold `dir/start.lock`, as a process in the middle of a start does.
+fn hold_start_lock(dir: &Path) -> std::fs::File {
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("start.lock")).unwrap();
+    // SAFETY: plain syscall on a file we hold open.
+    assert_eq!(unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    file
+}
+
+#[test]
+fn stopping_this_computer_waits_for_a_start_under_way_and_leaves_the_note_of_a_stop_from_a_connection() {
+    let place = Place::new("lazy-stop-lock");
+    let path = local_notebook(&place, "stop.jl");
+    let mut front = start_front(&place, &[("ENDEAVOR_STOP_LOCK_SECS", "1")]);
+    front.initialize();
+    front.ok("open_notebook", json!({ "path": path }));
+    let runtime = place.local_runtime().unwrap();
+
+    let held = hold_start_lock(&place.local_state);
+    let (failed, said) = front.call("stop_machine", json!({ "machine": "local", "force": true }));
+    assert!(failed && text(&said).contains("Julia was not stopped") && text(&said).contains("start lock"), "{said}");
+    assert!(pid_alive(runtime));
+    drop(held);
+    let stopped = front.ok("stop_machine", json!({ "machine": "local", "force": true }));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    wait_for("the runtime to end", || !pid_alive(runtime));
+    let note = std::fs::read_to_string(place.local_state.join("stopped")).unwrap();
+    assert_eq!(note, format!("{runtime} connection"), "other clients hear it was stopped from another connection");
+    front.finish();
+}
+
+#[test]
+fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_attaches_to_it() {
+    let place = Place::new("lazy-abandoned");
+    let path = local_notebook(&place, "abandoned.jl");
+    std::fs::write(place.local_state.join("hold"), "").unwrap();
+    let short = [("ENDEAVOR_START_WAIT_SECS", "2")];
+    let mut first = start_front(&place, &short);
+    first.initialize();
+    let (failed, said) = first.call("open_notebook", json!({ "path": path }));
+    assert!(failed && text(&said).contains("still starting"), "{said}");
+    let started = core_of(&place);
+    assert_eq!(started.len(), 1, "{started:?}");
+    first.finish();
+    assert!(pid_alive(started[0]) && place.local_runtime().is_none(), "the start goes on without the front");
+
+    // A front that comes while the start is still under way waits for it and starts none.
+    let mut second = start_front(&place, &short);
+    second.initialize();
+    let (failed, said) = second.call("open_notebook", json!({ "path": path }));
+    assert!(failed && text(&said).contains("still starting"), "{said}");
+    assert_eq!(core_of(&place), started, "no second runtime was started");
+    std::fs::remove_file(place.local_state.join("hold")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (failed, said) = second.call("open_notebook", json!({ "path": path }));
+        if !failed {
+            break;
+        }
+        assert!(text(&said).contains("still starting"), "{said}");
+        assert!(Instant::now() < deadline, "{said}");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert_eq!(place.local_runtime(), Some(started[0]), "the second front uses the runtime the first one began");
+    assert_eq!(core_of(&place), started);
+    second.finish();
+}
+
 #[test]
 fn a_link_of_the_same_protocol_is_sent_a_start_and_one_of_another_is_not() {
     for (protocol, sent) in [(endeavor_mcp::link::PROTOCOL, true), (0, false)] {

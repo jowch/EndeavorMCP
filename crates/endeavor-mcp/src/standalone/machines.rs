@@ -907,7 +907,7 @@ impl Relay {
             Target::Local { stopped } => (*stopped, true),
             Target::Machine(_) => (false, false),
         };
-        let running = super::running_here(&self.options.state_dir).is_some();
+        let running = crate::runtime::look(&self.options.state_dir, false).alive().is_some();
         let local_state = match (stopped, running) {
             (true, _) => "stopped from this session",
             (false, true) => "running",
@@ -1405,7 +1405,9 @@ impl Relay {
 
     fn stop_local(&self, force: bool) -> Result<Value, String> {
         let dir = &self.options.state_dir;
-        let Some(state) = super::running_here(dir) else {
+        // First, so that a start another process has under way is waited for, not missed by the look below.
+        let _starting = super::stop_lock(dir)?;
+        let Some(state) = crate::runtime::look(dir, false).alive() else {
             return Ok(json!({ "machine": LOCAL, "stopped": false, "message": "Julia isn't running on this computer, so there is nothing to stop." }));
         };
         if !force && let Some(port) = state.port {
@@ -1434,7 +1436,7 @@ impl Relay {
                 *stopped = false;
             }
         };
-        match super::end_runtime(dir) {
+        match super::end_runtime_locked(dir, crate::stopped::How::Connection) {
             super::Ended::Stopped(_) | super::Ended::NotRunning => {}
             super::Ended::Alive(pid) => {
                 unmark();
@@ -1443,6 +1445,10 @@ impl Relay {
             super::Ended::Elsewhere(node) => {
                 unmark();
                 return Err(format!("The Julia recorded here runs on {node}, not on this computer."));
+            }
+            super::Ended::Busy(why) => {
+                unmark();
+                return Err(why);
             }
         }
         // Only the runtime that was stopped: another thread may have started a new one meanwhile.

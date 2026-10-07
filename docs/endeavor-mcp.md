@@ -138,6 +138,18 @@ error, not "not running". After a failed call they take this path again. The
 first call that starts it waits as a start at launch did: up to `start_wait()`
 (45 s), then a "still starting, try again" failure, and the start goes on.
 
+The helper, `serve` and the front find or start the runtime with one function
+(`runtime::find_or_start`) and look at what is running with one (`runtime::look`).
+A start, once begun, finishes without the process that asked for it: the core
+is its own session and records itself in `runtime.json` when Julia is ready, so
+a front that exits meanwhile leaves it going. Until then `starting.json` in the
+state folder names the core, and a client that takes the start lock finds it
+there and waits for it instead of starting another. Only an explicit stop
+ends a start: a `Stop` to the helper (answered `StartCancelled`), Ctrl-C in
+`serve`, or `endeavor stop`. The one exception is a helper given
+`--quit-with-client`, which stops a runtime it is waiting for when its input
+ends, as it does one it is attached to.
+
 ## Session identity
 
 _Built 2026-10-03._
@@ -260,6 +272,14 @@ says another call is still running and has changed nothing.
 | `add_machine` | `host` (an ssh alias or `user@host[:port]`, through `valid_host`), `name`, `julia`, `slurm` (boolean), `install` (boolean, only after the user agreed; covers the helper only) | `{machine, host, state, saved, updated, node, home, os, arch, slurm, cluster, runs_in, partitions: [{name, default, max_hours, cpus, memory_gb}], scratch, found, message}`. `slurm` is whether Slurm was found; `cluster` and `runs_in` (`slurm_jobs` or `directly`) are what is used. `state` is `connecting` when 45 s ran out; call again. `needs_install` when this build's helper isn't on the machine and `install` wasn't given: `install` `{items: [{kind: "helper", name, size_mb, place}], os, arch, update, running}` (`size_mb` is null for a server of another platform than this computer's; `running` is `{process}` or `{slurm_job}` when a runtime is recorded and alive there, and `{process_recorded}` or `{slurm_job_recorded}` when it is recorded and alive but `ps` or `squeue` couldn't say more, else null), `saved` true (not added), and a `message` that tells the agent to ask the user. `found` (`[{name, version, path}]`, Julia once a runtime has been started there) is empty until then |
 | `use_machine` | `machine` (a name, or `"local"`), `folder`, `install` (boolean, only after the user agreed); on a cluster `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | `{machine, state, ready, message, …}`. `ready`: `browser_url`, `node`, `folder`, `already_running`, and for a cluster `job` `{id, summary, node, ends_at, ends_in_minutes}`. `starting`, `queued`: `step`, `queue` `{state, reason, reason_text}`, `job`. `needs_job`: a cluster with nothing running and no resources given; `defaults`, `partitions`; nothing was submitted and the session did not move. `needs_install`: the machine lacks this build's helper (an update when an older one is there), or what the start needs, such as Julia when none was found (`install` `{items: [{kind, name, size_mb, place}], …}`); nothing was installed and the session did not move; call again with `install: true` after the user agreed. One yes covers everything this call needs, the helper and then Julia if none is found; the helper's agreement from `add_machine` covers the helper only. `gpus` 0 is no GPU (it overrides and clears the saved default); each `extra_sbatch_flags` entry starts with `-`, and `--wrap` and line breaks are refused |
 | `stop_machine` | `machine`, `force`, `install` (boolean, only after the user agreed) | `{machine, stopped, message}`; `needs_install` (`stopped` false) when the machine has only an older build's helper, since stopping needs this build's: the same `install` as above, and nothing was stopped; refused without `force` with `other_sessions` `[{client, active_seconds_ago, notebook}]` when another session was active in the last 15 minutes; with `state` `starting`/`queued`, `job` and `queue` when Julia is starting or a job is queued (waiting sessions can't be seen); or as an error when the runtime doesn't answer the check for 5 s |
+
+`stop_machine` with `"local"` takes `start.lock` first, as the helper's stop does,
+and waits for it up to 20 s (`ENDEAVOR_STOP_LOCK_SECS` sets it for tests), so it
+doesn't stop a runtime another process is still starting; if the lock isn't had
+it stops nothing and says so (an error). It marks the stop as made from a connection,
+so a client that finds the runtime gone is told "It was stopped from another
+connection." `endeavor stop` waits for the lock in the same way and keeps its own
+words ("It was stopped with `endeavor stop`.").
 
 `use_machine` and `pluto_session_status` use the link's own words for what is
 going on, and no call waits longer than 45 seconds (`ENDEAVOR_START_WAIT_SECS`

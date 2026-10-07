@@ -137,6 +137,9 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 
 1. One find-or-start function, used by the helper, `serve` and the front.
    Stopping the local runtime takes `start.lock`, which it does not today.
+   _Built 2026-10-07:_ `runtime::find_or_start` and `runtime::look`; the
+   local stop, `stop_machine` and `endeavor stop`, take the lock; a start
+   outlives the client that asked for it (below).
 2. Connect, retry and re-attach as one library type that answers with an
    outcome.
 3. The front holds its connections in process and has one kind of target.
@@ -160,16 +163,18 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 - Sign-in stays with keys only. A page for servers that ask for a password
   or a code is not planned; it stays under "Not in the first version".
 - A start, once begun, finishes without the client that asked for it, so
-  the next session finds the runtime. It is made true and tested in step 1,
-  for this computer and for a server.
-
-**Open.**
+  the next session finds the runtime. Built and tested in step 1, for this
+  computer and for a server that runs it as a process: the core is its own
+  session and `starting.json` names it until it records itself, so a client
+  that comes meanwhile waits for it. A Slurm job was already left queued.
+  A helper started with `--quit-with-client` still stops a runtime it waits
+  for when its input ends.
 
 - `endeavor serve` runs in your terminal until you stop it and has no idle
-  exit, while a runtime that `mcp` or a server connection starts exits once
-  no notebook has been open for the idle limit. Proposed: keep that
-  difference, as an option of `serve`, and record in `runtime.json` whether
-  the runtime exits when idle, so every client can say which it is.
+  exit: you started it on purpose where you can see it. A runtime that
+  `mcp` or a server connection starts exits once no notebook has been open
+  for the idle limit. `runtime.json` records which it is, so every client
+  can say (step 5).
 
 ## Decided
 
@@ -414,7 +419,8 @@ together, and the client refuses a helper of another number when it connects
 (a failed connection that is not retried, saying the server side is of
 another version of Endeavor). A stop waits 20 s for
 `start.lock`, so it does not stop a runtime that another helper is still
-starting; it says so instead.
+starting; it says so instead. `stop_machine` on this computer and `endeavor stop`
+do the same, and the first marks the stop as made from a connection.
 
 **A runtime from another build** is used, as `serve` and `mcp` do today.
 `use_machine` and `pluto_session_status` say that the runtime there is from

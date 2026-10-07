@@ -212,7 +212,7 @@ fn put_in_place(part: &Path, exe: &Path, aside: bool) -> Result<(), String> {
 
 /// Whether a runtime recorded in `dir` is running on this machine.
 fn running(dir: &Path) -> bool {
-    crate::read_state(dir).is_some_and(|state| state.node == crate::hostname() && crate::pid_alive(state.pid, state.started))
+    crate::runtime::look(dir, false).alive().is_some()
 }
 
 #[cfg(all(test, unix))]

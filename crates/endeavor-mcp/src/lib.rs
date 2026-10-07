@@ -26,6 +26,7 @@ mod mcp;
 mod notebooks;
 mod release;
 mod results;
+mod runtime;
 mod slurm;
 mod standalone;
 mod stopped;
@@ -70,6 +71,7 @@ use serde_json::{Value, json};
 use wire::relay::Mux;
 use wire::files::RuntimeState;
 use wire::slurm::JobRequest;
+use runtime::{Hooks, Outcome, Up, Waiting, Want};
 use wire::{Frame, ToApp, ToHelper};
 
 const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
@@ -450,7 +452,7 @@ impl Attached {
         *routes.write().unwrap() = Route::None;
         match &self.how {
             How::Process(runtime, _) => {
-                if !stop_marked(&args.state_dir, &self.state, runtime, stopped::How::Connection) {
+                if !stop_marked(&args.state_dir, Some(&self.state), runtime, stopped::How::Connection) {
                     *routes.write().unwrap() = self.route();
                     return Err(Box::new((self, STILL_RUNNING.into())));
                 }
@@ -470,12 +472,12 @@ const STILL_RUNNING: &str = "Julia was not stopped: it is still running.";
 
 /// Stop `runtime`, leaving a note for the other clients of how it was stopped
 /// (see `stopped`), and taking the note back if it is still alive. Whether it
-/// is gone.
-fn stop_marked(dir: &Path, state: &State, runtime: &Runtime, how: stopped::How) -> bool {
-    let of = stopped::Of::Runtime(state.pid);
+/// is gone. `state` is the runtime's record when it has one; a runtime still starting has none.
+fn stop_marked(dir: &Path, state: Option<&State>, runtime: &Runtime, how: stopped::How) -> bool {
+    let of = stopped::Of::Runtime(runtime.pid);
     stopped::mark(dir, of, how);
-    runtime.stop(Some(state));
-    let gone = !pid_alive(state.pid, state.started);
+    runtime.stop(state);
+    let gone = !pid_alive(runtime.pid, runtime.started_at());
     if !gone {
         stopped::unmark(dir, of);
     }
@@ -497,8 +499,8 @@ enum Heard {
     Stop(u32),
     Detach,
     Eof,
-    /// What happened to a runtime or a relay, or a file request.
-    Event(Event),
+    /// What happened to a runtime or a relay: nothing a start under way acts on.
+    Event,
 }
 
 impl Inbox {
@@ -527,7 +529,7 @@ impl Inbox {
             Event::App(ToHelper::Stop { id }) => Heard::Stop(id),
             Event::App(ToHelper::Detach) => Heard::Detach,
             Event::Eof => Heard::Eof,
-            other => Heard::Event(other),
+            _ => Heard::Event,
         }
     }
 
@@ -585,41 +587,105 @@ impl Unstarted {
     }
 }
 
-/// Take the start lock to start a runtime, as `standalone::start_lock` does.
-/// What the client said while a stop waited is heard first, so a start for a
-/// client that has since left is not made. While another helper holds the lock
-/// (a start can take minutes) the client is told once, and what it sends is
-/// still served: Detach and the end of input exit, and Stop ends the start,
-/// since nothing here is starting for it to stop.
-fn lock_start(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, parts: &Parts) -> Result<File, Unstarted> {
-    fn hear(mux: &Arc<Mux>, inbox: &mut Inbox, parts: &Parts, wait: Duration) -> Result<(), Unstarted> {
-        match inbox.hear_while_starting(mux, wait) {
-            Heard::Stop(id) => return Err(Unstarted::Stopped(id)),
-            Heard::Detach => {
-                parts.discard();
-                std::process::exit(0)
+/// What the helper says to its client, and hears from it, while a start goes on (`runtime::Hooks`).
+struct Client<'a> {
+    args: &'a Args,
+    mux: &'a Arc<Mux>,
+    inbox: &'a mut Inbox,
+    parts: &'a Parts,
+    /// Whether the client was told that another helper holds the start lock.
+    told: bool,
+    /// The `Stop` that ended the start.
+    stop: Option<u32>,
+}
+
+impl<'a> Client<'a> {
+    fn new(args: &'a Args, mux: &'a Arc<Mux>, inbox: &'a mut Inbox, parts: &'a Parts) -> Client<'a> {
+        Client { args, mux, inbox, parts, told: false, stop: None }
+    }
+
+    /// Hear what the client said while a stop waited, before a start for it is made: a client that has
+    /// since left gets none. Err when a `Stop` among it ended the start.
+    fn hear_kept(&mut self) -> Result<(), Unstarted> {
+        while !self.inbox.later.is_empty() {
+            if !self.hear(Duration::ZERO, Waiting::Lock) {
+                return Err(self.cancelled());
             }
-            Heard::Eof => std::process::exit(0),
-            Heard::Quiet | Heard::Event(_) => {}
         }
         Ok(())
     }
-    while !inbox.later.is_empty() {
-        hear(mux, inbox, parts, Duration::ZERO)?;
-    }
-    let mut told = false;
-    let waited = standalone::wait_for_start_lock(&args.state_dir, standalone::start_lock_limit(), || {
-        if !told {
-            let _ = mux.send(&ToApp::Progress { line: "Another connection is starting Julia here; waiting for it.".into() }.frame());
-            told = true;
+
+    /// Hear the client for up to `wait`. Detach and the end of input exit, leaving a runtime that is
+    /// starting to finish by itself; but the end of input stops it where `--quit-with-client` says the
+    /// runtime goes with the client. A `Stop` ends the start. A `StartRuntime` is refused. False: the start is over.
+    fn hear(&mut self, wait: Duration, waiting: Waiting) -> bool {
+        match self.inbox.hear_while_starting(self.mux, wait) {
+            Heard::Stop(id) => {
+                self.stop = Some(id);
+                return false;
+            }
+            Heard::Detach => {
+                self.parts.discard();
+                std::process::exit(0)
+            }
+            Heard::Eof if self.args.quit_with_client && waiting == Waiting::Ready => return false,
+            Heard::Eof => std::process::exit(0),
+            Heard::Quiet | Heard::Event => {}
         }
-        hear(mux, inbox, parts, Duration::from_millis(200))
-    });
-    waited.map_err(|wait| match wait {
-        standalone::Wait::Failed(message) => Unstarted::Failed(message),
-        standalone::Wait::TimedOut => Unstarted::Failed(standalone::start_lock_gave_up(&args.state_dir)),
-        standalone::Wait::Interrupted(message) => message,
-    })
+        true
+    }
+
+    /// How a start that `hear` ended is answered; none is when the client has gone, and the process exits.
+    fn cancelled(&self) -> Unstarted {
+        match self.stop {
+            Some(id) => Unstarted::Stopped(id),
+            None => std::process::exit(0),
+        }
+    }
+
+    /// The app's answer to a start that came to nothing.
+    fn unstarted(&self, outcome: Outcome) -> Unstarted {
+        match outcome {
+            Outcome::Failed(message) => Unstarted::Failed(message),
+            Outcome::NeedsInstall(items) => Unstarted::NeedsInstall(items),
+            Outcome::Died { status, log_tail } => Unstarted::Died { status, log_tail },
+            Outcome::Unusable(runtime::Unusable::OtherNode(node)) => Unstarted::Failed(runtime::other_node_text(&node)),
+            Outcome::Unusable(runtime::Unusable::Older) => Unstarted::Failed(OLDER_RUNTIME.into()),
+            Outcome::Cancelled => self.cancelled(),
+            Outcome::Ready(_) => unreachable!("a runtime is not an unstarted one"),
+        }
+    }
+
+    /// Take the start lock to start a runtime. While another helper holds it (a start can take minutes)
+    /// the client is told once, and what it sends is still served.
+    fn lock_start(&mut self) -> Result<File, Unstarted> {
+        self.hear_kept()?;
+        let dir = &self.args.state_dir;
+        let waited = standalone::wait_for_start_lock(dir, standalone::start_lock_limit(), || if self.wait(Duration::from_millis(200), Waiting::Lock) { Ok(()) } else { Err(()) });
+        waited.map_err(|wait| match wait {
+            standalone::Wait::Failed(message) => Unstarted::Failed(message),
+            standalone::Wait::TimedOut => Unstarted::Failed(standalone::start_lock_gave_up(dir)),
+            standalone::Wait::Interrupted(()) => self.cancelled(),
+        })
+    }
+}
+
+impl Hooks for Client<'_> {
+    fn progress(&mut self, line: String) {
+        let _ = self.mux.send(&ToApp::Progress { line }.frame());
+    }
+
+    fn found(&mut self, version: &str, path: &str) {
+        let _ = self.mux.send(&ToApp::Found { name: "Julia".into(), version: version.into(), path: path.into() }.frame());
+    }
+
+    fn wait(&mut self, wait: Duration, waiting: Waiting) -> bool {
+        if waiting == Waiting::Lock && !self.told {
+            self.progress("Another connection is starting Julia here; waiting for it.".into());
+            self.told = true;
+        }
+        self.hear(wait, waiting)
+    }
 }
 
 /// Take the start lock to stop the runtime, waiting up to `limit`. What the
@@ -641,38 +707,21 @@ fn lock_stop(dir: &Path, inbox: &mut Inbox, limit: Duration) -> Result<File, Str
     })
 }
 
-/// Find, or with `install` install, what the notebook system `engine` starts
-/// with, and say what was found. The path of the julia that runs it.
-fn prepare(args: &Args, mux: &Arc<Mux>, engine: &str, install: bool) -> Result<String, Unstarted> {
-    match engine {
-        wire::ENGINE_PLUTO => {
-            let (path, version) = julia::find(&args.julia, install, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(julia::Failure::into_unstarted)?;
-            let _ = mux.send(&ToApp::Found { name: "Julia".into(), version, path: path.clone() }.frame());
-            Ok(path)
-        }
-        other => Err(Unstarted::Failed(format!("Endeavor doesn't know a notebook system called \"{other}\"."))),
-    }
-}
-
-/// Attach to the runtime in the state folder, or start one. The start lock
-/// is held until the runtime is ready, so helpers asked at once start one
-/// runtime and the rest attach to it. The error is the app's answer: why it
-/// couldn't start, or that it died while starting.
+/// Attach to the runtime in the state folder, or start one (`runtime::find_or_start`). The start lock
+/// is held until the runtime is ready, so helpers asked at once start one runtime and the rest attach
+/// to it. The error is the app's answer: why it couldn't start, or that it died while starting.
 fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, engine: &str, install: bool) -> Result<Attached, Unstarted> {
-    let failed = Unstarted::Failed;
-    let _starting = lock_start(args, mux, inbox, parts)?;
-    if let Some(state) = existing(args).map_err(failed)? {
-        let port = state.port.ok_or_else(|| failed(OLDER_RUNTIME.into()))?;
-        let runtime = Runtime::recorded(&state, &args.state_dir, events);
-        return Ok(Attached { how: How::Process(runtime, port), state, reattached: true });
+    let mut client = Client::new(args, mux, inbox, parts);
+    client.hear_kept()?;
+    let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events };
+    match runtime::find_or_start(&want, &mut client) {
+        Outcome::Ready(Up { state, port, started }) => {
+            let reattached = started.is_none();
+            let runtime = started.unwrap_or_else(|| Runtime::recorded(&state, &args.state_dir, events));
+            Ok(Attached { how: How::Process(runtime, port), state, reattached })
+        }
+        other => Err(client.unstarted(other)),
     }
-    stopped::clear(&args.state_dir);
-    let julia = prepare(args, mux, engine, install)?;
-    let token = token(&args.state_dir).map_err(failed)?;
-    let child = start(args, &julia, &token).map_err(failed)?;
-    let runtime = Runtime::child(child, &args.state_dir, events);
-    let (state, port) = boot(args, mux, &runtime, inbox, parts)?;
-    Ok(Attached { how: How::Process(runtime, port), state, reattached: false })
 }
 
 /// Stop the runtime recorded in the state folder without attaching to it (on
@@ -681,18 +730,22 @@ fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>
 /// runtime. Without the start lock, or for a runtime this helper may not stop,
 /// nothing is stopped: why.
 fn stop_recorded(args: &Args, inbox: &mut Inbox, events: &Sender<Event>) -> Result<(), String> {
-    let _starting = lock_stop(&args.state_dir, inbox, standalone::stop_lock_limit())?;
+    let dir = &args.state_dir;
+    let _starting = lock_stop(dir, inbox, standalone::stop_lock_limit())?;
     match args.launcher {
-        Launcher::Process => match existing(args) {
-            Ok(Some(state)) => {
-                if !stop_marked(&args.state_dir, &state, &Runtime::recorded(&state, &args.state_dir, events), stopped::How::Connection) {
-                    return Err(STILL_RUNNING.into());
-                }
+        Launcher::Process => {
+            let runtime = match runtime::look(dir, args.any_node) {
+                runtime::Looked::OtherNode(state) => return Err(format!("Julia was not stopped. {}", runtime::other_node_text(&state.node))),
+                runtime::Looked::Running(state, _) | runtime::Looked::Older(state) => Some((Runtime::recorded(&state, dir, events), Some(state))),
+                runtime::Looked::Silent(_) | runtime::Looked::NotRunning => runtime::starting(dir, events).map(|(runtime, _)| (runtime, None)),
+            };
+            if let Some((runtime, state)) = runtime
+                && !stop_marked(dir, state.as_ref(), &runtime, stopped::How::Connection)
+            {
+                return Err(STILL_RUNNING.into());
             }
-            Ok(None) => {}
-            Err(e) => return Err(format!("Julia was not stopped. {e}")),
-        },
-        Launcher::Slurm => slurm::cancel_recorded(&args.state_dir),
+        }
+        Launcher::Slurm => slurm::cancel_recorded(dir),
     }
     Ok(())
 }
@@ -710,15 +763,11 @@ fn check(dir: &Path, launcher: Launcher, any_node: bool) -> RuntimeState {
     if launcher == Launcher::Slurm {
         return slurm::check(dir);
     }
-    let Some(state) = read_state(dir) else { return RuntimeState::NotRunning };
-    if state.node != hostname() && !any_node {
-        return RuntimeState::Running { node: state.node, notebooks: None, job: None };
+    match runtime::look(dir, any_node) {
+        runtime::Looked::NotRunning | runtime::Looked::Silent(_) => RuntimeState::NotRunning,
+        runtime::Looked::OtherNode(state) | runtime::Looked::Older(state) => RuntimeState::Running { node: state.node, notebooks: None, job: None },
+        runtime::Looked::Running(state, port) => RuntimeState::Running { notebooks: open_notebooks(port, &state.token), node: state.node, job: None },
     }
-    if !alive(&state) {
-        return RuntimeState::NotRunning;
-    }
-    let notebooks = state.port.and_then(|port| open_notebooks(port, &state.token));
-    RuntimeState::Running { node: state.node, notebooks, job: None }
 }
 
 /// How many notebooks the runtime has open, from its `list_notebooks` tool.
@@ -728,48 +777,6 @@ fn open_notebooks(port: u16, token: &str) -> Option<u32> {
     let text = reply["result"]["content"][0]["text"].as_str()?;
     let list: Value = serde_json::from_str(text).ok()?;
     list.as_array().map(|a| a.len() as u32)
-}
-
-/// Wait for a runtime we just started to write its state and answer. A runtime
-/// that isn't ready is never left behind: anything but its readiness stops it.
-fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, inbox: &mut Inbox, parts: &Parts) -> Result<(State, u16), Unstarted> {
-    let ready = Arc::new(AtomicBool::new(false));
-    let log = follow_log(args.state_dir.join("runtime.log"), mux.clone(), ready.clone(), runtime.exit.clone());
-    let result = loop {
-        match inbox.hear_while_starting(mux, Duration::from_millis(200)) {
-            Heard::Event(Event::Exited(pid, status)) if pid == runtime.pid => {
-                let (status, log_tail) = runtime.died(status);
-                break Err(Unstarted::Died { status, log_tail });
-            }
-            Heard::Event(_) => {}
-            Heard::Stop(id) => {
-                runtime.stop(None);
-                break Err(Unstarted::Stopped(id));
-            }
-            Heard::Detach => {
-                runtime.stop(None);
-                parts.discard();
-                std::process::exit(0);
-            }
-            Heard::Eof => {
-                runtime.stop(None);
-                std::process::exit(0);
-            }
-            Heard::Quiet => {
-                if let Some(state) = read_state(&args.state_dir)
-                    && state.pid == runtime.pid
-                    && let Some(port) = state.port
-                    && answers(port, &state.token)
-                {
-                    break Ok((state, port));
-                }
-            }
-        }
-    };
-    // Its progress lines go out before Ready.
-    ready.store(true, Ordering::SeqCst);
-    let _ = log.join();
-    result
 }
 
 /// A runtime process this helper watches.
@@ -799,14 +806,29 @@ impl Runtime {
 
     /// The runtime `state` records, which some earlier helper started.
     fn recorded(state: &State, state_dir: &Path, events: &Sender<Event>) -> Runtime {
-        let exit = Exit::watch_pid(state.pid, state.started, events.clone());
+        Runtime::watching(state.pid, state.started, state_dir, events)
+    }
+
+    /// The runtime of process `pid` (started at `started`, see `State`), which some earlier client started.
+    fn watching(pid: i32, started: Option<u64>, state_dir: &Path, events: &Sender<Event>) -> Runtime {
         Runtime {
-            pid: state.pid,
+            pid,
             #[cfg(windows)]
-            started: state.started,
-            exit,
+            started,
+            exit: Exit::watch_pid(pid, started, events.clone()),
             state_dir: state_dir.to_path_buf(),
         }
+    }
+
+    /// When the process started, where that tells it from a later one with its pid (`State::started`).
+    #[cfg(windows)]
+    fn started_at(&self) -> Option<u64> {
+        self.started
+    }
+
+    #[cfg(not(windows))]
+    fn started_at(&self) -> Option<u64> {
+        None
     }
 
     /// It exited: clean up after it and say so, and if another connection
@@ -903,12 +925,16 @@ impl Exit {
         exit
     }
 
-    /// A runtime some earlier helper started isn't our child: poll it.
+    /// A runtime some earlier helper started isn't our child: poll it, until it is gone or no one
+    /// holds its `Exit` any more.
     fn watch_pid(pid: i32, started: Option<u64>, events: Sender<Event>) -> Arc<Exit> {
         let exit = Arc::new(Exit::default());
         let e = exit.clone();
         std::thread::spawn(move || {
             while pid_alive(pid, started) {
+                if Arc::strong_count(&e) == 1 {
+                    return;
+                }
                 std::thread::sleep(Duration::from_millis(500));
             }
             e.set(pid, "exited".into(), &events);
@@ -1076,23 +1102,6 @@ fn dial(mux: &Arc<Mux>, id: u32, port: u16) {
     }
 }
 
-/// The runtime in `runtime.json`, if it's alive and answering here.
-fn existing(args: &Args) -> Result<Option<State>, String> {
-    let Some(state) = read_state(&args.state_dir) else { return Ok(None) };
-    let here = hostname();
-    if state.node != here && !args.any_node {
-        return Err(format!(
-            "Julia for this folder is running on {}, and this is {here}. Connect to {} to use it, or stop it there.",
-            state.node, state.node
-        ));
-    }
-    if alive(&state) {
-        return Ok(Some(state));
-    }
-    eprintln!("endeavor: the recorded runtime (pid {}) isn't answering; starting a new one", state.pid);
-    Ok(None)
-}
-
 fn read_state(dir: &Path) -> Option<State> {
     parse_state(&serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?)
 }
@@ -1110,8 +1119,9 @@ fn parse_state(v: &Value) -> Option<State> {
     })
 }
 
-/// Remove `runtime.json` if it still describes the runtime `pid`.
+/// Remove `runtime.json` if it still describes the runtime `pid`, and the note that it is starting.
 fn remove_state(dir: &Path, pid: i32) {
+    runtime::clear_starting(dir, pid);
     let path = dir.join("runtime.json");
     let current = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
     if current.is_none_or(|v| v["pid"].as_i64() == Some(pid as i64)) {
@@ -1176,7 +1186,7 @@ fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_
 /// Start the runtime detached from us (its own session, no terminal, stdin from
 /// /dev/null), logging to `runtime.log`.
 #[cfg(unix)]
-fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
+fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child, String> {
     let dir = &args.state_dir;
     let log_path = dir.join("runtime.log");
     // The log shows Pluto's secret URL.
@@ -1185,7 +1195,7 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
         .and_then(|f| f.set_len(0).map(|_| f))
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let stderr = log.try_clone().map_err(|e| e.to_string())?;
-    let mut command = runtime_command(julia, &args.runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
+    let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
     command.stdout(log).stderr(stderr).envs(args.core_env.iter().map(|(k, v)| (k, v)));
     // SAFETY: setsid and sigprocmask are async-signal-safe.
     unsafe {
@@ -1206,7 +1216,7 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
 /// then puts itself in a Job Object that takes Julia and its workers along
 /// when it ends (see core).
 #[cfg(windows)]
-fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
+fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child, String> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
@@ -1217,7 +1227,7 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
         .and_then(|f| f.set_len(0).map(|_| f))
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let stderr = log.try_clone().map_err(|e| e.to_string())?;
-    let mut command = runtime_command(julia, &args.runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
+    let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
     command.stdout(log).stderr(stderr).envs(args.core_env.iter().map(|(k, v)| (k, v)));
     // Julia and Pluto's workers are console programs: with no console to
     // share, each would open a console window. CREATE_NO_WINDOW gives the core
@@ -1239,21 +1249,14 @@ fn start(args: &Args, julia: &str, token: &str) -> Result<Child, String> {
 /// been written so far) or gone.
 fn follow_log(path: PathBuf, mux: Arc<Mux>, ready: Arc<AtomicBool>, exit: Arc<Exit>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let Ok(file) = File::open(&path) else { return };
-        let mut lines = BufReader::new(file);
-        let mut line = String::new();
+        let mut log = runtime::Log::new(path);
         loop {
             let last_pass = ready.load(Ordering::SeqCst) || exit.status().is_some();
-            match lines.read_line(&mut line) {
-                Ok(n) if n > 0 && line.ends_with('\n') => {
-                    let text = redact_secret(line.trim_end());
-                    let _ = mux.send(&ToApp::Progress { line: text }.frame());
-                    line.clear();
-                }
-                // At the end for now; a partial line waits for the rest.
-                Ok(_) if !last_pass => std::thread::sleep(Duration::from_millis(100)),
-                _ => return,
+            log.drain(&mut |line| drop(mux.send(&ToApp::Progress { line }.frame())));
+            if last_pass {
+                return;
             }
+            std::thread::sleep(Duration::from_millis(100));
         }
     })
 }
@@ -1293,19 +1296,6 @@ fn hostname() -> String {
 
 /// The app's calls on the runtime's port.
 const CALL: &str = "/endeavor/call";
-
-/// Whether the runtime recorded in `state` is running: its process is, and
-/// it answers on its port. A runtime from before one port per runtime is
-/// taken at its process's word.
-fn alive(state: &State) -> bool {
-    // Twice: a busy runtime can be slow to answer once.
-    pid_alive(state.pid, state.started) && state.port.is_none_or(|port| answers(port, &state.token) || answers(port, &state.token))
-}
-
-/// Whether the runtime on `port` answers its calls.
-fn answers(port: u16, token: &str) -> bool {
-    bridge_call(port, CALL, token, "ping").is_ok_and(|status| status == 200)
-}
 
 /// POST one JSON-RPC call to the runtime's calls; its reply.
 fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::Result<Value> {

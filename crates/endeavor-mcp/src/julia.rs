@@ -76,19 +76,11 @@ impl Failure {
             Failure::Failed(message) => message,
         }
     }
-
-    /// What the helper tells its client.
-    pub fn into_unstarted(self) -> crate::Unstarted {
-        match self {
-            Failure::Missing(item) => crate::Unstarted::NeedsInstall(vec![item]),
-            Failure::Failed(message) => crate::Unstarted::Failed(message),
-        }
-    }
 }
 
 /// The julia binary and its version ("1.12.6"). `progress` hears about a
 /// download, which only happens when `download` is true.
-pub fn find(source: &Source, download: bool, progress: &dyn Fn(String)) -> Result<(String, String), Failure> {
+pub fn find(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> Result<(String, String), Failure> {
     match source {
         Source::Path(path) => {
             let path = expand_home(path);
@@ -159,7 +151,7 @@ fn uname(flag: &str) -> String {
 }
 
 /// `~/.cache/endeavor/julia-<version>/bin/julia`, downloading it the first time.
-fn own_julia(download: bool, progress: &dyn Fn(String)) -> Result<String, Failure> {
+fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String, Failure> {
     let home = std::env::var("HOME").map_err(|_| "HOME isn't set".to_owned())?;
     let cache = PathBuf::from(home).join(".cache/endeavor");
     let dir = cache.join(format!("julia-{JULIA_VERSION}"));
@@ -183,7 +175,7 @@ fn own_julia(download: bool, progress: &dyn Fn(String)) -> Result<String, Failur
     Ok(bin.display().to_string())
 }
 
-fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progress: &dyn Fn(String)) -> Result<(), String> {
+fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progress: &mut dyn FnMut(String)) -> Result<(), String> {
     std::fs::create_dir_all(cache).map_err(|e| format!("Couldn't create {}: {e}", cache.display()))?;
     let top = format!("julia-{JULIA_VERSION}");
     let part = cache.join(format!("{top}.tar.gz.part"));

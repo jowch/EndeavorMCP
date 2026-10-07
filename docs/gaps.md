@@ -18,9 +18,10 @@ _Started 2026-10-06, on the `client-library` branch._
 - **A start cut short by a lost connection is reported as "not running".**
   After a reconnect the link only re-attaches to a runtime the helper can
   see. A core that was still booting when the connection dropped has no
-  state file yet, so the helper can't see it and the link says the runtime
-  is not running any more. It never starts one by itself; the next
-  `use_machine` does. To close: have the helper record a start under way.
+  `runtime.json` yet, so the helper's runtime check says nothing is running,
+  though the core goes on and records itself, and the next `StartRuntime`
+  waits for it (`starting.json`). The link never starts one by itself; the
+  next `use_machine` does. To close: have the check report a start under way.
 - **The test for a connection lost during a start doesn't force the order
   of messages that caused the bug.** It passes on the old code too. The fix
   is covered by reading, not by the test.
@@ -58,6 +59,21 @@ _Started 2026-10-06, on the `client-library` branch._
   refused. Generated ids are lower-case already.
 
 ## Stopping and the client
+
+- **A start that the client left is found through `starting.json`, which names
+  a pid.** If the core dies without removing it and the pid is used again
+  within 30 minutes, a client that waits for that pid gives up after the rest
+  of the 30 minutes, saying which file to delete. On Windows the pid's start
+  time is checked as well.
+- **`stop_machine` for this computer while this session's own start is under
+  way** waits 20 s for `start.lock`, which its own start holds, then says
+  another process has held it too long. The answer to a stop during a start
+  should say the start is under way.
+- **A helper started with `--quit-with-client` stops a runtime it is waiting
+  for when its input ends**, where one without the flag leaves it to finish.
+  `list_machines`, `stop_machine` and `endeavor update` ask a running runtime
+  on its port, so a runtime that is alive and not answering makes them slow
+  (up to about 10 s) where they once only checked the process.
 
 - **A stop that gave up waiting** drops the helper's late answer, since its
   id is no longer waited for. The runtime is watched again at that point, so a
