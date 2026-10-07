@@ -9,6 +9,11 @@ remote code ([remote-sessions.md](https://github.com/jowch/Endeavor/blob/main/do
 Facts about Codex and Antigravity come from their documentation and are
 untested._
 
+_Revised 2026-10-07: see [The revision](#the-revision-decided-2026-10-07-planned).
+It replaces the link process and the front's own local launcher. Until the
+code follows, the sections below describe what is built, and say where the
+revision changes them._
+
 ## Summary
 
 - One binary, `endeavor`, and one plugin per harness. The plugin holds the
@@ -17,7 +22,7 @@ untested._
   starts. The agent does the rest through
   tools: adds a server, starts a runtime there or submits a Slurm job, and gives
   you the browser link. There is no configuration file to edit and no tunnel
-  to open.
+  to open while a session is connected.
 - Remote uses what the app uses: one `ssh` to `endeavor connect` on the
   server and the wire protocol over it. The server half is in this
   repository already. The client half moves here from the app.
@@ -27,6 +32,130 @@ untested._
 - First version: login with ssh keys only, and the binary fetched from the
   GitHub release by the plugin's launcher (or by hand with the install
   script).
+
+## The revision (decided 2026-10-07, planned)
+
+Nothing in this section is built. It was decided after three review rounds
+found most of their faults in two places: between the front and the link,
+and where the front starts this computer's runtime with code of its own
+beside the helper's.
+
+**What matters, and what does not.** A runtime and its notebooks keep
+running when a session ends, crashes or goes quiet, on this computer and on
+a server. That is built and stays. A server's browser page staying
+reachable on your computer after the session has ended is not needed, and
+that was the only thing the link was for.
+
+**The design.**
+
+```text
+Your computer                              Server or login node        Compute node
+
+harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ── (relay) ── the runtime
+                         │
+                         └── this computer: the runtime, found or started directly
+```
+
+- **No link.** Each `endeavor mcp` holds its own `ssh` and helper for the
+  machine its session is on, through the client library, as the app does.
+  Several sessions on one server each have their own connection; many
+  helpers attach to one runtime, as built.
+- **One way to find or start a runtime.** The steps (find the one running,
+  take `start.lock`, find Julia, start the core, wait until it answers, give
+  its port and token) are one function in the library. The helper is a thin
+  wrapper that turns `StartRuntime` into that call. On this computer the
+  front calls it directly: no child process and no messages. `serve` calls
+  it too.
+- **The connection looks after itself.** Connect, retry and re-attach move
+  from the link into one library type that both the front and the app use.
+  A caller says what it wants (attach only, or start, with the settings and
+  whether the user agreed to an install) and gets an outcome: ready, queued,
+  nothing running, needs install (what), failed (why) or still working
+  (which step). The front no longer works an outcome out from state words.
+- **One kind of target in the front.** This computer and a server differ
+  only in how the runtime's address is obtained. There is one status, one
+  way to use a machine and one way to stop its runtime.
+- **Sessions come and go without ceremony.** A client attaches, works and
+  goes quiet. Nothing says "I'm done": `endeavor/end_session` and the
+  record of ended sessions go. The runtime keeps, for each session, the
+  notebook it works in, what it has read, and the time of its last call,
+  which is used only to forget a session after 7 days.
+- **No list of other sessions.** `other_sessions` and `active_seconds_ago`
+  go from `list_notebooks` and `pluto_session_status`, and the skill no
+  longer tells the agent to mention them. Reading before writing
+  (`stale_read`) and the check before a run (`run_conflict`) are what keep
+  two sessions from undoing each other, and they stay.
+- **One rule ends a notebook: the idle limit.** It is the same on this
+  computer and on a server, whoever started the runtime, and it is recorded
+  with the runtime. The app's "local notebooks quit with the app" is not
+  needed; the app can attach and detach as the plugin does.
+
+**What goes.**
+
+- The link process: `endeavor link`, its control port and token,
+  `link.json`, `link.lock`, `link.log`, `server.json`, `link::PROTOCOL`,
+  reading a link of another protocol, the rules for replacing a link, the
+  four-minute status call and the 8-hour lifetime.
+- In the front: polling the link and settling on an outcome, the record
+  comparison, ending the link of a machine that was never saved, and the
+  second target type for this computer (`Target::Local`, `use_local`,
+  `stop_local`, the front's own start and attach).
+- In the runtime: `end_session`, the ended list, the other-sessions list.
+
+Rough size, an estimate from reading: about 1,000 to 1,400 lines of source
+go, with `tests/link.rs` and `e2e_link`. About 600 lines of the link (the
+connect, retry and re-attach rules) are not removed but move into the
+library. The larger gain is fewer places that decide.
+
+**What stays.** The helper, the wire protocol with request ids, the process
+and Slurm launchers and `job.json`, the client library's `ssh` and channel,
+the machine tools, `machines.json` with its schema number and unknown
+fields (the app is a second writer; a machine is still saved only after a
+connect succeeded, which needs no hand-over now), `projects.json` and
+attach-only for a remembered project, the question before installing on a
+server and none on this computer, the local runtime starting at the first
+call that needs it, `keep_notebook_alive`, the launcher and the plugins.
+
+**What is given up.**
+
+- A server's browser address works while a session or the app is
+  connected. When the session ends the tab disconnects; the notebook keeps
+  running. A new session gives a new address.
+- Between sessions you can forward the port yourself: results will name the
+  runtime's port on the server, so `ssh -L <port>:127.0.0.1:<port> <host>`
+  and the link with its token reach it. On a cluster the runtime is on a
+  compute node behind the login node, and there is no supported way to open
+  the page between sessions.
+- Several sessions on one server mean several `ssh` connections, and each
+  subagent's server its own.
+- A later interactive sign-in (password or code) would be asked once for
+  each session, not once for each server.
+
+**Order of work.** Each step can be stopped after.
+
+1. One find-or-start function, used by the helper, `serve` and the front.
+   Stopping the local runtime takes `start.lock`, which it does not today.
+2. Connect, retry and re-attach as one library type that answers with an
+   outcome.
+3. The front holds its connections in process and has one kind of target.
+   The link and the front's code for it are deleted.
+4. The session records: no `end_session`, no other-sessions list; the
+   skills and tool descriptions follow.
+5. One idle rule, recorded in `runtime.json`.
+6. One local state folder for the app and the plugin, with the paths module.
+
+**Open, to decide.**
+
+- A cell that another session changed in the last two minutes is named in
+  results (`other_session`). It is not the other-sessions list. Keep it or
+  drop it?
+- `endeavor serve` has no idle exit today. Does it follow the one rule?
+- Codex on Windows puts an MCP server in a job object that its children
+  cannot leave (read from its source, not run), so a runtime started from
+  it would end with the session. It needs another way to be started there
+  before Windows is offered.
+- A session that ends while a runtime is still starting: checked for
+  neither this computer nor a server.
 
 ## Decided
 
@@ -46,9 +175,15 @@ untested._
 | Jobs on a cluster | One at a time for each user. A second client attaches to the job as the first one asked for it, and is told its size |
 | Several clients on one runtime | Allowed. No client makes another exit |
 | Several agent sessions on one notebook | Allowed, as in the app today. No owner and no takeover |
+| Who holds the connection to a server | Planned (2026-10-07): each `endeavor mcp`, in process, as the app does. Built today: a link process for each server |
+| This computer | Planned (2026-10-07): the front calls the one find-or-start function the helper also calls. Built today: the front has its own |
+| When a session ends | Planned (2026-10-07): nothing is said and nothing is listed. The idle limit is the only thing that ends a notebook, the same everywhere |
 | Windows | A target soon, so nothing macOS-only in the design |
 
 ## Three roles
+
+_Built as described here. The revision removes the link: the front holds
+the connection itself. The runtime and the helper are unchanged._
 
 | Role | Command | Where | State |
 |---|---|---|---|
@@ -351,7 +486,8 @@ Built:
   how a new agent session picks up yesterday's notebook. The app's own calls
   get the same result: it lists first and only opens what isn't open, so it
   never relied on the error.
-- **Who else is there.** The core records each session's last call and a
+- **Who else is there** (goes with the revision; only the time of a
+  session's last call is kept). The core records each session's last call and a
   label its client sends ("Claude Code on jc-workstation"). `list_notebooks`
   and `pluto_session_status` show a notebook's other sessions and how lately
   each was active, so an agent can say that someone else is working there
@@ -431,7 +567,8 @@ is not waited for. The time waited is not given: the link doesn't know when a
 job was submitted by an earlier connection.
 
 **The notebook.** `browser_url` is on your computer's loopback and stays the
-same while the link runs.
+same while the link runs. (With the revision: while the session is
+connected.)
 
 **The next session.** The project remembers its machine and folder. If the
 runtime is still up, the first tool call attaches without asking. If it
@@ -471,7 +608,7 @@ defaults.
   `install: true` only after the user agreed to that. Julia's download is a
   separate question from the helper's, asked again for each start that needs it.
 - When another session was active in your notebook lately, say so before
-  you change it.
+  you change it. (Goes with the revision.)
 - Never ask for a password or passphrase, and never run `ssh` with one.
 - On a server, files are there: use `list_folder`, `read_file` and
   `run_shell`. A project checked out on both machines has the same paths in
@@ -724,8 +861,11 @@ server starts (if not, the first start downloads, as in the other agents).
    and unverified), the `endeavor-setup` skill, and `endeavor update` leaving a
    plugin's binary alone. The pinned key is set after the first release from
    `main`.
-7. The app: the moved code, the shared state folder, a version on its calls
-   to the runtime.
+7. The revision of 2026-10-07, in the order given in
+   [The revision](#the-revision-decided-2026-10-07-planned). It comes before
+   the app, which then takes the library as revised.
+8. The app: the moved code, the shared state folder, a version on its calls
+   to the runtime, and attaching and detaching as the plugin does.
 
 ## Not in the first version
 

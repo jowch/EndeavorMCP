@@ -388,6 +388,11 @@ _Started 2026-10-06, on the `client-library` branch._
   and one install test fail there because busybox runs its own built-in
   `uname`, `mkdir`, `timeout` and `wget` and ignores the fakes the tests put
   on the `PATH`. The scripts themselves were not run by hand under busybox.
+- **Under Codex on Windows a runtime would end with the session.** Codex
+  puts an MCP server in a job object that its children cannot leave, and
+  ends the job with the session (read from its source, not run). Endeavor
+  asks to leave the job and starts inside it when refused. To close: start
+  the runtime there another way, before Windows is offered.
 - **`list_machines` says "not running" for a local runtime recorded on another
   node** (a state folder shared between computers). A notebook call then says
   where it is running. To close: a third state for "running on another node".
