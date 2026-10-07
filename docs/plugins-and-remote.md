@@ -105,7 +105,7 @@ request with an Origin.
 | Call | What it does |
 |---|---|
 | `GET /link/status` | `state` (connecting, connected, starting, queued, ready, failed), the last `step`, an `error`, what the helper said (`hello`), the `runtime` once ready (the listener's port, the runtime's token, the page URL), and for a job its `job` and `queue` |
-| `POST /link/start` | `{"job": …, "only_running": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true. A body with any other field is refused with HTTP 400, so that an older link never ignores a field a newer front adds. A front uses a link of its own control protocol number (`link::PROTOCOL`, in `link.json` and the status; a missing number is 0) fully, whatever its build. To a link of another protocol it sends no start: it replaces one that nothing hangs on, and uses one with a runtime as it is |
+| `POST /link/start` | `{"job": …, "only_running": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true. A body with any other field is refused with HTTP 400, so that an older link never ignores a field a newer front adds. A front uses a link of its own control protocol number (`link::PROTOCOL`, in `link.json`; a missing number is 0) fully, whatever its build. To a link of another protocol it sends no start: it replaces one that nothing hangs on, and uses one with a runtime as it is |
 | `POST /link/stop` | Stop the runtime for every client, and say why it didn't. The link stays connected |
 | `POST /link/quit` | Remove the record, detach and exit. The record goes first, so a front that asks for a link right after gets a new one |
 
@@ -243,11 +243,18 @@ helper answers each once, naming it: `Stopped` or `NotStopped` and why, and for
 a start `Ready`, `StartFailed`, `NoJulia`, `StartDied` or `StartCancelled`. A
 stop that ends a start under way is answered with its own `Stopped`, and the
 start with `StartCancelled`. The client waits 60 s for a stop's answer, and an
-answer that comes after it gave up is dropped by its id. The helper's `Hello`
-carries `wire::PROTOCOL`, which is raised when a client and a helper of the
-previous number can no longer work together. Client and helper change
-together (the helper is always this build's), and the Endeavor app's own copy
-of the client, pinned to an older helper, is unaffected until it adopts this library. A stop waits 20 s for
+answer that comes after it gave up is dropped by its id. Stops said while
+another stop is under way (before any start asked for after it) share its
+outcome: each is answered by its own id, and nothing is stopped twice. A second
+start on one channel while one waits fails at once on the client side ("Julia
+is already starting."), without disturbing the first. What the client said
+during a stop is heard by a start that follows it: a `Detach` or the end of
+input ends the helper without starting, and a `Stop` ends that start with
+`StartCancelled`. The helper's `Hello` carries `wire::PROTOCOL`, which is
+raised when a client and a helper of the previous number can no longer work
+together, and the client refuses a helper of another number when it connects
+(a failed connection that is not retried, saying the server side is of
+another version of Endeavor). A stop waits 20 s for
 `start.lock`, so it does not stop a runtime that another helper is still
 starting; it says so instead.
 

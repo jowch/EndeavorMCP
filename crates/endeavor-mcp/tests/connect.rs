@@ -1241,6 +1241,63 @@ fn a_stop_that_cant_get_the_lock_says_so_and_leaves_the_runtime_attached() {
 }
 
 #[test]
+fn a_start_and_a_leave_said_during_a_stop_are_heard_before_the_start_runs() {
+    for end_of_input in [false, true] {
+        let dir = state_dir(if end_of_input { "stop-start-eof" } else { "stop-start-detach" });
+        let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[]);
+        helper.hello();
+        let held = hold_start_lock(&dir);
+        let stop = helper.request_stop();
+        helper.request_start(None, true);
+        if end_of_input {
+            helper.stdin.0.lock().unwrap().take();
+        } else {
+            helper.send(ToHelper::Detach);
+        }
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(helper.control.try_recv().is_err(), "the stop waits for the lock");
+        drop(held);
+        assert_eq!(helper.next(), ToApp::Stopped { id: stop });
+        helper.exits();
+        assert!(helper.control.try_recv().is_err(), "the start was not run, so it said nothing (end of input: {end_of_input})");
+        assert!(!dir.join("runtime.log").exists() && !dir.join("runtime.json").exists());
+    }
+}
+
+#[test]
+fn a_stop_said_after_a_start_during_a_stop_ends_that_start_and_is_answered_after_the_first_stop() {
+    let dir = state_dir("stop-start-stop-cancelled");
+    let helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[]);
+    helper.hello();
+    let held = hold_start_lock(&dir);
+    let first = helper.request_stop();
+    let start = helper.request_start(None, true);
+    let last = helper.request_stop();
+    std::thread::sleep(Duration::from_millis(500));
+    drop(held);
+    assert_eq!(helper.next(), ToApp::Stopped { id: first });
+    assert_eq!(helper.next(), ToApp::StartCancelled { id: start });
+    assert_eq!(helper.next(), ToApp::Stopped { id: last });
+    assert!(!dir.join("runtime.log").exists(), "no Julia was started");
+}
+
+#[test]
+fn stops_said_during_a_stop_share_its_outcome_and_wait_for_the_lock_once() {
+    let dir = state_dir("stops-share");
+    let helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[("ENDEAVOR_STOP_LOCK_SECS", "1")]);
+    helper.hello();
+    let _held = hold_start_lock(&dir);
+    let ids = [helper.request_stop(), helper.request_stop(), helper.request_stop()];
+    let ToApp::NotStopped { id, message } = helper.next() else { panic!("expected why it didn't stop") };
+    assert_eq!(id, ids[0]);
+    let began = std::time::Instant::now();
+    for &id in &ids[1..] {
+        assert_eq!(helper.next_within(Duration::from_millis(800)), ToApp::NotStopped { id, message: message.clone() });
+    }
+    assert!(began.elapsed() < Duration::from_millis(800), "the others did not wait for the lock again");
+}
+
+#[test]
 fn a_detach_while_waiting_to_start_drops_an_unfinished_upload() {
     let dir = state_dir("detach-wait");
     let home = dir.join("home");
@@ -1334,33 +1391,6 @@ fn a_start_asked_while_a_stop_waits_is_answered_after_the_stop_not_lost() {
     assert!(!reattached && pid != old.pid, "the start began a new runtime once the old one was gone");
     let stop = helper.request_stop();
     assert_eq!(helper.next(), ToApp::Stopped { id: stop });
-    helper.stdin.0.lock().unwrap().take();
-    helper.exits();
-}
-
-#[test]
-fn a_stop_asked_after_a_start_that_waited_behind_a_stop_stops_that_start_not_the_first_stop() {
-    let dir = state_dir("stop-start-stop");
-    let bridge = common::FakeBridge::start(&dir);
-    let julia = common::serving_julia(&dir, &bridge);
-    std::fs::write(dir.join("token"), TOKEN).unwrap();
-    let old = FakeRuntime::start(&dir, &this_host());
-    let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
-    assert!(matches!(helper.start_runtime(), ToApp::Ready { reattached: true, .. }));
-    let held = hold_start_lock(&dir);
-    let first = helper.request_stop();
-    let start = helper.request_start(None, true);
-    let last = helper.request_stop();
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(helper.control.try_recv().is_err() && old.alive());
-    drop(held);
-    assert_eq!(helper.next(), ToApp::Stopped { id: first }, "the first Stop is answered alone");
-    let ToApp::Ready { id, pid, reattached, .. } = after_start(&helper) else { panic!("expected Ready") };
-    assert_eq!(id, start);
-    assert!(!reattached && pid != old.pid);
-    assert_eq!(helper.next(), ToApp::Stopped { id: last }, "the last Stop stops the runtime the start made");
-    common::wait_for("the second runtime to end", || !common::pid_alive(pid as i32));
-    assert!(!dir.join("runtime.json").exists());
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
 }

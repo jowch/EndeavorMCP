@@ -34,18 +34,12 @@ use serde::{Deserialize, Serialize};
 pub const MAX_FRAME: usize = 16 << 20;
 
 /// The number of this protocol: the frames, [`ToApp`] and [`ToHelper`]. The
-/// helper says it in [`ToApp::Hello`]. Raise it when a client and a helper of the
-/// previous number can no longer work together: a message or field one of them
-/// needs and the other would not understand, or one whose meaning changed.
-/// Adding an optional field or a message that an old peer may ignore does not
-/// raise it. A helper that says no number (`Hello` without `protocol`) is 0.
-///
-/// 1: `StartRuntime` and `Stop` carry an `id` and every answer to one names it.
-/// The id-less forms are gone, not kept beside the new ones: a client and its
-/// helper are always one build (the bootstrap runs `<root>/<build>/endeavor`, and
-/// a local helper is the client's own binary), so they change together. The
-/// Endeavor app has its own copy of the client, pinned to an older helper
-/// build, and is unaffected until it adopts this library.
+/// helper says it in [`ToApp::Hello`], and a client refuses a helper whose number
+/// differs from its own. Raise it when a client and a helper of the previous
+/// number can no longer work together: a message or field one of them needs and
+/// the other would not understand, or one whose meaning changed. Adding an
+/// optional field or a message that a peer may ignore does not raise it. A
+/// helper that says no number (`Hello` without `protocol`) is 0.
 pub const PROTOCOL: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -355,7 +349,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","id":5}"#).unwrap(), ToHelper::StartRuntime { id: 5, job: None, download_julia: true });
         let forbidden = ToHelper::StartRuntime { id: 5, job: None, download_julia: false };
         assert_eq!(serde_json::to_string(&forbidden).unwrap(), r#"{"type":"StartRuntime","id":5,"job":null,"download_julia":false}"#);
-        assert_eq!(serde_json::to_string(&ToHelper::StartRuntime { id: 5, job: None, download_julia: true }).unwrap(), r#"{"type":"StartRuntime","id":5,"job":null}"#, "what an older helper gets");
+        assert_eq!(serde_json::to_string(&ToHelper::StartRuntime { id: 5, job: None, download_julia: true }).unwrap(), r#"{"type":"StartRuntime","id":5,"job":null}"#, "download_julia is left out when it is true");
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","id":5,"download_julia":false}"#).unwrap(), forbidden);
         let no_julia = ToApp::NoJulia { id: 5, offer: "Julia 1.12.6, about 190 MB".into() };
         let Frame::Control(json) = no_julia.frame() else { panic!() };

@@ -3,7 +3,7 @@ use crate::link::{JobInfo, QueueInfo};
 use crate::standalone::{Command, Env, Options, parse};
 
 fn status(state: State) -> link::Status {
-    link::Status { machine: "lab".into(), name: "lab".into(), state, step: None, error: None, hello: None, runtime: None, job: None, queue: None, nothing_running: false, needs_install: None, pid: 1, build: "b".into(), protocol: link::PROTOCOL }
+    link::Status { machine: "lab".into(), name: "lab".into(), state, step: None, error: None, hello: None, runtime: None, job: None, queue: None, nothing_running: false, needs_install: None, pid: 1, build: "b".into() }
 }
 
 fn partition(name: &str, default: bool, minutes: Option<u32>, cpus: u32, mem_mb: u64) -> Partition {

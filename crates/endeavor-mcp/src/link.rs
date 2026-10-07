@@ -67,7 +67,7 @@ mod tests;
 pub(crate) use run::main;
 
 /// The number of the link's control interface: its endpoints, bodies and `Status`.
-/// It is in `link.json` and in `Status`, and a front uses a link fully (sends it starts,
+/// It is in `link.json`, and a front uses a link fully (sends it starts,
 /// attaches and installs) when the link's number is its own, whatever build the
 /// link is from. Raise it when a front and a link of the previous number can no
 /// longer work together: a request the old one would misread, an answer it
@@ -164,9 +164,6 @@ pub struct Status {
     /// The link process and the build it is from.
     pub pid: u32,
     pub build: String,
-    /// The link's control `PROTOCOL`; 0 when the link says none.
-    #[serde(default)]
-    pub protocol: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

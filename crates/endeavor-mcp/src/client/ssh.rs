@@ -527,7 +527,10 @@ pub fn connect_checked(server: &Server, transport: &Transport, options: &Options
         message
     });
     match hello {
-        Ok(hello) => Ok((channel, hello)),
+        Ok(hello) => match hello.other_version() {
+            Some(message) => Err(ConnectError { message, retry: false, needs: None }),
+            None => Ok((channel, hello)),
+        },
         Err(message) => Err(ConnectError { message, retry: retry.get(), needs: None }),
     }
 }

@@ -284,6 +284,7 @@ fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
 fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String> {
     make_state_dir(&args.state_dir)?;
     let (events, rx) = mpsc::channel();
+    let mut inbox = Inbox { rx, later: VecDeque::new() };
     let routes: Routes = Arc::new(RwLock::new(Route::None));
     let parts = Parts::default();
     let answer: Answer = {
@@ -301,10 +302,8 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
     let _ = mux.send(&hello.frame());
 
     let mut attached: Option<Attached> = None;
-    // Events a stop took off the queue that are still the loop's to handle.
-    let mut later: VecDeque<Event> = VecDeque::new();
     loop {
-        let event = later.pop_front().unwrap_or_else(|| rx.recv().expect("senders live as long as their threads"));
+        let event = inbox.next();
         match event {
             Event::App(ToHelper::StartRuntime { id, job, download_julia }) => {
                 if let Some(attached) = &attached {
@@ -312,8 +311,8 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                     continue;
                 }
                 let result = match args.launcher {
-                    Launcher::Process => attach(args, mux, &rx, &events, &parts, download_julia),
-                    Launcher::Slurm => slurm::attach(args, mux, &rx, &events, &parts, job.unwrap_or_default(), download_julia),
+                    Launcher::Process => attach(args, mux, &mut inbox, &events, &parts, download_julia),
+                    Launcher::Slurm => slurm::attach(args, mux, &mut inbox, &events, &parts, job.unwrap_or_default(), download_julia),
                 };
                 match result {
                     Ok(now) => {
@@ -326,19 +325,25 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
             }
             Event::App(ToHelper::Stop { id }) => {
                 let stopped = match attached.take() {
-                    Some(runtime) => runtime.stop(args, &routes, &rx, standalone::stop_lock_limit(), &mut later).map_err(|failed| {
+                    Some(runtime) => runtime.stop(args, &routes, &mut inbox, standalone::stop_lock_limit()).map_err(|failed| {
                         let (runtime, why) = *failed;
                         attached = Some(runtime);
                         why
                     }),
-                    None => stop_recorded(args, &rx, &events, &mut later),
+                    None => stop_recorded(args, &mut inbox, &events),
                 };
-                let reply = stopped.map_or_else(|message| ToApp::NotStopped { id, message }, |()| ToApp::Stopped { id });
-                let _ = mux.send(&reply.frame());
+                // A Stop said during this one has the same outcome: it is not stopped again.
+                for id in std::iter::once(id).chain(inbox.take_stops()) {
+                    let reply = match &stopped {
+                        Ok(()) => ToApp::Stopped { id },
+                        Err(message) => ToApp::NotStopped { id, message: message.clone() },
+                    };
+                    let _ = mux.send(&reply.frame());
+                }
             }
             Event::Eof if args.quit_with_client => {
                 if let Some(runtime) = attached.take()
-                    && let Err(failed) = runtime.stop(args, &routes, &rx, standalone::start_lock_limit(), &mut VecDeque::new())
+                    && let Err(failed) = runtime.stop(args, &routes, &mut inbox, standalone::start_lock_limit())
                 {
                     eprintln!("endeavor: {}", failed.1);
                 }
@@ -435,8 +440,8 @@ impl Attached {
     /// the lock within `limit` the runtime isn't stopped: it comes back with
     /// why, still routed to. The streams are cut only once the lock is held,
     /// and restored if a process is still alive after its stop.
-    fn stop(self, args: &Args, routes: &Routes, rx: &mpsc::Receiver<Event>, limit: Duration, later: &mut VecDeque<Event>) -> Result<(), Box<(Attached, String)>> {
-        let _starting = match lock_stop(&args.state_dir, rx, limit, later) {
+    fn stop(self, args: &Args, routes: &Routes, inbox: &mut Inbox, limit: Duration) -> Result<(), Box<(Attached, String)>> {
+        let _starting = match lock_stop(&args.state_dir, inbox, limit) {
             Ok(lock) => lock,
             Err(why) => return Err(Box::new((self, why))),
         };
@@ -451,7 +456,7 @@ impl Attached {
             How::Slurm(_) => {
                 stopped::mark(&args.state_dir, stopped::Of::Runtime(self.state.pid), stopped::How::Connection);
                 let How::Slurm(job) = self.how else { unreachable!() };
-                job.stop(rx, later);
+                job.stop(inbox);
             }
         }
         Ok(())
@@ -475,18 +480,81 @@ fn stop_marked(dir: &Path, state: &State, runtime: &Runtime, how: stopped::How) 
     gone
 }
 
-/// Keep `event` for the main loop once a stop is over. What happened to the
-/// runtime goes before what the app said, so that a start asked for meanwhile
-/// doesn't find a runtime that has since gone still attached.
-fn defer(later: &mut VecDeque<Event>, event: Event) {
-    let app = |event: &Event| matches!(event, Event::App(_) | Event::Eof);
-    let at = if app(&event) { later.len() } else { later.iter().position(app).unwrap_or(later.len()) };
-    later.insert(at, event);
+/// What the app and the runtime have said that the helper has not yet handled.
+struct Inbox {
+    rx: mpsc::Receiver<Event>,
+    /// Events a stop took off `rx` that are still the loop's to handle.
+    later: VecDeque<Event>,
 }
 
-/// A start that is under way when another `StartRuntime` comes: it is refused, so that it is answered.
-fn busy(mux: &Arc<Mux>, id: u32) {
-    let _ = mux.send(&ToApp::StartFailed { id, message: "Julia is already starting.".into() }.frame());
+/// What a start hears while it waits.
+enum Heard {
+    /// Nothing, or a `StartRuntime`, which was answered as busy.
+    Quiet,
+    /// The `Stop` with this id: it cuts the start short.
+    Stop(u32),
+    Detach,
+    Eof,
+    /// What happened to a runtime or a relay, or a file request.
+    Event(Event),
+}
+
+impl Inbox {
+    /// The next event, waiting for one.
+    fn next(&mut self) -> Event {
+        self.later.pop_front().unwrap_or_else(|| self.rx.recv().expect("senders live as long as their threads"))
+    }
+
+    /// The next event for a start under way, taking the ones a stop kept first,
+    /// and waiting up to `wait` for one. A `StartRuntime` meanwhile is refused,
+    /// so that it is answered.
+    fn hear_while_starting(&mut self, mux: &Arc<Mux>, wait: Duration) -> Heard {
+        let event = match self.later.pop_front() {
+            Some(event) => event,
+            None => match self.rx.recv_timeout(wait) {
+                Ok(event) => event,
+                Err(RecvTimeoutError::Timeout) => return Heard::Quiet,
+                Err(RecvTimeoutError::Disconnected) => unreachable!("the watchers hold senders"),
+            },
+        };
+        match event {
+            Event::App(ToHelper::StartRuntime { id, .. }) => {
+                let _ = mux.send(&ToApp::StartFailed { id, message: "Julia is already starting.".into() }.frame());
+                Heard::Quiet
+            }
+            Event::App(ToHelper::Stop { id }) => Heard::Stop(id),
+            Event::App(ToHelper::Detach) => Heard::Detach,
+            Event::Eof => Heard::Eof,
+            other => Heard::Event(other),
+        }
+    }
+
+    /// Keep `event` for the main loop once a stop is over. What happened to the
+    /// runtime goes before what the app said, so that a start asked for meanwhile
+    /// doesn't find a runtime that has since gone still attached.
+    fn defer(&mut self, event: Event) {
+        let app = |event: &Event| matches!(event, Event::App(_) | Event::Eof);
+        let at = if app(&event) { self.later.len() } else { self.later.iter().position(app).unwrap_or(self.later.len()) };
+        self.later.insert(at, event);
+    }
+
+    /// The ids of the `Stop`s kept that came before any start, a detach or the
+    /// end of input, which are no longer kept: a stop that is over answers them.
+    fn take_stops(&mut self) -> Vec<u32> {
+        let mut ids = Vec::new();
+        let mut at = 0;
+        while let Some(event) = self.later.get(at) {
+            match event {
+                Event::App(ToHelper::Stop { id }) => {
+                    ids.push(*id);
+                    self.later.remove(at);
+                }
+                Event::App(ToHelper::StartRuntime { .. } | ToHelper::Detach) | Event::Eof => break,
+                _ => at += 1,
+            }
+        }
+        ids
+    }
 }
 
 /// How a start ended without a runtime: what answers it.
@@ -515,28 +583,34 @@ impl Unstarted {
 }
 
 /// Take the start lock to start a runtime, as `standalone::start_lock` does.
-/// While another helper holds it (a start can take minutes) the client is told
-/// once, and what it sends is still served: Detach and the end of input exit,
-/// and Stop ends the start, since nothing here is starting for it to stop.
-fn lock_start(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, parts: &Parts) -> Result<File, Unstarted> {
+/// What the client said while a stop waited is heard first, so a start for a
+/// client that has since left is not made. While another helper holds the lock
+/// (a start can take minutes) the client is told once, and what it sends is
+/// still served: Detach and the end of input exit, and Stop ends the start,
+/// since nothing here is starting for it to stop.
+fn lock_start(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, parts: &Parts) -> Result<File, Unstarted> {
+    fn hear(mux: &Arc<Mux>, inbox: &mut Inbox, parts: &Parts, wait: Duration) -> Result<(), Unstarted> {
+        match inbox.hear_while_starting(mux, wait) {
+            Heard::Stop(id) => return Err(Unstarted::Stopped(id)),
+            Heard::Detach => {
+                parts.discard();
+                std::process::exit(0)
+            }
+            Heard::Eof => std::process::exit(0),
+            Heard::Quiet | Heard::Event(_) => {}
+        }
+        Ok(())
+    }
+    while !inbox.later.is_empty() {
+        hear(mux, inbox, parts, Duration::ZERO)?;
+    }
     let mut told = false;
     let waited = standalone::wait_for_start_lock(&args.state_dir, standalone::start_lock_limit(), || {
         if !told {
             let _ = mux.send(&ToApp::Progress { line: "Another connection is starting Julia here; waiting for it.".into() }.frame());
             told = true;
         }
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(Event::App(ToHelper::Stop { id })) => return Err(Unstarted::Stopped(id)),
-            Ok(Event::App(ToHelper::StartRuntime { id, .. })) => busy(mux, id),
-            Ok(Event::App(ToHelper::Detach)) => {
-                parts.discard();
-                std::process::exit(0)
-            }
-            Ok(Event::Eof) => std::process::exit(0),
-            Err(RecvTimeoutError::Disconnected) => unreachable!("the watchers hold senders"),
-            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
-        }
-        Ok(())
+        hear(mux, inbox, parts, Duration::from_millis(200))
     });
     waited.map_err(|wait| match wait {
         standalone::Wait::Failed(message) => Unstarted::Failed(message),
@@ -548,10 +622,10 @@ fn lock_start(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, parts: &P
 /// Take the start lock to stop the runtime, waiting up to `limit`. What the
 /// client sends meanwhile doesn't cancel the stop, and none of it is lost: it
 /// is kept in `later`.
-fn lock_stop(dir: &Path, rx: &mpsc::Receiver<Event>, limit: Duration, later: &mut VecDeque<Event>) -> Result<File, String> {
+fn lock_stop(dir: &Path, inbox: &mut Inbox, limit: Duration) -> Result<File, String> {
     let waited = standalone::wait_for_start_lock(dir, limit, || {
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(event) => defer(later, event),
+        match inbox.rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(event) => inbox.defer(event),
             Err(RecvTimeoutError::Disconnected) => unreachable!("the watchers hold senders"),
             Err(RecvTimeoutError::Timeout) => {}
         }
@@ -568,9 +642,9 @@ fn lock_stop(dir: &Path, rx: &mpsc::Receiver<Event>, limit: Duration, later: &mu
 /// is held until the runtime is ready, so helpers asked at once start one
 /// runtime and the rest attach to it. The error is the app's answer: why it
 /// couldn't start, or that it died while starting.
-fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, parts: &Parts, download_julia: bool) -> Result<Attached, Unstarted> {
+fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, download_julia: bool) -> Result<Attached, Unstarted> {
     let failed = Unstarted::Failed;
-    let _starting = lock_start(args, mux, rx, parts)?;
+    let _starting = lock_start(args, mux, inbox, parts)?;
     if let Some(state) = existing(args).map_err(failed)? {
         let port = state.port.ok_or_else(|| failed(OLDER_RUNTIME.into()))?;
         let runtime = Runtime::recorded(&state, &args.state_dir, events);
@@ -582,7 +656,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
     let token = token(&args.state_dir).map_err(failed)?;
     let child = start(args, &julia, &token).map_err(failed)?;
     let runtime = Runtime::child(child, &args.state_dir, events);
-    let (state, port) = boot(args, mux, &runtime, rx, parts)?;
+    let (state, port) = boot(args, mux, &runtime, inbox, parts)?;
     Ok(Attached { how: How::Process(runtime, port), state, reattached: false })
 }
 
@@ -591,8 +665,8 @@ fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Send
 /// for a host it only browsed. Waits for a start in progress, so it ends that
 /// runtime. Without the start lock, or for a runtime this helper may not stop,
 /// nothing is stopped: why.
-fn stop_recorded(args: &Args, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, later: &mut VecDeque<Event>) -> Result<(), String> {
-    let _starting = lock_stop(&args.state_dir, rx, standalone::stop_lock_limit(), later)?;
+fn stop_recorded(args: &Args, inbox: &mut Inbox, events: &Sender<Event>) -> Result<(), String> {
+    let _starting = lock_stop(&args.state_dir, inbox, standalone::stop_lock_limit())?;
     match args.launcher {
         Launcher::Process => match existing(args) {
             Ok(Some(state)) => {
@@ -643,32 +717,30 @@ fn open_notebooks(port: u16, token: &str) -> Option<u32> {
 
 /// Wait for a runtime we just started to write its state and answer. A runtime
 /// that isn't ready is never left behind: anything but its readiness stops it.
-fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, rx: &mpsc::Receiver<Event>, parts: &Parts) -> Result<(State, u16), Unstarted> {
+fn boot(args: &Args, mux: &Arc<Mux>, runtime: &Runtime, inbox: &mut Inbox, parts: &Parts) -> Result<(State, u16), Unstarted> {
     let ready = Arc::new(AtomicBool::new(false));
     let log = follow_log(args.state_dir.join("runtime.log"), mux.clone(), ready.clone(), runtime.exit.clone());
     let result = loop {
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(Event::Exited(pid, status)) if pid == runtime.pid => {
+        match inbox.hear_while_starting(mux, Duration::from_millis(200)) {
+            Heard::Event(Event::Exited(pid, status)) if pid == runtime.pid => {
                 let (status, log_tail) = runtime.died(status);
                 break Err(Unstarted::Died { status, log_tail });
             }
-            Ok(Event::Exited(..) | Event::Node(..) | Event::NodeGone(_) | Event::App(ToHelper::Files { .. })) => {}
-            Ok(Event::App(ToHelper::StartRuntime { id, .. })) => busy(mux, id),
-            Ok(Event::App(ToHelper::Stop { id })) => {
+            Heard::Event(_) => {}
+            Heard::Stop(id) => {
                 runtime.stop(None);
                 break Err(Unstarted::Stopped(id));
             }
-            Ok(Event::App(ToHelper::Detach)) => {
+            Heard::Detach => {
                 runtime.stop(None);
                 parts.discard();
                 std::process::exit(0);
             }
-            Ok(Event::Eof) => {
+            Heard::Eof => {
                 runtime.stop(None);
                 std::process::exit(0);
             }
-            Err(RecvTimeoutError::Disconnected) => unreachable!("the watchers hold senders"),
-            Err(RecvTimeoutError::Timeout) => {
+            Heard::Quiet => {
                 if let Some(state) = read_state(&args.state_dir)
                     && state.pid == runtime.pid
                     && let Some(port) = state.port

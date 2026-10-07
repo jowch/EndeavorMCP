@@ -33,7 +33,6 @@ fn a_status_from_a_newer_link_still_reads() {
     assert_eq!((helper.bytes, helper.running), (None, None), "a size and a runtime of a shape this build doesn't know are left out");
     assert_eq!(status.hello.map(|h| (h.node, h.slurm)), Some(("n".to_owned(), false)), "what is missing has its default");
     assert_eq!(status.job.map(|j| j.id), Some("9".to_owned()));
-    assert_eq!(status.protocol, 0, "a status with no protocol number is older than any");
     // The words of the states this build knows are the ones it always had.
     for (word, state) in [("connecting", State::Connecting), ("needs_install", State::NeedsInstall), ("ready", State::Ready)] {
         assert_eq!(serde_json::from_str::<State>(&format!("\"{word}\"")).unwrap(), state);

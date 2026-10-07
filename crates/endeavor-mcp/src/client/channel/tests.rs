@@ -229,17 +229,57 @@ fn the_answers_of_two_starts_are_not_confused() {
     helper.tell(&ToApp::StartFailed { id: one, message: "stray".into() });
     helper.tell(&ready_with(two, "two"));
     assert_eq!(second.join().unwrap().unwrap().token, "two");
+}
 
-    // Two under way at once, answered the other way round.
-    let a = helper.starting(&listener, |_| {});
-    let [.., a_id] = helper.starts_sent(3)[..] else { panic!() };
-    let b = helper.starting(&listener, |_| {});
-    let [.., b_id] = helper.starts_sent(4)[..] else { panic!() };
-    assert_ne!(a_id, b_id);
-    helper.tell(&ready_with(b_id, "b"));
-    helper.tell(&ToApp::StartFailed { id: a_id, message: "a failed".into() });
-    assert_eq!(b.join().unwrap().unwrap().token, "b");
-    assert_eq!(a.join().unwrap().unwrap_err(), "a failed");
+#[test]
+fn a_second_start_while_one_waits_fails_at_once_and_leaves_the_first_alone() {
+    let helper = Scripted::new();
+    let listener = Listener::start("lab").unwrap();
+    let (said, progress) = mpsc::channel();
+    let (noticed, heard) = mpsc::channel();
+    let first = std::thread::spawn({
+        let (channel, listener) = (helper.channel.clone(), listener.clone());
+        move || channel.start_runtime(&listener, None, &mut |message| drop(said.send(message)), move |notice| drop(noticed.send(notice)))
+    });
+    let [one] = helper.starts_sent(1)[..] else { panic!() };
+    let began = Instant::now();
+    let second = helper.channel.start_runtime(&listener, None, &mut |_| {}, |_| {});
+    assert_eq!(second.unwrap_err(), "Julia is already starting.");
+    assert!(began.elapsed() < Duration::from_millis(500));
+    assert_eq!(helper.requests().iter().filter(|request| matches!(request, ToHelper::StartRuntime { .. })).count(), 1, "nothing was sent for it");
+
+    helper.tell(&ToApp::Progress { line: "installing".into() });
+    helper.tell(&ready(one));
+    first.join().unwrap().expect("the first start is ready");
+    assert!(matches!(progress.recv_timeout(Duration::from_secs(5)), Ok(ToApp::Progress { line }) if line == "installing"));
+    helper.tell(&ToApp::Died { status: "exit status: 1".into(), log_tail: Vec::new() });
+    let notice = heard.recv_timeout(Duration::from_secs(5)).expect("the first runtime is still watched");
+    assert!(matches!(notice, Notice::Died(_)), "{notice:?}");
+}
+
+#[test]
+fn a_stop_on_a_channel_whose_helper_has_gone_fails_at_once() {
+    let helper = Scripted::new();
+    let Scripted { channel, say, .. } = helper;
+    drop(say);
+    channel.closed();
+    let began = Instant::now();
+    assert_eq!(channel.stop().unwrap_err(), CLOSED);
+    assert!(began.elapsed() < Duration::from_millis(500), "{:?}", began.elapsed());
+}
+
+#[test]
+fn a_stop_that_gave_up_does_not_undo_a_quit_made_meanwhile() {
+    let helper = Scripted::new();
+    let (noticed, heard) = mpsc::channel();
+    helper.started(&Listener::start("lab").unwrap(), move |notice| drop(noticed.send(notice)));
+    let stopping = helper.stopping();
+    helper.stops_sent(1);
+    helper.channel.quit(true);
+    assert!(stopping.join().unwrap().unwrap_err().contains("didn't answer"));
+    assert!(helper.channel.waiting.lock().unwrap().is_empty(), "nothing waits for the stop's answer");
+    helper.tell(&ToApp::Died { status: "exit status: 1".into(), log_tail: Vec::new() });
+    assert!(heard.recv_timeout(Duration::from_millis(500)).is_err(), "the client left, so its watcher stays quiet");
 }
 
 #[test]

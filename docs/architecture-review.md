@@ -15,7 +15,7 @@ the session that built it._
 
 - **Now, before the skills trial and the app:** P1, P2, P4 (with the
   `machines.json` fixes), N3, N4, and P5a.
-- **P1 is done:** request ids on `Stop` and `StartRuntime`, `wire::PROTOCOL` in `Hello`, and `link::PROTOCOL` in `link.json` and the status; fronts compare the protocol, not the build.
+- **P1 is done:** request ids on `Stop` and `StartRuntime`, `wire::PROTOCOL` in `Hello`, and `link::PROTOCOL` in `link.json`; fronts compare the protocol, not the build.
 - **P5b: no question on this computer.** Installing the plugin is the
   agreement to Julia and the packages it needs here. The question stays for
   servers.
@@ -32,7 +32,7 @@ file the app will share, so doing it later means doing the app's side twice.
 
 | # | Proposal | Before the app? | Cost | My read |
 |---|---|---|---|---|
-| P1 | Request ids on `Stop` and `StartRuntime`, and a protocol number in `Hello`, `link.json` and the status | Yes | Days | Do it. It removes the stop queue in the client and the replay logic in the helper, where two of the untested races live, and it is what makes builds of different ages work together. Today every build looks incompatible with every other |
+| P1 | Request ids on `Stop` and `StartRuntime`, and a protocol number in `Hello` and `link.json` | Yes | Days | Do it. It removes the stop queue in the client and the replay logic in the helper, where two of the untested races live, and it is what makes builds of different ages work together. Today every build looks incompatible with every other |
 | P2 | One engine-neutral shape for "what this start needs installed" | Yes | About a week | Do it. It is the direction already stated for R and marimo, and today each engine would add a wire message, a library error and tool text |
 | P4 | No provisional marker: the front hands the link its server record; `machines.json` is written only after a connect succeeds | Yes | Days | Do it. The app reads `machines.json` and cannot see the marker, so it would show half-added machines. With it: keep unknown fields on rewrite and add a schema field |
 | P5a | Start the local runtime at the first notebook call, not when `endeavor mcp` starts | No, but soon | Small | Do it. Every agent session with the plugin starts Julia today, used or not |
@@ -100,7 +100,7 @@ Mostly yes. Three drifts:
 ### 2. What is extra, and what I would change
 
 **P1. Give control messages ids and a protocol number. (High confidence; before the app.)**
-- What: `Stop{id}` answered by `Stopped{id}` or `NotStopped{id}`; the same for `StartRuntime`. Add `protocol: u32` to `Hello` and to `link.json` and `/link/status`.
+- What: `Stop{id}` answered by `Stopped{id}` or `NotStopped{id}`; the same for `StartRuntime`. Add `protocol: u32` to `Hello` and to `link.json`.
 - Why: `Files` already has ids; `Stop` does not, so answers are matched by arrival order. That alone needs the `Stops` queue, `Owed`, `Pending` and the `starting` marker in `client/channel.rs` (:89 to :117, :201 to :222, :377 to :417), and `Said` with its counter and re-sort in `lib.rs` (:483 to :539). gaps.md lists two untested races there.
 - Version: `Hello.version` is `CARGO_PKG_VERSION`, always `0.1.0` (lib.rs:300). The only comparison anywhere is `BUILD_VERSION` equality, a source hash. So every release looks incompatible with every other. That drives `link_rule`, "send no start to another build's link", `State::Unknown`, `InstallWhat::Unknown`, the `lenient` decoder, the refuse-unknown-fields rule in `/link/start`, and the `skip_serializing_if` on `download_julia`. With a protocol number, most build differences need no action.
 - Cost: a few days, both ends. Lost: nothing a user sees.

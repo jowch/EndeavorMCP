@@ -84,14 +84,14 @@ impl Running {
 
     /// Ask the runtime to shut down through the relay, then cancel the job.
     /// The caller holds the start lock.
-    pub fn stop(self, rx: &mpsc::Receiver<Event>, later: &mut VecDeque<Event>) {
+    pub fn stop(self, inbox: &mut Inbox) {
         let generation = self.link.generation;
         if self.link.send(&ToHelper::Stop { id: 0 }).is_ok() {
             let deadline = Instant::now() + Duration::from_secs(20);
             while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-                match rx.recv_timeout(left) {
+                match inbox.rx.recv_timeout(left) {
                     Ok(Event::Node(g, ToApp::Stopped { .. } | ToApp::Died { .. })) | Ok(Event::NodeGone(g)) if g == generation => break,
-                    Ok(event) => defer(later, event),
+                    Ok(event) => inbox.defer(event),
                     Err(_) => break,
                 }
             }
@@ -151,8 +151,8 @@ impl Link {
 /// decides and submits, so two helpers never submit two jobs, and let go
 /// before the wait in the queue: a helper that comes in meanwhile finds
 /// `job.json` and waits for the same job.
-pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, parts: &Parts, request: JobRequest, download_julia: bool) -> Result<Attached, Unstarted> {
-    let starting = lock_start(args, mux, rx, parts)?;
+pub fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, request: JobRequest, download_julia: bool) -> Result<Attached, Unstarted> {
+    let starting = lock_start(args, mux, inbox, parts)?;
     let dir = &args.state_dir;
     if let Some(attached) = running(args, mux, events)? {
         return Ok(attached);
@@ -172,7 +172,7 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &
         },
     };
     drop(starting);
-    let (state, running) = wait(args, mux, rx, events, &job)?;
+    let (state, running) = wait(args, mux, inbox, events, &job)?;
     Ok(Attached { how: How::Slurm(running), state, reattached: false })
 }
 
@@ -321,28 +321,23 @@ fn submit_job(args: &Args, mux: &Arc<Mux>, request: &JobRequest, flags: Vec<Stri
 /// Wait for the job to start and its runtime to come up, telling the app how
 /// it's queued, then connect to it. Stop cancels the job; the app leaving
 /// leaves it queued, for the next connect.
-fn wait(args: &Args, mux: &Arc<Mux>, rx: &mpsc::Receiver<Event>, events: &Sender<Event>, job: &str) -> Result<(State, Running), Unstarted> {
+fn wait(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, job: &str) -> Result<(State, Running), Unstarted> {
     let dir = &args.state_dir;
     let ready = Arc::new(AtomicBool::new(false));
     let log_done = Arc::new(Exit::default());
     let mut log = None;
     let mut last: Option<(String, String)> = None;
     let result = loop {
-        match rx.recv_timeout(poll()) {
-            Ok(Event::App(ToHelper::Stop { id })) => {
+        match inbox.hear_while_starting(mux, poll()) {
+            Heard::Stop(id) => {
                 stopped::mark(dir, stopped::Of::Job(job), stopped::How::Connection);
                 scancel(job);
                 forget(dir, job);
                 break Err(Unstarted::Stopped(id));
             }
-            Ok(Event::App(ToHelper::Detach) | Event::Eof) => std::process::exit(0),
-            Ok(Event::App(ToHelper::StartRuntime { id, .. })) => {
-                busy(mux, id);
-                continue;
-            }
-            Ok(_) => continue,
-            Err(RecvTimeoutError::Disconnected) => unreachable!("the watchers hold senders"),
-            Err(RecvTimeoutError::Timeout) => {}
+            Heard::Detach | Heard::Eof => std::process::exit(0),
+            Heard::Event(_) => continue,
+            Heard::Quiet => {}
         }
         let q = match squeue(job) {
             Ok(q) => q,

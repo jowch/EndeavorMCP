@@ -261,7 +261,6 @@ impl Shared {
             needs_install: i.needs.clone(),
             pid: std::process::id(),
             build: crate::embedded::BUILD_VERSION.to_owned(),
-            protocol: super::PROTOCOL,
         })
     }
 

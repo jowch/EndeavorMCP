@@ -450,6 +450,29 @@ fn a_cancel_holds_ssh_while_the_helper_lives_and_lets_go_once_it_has_exited() {
 }
 
 #[test]
+#[cfg(unix)]
+fn a_helper_of_another_protocol_is_refused_at_once_and_not_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = crate::client::scratch("other-protocol");
+    let with_protocol = ToApp::Hello { protocol: 0, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false }.frame().encode();
+    let without = wire::Frame::Control(br#"{"type":"Hello","version":"0","node":"n","home":"/"}"#.to_vec()).encode();
+    for (name, hello) in [("says 0", with_protocol), ("says none", without)] {
+        std::fs::write(dir.join("frames"), hello).unwrap();
+        let script = dir.join("helper");
+        std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", dir.join("frames").display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fake = |_: &str, _: &str| Ok(script.clone());
+        let options = Options { helper: &fake, root: dir.join("root").display().to_string(), ..options("", "", "") };
+        let transport = Transport::Shell { env: vec![("HOME".into(), dir.display().to_string())], ask: None };
+        let began = std::time::Instant::now();
+        let Err(error) = connect_checked(&Server::default(), &transport, &options, &Cancel::default(), &|_| {}) else { panic!("{name}: it was accepted") };
+        assert!(began.elapsed() < Duration::from_secs(10), "{name}: it hung");
+        assert!(!error.retry && error.needs.is_none(), "{name}: {error:?}");
+        assert!(error.message.contains("another version of Endeavor"), "{name}: {}", error.message);
+    }
+}
+
+#[test]
 fn a_cancel_forgets_ssh_once_it_has_exited() {
     let slot: Mutex<Option<u32>> = Mutex::new(Some(7));
     Cancel::finished(&slot, 8);
