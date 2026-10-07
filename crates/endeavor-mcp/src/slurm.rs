@@ -271,7 +271,7 @@ fn submit_job(args: &Args, mux: &Arc<Mux>, request: &JobRequest, flags: Vec<Stri
     let depot = match request.depot.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
         Some(d) => format!("{}:", wire::files::expand(d).display()),
         None => match s::scratch() {
-            Some(scratch) => format!("{scratch}/endeavor/depot:"),
+            Some(scratch) => crate::paths::scratch_depot(&scratch),
             None => args.depot.clone(),
         },
     };

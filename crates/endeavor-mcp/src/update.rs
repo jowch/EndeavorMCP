@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::release::{asset_name, checksum_for, download, sha256_of, this_platform_name};
-use crate::{embedded, release, standalone, xdg};
+use crate::{embedded, paths, release, standalone};
 
 const CARGO_INSTALL: &str = "cargo install --git https://github.com/jowch/EndeavorMCP endeavor-mcp";
 const USAGE: &str = "usage: endeavor update   replace this binary with the newest build from the Helpers release";
@@ -37,8 +37,7 @@ struct Here {
     platform: Option<&'static str>,
     home: PathBuf,
     cargo_home: PathBuf,
-    /// Where the plugins' launcher keeps binaries: `<data>/endeavor/bin`, and
-    /// `<data>/endeavor/bin-from/<release>` for a release set by a variable.
+    /// Where the plugins' launcher keeps binaries (`paths::Env::plugin_bin`).
     plugin_bin: PathBuf,
     release: String,
     /// Where a runtime from the old build would be recorded.
@@ -54,10 +53,10 @@ impl Here {
             exe,
             platform: this_platform_name(),
             cargo_home: var("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from),
-            plugin_bin: xdg::absolute_var(&|name| std::env::var(name).ok(), "XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share")).join("endeavor/bin"),
+            plugin_bin: paths::Env::here().plugin_bin(),
             home,
             release: release::base_url(),
-            state_dir: standalone::default_state_dir(),
+            state_dir: paths::Env::here().state_dir(),
         })
     }
 }
@@ -94,13 +93,13 @@ fn update(here: &Here) -> Result<String, String> {
     // The app installs its helper as ~/.cache/endeavor/<version>/endeavor and
     // reinstalls only when that folder is missing, so a replaced file there
     // would run under the wrong version's name.
-    if dir.parent().is_some_and(|d| same(d, &here.home.join(".cache/endeavor"))) || exe.ancestors().any(|a| a.extension().is_some_and(|e| e == "app")) {
+    if dir.parent().is_some_and(|d| same(d, &paths::server_root(&here.home))) || exe.ancestors().any(|a| a.extension().is_some_and(|e| e == "app")) {
         return Err(format!("This copy of endeavor ({}) belongs to the Endeavor app, which installs and updates it. Update the app instead.", exe.display()));
     }
     if same(dir, &here.cargo_home.join("bin")) {
         return Err(format!("This copy of endeavor was installed with cargo. Update it the same way:\n    {CARGO_INSTALL}"));
     }
-    if dir.parent().is_some_and(|d| same(d, &here.plugin_bin) || d.parent().is_some_and(|b| same(b, &here.plugin_bin.with_file_name("bin-from")))) {
+    if dir.parent().is_some_and(|d| same(d, &here.plugin_bin) || d.parent().is_some_and(|b| same(b, &paths::plugin_bin_from(&here.plugin_bin)))) {
         return Err(format!(
             "This copy of endeavor ({}) belongs to the Endeavor plugin, which manages it. The plugin fetches a newer build when it is updated or, if it isn't pinned to one, at the start of a Claude Code session and once a day in the background.\nTo fetch the newest now, run the plugin's launch/endeavor-mcp.sh with --fetch-only (`sh <the plugin's folder>/launch/endeavor-mcp.sh --fetch-only`; the folder is different for each agent).",
             exe.display()

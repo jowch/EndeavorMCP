@@ -25,7 +25,7 @@ fn cluster() -> Cluster {
 }
 
 fn options() -> Options {
-    let env = Env { home: "/home/ada".into(), state_home: None, cache_home: None, scratch: None, cwd: "/home/ada/project".into(), node: "lab3".into() };
+    let env = Env { home: "/home/ada".into(), cwd: "/home/ada/project".into(), node: "lab3".into(), ..Env::default() };
     let Ok(Command::Mcp(options)) = parse(&["mcp".to_owned()], &env) else { panic!() };
     options
 }

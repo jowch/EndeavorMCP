@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 
 use crate::http::Head;
 use crate::mcp::to_json;
+use crate::paths::Env;
 use crate::runtime::{self, Ended, Hooks, Looked, Outcome, Up, Waiting, Want};
 use crate::{Args, Launcher, embedded, julia, stopped};
 use machines::Need;
@@ -84,92 +85,6 @@ pub(crate) struct Options {
     idle_hours: f64,
     /// The agent loads the skills from the plugin (`mcp` only).
     skills_plugin: bool,
-}
-
-/// What the defaults come from.
-pub(crate) struct Env {
-    pub home: PathBuf,
-    pub state_home: Option<PathBuf>,
-    pub cache_home: Option<PathBuf>,
-    pub scratch: Option<String>,
-    pub cwd: PathBuf,
-    pub node: String,
-}
-
-impl Env {
-    fn here() -> Env {
-        Env::from_vars(&|name| std::env::var(name).ok())
-    }
-
-    /// The defaults for the environment `read` gives.
-    pub(crate) fn from_vars(read: &dyn Fn(&str) -> Option<String>) -> Env {
-        let var = |name: &str| read(name).filter(|v| !v.is_empty());
-        #[cfg(windows)]
-        let home = var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default().join("Endeavor");
-        #[cfg(not(windows))]
-        let home = crate::xdg::absolute_var(read, "HOME").or_else(|| std::env::home_dir().filter(|h| h.is_absolute())).unwrap_or_default();
-        Env {
-            home,
-            state_home: crate::xdg::absolute_var(read, "XDG_STATE_HOME"),
-            cache_home: crate::xdg::absolute_var(read, "XDG_CACHE_HOME"),
-            scratch: var("SCRATCH").filter(|s| s.starts_with('/')),
-            cwd: std::env::current_dir().unwrap_or_default(),
-            node: crate::hostname(),
-        }
-    }
-
-    /// Per machine, since a home folder is often shared by a cluster's nodes.
-    fn state_dir(&self) -> PathBuf {
-        if cfg!(windows) {
-            return self.home.join("serve").join(&self.node);
-        }
-        self.state_home.clone().unwrap_or_else(|| self.home.join(".local/state")).join("endeavor/serve").join(&self.node)
-    }
-
-    /// What projects remember (`projects`).
-    pub(crate) fn projects_path(&self) -> PathBuf {
-        if cfg!(windows) {
-            return self.home.join("projects.json");
-        }
-        self.state_home.clone().unwrap_or_else(|| self.home.join(".local/state")).join("endeavor/projects.json")
-    }
-
-    /// For `connect --launcher slurm`: one for the whole cluster, since a reconnect
-    /// through another login node must find the same job.
-    fn cluster_state_dir(&self) -> PathBuf {
-        if cfg!(windows) {
-            return self.home.join("cluster");
-        }
-        self.state_home.clone().unwrap_or_else(|| self.home.join(".local/state")).join("endeavor/cluster")
-    }
-
-    fn cache(&self) -> PathBuf {
-        if cfg!(windows) {
-            return self.home.join("serve-runtime");
-        }
-        self.cache_home.clone().unwrap_or_else(|| self.home.join(".cache")).join("endeavor/serve")
-    }
-
-    /// Helpers fetched from the release for servers of other platforms (`release::fetch_helper`).
-    pub(crate) fn helpers_dir(&self) -> PathBuf {
-        if cfg!(windows) {
-            return self.home.join("helpers");
-        }
-        self.cache_home.clone().unwrap_or_else(|| self.home.join(".cache")).join("endeavor/helpers")
-    }
-
-    /// The depot the app's server installs use, so packages installed for one
-    /// serve the other; the trailing separator stacks the user's own depots
-    /// (~/.julia) behind it, read-only.
-    fn depot(&self) -> String {
-        if cfg!(windows) {
-            return format!("{};", self.home.join("serve-depot").display());
-        }
-        match &self.scratch {
-            Some(scratch) => format!("{scratch}/endeavor/depot:"),
-            None => format!("{}/.cache/endeavor/depot:", self.home.display()),
-        }
-    }
 }
 
 pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
@@ -574,16 +489,6 @@ The token lets anyone who has it run code as you. Keep it to yourself.
 ",
         gemini = to_json(&json!({ "mcpServers": { "endeavor": { "httpUrl": url, "headers": { "Authorization": bearer } } } })),
     )
-}
-
-/// The state folder `serve`, `mcp` and `stop` use when not given one.
-pub(crate) fn default_state_dir() -> PathBuf {
-    Env::here().state_dir()
-}
-
-/// The state folder `connect --launcher slurm` uses when not given one.
-pub(crate) fn default_cluster_state_dir() -> PathBuf {
-    Env::here().cluster_state_dir()
 }
 
 /// The folder a running standalone runtime recorded for its notebooks.

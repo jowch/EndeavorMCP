@@ -37,7 +37,7 @@ section._
 
 ## The revision (decided 2026-10-07)
 
-Steps 1 to 5 of the order of work below are built; step 6 is not. It was
+Steps 1 to 6 of the order of work below are built. It was
 decided after three review rounds found most of their faults in two places:
 between the front and the link process it used, and where the front started
 this computer's runtime with code of its own beside the helper's.
@@ -217,6 +217,15 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    `pluto_session_status` carries `idle_stop_hours` (0 never ends it, even with
    `exits_when_idle` true) and `exits_when_idle`.
 6. One local state folder for the app and the plugin, with the paths module.
+   _Built 2026-10-07._ `paths.rs` defines every folder Endeavor uses (`Env`
+   and one method per folder, plus `server_root`); no other file builds one.
+   It is public, so the app takes its folders from it. Two shell scripts
+   still repeat a rule because they run before the binary exists: the
+   bootstrap script's state folder (`paths::STATE_DIR_SH`, which `ssh.rs` puts
+   in the script) and `scripts/endeavor-mcp.sh`'s binary store. Tests run the
+   shell text and compare it with the module; there is no `endeavor paths`
+   command, since neither script could call it. The bootstrap script now
+   ignores a relative `XDG_STATE_HOME`, as Rust does. No default folder changed.
 
 **Decided on the open points (2026-10-07).**
 
@@ -520,7 +529,9 @@ it with the relay.
 **What the app changes.**
 
 - It uses the shared state folder, on servers and on your computer, and one
-  package folder locally.
+  package folder locally. It takes its folders from `endeavor_mcp::paths`
+  (`Env::here()`: `state_dir`, `cluster_state_dir`, `machines_file`;
+  `server_root`) and builds none itself.
 - Quitting only detaches.
 - It no longer hears "In use from another connection": nothing makes it
   exit. The runtime has no list of other sessions to show instead.
@@ -963,7 +974,7 @@ server starts (if not, the first start downloads, as in the other agents).
    plugin's binary alone. The pinned key is set after the first release from
    `main`.
 7. The revision of 2026-10-07, in the order given in
-   [The revision](#the-revision-decided-2026-10-07); steps 1 to 4 are built.
+   [The revision](#the-revision-decided-2026-10-07); steps 1 to 6 are built.
    It comes before the app, which then takes the library as revised.
 8. The app: the moved code, the shared state folder, a version on its calls
    to the runtime, and attaching and detaching as the plugin does.

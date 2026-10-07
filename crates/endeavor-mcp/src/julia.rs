@@ -2,7 +2,7 @@
 //! shell line of theirs sets up (`module load julia`), the one on their login
 //! shell's PATH, or else Endeavor's own, downloaded and checked here.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -153,7 +153,7 @@ fn uname(flag: &str) -> String {
 /// `~/.cache/endeavor/julia-<version>/bin/julia`, downloading it the first time.
 fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String, Failure> {
     let home = std::env::var("HOME").map_err(|_| "HOME isn't set".to_owned())?;
-    let cache = PathBuf::from(home).join(".cache/endeavor");
+    let cache = crate::paths::server_root(Path::new(&home));
     let dir = cache.join(format!("julia-{JULIA_VERSION}"));
     let bin = dir.join("bin/julia");
     if !bin.exists() {

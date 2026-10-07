@@ -59,7 +59,7 @@ fn open_session(server: Server, allow_install: bool) -> Result<Session, String> 
         if (os.to_owned(), arch.to_owned()) == this_platform() {
             std::env::current_exe().map_err(|e| format!("Couldn't find the endeavor program itself: {e}"))
         } else {
-            crate::release::helper_for(os, arch, &super::Env::from_vars(&|name| std::env::var(name).ok()).helpers_dir())
+            crate::release::helper_for(os, arch, &crate::paths::Env::here().helpers_dir())
         }
     };
     let mut config = Config::new(server, helper);

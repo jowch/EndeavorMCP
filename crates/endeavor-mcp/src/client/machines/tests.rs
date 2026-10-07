@@ -134,19 +134,6 @@ fn machine(id: &str, name: &str) -> Server {
 }
 
 #[test]
-fn the_machines_file_is_where_the_configuration_folder_says() {
-    let env = |vars: &'static [(&'static str, &'static str)]| move |name: &str| vars.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string());
-    if cfg!(windows) {
-        assert_eq!(machines_path(&env(&[("APPDATA", r"C:\Users\jc\AppData\Roaming")])), Path::new(r"C:\Users\jc\AppData\Roaming").join("Endeavor").join("machines.json"));
-        return;
-    }
-    assert_eq!(machines_path(&env(&[("XDG_CONFIG_HOME", "/x/config"), ("HOME", "/h")])), Path::new("/x/config/endeavor/machines.json"));
-    assert_eq!(machines_path(&env(&[("HOME", "/h")])), Path::new("/h/.config/endeavor/machines.json"));
-    assert_eq!(machines_path(&env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/h")])), Path::new("/h/.config/endeavor/machines.json"), "empty is unset");
-    assert_eq!(machines_path(&env(&[("XDG_CONFIG_HOME", "relative"), ("HOME", "/h")])), Path::new("/h/.config/endeavor/machines.json"), "XDG says to ignore a relative one");
-}
-
-#[test]
 fn machines_are_added_found_replaced_and_removed() {
     let file = MachinesFile::at(crate::client::scratch("machines-file").join("config/endeavor/machines.json"));
     assert_eq!(file.load(), Ok(Vec::new()), "no file is no machines");

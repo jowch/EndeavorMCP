@@ -160,19 +160,6 @@ impl Server {
     }
 }
 
-/// The machines file's place: `$XDG_CONFIG_HOME/endeavor/machines.json`, by
-/// default `~/.config/endeavor/machines.json` (macOS too), and on Windows
-/// `%APPDATA%\Endeavor\machines.json`. `var` reads the environment.
-pub fn machines_path(var: &dyn Fn(&str) -> Option<String>) -> PathBuf {
-    let set = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    if cfg!(windows) {
-        return set("APPDATA").unwrap_or_default().join("Endeavor").join("machines.json");
-    }
-    let config = crate::xdg::absolute_var(var, "XDG_CONFIG_HOME")
-        .or_else(|| crate::xdg::absolute_var(var, "HOME").or_else(|| std::env::home_dir().filter(|h| h.is_absolute())).map(|home| home.join(".config")));
-    config.unwrap_or_default().join("endeavor").join("machines.json")
-}
-
 /// The one file that lists the machines, which the app reads and writes as well:
 /// `{"schema": 1, "machines": [Server, ...]}`. A bare list of records, the shape
 /// before the schema number, is read as schema 1 and written as an object.
@@ -236,7 +223,7 @@ impl MachinesFile {
 
     /// The file for this user, from the environment.
     pub fn here() -> MachinesFile {
-        MachinesFile::at(machines_path(&|name| std::env::var(name).ok()))
+        MachinesFile::at(crate::paths::Env::here().machines_file())
     }
 
     pub fn path(&self) -> &Path {

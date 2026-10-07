@@ -23,6 +23,7 @@ mod http;
 mod julia;
 mod mcp;
 mod notebooks;
+pub mod paths;
 mod release;
 mod results;
 mod runtime;
@@ -30,7 +31,6 @@ mod slurm;
 mod standalone;
 mod stopped;
 mod update;
-mod xdg;
 #[cfg(windows)]
 mod winproc;
 
@@ -250,8 +250,8 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     }
     Ok(Args {
         state_dir: state_dir.unwrap_or_else(|| match launcher {
-            Launcher::Process => standalone::default_state_dir(),
-            Launcher::Slurm => standalone::default_cluster_state_dir(),
+            Launcher::Process => paths::Env::here().state_dir(),
+            Launcher::Slurm => paths::Env::here().cluster_state_dir(),
         }),
         julia: julia.ok_or("--julia or --julia-shell is required")?,
         runtime: runtime.ok_or("--runtime is required")?,

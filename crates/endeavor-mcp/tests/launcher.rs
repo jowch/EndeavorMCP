@@ -526,6 +526,38 @@ fn a_relative_xdg_data_home_is_ignored_and_a_relative_home_is_refused() {
 }
 
 #[test]
+fn the_launcher_keeps_its_binaries_where_the_paths_module_says() {
+    let cases: [(&str, Option<&str>); 4] = [("absolute", Some("home/xdg-data")), ("unset", None), ("relative", Some("rel/share")), ("empty", Some(""))];
+    for (name, xdg) in cases {
+        let place = Place::new(&format!("paths-{name}"));
+        place.pin("");
+        place.fake("curl", "#!/bin/sh\nexit 7\n");
+        let xdg = xdg.map(|x| if x.starts_with("home/") { place.dir.join(x).display().to_string() } else { x.to_owned() });
+        let home = place.dir.join("home").display().to_string();
+        let read = |var: &str| match var {
+            "HOME" => Some(home.clone()),
+            "XDG_DATA_HOME" => xdg.clone(),
+            _ => None,
+        };
+        let base = endeavor_mcp::paths::Env::from_vars(&read).plugin_bin();
+        assert!(base.starts_with(&place.dir), "{base:?}");
+        std::fs::create_dir_all(base.join(KEY)).unwrap();
+        std::fs::write(base.join(".newest"), format!("{KEY}\n")).unwrap();
+        std::fs::write(base.join(".checked"), "").unwrap();
+        std::fs::write(base.join(KEY).join("endeavor"), format!("#!/bin/sh\necho 'found in {name}'\n")).unwrap();
+        place.set_mode(&base.join(KEY).join("endeavor"), 0o755);
+
+        let mut command = place.command("endeavor-mcp.sh", &[], "unused");
+        command.env_remove("ENDEAVOR_RELEASE_URL").env_remove("XDG_DATA_HOME");
+        if let Some(xdg) = &xdg {
+            command.env("XDG_DATA_HOME", xdg);
+        }
+        let out = command.stdin(Stdio::null()).output().unwrap();
+        assert!(out.status.success() && out.stdout == format!("found in {name}\n").as_bytes(), "{name}: {base:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
 fn nothing_but_the_binary_reaches_stdout_even_when_the_tools_print() {
     let place = Place::new("noise");
     place.release(KEY);

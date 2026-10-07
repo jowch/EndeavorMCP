@@ -303,6 +303,29 @@ _Started 2026-10-06, on the `client-library` branch._
   never needed, since the app starts the server. It is left out of
   `notebook_guide`.
 
+## Folders
+
+- **Windows has no script check.** The tests that run `endeavor-mcp.sh` and the
+  bootstrap script against `paths` are `cfg(unix)`. Under Git Bash the launcher
+  keeps binaries in `$HOME/.local/share/endeavor/bin`, and `endeavor update`
+  finds them through `paths::Env::plugin_bin`, which starts from `HOME` if it is
+  a Windows absolute path and else from `USERPROFILE`. Whether the two agree
+  there was not checked. `install.ps1`'s `%LOCALAPPDATA%\Endeavor\bin` is not in
+  `paths` at all.
+- **The install scripts' default folder is only in shell.** `install.sh`
+  (`~/.local/bin`) and `install.ps1` repeat it, and nothing in Rust or a test
+  pins them.
+- **The server root ignores `XDG_CACHE_HOME`.** `~/.cache/endeavor`
+  (`paths::server_root`, and `c=` in the bootstrap script) is the folder the app
+  installs to, so it stays. `serve`'s runtime and the helpers cache do honour
+  `XDG_CACHE_HOME`, and the default depot does not. To close: move the app
+  too, then make all of them follow it.
+- **Folders below the server root are written by hand where they are used:**
+  `<build>` and `depot:` in the bootstrap script, `julia-<version>` in
+  `julia.rs`. Only the root is shared with `paths` (and, in the script, pinned by
+  a test). The script takes `$HOME` as it is, where Rust accepts only an
+  absolute `HOME`.
+
 ## The skills
 
 - **`endeavor-machines` says "helper".** The file says "helper", which an
