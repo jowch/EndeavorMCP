@@ -20,7 +20,7 @@ use wire::ToApp;
 
 use super::channel::{Channel, Hello, Notice, Runtime, StartError, StartOptions};
 use super::listener::Listener;
-use crate::paths::STATE_DIR_SH;
+use crate::paths::PICK_STATE_DIR_SH;
 use super::machines::Server;
 
 /// What happened so far while connecting.
@@ -214,7 +214,7 @@ pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
         r#"if [ -x "$d/endeavor" ] && [ -f "$d/runtime/boot.jl" ]; then s=have; else s=need; fi"#,
         r#"r=none; u=first"#,
         r#"num() { [ -n "$1" ] && [ -z "$(printf %s "$1" | tr -d 0-9)" ]; }"#,
-        &format!(r#"if [ "$s" = need ]; then if [ -n "$st" ]; then pd="$sd"; else {STATE_DIR_SH}; fi; for po in "$c"/*/endeavor; do pq=${{po%/endeavor}}; case "$pq" in "$d") ;; *) case "${{pq##*/}}" in *.part.*) ;; *) if [ -x "$po" ] && [ -f "$pq/runtime/boot.jl" ]; then u=older; fi;; esac;; esac; done; for pf in runtime.json job.json; do pj=$(cat "$pd/$pf" 2>/dev/null); if [ "$ln" = slurm ]; then case "$pj" in *job?:?[0-9]*) pk=${{pj#*job?:}}; pk=$(printf %s "$pk" | tr ",}}" "  " | cut -d" " -f1); pk=${{pk#?}}; pk=${{pk%?}}; if [ "$r" = none ] && num "$pk"; then if command -v squeue >/dev/null 2>&1 && pl=$(squeue -h -t PENDING,RUNNING,CONFIGURING -o %i -u "$(id -un)" 2>/dev/null); then if printf %s "$pl" | grep -qx "$pk"; then r=job:$pk; fi; else r=job-recorded:$pk; fi; fi;; esac; else case "$pj" in *pid?:[0-9]*) pk=${{pj#*pid?:}}; pk=$(printf %s "$pk" | tr ",}}" "  " | cut -d" " -f1); if num "$pk" && kill -0 "$pk" 2>/dev/null; then if pa=$(ps -p "$pk" -o args= 2>/dev/null) && [ -n "$pa" ]; then case "$pa" in *core*--state-dir*) r=process:$pk;; esac; else r=process-recorded:$pk; fi; fi;; esac; fi; done; fi"#),
+        &format!(r#"if [ "$s" = need ]; then {PICK_STATE_DIR_SH}; for po in "$c"/*/endeavor; do pq=${{po%/endeavor}}; case "$pq" in "$d") ;; *) case "${{pq##*/}}" in *.part.*) ;; *) if [ -x "$po" ] && [ -f "$pq/runtime/boot.jl" ]; then u=older; fi;; esac;; esac; done; for pf in runtime.json job.json; do pj=$(cat "$pd/$pf" 2>/dev/null); if [ "$ln" = slurm ]; then case "$pj" in *job?:?[0-9]*) pk=${{pj#*job?:}}; pk=$(printf %s "$pk" | tr ",}}" "  " | cut -d" " -f1); pk=${{pk#?}}; pk=${{pk%?}}; if [ "$r" = none ] && num "$pk"; then if command -v squeue >/dev/null 2>&1 && pl=$(squeue -h -t PENDING,RUNNING,CONFIGURING -o %i -u "$(id -un)" 2>/dev/null); then if printf %s "$pl" | grep -qx "$pk"; then r=job:$pk; fi; else r=job-recorded:$pk; fi; fi;; esac; else case "$pj" in *pid?:[0-9]*) pk=${{pj#*pid?:}}; pk=$(printf %s "$pk" | tr ",}}" "  " | cut -d" " -f1); if num "$pk" && kill -0 "$pk" 2>/dev/null; then if pa=$(ps -p "$pk" -o args= 2>/dev/null) && [ -n "$pa" ]; then case "$pa" in *core*--state-dir*) r=process:$pk;; esac; else r=process-recorded:$pk; fi; fi;; esac; fi; done; fi"#),
         r#"if [ "$s" = need ]; then printf %s "ENDEAVOR $(uname -s) $(uname -m) need $r $u $d"; else printf %s "ENDEAVOR $(uname -s) $(uname -m) have"; fi; echo"#,
         r#"if [ "$s" = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; printf %s "Endeavor: installing into $d failed" >&2; echo >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
         &format!(r#"exec "$d/endeavor" connect "$@" {}--launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#, if exit_idle { "--exit-idle " } else { "" }),

@@ -67,7 +67,7 @@ fn here(dir: &Path, release: String) -> Here {
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join("endeavor");
     std::fs::write(&exe, "old").unwrap();
-    Here { exe, platform: Some("linux-x86_64"), home: dir.join("home"), cargo_home: dir.join("home/.cargo"), plugin_bin: dir.join("home/.local/share/endeavor/bin"), release, state_dir: dir.join("state") }
+    Here { exe, platform: Some("linux-x86_64"), server_root: dir.join("home/.cache/endeavor"), cargo_home: dir.join("home/.cargo"), plugin_bin: dir.join("home/.local/share/endeavor/bin"), release, state_dir: dir.join("state") }
 }
 
 fn leftovers(dir: &Path) -> Vec<String> {
@@ -131,7 +131,7 @@ fn copies_the_app_cargo_or_a_plugin_installed_are_left_to_them() {
     let nowhere = "http://127.0.0.1:9".to_owned();
     let mut here = here(&dir, nowhere.clone());
 
-    let app_helper = here.home.join(".cache/endeavor/0.1.0-0123456789abcdef");
+    let app_helper = here.server_root.join("0.1.0-0123456789abcdef");
     std::fs::create_dir_all(&app_helper).unwrap();
     here.exe = app_helper.join("endeavor");
     let error = update(&here).unwrap_err();

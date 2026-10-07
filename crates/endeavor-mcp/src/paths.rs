@@ -3,7 +3,7 @@
 //! and a server share one state folder.
 //!
 //! Two shell scripts must repeat a rule because they run before the binary
-//! exists: the bootstrap script (`STATE_DIR_SH`, for the state folder) and
+//! exists: the bootstrap script (`PICK_STATE_DIR_SH`, for the state folder) and
 //! `scripts/endeavor-mcp.sh` (the binary store, `Env::plugin_bin`). Tests here
 //! and in `tests/launcher.rs` run the shell text and compare it with this module.
 //!
@@ -20,11 +20,10 @@ fn absolute_var(read: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<Pat
 /// What the folders come from: the environment, read once.
 #[derive(Clone, Debug, Default)]
 pub struct Env {
-    /// Where Endeavor's own folders are when no XDG variable says otherwise:
-    /// the user's home, and on Windows `%LOCALAPPDATA%\Endeavor`.
+    /// The user's home folder, where Endeavor's folders are when no XDG variable says otherwise.
     pub(crate) home: PathBuf,
-    /// The user's home folder, on Windows too.
-    pub(crate) user_home: PathBuf,
+    /// On Windows, where Endeavor keeps its folders: `%LOCALAPPDATA%\Endeavor`. Empty elsewhere.
+    pub(crate) local: PathBuf,
     pub(crate) state_home: Option<PathBuf>,
     pub(crate) cache_home: Option<PathBuf>,
     pub(crate) config_home: Option<PathBuf>,
@@ -44,14 +43,10 @@ impl Env {
     /// The folders for the environment `read` gives.
     pub fn from_vars(read: &dyn Fn(&str) -> Option<String>) -> Env {
         let var = |name: &str| read(name).filter(|v| !v.is_empty());
-        let user_home = absolute_var(read, "HOME").or_else(|| std::env::home_dir().filter(|h| h.is_absolute())).unwrap_or_default();
-        #[cfg(windows)]
-        let home = var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default().join("Endeavor");
-        #[cfg(not(windows))]
-        let home = user_home.clone();
+        let local = if cfg!(windows) { var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default().join("Endeavor") } else { PathBuf::new() };
         Env {
-            home,
-            user_home,
+            home: absolute_var(read, "HOME").or_else(|| std::env::home_dir().filter(|h| h.is_absolute())).unwrap_or_default(),
+            local,
             state_home: absolute_var(read, "XDG_STATE_HOME"),
             cache_home: absolute_var(read, "XDG_CACHE_HOME"),
             config_home: absolute_var(read, "XDG_CONFIG_HOME"),
@@ -74,7 +69,7 @@ impl Env {
     /// The runtime's state on this machine, `serve`'s, `mcp`'s and an app's. Per machine, since a home folder is often shared by a cluster's nodes.
     pub fn state_dir(&self) -> PathBuf {
         if cfg!(windows) {
-            return self.home.join("serve").join(&self.node);
+            return self.local.join("serve").join(&self.node);
         }
         self.state_base().join("endeavor/serve").join(&self.node)
     }
@@ -83,7 +78,7 @@ impl Env {
     /// through another login node must find the same job.
     pub fn cluster_state_dir(&self) -> PathBuf {
         if cfg!(windows) {
-            return self.home.join("cluster");
+            return self.local.join("cluster");
         }
         self.state_base().join("endeavor/cluster")
     }
@@ -94,19 +89,19 @@ impl Env {
         if cfg!(windows) {
             return self.appdata.clone().unwrap_or_default().join("Endeavor").join("machines.json");
         }
-        let config = self.config_home.clone().or_else(|| (!self.user_home.as_os_str().is_empty()).then(|| self.user_home.join(".config")));
+        let config = self.config_home.clone().or_else(|| (!self.home.as_os_str().is_empty()).then(|| self.home.join(".config")));
         config.unwrap_or_default().join("endeavor").join("machines.json")
     }
 
     /// Where the plugins' launcher keeps binaries: `<data>/endeavor/bin` (`plugin_bin_from` for a release set by a variable).
     pub fn plugin_bin(&self) -> PathBuf {
-        self.data_home.clone().unwrap_or_else(|| self.user_home.join(".local/share")).join("endeavor/bin")
+        self.data_home.clone().unwrap_or_else(|| self.home.join(".local/share")).join("endeavor/bin")
     }
 
     /// What projects remember (`projects`).
     pub(crate) fn projects_path(&self) -> PathBuf {
         if cfg!(windows) {
-            return self.home.join("projects.json");
+            return self.local.join("projects.json");
         }
         self.state_base().join("endeavor/projects.json")
     }
@@ -114,7 +109,7 @@ impl Env {
     /// Where `serve` unpacks the runtime.
     pub(crate) fn cache(&self) -> PathBuf {
         if cfg!(windows) {
-            return self.home.join("serve-runtime");
+            return self.local.join("serve-runtime");
         }
         self.cache_base().join("endeavor/serve")
     }
@@ -122,7 +117,7 @@ impl Env {
     /// Helpers fetched from the release for servers of other platforms (`release::fetch_helper`).
     pub(crate) fn helpers_dir(&self) -> PathBuf {
         if cfg!(windows) {
-            return self.home.join("helpers");
+            return self.local.join("helpers");
         }
         self.cache_base().join("endeavor/helpers")
     }
@@ -130,16 +125,26 @@ impl Env {
     /// The depot the app's server installs use, so packages installed for one
     /// serve the other; the trailing separator stacks the user's own depots
     /// (~/.julia) behind it, read-only.
-    pub(crate) fn depot(&self) -> String {
+    pub fn depot(&self) -> String {
         if cfg!(windows) {
-            return format!("{};", self.home.join("serve-depot").display());
+            return format!("{};", self.local.join("serve-depot").display());
         }
         match &self.scratch {
             Some(scratch) => scratch_depot(scratch),
-            None => format!("{}/depot:", server_root(&self.home).display()),
+            None if self.home.as_os_str().is_empty() => format!("/{}/depot:", SERVER_ROOT),
+            None => format!("{}/depot:", self.server_root().display()),
         }
     }
+
+    /// What the app and the bootstrap script install into on a server or this
+    /// computer: `~/.cache/endeavor`. It ignores `XDG_CACHE_HOME`, since the app
+    /// installs to the same folder.
+    pub fn server_root(&self) -> PathBuf {
+        self.home.join(SERVER_ROOT)
+    }
 }
+
+const SERVER_ROOT: &str = ".cache/endeavor";
 
 /// Where the launcher keeps the binaries of a release set by `ENDEAVOR_RELEASE_URL`,
 /// `<data>/endeavor/bin-from/<checksum of the address>`: beside `plugin_bin`.
@@ -147,23 +152,17 @@ pub(crate) fn plugin_bin_from(plugin_bin: &Path) -> PathBuf {
     plugin_bin.with_file_name("bin-from")
 }
 
-/// What the app and the bootstrap script install into on a server or this
-/// computer: `~/.cache/endeavor`. It ignores `XDG_CACHE_HOME`, since the app
-/// installs to the same folder.
-pub fn server_root(home: &Path) -> PathBuf {
-    home.join(".cache/endeavor")
-}
-
 /// A cluster's depot on its scratch folder, where home quotas are small.
 pub(crate) fn scratch_depot(scratch: &str) -> String {
     format!("{scratch}/endeavor/depot:")
 }
 
-/// Shell for the bootstrap script: sets `pd` to the state folder a server keeps
-/// when the client names none, as `Env::state_dir` and `Env::cluster_state_dir`
-/// give it, for the launcher in `$ln`. It runs before any binary is installed,
-/// so it can't ask one. `uname -n` is what `gethostname` returns.
-pub(crate) const STATE_DIR_SH: &str = r#"case "${XDG_STATE_HOME:-}" in /*) pd="$XDG_STATE_HOME";; *) pd="$HOME/.local/state";; esac; case "$ln" in slurm) pd="$pd/endeavor/cluster";; *) pd="$pd/endeavor/serve/$(uname -n)";; esac"#;
+/// Shell for the bootstrap script, run when the helper must be installed: sets
+/// `pd` to `$sd` if the client named a state folder (`$st`), else to the folder a
+/// server keeps, as `Env::state_dir` and `Env::cluster_state_dir` give it, for the
+/// launcher in `$ln`. It runs before any binary is installed, so it can't ask one.
+/// `uname -n` is what `gethostname` returns.
+pub(crate) const PICK_STATE_DIR_SH: &str = r#"if [ -n "$st" ]; then pd="$sd"; else case "${XDG_STATE_HOME:-}" in /*) pd="$XDG_STATE_HOME";; *) pd="$HOME/.local/state";; esac; case "$ln" in slurm) pd="$pd/endeavor/cluster";; *) pd="$pd/endeavor/serve/$(uname -n)";; esac; fi"#;
 
 #[cfg(test)]
 mod tests {
@@ -214,20 +213,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn the_depot_is_never_relative() {
+        assert_eq!(Env::default().depot(), "/.cache/endeavor/depot:", "no home at all");
+        assert_eq!(Env { home: "/home/ada".into(), ..Env::default() }.depot(), "/home/ada/.cache/endeavor/depot:");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn the_bootstrap_script_finds_the_state_folder_this_module_does() {
         use std::process::Command;
         let uname = Command::new("uname").arg("-n").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&uname.stdout).trim_end(), crate::hostname(), "gethostname and `uname -n` name the same host");
-        assert!(crate::client::bootstrap_script("v1", false).contains(STATE_DIR_SH), "the script holds the shell text that is tested");
+        assert!(crate::client::bootstrap_script("v1", false).contains(PICK_STATE_DIR_SH), "the script holds the shell text that is tested");
         let path = std::env::var("PATH").unwrap();
+        let pick = |st: &str, xdg: Option<&str>, launcher: &str| {
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(format!("{PICK_STATE_DIR_SH}; printf %s \"$pd\"")).env_clear().env("PATH", &path).env("HOME", "/home/ada").env("ln", launcher).env("st", st).env("sd", "/given/state");
+            if let Some(xdg) = xdg {
+                command.env("XDG_STATE_HOME", xdg);
+            }
+            String::from_utf8(command.output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(pick("given", Some("/xdg/state"), "slurm"), "/given/state", "a state folder the client names is used as it is");
         for xdg in [None, Some("/xdg/state"), Some("xdg/state"), Some("")] {
             for launcher in ["process", "slurm"] {
-                let mut command = Command::new("sh");
-                command.arg("-c").arg(format!("{STATE_DIR_SH}; printf %s \"$pd\"")).env_clear().env("PATH", &path).env("HOME", "/home/ada").env("ln", launcher);
-                if let Some(xdg) = xdg {
-                    command.env("XDG_STATE_HOME", xdg);
-                }
-                let said = String::from_utf8(command.output().unwrap().stdout).unwrap();
                 let read = |name: &str| match name {
                     "HOME" => Some("/home/ada".to_owned()),
                     "XDG_STATE_HOME" => xdg.map(str::to_owned),
@@ -235,7 +244,7 @@ mod tests {
                 };
                 let env = Env::from_vars(&read);
                 let want = if launcher == "slurm" { env.cluster_state_dir() } else { env.state_dir() };
-                assert_eq!(Path::new(&said), want, "XDG_STATE_HOME {xdg:?}, {launcher}");
+                assert_eq!(Path::new(&pick("", xdg, launcher)), want, "XDG_STATE_HOME {xdg:?}, {launcher}");
             }
         }
     }

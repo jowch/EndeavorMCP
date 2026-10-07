@@ -152,8 +152,11 @@ fn uname(flag: &str) -> String {
 
 /// `~/.cache/endeavor/julia-<version>/bin/julia`, downloading it the first time.
 fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String, Failure> {
-    let home = std::env::var("HOME").map_err(|_| "HOME isn't set".to_owned())?;
-    let cache = crate::paths::server_root(Path::new(&home));
+    let env = crate::paths::Env::here();
+    if env.home.as_os_str().is_empty() {
+        return Err("HOME isn't set".to_owned().into());
+    }
+    let cache = env.server_root();
     let dir = cache.join(format!("julia-{JULIA_VERSION}"));
     let bin = dir.join("bin/julia");
     if !bin.exists() {

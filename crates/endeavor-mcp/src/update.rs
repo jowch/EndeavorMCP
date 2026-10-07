@@ -35,7 +35,8 @@ struct Here {
     exe: PathBuf,
     /// The Helpers release's name for this platform, if it has binaries for it.
     platform: Option<&'static str>,
-    home: PathBuf,
+    /// `~/.cache/endeavor`, where the app installs its helper (`paths::Env::server_root`).
+    server_root: PathBuf,
     cargo_home: PathBuf,
     /// Where the plugins' launcher keeps binaries (`paths::Env::plugin_bin`).
     plugin_bin: PathBuf,
@@ -48,15 +49,15 @@ impl Here {
     fn now() -> Result<Here, String> {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         let exe = std::env::current_exe().and_then(|exe| exe.canonicalize()).map_err(|e| format!("Couldn't find this binary: {e}"))?;
-        let home = std::env::home_dir().unwrap_or_default();
+        let env = paths::Env::here();
         Ok(Here {
             exe,
             platform: this_platform_name(),
-            cargo_home: var("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from),
-            plugin_bin: paths::Env::here().plugin_bin(),
-            home,
+            cargo_home: var("CARGO_HOME").map_or_else(|| env.home.join(".cargo"), PathBuf::from),
+            plugin_bin: env.plugin_bin(),
+            server_root: env.server_root(),
             release: release::base_url(),
-            state_dir: paths::Env::here().state_dir(),
+            state_dir: env.state_dir(),
         })
     }
 }
@@ -93,7 +94,7 @@ fn update(here: &Here) -> Result<String, String> {
     // The app installs its helper as ~/.cache/endeavor/<version>/endeavor and
     // reinstalls only when that folder is missing, so a replaced file there
     // would run under the wrong version's name.
-    if dir.parent().is_some_and(|d| same(d, &paths::server_root(&here.home))) || exe.ancestors().any(|a| a.extension().is_some_and(|e| e == "app")) {
+    if dir.parent().is_some_and(|d| same(d, &here.server_root)) || exe.ancestors().any(|a| a.extension().is_some_and(|e| e == "app")) {
         return Err(format!("This copy of endeavor ({}) belongs to the Endeavor app, which installs and updates it. Update the app instead.", exe.display()));
     }
     if same(dir, &here.cargo_home.join("bin")) {

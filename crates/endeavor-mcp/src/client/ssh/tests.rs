@@ -281,7 +281,7 @@ fn an_empty_state_folder_leaves_the_flag_out() {
 #[cfg(unix)]
 fn an_empty_root_means_the_cache_folder_in_home() {
     let home = crate::client::scratch("bootstrap-home");
-    let cache = crate::paths::server_root(&home);
+    let cache = crate::paths::Env::from_vars(&|name| (name == "HOME").then(|| home.display().to_string())).server_root();
     fake_install(&cache);
     let args = connect_args(&home, "\nstate\n\n--julia\nauto\nprocess\n");
     assert_eq!((args[2].as_str(), args[8].as_str(), args[10].as_str()), (cache.join("state").to_str().unwrap(), cache.join("v1/runtime").to_str().unwrap(), cache.join("depot:").to_str().unwrap()));

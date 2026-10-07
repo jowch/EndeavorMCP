@@ -221,8 +221,8 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    and one method per folder, plus `server_root`); no other file builds one.
    It is public, so the app takes its folders from it. Two shell scripts
    still repeat a rule because they run before the binary exists: the
-   bootstrap script's state folder (`paths::STATE_DIR_SH`, which `ssh.rs` puts
-   in the script) and `scripts/endeavor-mcp.sh`'s binary store. Tests run the
+   bootstrap script's state folder (`paths::PICK_STATE_DIR_SH`, which `ssh.rs`
+   puts in the script) and `scripts/endeavor-mcp.sh`'s binary store. Tests run the
    shell text and compare it with the module; there is no `endeavor paths`
    command, since neither script could call it. The bootstrap script now
    ignores a relative `XDG_STATE_HOME`, as Rust does. No default folder changed.
@@ -530,8 +530,8 @@ it with the relay.
 
 - It uses the shared state folder, on servers and on your computer, and one
   package folder locally. It takes its folders from `endeavor_mcp::paths`
-  (`Env::here()`: `state_dir`, `cluster_state_dir`, `machines_file`;
-  `server_root`) and builds none itself.
+  (`Env::here()`: `state_dir`, `cluster_state_dir`, `machines_file`,
+  `server_root`, `depot`) and builds none itself.
 - Quitting only detaches.
 - It no longer hears "In use from another connection": nothing makes it
   exit. The runtime has no list of other sessions to show instead.

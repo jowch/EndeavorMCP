@@ -325,6 +325,19 @@ _Started 2026-10-06, on the `client-library` branch._
   `julia.rs`. Only the root is shared with `paths` (and, in the script, pinned by
   a test). The script takes `$HOME` as it is, where Rust accepts only an
   absolute `HOME`.
+- **The script's state folder is pinned on this machine only.** The test checks
+  that `gethostname` and `uname -n` agree here. On a server where they differ,
+  the script and Rust would name different folders.
+- **`SCRATCH` is found by two rules.** `serve` and `mcp` read only the variable
+  (`Env::from_vars`); a Slurm job (`wire::slurm::scratch()`) also asks a login
+  shell. On a cluster that sets it only in the login profile, the two use
+  different depots. To close: one rule in `paths`.
+- **On Windows `endeavor update` finds the plugins' binary store from an
+  absolute `HOME` before the profile folder**, as the launcher script does. It
+  used the profile folder only.
+- **`Env::from_vars` still reads the real process** for the home fallback
+  (`home_dir`), the working folder and the host name, so a test that fakes the
+  variables does not fake those three.
 
 ## The skills
 
