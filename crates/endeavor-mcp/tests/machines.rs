@@ -202,6 +202,11 @@ fn end_leftovers(dir: &Path) {
             unsafe { libc::kill(-pid, libc::SIGTERM) };
         }
     }
+    // A runtime that is still starting has no record yet: find its core by this test's own folder.
+    for pid in pids(&dir.join("local-state").display().to_string()) {
+        // SAFETY: plain syscall, on a process whose command line names this test's folder.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
 }
 
 fn start_front(place: &Place, more: &[(&str, &str)]) -> Front {
@@ -677,11 +682,11 @@ fn a_remembered_machine_that_is_gone_from_the_list_is_said_once() {
     second.initialize();
     let (failed, contents) = second.contents("list_notebooks", json!({}));
     assert!(!failed);
-    assert_eq!(contents[0], json!([]), "this computer's runtime answers");
+    assert_eq!(contents[0], json!([]), "this computer has no runtime and no notebooks");
     assert!(contents[1].as_str().unwrap().contains("last used the machine \"lab\", which isn't in the list of machines any more"), "{contents:?}");
     let (_, again) = second.contents("list_notebooks", json!({}));
     assert_eq!(again.len(), 1, "said once");
-    assert!(second.said().iter().any(|l| l.starts_with("Endeavor's notebooks:")), "this computer's runtime was started");
+    assert!(place_none(&place), "no runtime was started for it");
 }
 
 #[test]
@@ -776,6 +781,7 @@ fn stop_machine_works_on_this_computer_with_the_same_check() {
     place.local_bridge.set_notebooks(vec![notebook_json(NOTEBOOK, &path.display().to_string())]);
     let mut front = place.front();
     front.initialize();
+    front.ok("use_machine", json!({ "machine": "local" }));
     assert_eq!(front.ok("list_notebooks", json!({}))[0]["path"], path.display().to_string());
     let local = place.local_runtime().unwrap();
     // Another session works there.
@@ -953,6 +959,98 @@ impl Drop for FakeLink {
     }
 }
 
+fn local_notebook(place: &Place, name: &str) -> String {
+    let path = place.project.join(name).display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    place.local_bridge.set_notebooks(vec![notebook_json(NOTEBOOK, &path)]);
+    path
+}
+
+fn place_none(place: &Place) -> bool {
+    place.local_runtime().is_none() && core_of(place).is_empty()
+}
+
+fn core_of(place: &Place) -> Vec<i32> {
+    pids(&format!("core --state-dir {}", place.local_state.display()))
+}
+
+#[test]
+fn a_front_that_only_initializes_and_lists_tools_starts_no_local_runtime() {
+    let place = Place::new("lazy-none");
+    place.add_lab();
+    let mut front = place.front();
+    front.initialize();
+    for name in ["list_machines", "notebook_guide", "list_notebooks", "pluto_session_status"] {
+        let (failed, said) = front.call(name, json!({}));
+        assert!(!failed, "{name}: {said}");
+    }
+    assert_eq!(front.ok("list_notebooks", json!({})), json!([]));
+    assert_eq!(front.ok("pluto_session_status", json!({}))["pluto"], "not running");
+    assert_eq!(front.ok("list_machines", json!({}))["local"]["state"], "not running");
+    assert!(!place.local_state.join("runtime.json").exists());
+    assert!(core_of(&place).is_empty(), "{:?}", core_of(&place));
+    front.finish();
+}
+
+#[test]
+fn the_first_notebook_call_starts_the_local_runtime_and_a_second_front_finds_it() {
+    let place = Place::new("lazy-first");
+    let path = local_notebook(&place, "first.jl");
+    let mut front = place.front();
+    front.initialize();
+    assert!(place.local_runtime().is_none());
+    front.ok("open_notebook", json!({ "path": path }));
+    let runtime = place.local_runtime().expect("started by the call");
+    assert!(pid_alive(runtime));
+
+    let mut second = place.front();
+    second.initialize();
+    assert_eq!(second.ok("list_notebooks", json!({}))[0]["path"], path);
+    assert!(second.ok("pluto_session_status", json!({})).get("browser_url").is_some());
+    assert_eq!(place.local_runtime(), Some(runtime));
+    assert_eq!(second.ok("list_machines", json!({}))["local"]["state"], "running");
+    second.finish();
+    front.finish();
+}
+
+#[test]
+fn use_machine_local_starts_the_local_runtime() {
+    let place = Place::new("lazy-use-local");
+    let mut front = place.front();
+    front.initialize();
+    assert!(place.local_runtime().is_none());
+    assert_eq!(front.ok("use_machine", json!({ "machine": "local" }))["state"], "ready");
+    assert!(place.local_runtime().is_some_and(pid_alive));
+    front.finish();
+}
+
+#[test]
+fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call_succeeds() {
+    let place = Place::new("lazy-slow");
+    let path = local_notebook(&place, "slow.jl");
+    std::fs::write(place.local_state.join("hold"), "").unwrap();
+    let mut front = start_front(&place, &[("ENDEAVOR_START_WAIT_SECS", "3")]);
+    front.initialize();
+    let started = Instant::now();
+    let (failed, said) = front.call("open_notebook", json!({ "path": path }));
+    assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
+    assert!(failed && text(&said).contains("still starting") && text(&said).contains("Try again"), "{said}");
+    assert!(place.local_runtime().is_none());
+    std::fs::remove_file(place.local_state.join("hold")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (failed, said) = front.call("open_notebook", json!({ "path": path }));
+        if !failed {
+            break;
+        }
+        assert!(text(&said).contains("still starting"), "{said}");
+        assert!(Instant::now() < deadline, "{said}");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(place.local_runtime().is_some_and(pid_alive));
+    front.finish();
+}
+
 #[test]
 fn a_link_of_the_same_protocol_is_sent_a_start_and_one_of_another_is_not() {
     for (protocol, sent) in [(endeavor_mcp::link::PROTOCOL, true), (0, false)] {
@@ -963,8 +1061,6 @@ fn a_link_of_the_same_protocol_is_sent_a_start_and_one_of_another_is_not() {
         front.initialize();
         let _ = front.call("use_machine", json!({ "machine": "lab" }));
         assert_eq!(link.starts() > 0, sent, "protocol {protocol}: {:?}", link.requests.lock().unwrap());
-        // The place ends the local runtime by its record, which is written after the front answers.
-        wait_for("the local runtime to record itself", || recorded_pid(&place.local_state).is_some());
         front.finish();
     }
 }

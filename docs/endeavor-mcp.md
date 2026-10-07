@@ -115,6 +115,20 @@ For the plugin, a stdio mode is a thin shim that starts or attaches to the
 long-running core (the helper's `runtime.json` and lock already do this), so
 notebooks keep running between client sessions.
 
+The stdio form starts the local runtime at the first call that needs it, not
+at launch (`Relay::runtime` takes `Status::Idle` to a start). A session on this
+computer needs it for: every notebook tool, `keep_notebook_alive`, the host
+tools (which refuse there, but only the runtime says so), and `use_machine` with
+`"local"`. It does not for `initialize`, `ping`, `tools/list`, `notebook_guide`
+(the front answers it from the guide it embeds), `list_machines`, `add_machine`,
+`stop_machine`, or a session whose project is on a machine. `list_notebooks` and
+`pluto_session_status` use a runtime already running here (found from
+`runtime.json` and the process, and told the session's folder) and otherwise
+answer without starting one: `[]`, and `{pluto: "not running", notebooks: [],
+message}`. The first call that starts it waits as a start at launch did: up to
+`start_wait()` (45 s), then a "still starting, try again" failure, and the start
+goes on.
+
 ## Session identity
 
 _Built 2026-10-03._

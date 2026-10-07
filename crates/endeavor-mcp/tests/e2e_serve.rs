@@ -344,13 +344,29 @@ fn serve_and_mcp_without_the_app() {
     let mut stdin = mcp.stdin.take().unwrap();
     cleanup.children.push(mcp);
     let mut send = |message: Value| writeln!(stdin, "{message}").unwrap();
-    step("the stdio form answers the handshake at once and starts Julia behind it", || {
+    step("the stdio form answers the handshake at once and starts no Julia", || {
         send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {} } }));
         let init: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
         assert_eq!(init["result"]["instructions"], json!(said_standalone()), "{init}");
         send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
+        let reply: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
+        assert_eq!(reply["result"]["content"][0]["text"], "[]", "{reply}");
+        assert!(recorded_pid(&state).is_none(), "no runtime was started yet");
+    });
+    step("the first call that needs Julia starts it, and the stdio form says where the notebooks are", || {
+        let started = Instant::now();
+        loop {
+            send(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "use_machine", "arguments": { "machine": "local" } } }));
+            let reply: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(120)).unwrap()).unwrap();
+            assert_eq!(reply["id"], 3);
+            if reply["result"]["isError"] == false && reply["result"]["content"][0]["text"].as_str().unwrap().contains("\"state\":\"ready\"") {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(900), "{reply}");
+        }
         let link = loop {
-            let line = said.recv_timeout(Duration::from_secs(900)).expect("mcp says where the notebooks are");
+            let line = said.recv_timeout(Duration::from_secs(5)).expect("mcp says where the notebooks are");
             if let Some(link) = line.strip_prefix("Endeavor's notebooks: ") {
                 break link.to_owned();
             }
@@ -358,17 +374,9 @@ fn serve_and_mcp_without_the_app() {
         assert!(link.starts_with("http://localhost:") && link.contains("/?token="), "{link}");
     });
     step("a tool call goes through to the runtime", || {
-        let started = Instant::now();
-        loop {
-            send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
-            let reply: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(120)).unwrap()).unwrap();
-            assert_eq!(reply["id"], 2);
-            if reply["result"]["isError"] == false {
-                assert_eq!(reply["result"]["content"][0]["text"], "[]", "a new runtime has no notebooks open: {reply}");
-                break;
-            }
-            assert!(started.elapsed() < Duration::from_secs(900), "{reply}");
-        }
+        send(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
+        let reply: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(120)).unwrap()).unwrap();
+        assert_eq!(reply["result"]["content"][0]["text"], "[]", "a new runtime has no notebooks open: {reply}");
     });
     let core = recorded_pid(&state).unwrap();
     step("the runtime outlives the agent, and stop ends it", || {

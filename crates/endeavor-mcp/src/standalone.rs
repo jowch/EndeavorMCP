@@ -858,9 +858,6 @@ fn relay(options: Options) -> ! {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let relay = Arc::new(Relay::new(options, format!("stdio-{}-{}", std::process::id(), now.as_millis()), Box::new(io::stdout())));
     relay.target_from_project();
-    if matches!(*relay.target.lock().unwrap(), machines::Target::Local { .. }) {
-        relay.start();
-    }
     relay.keep_link_alive();
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -1007,6 +1004,37 @@ impl Relay {
         Some((port, token, session))
     }
 
+    /// What `tool` (`pluto_session_status` or `list_notebooks`) says when the session is on this
+    /// computer and no runtime is running here: it starts none. A runtime that is running is
+    /// found and used, so the answer is never wrong for not having started one.
+    fn without_runtime(self: &Arc<Self>, tool: &str) -> Option<String> {
+        if !matches!(*self.target.lock().unwrap(), machines::Target::Local { stopped: false }) {
+            return None;
+        }
+        if !matches!(*self.status.lock().unwrap(), Status::Idle) {
+            return None;
+        }
+        let state = crate::read_state(&self.options.state_dir).filter(|s| s.node == crate::hostname() && s.port.is_some() && crate::alive(s));
+        if let Some(state) = state {
+            let port = state.port?;
+            let mut status = self.status.lock().unwrap();
+            if matches!(*status, Status::Idle) {
+                *status = Status::Ready { port, token: state.token.clone() };
+                drop(status);
+                self.tell_folder(port, &state.token);
+            }
+            return None;
+        }
+        Some(match tool {
+            "list_notebooks" => "[]".to_owned(),
+            _ => to_json(&json!({
+                "pluto": "not running",
+                "notebooks": [],
+                "message": "Julia on this computer isn't running. It starts at the first notebook tool call, which then takes a few minutes the first time.",
+            })),
+        })
+    }
+
     /// The runtime's port and token, waiting up to `start_wait()` for a start;
     /// else why it can't be used yet.
     fn runtime(self: &Arc<Self>) -> Result<(u16, String), String> {
@@ -1074,6 +1102,22 @@ impl Relay {
         let tool = (message["method"] == "tools/call").then(|| message["params"]["name"].as_str().unwrap_or_default().to_owned());
         if let Some(tool) = tool.as_deref().filter(|tool| crate::mcp::MACHINE_NAMES.contains(tool)) {
             return self.machine_tool(&message, tool);
+        }
+        if let (Some(id), Some(tool)) = (&id, tool.as_deref())
+            && tool == crate::guide::TOOL
+        {
+            let arguments = message["params"].get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let result = match crate::guide::read(&arguments) {
+                Ok(guide) => json!({ "content": [{ "type": "text", "text": guide }], "isError": false }),
+                Err(error) => crate::mcp::tool_error(&error, false),
+            };
+            return self.write(&self.decorate(&message, Some(tool), to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))));
+        }
+        if let (Some(id), Some(tool @ ("pluto_session_status" | "list_notebooks"))) = (&id, tool.as_deref())
+            && let Some(text) = self.without_runtime(tool)
+        {
+            let result = json!({ "content": [{ "type": "text", "text": text }], "isError": false });
+            return self.write(&self.decorate(&message, Some(tool), to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))));
         }
         let failed = |why: String| {
             if let Some(id) = &id {
