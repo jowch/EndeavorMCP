@@ -9,7 +9,21 @@ independent review by a separate agent that had not worked on the branch and
 was told that proposing removals was welcome. The first part is the view of
 the session that built it._
 
-## Decisions wanted
+## Decided
+
+2026-10-09: go with the recommendations below.
+
+- **Now, before the skills trial and the app:** P1, P2, P4 (with the
+  `machines.json` fixes), N3, N4, and P5a.
+- **P5b: no question on this computer.** Installing the plugin is the
+  agreement to Julia and the packages it needs here. The question stays for
+  servers.
+- **With the skills rewrite:** N1.
+- **Before real users:** N2, N5.
+- **With the app:** P3. **At the first release from `main`:** P7.
+- **P6:** a short spike first.
+
+## The proposals
 
 Ordered by how much they matter before the app takes the library. "Before
 the app" means the change touches the wire protocol, the library's API or a
