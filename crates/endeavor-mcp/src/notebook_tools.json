@@ -28,7 +28,7 @@
     "name": "read_cell"
   },
   {
-    "description": "See a cell's output as an image (PNG). Use it to check what a plot or figure looks like; `read_cell` only describes images. The notebook must be running code (not in safe preview), and the call waits while cells run. Fails with `no_image` when the output has no image form (text, Markdown, HTML): use `read_cell` for those.",
+    "description": "See a cell's output as an image (PNG). Use it to check what a plot or figure looks like; `read_cell` only describes images. The call waits while cells run. In safe preview it works only for an output that is already an image. Fails with `no_image` when the output has no image form (text, Markdown, HTML): use `read_cell` for those.",
     "inputSchema": {
       "properties": {
         "cell_id": {
@@ -170,7 +170,7 @@
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Wait until the run finishes, at most 60 seconds. Default: false.",
+          "description": "Block until the run ends, with no time limit. Use it only for a run that takes a few seconds. Default: false.",
           "type": "boolean"
         }
       },
@@ -201,7 +201,7 @@
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Wait until the run finishes, at most 60 seconds. Default: false.",
+          "description": "Block until the run ends, with no time limit. Use it only for a run that takes a few seconds. Default: false.",
           "type": "boolean"
         }
       },
@@ -220,7 +220,7 @@
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Wait until the run finishes, at most 60 seconds. Default: false.",
+          "description": "Block until the run ends, with no time limit. Use it only for a run that takes a few seconds. Default: false.",
           "type": "boolean"
         }
       },

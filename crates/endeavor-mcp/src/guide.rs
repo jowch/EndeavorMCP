@@ -10,7 +10,7 @@ pub const TOOL: &str = "notebook_guide";
 /// Each skill file by its path under `plugin/skills`.
 const FILES: [(&str, &str); 6] = [
     (NOTEBOOKS, include_str!("../../../plugin/skills/endeavor-notebooks/SKILL.md")),
-    ("endeavor-notebooks/reference/pluto.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/pluto.md")),
+    (PLUTO, include_str!("../../../plugin/skills/endeavor-notebooks/reference/pluto.md")),
     ("endeavor-notebooks/reference/app.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/app.md")),
     ("endeavor-notebooks/reference/errors.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/errors.md")),
     ("endeavor-machines/SKILL.md", include_str!("../../../plugin/skills/endeavor-machines/SKILL.md")),
@@ -20,9 +20,12 @@ const FILES: [(&str, &str); 6] = [
 /// The skill the guide is, when asked for no topic.
 const NOTEBOOKS: &str = "endeavor-notebooks/SKILL.md";
 
+/// The engine reference the guide includes while Pluto is the only engine.
+const PLUTO: &str = "endeavor-notebooks/reference/pluto.md";
+
 /// Points an agent without the plugin's skills to the guide.
 const READ_GUIDE: &str = "Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
-how to find this session's notebook, the read-edit-run loop, when the user must approve a run, and how to lay out cells.";
+how to find this session's notebook, the read-edit-run loop, and the rules for a Pluto cell. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
 
 /// What a runtime with the app tells an agent without the skills.
 const APP: &str = "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat.";
@@ -82,14 +85,19 @@ pub fn read(arguments: &Value) -> Result<String, String> {
     }
 }
 
-/// The notebook skill, and how to ask for what it and the machine tools point to.
+/// The notebook skill and the Pluto reference, and how to ask for what they and the machine tools point to.
 fn whole() -> String {
-    let (path, text) = FILES.iter().find(|(p, _)| *p == NOTEBOOKS).expect("the notebook skill is in FILES");
+    let file = |wanted: &str| {
+        let (path, text) = FILES.iter().find(|(p, _)| *p == wanted).expect("the file is in FILES");
+        served(path, text)
+    };
     format!(
         "Links to .md paths in this guide are further topics: call `notebook_guide` with `topic` set to the path when the guide says to read one.\n\n\
          {}\n---\n\n\
+         {}\n---\n\n\
          If you have the tool `list_machines`, the notebooks can run on a server or cluster: call `notebook_guide` with `topic` set to `endeavor-machines` for how.\n",
-        served(path, text)
+        file(NOTEBOOKS),
+        file(PLUTO)
     )
 }
 
@@ -169,7 +177,8 @@ mod tests {
         for topic in ["pluto", "app", "errors"] {
             assert!(guide.contains(&format!("[reference/{topic}.md](endeavor-notebooks/reference/{topic}.md)")), "{topic}");
         }
-        assert!(!guide.contains("# In the Endeavor app") && !guide.contains("# Pluto notebooks"), "references are read when asked for");
+        assert!(guide.contains("\n# Pluto notebooks (Julia)\n"), "the guide holds the cell rules");
+        assert!(!guide.contains("# In the Endeavor app") && !guide.contains("# Error codes"), "other references are read when asked for");
         for link in guide.split("](").skip(1).filter_map(|l| l.split_once(')')).map(|(t, _)| t).filter(|t| !t.contains("://")) {
             assert!(read(&json!({ "topic": link })).is_ok(), "the guide links to {link}, which isn't a topic");
         }
@@ -179,7 +188,8 @@ mod tests {
     #[test]
     fn reads_one_topic() {
         let errors = read(&json!({ "topic": "endeavor-notebooks/reference/errors.md" })).unwrap();
-        assert_eq!(errors, served("endeavor-notebooks/reference/errors.md", FILES[3].1));
+        let path = "endeavor-notebooks/reference/errors.md";
+        assert_eq!(errors, served(path, FILES.iter().find(|(p, _)| *p == path).unwrap().1));
         assert!(errors.contains("[app.md](endeavor-notebooks/reference/app.md)"), "a reference's link to another is a topic too");
         assert!(read(&json!({ "topic": "endeavor-notebooks" })).unwrap().starts_with("# Working in a live notebook"));
         let missing = read(&json!({ "topic": "nope.md" })).unwrap_err();

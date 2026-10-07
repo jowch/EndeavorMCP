@@ -325,7 +325,7 @@ impl Call<'_> {
             let status = reply["process_status"].as_str().unwrap_or_default();
             let mut warning = format!("execution_blocked::notebook is not running code (process_status={status}); pending_run kept");
             if status == "waiting_for_permission" {
-                warning.push_str("; call allow_execution to exit safe preview");
+                warning.push_str("; nothing ran. allow_execution is for when the user asked you to run the notebook");
             }
             warnings.push(warning);
         } else if wait {
@@ -864,10 +864,7 @@ impl Call<'_> {
             Some(Value::String(path)) => path,
             Some(_) => return Err(argument_error("invalid_path::path must be a string")),
         };
-        let path = &match folder {
-            Some(folder) if !super::is_absolute(&super::expand_user(path)?) => absolute_path(&format!("{folder}/{path}"))?,
-            _ => path.clone(),
-        };
+        let path = &super::requested_path(path, folder)?;
         if !std::path::Path::new(path).exists() {
             return Err(argument_error(&format!("file_not_found::No file at '{path}'")));
         }

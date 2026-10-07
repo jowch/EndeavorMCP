@@ -640,6 +640,9 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
     // On, with no app following to ask: it fails at once.
     policy("ask", true);
     assert_eq!(text(&mcp(&core, &shell(2), &caller).1)["error"], "no_app");
+    let open = |run: bool| format!(r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"open_notebook","arguments":{{"path":"/nope.jl","run_notebook":{run}}}}}}}"#);
+    assert_eq!(text(&mcp(&core, &open(true), &caller).1)["error"], "no_app", "opening to run asks like a run");
+    assert_ne!(text(&mcp(&core, &open(false), &caller).1)["error"], "no_app", "opening without running doesn't");
 
     let mut events = core.connect();
     let mut reader = BufReader::new(events.try_clone().unwrap());
@@ -857,6 +860,12 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     assert_eq!(mcp(&core, &tool(3, "edit_cell"), &[("X-Endeavor-Session", "8")]).1, not_a_notebook(3));
     assert_eq!(app_call(&core, &tool(4, "edit_cell")), not_a_notebook(4));
 
+    // Opening a notebook is refused in Plan mode only when it would run it.
+    let open = |id: u32, run: bool| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"open_notebook","arguments":{{"path":"/nope.jl","run_notebook":{run}}}}}}}"#);
+    let plan_open = "Plan mode is read-only: `open_notebook` would change or run the notebook. Finish the plan; the user switches modes to carry it out.";
+    assert_eq!(mcp(&core, &open(20, true), &seven).1, tool_error(20, "plan_mode", plan_open));
+    assert!(!mcp(&core, &open(21, false), &seven).1.contains("plan_mode"));
+
     // Host tools: plan mode refuses run_shell too; without a server, none run.
     let on_server = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
     let plan_shell = "Plan mode is read-only: `run_shell` would run a command on the server. Finish the plan; the user switches modes to carry it out.";
@@ -876,6 +885,7 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let hint = |name: &str| reply["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
     assert_eq!((hint("edit_cell"), hint("read_cell"), hint("allow_execution")), (false.into(), true.into(), false.into()));
+    assert_eq!(hint("open_notebook"), false, "it can run the notebook");
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")), "Julia answers only the adapter's calls");
 }
 

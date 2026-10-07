@@ -229,12 +229,6 @@ _Started 2026-10-06, on the `client-library` branch._
 
 - **`endeavor-machines` says "helper".** The file says "helper", which an
   agent should not have to read.
-- **Two messages from the code disagree with the notebook skill.** The
-  `execution_blocked` warning (`notebooks/tools.rs`) ends "call
-  allow_execution to exit safe preview", where the skill says to call it only
-  when the user asked. The `risky_source` error (`Adapter.jl`) says "notebook
-  pane", which only the app has. The skill says which to follow. To close:
-  reword both.
 - **The notebook skill is untried.** No agent session has run against
   `endeavor-notebooks` or the shorter tool descriptions, and no rule that was
   cut has been tested for whether a current model needs it. To close: the
@@ -244,6 +238,13 @@ _Started 2026-10-06, on the `client-library` branch._
   `endeavor-notebooks/reference/pluto.md` before its first cell. Every
   notebook is Pluto today, so this is one more call each session. Left so
   that the guide needs no change when a second engine arrives.
+
+- **A waited run has no time limit.** `wait_for_completion=true` blocks until
+  the whole run ends (`run_cells!` calls Pluto with `run_async=false`), so the
+  60-second `TIMEOUT_SECONDS` never applies and the agent client's own tool
+  timeout is the only bound. The skill and the tool descriptions say to wait
+  only for a run that takes a few seconds. To close: run async and wait in
+  `_wait_cells!`, which would give the cap and make `execution_timeout` real.
 
 ## Not checked
 

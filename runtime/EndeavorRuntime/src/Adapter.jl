@@ -308,7 +308,7 @@ function allow_execution!(session, nb, run::Bool, timeout::Real)
     ps !== Pluto.ProcessStatus.waiting_for_permission &&
         throw(ArgumentError("execution_not_gated::Notebook is not in safe preview (process_status=$ps)"))
     haskey(nb.metadata, "risky_file_source") && throw(ArgumentError(
-        "risky_source::Cannot allow execution for risky remote sources via MCP; ask the user to run it from the notebook pane",
+        "risky_source::Cannot allow execution for risky remote sources via MCP; ask the user to run it from the notebook itself",
     ))
     nb.process_status = Pluto.ProcessStatus.waiting_to_restart
     session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(nb)

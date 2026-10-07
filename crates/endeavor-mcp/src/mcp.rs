@@ -77,6 +77,8 @@ pub fn runs_code(tool: &str, arguments: &Value) -> bool {
         // A shell command on a session's server.
         "run_shell" => true,
         "add_cell" | "edit_cell" => arguments["run_after"].as_bool() == Some(true),
+        // Opening a notebook runs nothing unless asked to.
+        "open_notebook" => arguments["run_notebook"].as_bool() == Some(true),
         _ => false,
     }
 }
@@ -372,7 +374,7 @@ impl Bridge {
             Some(other) => return tool_error(&format!("ArgumentError: unknown_tool::Unknown tool: '{}'", julia_string(other)), help),
         };
         self.notebooks.note_activity(&arguments);
-        if let Some(refusal) = self.refusal(caller, name) {
+        if let Some(refusal) = self.refusal(caller, name, &arguments) {
             return tool_error(&refusal, false);
         }
         if name == guide::TOOL {
@@ -395,14 +397,14 @@ impl Bridge {
         if name == "keep_notebook_alive" {
             return self.notebooks.keep_alive(&arguments).map_or_else(|e| tool_error(&e, help), |r| text(&r));
         }
-        if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments) {
+        let folder = self.folder(&caller.owner);
+        if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments, folder.as_deref()) {
             return tool_error(&refusal, help);
         }
         let run = match self.ask_first(call, name, &arguments) {
             Ok(run) => run,
             Err(result) => return result,
         };
-        let folder = self.folder(&caller.owner);
         let reply = if run {
             self.notebooks.tool(&caller.owner, name, &arguments, folder.as_deref())
         } else {
@@ -481,14 +483,14 @@ impl Bridge {
     }
 
     /// Why a session may not call `tool`, as the error Julia raised for it.
-    fn refusal(&self, caller: &Caller, tool: &str) -> Option<String> {
+    fn refusal(&self, caller: &Caller, tool: &str, arguments: &Value) -> Option<String> {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(format!(
                 "ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on the user's computer: use your own file and shell tools."
             ));
         }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
-        if plan && WRITE_TOOLS.contains(&tool) {
+        if plan && (WRITE_TOOLS.contains(&tool) || runs_code(tool, arguments)) {
             let what = if tool == "run_shell" { "run a command on the server" } else { "change or run the notebook" };
             return Some(format!(
                 "ArgumentError: plan_mode::Plan mode is read-only: `{tool}` would {what}. Finish the plan; the user switches modes to carry it out."
@@ -681,7 +683,8 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
             }
             for tool in &mut tools {
                 // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
-                let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name) || (MACHINE_NAMES.contains(&name) && name != "list_machines"));
+                // open_notebook can run the notebook, so it is not read-only either.
+                let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name) || name == "open_notebook" || (MACHINE_NAMES.contains(&name) && name != "list_machines"));
                 tool["annotations"] = json!({ "readOnlyHint": read_only });
             }
             ok(json!({ "tools": tools }))
@@ -851,7 +854,7 @@ mod tests {
             ask("initialize", false)["instructions"],
             "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat. \
 Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
-how to find this session's notebook, the read-edit-run loop, when the user must approve a run, and how to lay out cells."
+how to find this session's notebook, the read-edit-run loop, and the rules for a Pluto cell. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`."
         );
         assert_eq!(names(ask("tools/list", false))[0], "notebook_guide");
         assert_eq!(ask("tools/list", false)["tools"][0]["annotations"]["readOnlyHint"], true);
@@ -881,6 +884,9 @@ how to find this session's notebook, the read-edit-run loop, when the user must 
         assert!(!runs("add_cell", json!({ "code": "1" })));
         assert!(!runs("edit_cell", json!({ "code": "1", "run_after": false })));
         assert!(!runs("edit_cells", json!({ "cells": [] })));
+        assert!(runs("open_notebook", json!({ "path": "/x.jl", "run_notebook": true })));
+        assert!(!runs("open_notebook", json!({ "path": "/x.jl" })));
+        assert!(!runs("open_notebook", json!({ "path": "/x.jl", "run_notebook": false })));
         assert!(!runs("read_cell", json!({})));
         assert!(!runs("read_file", json!({ "path": "/tmp/x" })));
     }
@@ -896,6 +902,8 @@ how to find this session's notebook, the read-edit-run loop, when the user must 
         }
         assert!(!held("edit_cell", "ask", false), "Ask to run doesn't hold an edit that doesn't run");
         assert!(held("execute_cell", "ask", false));
+        let open = |run: bool, policy: &str| asks_first("open_notebook", &json!({ "path": "/x.jl", "run_notebook": run }), policy, false);
+        assert!(open(true, "ask") && !open(false, "ask") && !open(true, "auto") && !open(true, "plan"), "opening asks only when it runs the notebook");
         assert!(held("move_cell", "auto", true) && !held("execute_cell", "auto", true), "Manual with runs allowed still asks before changes");
         assert!(!held("edit_cell", "plan", true), "plan refuses it instead");
     }

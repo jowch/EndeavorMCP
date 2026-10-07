@@ -857,7 +857,7 @@ impl Notebooks {
 
     /// Why a session may not make this call: it works on another notebook.
     /// Other notebooks stay readable.
-    pub fn refusal(&self, owner: &str, tool: &str, arguments: &Value) -> Option<String> {
+    pub fn refusal(&self, owner: &str, tool: &str, arguments: &Value, folder: Option<&str>) -> Option<String> {
         if owner.is_empty() {
             return None;
         }
@@ -872,7 +872,7 @@ impl Notebooks {
         if tool == "open_notebook" || tool == "new_notebook" {
             let requested = arguments.get("path").and_then(Value::as_str);
             if let Some(requested) = requested {
-                match canonical_path(requested) {
+                match requested_path(requested, folder).and_then(|path| canonical_path(&path)) {
                     Ok(path) if path == bound => return None,
                     Err(error) => return Some(error),
                     Ok(_) => {}
@@ -1128,6 +1128,16 @@ pub fn canonical_path(path: &str) -> Result<String, String> {
     match (real_dir, absolute.file_name()) {
         (Some(dir), Some(base)) => Ok(dir.join(base).display().to_string()),
         _ => Ok(absolute.display().to_string()),
+    }
+}
+
+/// A path an agent gave, as the tools resolve it: `~` expanded, and a relative
+/// path taken from the session's `folder` when it has one.
+fn requested_path(path: &str, folder: Option<&str>) -> Result<String, String> {
+    let expanded = expand_user(path)?;
+    match folder {
+        Some(folder) if !is_absolute(&expanded) => absolute_path(&format!("{folder}/{expanded}")),
+        _ => Ok(expanded),
     }
 }
 

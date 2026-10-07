@@ -123,7 +123,7 @@ Mostly yes. Three drifts:
 
 **P5. Local start: make it lazy and ask before downloading Julia. (High confidence; can be done any time, but soon.)**
 - `relay()` starts the runtime at process start when the target is local (standalone.rs:861). `start_or_reuse` calls `julia::find(&options.julia, true, …)` (:414), so a missing Julia is downloaded without a question. Every session in every project with the plugin enabled does this, even if it never opens a notebook. It is one runtime per computer, not one per session, but it contradicts the "Installing on a server" row of the Decided table in spirit.
-- Change: start on the first notebook call (`Relay::runtime` already handles `Status::Idle`), and return `needs_install` for Julia as the server path does.
+- Change: start on the first notebook call (`Relay::runtime` already handles `Status::Idle`), and return `needs_install` for Julia as the server path does. (Decided otherwise for the second half: no question on this computer. See "Decided".)
 - Longer term: treat `local` as a machine reached through the same channel (the helper over a local pipe). That removes drift 1c. Moderate confidence; a week or more; not urgent.
 
 **P6. Take the launcher choice out of the connection. (Moderate confidence; wire change, so decide before the app.)**
