@@ -59,6 +59,8 @@ fn command(args: &[&str], work: &Path, julia: &Path, depot: &str) -> Command {
         .arg("--state-dir")
         .arg(work.join("state"))
         .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("XDG_STATE_HOME", work.join("state-home"))
+        .env("XDG_CONFIG_HOME", work.join("config"))
         .env("ENDEAVOR_IDLE_CHECK_SECS", "1");
     if args[0] != "stop" {
         command.args(["--julia", julia.to_str().unwrap(), "--depot", depot]);
