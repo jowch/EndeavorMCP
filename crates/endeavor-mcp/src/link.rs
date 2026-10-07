@@ -59,9 +59,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use wire::slurm::{JobRequest, Partition};
+use wire::slurm::JobRequest;
 
 use crate::client::Server;
+pub use crate::client::{FoundInfo, HelloInfo, InstallInfo, JobInfo, QueueInfo, RuntimeInfo, State};
 use crate::standalone::Env;
 
 mod run;
@@ -89,57 +90,6 @@ const SILENT_PAUSE: Duration = Duration::from_millis(700);
 
 /// How long a call to the link may take, except a stop (`Link::stop`).
 pub const CALL_WAIT: Duration = Duration::from_secs(5);
-
-/// Where a link stands.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum State {
-    /// Signing in and starting the helper, or getting the connection back.
-    Connecting,
-    /// The helper is up and no runtime is asked for (or it was stopped).
-    Connected,
-    /// A runtime is starting or being attached to.
-    Starting,
-    /// A cluster job waits in the queue.
-    Queued,
-    /// The runtime is attached and answers through the listener's port.
-    Ready,
-    /// The last step didn't work: `error` says why. `POST /link/start` tries again.
-    Failed,
-    /// Endeavor must install something on the machine first (`Status::needs_install`)
-    /// and the user hasn't agreed. Not a failure, and not tried again by itself:
-    /// `POST /link/start` with `install`, or for the helper `POST /link/install`, goes on.
-    #[serde(rename = "needs_install")]
-    NeedsInstall,
-    /// A state this build doesn't know, from a link of another control `PROTOCOL`:
-    /// not ready, and not replaceable. A link of another protocol is read only for
-    /// the fields of `Status` this build can read (`Status::read`).
-    #[serde(other)]
-    Unknown,
-}
-
-/// What the link wants to install on the machine, and what it found there.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct InstallInfo {
-    /// What is needed, in the order it would be installed.
-    pub items: Vec<wire::Item>,
-    /// Set exactly when Endeavor's helper is one of the items: the platform, where it
-    /// would go, its size and what runs there already.
-    pub helper: Option<crate::client::NeedsInstall>,
-}
-
-impl InstallInfo {
-    /// The helper is missing: the one item, with what was found on the machine.
-    pub(crate) fn helper(found: crate::client::NeedsInstall) -> InstallInfo {
-        let item = wire::Item { kind: wire::KIND_HELPER.into(), name: "Endeavor's helper".into(), size_mb: found.bytes.map(|bytes| bytes.div_ceil(1_000_000).max(1)), place: Some(found.folder.clone()) };
-        InstallInfo { items: vec![item], helper: Some(found) }
-    }
-
-    /// Whether the helper is among them.
-    pub fn needs_helper(&self) -> bool {
-        self.helper.is_some()
-    }
-}
 
 /// What `GET /link/status` answers.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -206,70 +156,6 @@ impl Status {
             build: text("build").unwrap_or_default(),
         })
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HelloInfo {
-    pub node: String,
-    pub home: String,
-    pub slurm: bool,
-    pub uploads: bool,
-    /// `uname`'s words for the machine, as `linux` and `x86_64`.
-    pub os: Option<String>,
-    pub arch: Option<String>,
-    /// This connect installed the helper there, or it was already installed.
-    pub helper_installed: Option<bool>,
-    /// What the helper found to start the runtime with (Julia), once it has started one.
-    pub found: Vec<FoundInfo>,
-    /// Slurm's partitions, on a machine that has Slurm.
-    pub partitions: Option<Vec<Partition>>,
-    /// Asking Slurm for them failed, so `partitions` is empty.
-    #[serde(default)]
-    pub partitions_failed: bool,
-    pub scratch: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FoundInfo {
-    /// "Julia".
-    pub name: String,
-    pub version: String,
-    pub path: String,
-}
-
-/// How to reach the runtime that is attached.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RuntimeInfo {
-    /// The listener's port on this computer. It stays the same while the link runs.
-    pub port: u16,
-    /// For `Authorization: Bearer` on every request to that port.
-    pub token: String,
-    pub mcp_url: String,
-    /// Pluto's start page, with the token that lets a browser in.
-    pub page_url: String,
-    pub node: String,
-    pub pid: u32,
-    /// It was running already; this link didn't start it.
-    pub reattached: bool,
-    pub job: Option<wire::slurm::Job>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct JobInfo {
-    pub id: String,
-    /// "8 CPUs · 32 GB · 8 h".
-    pub summary: Option<String>,
-    pub node: Option<String>,
-    /// When Slurm will end it (Unix seconds).
-    pub ends_at: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct QueueInfo {
-    pub state: String,
-    pub reason: String,
 }
 
 /// The file a running link keeps (`link.json`).

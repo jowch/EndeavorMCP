@@ -4,6 +4,7 @@
 //! runtime goes away and comes back.
 
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ pub type Refuse = Box<dyn Fn(&str, &str, &Value) -> Option<String> + Send + Sync
 /// What a listener says when the runtime is away and nothing will bring it
 /// back by itself, as a function of the server's name. The default speaks in
 /// the app's words (its buttons); a caller with other controls says its own.
+#[derive(Clone, Copy)]
 pub struct Messages {
     /// A restart that was announced (`restarting`) did not bring Julia back.
     pub restart_failed: fn(&str) -> String,
@@ -42,6 +44,7 @@ pub struct Listener {
     name: String,
     upstream: Mutex<Upstream>,
     changed: Condvar,
+    closed: AtomicBool,
     /// Without one, connections are relayed without reading the HTTP in them.
     refuse: Option<Refuse>,
     messages: Messages,
@@ -77,6 +80,7 @@ impl Listener {
             name: name.to_owned(),
             upstream: Mutex::new(Upstream::None),
             changed: Condvar::new(),
+            closed: AtomicBool::new(false),
             refuse,
             messages,
         });
@@ -85,6 +89,9 @@ impl Listener {
             // A failed accept (no file descriptors left, a connection reset before it was taken) doesn't end the listener.
             let mut backoff = Backoff::default();
             for connection in socket.incoming() {
+                if accepting.closed.load(Ordering::SeqCst) {
+                    break;
+                }
                 match connection {
                     Ok(connection) => {
                         backoff.accepted();
@@ -193,6 +200,17 @@ impl Listener {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Stop taking connections and close the port. A connection already relayed goes on until its ends close.
+    pub fn close(&self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        *self.upstream.lock().unwrap() = Upstream::None;
+        self.changed.notify_all();
+        // The accept loop is woken by a connection of its own.
+        let _ = TcpStream::connect(("127.0.0.1", self.port));
     }
 
     /// The MCP URL the agent's config carries; the same for the listener's whole life.

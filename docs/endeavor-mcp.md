@@ -306,6 +306,15 @@ cluster submits nothing, and says so with the defaults to ask the user about.
 An entry whose machine is gone from the machines file is ignored, and the first
 result says so once.
 
+**The connection is a library type.** `client::Session` (one for each machine)
+does what the link's states describe: it connects, starts the runtime or
+attaches, retries and attaches again after a drop, and keeps one listener port
+through all of it. `Session::ensure(Want, wait)` answers with an `Outcome`
+(`Ready`, `Queued`, `NothingRunning`, `NeedsInstall`, `Failed`, `StillWorking`);
+`status()` has the states and fields `GET /link/status` shows. `close()` and
+dropping the session detach from the helper and end its thread, and never stop
+the runtime. The link process holds one and maps its control calls onto it.
+
 **The link's `only_running`.** `POST /link/start` takes `{"job": …,
 "only_running": true}`. After connecting, the link asks the helper whether a
 runtime runs or a job waits (`Request::Runtime`, as a reconnect does). If so it

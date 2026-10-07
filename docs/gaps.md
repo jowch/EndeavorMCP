@@ -30,9 +30,33 @@ _Started 2026-10-06, on the `client-library` branch._
   the link isn't answering, until `link.json` is removed. To close: check
   the recorded start time on Unix as on Windows.
 - **A runtime that dies in the moment its start succeeds** is handled
-  (`gone_early`) but has no test: the order can't be forced.
+  (`Run::Gone`, in `client/session.rs`) but has no test: the order can't be forced.
 - **A stop that fails while a start is under way** restores the start's
   state only roughly.
+
+## The connection library
+
+- **`Outcome::Queued` has no test.** The fake helper has no Slurm, so the
+  queued outcome is read from the code and from the link's e2e Slurm tests.
+- **A closed session leaves three kinds of thread to end by themselves:** the
+  one that waits for the helper to go, a start that was under way, and the
+  one that asks Slurm for the partitions. They end when the helper does, but
+  `close` doesn't join them.
+- **A session writes its progress and failures to stderr** (`eprintln!`), as
+  the link did into `link.log`. A caller that holds sessions in its own process
+  gets them on its stderr.
+- **`close` can take longer than the link took to exit.** It waits for the
+  supervisor, which may be inside a call to the helper that takes up to 60 s
+  (`Channel::files` in `reattach`), where the link exited within 5 s.
+  `reattach` looks at the closing flag between its tries only.
+- **Adopting `Session` in the app needs three settings it fixes now:** the
+  wording of the listener's messages (`Config::messages` names MCP tools in the
+  link's case; the default speaks in the app's words), batch sign-in only
+  (`Auth::Batch`) and `exit_idle: true` for a runtime this session starts. Each
+  would become a `Config` field.
+- **`ensure` remembers one want for each session.** A second caller that
+  asks with the same want right after a `StillWorking` is told how it ended
+  instead of the start trying again; the one after that tries again.
 
 ## The machines file
 

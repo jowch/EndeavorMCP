@@ -36,7 +36,7 @@ the helper or fetches one, the front does that after the revision._
 
 ## The revision (decided 2026-10-07, planned)
 
-Nothing in this section is built. It was decided after three review rounds
+Steps 1 and 2 of the order of work below are built; nothing else in this section is. It was decided after three review rounds
 found most of their faults in two places: between the front and the link,
 and where the front starts this computer's runtime with code of its own
 beside the helper's.
@@ -143,6 +143,17 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    starting; a start outlives the client that asked for it (below).
 2. Connect, retry and re-attach as one library type that answers with an
    outcome.
+   _Built 2026-10-07:_ `client::Session` (`src/client/session.rs`) holds one
+   machine's connection, the listener's port, the retries and the re-attach
+   after a drop, in a thread of its own that ends when the session is closed
+   or dropped (the runtime keeps running). `ensure(want, wait)` answers
+   `Ready` (the listener's port, the runtime's token, the page address, pid,
+   node, job), `Queued`, `NothingRunning`, `NeedsInstall`, `Failed` or
+   `StillWorking(step)`; it returns as soon as that is known, and a later call
+   with the same want goes on from there. `status()`, `stop()`,
+   `allow_install()` and `close()` are the rest. The link process is now this
+   type plus the record, the control port, the idle limit and the stop signals;
+   the front still reads the link's states, which step 3 replaces.
 3. The front holds its connections in process and has one kind of target.
    The link and the front's code for it are deleted. `Ready` gains the
    runtime's port (it has none today), so that results can name it.
@@ -245,7 +256,9 @@ in a local state folder, as `mcp` finds `runtime.json`, and starts it under
 a lock when there is none. The app keeps its own connection; the two don't
 disturb each other (see [Sharing a runtime](#sharing-a-runtime)).
 
-**The link, as built.** `endeavor link --machine <id>` is a hidden command; a
+**The link, as built.** The connecting, retrying and re-attaching below are
+`client::Session`'s (see step 2 of the revision); the link process adds the
+record, the control port, the idle limit and the stop signals. `endeavor link --machine <id>` is a hidden command; a
 front starts it with `link::ensure(<server record>)`, which returns the link's control
 port and token. The front writes the record to `links/<id>/server.json` (owner-only) before
 it starts the link, which reads it once and keeps it, also when it reconnects: it doesn't read
