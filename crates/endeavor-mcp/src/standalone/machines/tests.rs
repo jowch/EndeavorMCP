@@ -348,3 +348,46 @@ fn a_call_to_a_stopped_computer_says_to_call_use_machine() {
     let Err(unready) = relay.route(true) else { panic!("a stopped runtime has no route") };
     assert!(unready.message.contains("stop_machine") && unready.message.contains("`use_machine` with machine \"local\""), "{}", unready.message);
 }
+
+fn needing(items: Vec<wire::Item>, helper: Option<crate::client::NeedsInstall>) -> link::Status {
+    let mut status = status(State::NeedsInstall);
+    status.needs_install = Some(link::InstallInfo { items, helper });
+    status
+}
+
+#[test]
+fn the_question_is_built_from_the_items_including_a_kind_it_has_never_seen() {
+    let r = wire::Item { kind: "kernel".into(), name: "R 4.5.1".into(), size_mb: Some(120), place: Some("/home/ada/.cache/endeavor/r".into()) };
+    let status = needing(vec![r.clone()], None);
+    for tool in ["use_machine", "add_machine", "stop_machine"] {
+        let said = install_text("lab", &status, tool);
+        assert!(said.contains("Endeavor needs to install R 4.5.1 (about 120 MB, into /home/ada/.cache/endeavor/r) on lab."), "{said}");
+        assert!(said.contains("Ask the user") && said.contains("`install: true`") && said.contains(tool), "{said}");
+        assert!(!said.contains("helper program") && !said.contains("shell line"), "no sentence of a known kind: {said}");
+    }
+    let json = install_json(&status).unwrap();
+    assert_eq!(json["items"], json!([{ "kind": "kernel", "name": "R 4.5.1", "size_mb": 120, "place": "/home/ada/.cache/endeavor/r" }]));
+    assert_eq!(json.get("os"), None, "no helper details for no helper");
+    let result = needs_install_result("lab", &status, "use_machine");
+    assert_eq!((result["state"].as_str(), result["needs_install"].clone(), result["ready"].clone()), (Some("needs_install"), json!(true), json!(false)));
+    assert!(result["message"].as_str().unwrap().contains("R 4.5.1") && result["message"].as_str().unwrap().ends_with("Nothing was installed on lab."));
+
+    let julia = wire::Item { kind: wire::KIND_RUNTIME.into(), name: "Julia 1.12.6".into(), size_mb: Some(289), place: None };
+    let both = needing(vec![julia, r], None);
+    let said = install_text("lab", &both, "use_machine");
+    assert!(said.contains("Julia 1.12.6 (about 289 MB) and R 4.5.1 (about 120 MB, into /home/ada/.cache/endeavor/r)"), "{said}");
+    assert!(said.contains("`module load julia`"), "the known kind adds its note: {said}");
+}
+
+#[test]
+fn the_helper_item_keeps_what_was_found_on_the_machine() {
+    let found = crate::client::NeedsInstall { os: "Linux".into(), arch: "x86_64".into(), folder: "/srv/e/abc".into(), bytes: Some(21_500_000), update: true, running: Some(Running::Process { pid: 77, checked: true }) };
+    let mut status = status(State::NeedsInstall);
+    status.needs_install = Some(link::InstallInfo::helper(found));
+    let said = install_text("lab", &status, "stop_machine");
+    for part in ["Endeavor's helper (about 22 MB, into /srv/e/abc)", "Linux x86_64", "Stopping the runtime there needs it", "this is an update", "process 77"] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+    let json = install_json(&status).unwrap();
+    assert_eq!((json["update"].clone(), json["running"].clone(), json["os"].clone()), (json!(true), json!({ "process": 77 }), json!("Linux")));
+}

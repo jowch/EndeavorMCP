@@ -25,20 +25,19 @@
 //!   the runtime, or attach to the one running, in the background. The `Status`
 //!   at once. With `only_running` it attaches only if the helper says a runtime
 //!   runs, or a job waits, and otherwise starts nothing: the state is then
-//!   `connected` and `nothing_running` is true. A body with any other field is
-//!   refused (HTTP 400), so that a field a newer front adds is never silently
-//!   ignored by an older link. The link connects without installing anything
-//!   on the machine (its helper), and starts without downloading Julia: where
-//!   either is needed the state is `needs_install`, and `needs_install` says
-//!   which (`helper` or `julia`). `install: true` is the user's agreement to what
-//!   this start needs: the helper if it is missing, which connects again and
-//!   goes on, and Julia if none is found, which the helper downloads for this
-//!   start only. A start without it never downloads Julia, whatever was agreed
+//!   `connected` and `nothing_running` is true. The link connects without
+//!   installing anything on the machine (its helper), and starts without
+//!   installing what the start needs (such as Julia): where either is needed the
+//!   state is `needs_install`, and `needs_install` lists the items
+//!   (`wire::Item`). `install: true` is the user's agreement to what this start
+//!   needs: the helper if it is missing, which connects again and goes on, and
+//!   whatever the helper then finds the start needs, installed for this start
+//!   only. A start without it installs nothing a start needs, whatever was agreed
 //!   before. The agreement to the helper is kept for as long as the link runs,
 //!   but only a reconnect (to a machine that lost the helper) uses it again.
 //! - `POST /link/install`: the agreement to the helper alone, without a start:
 //!   a link that needs it installed connects again and installs it. It covers
-//!   no download of Julia.
+//!   nothing a start needs.
 //! - `POST /link/stop`: stop the runtime for every client. The link stays connected.
 //! - `POST /link/quit`: detach, remove the record and exit. The record goes
 //!   first, so a front that asks for a link right after gets a new one.
@@ -84,7 +83,7 @@ const SILENT_TRIES: u32 = 5;
 const SILENT_PAUSE: Duration = Duration::from_millis(700);
 
 /// How long a call to the link may take, except a stop (`Link::stop`).
-pub(crate) const CALL_WAIT: Duration = Duration::from_secs(5);
+pub const CALL_WAIT: Duration = Duration::from_secs(5);
 
 /// Where a link stands.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -107,7 +106,8 @@ pub enum State {
     /// `POST /link/start` with `install`, or for the helper `POST /link/install`, goes on.
     #[serde(rename = "needs_install")]
     NeedsInstall,
-    /// A state this build doesn't know, from a link of a newer one: not ready.
+    /// A state this build doesn't know, from a link of another control `PROTOCOL`:
+    /// not ready. A front still reads such a status to decide whether to replace the link.
     #[serde(other)]
     Unknown,
 }
@@ -115,23 +115,24 @@ pub enum State {
 /// What the link wants to install on the machine, and what it found there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstallInfo {
-    pub what: InstallWhat,
-    /// The helper: the platform, where it would go, its size and what runs there already.
+    /// What is needed, in the order it would be installed.
+    pub items: Vec<wire::Item>,
+    /// When Endeavor's helper is one of the items: the platform, where it would
+    /// go, its size and what runs there already.
     pub helper: Option<crate::client::NeedsInstall>,
-    /// Julia: what Endeavor would download there, as the helper said it.
-    pub julia: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum InstallWhat {
-    /// Endeavor's helper (this build's) isn't on the machine.
-    Helper,
-    /// No Julia was found there, and Endeavor's own would be downloaded.
-    Julia,
-    /// Something this build doesn't know, from a link of a newer one.
-    #[serde(other)]
-    Unknown,
+impl InstallInfo {
+    /// The helper is missing: the one item, with what was found on the machine.
+    pub(crate) fn helper(found: crate::client::NeedsInstall) -> InstallInfo {
+        let item = wire::Item { kind: wire::KIND_HELPER.into(), name: "Endeavor's helper".into(), size_mb: found.bytes.map(|bytes| bytes.div_ceil(1_000_000).max(1)), place: Some(found.folder.clone()) };
+        InstallInfo { items: vec![item], helper: Some(found) }
+    }
+
+    /// Whether the helper is among them.
+    pub fn needs_helper(&self) -> bool {
+        self.items.iter().any(|item| item.kind == wire::KIND_HELPER)
+    }
 }
 
 /// What `GET /link/status` answers.
@@ -178,8 +179,8 @@ pub struct HelloInfo {
     pub arch: Option<String>,
     /// This connect installed the helper there, or it was already installed.
     pub helper_installed: Option<bool>,
-    /// The Julia the helper found, once it has started one.
-    pub julia: Option<JuliaInfo>,
+    /// What the helper found to start the runtime with (Julia), once it has started one.
+    pub found: Vec<FoundInfo>,
     /// Slurm's partitions, on a machine that has Slurm.
     pub partitions: Option<Vec<Partition>>,
     /// Asking Slurm for them failed, so `partitions` is empty.
@@ -189,9 +190,11 @@ pub struct HelloInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct JuliaInfo {
-    pub path: String,
+pub struct FoundInfo {
+    /// "Julia".
+    pub name: String,
     pub version: String,
+    pub path: String,
 }
 
 /// How to reach the runtime that is attached.
@@ -476,7 +479,7 @@ fn look(dir: &Path, machine: &str) -> Found {
         return Found::None;
     }
     let link = Link { machine: machine.to_owned(), port: record.port, token: record.token, pid: record.pid, build: record.build, protocol: record.protocol };
-    match link.status() {
+    match link.status(CALL_WAIT) {
         Ok(status) if status.machine == machine && status.pid == link.pid => Found::Link(link),
         _ => Found::Silent(link.pid),
     }
@@ -491,51 +494,33 @@ fn running(dir: &Path, machine: &str) -> Option<Link> {
 }
 
 impl Link {
-    /// Where the link stands.
-    pub fn status(&self) -> Result<Status, String> {
-        self.status_within(CALL_WAIT)
-    }
-
-    /// `status`, with the call allowed `wait` at most.
-    pub fn status_within(&self, wait: Duration) -> Result<Status, String> {
+    /// Where the link stands. The call is allowed `wait` at most.
+    pub fn status(&self, wait: Duration) -> Result<Status, String> {
         self.call("GET", "/link/status", &[], wait)
     }
 
     /// Start the runtime, or attach to the one running, and return at once: poll
     /// `status` for the rest. A start under way, or a runtime attached, is not an
-    /// error. `job` is what to submit on a cluster.
-    pub fn start(&self, job: Option<JobRequest>) -> Result<Status, String> {
-        self.start_within(job, false, CALL_WAIT)
-    }
-
-    /// `start`, with the call allowed `wait` at most. `install` is the user's
+    /// error. `job` is what to submit on a cluster. `install` is the user's
     /// agreement to what this start needs on the machine (`State::NeedsInstall`):
-    /// the helper, and Julia if none is found there.
-    pub fn start_within(&self, job: Option<JobRequest>, install: bool, wait: Duration) -> Result<Status, String> {
+    /// the helper if it is missing, and then whatever the notebook system needs.
+    /// The call is allowed `wait` at most.
+    pub fn start(&self, job: Option<JobRequest>, install: bool, wait: Duration) -> Result<Status, String> {
         let body = if install { serde_json::json!({ "job": job, "install": true }) } else { serde_json::json!({ "job": job }) };
         self.call("POST", "/link/start", &serde_json::to_vec(&body).map_err(|e| e.to_string())?, wait)
     }
 
-    /// The user agreed to install the helper on the machine (not to a download
-    /// of Julia): a link waiting for that connects again with it allowed. Returns at once.
-    pub fn install(&self) -> Result<Status, String> {
-        self.install_within(CALL_WAIT)
-    }
-
-    /// `install`, with the call allowed `wait` at most.
-    pub fn install_within(&self, wait: Duration) -> Result<Status, String> {
+    /// The user agreed to install the helper on the machine, and nothing a start
+    /// needs after it: a link waiting for that connects again with it allowed.
+    /// Returns at once.
+    pub fn install(&self, wait: Duration) -> Result<Status, String> {
         self.call("POST", "/link/install", &[], wait)
     }
 
     /// Attach to the runtime if one is running there (or, on a cluster, a job waits
     /// or runs), and start nothing otherwise: then the status says `nothing_running`.
-    /// Returns at once, like `start`.
-    pub fn attach(&self) -> Result<Status, String> {
-        self.attach_within(false, CALL_WAIT)
-    }
-
-    /// `attach`, with the call allowed `wait` at most, and `install` as in `start_within`.
-    pub fn attach_within(&self, install: bool, wait: Duration) -> Result<Status, String> {
+    /// Returns at once, like `start`, and `install` is as there.
+    pub fn attach(&self, install: bool, wait: Duration) -> Result<Status, String> {
         let body = if install { serde_json::json!({ "job": null, "only_running": true, "install": true }) } else { serde_json::json!({ "job": null, "only_running": true }) };
         self.call("POST", "/link/start", &serde_json::to_vec(&body).map_err(|e| e.to_string())?, wait)
     }

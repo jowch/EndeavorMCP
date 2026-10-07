@@ -82,9 +82,9 @@ impl Helper {
     }
 
     /// Ask for the runtime: the request's id.
-    pub fn request_start(&self, job: Option<wire::slurm::JobRequest>, download_julia: bool) -> u32 {
+    pub fn request_start(&self, job: Option<wire::slurm::JobRequest>, install: bool) -> u32 {
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
-        self.send(ToHelper::StartRuntime { id, job, download_julia });
+        self.send(ToHelper::StartRuntime { id, job, engine: wire::ENGINE_PLUTO.into(), install });
         id
     }
 

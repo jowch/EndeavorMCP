@@ -151,7 +151,7 @@ impl Link {
 /// decides and submits, so two helpers never submit two jobs, and let go
 /// before the wait in the queue: a helper that comes in meanwhile finds
 /// `job.json` and waits for the same job.
-pub fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, request: JobRequest, download_julia: bool) -> Result<Attached, Unstarted> {
+pub fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, request: JobRequest, engine: &str, install: bool) -> Result<Attached, Unstarted> {
     let starting = lock_start(args, mux, inbox, parts)?;
     let dir = &args.state_dir;
     if let Some(attached) = running(args, mux, events)? {
@@ -167,7 +167,7 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Ev
             Some(attached) => return Ok(attached),
             None => {
                 stopped::clear(dir);
-                submit(args, mux, &request, download_julia)?
+                submit(args, mux, &request, engine, install)?
             }
         },
     };
@@ -257,11 +257,9 @@ pub fn cancel_recorded(dir: &Path) {
 
 /// Find Julia (here, on the shared filesystem), write the job script and
 /// submit it. The job's id.
-fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest, download_julia: bool) -> Result<String, Unstarted> {
+fn submit(args: &Args, mux: &Arc<Mux>, request: &JobRequest, engine: &str, install: bool) -> Result<String, Unstarted> {
     let flags = request.checked_sbatch_args().map_err(|why| Unstarted::Failed(format!("The job wasn't submitted: {why}")))?;
-    let (julia, version) = julia::find(&args.julia, download_julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame())))
-        .map_err(julia::Failure::into_unstarted)?;
-    let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
+    let julia = crate::prepare(args, mux, engine, install)?;
     submit_job(args, mux, request, flags, &julia).map_err(Unstarted::Failed)
 }
 

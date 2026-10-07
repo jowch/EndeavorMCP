@@ -305,14 +305,14 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
     loop {
         let event = inbox.next();
         match event {
-            Event::App(ToHelper::StartRuntime { id, job, download_julia }) => {
+            Event::App(ToHelper::StartRuntime { id, job, engine, install }) => {
                 if let Some(attached) = &attached {
                     let _ = mux.send(&attached.ready(id, true).frame());
                     continue;
                 }
                 let result = match args.launcher {
-                    Launcher::Process => attach(args, mux, &mut inbox, &events, &parts, download_julia),
-                    Launcher::Slurm => slurm::attach(args, mux, &mut inbox, &events, &parts, job.unwrap_or_default(), download_julia),
+                    Launcher::Process => attach(args, mux, &mut inbox, &events, &parts, &engine, install),
+                    Launcher::Slurm => slurm::attach(args, mux, &mut inbox, &events, &parts, job.unwrap_or_default(), &engine, install),
                 };
                 match result {
                     Ok(now) => {
@@ -560,7 +560,8 @@ impl Inbox {
 /// How a start ended without a runtime: what answers it.
 enum Unstarted {
     Failed(String),
-    NoJulia(String),
+    /// The start needs these installed and `install` was false.
+    NeedsInstall(Vec<wire::Item>),
     Died { status: String, log_tail: Vec<String> },
     /// The `Stop` with this id cut it short; that is answered too.
     Stopped(u32),
@@ -571,7 +572,7 @@ impl Unstarted {
     fn answer(self, mux: &Arc<Mux>, start: u32) {
         let (reply, stop) = match self {
             Unstarted::Failed(message) => (ToApp::StartFailed { id: start, message }, None),
-            Unstarted::NoJulia(offer) => (ToApp::NoJulia { id: start, offer }, None),
+            Unstarted::NeedsInstall(items) => (ToApp::NeedsInstall { id: start, items }, None),
             Unstarted::Died { status, log_tail } => (ToApp::StartDied { id: start, status, log_tail }, None),
             Unstarted::Stopped(stop) => (ToApp::StartCancelled { id: start }, Some(stop)),
         };
@@ -638,11 +639,24 @@ fn lock_stop(dir: &Path, inbox: &mut Inbox, limit: Duration) -> Result<File, Str
     })
 }
 
+/// Find, or with `install` install, what the notebook system `engine` starts
+/// with, and say what was found. The path of the julia that runs it.
+fn prepare(args: &Args, mux: &Arc<Mux>, engine: &str, install: bool) -> Result<String, Unstarted> {
+    match engine {
+        wire::ENGINE_PLUTO => {
+            let (path, version) = julia::find(&args.julia, install, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(julia::Failure::into_unstarted)?;
+            let _ = mux.send(&ToApp::Found { name: "Julia".into(), version, path: path.clone() }.frame());
+            Ok(path)
+        }
+        other => Err(Unstarted::Failed(format!("Endeavor doesn't know a notebook system called \"{other}\"."))),
+    }
+}
+
 /// Attach to the runtime in the state folder, or start one. The start lock
 /// is held until the runtime is ready, so helpers asked at once start one
 /// runtime and the rest attach to it. The error is the app's answer: why it
 /// couldn't start, or that it died while starting.
-fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, download_julia: bool) -> Result<Attached, Unstarted> {
+fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, engine: &str, install: bool) -> Result<Attached, Unstarted> {
     let failed = Unstarted::Failed;
     let _starting = lock_start(args, mux, inbox, parts)?;
     if let Some(state) = existing(args).map_err(failed)? {
@@ -651,8 +665,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>
         return Ok(Attached { how: How::Process(runtime, port), state, reattached: true });
     }
     stopped::clear(&args.state_dir);
-    let (julia, version) = julia::find(&args.julia, download_julia, &|line| drop(mux.send(&ToApp::Progress { line }.frame()))).map_err(julia::Failure::into_unstarted)?;
-    let _ = mux.send(&ToApp::FoundJulia { path: julia.clone(), version }.frame());
+    let julia = prepare(args, mux, engine, install)?;
     let token = token(&args.state_dir).map_err(failed)?;
     let child = start(args, &julia, &token).map_err(failed)?;
     let runtime = Runtime::child(child, &args.state_dir, events);

@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 use wire::files::{Reply, Request, RuntimeState};
 use wire::slurm::JobRequest;
 
-use super::{HelloInfo, InstallInfo, InstallWhat, JobInfo, JuliaInfo, QueueInfo, Record, RuntimeInfo, State, Status, valid_id};
-use crate::client::{Auth, CLOSED, Cancel, Channel, ConnectError, Event, Listener, MachinesFile, Messages, Notice, Options, Server, StartError, Transport, connect_checked, start_with, this_platform};
+use super::{FoundInfo, HelloInfo, InstallInfo, JobInfo, QueueInfo, Record, RuntimeInfo, State, Status, valid_id};
+use crate::client::{Auth, CLOSED, Cancel, Channel, ConnectError, Event, Listener, MachinesFile, Messages, Notice, Options, Server, StartError, StartOptions, Transport, connect, start, this_platform};
 use crate::http::{self, Framing, Head};
 use crate::standalone::Env;
 
@@ -54,9 +54,9 @@ enum Msg {
 struct Wish {
     /// On a cluster, what to submit.
     job: Option<JobRequest>,
-    /// The helper may download Julia for this start if it finds none: the
-    /// `install` of the request, and not what was agreed for an earlier one.
-    download: bool,
+    /// The helper may install what this start needs: the `install` of the
+    /// request, and not what was agreed for an earlier one.
+    install: bool,
 }
 
 struct Inner {
@@ -276,10 +276,11 @@ impl Shared {
                 i.hello.get_or_insert_with(HelloInfo::default).helper_installed = Some(installed);
                 i.step = Some(if installed { "Installed Endeavor's helper".into() } else { "Endeavor's helper is installed".into() });
             }
-            Event::FoundJulia { path, version } => {
-                i.step = Some(format!("Found Julia {version} ({path})"));
+            Event::Found { name, version, path } => {
+                i.step = Some(format!("Found {name} {version} ({path})"));
                 if let Some(hello) = &mut i.hello {
-                    hello.julia = Some(JuliaInfo { path, version });
+                    hello.found.retain(|f| f.name != name);
+                    hello.found.push(FoundInfo { name, version, path });
                 }
             }
             Event::Progress(line) => i.step = Some(line),
@@ -330,7 +331,8 @@ impl Shared {
                 return;
             }
             let tx = shared.inbox.clone();
-            let result = start_with(&channel, &shared.listener, wish.job, wish.download, &|event| shared.on_event(event), move |notice| drop(tx.send(Msg::Notice(conn, notice))));
+            let options = StartOptions { job: wish.job, install: wish.install, ..StartOptions::default() };
+            let result = start(&channel, &shared.listener, &options, &|event| shared.on_event(event), move |notice| drop(tx.send(Msg::Notice(conn, notice))));
             let _ = shared.inbox.send(Msg::Started(conn, epoch, result));
         });
     }
@@ -395,7 +397,7 @@ impl Shared {
     /// `POST /link/start`.
     fn request_start(self: &Arc<Shared>, job: Option<JobRequest>, only_running: bool, install: bool) {
         let connected = self.with(|i| {
-            // Only a start with no connection can mean the helper: with one, `install` is for Julia, and a
+            // Only a start with no connection can mean the helper: with one, `install` is for what the start needs, and a
             // yes to that mustn't be kept as one for the helper. Set under the lock, as the supervisor checks it.
             if install && i.channel.is_none() {
                 self.allow_install.store(true, Ordering::SeqCst);
@@ -403,7 +405,7 @@ impl Shared {
             if i.runtime.is_some() || i.starting {
                 return true;
             }
-            i.wanted = Some(Wish { job, download: install });
+            i.wanted = Some(Wish { job, install });
             i.resume = None;
             i.check_first = only_running;
             i.nothing_running = false;
@@ -526,7 +528,7 @@ fn supervise(shared: Arc<Shared>, inbox: Receiver<Msg>) -> ! {
                         i.wanted = None;
                         i.resume = None;
                         i.step = Some(format!("Endeavor's helper isn't installed on {name}"));
-                        i.needs = Some(InstallInfo { what: InstallWhat::Helper, helper: Some(helper), julia: None });
+                        i.needs = Some(InstallInfo::helper(helper));
                         true
                     });
                     if !parked {
@@ -689,7 +691,7 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
         cancel.cancel();
     }
     shared.with(|i| i.hello = None);
-    let (channel, hello) = connect_checked(&server, &transport, &options, &cancel, &|event| shared.on_event(event))?;
+    let (channel, hello) = connect(&server, &transport, &options, &cancel, &|event| shared.on_event(event))?;
     shared.with(|i| {
         let hello_info = i.hello.get_or_insert_with(HelloInfo::default);
         (hello_info.node, hello_info.home, hello_info.slurm, hello_info.uploads) = (hello.node, hello.home.display().to_string(), hello.slurm, hello.uploads);
@@ -767,15 +769,15 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) {
                     // The connection ended under the start: `Closed` follows and takes the start along to the next one.
                     Err(StartError::Failed(message)) if message == CLOSED => {}
                     Err(_) if shared.with(|i| i.channel.as_ref().is_some_and(|c| c.is_closed())) => {}
-                    Err(StartError::NoJulia(offer)) => {
-                        eprintln!("Starting the runtime: no Julia, and no download was allowed. {offer}");
+                    Err(StartError::NeedsInstall(items)) => {
+                        eprintln!("Starting the runtime needs {}, and installing wasn't allowed.", wire::items_text(&items));
                         shared.with(|i| {
                             (i.starting, i.gone_early, i.runtime, i.job, i.queue) = (false, false, None, None, None);
                             i.wanted = None;
                             i.state = State::NeedsInstall;
                             i.error = None;
-                            i.step = Some(format!("Julia wasn't found on {}", i.name));
-                            i.needs = Some(InstallInfo { what: InstallWhat::Julia, helper: None, julia: Some(offer) });
+                            i.step = Some(format!("{} needs installing on {}", wire::items_text(&items), i.name));
+                            i.needs = Some(InstallInfo { items, helper: None });
                         });
                         shared.listener.restart_failed();
                     }
@@ -949,10 +951,6 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
                 (None, false, false)
             } else {
                 let Ok(asked) = serde_json::from_slice::<Value>(&body) else { return reply(&mut connection, "400 Bad Request", &json!({ "error": "the body isn't JSON" })) };
-                if let Some(unknown) = asked.as_object().and_then(|fields| fields.keys().find(|key| !matches!(key.as_str(), "job" | "only_running" | "install"))) {
-                    let said = format!("This link doesn't know the field \"{unknown}\" in a start request, so it didn't start anything.");
-                    return reply(&mut connection, "400 Bad Request", &json!({ "error": said }));
-                }
                 let Ok(job) = serde_json::from_value::<Option<JobRequest>>(asked.get("job").cloned().unwrap_or(Value::Null)) else {
                     return reply(&mut connection, "400 Bad Request", &json!({ "error": "job isn't a job request" }));
                 };

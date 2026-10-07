@@ -23,7 +23,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use common::find_julia;
-use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Options, Server, Transport, connect, start};
+use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Options, Server, StartOptions, Transport, connect, start};
 use serde_json::{Value, json};
 
 /// End the runtime recorded in `state`, if one runs: the core, Julia and its
@@ -96,7 +96,7 @@ fn a_runtime_over_real_ssh() {
     let (events_tx, events) = mpsc::channel();
     let on = move |event: Event| drop(events_tx.send(event));
 
-    let (channel, hello) = connect(&server, &Transport::for_server(&server), &options, &Cancel::default(), &on).expect("connect over ssh");
+    let (channel, hello) = connect(&server, &Transport::for_server(&server), &options, &Cancel::default(), &on).map_err(|e| e.message).expect("connect over ssh");
     eprintln!("[{:?}] hello from {}, home {}", started.elapsed(), hello.node, hello.home.display());
     assert!(!hello.node.is_empty() && hello.uploads);
     let installed = root.join(endeavor_mcp::embedded::BUILD_VERSION);
@@ -109,7 +109,7 @@ fn a_runtime_over_real_ssh() {
     let channel = std::sync::Arc::new(channel);
     std::thread::spawn({
         let (channel, listener) = (channel.clone(), listener.clone());
-        move || drop(ready_tx.send(start(&channel, &listener, None, &on, move |notice| drop(lost_tx.send(notice)))))
+        move || drop(ready_tx.send(start(&channel, &listener, &StartOptions { install: true, ..StartOptions::default() }, &on, move |notice| drop(lost_tx.send(notice)))))
     });
     let runtime = ready.recv_timeout(Duration::from_secs(1200)).expect("the runtime is ready in time").expect("start");
     eprintln!("[{:?}] ready on {}, pid {}", started.elapsed(), runtime.node, runtime.pid);

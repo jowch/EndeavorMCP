@@ -54,12 +54,31 @@ pub enum Notice {
     Lost(String),
 }
 
-/// Why `start_runtime_with` didn't give a runtime.
+/// What a start asks for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StartOptions {
+    /// On a cluster, what to submit.
+    pub job: Option<JobRequest>,
+    /// The notebook system (`wire::ENGINE_PLUTO`).
+    pub engine: String,
+    /// The user agreed that the helper installs whatever this start needs
+    /// (`ToHelper::StartRuntime`'s `install`). Without it a start that needs
+    /// something ends with `StartError::NeedsInstall` and installs nothing.
+    pub install: bool,
+}
+
+impl Default for StartOptions {
+    fn default() -> StartOptions {
+        StartOptions { job: None, engine: wire::ENGINE_PLUTO.to_owned(), install: false }
+    }
+}
+
+/// Why `start_runtime` didn't give a runtime.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StartError {
-    /// No Julia was found there, and a download wasn't allowed: nothing was
-    /// started or downloaded. What a download would be.
-    NoJulia(String),
+    /// The start needs these installed and `StartOptions::install` was false:
+    /// nothing was started or installed.
+    NeedsInstall(Vec<wire::Item>),
     Failed(String),
 }
 
@@ -67,7 +86,7 @@ impl StartError {
     /// The words for an error, whichever it is.
     pub fn message(self) -> String {
         match self {
-            StartError::NoJulia(offer) => format!("Julia wasn't found on that machine. {offer}"),
+            StartError::NeedsInstall(items) => format!("Endeavor needs to install {} on that machine, and installing wasn't allowed.", wire::items_text(&items)),
             StartError::Failed(message) => message,
         }
     }
@@ -320,26 +339,13 @@ impl Channel {
     }
 
     /// Start the runtime (or attach to the running one) and relay `listener`'s
-    /// connections to it from now on; on a cluster, `job` is what to submit.
-    /// Blocks until it's ready; `on_message` hears `Progress`, `FoundJulia`,
-    /// `Submitted` and `Queued` meanwhile, and `notice` the first word of the
-    /// runtime going away later, unless the client is the one stopping it.
-    /// The helper may download Julia if it finds none.
-    pub fn start_runtime(&self, listener: &Arc<Listener>, job: Option<JobRequest>, on_message: &mut dyn FnMut(ToApp), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, String> {
-        self.start_runtime_with(listener, job, true, on_message, notice).map_err(StartError::message)
-    }
-
-    /// `start_runtime`, and `download_julia` false has the helper download
-    /// nothing: it ends with `StartError::NoJulia` when it finds no Julia.
-    /// That is sent only to a helper of this build, which knows it (`ToHelper::StartRuntime`).
-    pub fn start_runtime_with(
-        &self,
-        listener: &Arc<Listener>,
-        job: Option<JobRequest>,
-        download_julia: bool,
-        on_message: &mut dyn FnMut(ToApp),
-        notice: impl FnOnce(Notice) + Send + 'static,
-    ) -> Result<Runtime, StartError> {
+    /// connections to it from now on. Blocks until it's ready; `on_message`
+    /// hears `Progress`, `Found`, `Submitted` and `Queued` meanwhile, and
+    /// `notice` the first word of the runtime going away later, unless the
+    /// client is the one stopping it. The helper is of this build, which knows
+    /// `StartOptions` (the bootstrap script runs the build's own and installs it
+    /// when it is missing).
+    pub fn start_runtime(&self, listener: &Arc<Listener>, options: &StartOptions, on_message: &mut dyn FnMut(ToApp), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, StartError> {
         let failed = StartError::Failed;
         // A second start would take the first one's progress and its watcher.
         if self.starting.swap(true, Ordering::SeqCst) {
@@ -350,17 +356,17 @@ impl Channel {
         let (events, _registered) = self.register(id, None, true);
         let leaving = Arc::new(AtomicU32::new(0));
         *self.leaving.lock().unwrap() = leaving.clone();
-        self.mux.send(&ToHelper::StartRuntime { id, job, download_julia }.frame()).map_err(|_| failed(CLOSED.to_owned()))?;
+        self.mux.send(&ToHelper::StartRuntime { id, job: options.job.clone(), engine: options.engine.clone(), install: options.install }.frame()).map_err(|_| failed(CLOSED.to_owned()))?;
         let runtime = loop {
             match events.recv() {
-                Ok(message @ (ToApp::Progress { .. } | ToApp::FoundJulia { .. } | ToApp::Submitted { .. } | ToApp::Queued { .. })) => on_message(message),
+                Ok(message @ (ToApp::Progress { .. } | ToApp::Found { .. } | ToApp::Submitted { .. } | ToApp::Queued { .. })) => on_message(message),
                 Ok(ToApp::Ready { node, pid, token, reattached, job, .. }) => {
                     *self.listener.lock().unwrap() = Some(listener.clone());
                     listener.attach(self.mux.clone(), token.clone());
                     break Runtime { port: listener.port(), mcp_url: listener.mcp_url(), page_url: listener.page_url(&token), token, pid, reattached, node, job };
                 }
                 Ok(ToApp::StartFailed { message, .. } | ToApp::Error { message }) => return Err(failed(message)),
-                Ok(ToApp::NoJulia { offer, .. }) => return Err(StartError::NoJulia(offer)),
+                Ok(ToApp::NeedsInstall { items, .. }) => return Err(StartError::NeedsInstall(items)),
                 Ok(ToApp::StartDied { status, log_tail, .. }) => {
                     let how = died_reason(&status, &[]);
                     return Err(failed(format!("Julia stopped before Pluto was ready. {how}{}{}", if how.is_empty() { "" } else { " " }, diagnose(&log_tail))));

@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::find_julia;
-use endeavor_mcp::client::{Auth, Cancel, Channel, Cluster, Event, Listener, Notice, Options, Runtime, Server, Transport, connect, start};
+use endeavor_mcp::client::{Auth, Cancel, Channel, Cluster, Event, Listener, Notice, Options, Runtime, Server, StartOptions, Transport, connect, start};
 use serde_json::{Value, json};
 use wire::files::{Reply, Request, RuntimeState};
 use wire::slurm::{JobRequest, Resources};
@@ -283,7 +283,7 @@ fn a_runtime_in_a_slurm_job() {
     let options = Options { auth: Auth::Batch, root: root.display().to_string(), state: state.display().to_string(), depot: format!("{}:", depot.display()), exit_idle: false, allow_install: true, helper: &helper };
 
     let join = |log: &Log| -> Client {
-        let (channel, hello) = connect(&server, &Transport::for_server(&server), &options, &Cancel::default(), &log.on()).expect("connect over ssh");
+        let (channel, hello) = connect(&server, &Transport::for_server(&server), &options, &Cancel::default(), &log.on()).map_err(|e| e.message).expect("connect over ssh");
         eprintln!("[{:?}] {}: hello from {}, home {}, slurm {}", began.elapsed(), log.who, hello.node, hello.home.display(), hello.slurm);
         assert!(hello.slurm, "the login node has Slurm's commands");
         let listener = Listener::start(&host).unwrap();
@@ -292,7 +292,7 @@ fn a_runtime_in_a_slurm_job() {
         let (ready_tx, ready) = mpsc::channel();
         std::thread::spawn({
             let (channel, listener, log, request) = (channel.clone(), listener.clone(), log.clone(), request.clone());
-            move || drop(ready_tx.send(start(&channel, &listener, Some(request), &log.on(), move |notice| drop(lost_tx.send(notice)))))
+            move || drop(ready_tx.send(start(&channel, &listener, &StartOptions { job: Some(request), install: true, ..StartOptions::default() }, &log.on(), move |notice| drop(lost_tx.send(notice)))))
         });
         let runtime = ready.recv_timeout(Duration::from_secs(1500)).unwrap_or_else(|_| panic!("{} is ready in time", log.who)).expect("start");
         Client { channel, listener, runtime, lost }

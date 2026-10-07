@@ -16,12 +16,13 @@ Don't add a machine, switch machines, submit a job or stop a runtime unless the 
 
 ## Installing needs the user
 
-Looking at a machine installs nothing. When `add_machine`, `use_machine` or `stop_machine` returns `needs_install`, Endeavor has not changed the machine. There are two separate questions:
+Looking at a machine installs nothing. When `add_machine`, `use_machine` or `stop_machine` returns `needs_install`, Endeavor has not changed the machine. `install.items` lists what it would install, each with a `kind`, a `name` (with its version), `size_mb` and `place` (the folder); the message says the same in words. Tell the user what is named, where and about how large, and ask.
 
-1. The helper: Endeavor's program on the machine is missing (or older than this plugin's, an update). Installing it copies the helper and its runtime files into one folder and doesn't install Julia. Tell the user what the result says (where, about how large, and whether Julia already runs there) and ask.
-2. Julia, only if none is found there: Endeavor would download its own. `use_machine` returns it as `needs_install` with `install.what` `julia`, with what would be downloaded and where. Ask again; a yes to the helper is not a yes to this.
+- An item of kind `helper` is Endeavor's program on the machine, missing or older than this plugin's (an update). `install.running` says whether Julia already runs there.
+- An item of kind `runtime` is Julia, which Endeavor would download because none was found.
+- On `use_machine`, one yes covers everything that call needs, including Julia if none is found once the helper is there. A yes given to `add_machine` covers the helper only.
 
-Only after the user agrees to what the result names, call the same tool again with the same arguments and `install: true`. It covers what that call needs and nothing later: ask again each time. Never set `install` on a first call, and never to get past an error. The user may instead tell you where Julia is: `add_machine` with `julia` set to its path, or to a shell line such as `module load julia`. A remembered project's first call never installs or downloads; its notebook tool says what is missing.
+Only after the user agrees to what the result names, call the same tool again with the same arguments and `install: true`. It covers that call only: ask again each time. Never set `install` on a first call, and never to get past an error. The user may instead tell you where Julia is: `add_machine` with `julia` set to its path, or to a shell line such as `module load julia`. A remembered project's first call never installs or downloads; its notebook tool says what is missing.
 
 ## The first time
 

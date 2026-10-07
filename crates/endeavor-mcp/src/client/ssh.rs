@@ -4,8 +4,8 @@
 //! rest of ssh's stdin and stdout. From there on it's the same channel as a
 //! helper on this computer's (`Channel`). Unless `Options::allow_install`, a
 //! server without the helper is only looked at: nothing is written there.
-//! Downloading Julia there is not part of that: it is asked for with each start
-//! (`start_with`).
+//! Installing what a start needs (such as Julia) is not part of that: it is
+//! asked for with each start (`StartOptions::install`).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -17,9 +17,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use wire::ToApp;
-use wire::slurm::JobRequest;
 
-use super::channel::{Channel, Hello, Notice, Runtime, StartError};
+use super::channel::{Channel, Hello, Notice, Runtime, StartError, StartOptions};
 use super::listener::Listener;
 use super::machines::Server;
 
@@ -30,7 +29,8 @@ pub enum Event {
     Connected { os: String, arch: String },
     /// The helper and runtime for this build were just installed (or already there).
     Helper { installed: bool },
-    FoundJulia { path: String, version: String },
+    /// What the runtime starts with, such as Julia.
+    Found { name: String, version: String, path: String },
     /// A line of Julia's download or the runtime's boot log.
     Progress(String),
     /// A cluster job for Julia was submitted.
@@ -163,7 +163,7 @@ pub struct Options<'a> {
     /// The user agreed that Endeavor installs its helper on the server. Without
     /// it a server that lacks this build's helper is only looked at, and
     /// `connect` ends with `ConnectError::needs`. The app, which asks its user
-    /// itself, passes true. (Downloading Julia is asked for by each `start_with`.)
+    /// itself, passes true. (What a start needs is asked for by each start, `StartOptions::install`.)
     pub allow_install: bool,
     /// The helper binary to send to a server whose `uname -s` is `os` and
     /// `uname -m` is `arch`, as `linux` and `x86_64` (`arm64` as `aarch64`).
@@ -383,14 +383,7 @@ pub struct NeedsInstall {
     /// A helper of another build is installed there already; this one goes beside it.
     pub update: bool,
     /// A runtime recorded in the folder the helper would use.
-    #[serde(deserialize_with = "lenient")]
     pub running: Option<Running>,
-}
-
-/// An `Option` that is `None` for a value this build doesn't know, so that a
-/// status from a newer link still reads.
-fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(from: D) -> Result<Option<T>, D::Error> {
-    Ok(Option::<serde_json::Value>::deserialize(from)?.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// `seen` of the script's `need` line.
@@ -427,13 +420,9 @@ pub struct ConnectError {
 }
 
 /// Run the bootstrap on `server` and wait for the helper's hello. The runtime
-/// starts later, when the channel is asked to (`start`).
-pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), String> {
-    connect_checked(server, transport, options, cancel, on).map_err(|e| e.message)
-}
-
-/// `connect`, and a failure says whether retrying could help.
-pub fn connect_checked(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
+/// starts later, when the channel is asked to (`start`). A failure says whether
+/// retrying could help.
+pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
     let wrong = |message: String| ConnectError { message, retry: false, needs: None };
     let preamble = preamble(server, options).map_err(wrong)?;
     let version = crate::embedded::BUILD_VERSION;
@@ -535,26 +524,18 @@ pub fn connect_checked(server: &Server, transport: &Transport, options: &Options
     }
 }
 
-/// Start the runtime on a connected server's channel (on a cluster, `job` is
-/// what to submit); `on` hears Julia being found, the job queueing, and its
-/// log. `notice` hears if the runtime goes away later.
-/// The helper may download Julia if it finds none (`start_with`).
-pub fn start(channel: &Channel, listener: &Arc<Listener>, job: Option<JobRequest>, on: &dyn Fn(Event), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, String> {
-    start_with(channel, listener, job, true, on, notice).map_err(StartError::message)
-}
-
-/// `start`, and `download_julia` false has the helper download nothing:
-/// `StartError::NoJulia` says what a download would be. The channel is always
-/// to a helper of this build (the bootstrap script runs the build's own and
-/// installs it when it is missing), which is what knows that.
-pub fn start_with(channel: &Channel, listener: &Arc<Listener>, job: Option<JobRequest>, download_julia: bool, on: &dyn Fn(Event), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, StartError> {
-    let runtime = channel.start_runtime_with(
+/// Start the runtime on a connected server's channel; `on` hears what was
+/// found, the job queueing, and the runtime's log. `notice` hears if the runtime
+/// goes away later. `options` says what to submit on a cluster, and whether the
+/// helper may install what the start needs: if not, `StartError::NeedsInstall`
+/// lists it.
+pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions, on: &dyn Fn(Event), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, StartError> {
+    let runtime = channel.start_runtime(
         listener,
-        job,
-        download_julia,
+        options,
         &mut |message| match message {
             ToApp::Progress { line } => on(Event::Progress(line)),
-            ToApp::FoundJulia { path, version } => on(Event::FoundJulia { path, version }),
+            ToApp::Found { name, version, path } => on(Event::Found { name, version, path }),
             ToApp::Submitted { job, summary } => on(Event::Submitted { job, summary }),
             ToApp::Queued { state, reason, .. } => on(Event::Queued { state, reason }),
             _ => {}
@@ -569,7 +550,7 @@ pub fn start_with(channel: &Channel, listener: &Arc<Listener>, job: Option<JobRe
 /// then stop it (or leave it running if it already was). On a cluster, only
 /// ask Slurm about itself: starting Julia there means a job.
 pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(), String> {
-    let (channel, _) = connect(server, transport, options, cancel, on)?;
+    let (channel, _) = connect(server, transport, options, cancel, on).map_err(|e| e.message)?;
     if server.cluster.is_some() {
         let reply = channel.files(wire::files::Request::Slurm);
         channel.detach();
@@ -582,7 +563,7 @@ pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &
         };
     }
     let listener = test_listener()?;
-    let runtime = start(&channel, &listener, None, on, |_| {}).map_err(|e| or_cancelled(cancel, e))?;
+    let runtime = start(&channel, &listener, &StartOptions { install: true, ..StartOptions::default() }, on, |_| {}).map_err(|e| or_cancelled(cancel, e.message()))?;
     let answered = bridge_ping(listener.port(), &runtime.token);
     let stopped = if runtime.reattached { Ok(()) } else { channel.stop() };
     channel.detach();

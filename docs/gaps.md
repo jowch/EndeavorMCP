@@ -275,13 +275,14 @@ _Started 2026-10-06, on the `client-library` branch._
   not checked. A cluster's job counts when the user's `squeue` lists it as
   pending, running or configuring, and is reported as recorded when there is
   no `squeue` or it fails.
-- **Julia's download on a server whose Julia is found later is not retried
-  by the link by itself.** After `needs_install` for Julia it waits for
-  `install: true` or for `add_machine` with a `julia` setting.
+- **An install a start needs is not retried by the link by itself.** After
+  `needs_install` for a runtime such as Julia it waits for `install: true` or
+  for `add_machine` with a `julia` setting.
 - **A start that is already under way takes no later agreement.** A
   `use_machine` without `install` that is still starting when a second one
   with `install: true` arrives keeps its own permission, so it can end with
-  `needs_install` for Julia; the second call, made again, then goes through.
+  `needs_install` for what the start needs; the second call, made again, then
+  goes through.
 - **The Julia decision is tested through the link and the tools** with a fake
   `curl`, not against a real download; its unit test would need a login shell
   that finds no Julia, which a developer's machine often has. That test
@@ -294,13 +295,21 @@ _Started 2026-10-06, on the `client-library` branch._
 - **A link of another build that has a runtime on it is not sent `install`.**
   `add_machine` says so in its result, and the user has to end the runtime, or
   wait for the link to end, to install through a new link.
-- **A front built before `needs_install` can't use a link that says it,** and
-  one built at the commit that added it can't read this build's `running` and
-  `bytes` of a helper's look (their shapes changed). A front reads unknown
-  states and kinds as `unknown` and ignores unknown fields from now on, but
-  that doesn't change fronts already built.
+- **A status of another link protocol is read only as far as `State::Unknown`
+  and ignored fields go.** The front reads such a status to decide whether to
+  replace the link. A protocol bump that changes the shape of a field it
+  decodes (`needs_install`, `hello`, `runtime`) makes that read fail, and
+  `ensure` then reports the link as not answering. Nothing was released with
+  protocol 1, so no front or link of another number exists yet.
 - **Julia is not known when a machine is added.** The helper has no call for
-  it, so `add_machine` reports `julia: null` until the first runtime start.
+  it, so `add_machine` reports `found: []` until the first runtime start.
+- **Only Julia is installed through the item list.** The engine name picks
+  what a start needs at one `match` (`prepare` in `src/lib.rs`); there is no
+  registry. `machines.json`'s `julia` field is still Julia's.
+- **With the helper missing, the question can't name the runtime.** The
+  helper is what looks for Julia, so the first question names the helper only;
+  `use_machine`'s one yes then covers Julia too, and a start that finds Julia
+  missing and had no yes asks a second time.
 - **Adding a cluster takes two connections.** The first link connects as a
   plain server; `add_machine` quits it once Slurm is found.
 - **Time waited in the queue is not reported**: the link doesn't know when a
@@ -352,6 +361,11 @@ _Started 2026-10-06, on the `client-library` branch._
   pass; a panic or a kill skips that. To close: have each test's place end
   what it started when it is dropped, and check for leftovers at the start
   of a run.
+- **`honors_the_mcp_protocol_version_header` failed once.** In one full
+  workspace run (2026-10-06) the `core` test timed out after 20 s waiting for
+  its core's `runtime.json`; five runs after it passed, three of them of that
+  binary alone. Not understood. To close: if it recurs, keep the core's
+  stderr in the failure message.
 - **The launcher's tests don't pass under `busybox sh`.** Four launcher tests
   and one install test fail there because busybox runs its own built-in
   `uname`, `mkdir`, `timeout` and `wget` and ignores the fakes the tests put

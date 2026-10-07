@@ -105,7 +105,7 @@ request with an Origin.
 | Call | What it does |
 |---|---|
 | `GET /link/status` | `state` (connecting, connected, starting, queued, ready, failed), the last `step`, an `error`, what the helper said (`hello`), the `runtime` once ready (the listener's port, the runtime's token, the page URL), and for a job its `job` and `queue` |
-| `POST /link/start` | `{"job": …, "only_running": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true. A body with any other field is refused with HTTP 400, so that an older link never ignores a field a newer front adds. A front uses a link of its own control protocol number (`link::PROTOCOL`, in `link.json`; a missing number is 0) fully, whatever its build. To a link of another protocol it sends no start: it replaces one that nothing hangs on, and uses one with a runtime as it is |
+| `POST /link/start` | `{"job": …, "only_running": bool, "install": bool}`: start the runtime or attach to the one running, in the background. Returns the status at once. A start under way, or a runtime attached, is not an error. With `only_running` it attaches only if a runtime runs or a job waits, and else starts nothing: the state is `connected` and `nothing_running` is true. `install` is the user's agreement to what this start needs (the helper if missing, then whatever the start finds it needs). A front uses a link of its own control protocol number (`link::PROTOCOL`, in `link.json`; a missing number is 0) fully, whatever its build. To a link of another protocol it sends no start: it replaces one that nothing hangs on, and uses one with a runtime as it is |
 | `POST /link/stop` | Stop the runtime for every client, and say why it didn't. The link stays connected |
 | `POST /link/quit` | Remove the record, detach and exit. The record goes first, so a front that asks for a link right after gets a new one |
 
@@ -240,7 +240,7 @@ when you ask, such as to give a cluster node back. It first says which
 other sessions were active lately, and the clients still attached are told
 the runtime was stopped from another connection. Every `Stop` and `StartRuntime` carries an id the client chooses, and the
 helper answers each once, naming it: `Stopped` or `NotStopped` and why, and for
-a start `Ready`, `StartFailed`, `NoJulia`, `StartDied` or `StartCancelled`. A
+a start `Ready`, `StartFailed`, `NeedsInstall`, `StartDied` or `StartCancelled`. A
 stop that ends a start under way is answered with its own `Stopped`, and the
 start with `StartCancelled`. The client waits 60 s for a stop's answer, and an
 answer that comes after it gave up is dropped by its id. Stops said while
@@ -303,14 +303,21 @@ it with the relay.
     `Running` is `Process { pid, checked }` or `Job { id, listed }`, where
     `checked` and `listed` say whether the script verified it or only read it
     from the record.
-  - `ToHelper::StartRuntime` has `download_julia`; absent means true. A helper
-    that finds no Julia and may not download answers `ToApp::NoJulia` with an
-    `offer` saying what it could download. `connect --no-julia-download` is
-    gone.
-  - `client::start_with(..., download_julia, ...)` returns
-    `Result<Runtime, StartError>`; `StartError::NoJulia` carries the offer.
-    `client::start` is `start_with` with the download allowed and the error as
-    a string.
+  - `ToHelper::StartRuntime { id, job, engine, install }` names the notebook
+    system (`wire::ENGINE_PLUTO`) and says whether the helper may install what
+    this start needs. A start that needs something it may not install is
+    answered `ToApp::NeedsInstall { id, items }`; an item is `wire::Item
+    { kind, name, size_mb, place }` (`kind` is `helper` or `runtime` so far, a
+    plain string so that a new kind needs no decoder change). `FoundJulia` is
+    now `ToApp::Found { name, version, path }`. `connect --no-julia-download`
+    is gone.
+  - `client::start(channel, listener, &StartOptions { job, engine, install },
+    on, notice)` returns `Result<Runtime, StartError>`; `StartError::NeedsInstall`
+    carries the items, `StartError::message()` the words. `StartOptions::default()`
+    is no job, `ENGINE_PLUTO` and no install. `client::connect` returns
+    `ConnectError` (`message`, `retry`, `needs`); there is no string-only twin.
+    `link::Link`'s `status`, `start`, `install` and `attach` take the wait as
+    their last argument (`link::CALL_WAIT` is the usual one).
   - `ToApp::NotStopped { id, .. }` answers a `Stop` that didn't end the runtime, and
     `Channel::stop()` returns a `Result`. Requests carry ids and every answer
     names one (`ToApp::answers`); `client::Hello` has the helper's `protocol`.
@@ -398,10 +405,13 @@ app moves its pin ([status.md](status.md)).
    and its link is quit, so the next connection starts the helper for Slurm.
    The same question comes with `use_machine` and `stop_machine` when a plugin
    update left the server with an older helper (an update, which sits beside the
-   old one). Julia is a second question, asked when it matters: if no Julia is
-   found on the machine, `use_machine` returns `needs_install` for Julia, which
-   Endeavor would download itself (a few hundred MB, into `~/.cache/endeavor`
-   there). Your yes to the helper doesn't cover it. You can instead tell the
+   old one). Julia is part of the same question when it is known: if no Julia
+   is found on the machine, `use_machine` returns `needs_install` with Julia as
+   an item, which Endeavor would download itself (a few hundred MB, into
+   `~/.cache/endeavor` there). With the helper missing too, nothing is known
+   of Julia yet, so one `use_machine` with `install: true` covers the helper
+   and then Julia in one call; a yes to `add_machine` covers the helper only.
+   You can instead tell the
    agent where Julia is (`add_machine` with `julia`). A project's remembered
    machine never installs or downloads: the first notebook call says what is
    missing and the agent asks you.
@@ -659,12 +669,12 @@ server starts (if not, the first start downloads, as in the other agents).
   connects with installs not allowed (the bootstrap script only reports the
   platform, whether this build's helper is there, and, with `sh`, `cat`, `kill`,
   `ps` and `squeue`, whether a runtime or a job is recorded in the state folder
-  the helper would use), and starts Julia with `download_julia` false. The
+  the helper would use), and starts with `install` false. The
   agreement to the helper is for one link process: it lasts for its reconnects,
   and a new link starts without it, which is harmless since the helper is
-  installed by then. The agreement to Julia's download is for one start and is
-  not kept. The app, which asks its user itself, passes `allow_install` true and
-  starts with `download_julia` true.
+  installed by then. The agreement to what a start needs (Julia's download) is
+  for one start and is not kept. The app, which asks its user itself, passes
+  `allow_install` true and starts with `install` true.
 - Both ends stay on loopback. The link's port needs the token, as a
   runtime's does.
 - `add_machine` takes an ssh alias: letters, digits, `.`, `-`, `_` and an

@@ -16,6 +16,7 @@ the session that built it._
 - **Now, before the skills trial and the app:** P1, P2, P4 (with the
   `machines.json` fixes), N3, N4, and P5a.
 - **P1 is done:** request ids on `Stop` and `StartRuntime`, `wire::PROTOCOL` in `Hello`, and `link::PROTOCOL` in `link.json`; fronts compare the protocol, not the build.
+- **P2 and N4 are done:** `StartRuntime { engine, install }`, `ToApp::NeedsInstall { items }` with `wire::Item { kind, name, size_mb, place }`, `StartError::NeedsInstall`, `link::InstallInfo { items, helper }`; one `connect`, one `start` (with `StartOptions`) and one `status`/`start`/`install`/`attach` each, taking the wait. The compatibility code of P1 (`InstallWhat::Unknown`, `lenient`, the refuse-unknown-fields rule, `download_julia`'s default) is gone; `State::Unknown` stays for reading a link of another protocol.
 - **P5b: no question on this computer.** Installing the plugin is the
   agreement to Julia and the packages it needs here. The question stays for
   servers.

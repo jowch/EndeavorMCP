@@ -304,7 +304,7 @@ fn a_line_break_in_a_parameter_is_refused() {
         assert!(err.contains("can't hold a line break"), "{err}");
     }
     assert!(preamble(&server, &options("", "", "")).is_ok(), "an empty state folder is the helper's default");
-    let err = connect(&server, &Transport::Shell { env: Vec::new(), ask: None }, &options("a\nb", "s", ""), &Cancel::default(), &|_| {}).err().expect("refused");
+    let err = connect(&server, &Transport::Shell { env: Vec::new(), ask: None }, &options("a\nb", "s", ""), &Cancel::default(), &|_| {}).err().expect("refused").message;
     assert!(err.contains("install folder"), "{err}");
 }
 
@@ -465,7 +465,7 @@ fn a_helper_of_another_protocol_is_refused_at_once_and_not_retried() {
         let options = Options { helper: &fake, root: dir.join("root").display().to_string(), ..options("", "", "") };
         let transport = Transport::Shell { env: vec![("HOME".into(), dir.display().to_string())], ask: None };
         let began = std::time::Instant::now();
-        let Err(error) = connect_checked(&Server::default(), &transport, &options, &Cancel::default(), &|_| {}) else { panic!("{name}: it was accepted") };
+        let Err(error) = connect(&Server::default(), &transport, &options, &Cancel::default(), &|_| {}) else { panic!("{name}: it was accepted") };
         assert!(began.elapsed() < Duration::from_secs(10), "{name}: it hung");
         assert!(!error.retry && error.needs.is_none(), "{name}: {error:?}");
         assert!(error.message.contains("another version of Endeavor"), "{name}: {}", error.message);

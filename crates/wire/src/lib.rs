@@ -42,6 +42,44 @@ pub const MAX_FRAME: usize = 16 << 20;
 /// helper that says no number (`Hello` without `protocol`) is 0.
 pub const PROTOCOL: u32 = 1;
 
+/// `StartRuntime::engine` for Pluto notebooks, the only engine so far.
+pub const ENGINE_PLUTO: &str = "pluto";
+
+/// [`Item::kind`] of a language runtime, such as Julia.
+pub const KIND_RUNTIME: &str = "runtime";
+/// [`Item::kind`] of Endeavor's own files on a machine.
+pub const KIND_HELPER: &str = "helper";
+
+/// Something that has to be installed on a machine before a start can go on.
+/// `kind` is a plain string, so that a kind a peer doesn't know still reads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Item {
+    pub kind: String,
+    /// What a person calls it, with its version: "Julia 1.12.6".
+    pub name: String,
+    /// About how much would be downloaded or copied, in MB, when known.
+    pub size_mb: Option<u64>,
+    /// The folder it would go in, when known.
+    pub place: Option<String>,
+}
+
+impl std::fmt::Display for Item {
+    /// "Julia 1.12.6 (about 289 MB, into /home/ada/.cache/endeavor/julia-1.12.6)".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let details: Vec<String> = self.size_mb.map(|mb| format!("about {mb} MB")).into_iter().chain(self.place.as_ref().map(|place| format!("into {place}"))).collect();
+        if details.is_empty() { write!(f, "{}", self.name) } else { write!(f, "{} ({})", self.name, details.join(", ")) }
+    }
+}
+
+/// The items as a sentence part: "Julia 1.12.6 (about 289 MB, into /x) and Endeavor's helper (about 20 MB)".
+pub fn items_text(items: &[Item]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.iter().map(Item::to_string).collect::<Vec<_>>().join(", ")),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
     Open { id: u32 },
@@ -142,12 +180,13 @@ pub enum ToApp {
         #[serde(default)]
         uploads: bool,
     },
-    /// A line of the runtime's log while it starts, or of Julia's download. A
-    /// start's progress (this, `FoundJulia`, `Submitted`, `Queued`) names no
+    /// A line of the runtime's log while it starts, or of an install. A
+    /// start's progress (this, `Found`, `Submitted`, `Queued`) names no
     /// id: only one start is under way at a time, and the answer that ends it names it.
     Progress { line: String },
-    /// The julia the helper starts the runtime with (sent only when it starts one).
-    FoundJulia { path: String, version: String },
+    /// What the helper starts the runtime with, such as Julia: its `name`
+    /// ("Julia"), `version` and `path` (sent only when it starts one).
+    Found { name: String, version: String, path: String },
     /// A cluster job for the runtime was submitted (`summary`: "8 CPUs · 32 GB · 8 h").
     Submitted { job: String, summary: String },
     /// The job waits in the queue: its state (PENDING, CONFIGURING) and Slurm's
@@ -174,11 +213,10 @@ pub enum ToApp {
     /// `StartRuntime` with this id. The helper stays connected, so
     /// `StartRuntime` can try again.
     StartFailed { id: u32, message: String },
-    /// No Julia was found, and the `StartRuntime` with this id didn't allow downloading one:
-    /// nothing was started or downloaded. `offer` says what a download would
-    /// be (the version, its size, and where it would go). The helper stays
-    /// connected, so `StartRuntime` can try again, allowing the download.
-    NoJulia { id: u32, offer: String },
+    /// The `StartRuntime` with this id needs `items` installed and didn't
+    /// allow installing: nothing was started or installed. The helper stays
+    /// connected, so `StartRuntime` can try again with `install` true.
+    NeedsInstall { id: u32, items: Vec<Item> },
     /// The runtime exited while the `StartRuntime` with this id waited for it:
     /// that start's answer. A runtime that exits later is `Died`.
     StartDied { id: u32, status: String, log_tail: Vec<String> },
@@ -212,18 +250,16 @@ pub enum ToHelper {
     /// answers each request once. Ids are the client's to keep apart: one in use
     /// by a request still waiting must not be used again.
     ///
-    /// `download_julia` false says the helper must not download Julia: when it
-    /// finds none it answers `NoJulia`. Absent means true, as before the field
-    /// existed, and a true is not sent. A helper from before the field would
-    /// ignore a false and download, so a client sends false only to a helper of
-    /// its own build: the bootstrap script runs `<root>/<build>/endeavor` and
-    /// installs that first if it is missing, so the helper is never another build's.
+    /// `engine` names the notebook system to start ([`ENGINE_PLUTO`]). `install`
+    /// says the helper may install whatever this start needs (such as a
+    /// language runtime); without it, a start that needs something is answered
+    /// `NeedsInstall` and installs nothing.
     StartRuntime {
         id: u32,
         #[serde(default)]
         job: Option<slurm::JobRequest>,
-        #[serde(default = "allowed", skip_serializing_if = "is_allowed")]
-        download_julia: bool,
+        engine: String,
+        install: bool,
     },
     /// Stop the runtime and stay connected: the attached one, else the one
     /// recorded in the state folder, or on a cluster the job waiting for it.
@@ -234,19 +270,11 @@ pub enum ToHelper {
     Files { id: u32, request: files::Request },
 }
 
-fn allowed() -> bool {
-    true
-}
-
-fn is_allowed(allowed: &bool) -> bool {
-    *allowed
-}
-
 impl ToApp {
     /// The id of the request this answers, if it answers one.
     pub fn answers(&self) -> Option<u32> {
         match self {
-            ToApp::Ready { id, .. } | ToApp::StartFailed { id, .. } | ToApp::NoJulia { id, .. } | ToApp::StartDied { id, .. } | ToApp::StartCancelled { id } | ToApp::Stopped { id } | ToApp::NotStopped { id, .. } => Some(*id),
+            ToApp::Ready { id, .. } | ToApp::StartFailed { id, .. } | ToApp::NeedsInstall { id, .. } | ToApp::StartDied { id, .. } | ToApp::StartCancelled { id } | ToApp::Stopped { id } | ToApp::NotStopped { id, .. } => Some(*id),
             _ => None,
         }
     }
@@ -346,14 +374,22 @@ mod tests {
         let Frame::Control(json) = not_stopped.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&json).unwrap()["type"], "NotStopped");
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), not_stopped);
-        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","id":5}"#).unwrap(), ToHelper::StartRuntime { id: 5, job: None, download_julia: true });
-        let forbidden = ToHelper::StartRuntime { id: 5, job: None, download_julia: false };
-        assert_eq!(serde_json::to_string(&forbidden).unwrap(), r#"{"type":"StartRuntime","id":5,"job":null,"download_julia":false}"#);
-        assert_eq!(serde_json::to_string(&ToHelper::StartRuntime { id: 5, job: None, download_julia: true }).unwrap(), r#"{"type":"StartRuntime","id":5,"job":null}"#, "download_julia is left out when it is true");
-        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","id":5,"download_julia":false}"#).unwrap(), forbidden);
-        let no_julia = ToApp::NoJulia { id: 5, offer: "Julia 1.12.6, about 190 MB".into() };
-        let Frame::Control(json) = no_julia.frame() else { panic!() };
-        assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), no_julia);
+        let start = ToHelper::StartRuntime { id: 5, job: None, engine: ENGINE_PLUTO.into(), install: false };
+        assert_eq!(serde_json::to_string(&start).unwrap(), r#"{"type":"StartRuntime","id":5,"job":null,"engine":"pluto","install":false}"#);
+        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","id":5,"engine":"pluto","install":false}"#).unwrap(), start);
+        let julia = Item { kind: KIND_RUNTIME.into(), name: "Julia 1.12.6".into(), size_mb: Some(289), place: Some("/home/ada/.cache/endeavor/julia-1.12.6".into()) };
+        let needs = ToApp::NeedsInstall { id: 5, items: vec![julia.clone()] };
+        let Frame::Control(json) = needs.frame() else { panic!() };
+        assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), needs);
+        assert_eq!(needs.answers(), Some(5));
+        let unseen: Item = serde_json::from_str(r#"{"kind":"kernel","name":"R 4.5.1","size_mb":null,"place":null}"#).unwrap();
+        assert_eq!(unseen.kind, "kernel", "a kind nobody here knows still reads");
+        assert_eq!(julia.to_string(), "Julia 1.12.6 (about 289 MB, into /home/ada/.cache/endeavor/julia-1.12.6)");
+        assert_eq!(unseen.to_string(), "R 4.5.1");
+        assert_eq!(items_text(&[julia.clone(), unseen.clone()]), "Julia 1.12.6 (about 289 MB, into /home/ada/.cache/endeavor/julia-1.12.6) and R 4.5.1");
+        let found = ToApp::Found { name: "Julia".into(), version: "1.12.6".into(), path: "/opt/julia/bin/julia".into() };
+        let Frame::Control(json) = found.frame() else { panic!() };
+        assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), found);
         assert_eq!(ToApp::Stopped { id: 3 }.answers(), Some(3));
         assert_eq!(ToApp::StartCancelled { id: 4 }.answers(), Some(4));
         assert_eq!(ToApp::Died { status: String::new(), log_tail: Vec::new() }.answers(), None);

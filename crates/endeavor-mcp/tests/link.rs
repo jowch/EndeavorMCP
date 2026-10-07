@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use common::{FakeBridge, TOKEN, pid_alive, serving_julia, wait_for};
 use endeavor_mcp::client::{MachinesFile, Server};
-use endeavor_mcp::link::{InstallWhat, Link, Spawn, State, Status, ensure_with};
+use endeavor_mcp::link::{CALL_WAIT, Link, Spawn, State, Status, ensure_with};
 use serde_json::{Value, json};
 
 /// One machine called `lab-NAME` whose helper, runtime and link all live in a folder of the test's own.
@@ -76,7 +76,7 @@ impl Place {
     /// The link, with the user's agreement to install the helper given.
     fn ensure(&self) -> Link {
         let link = self.look();
-        link.install().expect("install");
+        link.install(CALL_WAIT).expect("install");
         link
     }
 
@@ -139,7 +139,7 @@ fn end_leftovers(dir: &Path) {
 fn wait_status(link: &Link, what: &str, done: impl Fn(&Status) -> bool) -> Status {
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
-        let status = link.status().expect("status");
+        let status = link.status(CALL_WAIT).expect("status");
         if done(&status) {
             return status;
         }
@@ -190,7 +190,7 @@ fn one_link_serves_every_front_and_reaches_ready() {
     });
     assert!(links.iter().all(|l| l == &links[0]), "{links:?}");
     let link = links[0].clone();
-    link.install().expect("install");
+    link.install(CALL_WAIT).expect("install");
     assert!(pid_alive(link.pid as i32));
     assert_eq!(place.ensure(), link, "a later front reuses it");
     assert_eq!(pids("link --machine lab-ready").len(), 1, "one process");
@@ -210,7 +210,7 @@ fn one_link_serves_every_front_and_reaches_ready() {
     assert_eq!((status.machine.as_str(), status.name.as_str(), status.runtime.clone()), (place.id.as_str(), "lab", None));
     assert!(place.runtime().is_none());
 
-    let asked = link.start(None).expect("start");
+    let asked = link.start(None, false, CALL_WAIT).expect("start");
     assert!(matches!(asked.state, State::Connected | State::Starting), "answered at once: {asked:?}");
     let status = ready(&link);
     let runtime = status.runtime.clone().expect("the runtime");
@@ -219,10 +219,10 @@ fn one_link_serves_every_front_and_reaches_ready() {
     assert_eq!(runtime.page_url, format!("http://127.0.0.1:{}/?token={TOKEN}", runtime.port));
     assert_eq!(runtime.mcp_url, format!("http://127.0.0.1:{}/mcp", runtime.port));
     assert_ne!(runtime.port, link.port, "the control port isn't the listener's");
-    assert_eq!(status.hello.unwrap().julia.map(|j| j.version), Some("1.12.0".into()));
+    assert_eq!(status.hello.unwrap().found.first().map(|f| (f.name.clone(), f.version.clone())), Some(("Julia".into(), "1.12.0".into())));
 
     // A start with the runtime attached is not an error and changes nothing.
-    let again = link.start(None).expect("start again");
+    let again = link.start(None, false, CALL_WAIT).expect("start again");
     assert_eq!((again.state, again.runtime.map(|r| r.pid)), (State::Ready, Some(runtime.pid)));
 
     // The agent's call through the listener, with the browser port it was given.
@@ -237,10 +237,10 @@ fn one_link_serves_every_front_and_reaches_ready() {
 fn stopping_ends_the_runtime_but_not_the_link_and_a_start_after_it_works() {
     let place = Place::new("stop");
     let link = place.ensure();
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     let first = ready(&link).runtime.unwrap();
     link.stop().expect("stop");
-    let status = link.status().unwrap();
+    let status = link.status(CALL_WAIT).unwrap();
     assert_eq!((status.state, status.runtime), (State::Connected, None));
     assert!(!pid_alive(first.pid as i32), "the runtime is gone");
     assert!(!place.helpers().is_empty(), "the link stays connected");
@@ -248,7 +248,7 @@ fn stopping_ends_the_runtime_but_not_the_link_and_a_start_after_it_works() {
     let said = tool(first.port, &first.token, "list_notebooks", None);
     assert!(said.as_str().is_some_and(|text| text.contains("Call use_machine")), "{said}");
 
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     let second = ready(&link).runtime.unwrap();
     assert_eq!(second.port, first.port, "the same listener");
     assert!(!second.reattached && second.pid != first.pid);
@@ -263,14 +263,14 @@ fn an_attach_starts_nothing_when_no_runtime_is_there_and_takes_the_one_that_is()
     let place = Place::new("attach");
     let link = place.ensure();
     // Asked at once, while the link may still be connecting: it asks the helper once connected.
-    link.attach().expect("attach");
+    link.attach(false, CALL_WAIT).expect("attach");
     let status = wait_status(&link, "nothing running", |s| s.nothing_running);
     assert_eq!((status.state, status.runtime.is_none(), status.error.clone()), (State::Connected, true, None), "{status:?}");
     assert!(place.runtime().is_none() && !place.state.join("julia.args").exists(), "no Julia was started");
     assert!(status.step.unwrap().contains("No runtime is running"));
 
     // A start after it is a start, and the flag clears.
-    let asked = link.start(None).unwrap();
+    let asked = link.start(None, false, CALL_WAIT).unwrap();
     assert!(!asked.nothing_running);
     let runtime = ready(&link).runtime.unwrap();
     assert!(!runtime.reattached);
@@ -280,20 +280,20 @@ fn an_attach_starts_nothing_when_no_runtime_is_there_and_takes_the_one_that_is()
     wait_for("the link to end", || !pid_alive(link.pid as i32));
     let second = place.ensure();
     assert_ne!(second.pid, link.pid);
-    second.attach().unwrap();
+    second.attach(false, CALL_WAIT).unwrap();
     let status = ready(&second);
     let attached = status.runtime.unwrap();
     assert!(attached.reattached && attached.pid == runtime.pid, "{attached:?}");
     assert!(!status.nothing_running);
     // With a runtime attached, an attach changes nothing.
-    assert_eq!(second.attach().unwrap().state, State::Ready);
+    assert_eq!(second.attach(false, CALL_WAIT).unwrap().state, State::Ready);
 }
 
 #[test]
 fn the_connection_comes_back_on_the_same_port() {
     let place = Place::new("reconnect");
     let link = place.ensure();
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     let before = ready(&link).runtime.unwrap();
     let helpers = place.helpers();
     assert!(!helpers.is_empty());
@@ -312,7 +312,7 @@ fn the_connection_comes_back_on_the_same_port() {
 fn a_runtime_that_ended_while_disconnected_is_not_started_again() {
     let place = Place::new("ended-away");
     let link = place.ensure();
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     let before = ready(&link).runtime.unwrap();
     // The runtime goes, and the connection with it.
     // SAFETY: plain syscalls, on the runtime and helper this test's link started.
@@ -329,7 +329,7 @@ fn a_runtime_that_ended_while_disconnected_is_not_started_again() {
     let said = tool(before.port, &before.token, "list_notebooks", None);
     assert!(said.as_str().is_some_and(|text| text.contains("Call use_machine") && !text.contains("by itself")), "{said}");
     // And a start asked for now works.
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     assert_ne!(ready(&link).runtime.unwrap().pid, before.pid);
 }
 
@@ -337,7 +337,7 @@ fn a_runtime_that_ended_while_disconnected_is_not_started_again() {
 fn an_idle_link_ends_and_leaves_the_runtime_running() {
     let place = Place::with("idle", &[("ENDEAVOR_LINK_IDLE_SECS", "2")]);
     let link = place.ensure();
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     let runtime = ready(&link).runtime.unwrap();
     // No request from here on.
     wait_for("the link to end", || !pid_alive(link.pid as i32));
@@ -349,7 +349,7 @@ fn an_idle_link_ends_and_leaves_the_runtime_running() {
     // The next front starts a new link, which attaches to the same runtime.
     let again = place.ensure();
     assert_ne!(again.pid, link.pid);
-    again.start(None).unwrap();
+    again.start(None, false, CALL_WAIT).unwrap();
     let attached = ready(&again).runtime.unwrap();
     assert_eq!((attached.pid, attached.reattached), (runtime.pid, true));
 }
@@ -358,21 +358,21 @@ fn an_idle_link_ends_and_leaves_the_runtime_running() {
 fn quitting_detaches_and_removes_the_record() {
     let place = Place::new("quit");
     let link = place.ensure();
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     let runtime = ready(&link).runtime.unwrap();
     link.quit().expect("quit");
     wait_for("the link to end", || !pid_alive(link.pid as i32));
     assert!(!place.record().exists());
     wait_for("its helper to go", || place.helpers().is_empty());
     assert!(pid_alive(runtime.pid as i32), "the runtime goes on");
-    assert!(link.status().is_err(), "nothing answers on its port");
+    assert!(link.status(CALL_WAIT).is_err(), "nothing answers on its port");
 }
 
 #[test]
 fn a_stop_signal_detaches_and_removes_the_record() {
     let place = Place::new("signal");
     let link = place.ensure();
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     let runtime = ready(&link).runtime.unwrap();
     // SAFETY: plain syscall, on the link this test started.
     unsafe { libc::kill(link.pid as i32, libc::SIGTERM) };
@@ -399,12 +399,7 @@ fn the_control_port_wants_the_token_a_loopback_host_and_no_origin() {
     assert_eq!((at("GET", "/link/nope"), at("GET", "/link/start"), at("POST", "/link/status")), (404, 405, 405));
     let bad = format!("POST /link/start HTTP/1.1\r\nHost: localhost\r\n{bearer}Content-Length: 12\r\n\r\n{{\"job\":\"no\"}}");
     assert_eq!(http(link.port, &bad).0, 400, "a job that isn't one");
-    let before = link.status().unwrap();
-    let unknown = r#"{"job":null,"only_running":true,"later_field":1}"#;
-    let (code, body) = http(link.port, &format!("POST /link/start HTTP/1.1\r\nHost: localhost\r\n{bearer}Content-Length: {}\r\n\r\n{unknown}", unknown.len()));
-    assert!(code == 400 && body.contains(r#"doesn't know the field \"later_field\""#) && body.contains("didn't start anything"), "a field this link doesn't know: {code} {body}");
-    assert_eq!(link.status().unwrap().state, before.state, "nothing was asked of it");
-    assert_eq!(link.status().unwrap().machine, place.id, "none of that ended the link");
+    assert_eq!(link.status(CALL_WAIT).unwrap().machine, place.id, "none of that ended the link");
 }
 
 #[test]
@@ -419,7 +414,7 @@ fn a_failed_connect_is_reported_once_and_tried_again_only_when_asked() {
     std::thread::sleep(Duration::from_secs(3));
     let attempts = |log: &str| log.matches("The connection to lab failed").count();
     assert_eq!(attempts(&place.log()), 1, "no loop: {}", place.log());
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     wait_for("a second attempt", || attempts(&place.log()) == 2);
     wait_status(&link, "failed again", |s| s.state == State::Failed);
 }
@@ -440,7 +435,7 @@ fn a_connection_lost_while_the_runtime_starts_is_resumed_after_the_reconnect() {
     let (hold, gate) = (place.state.join("hold"), place.dir.join("gate"));
     std::fs::write(&hold, "").unwrap();
     let link = place.ensure();
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     wait_status(&link, "starting", |s| s.state == State::Starting);
     wait_for("Julia to be asked for", || place.state.join("julia.args").exists());
     std::fs::write(&gate, "").unwrap();
@@ -464,13 +459,13 @@ fn a_stop_during_a_start_is_no_failure() {
     let hold = place.state.join("hold");
     std::fs::write(&hold, "").unwrap();
     let link = place.ensure();
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     wait_status(&link, "starting", |s| s.state == State::Starting);
     wait_for("Julia to be asked for", || place.state.join("julia.args").exists());
     link.stop().expect("stop");
     std::fs::remove_file(&hold).unwrap();
     std::thread::sleep(Duration::from_secs(1));
-    let status = link.status().unwrap();
+    let status = link.status(CALL_WAIT).unwrap();
     assert_eq!((status.state, status.error, status.runtime), (State::Connected, None, None));
 }
 
@@ -481,7 +476,7 @@ fn a_front_that_asks_right_after_a_quit_gets_a_new_link() {
     link.quit().expect("quit");
     let again = place.ensure();
     assert_ne!(again.pid, link.pid);
-    assert!(again.status().is_ok());
+    assert!(again.status(CALL_WAIT).is_ok());
     wait_for("the first link to end", || !pid_alive(link.pid as i32));
     assert_eq!(place.ensure(), again, "the record is the new link's");
 }
@@ -530,13 +525,13 @@ fn a_start_asked_for_while_connecting_does_not_make_another_attempt() {
     let place = Place::with("kicks", &[("ENDEAVOR_LINK_ASK", "echo x >> {dir}/attempts; sleep 2; exit 1")]);
     let link = place.ensure();
     for _ in 0..5 {
-        link.start(None).unwrap();
+        link.start(None, false, CALL_WAIT).unwrap();
     }
     wait_status(&link, "failed", |s| s.state == State::Failed);
     std::thread::sleep(Duration::from_secs(2));
     let attempts = || std::fs::read_to_string(place.dir.join("attempts")).unwrap_or_default().lines().count();
     assert_eq!(attempts(), 1, "{}", place.log());
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     wait_for("a second attempt", || attempts() == 2);
     wait_status(&link, "failed again", |s| s.state == State::Failed);
     assert_eq!(attempts(), 2);
@@ -546,7 +541,7 @@ fn a_start_asked_for_while_connecting_does_not_make_another_attempt() {
 fn a_connection_that_cannot_come_back_tells_the_listener() {
     let place = Place::new("given-up");
     let link = place.ensure();
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     let runtime = ready(&link).runtime.unwrap();
     // The machine leaves the list, so the next connect can't work and isn't tried again.
     MachinesFile::at(place.dir.join("config/endeavor/machines.json")).remove(&place.id).unwrap();
@@ -566,7 +561,7 @@ fn an_idle_time_that_is_no_time_is_ignored() {
         let place = Place::with(name, &[("ENDEAVOR_LINK_IDLE_SECS", value)]);
         let link = place.ensure();
         std::thread::sleep(Duration::from_millis(600));
-        assert!(pid_alive(link.pid as i32) && link.status().is_ok(), "{value}: {}", place.log());
+        assert!(pid_alive(link.pid as i32) && link.status(CALL_WAIT).is_ok(), "{value}: {}", place.log());
     }
 }
 
@@ -586,7 +581,8 @@ fn a_machine_without_the_helper_waits_for_the_user_and_installs_once_told() {
     let link = place.look();
     let status = wait_status(&link, "needs_install", |s| s.state == State::NeedsInstall);
     let needs = status.needs_install.clone().expect("what it needs");
-    assert_eq!(needs.what, InstallWhat::Helper);
+    assert_eq!(needs.items.iter().map(|i| i.kind.as_str()).collect::<Vec<_>>(), [wire::KIND_HELPER], "the helper is the one item");
+    assert_eq!(needs.items[0].place.as_deref(), Some(root.join(endeavor_mcp::embedded::BUILD_VERSION).to_str().unwrap()));
     let helper = needs.helper.expect("the helper's details");
     assert_eq!(Path::new(&helper.folder), root.join(endeavor_mcp::embedded::BUILD_VERSION));
     assert!(helper.bytes.is_some_and(|bytes| bytes > 1000) && !helper.update && helper.running.is_none(), "{helper:?}");
@@ -594,15 +590,15 @@ fn a_machine_without_the_helper_waits_for_the_user_and_installs_once_told() {
     assert!(status.hello.is_some_and(|h| h.os.is_some()), "what it found is kept");
 
     // A start without the agreement asks again and finds the same, and nothing is written there.
-    link.start(None).unwrap();
-    wait_for("the second look", || link.status().is_ok_and(|s| s.state == State::NeedsInstall && s.step.as_deref().is_some_and(|step| step.contains("isn't installed"))));
+    link.start(None, false, CALL_WAIT).unwrap();
+    wait_for("the second look", || link.status(CALL_WAIT).is_ok_and(|s| s.state == State::NeedsInstall && s.step.as_deref().is_some_and(|step| step.contains("isn't installed"))));
     std::thread::sleep(Duration::from_millis(800));
-    assert_eq!(link.status().unwrap().state, State::NeedsInstall, "not tried in a loop");
+    assert_eq!(link.status(CALL_WAIT).unwrap().state, State::NeedsInstall, "not tried in a loop");
     assert!(!root.exists() && place.helpers().is_empty(), "nothing was installed");
     assert_eq!(place.log().matches("waiting for the user's agreement").count(), 2, "one look for each request: {}", place.log());
 
     // The agreement in the start installs and starts.
-    link.start_within(None, true, Duration::from_secs(5)).unwrap();
+    link.start(None, true, Duration::from_secs(5)).unwrap();
     let status = ready(&link);
     assert_eq!(status.needs_install, None);
     assert_eq!(status.hello.unwrap().helper_installed, Some(true));
@@ -619,7 +615,7 @@ fn a_machine_without_the_helper_waits_for_the_user_and_installs_once_told() {
     assert_eq!(after.pid, before.pid);
     wait_for("the helper again", || !place.helpers().is_empty());
     assert!(root.join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists(), "installed again by the reconnect");
-    assert_ne!(link.status().unwrap().state, State::NeedsInstall);
+    assert_ne!(link.status(CALL_WAIT).unwrap().state, State::NeedsInstall);
     link.stop().unwrap();
 
     // A new link process asks nothing: the helper is there.
@@ -636,13 +632,13 @@ fn the_agreement_without_a_start_installs_the_helper_and_starts_nothing() {
     let place = Place::new("install-only");
     let link = place.look();
     wait_status(&link, "needs_install", |s| s.state == State::NeedsInstall);
-    link.start(None).unwrap();
+    link.start(None, false, CALL_WAIT).unwrap();
     wait_status(&link, "needs_install", |s| s.state == State::NeedsInstall);
     // The wish for a runtime isn't kept for the agreement that comes later.
-    link.install().unwrap();
+    link.install(CALL_WAIT).unwrap();
     let status = wait_status(&link, "connected", |s| s.state == State::Connected);
     std::thread::sleep(Duration::from_millis(500));
-    assert_eq!((status.runtime, link.status().unwrap().state), (None, State::Connected));
+    assert_eq!((status.runtime, link.status(CALL_WAIT).unwrap().state), (None, State::Connected));
     assert!(place.runtime().is_none() && !place.state.join("julia.args").exists(), "no Julia was started");
 }
 
@@ -650,20 +646,19 @@ fn the_agreement_without_a_start_installs_the_helper_and_starts_nothing() {
 fn an_agreement_that_comes_while_connecting_is_not_lost() {
     let place = Place::with("install-racing", &[("ENDEAVOR_LINK_ASK", "sleep 1")]);
     let link = place.look();
-    link.install().unwrap();
+    link.install(CALL_WAIT).unwrap();
     let status = wait_status(&link, "connected", |s| s.state == State::Connected);
     assert_eq!(status.hello.unwrap().helper_installed, Some(true));
 }
 
 #[test]
-fn a_start_body_with_an_unknown_field_is_still_refused_and_install_is_known() {
+fn a_start_body_with_install_goes_through() {
     let place = Place::new("install-field");
     let link = place.look();
     let call = |body: &str| {
         let request = format!("POST /link/start HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n{body}", link.port, link.token, body.len());
         http(link.port, &request).0
     };
-    assert_eq!(call(r#"{"job":null,"installs":true}"#), 400);
     assert_eq!(call(r#"{"job":null,"install":true}"#), 200);
     ready(&link);
 }
@@ -676,7 +671,7 @@ fn an_agreement_given_with_a_connection_up_is_not_kept_for_the_helper() {
     let link = place.look();
     wait_status(&link, "connected", |s| s.state == State::Connected);
     // With the helper connected, `install` can only be for what the start needs (Julia).
-    link.start_within(None, true, Duration::from_secs(5)).unwrap();
+    link.start(None, true, Duration::from_secs(5)).unwrap();
     ready(&link);
     // The helper goes from the machine, and the connection with it: that reconnect asks.
     std::fs::remove_dir_all(&root).unwrap();
@@ -685,11 +680,11 @@ fn an_agreement_given_with_a_connection_up_is_not_kept_for_the_helper() {
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
     let status = wait_status(&link, "needs_install", |s| s.state == State::NeedsInstall);
-    assert_eq!(status.needs_install.map(|n| n.what), Some(InstallWhat::Helper));
+    assert_eq!(status.needs_install.map(|n| n.needs_helper()), Some(true));
     std::thread::sleep(Duration::from_millis(500));
     assert!(!root.exists(), "nothing was installed without a question");
     // The agreement to the helper does it, and `stop` ends the runtime that was left.
-    link.install().unwrap();
+    link.install(CALL_WAIT).unwrap();
     wait_status(&link, "connected", |s| s.state == State::Connected);
     link.stop().unwrap();
 }

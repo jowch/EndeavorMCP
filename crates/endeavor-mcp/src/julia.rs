@@ -57,8 +57,8 @@ pub enum Source {
 #[derive(Debug, PartialEq)]
 pub enum Failure {
     /// None was found and `find`'s `download` was false: nothing was downloaded.
-    /// What a download would be (the version, its size and where it goes).
-    Missing(String),
+    /// The download that was not allowed.
+    Missing(wire::Item),
     Failed(String),
 }
 
@@ -72,7 +72,7 @@ impl Failure {
     /// The words for an error, whichever it is.
     pub fn message(self) -> String {
         match self {
-            Failure::Missing(offer) => format!("Julia wasn't found on this machine. {offer}"),
+            Failure::Missing(item) => format!("Julia wasn't found on this machine. Endeavor can download its own copy: {item}."),
             Failure::Failed(message) => message,
         }
     }
@@ -80,7 +80,7 @@ impl Failure {
     /// What the helper tells its client.
     pub fn into_unstarted(self) -> crate::Unstarted {
         match self {
-            Failure::Missing(offer) => crate::Unstarted::NoJulia(offer),
+            Failure::Missing(item) => crate::Unstarted::NeedsInstall(vec![item]),
             Failure::Failed(message) => crate::Unstarted::Failed(message),
         }
     }
@@ -171,7 +171,12 @@ fn own_julia(download: bool, progress: &dyn Fn(String)) -> Result<String, Failur
             .find(|t| t.0 == os && t.1 == arch)
             .ok_or_else(|| format!("No julia on this machine's PATH, and Endeavor has no Julia download for {os} {arch}. Set How to get Julia for this server."))?;
         if !download {
-            return Err(Failure::Missing(format!("Endeavor can download its own copy: Julia {JULIA_VERSION}, about {} MB, into {}.", size / 1_000_000, dir.display())));
+            return Err(Failure::Missing(wire::Item {
+                kind: wire::KIND_RUNTIME.into(),
+                name: format!("Julia {JULIA_VERSION}"),
+                size_mb: Some(size / 1_000_000),
+                place: Some(dir.display().to_string()),
+            }));
         }
         install(&cache, &dir, url, sha256, size, progress)?;
     }

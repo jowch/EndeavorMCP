@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use common::{find_julia, pid_alive, wait_for};
 use endeavor_mcp::client::{MachinesFile, Server};
-use endeavor_mcp::link::{Link, Spawn, State, ensure_with};
+use endeavor_mcp::link::{CALL_WAIT, Link, Spawn, State, ensure_with};
 use serde_json::{Value, json};
 
 /// A failed step leaves no link and no Julia behind.
@@ -81,7 +81,7 @@ fn tool(port: u16, token: &str, id: u64, name: &str, arguments: Value) -> Value 
 fn wait_status(link: &Link, what: &str, limit: Duration, done: impl Fn(&endeavor_mcp::link::Status) -> bool) -> endeavor_mcp::link::Status {
     let deadline = Instant::now() + limit;
     loop {
-        let status = link.status().expect("status");
+        let status = link.status(CALL_WAIT).expect("status");
         if done(&status) {
             return status;
         }
@@ -139,7 +139,7 @@ fn the_link_over_real_ssh() {
     assert_eq!(ensure_with(&spawn, "e2e-link").unwrap(), link, "a second front reuses it");
     let looked = wait_status(&link, "the helper missing", Duration::from_secs(120), |s| s.state == State::NeedsInstall);
     assert!(looked.needs_install.is_some() && !root.join(endeavor_mcp::embedded::BUILD_VERSION).exists(), "a look installs nothing");
-    link.install().expect("install");
+    link.install(CALL_WAIT).expect("install");
     let status = wait_status(&link, "connected", Duration::from_secs(120), |s| s.state == State::Connected);
     let hello = status.hello.expect("hello");
     assert!(!hello.node.is_empty() && hello.uploads);
@@ -148,7 +148,7 @@ fn the_link_over_real_ssh() {
     assert!(installed.join("endeavor").is_file() && installed.join("runtime/boot.jl").is_file(), "the helper is installed in {}", installed.display());
     eprintln!("[{:?}] connected to {}", started.elapsed(), hello.node);
 
-    link.start(None).expect("start");
+    link.start(None, false, CALL_WAIT).expect("start");
     let status = wait_status(&link, "ready", Duration::from_secs(1200), |s| s.state == State::Ready);
     let runtime = status.runtime.expect("a runtime");
     eprintln!("[{:?}] ready on {}, pid {}", started.elapsed(), runtime.node, runtime.pid);
@@ -177,7 +177,7 @@ fn the_link_over_real_ssh() {
 
     link.stop().expect("stop");
     wait_for("the runtime to end", || !pid_alive(runtime.pid as i32));
-    let status = link.status().unwrap();
+    let status = link.status(CALL_WAIT).unwrap();
     assert_eq!((status.state, status.runtime), (State::Connected, None));
     link.quit().expect("quit");
     wait_for("the link to end", || !pid_alive(link.pid as i32));

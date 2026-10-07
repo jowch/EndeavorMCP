@@ -75,7 +75,7 @@ impl Runtime {
         let mut log = Vec::new();
         loop {
             match self.helper.next_within(Duration::from_secs(900)) {
-                ToApp::FoundJulia { .. } => {}
+                ToApp::Found { .. } => {}
                 ToApp::Progress { line } => log.push(line),
                 ToApp::Ready { token, .. } => return self.token = token,
                 other => panic!("expected Ready, got {other:?}; the log:\n{}", log.join("\n")),

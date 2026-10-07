@@ -133,7 +133,7 @@ impl Scripted {
     fn starting(&self, listener: &Arc<Listener>, notice: impl FnOnce(Notice) + Send + 'static) -> std::thread::JoinHandle<Result<Runtime, String>> {
         std::thread::spawn({
             let (channel, listener) = (self.channel.clone(), listener.clone());
-            move || channel.start_runtime(&listener, None, &mut |_| {}, notice)
+            move || channel.start_runtime(&listener, &StartOptions::default(), &mut |_| {}, notice).map_err(StartError::message)
         })
     }
 
@@ -239,12 +239,12 @@ fn a_second_start_while_one_waits_fails_at_once_and_leaves_the_first_alone() {
     let (noticed, heard) = mpsc::channel();
     let first = std::thread::spawn({
         let (channel, listener) = (helper.channel.clone(), listener.clone());
-        move || channel.start_runtime(&listener, None, &mut |message| drop(said.send(message)), move |notice| drop(noticed.send(notice)))
+        move || channel.start_runtime(&listener, &StartOptions::default(), &mut |message| drop(said.send(message)), move |notice| drop(noticed.send(notice)))
     });
     let [one] = helper.starts_sent(1)[..] else { panic!() };
     let began = Instant::now();
-    let second = helper.channel.start_runtime(&listener, None, &mut |_| {}, |_| {});
-    assert_eq!(second.unwrap_err(), "Julia is already starting.");
+    let second = helper.channel.start_runtime(&listener, &StartOptions::default(), &mut |_| {}, |_| {});
+    assert_eq!(second.unwrap_err(), StartError::Failed("Julia is already starting.".into()));
     assert!(began.elapsed() < Duration::from_millis(500));
     assert_eq!(helper.requests().iter().filter(|request| matches!(request, ToHelper::StartRuntime { .. })).count(), 1, "nothing was sent for it");
 

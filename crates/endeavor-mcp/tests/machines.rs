@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use common::front::Front;
 use common::{FakeBridge, TOKEN, pid_alive, serving_julia, wait_for};
 use endeavor_mcp::client::{Cluster, MachinesFile, Server};
-use endeavor_mcp::link::{Link, Spawn, State, Status, ensure_with};
+use endeavor_mcp::link::{CALL_WAIT, Link, Spawn, State, Status, ensure_with};
 use serde_json::{Value, json};
 use wire::slurm::{Partition, Resources};
 
@@ -252,7 +252,7 @@ fn other_agent(runtime: &endeavor_mcp::link::RuntimeInfo, session: &str, client:
 fn wait_status(link: &Link, what: &str, done: impl Fn(&Status) -> bool) -> Status {
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
-        let status = link.status().expect("status");
+        let status = link.status(CALL_WAIT).expect("status");
         if done(&status) {
             return status;
         }
@@ -1223,7 +1223,7 @@ fn add_machine_only_looks_until_told_to_install() {
     let julia = place.julia.display().to_string();
     let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
     assert_eq!((first["state"].as_str(), first["needs_install"].clone(), first["saved"].clone()), (Some("needs_install"), json!(true), json!(true)), "{first}");
-    assert_eq!(first["install"]["what"], "helper", "{first}");
+    assert_eq!(first["install"]["items"][0]["kind"], "helper", "{first}");
     assert_eq!(first["install"]["running"], json!({ "process": core_pid }), "{first}");
     let message = first["message"].as_str().unwrap();
     assert!(message.contains("`install: true`") && message.contains("Ask the user") && message.contains("MB") && message.contains("already running"), "{message}");
@@ -1302,7 +1302,7 @@ fn a_remembered_project_never_installs() {
     let mut front = place.front();
     front.initialize();
     let (failed, said) = front.call("list_notebooks", json!({}));
-    assert!(failed && text(&said).contains("isn't installed on lab") && text(&said).contains("`install: true`") && text(&said).contains("Ask the user"), "{said}");
+    assert!(failed && text(&said).contains("needs to install Endeavor's helper") && text(&said).contains("`install: true`") && text(&said).contains("Ask the user"), "{said}");
     let status = front.ok("pluto_session_status", json!({}));
     assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("needs_install"), json!(false)), "{status}");
     assert!(!place.dir.join("root").exists(), "nothing was installed");
@@ -1341,9 +1341,9 @@ fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
     let mut front = place.front();
     front.initialize();
     let first = front.ok("use_machine", json!({ "machine": "lab" }));
-    assert_eq!((first["state"].as_str(), first["install"]["what"].as_str()), (Some("needs_install"), Some("julia")), "{first}");
+    assert_eq!((first["state"].as_str(), first["install"]["items"][0]["kind"].as_str()), (Some("needs_install"), Some("runtime")), "{first}");
     let message = text(&first);
-    assert!(message.contains("Julia wasn't found on lab") && message.contains("download its own copy") && message.contains("MB") && message.contains("`julia`") && message.contains("`install: true`"), "{message}");
+    assert!(message.contains("needs to install Julia") && message.contains("MB") && message.contains("`julia`") && message.contains("`install: true`"), "{message}");
     assert!(!tried.exists(), "nothing was downloaded");
     assert_eq!(place.projects(), Value::Null);
     assert_eq!(front.ok("pluto_session_status", json!({})).get("machine"), None, "the session stays where it was");
@@ -1368,7 +1368,7 @@ fn add_machine_with_install_connects_once_and_without_it_does_not_install() {
 }
 
 #[test]
-fn the_agreement_to_the_helper_is_not_one_to_download_julia() {
+fn the_agreement_to_the_helper_from_add_machine_is_not_one_to_install_what_a_start_needs() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("machines-julia-per-start");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1390,9 +1390,9 @@ fn the_agreement_to_the_helper_is_not_one_to_download_julia() {
 
     // A use_machine without `install` doesn't download Julia, though the helper was agreed to.
     let first = front.ok("use_machine", json!({ "machine": "lab" }));
-    assert_eq!((first["state"].as_str(), first["install"]["what"].as_str()), (Some("needs_install"), Some("julia")), "{first}");
+    assert_eq!((first["state"].as_str(), first["install"]["items"][0]["kind"].as_str()), (Some("needs_install"), Some("runtime")), "{first}");
     let message = text(&first);
-    assert!(message.contains("Julia wasn't found on lab") && message.contains("MB") && message.contains("`install: true`"), "{message}");
+    assert!(message.contains("needs to install Julia") && message.contains("MB") && message.contains("`install: true`"), "{message}");
     assert_eq!(tries(), 0, "nothing was downloaded");
     assert_eq!(place.projects(), Value::Null, "the project doesn't remember it");
 
@@ -1403,7 +1403,7 @@ fn the_agreement_to_the_helper_is_not_one_to_download_julia() {
 
     // That agreement was for that call: the next one without it asks again and downloads nothing.
     let again = front.ok("use_machine", json!({ "machine": "lab" }));
-    assert_eq!((again["state"].as_str(), again["install"]["what"].as_str()), (Some("needs_install"), Some("julia")), "{again}");
+    assert_eq!((again["state"].as_str(), again["install"]["items"][0]["kind"].as_str()), (Some("needs_install"), Some("runtime")), "{again}");
     assert_eq!(tries(), 1, "no second try");
 
     // A project that remembers the machine doesn't download either.
@@ -1413,9 +1413,39 @@ fn the_agreement_to_the_helper_is_not_one_to_download_julia() {
     let mut second = place.front();
     second.initialize();
     let (failed, said) = second.call("list_notebooks", json!({}));
-    assert!(failed && text(&said).contains("Julia wasn't found on lab"), "{said}");
+    assert!(failed && text(&said).contains("needs to install Julia"), "{said}");
     assert_eq!(tries(), 1, "a remembered project's call downloads nothing");
     second.finish();
+    front.finish();
+}
+
+#[test]
+fn one_yes_to_use_machine_covers_the_helper_and_the_runtime_in_one_start() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("machines-one-yes");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let place = Place::bare("one-yes", &[("PATH", &no_julia_path(&dir)), ("SHELL", "/bin/sh")]);
+    let tried = place.dir.join("download-tried");
+    let _ = std::fs::remove_file(&tried);
+    let find = Command::new("/bin/sh").args(["-lc", "command -v julia"]).env("HOME", place.dir.join("home")).env("PATH", no_julia_path(&place.dir)).output().unwrap();
+    if find.status.success() {
+        eprintln!("skipped: a login shell finds julia at {}", String::from_utf8_lossy(&find.stdout).trim());
+        return;
+    }
+    place.machines().save(Server { id: "lab".into(), name: "lab".into(), ssh_host: "lab".into(), ..Default::default() }).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    // Neither is on the machine: the question names the helper, and says the yes goes on to what the start needs.
+    let first = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(first["install"]["items"].as_array().map(|items| items.iter().map(|i| i["kind"].clone()).collect::<Vec<_>>()), Some(vec![json!("helper")]), "{first}");
+    assert!(text(&first).contains("The same yes covers what this start needs after it"), "{first}");
+    assert!(!place.dir.join("root").exists() && !tried.exists(), "nothing was installed");
+
+    // One call with `install: true` installs the helper and goes on to the runtime's install (the fake curl fails).
+    let (failed, said) = front.call("use_machine", json!({ "machine": "lab", "install": true }));
+    assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists(), "the helper was installed");
+    assert!(failed && text(&said).contains("Couldn't download Julia"), "{said}");
+    assert_eq!(std::fs::read_to_string(&tried).unwrap_or_default().lines().count(), 1, "the download was tried in the same call");
     front.finish();
 }
 
@@ -1479,7 +1509,7 @@ fn stop_machine_asks_before_installing_the_helper_it_needs() {
     std::fs::write(root.join("0.0.1-old/runtime/boot.jl"), "").unwrap();
 
     let first = front.ok("stop_machine", json!({ "machine": "lab", "force": true }));
-    assert_eq!((first["state"].as_str(), first["stopped"].clone(), first["install"]["what"].as_str()), (Some("needs_install"), json!(false), Some("helper")), "{first}");
+    assert_eq!((first["state"].as_str(), first["stopped"].clone(), first["install"]["items"][0]["kind"].as_str()), (Some("needs_install"), json!(false), Some("helper")), "{first}");
     let message = text(&first);
     assert!(message.contains("Stopping the runtime there needs it") && message.contains("`stop_machine` again") && message.contains("`install: true`"), "{message}");
     assert_eq!(place.runtime(), Some(runtime), "the runtime is still there");

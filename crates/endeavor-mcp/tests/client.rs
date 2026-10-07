@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Notice, Options, Running, Server, StartError, Transport, connect, connect_checked, no_helper, start, start_with};
+use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Notice, Options, Running, Server, StartError, StartOptions, Transport, connect, no_helper, start};
 use wire::files;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -195,7 +195,7 @@ fn the_helper_is_installed_then_reused_and_attaches() {
     let transport = place.transport();
 
     let (seen, on) = events();
-    let (channel, hello) = connect(&server, &transport, &options, &Cancel::default(), &on).expect("first connect");
+    let (channel, hello) = connect(&server, &transport, &options, &Cancel::default(), &on).map_err(|e| e.message).expect("first connect");
     assert_eq!((hello.node.as_str(), hello.home.as_path()), (hostname().as_str(), place.home.as_path()));
     let installed = place.installed();
     assert!(installed.join("endeavor").is_file() && installed.join("runtime/boot.jl").is_file());
@@ -211,7 +211,7 @@ fn the_helper_is_installed_then_reused_and_attaches() {
 
     // Started on request, reachable through a listener.
     let listener = Listener::start("test").unwrap();
-    let runtime = start(&channel, &listener, None, &on, |_| {}).expect("start");
+    let runtime = start(&channel, &listener, &StartOptions { install: true, ..StartOptions::default() }, &on, |_| {}).expect("start");
     assert!(runtime.reattached);
     assert_eq!((runtime.token.as_str(), runtime.node.as_str()), (TOKEN, hostname().as_str()));
     assert_eq!((runtime.port, runtime.page_url.as_str()), (listener.port(), format!("http://127.0.0.1:{}/?token={TOKEN}", listener.port()).as_str()));
@@ -226,9 +226,9 @@ fn the_helper_is_installed_then_reused_and_attaches() {
     assert!(fake.alive(), "detaching leaves it running");
 
     let (seen, on) = events();
-    let (channel, _) = connect(&server, &transport, &options, &Cancel::default(), &on).expect("second connect");
+    let (channel, _) = connect(&server, &transport, &options, &Cancel::default(), &on).map_err(|e| e.message).expect("second connect");
     assert_eq!(seen.lock().unwrap()[1], Event::Helper { installed: false });
-    start(&channel, &listener, None, &on, |_| {}).expect("start again");
+    start(&channel, &listener, &StartOptions { install: true, ..StartOptions::default() }, &on, |_| {}).expect("start again");
     channel.stop().expect("stop");
     assert!(!fake.alive(), "Stop reaches the runtime's bridge");
     // The helper stays connected after a stop.
@@ -242,8 +242,8 @@ fn a_relative_state_folder_is_under_the_install_folder() {
     std::fs::create_dir_all(place.root.join("state-rel")).unwrap();
     let fake = FakeRuntime::start(&place.root.join("state-rel"));
     let options = Options { state: "state-rel".into(), ..place.options() };
-    let (channel, _) = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).expect("connect");
-    let runtime = start(&channel, &Listener::start("test").unwrap(), None, &|_| {}, |_| {}).expect("attached to the runtime recorded there");
+    let (channel, _) = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
+    let runtime = start(&channel, &Listener::start("test").unwrap(), &StartOptions { install: true, ..StartOptions::default() }, &|_| {}, |_| {}).expect("attached to the runtime recorded there");
     assert!(runtime.reattached);
     channel.detach();
     assert!(fake.alive());
@@ -255,7 +255,7 @@ fn a_helper_that_ends_with_no_julia_is_a_drop_and_a_detach_is_not() {
     let server = Server::default();
     let transport = place.transport();
     let options = place.options();
-    let (channel, _) = connect(&server, &transport, &options, &Cancel::default(), &|_| {}).expect("connect");
+    let (channel, _) = connect(&server, &transport, &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
     let channel = Arc::new(channel);
     let (heard_tx, heard) = mpsc::channel();
     std::thread::spawn({
@@ -273,7 +273,7 @@ fn a_helper_that_ends_with_no_julia_is_a_drop_and_a_detach_is_not() {
     assert!(matches!(&notice, Some(Notice::Lost(reason)) if reason == "The connection closed unexpectedly."), "{notice:?}");
     assert!(channel.files(files::Request::List { path: "~".into() }).is_err());
 
-    let (channel, _) = connect(&server, &transport, &options, &Cancel::default(), &|_| {}).expect("connect again");
+    let (channel, _) = connect(&server, &transport, &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect again");
     channel.detach();
     assert!(channel.closed().is_none(), "the client let it go");
 }
@@ -294,7 +294,7 @@ fn a_server_without_a_helper_build_is_refused_plainly() {
         Err(no_helper(os, arch))
     };
     let options = Options { helper: &helper, ..place.options() };
-    let err = connect(&Server::default(), &transport, &options, &Cancel::default(), &|_| {}).err().expect("refused");
+    let err = connect(&Server::default(), &transport, &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).err().expect("refused");
     assert_eq!(err, "Endeavor has no runtime helper for plan9 aarch64 servers.");
     assert_eq!(*asked.lock().unwrap(), [("plan9".to_owned(), "aarch64".to_owned())]);
     assert!(!place.installed().exists());
@@ -305,7 +305,7 @@ fn a_helper_that_cannot_be_read_is_named() {
     let place = Place::new("unreadable");
     let missing = |_: &str, _: &str| Ok(PathBuf::from("/no/such/endeavor"));
     let options = Options { helper: &missing, ..place.options() };
-    let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().expect("refused");
+    let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).err().expect("refused");
     assert_eq!(err, "/no/such/endeavor: No such file or directory (os error 2)");
 }
 
@@ -318,7 +318,7 @@ fn cancelling_ends_a_connect_that_waits_on_ssh() {
     let (done_tx, done) = mpsc::channel();
     std::thread::spawn({
         let (cancel, options) = (cancel.clone(), place.options());
-        move || done_tx.send(connect(&Server::default(), &transport, &options, &cancel, &|_| {}).err()).unwrap()
+        move || done_tx.send(connect(&Server::default(), &transport, &options, &cancel, &|_| {}).map_err(|e| e.message).err()).unwrap()
     });
     assert!(done.recv_timeout(Duration::from_millis(500)).is_err(), "it waits");
     cancel.cancel();
@@ -331,7 +331,7 @@ fn a_connect_cancelled_before_it_starts_runs_nothing() {
     let transport = Transport::Shell { env: Vec::new(), ask: Some("sleep 30".into()) };
     let cancel = Cancel::default();
     cancel.cancel();
-    let err = connect(&Server::default(), &transport, &place.options(), &cancel, &|_| {}).err().expect("cancelled");
+    let err = connect(&Server::default(), &transport, &place.options(), &cancel, &|_| {}).map_err(|e| e.message).err().expect("cancelled");
     assert_eq!(err, "Cancelled.");
 }
 
@@ -339,10 +339,10 @@ fn a_connect_cancelled_before_it_starts_runs_nothing() {
 fn a_start_that_fails_leaves_no_helper_behind() {
     let place = Place::new("leak-start");
     let server = Server { julia: Some("/no/such/julia".into()), ..Default::default() };
-    let (channel, _) = connect(&server, &place.transport(), &place.options(), &Cancel::default(), &|_| {}).expect("connect");
+    let (channel, _) = connect(&server, &place.transport(), &place.options(), &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
     assert!(!helper_pids(&place.state).is_empty());
-    let err = start(&channel, &Listener::start("test").unwrap(), None, &|_| {}, |_| {}).expect_err("no Julia there");
-    assert!(!err.is_empty());
+    let err = start(&channel, &Listener::start("test").unwrap(), &StartOptions { install: true, ..StartOptions::default() }, &|_| {}, |_| {}).expect_err("no Julia there");
+    assert!(!err.message().is_empty());
     drop(channel);
     no_helper_left(&place.state);
 }
@@ -358,7 +358,7 @@ fn a_connect_that_fails_after_the_helper_started_leaves_no_helper_behind() {
     std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", frames.display())).unwrap();
     let fake = |_: &str, _: &str| Ok(script.clone());
     let options = Options { helper: &fake, ..place.options() };
-    let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().expect("no hello");
+    let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).err().expect("no hello");
     assert_eq!(err, "no hello for you");
     no_helper_left(&place.state);
 }
@@ -374,7 +374,7 @@ fn a_failed_install_is_reported_as_one_not_as_a_refused_sign_in() {
         return eprintln!("skipped: root can write anywhere");
     }
     let options = Options { root: shut.join("root").display().to_string(), ..place.options() };
-    let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().expect("can't install");
+    let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).err().expect("can't install");
     assert!(err.contains("installing into") && err.contains("failed") && !err.contains("refused the sign-in"), "{err}");
 }
 
@@ -382,7 +382,7 @@ fn a_failed_install_is_reported_as_one_not_as_a_refused_sign_in() {
 fn text_that_is_not_utf8_before_the_bootstrap_line_is_skipped() {
     let place = Place::new("banner");
     let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string())], ask: Some(r"printf 'caf\351 banner\n'".into()) };
-    let (channel, _) = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).expect("connect");
+    let (channel, _) = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
     channel.detach();
 }
 
@@ -390,7 +390,7 @@ fn text_that_is_not_utf8_before_the_bootstrap_line_is_skipped() {
 fn cancelling_after_the_connect_is_over_ends_the_connection_while_it_lasts() {
     let place = Place::new("cancel-late");
     let cancel = Cancel::default();
-    let (channel, _) = connect(&Server::default(), &place.transport(), &place.options(), &cancel, &|_| {}).expect("connect");
+    let (channel, _) = connect(&Server::default(), &place.transport(), &place.options(), &cancel, &|_| {}).map_err(|e| e.message).expect("connect");
     assert!(channel.files(files::Request::List { path: "~".into() }).is_ok());
     cancel.cancel();
     let notice = channel.closed();
@@ -429,7 +429,7 @@ fn a_line_that_is_not_utf8_on_ssh_stderr_does_not_hide_the_reason_after_it() {
     let place = Place::new("stderr-latin1");
     let ask = r"printf 'caf\351 banner\n' >&2; echo 'jc@lab: Permission denied (publickey).' >&2; exit 255";
     let transport = Transport::Shell { env: Vec::new(), ask: Some(ask.into()) };
-    let err = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).err().expect("refused");
+    let err = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).map_err(|e| e.message).err().expect("refused");
     assert!(err.contains("refused the sign-in") && err.contains("ssh-add"), "{err}");
 }
 
@@ -451,7 +451,7 @@ fn without_permission_a_server_that_lacks_the_helper_is_only_looked_at() {
     // Nothing is fetched or read for the helper before the install is allowed.
     let options = Options { allow_install: false, helper: &|_, _| Err("the helper was asked for".into()), ..place.options() };
     let (seen, on) = events();
-    let err = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).err().expect("no connection");
+    let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).err().expect("no connection");
     let needs = err.needs.expect("it says what it needs");
     assert!(!err.retry);
     assert_eq!(needs.folder, place.installed().display().to_string());
@@ -462,7 +462,7 @@ fn without_permission_a_server_that_lacks_the_helper_is_only_looked_at() {
     assert!(!place.root.exists() && !place.home.join(".cache").exists(), "nothing was written on the server: {:?}", tree(&place.home));
     no_helper_left(&place.state);
     // `connect` gives the message alone.
-    let message = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().expect("no connection");
+    let message = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).err().expect("no connection");
     assert_eq!(message, err.message);
 }
 
@@ -472,12 +472,12 @@ fn a_runtime_recorded_and_alive_there_is_reported_without_the_helper() {
     let runtime = FakeRuntime::start(&place.state);
     let pid = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(place.state.join("runtime.json")).unwrap()).unwrap()["pid"].as_u64().unwrap() as u32;
     let options = Options { allow_install: false, ..place.options() };
-    let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    let needs = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
     assert_eq!(needs.running, Some(Running::Process { pid, checked: true }));
     // A record whose process is gone isn't reported.
     drop(runtime);
     wait_gone(pid);
-    let needs = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    let needs = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
     assert_eq!(needs.running, None);
     assert!(!place.root.exists());
 }
@@ -488,7 +488,7 @@ fn a_pid_that_is_not_a_runtime_is_not_reported_and_without_ps_it_is_only_recorde
     // This test's own process is alive, and is not a core.
     std::fs::write(place.state.join("runtime.json"), serde_json::json!({ "launcher": "process", "node": hostname(), "pid": std::process::id(), "token": "t" }).to_string()).unwrap();
     let options = Options { allow_install: false, ..place.options() };
-    let needs = |transport: &Transport| connect_checked(&Server::default(), transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    let needs = |transport: &Transport| connect(&Server::default(), transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
     assert_eq!(needs(&looking(&place, None)).running, None);
     // A shell whose `ps` takes no -p says nothing of the process, which is alive: recorded, not checked.
     let bin = place.home.join("no-ps");
@@ -516,7 +516,7 @@ fn a_slurm_job_recorded_in_the_cluster_folder_is_reported_as_slurm_says() {
     std::fs::write(place.state.join("job.json"), r#"{"job":"4242","summary":"8 CPUs"}"#).unwrap();
     let cluster = Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() };
     let options = Options { allow_install: false, ..place.options() };
-    let needs = |server: &Server, transport: &Transport| connect_checked(server, transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    let needs = |server: &Server, transport: &Transport| connect(server, transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
     assert_eq!(needs(&cluster, &looking(&place, Some("1 4242 7"))).running, Some(Running::Job { id: "4242".into(), listed: true }));
     assert_eq!(needs(&cluster, &looking(&place, Some("1 7"))).running, None, "Slurm doesn't list it any more");
     assert_eq!(needs(&cluster, &looking(&place, None)).running, Some(Running::Job { id: "4242".into(), listed: false }), "no squeue to ask");
@@ -542,7 +542,7 @@ fn the_default_state_folders_are_looked_in_when_none_is_given() {
     env.push(("XDG_STATE_HOME".into(), state_home.display().to_string()));
     let transport = Transport::Shell { env, ask: None };
     let options = Options { allow_install: false, state: String::new(), ..place.options() };
-    let needs = |server: &Server| connect_checked(server, &transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    let needs = |server: &Server| connect(server, &transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
     assert_eq!(needs(&Server::default()).running, Some(Running::Process { pid: core.0.id(), checked: true }));
     assert_eq!(needs(&Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() }).running, Some(Running::Job { id: "99".into(), listed: true }));
 }
@@ -551,7 +551,7 @@ fn the_default_state_folders_are_looked_in_when_none_is_given() {
 fn only_a_complete_helper_of_another_build_makes_it_an_update() {
     let place = Place::new("no-install-older");
     let options = Options { allow_install: false, ..place.options() };
-    let update = || connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap().update;
+    let update = || connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap().update;
     let helper_in = |name: &str, with_runtime: bool| {
         let dir = place.root.join(name);
         std::fs::create_dir_all(dir.join("runtime")).unwrap();
@@ -577,7 +577,7 @@ fn only_a_complete_helper_of_another_build_makes_it_an_update() {
 fn with_permission_it_installs_as_before_and_a_helper_already_there_needs_none() {
     let place = Place::new("install-allowed");
     let (seen, on) = events();
-    let (channel, _) = connect_checked(&Server::default(), &place.transport(), &place.options(), &Cancel::default(), &on).expect("connects");
+    let (channel, _) = connect(&Server::default(), &place.transport(), &place.options(), &Cancel::default(), &on).expect("connects");
     assert!(seen.lock().unwrap().contains(&Event::Helper { installed: true }));
     assert!(place.installed().join("endeavor").exists());
     channel.detach();
@@ -585,7 +585,7 @@ fn with_permission_it_installs_as_before_and_a_helper_already_there_needs_none()
     // Without permission, with the helper there: it connects.
     let (seen, on) = events();
     let options = Options { allow_install: false, ..place.options() };
-    let (channel, _) = connect_checked(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).expect("connects");
+    let (channel, _) = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).expect("connects");
     assert!(seen.lock().unwrap().contains(&Event::Helper { installed: false }));
     channel.detach();
     no_helper_left(&place.state);
@@ -603,7 +603,7 @@ fn the_helper_gets_this_builds_name_after_the_probe_found_a_job() {
     let options = Options { helper: &helper, ..place.options() };
     let cluster = Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() };
     // The fake helper says nothing, so the connect fails; what matters is how it was started.
-    let _ = connect(&cluster, &looking(&place, Some("4242")), &options, &Cancel::default(), &|_| {});
+    let _ = connect(&cluster, &looking(&place, Some("4242")), &options, &Cancel::default(), &|_| {}).map_err(|e| e.message);
     let args: Vec<String> = std::fs::read_to_string(&record).expect("the installed helper was run").lines().map(str::to_owned).collect();
     let at = args.iter().position(|a| a == "--build").expect("--build is passed");
     assert_eq!(args[at + 1], endeavor_mcp::embedded::BUILD_VERSION, "{args:?}");
@@ -617,7 +617,7 @@ fn a_folder_with_a_space_or_an_escape_in_it_is_reported_whole() {
     for name in ["a folder with spaces", r"back\cslash", r"new\nline-like", "dollar$HOME"] {
         let root = place.home.join(name);
         let options = Options { allow_install: false, root: root.display().to_string(), ..place.options() };
-        let needs = connect_checked(&Server::default(), &looking(&place, None), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap_or_else(|| panic!("{name}: it didn't say what it needs"));
+        let needs = connect(&Server::default(), &looking(&place, None), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap_or_else(|| panic!("{name}: it didn't say what it needs"));
         assert_eq!(needs.folder, root.join(endeavor_mcp::embedded::BUILD_VERSION).display().to_string(), "{name}");
     }
 }
@@ -628,13 +628,13 @@ fn a_setup_line_that_cannot_be_read_ends_the_connect_with_a_message() {
     let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string())], ask: Some("echo ENDEAVOR Linux x86_64 need nonsense first /x".into()) };
     let (done, waited) = mpsc::channel();
     let options = Options { allow_install: false, ..place.options() };
-    std::thread::spawn(move || done.send(connect(&Server::default(), &transport, &options, &Cancel::default(), &|_| {}).err()).unwrap());
+    std::thread::spawn(move || done.send(connect(&Server::default(), &transport, &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).err()).unwrap());
     let err = waited.recv_timeout(Duration::from_secs(10)).expect("it doesn't wait for more").expect("an error");
     assert!(err.contains("answered with something Endeavor doesn't understand") && err.contains("need nonsense first /x"), "{err}");
 }
 
 #[test]
-fn a_start_that_forbids_the_download_says_no_julia_and_one_that_allows_it_goes_on() {
+fn a_start_that_may_not_install_lists_what_it_needs_and_one_that_may_goes_on() {
     let place = Place::new("no-julia");
     let transport = looking(&place, None);
     let find = Command::new("/bin/sh").args(["-lc", "command -v julia"]).env("HOME", &place.home).env("PATH", server_path(&place, None)).output().unwrap();
@@ -642,14 +642,19 @@ fn a_start_that_forbids_the_download_says_no_julia_and_one_that_allows_it_goes_o
         eprintln!("skipped: a login shell finds julia at {}", String::from_utf8_lossy(&find.stdout).trim());
         return;
     }
-    let (channel, _) = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).expect("connect");
+    let (channel, _) = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
     let listener = Listener::start("test").unwrap();
-    let err = start_with(&channel, &listener, None, false, &|_| {}, |_| {}).expect_err("no Julia there");
-    let StartError::NoJulia(offer) = err else { panic!("{err:?}") };
-    assert!(offer.contains("Endeavor can download its own copy") && offer.contains("MB") && offer.contains(&place.home.display().to_string()), "{offer}");
+    let err = start(&channel, &listener, &StartOptions::default(), &|_| {}, |_| {}).expect_err("no Julia there");
+    let StartError::NeedsInstall(items) = err.clone() else { panic!("{err:?}") };
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].kind, wire::KIND_RUNTIME);
+    assert!(items[0].name.starts_with("Julia ") && items[0].size_mb.is_some_and(|mb| mb > 100), "{items:?}");
+    assert!(items[0].place.as_deref().is_some_and(|place_| place_.starts_with(&place.home.display().to_string())), "{items:?}");
+    let said = err.message();
+    assert!(said.contains(&items[0].name) && said.contains("MB"), "{said}");
     assert!(!place.home.join(".cache").exists(), "nothing was downloaded");
     // The same helper, allowed to download, tries (there is neither curl nor wget here).
-    let err = start_with(&channel, &listener, None, true, &|_| {}, |_| {}).expect_err("no download tool");
+    let err = start(&channel, &listener, &StartOptions { install: true, ..StartOptions::default() }, &|_| {}, |_| {}).expect_err("no download tool");
     assert!(matches!(&err, StartError::Failed(message) if message.contains("neither curl nor wget")), "{err:?}");
     channel.detach();
     no_helper_left(&place.state);
