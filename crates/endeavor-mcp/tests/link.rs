@@ -552,6 +552,25 @@ fn a_start_asked_for_while_connecting_does_not_make_another_attempt() {
 }
 
 #[test]
+fn a_connection_that_cannot_come_back_tells_the_listener() {
+    // The sign-in is refused once `refuse` exists: that is not a failure that trying again could fix.
+    let place = Place::with("given-up", &[("ENDEAVOR_LINK_ASK", "[ ! -e {dir}/refuse ] || { echo 'Permission denied (publickey)' >&2; exit 255; }")]);
+    let link = place.ensure();
+    link.start(None, false, CALL_WAIT).unwrap();
+    let runtime = ready(&link).runtime.unwrap();
+    std::fs::write(place.dir.join("refuse"), "").unwrap();
+    for pid in place.helpers() {
+        // SAFETY: plain syscall, on the helper this test's link started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    let status = wait_status(&link, "failed", |s| s.state == State::Failed);
+    assert!(status.error.is_some_and(|e| e.contains("refused the sign-in")));
+    let said = tool(runtime.port, &runtime.token, "list_notebooks", None);
+    assert!(said.as_str().is_some_and(|text| text.contains("Call use_machine") && !text.contains("by itself")), "{said}");
+    assert!(link.status(CALL_WAIT).is_ok(), "the link stays alive and answers");
+}
+
+#[test]
 fn an_idle_time_that_is_no_time_is_ignored() {
     for (name, value) in [("idle-negative", "-5"), ("idle-nan", "NaN"), ("idle-inf", "inf"), ("idle-zero", "0"), ("idle-huge", "1e300")] {
         let place = Place::with(name, &[("ENDEAVOR_LINK_IDLE_SECS", value)]);

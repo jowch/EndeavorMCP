@@ -359,19 +359,19 @@ impl Bridge {
     fn call_tool(&self, params: &Value, call: &Call) -> Value {
         let caller = call.caller;
         let text = |result: &Value| json!({ "content": [{ "type": "text", "text": to_json(result) }], "isError": false });
-        let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
         // Whether a notebook-tool error is worth pointing at the guide: only an
         // agent without it to begin with, and only for a call it could retry
         // differently, not a host-tool mistake (its own tools, not these) or a
         // refusal that already says exactly what to do.
         let help = !caller.has_skills;
-        if !arguments.is_object() {
-            return tool_error("ArgumentError: invalid_argument::arguments must be an object", help);
-        }
+        let arguments = match call_arguments(params, help) {
+            Ok(arguments) => arguments,
+            Err(result) => return result,
+        };
         let name = match params.get("name") {
             None => "",
             Some(Value::String(name)) => name.as_str(),
-            Some(other) => return tool_error(&format!("ArgumentError: unknown_tool::Unknown tool: '{}'", julia_string(other)), help),
+            Some(other) => return unknown_tool_result(&julia_string(other), help),
         };
         self.notebooks.note_activity(&arguments);
         if let Some(refusal) = self.refusal(caller, name, &arguments) {
@@ -485,9 +485,7 @@ impl Bridge {
     /// Why a session may not call `tool`, as the error Julia raised for it.
     fn refusal(&self, caller: &Caller, tool: &str, arguments: &Value) -> Option<String> {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
-            return Some(format!(
-                "ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on the user's computer: use your own file and shell tools."
-            ));
+            return Some(host_tool_refusal(tool));
         }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
         if plan && (WRITE_TOOLS.contains(&tool) || runs_code(tool, arguments)) {
@@ -498,6 +496,36 @@ impl Bridge {
         }
         None
     }
+}
+
+/// Why a session on the user's computer may not call host tool `tool`, as the error Julia raised for it.
+pub(crate) fn host_tool_refusal(tool: &str) -> String {
+    format!("ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on the user's computer: use your own file and shell tools.")
+}
+
+/// The arguments of a `tools/call` (none is `{}`), or the failed result for ones that aren't an object.
+pub(crate) fn call_arguments(params: &Value, help: bool) -> Result<Value, Value> {
+    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    if arguments.is_object() { Ok(arguments) } else { Err(tool_error("ArgumentError: invalid_argument::arguments must be an object", help)) }
+}
+
+fn unknown_tool_result(name: &str, help: bool) -> Value {
+    tool_error(&format!("ArgumentError: unknown_tool::Unknown tool: '{name}'"), help)
+}
+
+/// The failed result a runtime gives a `tools/call` whose tool this build doesn't have; None if it has it.
+pub(crate) fn unknown_tool(params: &Value, help: bool) -> Option<Value> {
+    match params.get("name") {
+        Some(Value::String(name)) if is_tool(name) => None,
+        Some(Value::String(name)) => Some(unknown_tool_result(name, help)),
+        Some(other) => Some(unknown_tool_result(&julia_string(other), help)),
+        None => Some(unknown_tool_result("", help)),
+    }
+}
+
+/// The JSON-RPC error for a request whose `method` isn't one this server answers.
+pub(crate) fn method_not_found(id: &Value, method: &str) -> String {
+    to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }))
 }
 
 /// One tool call: who made it, its JSON-RPC id, the id the agent's client
@@ -690,7 +718,7 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
             ok(json!({ "tools": tools }))
         }
         "tools/call" => ok(call(&message["params"])),
-        _ => Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }))),
+        _ => Some(method_not_found(id, &method)),
     }
 }
 

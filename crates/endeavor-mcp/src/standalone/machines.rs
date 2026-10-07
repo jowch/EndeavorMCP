@@ -20,6 +20,11 @@ use crate::client::{Cluster, Running, Server, ssh_config_hosts};
 use crate::link::{self, Link, State};
 use crate::mcp::{browser_link, to_json, tool_error};
 
+/// A tool call's result that is `text`.
+pub(super) fn text_result(text: &str) -> Value {
+    json!({ "content": [{ "type": "text", "text": text }], "isError": false })
+}
+
 /// What `use_machine` and `stop_machine` call this computer.
 pub(super) const LOCAL: &str = "local";
 
@@ -786,7 +791,9 @@ impl Relay {
     /// Answer a call to one of the machine tools.
     pub(super) fn machine_tool(self: &Arc<Self>, message: &Value, tool: &str) {
         let deadline = Deadline::after(start_wait());
-        let Some(id) = message.get("id").filter(|id| !id.is_null()).cloned() else { return };
+        if message.get("id").is_none_or(Value::is_null) {
+            return;
+        }
         let arguments = message["params"].get("arguments").filter(|a| a.is_object()).cloned().unwrap_or_else(|| json!({}));
         let result = match tool {
             "list_machines" => self.list_machines(),
@@ -795,11 +802,55 @@ impl Relay {
             _ => self.stop_machine(&arguments, deadline),
         };
         let result = match result {
-            Ok(result) => json!({ "content": [{ "type": "text", "text": to_json(&result) }], "isError": false }),
+            Ok(result) => text_result(&to_json(&result)),
             Err(e) => tool_error(&e, false),
         };
-        let reply = to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-        self.write(&self.decorate(message, Some(tool), reply));
+        self.answer_call(message, Some(tool), result);
+    }
+
+    /// Answer request `message` with `result`, a tool call's result.
+    pub(super) fn answer_call(&self, message: &Value, tool: Option<&str>, result: Value) {
+        let Some(id) = message.get("id").filter(|id| !id.is_null()) else { return };
+        self.write(&self.decorate(message, tool, to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))));
+    }
+
+    /// What `tool` (`pluto_session_status` or `list_notebooks`) answers when the session is on this
+    /// computer and its runtime isn't up yet: it uses one that is running, as a start would, and
+    /// starts none. None when the call is to go to the runtime (or the machine) as usual; else
+    /// the answer, or why there is none.
+    pub(super) fn without_start(self: &Arc<Self>, tool: &str) -> Option<Result<String, String>> {
+        let idle = || matches!(*self.target.lock().unwrap(), Target::Local { stopped: false }) && matches!(*self.status.lock().unwrap(), Local::Idle);
+        if !idle() {
+            return None;
+        }
+        // The same lock as `use_machine` and `stop_machine`: the session doesn't move, and the
+        // runtime isn't stopped, between the check and the answer.
+        let _one = match self.lock_ops(Deadline::after(start_wait())) {
+            Ok(one) => one,
+            Err(why) => return Some(Err(why)),
+        };
+        if !idle() {
+            return None;
+        }
+        match super::attach(&self.options) {
+            Ok(Some(up)) => {
+                self.told(&up);
+                let mut status = self.status.lock().unwrap();
+                if matches!(*status, Local::Idle) {
+                    *status = Local::Ready { port: up.port, token: up.state.token };
+                }
+                drop(status);
+                self.changed.notify_all();
+                None
+            }
+            Ok(None) if tool == "list_notebooks" => Some(Ok("[]".to_owned())),
+            Ok(None) => Some(Ok(to_json(&json!({
+                "pluto": "not running",
+                "notebooks": [],
+                "message": "Julia on this computer isn't running. It starts at the first notebook tool call, which then takes a few minutes the first time.",
+            })))),
+            Err(e) => Some(Err(format!("Endeavor's Julia couldn't start: {e}"))),
+        }
     }
 
     /// The one machine tool call that runs at a time (they switch, start and stop things), waited
@@ -837,7 +888,7 @@ impl Relay {
             Target::Local { stopped } => (*stopped, true),
             Target::Machine(_) => (false, false),
         };
-        let running = crate::read_state(&self.options.state_dir).is_some_and(|s| crate::pid_alive(s.pid, s.started));
+        let running = super::running_here(&self.options.state_dir).is_some();
         let local_state = match (stopped, running) {
             (true, _) => "stopped from this session",
             (false, true) => "running",
@@ -954,15 +1005,16 @@ impl Relay {
                 display_name(&record)
             ));
         }
-        // The link asks Slurm for the partitions after it connects, so they may come a moment later.
-        while cluster && status.hello.as_ref().is_some_and(|h| h.slurm && h.partitions.is_none()) && !deadline.spent() {
+        // The link asks Slurm for the partitions after it connects, so they may come a moment later. They are reported, so they are waited for, except when the user said it is no cluster.
+        let listed = cluster || slurm != Some(false);
+        while listed && status.hello.as_ref().is_some_and(|h| h.slurm && h.partitions.is_none()) && !deadline.spent() {
             std::thread::sleep(POLL);
             if !deadline.spent() {
                 status = deadline.status(&link)?;
             }
         }
         let hello = status.hello.clone().unwrap_or_default();
-        if cluster && hello.slurm && hello.partitions.is_none() && record.cluster.as_ref().is_none_or(|c| c.partitions.is_empty()) {
+        if listed && hello.slurm && hello.partitions.is_none() && record.cluster.as_ref().is_none_or(|c| c.partitions.is_empty()) {
             return Ok(json!({
                 "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": false,
                 "step": status.step,
@@ -1312,8 +1364,7 @@ impl Relay {
 
     fn stop_local(&self, force: bool) -> Result<Value, String> {
         let dir = &self.options.state_dir;
-        let running = crate::read_state(dir).filter(|s| s.node == crate::hostname() && crate::pid_alive(s.pid, s.started));
-        let Some(state) = running else {
+        let Some(state) = super::running_here(dir) else {
             return Ok(json!({ "machine": LOCAL, "stopped": false, "message": "Julia isn't running on this computer, so there is nothing to stop." }));
         };
         if !force && let Some(port) = state.port {

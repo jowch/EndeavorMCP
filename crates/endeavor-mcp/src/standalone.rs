@@ -385,15 +385,15 @@ struct Up {
     started: Option<Runtime>,
 }
 
-/// The runtime running from the state folder, or a new one, once it answers.
-/// `progress` hears the start's log; `cancelled` ends a start early.
-fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Up, String> {
-    let dir = &options.state_dir;
-    crate::make_state_dir(dir)?;
-    // One start at a time: the stdio form runs once per agent session.
-    let _starting = start_lock(dir)?;
-    let mut args = Args {
-        state_dir: dir.clone(),
+/// The runtime recorded in `dir` when it runs on this computer and its process is alive,
+/// whether or not it answers.
+fn running_here(dir: &Path) -> Option<State> {
+    crate::read_state(dir).filter(|s| s.node == crate::hostname() && crate::pid_alive(s.pid, s.started))
+}
+
+fn runtime_args(options: &Options, exit_idle: bool) -> Args {
+    Args {
+        state_dir: options.state_dir.clone(),
         julia: options.julia.clone(),
         runtime: PathBuf::new(),
         depot: options.depot.clone(),
@@ -403,10 +403,26 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         build: Some(embedded::BUILD_VERSION.into()),
         exit_idle,
         core_env: core_env(options, exit_idle),
-    };
-    if let Some(state) = crate::existing(&args)? {
-        let port = state.port.ok_or("The Julia running here was started by an older version of Endeavor. Stop it with `endeavor stop`, then try again.")?;
-        return Ok(Up { state, port, started: None });
+    }
+}
+
+/// The runtime running from the state folder, if it answers here.
+fn reuse(args: &Args) -> Result<Option<Up>, String> {
+    let Some(state) = crate::existing(args)? else { return Ok(None) };
+    let port = state.port.ok_or("The Julia running here was started by an older version of Endeavor. Stop it with `endeavor stop`, then try again.")?;
+    Ok(Some(Up { state, port, started: None }))
+}
+
+/// The runtime running from the state folder, or a new one, once it answers.
+/// `progress` hears the start's log; `cancelled` ends a start early.
+fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Up, String> {
+    let dir = &options.state_dir;
+    crate::make_state_dir(dir)?;
+    // One start at a time: the stdio form runs once per agent session.
+    let _starting = start_lock(dir)?;
+    let mut args = runtime_args(options, exit_idle);
+    if let Some(up) = reuse(&args)? {
+        return Ok(up);
     }
     crate::stopped::clear(dir);
     args.runtime = unpack_runtime(&options.cache)?;
@@ -423,6 +439,39 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
             Err(e)
         }
     }
+}
+
+/// How long `attach` waits for another process that holds the start lock.
+const ATTACH_LOCK_WAIT: Duration = Duration::from_secs(3);
+
+/// The runtime already running from the state folder, as `start_or_reuse` finds it, and none is
+/// started: None when nothing is recorded or the recorded process is gone. A record that can't be
+/// used (another node, no port, a process that doesn't answer) is an error.
+fn attach(options: &Options) -> Result<Option<Up>, String> {
+    let dir = &options.state_dir;
+    if crate::read_state(dir).is_none() {
+        return Ok(None);
+    }
+    let pause = || {
+        std::thread::sleep(Duration::from_millis(100));
+        Ok::<(), std::convert::Infallible>(())
+    };
+    let _held = wait_for_start_lock(dir, ATTACH_LOCK_WAIT, pause).map_err(|wait| match wait {
+        Wait::Failed(message) => message,
+        Wait::TimedOut => format!("Another process is still starting or reusing Julia in {}. Try again shortly.", dir.display()),
+        Wait::Interrupted(never) => match never {},
+    })?;
+    let args = runtime_args(options, true);
+    let Some(state) = crate::read_state(dir) else { return Ok(None) };
+    if state.node == crate::hostname() {
+        if !crate::pid_alive(state.pid, state.started) {
+            return Ok(None);
+        }
+        if !crate::alive(&state) {
+            return Err(format!("Julia on this computer (pid {}) is running but isn't answering. Try again in a moment.", state.pid));
+        }
+    }
+    reuse(&args)
 }
 
 /// The core's environment for a standalone runtime (see `core::main`).
@@ -930,11 +979,7 @@ impl Relay {
             };
             let status = match start_or_reuse(&relay.options, true, &progress, &|| false) {
                 Ok(up) => {
-                    relay.tell_folder(up.port, &up.state.token);
-                    eprintln!("Endeavor's notebooks: http://localhost:{}/?token={}", up.port, up.state.token);
-                    if let Some(message) = up.started.is_none().then(|| other_build(&relay.options.state_dir)).flatten() {
-                        eprintln!("endeavor: {message}");
-                    }
+                    relay.told(&up);
                     Status::Ready { port: up.port, token: up.state.token }
                 }
                 Err(e) => {
@@ -945,6 +990,16 @@ impl Relay {
             *relay.status.lock().unwrap() = status;
             relay.changed.notify_all();
         });
+    }
+
+    /// Before the session uses `up`: give it the session's folder, and tell the user where the
+    /// notebooks are and whether another build started it.
+    fn told(&self, up: &Up) {
+        self.tell_folder(up.port, &up.state.token);
+        eprintln!("Endeavor's notebooks: http://localhost:{}/?token={}", up.port, up.state.token);
+        if let Some(message) = up.started.is_none().then(|| other_build(&self.options.state_dir)).flatten() {
+            eprintln!("endeavor: {message}");
+        }
     }
 
     /// Tell the runtime something about this session, as the app does for its
@@ -1002,37 +1057,6 @@ impl Relay {
             },
         };
         Some((port, token, session))
-    }
-
-    /// What `tool` (`pluto_session_status` or `list_notebooks`) says when the session is on this
-    /// computer and no runtime is running here: it starts none. A runtime that is running is
-    /// found and used, so the answer is never wrong for not having started one.
-    fn without_runtime(self: &Arc<Self>, tool: &str) -> Option<String> {
-        if !matches!(*self.target.lock().unwrap(), machines::Target::Local { stopped: false }) {
-            return None;
-        }
-        if !matches!(*self.status.lock().unwrap(), Status::Idle) {
-            return None;
-        }
-        let state = crate::read_state(&self.options.state_dir).filter(|s| s.node == crate::hostname() && s.port.is_some() && crate::alive(s));
-        if let Some(state) = state {
-            let port = state.port?;
-            let mut status = self.status.lock().unwrap();
-            if matches!(*status, Status::Idle) {
-                *status = Status::Ready { port, token: state.token.clone() };
-                drop(status);
-                self.tell_folder(port, &state.token);
-            }
-            return None;
-        }
-        Some(match tool {
-            "list_notebooks" => "[]".to_owned(),
-            _ => to_json(&json!({
-                "pluto": "not running",
-                "notebooks": [],
-                "message": "Julia on this computer isn't running. It starts at the first notebook tool call, which then takes a few minutes the first time.",
-            })),
-        })
     }
 
     /// The runtime's port and token, waiting up to `start_wait()` for a start;
@@ -1103,21 +1127,34 @@ impl Relay {
         if let Some(tool) = tool.as_deref().filter(|tool| crate::mcp::MACHINE_NAMES.contains(tool)) {
             return self.machine_tool(&message, tool);
         }
-        if let (Some(id), Some(tool)) = (&id, tool.as_deref())
-            && tool == crate::guide::TOOL
-        {
-            let arguments = message["params"].get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let result = match crate::guide::read(&arguments) {
-                Ok(guide) => json!({ "content": [{ "type": "text", "text": guide }], "isError": false }),
-                Err(error) => crate::mcp::tool_error(&error, false),
-            };
-            return self.write(&self.decorate(&message, Some(tool), to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))));
+        let help = !self.options.skills_plugin;
+        let local = matches!(*self.target.lock().unwrap(), machines::Target::Local { .. });
+        // On this computer the front answers what needs no runtime.
+        if local && let Some(tool) = tool.as_deref().filter(|tool| *tool == crate::guide::TOOL || crate::host_tools::NAMES.contains(tool)) {
+            if id.is_none() {
+                return;
+            }
+            let result = crate::mcp::call_arguments(&message["params"], help).and_then(|arguments| {
+                if tool == crate::guide::TOOL {
+                    crate::guide::read(&arguments).map(|guide| machines::text_result(&guide)).map_err(|error| crate::mcp::tool_error(&error, false))
+                } else {
+                    Err(crate::mcp::tool_error(&crate::mcp::host_tool_refusal(tool), false))
+                }
+            });
+            return self.answer_call(&message, Some(tool), result.unwrap_or_else(|failed| failed));
         }
-        if let (Some(id), Some(tool @ ("pluto_session_status" | "list_notebooks"))) = (&id, tool.as_deref())
-            && let Some(text) = self.without_runtime(tool)
-        {
-            let result = json!({ "content": [{ "type": "text", "text": text }], "isError": false });
-            return self.write(&self.decorate(&message, Some(tool), to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))));
+        // Only a call of a tool this build has starts the runtime here.
+        if local && !matches!(*self.status.lock().unwrap(), Status::Ready { .. }) {
+            let Some(id) = &id else { return };
+            let Some(tool) = tool.as_deref() else {
+                if let Some(method) = message["method"].as_str() {
+                    self.write(&self.decorate(&message, None, crate::mcp::method_not_found(id, method)));
+                }
+                return;
+            };
+            if let Some(result) = crate::mcp::call_arguments(&message["params"], help).err().or_else(|| crate::mcp::unknown_tool(&message["params"], help)) {
+                return self.answer_call(&message, Some(tool), result);
+            }
         }
         let failed = |why: String| {
             if let Some(id) = &id {
@@ -1125,7 +1162,15 @@ impl Relay {
             }
         };
         let sink = |reply: String| self.write(&self.decorate(&message, tool.as_deref(), reply));
+        // These two use a runtime that is running, and start none.
+        let no_start = id.is_some() && matches!(tool.as_deref(), Some("pluto_session_status" | "list_notebooks"));
         for attempt in 0..2 {
+            if no_start && let Some(answer) = self.without_start(tool.as_deref().unwrap_or_default()) {
+                return match answer {
+                    Ok(text) => self.answer_call(&message, tool.as_deref(), machines::text_result(&text)),
+                    Err(why) => failed(why),
+                };
+            }
             let route = match self.route(tool.as_deref() != Some("pluto_session_status")) {
                 Ok(route) => route,
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),

@@ -116,18 +116,27 @@ long-running core (the helper's `runtime.json` and lock already do this), so
 notebooks keep running between client sessions.
 
 The stdio form starts the local runtime at the first call that needs it, not
-at launch (`Relay::runtime` takes `Status::Idle` to a start). A session on this
-computer needs it for: every notebook tool, `keep_notebook_alive`, the host
-tools (which refuse there, but only the runtime says so), and `use_machine` with
+at launch (`Relay::runtime` takes `Status::Idle` to a start). Only a `tools/call`
+of a tool this build has starts it. A session on this computer needs it for:
+every notebook tool and `keep_notebook_alive`, and `use_machine` with
 `"local"`. It does not for `initialize`, `ping`, `tools/list`, `notebook_guide`
-(the front answers it from the guide it embeds), `list_machines`, `add_machine`,
-`stop_machine`, or a session whose project is on a machine. `list_notebooks` and
-`pluto_session_status` use a runtime already running here (found from
-`runtime.json` and the process, and told the session's folder) and otherwise
-answer without starting one: `[]`, and `{pluto: "not running", notebooks: [],
-message}`. The first call that starts it waits as a start at launch did: up to
-`start_wait()` (45 s), then a "still starting, try again" failure, and the start
-goes on.
+(the front answers it from the guide it embeds, with the runtime's check that
+`arguments` is an object; on a machine the call goes to that machine's runtime),
+the host tools (the front refuses them for a session on this computer, with the
+runtime's text), `list_machines`, `add_machine`, `stop_machine`, or a session
+whose project is on a machine. While no runtime is `Ready`, a notification is
+dropped, a request that is not a `tools/call` gets JSON-RPC -32601, and a
+`tools/call` of an unknown tool gets the runtime's `unknown_tool` result; with a
+runtime up all of these are forwarded as before. `list_notebooks` and
+`pluto_session_status` attach to a runtime already running here as a start does
+(`attach`: the same checks and messages, under the start lock for at most 3 s
+and the machine tools' `ops` lock, the session's folder told before the runtime
+is published, the notebooks line printed) and otherwise answer without starting
+one: `[]`, and `{pluto: "not running", notebooks: [], message}`. A record that
+can't be used (another node, no port, a process that doesn't answer) is an
+error, not "not running". After a failed call they take this path again. The
+first call that starts it waits as a start at launch did: up to `start_wait()`
+(45 s), then a "still starting, try again" failure, and the start goes on.
 
 ## Session identity
 

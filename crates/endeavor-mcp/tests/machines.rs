@@ -197,16 +197,24 @@ fn end_leftovers(dir: &Path) {
             }
         }
     }
+    // The recorded runtimes, and any still starting (no record yet): the cores whose command line is `core --state-dir` and this test's own folder.
+    let mut groups: Vec<i32> = ["runtime-state", "local-state"].iter().filter_map(|state| recorded_pid(&dir.join(state))).collect();
     for state in ["runtime-state", "local-state"] {
-        if let Some(pid) = recorded_pid(&dir.join(state)) {
-            // SAFETY: plain syscall, on a runtime this test started.
-            unsafe { libc::kill(-pid, libc::SIGTERM) };
+        groups.extend(pids(&format!("core --state-dir {} ", dir.join(state).display())));
+    }
+    groups.sort();
+    groups.dedup();
+    for &pid in &groups {
+        // SAFETY: plain syscalls, on a core this test started and the processes in its group.
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+            libc::kill(pid, libc::SIGTERM);
         }
     }
-    // A runtime that is still starting has no record yet: find its core by this test's own folder.
-    for pid in pids(&dir.join("local-state").display().to_string()) {
-        // SAFETY: plain syscall, on a process whose command line names this test's folder.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+    // Gone before the next test uses the folder: a dying core could write into it.
+    let limit = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < limit && groups.iter().any(|&pid| pid_alive(pid) || unsafe { libc::kill(-pid, 0) } == 0) {
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -300,6 +308,7 @@ fn the_tool_list_has_the_host_tools_and_the_four_machine_tools() {
     // On this computer the host tools refuse, as the runtime says.
     let (failed, refused) = front.call("list_folder", json!({ "path": "/" }));
     assert!(failed && refused["message"].as_str().unwrap().contains("only for sessions on a server"), "{refused}");
+    assert!(place_none(&place), "the refusal started no runtime");
 }
 
 #[test]
@@ -1049,6 +1058,97 @@ fn the_first_notebook_call_starts_the_local_runtime_and_a_second_front_finds_it(
     assert_eq!(place.local_runtime(), Some(runtime));
     assert_eq!(second.ok("list_machines", json!({}))["local"]["state"], "running");
     second.finish();
+    front.finish();
+}
+
+#[test]
+fn only_a_call_of_a_known_tool_starts_the_local_runtime() {
+    let place = Place::new("lazy-known");
+    let mut front = place.front();
+    front.initialize();
+    front.send(json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 1 } }));
+    front.send(json!({ "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
+    for method in ["resources/list", "prompts/list", "logging/setLevel"] {
+        let reply = front.request(method, json!({}));
+        assert_eq!(reply["error"]["code"], -32601, "{method}: {reply}");
+    }
+    let (failed, said) = front.call("no_such_tool", json!({}));
+    assert!(failed && said["error"] == "unknown_tool" && said["message"].as_str().unwrap().contains("Unknown tool: 'no_such_tool'"), "{said}");
+    let reply = front.request("tools/call", json!({ "name": "notebook_guide", "arguments": null }));
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("arguments must be an object"), "{reply}");
+    let guide = front.request("tools/call", json!({ "name": "notebook_guide", "arguments": {} }));
+    assert_eq!(guide["result"]["isError"], false, "{guide}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(place_none(&place), "{:?}", core_of(&place));
+    front.finish();
+}
+
+#[test]
+fn a_status_query_after_the_runtime_it_used_has_exited_starts_none() {
+    let place = Place::new("lazy-exited");
+    let path = local_notebook(&place, "gone.jl");
+    let mut first = place.front();
+    first.initialize();
+    first.ok("open_notebook", json!({ "path": path }));
+    let runtime = place.local_runtime().expect("started by the call");
+    let mut second = place.front();
+    second.initialize();
+    assert!(second.ok("pluto_session_status", json!({})).get("browser_url").is_some(), "it uses the runtime that is running");
+    // SAFETY: plain syscall, on the core this test's front started.
+    unsafe { libc::kill(-runtime, libc::SIGTERM) };
+    wait_for("the runtime to end", || core_of(&place).is_empty() && !pid_alive(runtime));
+    let status = second.ok("pluto_session_status", json!({}));
+    assert_eq!(status["pluto"], "not running", "{status}");
+    assert_eq!(second.ok("list_notebooks", json!({})), json!([]));
+    assert!(core_of(&place).is_empty(), "no runtime was started for it");
+    second.finish();
+    first.finish();
+}
+
+#[test]
+fn a_front_that_attaches_through_list_notebooks_says_where_the_notebooks_are() {
+    let place = Place::new("lazy-attach");
+    let path = local_notebook(&place, "attach.jl");
+    let mut first = place.front();
+    first.initialize();
+    first.ok("open_notebook", json!({ "path": path }));
+    let mut second = place.front();
+    second.initialize();
+    assert_eq!(second.ok("list_notebooks", json!({}))[0]["path"], path);
+    wait_for("the notebooks line", || second.said().iter().any(|line| line.starts_with("Endeavor's notebooks: http://localhost:")));
+    second.finish();
+    first.finish();
+}
+
+#[test]
+fn a_recorded_runtime_that_cannot_be_used_is_an_error_for_the_two_queries_and_starts_none() {
+    let place = Place::new("lazy-unusable");
+    let mut front = place.front();
+    front.initialize();
+    let record = |node: &str, pid: u32, port: Option<u16>| {
+        let mut record = json!({ "launcher": "process", "node": node, "pid": pid, "token": "t" });
+        if let Some(port) = port {
+            record["port"] = port.into();
+        }
+        std::fs::write(place.local_state.join("runtime.json"), record.to_string()).unwrap();
+    };
+    let mut sleeper = Command::new("sleep").arg("600").spawn().unwrap();
+    for tool in ["pluto_session_status", "list_notebooks"] {
+        record("another-node", sleeper.id(), Some(1));
+        let (failed, said) = front.call(tool, json!({}));
+        assert!(failed && text(&said).contains("running on another-node"), "{tool}: {said}");
+        record(&this_host(), sleeper.id(), None);
+        let (failed, said) = front.call(tool, json!({}));
+        assert!(failed && text(&said).contains("older version"), "{tool}: {said}");
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    record(&this_host(), sleeper.id(), Some(port));
+    let (failed, said) = front.call("pluto_session_status", json!({}));
+    assert!(failed && text(&said).contains("isn't answering"), "{said}");
+    assert!(core_of(&place).is_empty(), "no runtime was started");
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
     front.finish();
 }
 

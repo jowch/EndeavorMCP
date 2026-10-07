@@ -141,9 +141,6 @@ pub fn main(argv: &[String]) -> ! {
             if let Some(hours) = idle_hours {
                 served.bridge.notebooks.set_idle_limit(hours);
             }
-            if let Some(standalone) = &served.bridge.standalone {
-                set_pluto_folder(ready.bridge_port, &served.bridge.token, &standalone.folder);
-            }
             if exit_idle {
                 exit_when_idle(served.clone(), ready.bridge_port);
             }
@@ -214,6 +211,10 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge)
     };
     if !bridge_call(ready.bridge_port, "/call", token, "ping").is_ok_and(|status| status == 200) {
         return None;
+    }
+    // Before `runtime.json` says the runtime is ready: whoever finds it then may rely on the folder.
+    if let Some(standalone) = &bridge.standalone {
+        set_pluto_folder(ready.bridge_port, token, &standalone.folder);
     }
     // With the pid, what tells the core from a later process given its pid.
     #[cfg(windows)]
