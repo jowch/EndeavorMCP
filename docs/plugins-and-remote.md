@@ -36,7 +36,7 @@ the helper or fetches one, the front does that after the revision._
 
 ## The revision (decided 2026-10-07, planned)
 
-Steps 1 and 2 of the order of work below are built; nothing else in this section is. It was decided after three review rounds
+Steps 1 and 2 of the order of work below are built, and the front's half of step 3 (below); the rest of this section is not. It was decided after three review rounds
 found most of their faults in two places: between the front and the link,
 and where the front starts this computer's runtime with code of its own
 beside the helper's.
@@ -157,6 +157,18 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 3. The front holds its connections in process and has one kind of target.
    The link and the front's code for it are deleted. `Ready` gains the
    runtime's port (it has none today), so that results can name it.
+   _First half built 2026-10-07:_ `endeavor mcp` holds one `client::Session`
+   for each machine it uses, made by `standalone::open_session` (the one
+   place a session is set up; the link process calls it too), and closes them
+   when its input ends, leaving every runtime running. The machine tools and
+   the notebook calls ask the session and read its `Outcome`; nothing in the
+   front starts, finds or talks to a link process. `list_machines` shows the
+   state only of the machines this front is connected to and connects to
+   nothing. `ToApp::Ready` has `port` (`#[serde(default)]`, protocol still 1),
+   and `use_machine` and `pluto_session_status` give it as `remote_port`, with
+   `ssh -L` for a plain server. Still to do in this step: delete `endeavor
+   link`, `src/link.rs`, `tests/link.rs` and `tests/e2e_link.rs`, and merge
+   this computer and a server into one target type.
 4. The session records: no `end_session`, no other-sessions list; the
    skills and tool descriptions follow.
 5. One idle rule, recorded in `runtime.json`.
@@ -206,7 +218,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 | Jobs on a cluster | One at a time for each user. A second client attaches to the job as the first one asked for it, and is told its size |
 | Several clients on one runtime | Allowed. No client makes another exit |
 | Several agent sessions on one notebook | Allowed, as in the app today. No owner and no takeover |
-| Who holds the connection to a server | Planned (2026-10-07): each `endeavor mcp`, in process, as the app does. Built today: a link process for each server |
+| Who holds the connection to a server | Each `endeavor mcp`, in process, as the app does (built 2026-10-07). The link process is still in the code, and no front uses it |
 | This computer | Planned (2026-10-07): the front calls the one find-or-start function the helper also calls. Built today: the front has its own |
 | When a session ends | Planned (2026-10-07): nothing is said and nothing is listed. The idle limit is the only thing that ends a notebook, the same everywhere |
 | Windows | A target soon, so nothing macOS-only in the design |

@@ -232,8 +232,8 @@ send it, so its session drops out after the week.
 the session (`new_notebook`, `open_notebook`, `pluto_session_status`) carry a
 `browser_url`. A request to `/mcp` may send `X-Endeavor-Browser-Port: <port>`,
 a port from 1 to 65535, and then the link is on `http://localhost:<port>`, on
-any runtime. That is how a runtime reached through a link (its loopback port
-on the user's computer) gives a link that works there. Without the header, or
+any runtime. That is how a runtime reached through the front's connection (its
+loopback port on the user's computer) gives a link that works there. Without the header, or
 with one that isn't a port, only a runtime started by `serve` or `mcp` adds a
 `browser_url`, on its own port, as before.
 
@@ -251,7 +251,7 @@ its result; a failure is `{error, message}` with `isError` true.
 
 A session is on this computer or on one machine. On a machine the front sends
 the runtime `X-Endeavor-Host: <name>` (so it lists and allows the host tools
-for this session) and `X-Endeavor-Browser-Port: <the link's runtime port>`
+for this session) and `X-Endeavor-Browser-Port: <the connection's port on this computer>`
 (see [Session identity](#session-identity)), and gives it the session's folder
 with `endeavor/set_session_folder` each time it attaches to a runtime there.
 When the session moves to another runtime the front ends its key on the old
@@ -267,15 +267,16 @@ that fails, and `needs_job`, leave the session, its key and `projects.json` as
 they were.
 
 Each machine tool call has one 45 s deadline from the moment it arrives. Waiting
-for the one machine tool call that may run at a time, finding or starting the
-link and every call to it come out of it; a call that can't get the lock in time
-says another call is still running and has changed nothing.
+for the one machine tool call that may run at a time and every wait for a machine
+(`Session::ensure`'s `wait` is what is left) come out of it; a call that can't get
+the lock in time says another call is still running and has changed nothing. A
+wait that runs out is a result that says what step it is at and to call again.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `list_machines` | none | `machines`: each `{name, host, cluster, state, this_session}` (`state` is `no link running` or the link's: `connecting`, `connected`, `starting`, `queued`, `ready`, `failed`, `needs_install`, `unknown` (a state of a newer link), with `error`); `local` `{name, state, this_session}`; `this_session.machine`; `ssh_hosts_not_added`; `message`. Starts nothing |
+| `list_machines` | none | `machines`: each `{name, host, cluster, state, this_session}` (`state` is `not connected`, or, for a machine this session is connected to, the connection's: `connecting`, `connected`, `starting`, `queued`, `ready`, `failed`, `needs_install`, with `error`); `local` `{name, state, this_session}`; `this_session.machine`; `ssh_hosts_not_added`; `message`. Starts nothing and connects to nothing: a machine this process has no connection to is listed as saved, `not connected`, which says nothing about whether Julia runs there |
 | `add_machine` | `host` (an ssh alias or `user@host[:port]`, through `valid_host`), `name`, `julia`, `slurm` (boolean), `install` (boolean, only after the user agreed; covers the helper only) | `{machine, host, state, saved, updated, node, home, os, arch, slurm, cluster, runs_in, partitions: [{name, default, max_hours, cpus, memory_gb}], scratch, found, message}`. `slurm` is whether Slurm was found; `cluster` and `runs_in` (`slurm_jobs` or `directly`) are what is used. `state` is `connecting` when 45 s ran out; call again. `needs_install` when this build's helper isn't on the machine and `install` wasn't given: `install` `{items: [{kind: "helper", name, size_mb, place}], os, arch, update, running}` (`size_mb` is null for a server of another platform than this computer's; `running` is `{process}` or `{slurm_job}` when a runtime is recorded and alive there, and `{process_recorded}` or `{slurm_job_recorded}` when it is recorded and alive but `ps` or `squeue` couldn't say more, else null), `saved` true (not added), and a `message` that tells the agent to ask the user. `found` (`[{name, version, path}]`, Julia once a runtime has been started there) is empty until then |
-| `use_machine` | `machine` (a name, or `"local"`), `folder`, `install` (boolean, only after the user agreed); on a cluster `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | `{machine, state, ready, message, …}`. `ready`: `browser_url`, `node`, `folder`, `already_running`, and for a cluster `job` `{id, summary, node, ends_at, ends_in_minutes}`. `starting`, `queued`: `step`, `queue` `{state, reason, reason_text}`, `job`. `needs_job`: a cluster with nothing running and no resources given; `defaults`, `partitions`; nothing was submitted and the session did not move. `needs_install`: the machine lacks this build's helper (an update when an older one is there), or what the start needs, such as Julia when none was found (`install` `{items: [{kind, name, size_mb, place}], …}`); nothing was installed and the session did not move; call again with `install: true` after the user agreed. One yes covers everything this call needs, the helper and then Julia if none is found; the helper's agreement from `add_machine` covers the helper only. `gpus` 0 is no GPU (it overrides and clears the saved default); each `extra_sbatch_flags` entry starts with `-`, and `--wrap` and line breaks are refused |
+| `use_machine` | `machine` (a name, or `"local"`), `folder`, `install` (boolean, only after the user agreed); on a cluster `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | `{machine, state, ready, message, …}`. `ready`: `browser_url` (works while this session is connected), `node`, `remote_port` (the runtime's own port on `node`; null when an older helper didn't say), `folder`, `already_running`, and for a cluster `job` `{id, summary, node, ends_at, ends_in_minutes}`. `starting`, `queued`: `step`, `queue` `{state, reason, reason_text}`, `job`. `needs_job`: a cluster with nothing running and no resources given; `defaults`, `partitions`; nothing was submitted and the session did not move. `needs_install`: the machine lacks this build's helper (an update when an older one is there), or what the start needs, such as Julia when none was found (`install` `{items: [{kind, name, size_mb, place}], …}`); nothing was installed and the session did not move; call again with `install: true` after the user agreed. One yes covers everything this call needs, the helper and then Julia if none is found; the helper's agreement from `add_machine` covers the helper only. `gpus` 0 is no GPU (it overrides and clears the saved default); each `extra_sbatch_flags` entry starts with `-`, and `--wrap` and line breaks are refused |
 | `stop_machine` | `machine`, `force`, `install` (boolean, only after the user agreed) | `{machine, stopped, message}`; `needs_install` (`stopped` false) when the machine has only an older build's helper, since stopping needs this build's: the same `install` as above, and nothing was stopped; refused without `force` with `other_sessions` `[{client, active_seconds_ago, notebook}]` when another session was active in the last 15 minutes; with `state` `starting`/`queued`, `job` and `queue` when Julia is starting or a job is queued (waiting sessions can't be seen); or as an error when the runtime doesn't answer the check for 5 s |
 
 `stop_machine` with `"local"` takes `start.lock` first, as the helper's stop does,
@@ -286,64 +287,80 @@ the stop as made from a connection, so a client that finds the runtime gone is t
 was stopped from another connection." `endeavor stop` waits for the lock in the same way
 and keeps its own words ("It was stopped with `endeavor stop`.").
 
-`use_machine` and `pluto_session_status` use the link's own words for what is
-going on, and no call waits longer than 45 seconds (`ENDEAVOR_START_WAIT_SECS`
-sets it for tests). A notebook call while the target's runtime isn't up fails
-with a plain message built from the link's status; `pluto_session_status` is
-answered by the front from the link's status (`{machine, state, ready, step,
-error, queue, job, message}`), and when the runtime is up it is relayed with
-`machine` (and for a cluster `job`) added to its JSON. A queued job is not
-waited for.
+No call waits longer than 45 seconds (`ENDEAVOR_START_WAIT_SECS` sets it for
+tests). A notebook call while the target's runtime isn't up fails with a plain
+message built from the `Outcome` of asking the connection; `pluto_session_status`
+is answered by the front from it (`{machine, state, ready, step, error, queue,
+job, message}`), and when the runtime is up it is relayed with `machine` (and for
+a cluster `job`, and `remote_port`) added to its JSON. A queued job is not waited
+for, and neither is a start: the status tool waits only a few seconds (10) for a
+connection that was just made to say what is there.
+
+**A server's page and the runtime's port.** `browser_url` is on a port of this
+computer that the session's connection serves, so it works while the session is
+connected and stops when the front ends; the runtime and its notebooks run on.
+`remote_port` is the runtime's own port on the machine where it runs
+(`ToApp::Ready`'s `port`, from the runtime's record; an older helper's answer has
+none). On a plain server, `ssh -L <port>:127.0.0.1:<port> <host>` on the user's
+computer reaches it with the same token, and `use_machine` says so in its message.
+On a cluster the runtime is on a compute node behind the login node: the result
+gives the node and port and promises no command.
 
 **What a project remembers.** `<state home>/endeavor/projects.json`, which the
 binary owns, maps a project folder (the front's `--folder`, canonical) to
 `{machine, folder}`. It is written whole and renamed, owner-only, under a lock.
 `use_machine` writes it once its request was taken; `"local"` removes the entry. A front that starts in a
 project with an entry targets that machine and starts nothing. On its first
-runtime call it asks the link to attach only to a runtime that is already
-there (`only_running`): a plain server then starts one if none runs, and a
-cluster submits nothing, and says so with the defaults to ask the user about.
+runtime call it makes a connection to that machine and attaches only to a
+runtime that is already there (`Want::Attach`): a plain server then starts one
+if none runs, and a cluster submits nothing, and says so with the defaults to
+ask the user about.
 An entry whose machine is gone from the machines file is ignored, and the first
 result says so once.
 
-**The connection is a library type.** `client::Session` (one for each machine)
-does what the link's states describe: it connects, starts the runtime or
+**The connection is a library type, and the front holds its own.**
+`client::Session` (one for each machine) connects, starts the runtime or
 attaches, retries and attaches again after a drop, and keeps one listener port
 through all of it. `Session::ensure(Want, wait)` answers with an `Outcome`
 (`Ready`, `Queued`, `NothingRunning`, `NeedsInstall`, `Failed`, `StillWorking`);
-`status()` has the states and fields `GET /link/status` shows. Asked for what
-is already wanted or under way, `ensure` only waits, so any number of callers can
-ask at once; `install: true` is an agreement and upgrades a start that lacked
-it; an attach never replaces a start. A failure is told to the first call that
-finds it, and the next call tries again. `close()` and
+`status()` reads its fields, and `settled()` the outcome with nothing asked.
+Asked for what is already wanted or under way, `ensure` only waits, so any
+number of callers can ask at once; `install: true` is an agreement and upgrades
+a start that lacked it; an attach never replaces a start. A failure is told to
+the first call that finds it, and the next call tries again. `close()` and
 dropping the session detach from the helper and end its thread, and never stop
-the runtime. The link process holds one and maps its control calls onto it.
+the runtime.
 
-**The link's `only_running`.** `POST /link/start` takes `{"job": …,
-"only_running": true}`. After connecting, the link asks the helper whether a
-runtime runs or a job waits (`Request::Runtime`, as a reconnect does). If so it
-attaches as for any start. If not it starts nothing, and the status is
-`connected` with `nothing_running` true until the next start.
+`endeavor mcp` holds one `Session` for each machine it uses, in its own process
+(`Connections` in `src/standalone/machines.rs`, by machine id), made when a
+tool or a runtime call first needs it: `use_machine`, `add_machine`,
+`stop_machine`, or the first runtime call of a project that remembers a
+machine. `open_session` is the one place that makes one (the helper to send,
+the test variables below, the listener's words). When the front's input ends,
+every session is closed: the helper is told to detach, and no runtime is
+stopped. Each front has its own `ssh` for each machine, and the page's address
+works only while its session is connected. `list_machines` shows the state of
+the machines the front is connected to and connects to nothing.
 
-**The link and the front.** While its target is a machine the front asks the
-link for its status every four minutes (`ENDEAVOR_FRONT_PING_SECS` for tests),
-which counts as activity, so the link's 8 hours run from the end of the last
-session. A link that is gone is started again by the next call and attached to
-whatever runs. A link of another control protocol than the front's (`link::PROTOCOL`; a link of another build with the same protocol is used fully) is quit and started
-again only when no runtime hangs on it (a new link has a new port, and the
-browser's page would break); otherwise it is kept and the result says so. One
-function applies that rule to every link a front gets, for the tools and for a
-notebook call, before any start or attach is sent; a link of another protocol that
-is kept is sent no start, since it may not know `only_running` and would start
-what was only to be attached to. A front reads a status from a link of another
-protocol only to apply that rule: a state it doesn't know reads as `unknown`
-(not ready; a link in it is replaced only by the rule above), and unknown
-fields are ignored. Both ends of a protocol number are otherwise the same, so
-nothing else is read leniently.
+What a machine tool says comes from the `Outcome`: `ready` (`RuntimeInfo`),
+`queued`, `connected` (nothing running), `needs_install`, `failed`, or, when
+the call's time ran out, `StillWorking(step)`, which is "still connecting" or
+"still starting, call again". A failure that has settled stays what the notebook
+calls and the status tool say until `use_machine` asks again.
 
-**Installing needs the user.** The link connects with the helper's install not
-allowed (`client::Options::allow_install` false), and starts without installing
-what the start needs (`ToHelper::StartRuntime`'s `install` false). A machine without
+`add_machine` connects with a `Trial` (a `Held` that it owns) and puts it with
+the machine's connections only after `machines.json` was written, so every way
+out that doesn't save the machine ends the connection. A result that says "call
+again" (still connecting, partitions not listed yet) leaves it for the next
+`add_machine` with the same connection settings (`Server::same_connection`);
+`use_machine` and `stop_machine` let it go. If the machine's settings change
+(its address, port, Julia or whether it is a cluster) and a runtime is in use
+through its connection, the change is refused in plain words; with nothing in
+use the connection is replaced.
+
+**Installing needs the user.** A connection is made with the helper's install
+not allowed (`Config::allow_install` false), and starts without installing what
+the start needs (`ToHelper::StartRuntime`'s `install` false). A machine without
 this build's helper is then only looked at: the bootstrap reports its platform,
 where the helper would go, whether a complete helper of another build is there,
 and whether a runtime or a Slurm job is recorded in the state folder the helper
@@ -353,27 +370,27 @@ alive and its command looks like a core's (`ps -p PID -o args=` has `core` and
 `--state-dir`), and as recorded when `ps` can't say; a job counts when `squeue`
 lists it as pending, running or configuring, and as recorded when there is no
 `squeue` or it didn't answer. The connect ends with `ConnectError::needs`, the
-link's state is `needs_install` (not a failure, not retried by itself) with
-`needs_install` in its status. Nothing is fetched for the look: the size is
+session's state is `needs_install` (not a failure, not retried by itself) and
+the outcome is `NeedsInstall`. Nothing is fetched for the look: the size is
 known only for this computer's own platform, and the helper for another is
 fetched once the install is allowed.
 
 There are two agreements. The helper's belongs to the connection:
-`POST /link/install`, a `"install": true` start, or `endeavor link --install`
-(what `add_machine` passes to a link it has to start, so that it connects once)
-allow it, and the link keeps that for as long as it runs, so that a reconnect
-to a machine that lost the helper asks nothing. What a start needs belongs to the
-start: `"install": true` on `POST /link/start` sends that one `StartRuntime`
-with `install` true (the same for a job's `StartRuntime` on a cluster), and any
-other start sends false. A helper that finds the start needs something (Julia,
-when none is found) then answers `ToApp::NeedsInstall` with the items, and the
-link goes to `needs_install` on the same connection, with the same list in
-`needs_install.items`. A link with no helper and a start with `install: true`
-therefore installs the helper and then what the start needs, in one call: one
-yes covers both. So `use_machine` without `install` installs nothing a start
-needs, however the helper was agreed to, and a remembered project's first
-notebook call never installs. `POST /link/install`, which `add_machine` uses,
-covers the helper only.
+`Config::allow_install` (what `add_machine` passes when it makes a connection
+for `install: true`, so that it connects once), `Session::allow_install`, or a
+`Want` with `install` while there is no connection allow it, and the session
+keeps that for as long as it lives, so that a reconnect to a machine that lost
+the helper asks nothing. What a start needs belongs to the start: a `Want::Start`
+with `install: true` sends that one `StartRuntime` with `install` true (the same
+for a job's `StartRuntime` on a cluster), and any other start sends false. A
+helper that finds the start needs something (Julia, when none is found) then
+answers `ToApp::NeedsInstall` with the items, and the session goes to
+`needs_install` on the same connection. A session with no helper and a start
+with `install: true` therefore installs the helper and then what the start
+needs, in one call: one yes covers both. So `use_machine` without `install`
+installs nothing a start needs, however the helper was agreed to, and a
+remembered project's first notebook call never installs. The helper's agreement
+from `add_machine` covers the helper only.
 
 The items are `wire::Item`: `kind` (a plain string: `helper` for Endeavor's own
 files, `runtime` for a language runtime such as Julia), `name` with its version,
@@ -389,13 +406,13 @@ engine needs at one place (`prepare` in `src/lib.rs`).
 directly on the machine, since a host can have Slurm's tools without being a
 cluster. `add_machine`'s `slurm` argument sets it: true needs Slurm there,
 false runs directly, and left out a new machine takes what was detected and a
-machine connected before keeps how it was saved. `add_machine` gives the
-link the machine's record when it starts it and writes `machines.json` only
-after the connect has succeeded: a call that is still connecting, that needs the
-helper installed, or that fails leaves the file as it was, and the agent calls
-`add_machine` again with the same arguments. An updated machine keeps its old
-record until the new settings have connected. Changing a machine between the
-two is refused while the link has a runtime, a start or a job.
+machine connected before keeps how it was saved. `add_machine` connects with the
+machine's record and writes `machines.json` only after the connect has
+succeeded: a call that is still connecting, that needs the helper installed, or
+that fails leaves the file as it was, and the agent calls `add_machine` again
+with the same arguments. An updated machine keeps its old record until the new
+settings have connected. Changing a machine between the two is refused while
+its connection has a runtime, a start or a job.
 
 ## Approval
 

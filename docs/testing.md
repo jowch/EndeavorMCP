@@ -184,25 +184,25 @@ The test goes through these steps:
 ## The machine tools
 
 `crates/endeavor-mcp/tests/machines.rs` drives `endeavor mcp` over stdio as an
-agent's harness does, in plain `cargo test`: the link process with a local `sh`
-for ssh (`ENDEAVOR_LINK_SHELL`), the stand-in Julia under the real core, fake
+agent's harness does, in plain `cargo test`: the helper with a local `sh`
+for ssh (`ENDEAVOR_LINK_SHELL`; the front holds its own connection), the stand-in Julia under the real core, fake
 `sbatch`, `squeue`, `scancel`, `srun` and `sinfo` for a cluster, and a second
 runtime for "this computer". The front gets nothing but its own variables: HOME,
 `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are folders under
 `target/tmp`, which is also where `list_machines` finds the ssh config (it
 reads `$HOME/.ssh/config`), and `ENDEAVOR_LINK_ROOT`, `_STATE` and `_DEPOT`
-keep the helper's folders there. `ENDEAVOR_START_WAIT_SECS` and
-`ENDEAVOR_FRONT_PING_SECS` shorten the front's waits. A machine with Slurm
+keep the helper's folders there (`{id}` in them is the machine's id, for a test
+that uses two machines). `ENDEAVOR_START_WAIT_SECS` shortens the front's waits. A machine with Slurm
 installed reports `slurm: true` to every helper (`wire::slurm::has` looks in
 `/usr/bin`), so the `add_machine` test uses the fake Slurm and the other
 tests save their machines. It covers:
 
 - `tools/list` has the host tools and the four machine tools.
-- `list_machines` before anything starts no link; `add_machine` reports and
-  saves; adding again updates; a failing one leaves no record (or keeps the
-  old one) and no link.
+- `list_machines` connects to nothing and shows no state for a machine it
+  isn't connected to; `add_machine` reports and saves; adding again updates; a
+  failing one leaves no record (or keeps the old one) and no connection.
 - `use_machine` to ready; notebook calls reach the machine's runtime with the
-  host header and the link's browser port; `list_folder`, `read_file` and
+  host header and the connection's browser port; `list_folder`, `read_file` and
   `run_shell` work there and refuse after `use_machine("local")`.
 - A second front in the project comes up on the remembered machine; a plain
   server with nothing running is started; a remembered machine that is gone
@@ -215,8 +215,10 @@ tests save their machines. It covers:
 - `stop_machine` names another session that was active, stops with `force`,
   and a later call says to call `use_machine`; the same for this computer.
 - Leaving a machine or the front's exit ends its session there and leaves the
-  link; a gone link is started again; a link of another build; the front's
-  pings keep a link from its idle exit.
+  runtime; a new front attaches to it with the notebook still open; a dropped
+  connection is made again on the same browser address; one front uses two
+  machines, each with its own connection and runtime; `remote_port` is the
+  runtime's recorded port.
 
 `tests/link.rs` also covers the link's `only_running` start. The same path over
 real ssh and Julia is `e2e_machines.rs`, ignored like `e2e_link`:

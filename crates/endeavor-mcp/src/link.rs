@@ -46,13 +46,8 @@
 //! - `POST /link/quit`: detach, remove the record and exit. The record goes
 //!   first, so a front that asks for a link right after gets a new one.
 //!
-//! Variables for tests only, read by the link process: `ENDEAVOR_LINK_SHELL`
-//! (any value) runs the helper on this computer through `sh`, as
-//! `Transport::Shell` does, so no sshd is needed; `ENDEAVOR_LINK_ROOT`,
-//! `ENDEAVOR_LINK_STATE` and `ENDEAVOR_LINK_DEPOT` set `Options::root`, `state`
-//! and `depot`, which otherwise are the server's own default folders;
-//! `ENDEAVOR_LINK_ASK` is a command that runs in the shell before each connect
-//! (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
+//! The variables for tests (`ENDEAVOR_LINK_SHELL` and the others) are read where the
+//! session is made (`standalone::open_session`), for the front and for this process.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -197,16 +192,7 @@ impl Spawn {
     }
 }
 
-/// A machine's id becomes a folder's name, and the machines file can be edited by hand.
-/// Capitals are out because Windows and macOS give two ids that differ only in
-/// case one folder, and names Windows keeps for devices (`nul`, `com1`, even as
-/// `nul.txt`) and a trailing dot can't be folders there.
-pub(crate) fn valid_id(id: &str) -> Result<(), String> {
-    let stem = id.split('.').next().unwrap_or_default();
-    let device = matches!(stem, "con" | "prn" | "aux" | "nul") || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.ends_with(|c: char| c.is_ascii_digit() && c != '0'));
-    let plain = !id.is_empty() && id.len() <= 100 && !id.starts_with('.') && !id.ends_with('.') && !device && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
-    if plain { Ok(()) } else { Err(format!("\"{id}\" isn't a machine id: it has lower-case letters, digits, - _ and . only, doesn't start or end with a dot and isn't a name such as nul or com1.")) }
-}
+pub(crate) use crate::client::valid_id;
 
 /// A running link, as a front reaches it.
 #[derive(Clone, Debug, PartialEq)]

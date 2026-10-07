@@ -428,6 +428,10 @@ impl Attached {
                 How::Process(..) => None,
                 How::Slurm(job) => Some(job.info()),
             },
+            port: match &self.how {
+                How::Process(_, port) => Some(*port),
+                How::Slurm(_) => state.port,
+            },
         }
     }
 

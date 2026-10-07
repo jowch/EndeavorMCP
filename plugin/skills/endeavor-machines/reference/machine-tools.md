@@ -2,7 +2,7 @@
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| `list_machines` | The added machines and their state, `"local"`, which one this session uses, and `Host` names in `~/.ssh/config` not added yet | Starts no connection; safe anytime |
+| `list_machines` | The added machines, `"local"`, which one this session uses, and `Host` names in `~/.ssh/config` not added yet | Starts no connection; safe anytime. A machine has a state only while this session is connected to it; otherwise it says `not connected`, which doesn't say whether Julia runs there |
 | `add_machine(host, name?, julia?, slurm?, install?)` | Connect to an ssh alias or `user@host`, report and save what was found | Waits up to 45 s. Existing machine: updates it. Failure: nothing saved. Installs the helper only with `install: true`, after the user agreed; it never downloads Julia |
 | `use_machine(machine, folder?, …)` | Put this session on a machine, or back on `"local"` | Cluster resources below. Remembered by the project |
 | `stop_machine(machine, force?, install?)` | Stop the runtime there for every client | Refuses and names who when another session was active in the last 15 minutes. Needs this plugin's helper on the machine: if only an older one is there it returns `needs_install` and stops nothing |
@@ -30,12 +30,12 @@ Result `state`:
 
 | `state` | Meaning |
 |---------|---------|
-| `ready` | The runtime answers. `browser_url`, `node`, `folder`, `already_running` (it was running before this call), and for a cluster `job` (`id`, `node`, `ends_at`, `ends_in_minutes`) |
+| `ready` | The runtime answers. `browser_url` (works while this session is connected), `node`, `remote_port` (the runtime's own port on the machine), `folder`, `already_running` (it was running before this call), and for a cluster `job` (`id`, `node`, `ends_at`, `ends_in_minutes`) |
 | `starting`, `queued` | Not up yet. `step`, and for a job `job` and `queue` (`state`, `reason`). Check with `pluto_session_status` |
 | `needs_install` | The machine lacks the helper (or an update of it), or Julia. `install` says what. Ask the user, then call again with `install: true`; the session did not move |
 | `needs_job` | Cluster, nothing running, no resources given. `defaults` has what would be submitted. Nothing was submitted and the session did not move (the project is unchanged). Ask the user, then call again with the values |
 
-A call that fails (a bad argument or partition, a link that can't be reached) leaves the session, the project and the machine's saved defaults as they were.
+A call that fails (a bad argument or partition, a machine that can't be reached) leaves the session, the project and the machine's saved defaults as they were.
 
 `pluto_session_status` on a machine adds `machine`, and for a cluster `job`. When the runtime isn't up it answers from the connection's state: `state`, `step`, `queue`, `job`, `error`, `message`.
 

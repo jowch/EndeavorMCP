@@ -1,23 +1,24 @@
 //! The front on a machine (docs/plugins-and-remote.md): where this session's
 //! notebooks run, the four machine tools the front answers itself, and what a
-//! call to a runtime on a machine goes through: the machine's link (`link`),
-//! which gives the runtime's port and token on this computer.
+//! call to a runtime on a machine goes through: this process's own connection
+//! to the machine (`client::Session`, one for each machine it uses), which gives
+//! the runtime's port and token on this computer.
 //!
 //! A session is on this computer or on one machine. Its calls go to the
 //! runtime there, a machine's with `X-Endeavor-Host` and `X-Endeavor-Browser-Port`.
 //! When the session moves to another runtime its key on the old one is ended and
 //! it gets a new key, so nothing of its one-notebook binding carries over.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use wire::slurm::{JobRequest, Partition, Resources, check_extra_flag};
+use wire::slurm::{Partition, Resources, check_extra_flag};
 
 use super::projects::Remembered;
 use super::{Relay, Route, Status as Local, start_wait, tool_failure};
-use crate::client::{Cluster, Running, Server, ssh_config_hosts};
-use crate::link::{self, Link, State};
+use crate::client::{Cluster, Config, InstallInfo, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
 use crate::mcp::{browser_link, to_json, tool_error};
 use crate::runtime::Ended;
 
@@ -29,30 +30,238 @@ pub(super) fn text_result(text: &str) -> Value {
 /// What `use_machine` and `stop_machine` call this computer.
 pub(super) const LOCAL: &str = "local";
 
-/// How often a call that waits for a machine asks its link how it is.
-const POLL: Duration = Duration::from_millis(250);
-
-/// How long a link may say `connected` after it was asked to start something before that is taken as nothing running.
-const GRACE: Duration = Duration::from_secs(3);
-
 /// Another session counts as active in a notebook if it called a tool this lately.
 const RECENT_SECONDS: u64 = 15 * 60;
 
 /// A stop waits for the helper as long as is left of the call's time, but at least this long: the
-/// helper may take longer, and the link's own wait is longer still.
+/// helper may take longer.
 const STOP_FLOOR: Duration = Duration::from_secs(2);
-
-/// How often a front asks its link how it is, so that the link's idle exit counts from the end of the session.
-const PING_EVERY: Duration = Duration::from_secs(240);
 
 /// How long a runtime may say nothing to the question of who else is active before `stop_machine` gives up on it.
 const CHECK_WAIT: Duration = Duration::from_secs(5);
 
-/// A link call isn't started with less than this left of the call's time.
+/// How long the status tool waits for a connection that has only just been made to say whether a runtime is there.
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
+
+/// A call isn't begun with less than this left of the call's time.
 const MIN_CALL: Duration = Duration::from_millis(300);
 
+/// A connection to `server`: the one place that makes a `Session`, for the front and for the link process
+/// (which the next step deletes). The helper it sends to the machine is this program when the machine's
+/// platform is this computer's, else the release's for that platform. `allow_install` is the user's
+/// agreement to the helper on the machine.
+///
+/// For tests only, read from the environment: `ENDEAVOR_LINK_SHELL` (any value) runs the helper on this
+/// computer through `sh`, as `Transport::Shell` does, so no sshd is needed; `ENDEAVOR_LINK_ROOT`,
+/// `ENDEAVOR_LINK_STATE` and `ENDEAVOR_LINK_DEPOT` set `Options::root`, `state` and `depot`, which otherwise
+/// are the machine's own default folders (`{id}` in them is the machine's id, so that two machines don't
+/// share a runtime); `ENDEAVOR_LINK_ASK` is a command that runs in the shell before each connect
+/// (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
+pub(crate) fn open_session(server: Server, allow_install: bool) -> Result<Session, String> {
+    let id = server.id.clone();
+    let var = |name: &str| std::env::var(name).unwrap_or_default().replace("{id}", &id);
+    let helper = |os: &str, arch: &str| {
+        if (os.to_owned(), arch.to_owned()) == this_platform() {
+            std::env::current_exe().map_err(|e| format!("Couldn't find the endeavor program itself: {e}"))
+        } else {
+            crate::release::helper_for(os, arch, &super::Env::from_vars(&|name| std::env::var(name).ok()).helpers_dir())
+        }
+    };
+    let mut config = Config::new(server, helper);
+    if std::env::var_os("ENDEAVOR_LINK_SHELL").is_some() {
+        config.transport = Transport::Shell { env: Vec::new(), ask: std::env::var("ENDEAVOR_LINK_ASK").ok() };
+    }
+    (config.root, config.state, config.depot, config.allow_install) = (var("ENDEAVOR_LINK_ROOT"), var("ENDEAVOR_LINK_STATE"), var("ENDEAVOR_LINK_DEPOT"), allow_install);
+    config.messages = Messages {
+        restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
+        not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
+    };
+    Session::new(config)
+}
+
+/// `ensure` for a call that asks for the machine on purpose: a failure that is still waiting to be told to
+/// someone is not what this call hears, since it asks to try again.
+fn ensure_again(session: &Session, want: Want, wait: Duration) -> Outcome {
+    if session.status().state == State::Failed {
+        let _ = session.ensure(want.clone(), Duration::ZERO);
+    }
+    session.ensure(want, wait)
+}
+
+/// What to do about a stop that couldn't reach the helper, in the tools. Nothing for a stop the helper refused.
+pub(crate) fn stop_advice(session: &Session) -> &'static str {
+    if session.connected() {
+        return "";
+    }
+    match session.status().state {
+        State::NeedsInstall => " Ask the user whether Endeavor may install it, then call `stop_machine` again with `install: true`.",
+        State::Failed => " Tell the user, and call `stop_machine` again once that is fixed.",
+        _ => " Wait a few seconds, then call `stop_machine` again.",
+    }
+}
+
+/// A machine's connection and the settings it was made with, which a `Session` doesn't give back.
+/// Dropping it closes the session: it detaches from the machine's helper and leaves the runtime running.
+struct Held {
+    server: Server,
+    session: Arc<Session>,
+}
+
+impl Held {
+    fn new(server: &Server, allow_install: bool) -> Result<Held, String> {
+        Ok(Held { server: server.clone(), session: Arc::new(open_session(server.clone(), allow_install)?) })
+    }
+
+    /// Whether nothing hangs on the connection, so that a new one can take its place without breaking
+    /// the address of a notebook page that is open through it.
+    fn replaceable(&self) -> bool {
+        replaceable(&self.session.status())
+    }
+}
+
+fn replaceable(status: &Status) -> bool {
+    status.runtime.is_none() && matches!(status.state, State::Connecting | State::Connected | State::Failed | State::NeedsInstall)
+}
+
+impl Drop for Held {
+    // On a thread of its own: closing waits for a machine that may not answer, and a tool call must not.
+    fn drop(&mut self) {
+        let session = self.session.clone();
+        std::thread::spawn(move || session.close());
+    }
+}
+
+/// This front's connections: one for each machine it has used, by machine id, and the one an
+/// `add_machine` that was still connecting leaves for its next call. A machine that is not saved is
+/// never among the first.
+#[derive(Default)]
+pub(super) struct Connections {
+    held: Mutex<HashMap<String, Held>>,
+    adding: Mutex<Option<Held>>,
+}
+
+/// What `add_machine` connects with while the machine is not saved. A new connection it owns ends when
+/// this is dropped, so every way out that doesn't save the machine ends it; `park` keeps it for the next
+/// call and `Connections::keep` puts it with the saved ones.
+struct Trial {
+    session: Arc<Session>,
+    /// None when the connection is a saved machine's own, which stays where it is.
+    owned: Option<Held>,
+}
+
+fn settings_changed(name: &str) -> String {
+    format!("The settings of {name} changed while Julia is in use on it through this session with the old ones. Call `stop_machine` for {name} (with the user's agreement), or put the settings back.")
+}
+
+impl Connections {
+    /// The connection to machine `id`, if the front has one. Makes none.
+    fn get(&self, id: &str) -> Option<Arc<Session>> {
+        self.held.lock().unwrap().get(id).map(|held| held.session.clone())
+    }
+
+    /// Whether `session` is machine `id`'s connection now.
+    fn is(&self, id: &str, session: &Arc<Session>) -> bool {
+        self.get(id).is_some_and(|now| Arc::ptr_eq(&now, session))
+    }
+
+    /// The connection to `server`'s machine: the one held if it was made with the same settings, else a
+    /// new one that takes the place of one nothing hangs on, and none if something does. `allow_install`
+    /// is for a new one only.
+    fn open(&self, server: &Server, allow_install: bool) -> Result<Arc<Session>, String> {
+        let mut held = self.held.lock().unwrap();
+        if let Some(old) = held.get(&server.id) {
+            if old.server.same_connection(server) {
+                return Ok(old.session.clone());
+            }
+            if !old.replaceable() {
+                return Err(settings_changed(&display_name(server)));
+            }
+        }
+        let fresh = Held::new(server, allow_install)?;
+        let session = fresh.session.clone();
+        let old = held.insert(server.id.clone(), fresh);
+        drop(held);
+        drop(old);
+        Ok(session)
+    }
+
+    /// The connection `add_machine` tries `record` with: the saved machine's own when its settings are
+    /// the same and it hasn't failed, the one an earlier call left when it is for these settings, else a
+    /// new one. An error when a runtime is in use through a saved one made with other settings.
+    fn begin(&self, record: &Server, allow_install: bool) -> Result<Trial, String> {
+        let left = self.adding.lock().unwrap().take().filter(|left| left.server.same_connection(record));
+        if let Some(old) = self.held.lock().unwrap().get(&record.id) {
+            if old.server.same_connection(record) {
+                if old.session.status().state != State::Failed {
+                    return Ok(Trial { session: old.session.clone(), owned: None });
+                }
+            } else if !old.replaceable() {
+                return Err(settings_changed(&display_name(record)));
+            }
+        }
+        let owned = match left {
+            Some(left) => left,
+            None => Held::new(record, allow_install)?,
+        };
+        Ok(Trial { session: owned.session.clone(), owned: Some(owned) })
+    }
+
+    /// `trial`'s machine is saved as `record`: its connection is the machine's from now on, and it replaces
+    /// the one there was.
+    fn keep(&self, mut trial: Trial, record: &Server) {
+        let old = match trial.owned.take() {
+            Some(mut owned) => {
+                owned.server = record.clone();
+                self.held.lock().unwrap().insert(record.id.clone(), owned)
+            }
+            None => {
+                if let Some(held) = self.held.lock().unwrap().get_mut(&record.id) {
+                    held.server = record.clone();
+                }
+                None
+            }
+        };
+        drop(old);
+    }
+
+    /// An `add_machine` that said "still connecting" is abandoned: the connection it left ends.
+    fn abandon_adding(&self) {
+        let left = self.adding.lock().unwrap().take();
+        drop(left);
+    }
+
+    /// End machine `id`'s connection, if there is one.
+    fn forget(&self, id: &str) {
+        let old = self.held.lock().unwrap().remove(id);
+        drop(old);
+    }
+
+    /// Where machine `id`'s connection stands, if there is one.
+    fn status(&self, id: &str) -> Option<Status> {
+        self.get(id).map(|session| session.status())
+    }
+
+    /// The input ended: every connection lets go of its machine, which leaves each runtime running.
+    pub(super) fn close_all(&self) {
+        let mut all: Vec<Held> = self.held.lock().unwrap().drain().map(|(_, held)| held).collect();
+        all.extend(self.adding.lock().unwrap().take());
+        // Each may wait a few seconds for a machine that doesn't answer, and the front's end waits for all of them together.
+        let ending: Vec<_> = all.into_iter().map(|held| std::thread::spawn(move || held.session.close())).collect();
+        for ending in ending {
+            let _ = ending.join();
+        }
+    }
+}
+
+impl Trial {
+    /// Keep the connection, if it is a new one, for the next `add_machine` with these settings.
+    fn park(mut self, connections: &Connections) {
+        *connections.adding.lock().unwrap() = self.owned.take();
+    }
+}
+
 /// The time one machine tool call has, counted from the moment it arrived: waiting for the
-/// other machine tool call, finding or starting the link, and every call to it come out of it.
+/// other machine tool call and every wait for a machine come out of it.
 #[derive(Clone, Copy)]
 pub(super) struct Deadline(Instant);
 
@@ -61,87 +270,14 @@ impl Deadline {
         Deadline(Instant::now() + wait)
     }
 
-    fn left(self) -> Duration {
+    pub(super) fn left(self) -> Duration {
         self.0.saturating_duration_since(Instant::now())
     }
 
-    /// Too little time is left to ask the link anything.
-    fn spent(self) -> bool {
+    /// Too little time is left to begin anything.
+    pub(super) fn spent(self) -> bool {
         self.left() < MIN_CALL
     }
-
-    /// How long a call to the link may take, or the plain error when too little time is left.
-    fn call_wait(self) -> Result<Duration, String> {
-        if self.spent() {
-            return Err("This call ran out of the time a tool call gets before it could ask the link. Call it again to continue.".into());
-        }
-        Ok(self.left().min(link::CALL_WAIT))
-    }
-
-    fn status(self, link: &Link) -> Result<link::Status, String> {
-        link.status(self.call_wait()?)
-    }
-
-    /// The status once more as the time runs out, so that what a request started is reported: it may take a second past the deadline.
-    fn last_status(self, link: &Link) -> Result<link::Status, String> {
-        link.status(self.left().clamp(Duration::from_secs(1), link::CALL_WAIT))
-    }
-
-    /// A start or attach request to `link`, sent whatever its protocol: `Relay::ask` is the one that holds back.
-    fn send(self, link: &Link, ask: Ask, install: bool) -> Result<link::Status, String> {
-        match ask {
-            Ask::Attach => link.attach(install, self.call_wait()?),
-            Ask::Start(job) => link.start(job, install, self.call_wait()?),
-        }
-    }
-
-    /// `f`, given up on (it goes on in the background) when the time is out.
-    fn run<T: Send + 'static>(self, f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
-        let (done, waited) = mpsc::channel();
-        std::thread::spawn(move || drop(done.send(f())));
-        waited.recv_timeout(self.left()).map_err(|_| "This call ran out of the time a tool call gets while it waited for the link. Call it again to continue.".to_owned())
-    }
-
-    /// Tell the link the user agreed to install the helper.
-    fn install(self, link: &Link) -> Result<link::Status, String> {
-        link.install(self.call_wait()?)
-    }
-
-    fn ensure(self, server: &Server) -> Result<Link, String> {
-        let server = server.clone();
-        self.run(move || link::ensure(&server))?
-    }
-
-    /// `ensure`, and a link that has to be started may install the helper at once. The work goes on
-    /// in the background when the time runs out. With `discard_late` a link it then starts is ended
-    /// (unless a runtime is in use on it), for a machine that isn't saved and that no tool could name;
-    /// without it that link stays, and the next call finds it and reuses it.
-    fn ensure_install(self, server: &Server, install: bool, discard_late: bool) -> Result<Link, String> {
-        let server = server.clone();
-        let (done, waited) = mpsc::channel();
-        std::thread::spawn(move || {
-            if let Err(mpsc::SendError(Ok(late))) = done.send(link::ensure_install(&server, install))
-                && discard_late
-                && late.status(link::CALL_WAIT).is_ok_and(|status| link::replaceable(&status))
-            {
-                let _ = late.quit();
-            }
-        });
-        waited.recv_timeout(self.left()).map_err(|_| "This call ran out of the time a tool call gets while it waited for the link. Call it again to continue.".to_owned())?
-    }
-
-    fn find(self, id: &str) -> Result<Option<Link>, String> {
-        let id = id.to_owned();
-        self.run(move || link::find(&id))?
-    }
-}
-
-/// What a start request to a link asks for.
-pub(super) enum Ask {
-    /// Attach to a runtime that is there, or a job that waits; start nothing.
-    Attach,
-    /// Start the runtime (on a cluster, with the job).
-    Start(Option<JobRequest>),
 }
 
 /// Where this session's notebooks run.
@@ -154,36 +290,39 @@ pub(super) enum Target {
 
 #[derive(Clone)]
 pub(super) struct Machine {
-    /// The id in the machines file, which the link goes by.
+    /// The id in the machines file, which the connection goes by.
     pub id: String,
     /// What the agent calls it.
     pub name: String,
     pub cluster: bool,
     /// The session's folder there, if `use_machine` was given one; else the server's home.
     pub folder: Option<String>,
-    pub link: Option<Link>,
     /// The session should have a runtime there: false after `stop_machine`.
     pub active: bool,
-    /// The link process (its pid) that was asked to attach to or start the runtime.
-    pub asked: Option<u32>,
     /// The runtime (its pid) that was told this session's folder.
     told: Option<u32>,
 }
 
-/// Why a call can't go to a runtime yet. `status` is the link's when it was reached.
+/// How a machine stands when a call stopped waiting for it.
+pub(super) struct Reached {
+    outcome: Outcome,
+    status: Status,
+}
+
+/// Why a call can't go to a runtime yet. `reached` is how the machine stands, when it was asked.
 pub(super) struct NotReady {
     name: String,
     message: String,
-    status: Option<link::Status>,
+    reached: Option<Box<Reached>>,
 }
 
 impl NotReady {
     fn plain(message: impl Into<String>) -> NotReady {
-        NotReady { name: String::new(), message: message.into(), status: None }
+        NotReady { name: String::new(), message: message.into(), reached: None }
     }
 
-    fn of(name: &str, status: &link::Status, message: impl Into<String>) -> NotReady {
-        NotReady { name: name.to_owned(), message: message.into(), status: Some(status.clone()) }
+    fn of(name: &str, outcome: Outcome, status: Status, message: impl Into<String>) -> NotReady {
+        NotReady { name: name.to_owned(), message: message.into(), reached: Some(Box::new(Reached { outcome, status })) }
     }
 }
 
@@ -223,34 +362,49 @@ fn queue_reason_text(reason: &str) -> String {
     }
 }
 
-/// What a link in a state that isn't ready says, for the agent to relay and act on.
-fn not_ready_message(name: &str, status: &link::Status) -> String {
-    let step = status.step.as_deref().filter(|s| !s.is_empty()).map(|s| format!(" Last step: {s}")).unwrap_or_default();
-    match status.state {
-        State::Connecting => format!("Endeavor is connecting to {name}.{step} Wait a little, then call `pluto_session_status` to see how far it got. If it stays like this, call `use_machine` again."),
-        State::Connected => format!("Julia isn't running on {name} right now. Call `use_machine` with machine \"{name}\" to start it."),
-        State::Starting => format!("Julia is starting on {name}. The first start installs packages and takes a few minutes.{step} Wait, then call `pluto_session_status` to see how far it got."),
-        State::Queued => {
-            let job = status.job.as_ref().map(|j| format!(" {}", j.id)).unwrap_or_default();
-            let (state, reason) = status.queue.as_ref().map_or(("PENDING", ""), |q| (q.state.as_str(), q.reason.as_str()));
-            let what = if state == "RUNNING" { format!("running on node {reason}, and Julia is starting there") } else { format!("waiting in the queue: {}", queue_reason_text(reason)) };
+/// The state a result names for how a machine stands.
+fn outcome_word(reached: &Reached) -> &'static str {
+    match &reached.outcome {
+        Outcome::Ready(_) => "ready",
+        Outcome::Queued { .. } => "queued",
+        Outcome::NothingRunning => "connected",
+        Outcome::NeedsInstall(_) => "needs_install",
+        Outcome::Failed(_) => "failed",
+        Outcome::StillWorking(_) => state_word(reached.status.state),
+    }
+}
+
+/// What a machine that isn't ready says, for the agent to relay and act on. This is where an
+/// outcome becomes words for a result.
+fn not_ready_message(name: &str, reached: &Reached) -> String {
+    match &reached.outcome {
+        Outcome::StillWorking(step) => {
+            let step = if step.is_empty() { String::new() } else { format!(" Last step: {step}") };
+            if reached.status.state == State::Starting {
+                format!("Julia is starting on {name}. The first start installs packages and takes a few minutes.{step} Wait, then call `pluto_session_status` to see how far it got.")
+            } else {
+                format!("Endeavor is connecting to {name}.{step} Wait a little, then call `pluto_session_status` to see how far it got. If it stays like this, call `use_machine` again.")
+            }
+        }
+        Outcome::NothingRunning => format!("Julia isn't running on {name} right now. Call `use_machine` with machine \"{name}\" to start it."),
+        Outcome::Queued { job, queue } => {
+            let job = job.as_ref().map(|j| format!(" {}", j.id)).unwrap_or_default();
+            let what = if queue.state == "RUNNING" { format!("running on node {}, and Julia is starting there", queue.reason) } else { format!("waiting in the queue: {}", queue_reason_text(&queue.reason)) };
             format!("The Slurm job{job} on {name} is {what}. Tell the user, wait, and call `pluto_session_status` to follow it.")
         }
-        State::Failed => {
-            let error = status.error.as_deref().unwrap_or("it didn't say why");
+        Outcome::Failed(error) => {
+            let error = if error.is_empty() { "it didn't say why" } else { error };
             format!("Julia on {name} isn't available: {error}\nCall `use_machine` with machine \"{name}\" to try again, or tell the user.")
         }
-        State::NeedsInstall => format!("{} Nothing was installed.", install_text(name, status, "use_machine")),
-        State::Unknown => format!("The link to {name} is in a state this version of Endeavor doesn't know (it is from a newer build). Call `use_machine` with machine \"{name}\" to try again; if it stays like this, tell the user."),
-        State::Ready => format!("Julia on {name} is ready."),
+        Outcome::NeedsInstall(info) => format!("{} Nothing was installed.", install_text(name, info, "use_machine")),
+        Outcome::Ready(_) => format!("Julia on {name} is ready."),
     }
 }
 
 /// What installing would do on the machine and what to ask the user, for the agent to relay.
 /// `tool` is the machine tool to call again, with `install: true`, once the user has agreed.
 /// Every item is named with its size and place; a kind this build knows adds a note.
-fn install_text(name: &str, status: &link::Status, tool: &str) -> String {
-    let Some(info) = &status.needs_install else { return format!("Endeavor needs to install something on {name}.") };
+fn install_text(name: &str, info: &InstallInfo, tool: &str) -> String {
     let again = match tool {
         "add_machine" => "`add_machine` again with the same arguments".to_owned(),
         "stop_machine" => format!("`stop_machine` again with machine \"{name}\" (and the same other arguments)"),
@@ -281,8 +435,7 @@ fn install_text(name: &str, status: &link::Status, tool: &str) -> String {
     format!("{text} Ask the user whether Endeavor may do that. Only if they agree, call {again} and `install: true`.")
 }
 
-fn install_json(status: &link::Status) -> Option<Value> {
-    let info = status.needs_install.as_ref()?;
+fn install_json(info: &InstallInfo) -> Value {
     let mut out = json!({ "items": info.items });
     if let Some(helper) = &info.helper {
         out["os"] = helper.os.clone().into();
@@ -295,18 +448,18 @@ fn install_json(status: &link::Status) -> Option<Value> {
             Running::Job { id, listed: false } => json!({ "slurm_job_recorded": id }),
         }));
     }
-    Some(out)
+    out
 }
 
 /// What a tool says when the machine needs something installed that the user hasn't agreed to.
-fn needs_install_result(name: &str, status: &link::Status, tool: &str) -> Value {
+fn needs_install_result(name: &str, info: &InstallInfo, tool: &str) -> Value {
     let mut result = json!({
         "machine": name,
         "state": "needs_install",
         "ready": false,
         "needs_install": true,
-        "install": install_json(status),
-        "message": format!("{} Nothing was installed on {name}.", install_text(name, status, tool)),
+        "install": install_json(info),
+        "message": format!("{} Nothing was installed on {name}.", install_text(name, info, tool)),
     });
     if tool == "stop_machine" {
         result["stopped"] = false.into();
@@ -319,16 +472,7 @@ fn unsaved_note(updating: bool) -> &'static str {
     if updating { "The machine stays as it was; the new settings are saved once they have connected." } else { "The machine is saved when it has connected, and not before." }
 }
 
-/// End the link of `id` that `add_machine` started and could not use, unless a runtime is on it.
-fn quit_unless_in_use(id: &str) {
-    if let Ok(Some(link)) = link::find(id)
-        && link.status(link::CALL_WAIT).is_ok_and(|status| link::replaceable(&status))
-    {
-        let _ = link.quit();
-    }
-}
-
-fn job_json(status: &link::Status) -> Option<Value> {
+fn job_json(status: &Status) -> Option<Value> {
     let job = status.job.as_ref()?;
     let mut out = json!({ "id": job.id });
     if let Some(summary) = &job.summary {
@@ -344,14 +488,15 @@ fn job_json(status: &link::Status) -> Option<Value> {
     Some(out)
 }
 
-fn queue_json(status: &link::Status) -> Option<Value> {
+fn queue_json(status: &Status) -> Option<Value> {
     let queue = status.queue.as_ref()?;
     Some(json!({ "state": queue.state, "reason": queue.reason, "reason_text": queue_reason_text(&queue.reason) }))
 }
 
 /// What `pluto_session_status` says when the machine's runtime isn't up.
-fn status_result(name: &str, status: &link::Status, message: &str) -> Value {
-    let mut out = json!({ "machine": name, "state": state_word(status.state), "ready": false, "message": message });
+fn status_result(name: &str, reached: &Reached, message: &str) -> Value {
+    let Reached { outcome, status } = reached;
+    let mut out = json!({ "machine": name, "state": outcome_word(reached), "ready": false, "message": message });
     let mut put = |key: &str, value: Option<Value>| {
         if let Some(value) = value {
             out[key] = value;
@@ -361,7 +506,7 @@ fn status_result(name: &str, status: &link::Status, message: &str) -> Value {
     put("error", status.error.clone().map(Into::into));
     put("queue", queue_json(status));
     put("job", job_json(status));
-    put("install", install_json(status));
+    put("install", if let Outcome::NeedsInstall(info) = outcome { Some(install_json(info)) } else { None });
     out
 }
 
@@ -416,7 +561,7 @@ fn new_id(name: &str, servers: &[Server]) -> Result<String, String> {
         }
         id = format!("{base}-{n}");
     }
-    link::valid_id(&id).map_err(invalid)?;
+    crate::client::valid_id(&id).map_err(invalid)?;
     Ok(id)
 }
 
@@ -546,10 +691,10 @@ impl Relay {
         }
     }
 
-    /// The runtime's port and token on a machine, if the link says it is up. Starts nothing.
+    /// The runtime's port and token on a machine, if its connection says it is up. Starts nothing.
     pub(super) fn machine_runtime(&self, machine: &Machine) -> Option<(u16, String)> {
-        let status = machine.link.as_ref()?.status(link::CALL_WAIT).ok()?;
-        status.runtime.filter(|_| status.state == State::Ready).map(|r| (r.port, r.token))
+        let runtime = self.connections.status(&machine.id)?.runtime?;
+        Some((runtime.port, runtime.token))
     }
 
     /// The session moves to `next`. The target and the session's key are replaced together, by a
@@ -599,20 +744,6 @@ impl Relay {
         }
     }
 
-    /// While the target is a machine, ask its link how it is every few minutes: the link ends 8 hours after its last request.
-    pub(super) fn keep_link_alive(self: &Arc<Self>) {
-        let every = std::env::var("ENDEAVOR_FRONT_PING_SECS").ok().and_then(|s| s.parse::<f64>().ok()).filter(|s| *s > 0.0).and_then(|s| Duration::try_from_secs_f64(s).ok()).unwrap_or(PING_EVERY);
-        let relay = self.clone();
-        std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(every);
-                if let Some(link) = relay.machine().and_then(|m| m.link) {
-                    let _ = link.status(link::CALL_WAIT);
-                }
-            }
-        });
-    }
-
     /// Where a call goes, waiting up to `start_wait()` for a runtime that is on its way. `wait` false
     /// (for the status tool, which says how far it is) doesn't wait, and a job in the queue isn't waited for either.
     pub(super) fn route(self: &Arc<Self>, wait: bool) -> Result<Route, NotReady> {
@@ -626,64 +757,49 @@ impl Relay {
 
     fn machine_route(&self, wait: bool) -> Result<Route, NotReady> {
         let deadline = Deadline::after(start_wait());
-        let mut connected_since: Option<Instant> = None;
-        loop {
-            let Some((machine, session)) = self.machine_placed() else { return Err(NotReady::plain("This session moved to another machine while the call waited. Try the call again.")) };
-            let name = machine.name.clone();
-            let (link, status, _) = self.machine_link(&machine, deadline).map_err(NotReady::plain)?;
-            if !machine.active {
-                return Err(NotReady::of(&name, &status, format!("Julia on {name} was stopped from this session with stop_machine. Call `use_machine` with machine \"{name}\" to start it again.")));
-            }
-            if status.state == State::Ready {
-                return self.machine_ready(&machine, &status, &session).ok_or_else(|| NotReady::of(&name, &status, "The link to the machine says it is ready but gave no runtime. Try again."));
-            }
-            if machine.asked != Some(link.pid) {
-                self.ask(&link, Ask::Attach, false, deadline).map_err(NotReady::plain)?;
-                self.update_machine(&machine.id, |m| m.asked = Some(link.pid));
-                continue;
-            }
-            match status.state {
-                State::Connected if status.nothing_running && machine.cluster => return Err(NotReady::of(&name, &status, self.needs_job_message(&machine))),
-                State::Connected if status.nothing_running => {
-                    if self.ask(&link, Ask::Start(None), false, deadline).map_err(NotReady::plain)? {
-                        continue;
-                    }
-                    return Err(NotReady::of(&name, &status, not_ready_message(&name, &status)));
-                }
-                State::Connected => {
-                    if !wait || connected_since.get_or_insert_with(Instant::now).elapsed() > GRACE {
-                        return Err(NotReady::of(&name, &status, not_ready_message(&name, &status)));
-                    }
-                }
-                State::Failed | State::Queued | State::NeedsInstall | State::Unknown => return Err(NotReady::of(&name, &status, not_ready_message(&name, &status))),
-                _ => connected_since = None,
-            }
-            if !wait || deadline.spent() {
-                return Err(NotReady::of(&name, &status, not_ready_message(&name, &status)));
-            }
-            std::thread::sleep(POLL);
-            if deadline.spent() {
-                return Err(NotReady::of(&name, &status, not_ready_message(&name, &status)));
-            }
+        let Some((machine, key)) = self.machine_placed() else { return Err(NotReady::plain("This session moved to another machine while the call waited. Try the call again.")) };
+        let name = machine.name.clone();
+        if !machine.active {
+            let message = format!("Julia on {name} was stopped from this session with stop_machine. Call `use_machine` with machine \"{name}\" to start it again.");
+            return Err(match self.connections.status(&machine.id) {
+                Some(status) => NotReady::of(&name, Outcome::NothingRunning, status, message),
+                None => NotReady::plain(message),
+            });
         }
-    }
-
-    /// The machine's link and what it says, started if there is none or it has gone, after `link_rule`.
-    fn machine_link(&self, machine: &Machine, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
-        let (link, status) = match machine.link.clone().and_then(|link| deadline.status(&link).ok().map(|status| (link, status))) {
-            Some(found) => found,
+        let session = match self.connections.get(&machine.id) {
+            Some(session) => session,
             None => {
-                let server = self.listed(machine)?;
-                let link = deadline.ensure(&server)?;
-                let status = deadline.status(&link)?;
-                (link, status)
+                let server = self.listed(&machine).map_err(NotReady::plain)?;
+                self.connections.open(&server, false).map_err(NotReady::plain)?
             }
         };
-        let (link, status, note) = self.link_rule(&machine.id, &machine.name, None, link, status, deadline)?;
-        if machine.link.as_ref() != Some(&link) {
-            self.update_machine(&machine.id, |m| m.link = Some(link.clone()));
+        // A remembered machine is attached to. A plain server with nothing running is started; a cluster is not, since it needs a job the user agreed to. What has settled, a failure for one, stays until `use_machine` asks again.
+        // The status tool doesn't wait for a start, but a connection only just made is waited for a moment, so that it can say what is there.
+        let wait = if wait {
+            deadline.left()
+        } else if matches!(session.status().state, State::Connecting | State::Connected) {
+            deadline.left().min(CONNECT_WAIT)
+        } else {
+            Duration::ZERO
+        };
+        let mut outcome = session.settled().unwrap_or_else(|| session.ensure(Want::Attach { install: false }, wait));
+        if matches!(outcome, Outcome::NothingRunning) && !machine.cluster {
+            outcome = session.ensure(Want::Start { job: None, install: false }, wait);
         }
-        Ok((link, status, note))
+        // Another tool call may have moved the session, or replaced the connection, meanwhile.
+        if !self.machine_placed().is_some_and(|(now, now_key)| now.id == machine.id && now_key == key) || !self.connections.is(&machine.id, &session) {
+            return Err(NotReady::plain("This session moved to another machine while the call waited. Try the call again."));
+        }
+        let status = session.status();
+        match outcome {
+            Outcome::Ready(runtime) => Ok(self.machine_ready(&machine, &runtime, status.hello.as_ref().map(|h| h.home.as_str()), &key)),
+            Outcome::NothingRunning => Err(NotReady::of(&name, Outcome::NothingRunning, status, self.needs_job_message(&machine))),
+            other => {
+                let reached = Reached { outcome: other, status };
+                let message = not_ready_message(&name, &reached);
+                Err(NotReady { name, message, reached: Some(Box::new(reached)) })
+            }
+        }
     }
 
     /// The machine's record in the list of machines.
@@ -691,61 +807,18 @@ impl Relay {
         self.machines.find_by_id(&machine.id)?.ok_or_else(|| format!("{} isn't in the list of machines ({}) any more.", machine.name, self.machines.path().display()))
     }
 
-    /// The rule for a link, which every path to a link goes through before it asks for a runtime.
-    /// A link of the same control protocol is used fully, whatever its build. One of another
-    /// protocol is replaced (quit, then started again) only when no runtime hangs on it
-    /// (`replaceable`), since a new link has another port and the user's browser page would
-    /// break. Else it is used as it is, and the third is why; `ask` sends it no start, since it
-    /// may not know `only_running`. `status` is the link's. A replacement is started with `server`, or with the machine's record in the list when that is None.
-    fn link_rule(&self, id: &str, name: &str, server: Option<&Server>, link: Link, status: link::Status, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
-        if link.protocol == link::PROTOCOL {
-            return Ok((link, status, None));
-        }
-        let (link, status) = if link::replaceable(&status) {
-            let _ = link.quit();
-            let server = match server {
-                Some(server) => server.clone(),
-                None => self.machines.find_by_id(id)?.ok_or_else(|| format!("{name} isn't in the list of machines ({}) any more.", self.machines.path().display()))?,
-            };
-            let fresh = deadline.ensure(&server)?;
-            let status = deadline.status(&fresh)?;
-            (fresh, status)
-        } else {
-            (link, status)
-        };
-        if link.protocol == link::PROTOCOL {
-            return Ok((link, status, None));
-        }
-        let note = format!(
-            "The link to {name} was started by another build of endeavor ({}) that works differently from this one, and goes on, because a runtime is in use through it and a new link would change the address of the user's browser page. It is replaced when it ends.",
-            link.build
-        );
-        Ok((link, status, Some(note)))
-    }
-
-    /// Ask `link` to start the runtime or attach to it. A link of another protocol gets nothing: it
-    /// may not know `only_running`, and would then start what was only to be attached to (on a
-    /// cluster, a job nobody agreed to). False when nothing was sent. Every start goes through here.
-    pub(super) fn ask(&self, link: &Link, ask: Ask, install: bool, deadline: Deadline) -> Result<bool, String> {
-        if link.protocol != link::PROTOCOL {
-            return Ok(false);
-        }
-        deadline.send(link, ask, install)?;
-        Ok(true)
-    }
-
     /// Where calls to the machine's runtime go, once it is ready; the session's folder is told to it once.
-    fn machine_ready(&self, machine: &Machine, status: &link::Status, session: &str) -> Option<Route> {
-        let runtime = status.runtime.as_ref()?;
+    /// `home` is the machine's home folder, which is the session's folder when `use_machine` gave none.
+    fn machine_ready(&self, machine: &Machine, runtime: &RuntimeInfo, home: Option<&str>, session: &str) -> Route {
         if machine.told != Some(runtime.pid) {
-            let folder = machine.folder.clone().or_else(|| status.hello.as_ref().map(|h| h.home.clone()).filter(|h| !h.is_empty()));
+            let folder = machine.folder.clone().or_else(|| home.filter(|h| !h.is_empty()).map(str::to_owned));
             if let Some(folder) = folder {
                 self.tell_session_folder(runtime.port, &runtime.token, session, &folder);
             }
             self.update_machine(&machine.id, |m| m.told = Some(runtime.pid));
         }
         let host = crate::mcp::clean_label(&machine.name).unwrap_or_else(|| machine.id.clone());
-        Some(Route { port: runtime.port, token: runtime.token.clone(), session: session.to_owned(), host: Some(host) })
+        Route { port: runtime.port, token: runtime.token.clone(), session: session.to_owned(), host: Some(host) }
     }
 
     /// For a project's remembered cluster with no job: what to ask the user before submitting one.
@@ -764,9 +837,9 @@ impl Relay {
     /// The reply to a call that couldn't go to a runtime.
     pub(super) fn unready(&self, message: &Value, tool: Option<&str>, unready: NotReady) {
         let Some(id) = message.get("id").filter(|id| !id.is_null()) else { return };
-        let reply = match (&unready.status, tool) {
-            (Some(status), Some("pluto_session_status")) => {
-                let result = status_result(&unready.name, status, &unready.message);
+        let reply = match (&unready.reached, tool) {
+            (Some(reached), Some("pluto_session_status")) => {
+                let result = status_result(&unready.name, reached, &unready.message);
                 to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": to_json(&result) }], "isError": false } }))
             }
             _ => tool_failure(id, message, &unready.message),
@@ -799,10 +872,15 @@ impl Relay {
         let Some(machine) = self.machine() else { return false };
         let Some(Value::Object(mut fields)) = reply["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()) else { return false };
         fields.insert("machine".into(), machine.name.clone().into());
-        if machine.cluster
-            && let Some(job) = machine.link.as_ref().and_then(|l| l.status(link::CALL_WAIT).ok()).and_then(|s| job_json(&s))
-        {
-            fields.insert("job".into(), job);
+        if let Some(status) = self.connections.status(&machine.id) {
+            if machine.cluster
+                && let Some(job) = job_json(&status)
+            {
+                fields.insert("job".into(), job);
+            }
+            if let Some(port) = status.runtime.and_then(|r| r.remote_port) {
+                fields.insert("remote_port".into(), port.into());
+            }
         }
         reply["result"]["content"][0]["text"] = to_json(&Value::Object(fields)).into();
         true
@@ -895,8 +973,8 @@ impl Relay {
         let machines: Vec<Value> = servers
             .iter()
             .map(|server| {
-                let status = link::find(&server.id).ok().flatten().and_then(|l| l.status(link::CALL_WAIT).ok());
-                let state = status.as_ref().map_or("no link running", |s| state_word(s.state));
+                let status = self.connections.status(&server.id);
+                let state = status.as_ref().map_or("not connected", |s| state_word(s.state));
                 let mut entry = json!({ "name": display_name(server), "host": server.ssh_target(), "cluster": server.cluster.is_some(), "state": state, "this_session": mine.as_deref() == Some(server.id.as_str()) });
                 if let Some(error) = status.and_then(|s| s.error) {
                     entry["error"] = error.into();
@@ -921,25 +999,13 @@ impl Relay {
             "local": { "name": LOCAL, "state": local_state, "this_session": on_local },
             "this_session": { "machine": used },
             "ssh_hosts_not_added": ssh_hosts,
-            "message": format!("This session works on {used}. `add_machine` adds a server from the ssh hosts listed; `use_machine` moves the session to a machine, or back to \"{LOCAL}\"."),
+            "message": format!("This session works on {used}. A machine shows a state only while this session is connected to it: \"not connected\" says nothing about whether Julia runs there, and `use_machine` finds out. `add_machine` adds a server from the ssh hosts listed; `use_machine` moves the session to a machine, or back to \"{LOCAL}\"."),
         }))
     }
 
-    /// Adds or updates a machine (`add_machine_to`). Any error for a machine that wasn't saved ends the
-    /// link it started, unless a runtime is in use on it; the connecting and needs-install results keep it.
+    /// Adds or updates a machine: connects to it, and saves it only once it has connected. The connection
+    /// it connects with is a `Trial`, so that a call that ends without saving ends the connection.
     fn add_machine(&self, args: &Value, deadline: Deadline) -> Result<Value, String> {
-        let mut unsaved = None;
-        let result = self.add_machine_to(args, deadline, &mut unsaved);
-        if result.is_err()
-            && let Some(id) = unsaved
-        {
-            quit_unless_in_use(&id);
-        }
-        result
-    }
-
-    /// `unsaved` is set to the id of a new machine as soon as a link may be started for it, and cleared once it is saved.
-    fn add_machine_to(&self, args: &Value, deadline: Deadline, unsaved: &mut Option<String>) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
         let typed = text_arg(args, "host")?.ok_or_else(|| invalid("host is required: an ssh alias from ~/.ssh/config, or user@host"))?;
         let (host, port) = Server::parse_target(&typed).map_err(invalid)?;
@@ -976,69 +1042,41 @@ impl Relay {
         if julia.is_some() {
             record.julia = julia;
         }
-        // The record is saved only once it has connected: until then the link holds it. A new machine that
-        // doesn't get saved has its link ended by `add_machine`, whatever way this ends in an error.
-        if !updating {
-            *unsaved = Some(record.id.clone());
-        }
-        // A link that failed before connects afresh. One with other settings is replaced by `ensure`.
-        if let Some(old) = deadline.find(&record.id)?
-            && old.status(link::CALL_WAIT).is_ok_and(|s| s.state == State::Failed)
-        {
-            let _ = old.quit();
-        }
-        let link = deadline.ensure_install(&record, install, !updating)?;
-        let first = deadline.status(&link)?;
-        let (link, _, kept) = self.link_rule(&record.id, &record.name, Some(&record), link, first, deadline)?;
-        let mut notes: Vec<String> = kept.into_iter().collect();
-        if install && notes.is_empty() {
-            deadline.install(&link)?;
-        } else if install {
-            notes.push("`install: true` wasn't passed on to that link, which has a runtime in use.".into());
-        }
-        let mut status = deadline.status(&link)?;
-        let status = loop {
-            match status.state {
-                State::NeedsInstall if status.needs_install.as_ref().is_some_and(link::InstallInfo::needs_helper) => {
-                    let mut result = needs_install_result(&record.name, &status, "add_machine");
-                    result["host"] = record.ssh_target().into();
-                    result["saved"] = updating.into();
-                    result["message"] = format!("{} {}", result["message"].as_str().unwrap_or_default(), unsaved_note(updating)).into();
-                    return Ok(result);
-                }
-                State::Failed => {
-                    quit_unless_in_use(&record.id);
-                    return Err(format!(
-                        "Couldn't connect to {}: {}\nNothing was saved. This is for the user to fix in a terminal (never ask them for a password or passphrase here, and don't run ssh yourself), then call `add_machine` again.",
-                        record.ssh_target(),
-                        status.error.as_deref().unwrap_or("no reason was given")
-                    ));
-                }
-                State::Connecting if deadline.spent() => {
-                    return Ok(json!({
-                        "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": updating,
-                        "step": status.step,
-                        "message": format!("Still connecting to {}. Call `add_machine` again with the same host to continue. {}", record.ssh_target(), unsaved_note(updating)),
-                    }));
-                }
-                State::Connecting => {
-                    std::thread::sleep(POLL);
-                    if !deadline.spent() {
-                        status = deadline.status(&link)?;
-                    }
-                }
-                _ => break status,
+        let trial = self.connections.begin(&record, install)?;
+        let session = trial.session.clone();
+        let outcome = session.ensure(Want::Attach { install }, deadline.left());
+        match &outcome {
+            Outcome::NeedsInstall(info) => {
+                let mut result = needs_install_result(&record.name, info, "add_machine");
+                result["host"] = record.ssh_target().into();
+                result["saved"] = updating.into();
+                result["message"] = format!("{} {}", result["message"].as_str().unwrap_or_default(), unsaved_note(updating)).into();
+                return Ok(result);
             }
-        };
-        let mut status = status;
+            Outcome::Failed(why) => {
+                return Err(format!(
+                    "Couldn't connect to {}: {}\nNothing was saved. This is for the user to fix in a terminal (never ask them for a password or passphrase here, and don't run ssh yourself), then call `add_machine` again.",
+                    record.ssh_target(),
+                    if why.is_empty() { "no reason was given" } else { why }
+                ));
+            }
+            Outcome::StillWorking(step) => {
+                let result = json!({
+                    "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": updating,
+                    "step": step,
+                    "message": format!("Still connecting to {}. Call `add_machine` again with the same host to continue. {}", record.ssh_target(), unsaved_note(updating)),
+                });
+                trial.park(&self.connections);
+                return Ok(result);
+            }
+            Outcome::Ready(_) | Outcome::Queued { .. } | Outcome::NothingRunning => {}
+        }
+        let mut status = session.status();
         let connected_as_cluster = record.cluster.is_some();
         let found = status.hello.as_ref().is_some_and(|h| h.slurm);
         let cluster = match choose_mode(slurm, existing.as_ref(), found) {
             Ok(cluster) => cluster,
-            Err(why) => {
-                quit_unless_in_use(&record.id);
-                return Err(format!("{why}\nNothing was saved."));
-            }
+            Err(why) => return Err(format!("{why}\nNothing was saved.")),
         };
         if existing.as_ref().is_some_and(|p| p.cluster.is_some() != cluster) && (status.runtime.is_some() || status.job.is_some() || matches!(status.state, State::Starting | State::Queued | State::Ready)) {
             return Err(format!(
@@ -1046,21 +1084,20 @@ impl Relay {
                 display_name(&record)
             ));
         }
-        // The link asks Slurm for the partitions after it connects, so they may come a moment later. They are reported, so they are waited for, except when the user said it is no cluster.
+        // Slurm is asked for the partitions after the connection is made, so they may come a moment later. They are reported, so they are waited for, except when the user said it is no cluster.
         let listed = cluster || slurm != Some(false);
-        while listed && status.hello.as_ref().is_some_and(|h| h.slurm && h.partitions.is_none()) && !deadline.spent() {
-            std::thread::sleep(POLL);
-            if !deadline.spent() {
-                status = deadline.status(&link)?;
-            }
+        if listed {
+            status = session.wait_for(deadline.left(), |s| s.hello.as_ref().is_none_or(|h| !h.slurm || h.partitions.is_some()));
         }
         let hello = status.hello.clone().unwrap_or_default();
         if listed && hello.slurm && hello.partitions.is_none() && record.cluster.as_ref().is_none_or(|c| c.partitions.is_empty()) {
-            return Ok(json!({
+            let result = json!({
                 "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": updating,
                 "step": status.step,
                 "message": format!("Connected to {}, but Slurm hasn't listed its partitions yet. Call `add_machine` again with the same host to continue. {}", record.ssh_target(), unsaved_note(updating)),
-            }));
+            });
+            trial.park(&self.connections);
+            return Ok(result);
         }
         if cluster {
             let before = record.cluster.take();
@@ -1079,10 +1116,12 @@ impl Relay {
             record.cluster = None;
         }
         self.machines.save_expecting(record.clone(), existing.as_ref().map(|e| e.id.as_str()), &|servers| find_existing(servers).map(|e| e.id))?;
-        *unsaved = None;
         if record.cluster.is_some() != connected_as_cluster {
             // It connected the other way: the next connection starts the helper for how it is saved now.
-            let _ = link.quit();
+            self.connections.forget(&record.id);
+            drop(trial);
+        } else {
+            self.connections.keep(trial, &record);
         }
         let partitions: Vec<Partition> = record.cluster.as_ref().map(|c| c.partitions.clone()).or_else(|| hello.partitions.clone()).unwrap_or_default();
         let mut message = format!("Connected to {} (node {}, home folder {}). ", record.ssh_target(), hello.node, hello.home);
@@ -1108,9 +1147,6 @@ impl Relay {
             message.push_str(&format!("{} {} is at {}. ", found.name, found.version, found.path));
         }
         message.push_str(&format!("The machine is saved as \"{}\". Call `use_machine` to work on it.", record.name));
-        for note in &notes {
-            message.push_str(&format!(" {note}"));
-        }
         Ok(json!({
             "machine": record.name,
             "host": record.ssh_target(),
@@ -1143,38 +1179,12 @@ impl Relay {
         }
     }
 
-    /// The machine's link and its status, started if there is none, after `link_rule`; the third is a note for the result.
-    fn link_for_use(&self, server: &Server, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
-        let link = deadline.ensure(server)?;
-        let status = deadline.status(&link)?;
-        self.link_rule(&server.id, &display_name(server), Some(server), link, status, deadline)
-    }
-
-    /// Wait up to `deadline` for the link to settle: ready, queued, failed, found nothing running, or
-    /// connected with nothing under way.
-    fn settle(&self, link: &Link, deadline: Deadline) -> Result<link::Status, String> {
-        let mut connected_since: Option<Instant> = None;
-        loop {
-            let status = deadline.last_status(link)?;
-            match status.state {
-                State::Ready | State::Queued | State::Failed | State::NeedsInstall | State::Unknown => return Ok(status),
-                State::Connected if status.nothing_running => return Ok(status),
-                State::Connected if connected_since.get_or_insert_with(Instant::now).elapsed() > GRACE => return Ok(status),
-                State::Connected => {}
-                _ => connected_since = None,
-            }
-            if deadline.spent() {
-                return Ok(status);
-            }
-            std::thread::sleep(POLL);
-        }
-    }
-
     /// Put the session on a machine. Everything that can fail, and the request to start or attach, comes
     /// first; only when the request was taken does the session move, its key on the old runtime end,
     /// and the project remember the machine. Whatever fails before that leaves all of it as it was.
     fn use_machine(self: &Arc<Self>, args: &Value, deadline: Deadline) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
+        self.connections.abandon_adding();
         let key = text_arg(args, "machine")?.ok_or_else(|| invalid("machine is required: a name from list_machines, or \"local\""))?;
         if key.eq_ignore_ascii_case(LOCAL) {
             return self.use_local();
@@ -1194,47 +1204,33 @@ impl Relay {
             _ => None,
         };
         let name = display_name(&server);
-        let (link, status, note) = self.link_for_use(&server, deadline)?;
-        let was_ready = status.state == State::Ready;
-        let mut notes: Vec<String> = note.into_iter().collect();
+        let session = self.connections.open(&server, install)?;
+        let was_ready = session.status().state == State::Ready;
+        let mut notes: Vec<String> = Vec::new();
         let mut saved_resources = None;
-        let status = match &server.cluster {
-            None => {
-                self.ask(&link, Ask::Start(None), install, deadline)?;
-                self.settle(&link, deadline)?
-            }
+        let outcome = match &server.cluster {
+            None => ensure_again(&session, Want::Start { job: None, install }, deadline.left()),
             Some(cluster) => {
-                self.ask(&link, Ask::Attach, install, deadline)?;
-                let mut status = self.settle(&link, deadline)?;
-                if status.nothing_running {
+                let mut outcome = ensure_again(&session, Want::Attach { install }, deadline.left());
+                if matches!(outcome, Outcome::NothingRunning) {
                     let Some((resources, account)) = planned else { return Ok(self.needs_job(&name, cluster)) };
                     let mut job = cluster.job(&resources);
                     job.account = account.clone();
-                    if self.ask(&link, Ask::Start(Some(job)), install, deadline)? {
-                        saved_resources = Some((resources, account));
-                    } else {
-                        notes.push("No job was submitted: this link is from another build.".into());
-                    }
-                    status = self.settle(&link, deadline)?;
-                } else if given.any() && status.state != State::NeedsInstall {
+                    saved_resources = Some((resources, account));
+                    outcome = session.ensure(Want::Start { job: Some(job), install }, deadline.left());
+                } else if given.any() && !matches!(outcome, Outcome::NeedsInstall(_)) {
                     notes.push("A job is already queued or running there, so the resources you gave were not used.".into());
                 }
-                status
+                outcome
             }
         };
-        if status.state == State::NeedsInstall {
-            return Ok(needs_install_result(&name, &status, "use_machine"));
+        let reached = Reached { outcome, status: session.status() };
+        match &reached.outcome {
+            Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, info, "use_machine")),
+            Outcome::Failed(_) => return Err(format!("{}{}", not_ready_message(&name, &reached), notes.iter().map(|n| format!(" {n}")).collect::<String>())),
+            _ => {}
         }
-        if status.state == State::Failed {
-            return Err(format!("{}{}", not_ready_message(&name, &status), notes.iter().map(|n| format!(" {n}")).collect::<String>()));
-        }
-        if status.state == State::Ready && status.runtime.is_none() {
-            return Err(format!("The link to {name} says it is ready but gave no runtime. Call `use_machine` again."));
-        }
-        let mut machine = Machine::new(&server, folder.clone());
-        machine.link = Some(link.clone());
-        machine.asked = Some(link.pid);
-        let (previous, before, ended) = self.switch(Target::Machine(machine));
+        let (previous, before, ended) = self.switch(Target::Machine(Machine::new(&server, folder.clone())));
         if ended {
             self.leave(&previous, &before);
         }
@@ -1251,7 +1247,7 @@ impl Relay {
         if let Err(e) = self.projects.set(&self.options.folder, Some(Remembered { machine: server.id.clone(), folder: folder.clone() })) {
             notes.push(format!("The project won't remember this machine: {e}"));
         }
-        self.use_result(&server, &status, was_ready, notes)
+        self.use_result(&server, reached, was_ready, notes)
     }
 
     /// Put the saved defaults back as they are now in the file, with the cluster's resources and account from `saved`.
@@ -1278,42 +1274,41 @@ impl Relay {
         }
     }
 
-    fn use_result(&self, server: &Server, status: &link::Status, was_ready: bool, notes: Vec<String>) -> Result<Value, String> {
+    fn use_result(&self, server: &Server, reached: Reached, was_ready: bool, notes: Vec<String>) -> Result<Value, String> {
         let name = display_name(server);
         let notes = if notes.is_empty() { String::new() } else { format!(" {}", notes.join(" ")) };
-        match status.state {
-            State::Ready => {
-                let (machine, session) = self.machine_placed().ok_or("The session moved to another machine.")?;
-                let Some(route) = self.machine_ready(&machine, status, &session) else { return Err(format!("The link to {name} says it is ready but gave no runtime. Call `use_machine` again.")) };
-                let runtime = status.runtime.as_ref().ok_or("The link gave no runtime.")?;
-                let folder = machine.folder.clone().or_else(|| status.hello.as_ref().map(|h| h.home.clone()));
-                let mut result = json!({
-                    "machine": name,
-                    "state": "ready",
-                    "ready": true,
-                    "browser_url": browser_link(route.port, &route.token, "/"),
-                    "node": runtime.node,
-                    "folder": folder,
-                    "already_running": runtime.reattached || was_ready,
-                });
-                if let Some(job) = job_json(status) {
-                    result["job"] = job;
-                }
-                let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Julia started there" };
-                let ends = job_json(status).and_then(|j| j["ends_in_minutes"].as_u64()).map(|m| format!(" The job ends in {}.", wire::slurm::duration_text(m as u32))).unwrap_or_default();
-                result["message"] = format!(
-                    "{on} (node {}). Give the user this link to watch the notebooks: {}.{ends} This session has no notebook on {name} yet: create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
-                    runtime.node, result["browser_url"].as_str().unwrap_or_default()
-                )
-                .into();
-                Ok(result)
-            }
-            _ => {
-                let mut result = status_result(&name, status, &format!("{}{notes}", not_ready_message(&name, status)));
-                result["this_session"] = true.into();
-                Ok(result)
-            }
+        let Outcome::Ready(runtime) = &reached.outcome else {
+            let mut result = status_result(&name, &reached, &format!("{}{notes}", not_ready_message(&name, &reached)));
+            result["this_session"] = true.into();
+            return Ok(result);
+        };
+        let (machine, session) = self.machine_placed().ok_or("The session moved to another machine.")?;
+        let home = reached.status.hello.as_ref().map(|h| h.home.clone());
+        let route = self.machine_ready(&machine, runtime, home.as_deref(), &session);
+        let folder = machine.folder.clone().or(home);
+        let mut result = json!({
+            "machine": name,
+            "state": "ready",
+            "ready": true,
+            "browser_url": browser_link(route.port, &route.token, "/"),
+            "node": runtime.node,
+            "remote_port": runtime.remote_port,
+            "folder": folder,
+            "already_running": runtime.reattached || was_ready,
+        });
+        if let Some(job) = job_json(&reached.status) {
+            result["job"] = job;
         }
+        let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Julia started there" };
+        let ends = job_json(&reached.status).and_then(|j| j["ends_in_minutes"].as_u64()).map(|m| format!(" The job ends in {}.", wire::slurm::duration_text(m as u32))).unwrap_or_default();
+        result["message"] = format!(
+            "{on} (node {}). Give the user this address to watch the notebooks: {}.{ends}{} This session has no notebook on {name} yet: create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
+            runtime.node,
+            result["browser_url"].as_str().unwrap_or_default(),
+            reach_text(server, runtime)
+        )
+        .into();
+        Ok(result)
     }
 
     /// `use_machine` with this computer.
@@ -1345,6 +1340,7 @@ impl Relay {
 
     fn stop_machine(&self, args: &Value, deadline: Deadline) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
+        self.connections.abandon_adding();
         let key = text_arg(args, "machine")?.ok_or_else(|| invalid("machine is required: a name from list_machines, or \"local\""))?;
         let force = match args.get("force") {
             None | Some(Value::Null) => false,
@@ -1357,39 +1353,37 @@ impl Relay {
         }
         let server = self.find_machine(&key)?;
         let name = display_name(&server);
-        let (link, mut status, _) = self.link_for_use(&server, deadline)?;
-        if !matches!(status.state, State::Ready | State::Starting | State::Queued) {
-            self.ask(&link, Ask::Attach, install, deadline)?;
-            status = self.settle(&link, deadline)?;
+        let session = self.connections.open(&server, install)?;
+        if !matches!(session.status().state, State::Ready | State::Starting | State::Queued) {
+            match ensure_again(&session, Want::Attach { install }, deadline.left()) {
+                Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, &info, "stop_machine")),
+                Outcome::NothingRunning => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Julia isn't running on {name}, so there is nothing to stop.") })),
+                _ => {}
+            }
         }
-        if status.state == State::NeedsInstall {
-            return Ok(needs_install_result(&name, &status, "stop_machine"));
-        }
-        if status.nothing_running {
-            return Ok(json!({ "machine": name, "stopped": false, "message": format!("Julia isn't running on {name}, so there is nothing to stop.") }));
-        }
+        let status = session.status();
         if !force && matches!(status.state, State::Starting | State::Queued) {
             return Ok(waiting_result(&name, &status));
         }
-        if !force && let Some(runtime) = status.runtime.as_ref().filter(|_| status.state == State::Ready) {
-            let session = self.session();
-            let route = Route { port: runtime.port, token: runtime.token.clone(), session: session.clone(), host: Some(crate::mcp::clean_label(&name).unwrap_or_else(|| server.id.clone())) };
+        if !force && let Some(runtime) = status.runtime.as_ref() {
+            let key = self.session();
+            let route = Route { port: runtime.port, token: runtime.token.clone(), session: key.clone(), host: Some(crate::mcp::clean_label(&name).unwrap_or_else(|| server.id.clone())) };
             let on_this = self.machine().is_some_and(|m| m.id == server.id);
             let others = self.recent_others(&route, CHECK_WAIT);
             if !on_this {
-                self.end_session(route.port, &route.token, &session);
+                self.end_session(route.port, &route.token, &key);
             }
             let others = others?;
             if !others.is_empty() {
                 return Ok(others_result(&name, others));
             }
         }
-        let stopping = link.clone();
+        let stopping = session.clone();
         let (done, waited) = mpsc::channel();
         std::thread::spawn(move || drop(done.send(stopping.stop())));
         match waited.recv_timeout(deadline.left().max(STOP_FLOOR)) {
             Ok(Ok(())) => {}
-            Ok(Err(why)) => return Err(why),
+            Ok(Err(why)) => return Err(format!("{why}{}", stop_advice(&session))),
             Err(_) => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Stopping Julia on {name} is taking a while. It goes on in the background: call `pluto_session_status` or `list_machines` later to see whether it ended.") })),
         }
         self.update_machine(&server.id, |m| {
@@ -1515,7 +1509,7 @@ impl Relay {
 
 impl Machine {
     fn new(server: &Server, folder: Option<String>) -> Machine {
-        Machine { id: server.id.clone(), name: display_name(server), cluster: server.cluster.is_some(), folder, link: None, active: true, asked: None, told: None }
+        Machine { id: server.id.clone(), name: display_name(server), cluster: server.cluster.is_some(), folder, active: true, told: None }
     }
 }
 
@@ -1524,9 +1518,20 @@ fn display_name(server: &Server) -> String {
     [&server.name, &server.ssh_host, &server.id].into_iter().find(|n| !n.trim().is_empty()).cloned().unwrap_or_default()
 }
 
+/// What to tell about opening the page when this session is not connected: it works only while the
+/// session is, and the runtime's own port on the machine is what a forward of the user's reaches.
+fn reach_text(server: &Server, runtime: &RuntimeInfo) -> String {
+    let Some(port) = runtime.remote_port else { return " The page works while this session is connected.".into() };
+    if server.cluster.is_some() {
+        return format!(" The page works while this session is connected. The runtime is on node {}, port {port}, behind the login node, so there is no ssh command for it between sessions.", runtime.node);
+    }
+    let via = server.port.map(|p| format!(" -p {p}")).unwrap_or_default();
+    format!(" The page works while this session is connected. Once it has ended, `ssh -L {port}:127.0.0.1:{port}{via} {}` run on the user's computer reaches the runtime on port {port}, with the same token.", server.ssh_host)
+}
+
 /// What `stop_machine` says, without `force`, when Julia is starting or a job is queued: other
 /// sessions that wait for it can't be seen, and stopping cancels it for them too.
-fn waiting_result(name: &str, status: &link::Status) -> Value {
+fn waiting_result(name: &str, status: &Status) -> Value {
     let what = match (&status.job, &status.queue, status.state) {
         (job, Some(queue), State::Queued) => {
             let id = job.as_ref().map_or(String::new(), |j| format!(" {}", j.id));

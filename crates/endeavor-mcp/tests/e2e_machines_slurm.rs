@@ -13,8 +13,8 @@
 //! (`ENDEAVOR_TEST_SLURM_PARTITION` names another), and cancels it by its id if a
 //! step fails. Julia is found as in `e2e_machines`, and the depot is
 //! `e2e_client`'s, so run that test first or expect several minutes. The
-//! fronts' state, config and cache folders, the machines file, the link's
-//! records and the helper's install and state folders are under
+//! fronts' state, config and cache folders, the machines file,
+//! and the helper's install and state folders are under
 //! `target/tmp/e2e-machines-slurm`, which the host has to see at the same path.
 //! `HOME` stays the user's, where `ssh` finds its keys. The fronts' own local
 //! runtime is pointed at a Julia that doesn't exist, so none is started here.
@@ -53,10 +53,9 @@ fn json_field(path: &Path, field: &str) -> Option<String> {
     v[field].as_str().filter(|s| !s.is_empty()).map(str::to_owned)
 }
 
-/// A failed step leaves no link, no Julia and no job behind: cancels the jobs this test recorded, and ends the link and the runtime it started.
+/// A failed step leaves no Julia and no job behind: cancels the jobs this test recorded, and ends the runtime it started.
 struct Ends {
     state: PathBuf,
-    links: PathBuf,
     jobs: Arc<Mutex<Vec<String>>>,
 }
 
@@ -70,14 +69,6 @@ impl Drop for Ends {
             if !listed(&job).is_empty() {
                 eprintln!("cleanup: cancelling job {job}");
                 let _ = Command::new("scancel").arg(&job).output();
-            }
-        }
-        if let Ok(entries) = std::fs::read_dir(&self.links) {
-            for entry in entries.flatten() {
-                if let Some(pid) = std::fs::read_to_string(entry.path().join("link.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["pid"].as_i64()).filter(|&p| p > 1) {
-                    // SAFETY: plain syscall, on the link this test started.
-                    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                }
             }
         }
     }
@@ -120,7 +111,7 @@ fn the_machine_tools_over_real_slurm() {
     let depot = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-client/depot");
     let jobs = Arc::new(Mutex::new(Vec::new()));
     // A job an earlier run left is this test's own to cancel: it is recorded in the test's own folder.
-    drop(Ends { state: work.join("state"), links: work.join("state-home/endeavor/links"), jobs: jobs.clone() });
+    drop(Ends { state: work.join("state"), jobs: jobs.clone() });
     let _ = std::fs::remove_dir_all(&work);
     for folder in ["root", "state", "notebooks", "project", "config", "state-home", "cache"] {
         std::fs::create_dir_all(work.join(folder)).unwrap();
@@ -133,7 +124,7 @@ fn the_machine_tools_over_real_slurm() {
         Some(app) => format!("{}:{}:", depot.display(), app.join("depot").display()),
         None => format!("{}:", depot.display()),
     };
-    let _ends = Ends { state: state.clone(), links: work.join("state-home/endeavor/links"), jobs: jobs.clone() };
+    let _ends = Ends { state: state.clone(), jobs: jobs.clone() };
     let before = squeue(&[]);
     eprintln!("host: {host}, julia: {}, partition: {partition}; this user's endeavor jobs before: {before:?}", julia.display());
 
@@ -152,7 +143,6 @@ fn the_machine_tools_over_real_slurm() {
             .env("ENDEAVOR_LINK_ROOT", &root)
             .env("ENDEAVOR_LINK_STATE", &state)
             .env("ENDEAVOR_LINK_DEPOT", &depot_path)
-            .env("ENDEAVOR_LINK_IDLE_SECS", "3600")
             .env("ENDEAVOR_START_WAIT_SECS", "45")
             .current_dir(&project);
         let mut front = Front::spawn(command);
@@ -171,7 +161,7 @@ fn the_machine_tools_over_real_slurm() {
     assert!(added["message"].as_str().unwrap().contains("Slurm"), "{added}");
     let listing = one.ok("list_machines", json!({}));
     let entry = machine(&listing, "e2e-slurm");
-    assert_eq!((entry["cluster"].clone(), entry["state"].as_str(), entry["this_session"].clone()), (json!(true), Some("no link running"), json!(false)), "{listing}");
+    assert_eq!((entry["cluster"].clone(), entry["state"].as_str(), entry["this_session"].clone()), (json!(true), Some("not connected"), json!(false)), "{listing}");
 
     // No resources: asked for, nothing submitted, the session where it was.
     let asked = one.ok("use_machine", json!({ "machine": "e2e-slurm", "folder": notebooks.display().to_string() }));
@@ -227,6 +217,11 @@ fn the_machine_tools_over_real_slurm() {
     assert_eq!((entry["state"].as_str(), entry["this_session"].clone()), (Some("ready"), json!(true)), "{machines}");
     eprintln!("states seen while waiting: {seen:?}");
 
+    let remote_port = std::fs::read_to_string(state.join("runtime.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()).expect("the runtime's port in its record");
+    assert_eq!(ready["remote_port"], remote_port, "{ready}");
+    assert_eq!(status["remote_port"], remote_port, "{status}");
+    let message = ready["message"].as_str().unwrap();
+    assert!(message.contains(&format!("node {node}, port {remote_port}")) && !message.contains("ssh -L"), "a compute node's port is given, and no command is promised: {message}");
     let page = ready["browser_url"].as_str().unwrap().to_owned();
     let (port, token) = page.strip_prefix("http://localhost:").unwrap().split_once("/?token=").map(|(p, t)| (p.parse::<u16>().unwrap(), t.to_owned())).unwrap();
 
@@ -253,12 +248,25 @@ fn the_machine_tools_over_real_slurm() {
     assert!(body.contains("Pluto"));
     eprintln!("[{:?}] the notebook ran in job {job} on {node}, and the page answers", started.elapsed());
 
+    // Each front connects for itself, so its first status may still say it is connecting: ask until the runtime is there.
+    let up = |front: &mut Front| {
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            let status = front.ok("pluto_session_status", json!({}));
+            if status.get("browser_url").is_some() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "{status}");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    };
+
     // A second session in the project attaches to the same job with no `use_machine`, and sees the first.
     let mut two = front();
-    let attached = two.ok("pluto_session_status", json!({}));
+    let attached = up(&mut two);
     eprintln!("[{:?}] second front's pluto_session_status: {attached}", started.elapsed());
     assert_eq!((attached["machine"].as_str(), attached["job"]["id"].as_str(), attached["job"]["node"].as_str()), (Some("e2e-slurm"), Some(job.as_str()), Some(node)), "{attached}");
-    assert!(attached["job"]["ends_in_minutes"].as_u64().is_some_and(|m| (10..=15).contains(&m)), "the job's end is known to a link that attached to a running job: {attached}");
+    assert!(attached["job"]["ends_in_minutes"].as_u64().is_some_and(|m| (10..=15).contains(&m)), "the job's end is known to a front that attached to a running job: {attached}");
     let seen_by_two = two.ok("list_notebooks", json!({}));
     let nb = seen_by_two.as_array().and_then(|l| l.iter().find(|nb| nb["notebook_id"] == json!(notebook))).unwrap_or_else(|| panic!("{seen_by_two}"));
     assert_eq!(nb["other_sessions"].as_array().map(Vec::len), Some(1), "the first session is listed: {nb}");
@@ -273,7 +281,7 @@ fn the_machine_tools_over_real_slurm() {
 
     // A third session while the first is still there, then the first goes: nothing detached the job.
     let mut three = front();
-    let attached = three.ok("pluto_session_status", json!({}));
+    let attached = up(&mut three);
     assert_eq!((attached["machine"].as_str(), attached["job"]["id"].as_str()), (Some("e2e-slurm"), Some(job.as_str())), "{attached}");
     one.finish();
     assert_eq!(listed(&job).len(), 1, "the job runs on after the first front is gone");
@@ -315,12 +323,7 @@ fn the_machine_tools_over_real_slurm() {
     assert_eq!(entry["state"].as_str(), Some("connected"), "{listing}");
     three.finish();
 
-    // Nothing is left: the link goes with the test's own end of it.
-    let record: Value = serde_json::from_str(&std::fs::read_to_string(work.join("state-home/endeavor/links/e2e-slurm/link.json")).unwrap()).unwrap();
-    let link_pid = record["pid"].as_i64().unwrap() as i32;
-    // SAFETY: plain syscall, on the link this test started.
-    unsafe { libc::kill(link_pid, libc::SIGTERM) };
-    wait_for("the link to end", || !pid_alive(link_pid));
+    // Nothing is left: the front's end took its connection with it.
     wait_for("the helper to go", || Command::new("pgrep").arg("-f").arg("--").arg(format!("connect --state-dir {}", state.display())).output().unwrap().stdout.is_empty());
     assert!(!state.join("runtime.json").exists() && !state.join("job.json").exists());
     assert_eq!(squeue(&[]), before, "no job of this test is left");

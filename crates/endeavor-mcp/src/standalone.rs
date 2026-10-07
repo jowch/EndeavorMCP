@@ -32,6 +32,8 @@ use crate::{Args, Launcher, Runtime, embedded, julia, stopped};
 mod machines;
 mod projects;
 
+pub(crate) use machines::{open_session, stop_advice};
+
 const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Julia here and print how to connect (Ctrl-C stops it)
        endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
        endeavor stop              stop the Julia that serve or mcp started
@@ -821,6 +823,8 @@ struct Relay {
     sessions: std::sync::atomic::AtomicU64,
     /// Where this session's notebooks run.
     target: Mutex<machines::Target>,
+    /// The connections to the machines this session has used.
+    connections: machines::Connections,
     /// One machine tool at a time (they switch, start and stop things).
     ops: Mutex<()>,
     /// Said once, in the first result.
@@ -840,7 +844,6 @@ fn relay(options: Options) -> ! {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let relay = Arc::new(Relay::new(options, format!("stdio-{}-{}", std::process::id(), now.as_millis()), Box::new(io::stdout())));
     relay.target_from_project();
-    relay.keep_link_alive();
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -853,6 +856,7 @@ fn relay(options: Options) -> ! {
         std::thread::spawn(move || relay.handle(&line));
     }
     relay.release();
+    relay.connections.close_all();
     std::process::exit(0)
 }
 
@@ -866,6 +870,7 @@ impl Relay {
             session: Mutex::new(session),
             sessions: std::sync::atomic::AtomicU64::new(0),
             target: Mutex::new(machines::Target::Local { stopped: false }),
+            connections: machines::Connections::default(),
             ops: Mutex::new(()),
             notice: Mutex::new(None),
             machines: crate::client::MachinesFile::here(),
@@ -965,7 +970,7 @@ impl Relay {
     /// The agent has gone: let the runtime end this session, so other sessions
     /// don't see it as still working in a notebook, and a call still under way
     /// doesn't bind it again. Best effort, and it doesn't hold up the exit for
-    /// more than a moment. The link stays.
+    /// more than a moment.
     fn release(&self) {
         let Some((port, token, session)) = self.current_runtime() else { return };
         self.end_session(port, &token, &session);
@@ -1027,10 +1032,8 @@ impl Relay {
 
     /// The runtime went away: start or find it again.
     fn lost(self: &Arc<Self>) {
-        if let machines::Target::Machine(machine) = &mut *self.target.lock().unwrap() {
-            // The link is gone, or its runtime: the next call asks the link again.
-            machine.link = None;
-            machine.asked = None;
+        // A machine's connection gets its runtime back by itself, and the next call asks it how it stands.
+        if matches!(*self.target.lock().unwrap(), machines::Target::Machine(_)) {
             return;
         }
         let mut status = self.status.lock().unwrap();
@@ -1224,7 +1227,7 @@ pub(crate) struct Route {
     /// The session's key (`X-Endeavor-Session`).
     pub session: String,
     /// The machine's name (`X-Endeavor-Host`). With it the runtime also gets
-    /// the link's port as the browser's (`X-Endeavor-Browser-Port`), which is `port`.
+    /// the connection's port as the browser's (`X-Endeavor-Browser-Port`), which is `port`.
     pub host: Option<String>,
 }
 

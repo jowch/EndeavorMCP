@@ -127,6 +127,8 @@ pub struct RuntimeInfo {
     /// It was running already; this session didn't start it.
     pub reattached: bool,
     pub job: Option<wire::slurm::Job>,
+    /// The runtime's own port on `node`, where a server's user can forward it; none when an older helper doesn't say.
+    pub remote_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -455,19 +457,26 @@ impl Session {
 
     /// Where the session stands.
     pub fn status(&self) -> Status {
-        let i = self.shared.inner();
-        Status {
-            machine: i.id.clone(),
-            name: i.name.clone(),
-            state: i.state,
-            step: i.step.clone(),
-            error: i.error.clone(),
-            hello: i.hello.clone(),
-            runtime: i.runtime().cloned(),
-            job: i.job.clone(),
-            queue: i.queue.clone(),
-            nothing_running: i.nothing_running,
-            needs_install: i.needs.clone(),
+        status_of(&self.shared.inner())
+    }
+
+    /// How it stands, if that is settled: the outcome `ensure` would give, with nothing asked, nothing
+    /// told (a failure stays to be told to `ensure`) and nothing retried.
+    pub fn settled(&self) -> Option<Outcome> {
+        outcome(&self.shared.inner())
+    }
+
+    /// Where the session stands once `done` is true of it, or after `wait` if it never is.
+    pub fn wait_for(&self, wait: Duration, done: impl Fn(&Status) -> bool) -> Status {
+        let until = Instant::now().checked_add(wait);
+        let mut inner = self.shared.inner();
+        loop {
+            let status = status_of(&inner);
+            let left = until.map_or(Duration::from_secs(3600), |until| until.saturating_duration_since(Instant::now()));
+            if done(&status) || (until.is_some() && left.is_zero()) {
+                return status;
+            }
+            inner = self.shared.changed.wait_timeout(inner, left).unwrap().0;
         }
     }
 
@@ -543,6 +552,22 @@ impl Session {
             }
             inner = self.shared.changed.wait_timeout(inner, left).unwrap().0;
         }
+    }
+}
+
+fn status_of(i: &Inner) -> Status {
+    Status {
+        machine: i.id.clone(),
+        name: i.name.clone(),
+        state: i.state,
+        step: i.step.clone(),
+        error: i.error.clone(),
+        hello: i.hello.clone(),
+        runtime: i.runtime().cloned(),
+        job: i.job.clone(),
+        queue: i.queue.clone(),
+        nothing_running: i.nothing_running,
+        needs_install: i.needs.clone(),
     }
 }
 
@@ -1120,6 +1145,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             pid: runtime.pid,
                             reattached: runtime.reattached,
                             job: runtime.job,
+                            remote_port: runtime.remote_port,
                         });
                     }),
                     // The connection ended under the start: `Closed` follows and takes the start along to the next one.

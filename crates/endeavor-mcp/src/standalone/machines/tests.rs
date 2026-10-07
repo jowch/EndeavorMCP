@@ -1,9 +1,13 @@
 use super::*;
-use crate::link::{JobInfo, QueueInfo, replaceable};
+use crate::client::{JobInfo, QueueInfo};
 use crate::standalone::{Command, Env, Options, parse};
 
-fn status(state: State) -> link::Status {
-    link::Status { machine: "lab".into(), name: "lab".into(), state, step: None, error: None, hello: None, runtime: None, job: None, queue: None, nothing_running: false, needs_install: None, pid: 1, build: "b".into() }
+fn status(state: State) -> Status {
+    Status { machine: "lab".into(), name: "lab".into(), state, step: None, error: None, hello: None, runtime: None, job: None, queue: None, nothing_running: false, needs_install: None }
+}
+
+fn reached(outcome: Outcome, status: Status) -> Reached {
+    Reached { outcome, status }
 }
 
 fn partition(name: &str, default: bool, minutes: Option<u32>, cpus: u32, mem_mb: u64) -> Partition {
@@ -25,31 +29,26 @@ fn options() -> Options {
 }
 
 #[test]
-fn a_link_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
+fn a_machine_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
     let mut connecting = status(State::Connecting);
     connecting.step = Some("Connecting to lab".into());
-    let said = not_ready_message("lab", &connecting);
+    let said = not_ready_message("lab", &reached(Outcome::StillWorking("Connecting to lab".into()), connecting));
     assert!(said.starts_with("Endeavor is connecting to lab. Last step: Connecting to lab") && said.contains("`pluto_session_status`") && said.contains("`use_machine` again"), "{said}");
 
-    let mut starting = status(State::Starting);
-    starting.step = Some("Found Julia 1.12.0".into());
-    let said = not_ready_message("lab", &starting);
+    let said = not_ready_message("lab", &reached(Outcome::StillWorking("Found Julia 1.12.0".into()), status(State::Starting)));
     assert!(said.contains("Julia is starting on lab") && said.contains("Last step: Found Julia 1.12.0") && said.contains("`pluto_session_status`"), "{said}");
 
-    let mut queued = status(State::Queued);
-    queued.job = Some(JobInfo { id: "4242".into(), ..Default::default() });
-    queued.queue = Some(QueueInfo { state: "PENDING".into(), reason: "Priority".into() });
-    let said = not_ready_message("hpc", &queued);
+    let job = Some(JobInfo { id: "4242".into(), ..Default::default() });
+    let queued = Outcome::Queued { job: job.clone(), queue: QueueInfo { state: "PENDING".into(), reason: "Priority".into() } };
+    let said = not_ready_message("hpc", &reached(queued, status(State::Queued)));
     assert_eq!(said, "The Slurm job 4242 on hpc is waiting in the queue: other jobs are ahead of it. Tell the user, wait, and call `pluto_session_status` to follow it.");
-    queued.queue = Some(QueueInfo { state: "RUNNING".into(), reason: "n123".into() });
-    assert!(not_ready_message("hpc", &queued).contains("running on node n123, and Julia is starting there"));
+    let running = Outcome::Queued { job, queue: QueueInfo { state: "RUNNING".into(), reason: "n123".into() } };
+    assert!(not_ready_message("hpc", &reached(running, status(State::Queued))).contains("running on node n123, and Julia is starting there"));
 
-    let mut failed = status(State::Failed);
-    failed.error = Some("lab refused the sign-in.".into());
-    let said = not_ready_message("lab", &failed);
+    let said = not_ready_message("lab", &reached(Outcome::Failed("lab refused the sign-in.".into()), status(State::Failed)));
     assert!(said.starts_with("Julia on lab isn't available: lab refused the sign-in.") && said.contains("`use_machine` with machine \"lab\""), "{said}");
 
-    let said = not_ready_message("lab", &status(State::Connected));
+    let said = not_ready_message("lab", &reached(Outcome::NothingRunning, status(State::Connected)));
     assert!(said.contains("Julia isn't running on lab") && said.contains("`use_machine`"), "{said}");
 }
 
@@ -67,7 +66,8 @@ fn a_status_result_has_what_the_agent_needs() {
     queued.step = Some("Submitted job 7".into());
     queued.job = Some(JobInfo { id: "7".into(), summary: Some("8 CPUs · 32 GB · 8 h".into()), ..Default::default() });
     queued.queue = Some(QueueInfo { state: "PENDING".into(), reason: "Resources".into() });
-    let result = status_result("hpc", &queued, "waits");
+    let outcome = Outcome::Queued { job: queued.job.clone(), queue: queued.queue.clone().unwrap() };
+    let result = status_result("hpc", &reached(outcome, queued), "waits");
     assert_eq!(
         result,
         json!({
@@ -78,8 +78,10 @@ fn a_status_result_has_what_the_agent_needs() {
     );
     let mut failed = status(State::Failed);
     failed.error = Some("boom".into());
-    assert_eq!(status_result("lab", &failed, "m")["error"], "boom");
-    assert!(status_result("lab", &status(State::Connected), "m").get("queue").is_none());
+    assert_eq!(status_result("lab", &reached(Outcome::Failed("boom".into()), failed), "m")["error"], "boom");
+    let result = status_result("lab", &reached(Outcome::NothingRunning, status(State::Connected)), "m");
+    assert!(result.get("queue").is_none() && result["state"] == "connected");
+    assert_eq!(status_result("lab", &reached(Outcome::StillWorking(String::new()), status(State::Starting)), "m")["state"], "starting");
 }
 
 #[test]
@@ -93,23 +95,30 @@ fn a_job_says_when_it_ends() {
 }
 
 #[test]
-fn only_a_link_nothing_hangs_on_is_replaced() {
-    for state in [State::Connecting, State::Connected, State::Failed] {
+fn only_a_connection_nothing_hangs_on_is_replaced() {
+    for state in [State::Connecting, State::Connected, State::Failed, State::NeedsInstall] {
         assert!(replaceable(&status(state)), "{state:?}");
     }
     for state in [State::Starting, State::Queued, State::Ready] {
         assert!(!replaceable(&status(state)), "{state:?}");
     }
     let mut attached = status(State::Connected);
-    attached.runtime = Some(crate::link::RuntimeInfo { port: 1, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n".into(), pid: 2, reattached: false, job: None });
+    attached.runtime = Some(RuntimeInfo { port: 1, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n".into(), pid: 2, reattached: false, job: None, remote_port: None });
     assert!(!replaceable(&attached));
 }
 
 #[test]
-fn a_link_of_the_previous_protocol_with_an_old_shaped_status_is_replaceable() {
-    let old = json!({ "machine": "lab", "name": "lab", "state": "needs_install", "pid": 7, "build": "b", "needs_install": { "what": "julia", "helper": null } });
-    let status = link::Status::read(old, link::PROTOCOL - 1).unwrap();
-    assert!(replaceable(&status));
+fn what_to_tell_about_the_page_after_the_session_depends_on_where_the_runtime_is() {
+    let runtime = |remote_port| RuntimeInfo { port: 1, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n7".into(), pid: 2, reattached: false, job: None, remote_port };
+    let lab = Server { id: "lab".into(), ssh_host: "ada@lab".into(), ..Default::default() };
+    let said = reach_text(&lab, &runtime(Some(41234)));
+    assert!(said.contains("works while this session is connected") && said.contains("`ssh -L 41234:127.0.0.1:41234 ada@lab`"), "{said}");
+    let said = reach_text(&Server { port: Some(2222), ..lab.clone() }, &runtime(Some(41234)));
+    assert!(said.contains("`ssh -L 41234:127.0.0.1:41234 -p 2222 ada@lab`"), "{said}");
+    let said = reach_text(&Server { cluster: Some(Cluster::default()), ..lab.clone() }, &runtime(Some(41234)));
+    assert!(said.contains("node n7, port 41234") && !said.contains("ssh -L"), "no command is promised for a compute node: {said}");
+    let said = reach_text(&lab, &runtime(None));
+    assert!(said.contains("works while this session is connected") && !said.contains("ssh -L"), "an older helper gives no port: {said}");
 }
 
 #[test]
@@ -356,10 +365,8 @@ fn a_call_to_a_stopped_computer_says_to_call_use_machine() {
     assert!(unready.message.contains("stop_machine") && unready.message.contains("`use_machine` with machine \"local\""), "{}", unready.message);
 }
 
-fn needing(items: Vec<wire::Item>, helper: Option<crate::client::NeedsInstall>) -> link::Status {
-    let mut status = status(State::NeedsInstall);
-    status.needs_install = Some(link::InstallInfo { items, helper });
-    status
+fn needing(items: Vec<wire::Item>, helper: Option<crate::client::NeedsInstall>) -> InstallInfo {
+    InstallInfo { items, helper }
 }
 
 #[test]
@@ -372,7 +379,7 @@ fn the_question_is_built_from_the_items_including_a_kind_it_has_never_seen() {
         assert!(said.contains("Ask the user") && said.contains("`install: true`") && said.contains(tool), "{said}");
         assert!(!said.contains("helper program") && !said.contains("shell line"), "no sentence of a known kind: {said}");
     }
-    let json = install_json(&status).unwrap();
+    let json = install_json(&status);
     assert_eq!(json["items"], json!([{ "kind": "kernel", "name": "R 4.5.1", "size_mb": 120, "place": "/home/ada/.cache/endeavor/r" }]));
     assert_eq!(json.get("os"), None, "no helper details for no helper");
     let result = needs_install_result("lab", &status, "use_machine");
@@ -390,12 +397,11 @@ fn the_question_is_built_from_the_items_including_a_kind_it_has_never_seen() {
 #[test]
 fn the_helper_item_keeps_what_was_found_on_the_machine() {
     let found = crate::client::NeedsInstall { os: "Linux".into(), arch: "x86_64".into(), folder: "/srv/e/abc".into(), bytes: Some(21_500_000), update: true, running: Some(Running::Process { pid: 77, checked: true }) };
-    let mut status = status(State::NeedsInstall);
-    status.needs_install = Some(link::InstallInfo::helper(found));
+    let status = InstallInfo::helper(found);
     let said = install_text("lab", &status, "stop_machine");
     for part in ["Endeavor's helper (about 22 MB, into /srv/e/abc)", "Linux x86_64", "Stopping the runtime there needs it", "this is an update", "process 77"] {
         assert!(said.contains(part), "{part}: {said}");
     }
-    let json = install_json(&status).unwrap();
+    let json = install_json(&status);
     assert_eq!((json["update"].clone(), json["running"].clone(), json["os"].clone()), (json!(true), json!({ "process": 77 }), json!("Linux")));
 }

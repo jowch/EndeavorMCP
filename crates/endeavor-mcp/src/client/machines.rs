@@ -22,6 +22,17 @@ pub enum IdleStop {
     Never,
 }
 
+/// Whether `id` is fit to be a machine's id: the machines file can be edited by hand, and an id may become a folder's name.
+/// Capitals are out because Windows and macOS give two ids that differ only in
+/// case one folder, and names Windows keeps for devices (`nul`, `com1`, even as
+/// `nul.txt`) and a trailing dot can't be folders there.
+pub fn valid_id(id: &str) -> Result<(), String> {
+    let stem = id.split('.').next().unwrap_or_default();
+    let device = matches!(stem, "con" | "prn" | "aux" | "nul") || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.ends_with(|c: char| c.is_ascii_digit() && c != '0'));
+    let plain = !id.is_empty() && id.len() <= 100 && !id.starts_with('.') && !id.ends_with('.') && !device && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
+    if plain { Ok(()) } else { Err(format!("\"{id}\" isn't a machine id: it has lower-case letters, digits, - _ and . only, doesn't start or end with a dot and isn't a name such as nul or com1.")) }
+}
+
 /// A machine reached over SSH: a plain server, where the runtime runs as a
 /// detached process, or a cluster's login node, where it runs in a Slurm job.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

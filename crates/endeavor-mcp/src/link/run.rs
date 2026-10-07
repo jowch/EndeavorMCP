@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use wire::slurm::JobRequest;
 
-use super::{Record, State, Status, valid_id};
-use crate::client::{Config, Messages, Server, Session, Transport, Want, this_platform};
+use super::{Record, Status, valid_id};
+use crate::client::{Server, Session, Want};
 use crate::http::{self, Framing, Head};
 use crate::standalone::Env;
 
@@ -69,27 +69,10 @@ pub(crate) fn main(argv: &[String]) -> ! {
     }
     catch_stop_signals();
     let idle = std::env::var("ENDEAVOR_LINK_IDLE_SECS").ok().and_then(|s| s.parse::<f64>().ok()).filter(|secs| *secs > 0.0).and_then(|secs| Duration::try_from_secs_f64(secs).ok()).unwrap_or(IDLE);
-    let var = |name: &str| std::env::var(name).unwrap_or_default();
-    let helper = |os: &str, arch: &str| {
-        if (os.to_owned(), arch.to_owned()) == this_platform() {
-            std::env::current_exe().map_err(|e| format!("Couldn't find the endeavor program itself: {e}"))
-        } else {
-            crate::release::helper_for(os, arch, &Env::from_vars(&|name| std::env::var(name).ok()).helpers_dir())
-        }
-    };
-    let mut config = Config::new(server, helper);
-    if std::env::var_os("ENDEAVOR_LINK_SHELL").is_some() {
-        config.transport = Transport::Shell { env: Vec::new(), ask: std::env::var("ENDEAVOR_LINK_ASK").ok() };
-    }
-    (config.root, config.state, config.depot, config.allow_install) = (var("ENDEAVOR_LINK_ROOT"), var("ENDEAVOR_LINK_STATE"), var("ENDEAVOR_LINK_DEPOT"), install);
-    config.messages = Messages {
-        restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
-        not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
-    };
     let control = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| fail(format!("Couldn't open the control port: {e}")));
     let port = control.local_addr().map(|a| a.port()).unwrap_or_else(|e| fail(e.to_string()));
     let token = crate::random_hex::<32>().unwrap_or_else(|e| fail(e));
-    let session = Session::new(config).unwrap_or_else(|e| fail(e));
+    let session = crate::standalone::open_session(server, install).unwrap_or_else(|e| fail(e));
     #[cfg(windows)]
     let started = crate::winproc::own_start_time();
     #[cfg(not(windows))]
@@ -255,7 +238,7 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
         }
         ("POST", "/link/stop") => match shared.session.stop() {
             Ok(()) => reply(&mut connection, "200 OK", &json!({ "ok": true })),
-            Err(message) => reply(&mut connection, "409 Conflict", &json!({ "error": format!("{message}{}", stop_advice(&shared.session)) })),
+            Err(message) => reply(&mut connection, "409 Conflict", &json!({ "error": format!("{message}{}", crate::standalone::stop_advice(&shared.session)) })),
         },
         ("POST", "/link/quit") => {
             if start_leaving(shared) {
@@ -266,18 +249,6 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
         }
         (_, "/link/status" | "/link/start" | "/link/install" | "/link/stop" | "/link/quit") => reply(&mut connection, "405 Method Not Allowed", &json!({ "error": "method_not_allowed" })),
         _ => reply(&mut connection, "404 Not Found", &json!({ "error": "not_found" })),
-    }
-}
-
-/// What to do about a stop that couldn't reach the helper, in the front's tools. Nothing for a stop the helper refused.
-fn stop_advice(session: &Session) -> &'static str {
-    if session.connected() {
-        return "";
-    }
-    match session.status().state {
-        State::NeedsInstall => " Ask the user whether Endeavor may install it, then call `stop_machine` again with `install: true`.",
-        State::Failed => " Tell the user, and call `stop_machine` again once that is fixed.",
-        _ => " Wait a few seconds, then call `stop_machine` again.",
     }
 }
 

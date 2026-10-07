@@ -9,18 +9,12 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The link
 
-- **The link keeps the first front's `SSH_AUTH_SOCK`.** The link is started
-  by whichever agent session needs it first and lives for hours. If that
-  session's ssh agent socket goes away, a later reconnect fails at sign-in
-  and is not retried. Left because the link has no better source for the
-  socket. To close: let a front pass its current socket with
-  `POST /link/start`, or have the link look for the user's agent itself.
 - **A start cut short by a lost connection is reported as "not running".**
-  After a reconnect the link only re-attaches to a runtime the helper can
+  After a reconnect the session only re-attaches to a runtime the helper can
   see. A core that was still booting when the connection dropped has no
   `runtime.json` yet, so the helper's runtime check says nothing is running,
   though the core goes on and records itself, and the next `StartRuntime`
-  waits for it (`starting.lock`). The link never starts one by itself; the
+  waits for it (`starting.lock`). The session never starts one by itself; the
   next `use_machine` does. To close: have the check report a start under way.
 - **The test for a connection lost during a start doesn't force the order
   of messages that caused the bug.** It passes on the old code too. The fix
@@ -63,24 +57,52 @@ _Started 2026-10-06, on the `client-library` branch._
 - **`POST /link/start` with `only_running` drops `job`.** An attach carries none;
   the link's start did keep it in the wish, where it was never used.
 
+## The front's connections
+
+- **`list_machines` knows only this process's connections.** A machine the
+  front has not connected to is listed as saved and `not connected`, which says
+  nothing about whether Julia runs there; listing connects to nothing and asks
+  no server. To close: a read-only look at a server that needs its own `ssh`.
+- **A server's browser address ends with the session.** The address is a port of
+  this computer that the front's connection serves, so it works while the
+  session is connected and stops when the front ends; the runtime and its
+  notebooks go on, and a new session gives a new address. For a plain server the
+  result names the runtime's own port (`remote_port`) and `ssh -L` reaches it
+  between sessions. On a cluster the runtime is on a compute node behind the
+  login node, and no command is given. A helper from before `remote_port` says no
+  port, and the result has null.
+- **Each front has its own `ssh`.** Several agent sessions on one server make
+  several connections to it, each with its own helper, and each signs in on
+  its own (a key with a passphrase needs the agent to have it already, in every
+  session's environment). A subagent's front is one more. Many helpers attach to
+  one runtime, which is built to allow it.
+- **A front's status tool waits up to 10 s for a connection it has just made**
+  to say whether a runtime is there, so the first `pluto_session_status` of a
+  session on a remembered machine can take that long over a slow network. It
+  never waits for a start.
+- **A failure that settled is kept** by a remembered machine's connection, as
+  the link kept it: notebook calls and the status tool report it, and only
+  `use_machine` (or a new `add_machine`) tries again. A runtime that died is
+  reported as "isn't available" on every call until `use_machine` starts it again.
+- **The test variables keep their `ENDEAVOR_LINK_` names** (`SHELL`, `ROOT`,
+  `STATE`, `DEPOT`, `ASK`); `{id}` in the last four stands for the machine's
+  id, so that two machines in one test don't share a runtime.
+
 ## The machines file
 
-- **A link keeps the machine record it was started with, and a tool that
-  names the machine replaces it when the saved settings differ.** `use_machine`,
-  `stop_machine` and `add_machine` end a link whose address, port, Julia or
-  Slurm mode is not the one asked for (the saved record, or for `add_machine` the
-  new settings) and start another, or refuse in plain words if Julia is in use
+- **A connection keeps the settings it was made with, and a tool that names
+  the machine replaces it when the saved settings differ.** `use_machine`,
+  `stop_machine` and `add_machine` replace a connection whose address, port,
+  Julia or Slurm mode is not the one asked for (the saved record, or for
+  `add_machine` the new settings), or refuse in plain words if Julia is in use
   through it. A session that is already working through a connection is not
   checked on each call, so a change made to `machines.json` meanwhile reaches it
-  at its next `use_machine`.
-- **A link whose machine was removed from the list keeps reconnecting** until
-  its 8 hour idle limit (it used to stop with "isn't in the list"). It
-  holds the record it was started with.
-- **An `add_machine` that was still connecting leaves a link running with a
-  record that is in no list** (an update keeps its link too). It ends at the idle
-  limit; the next `add_machine` for the same name reuses it, or replaces it when
-  the settings differ. A call that ends in an error for a new machine ends the
-  link, and so does a start that finishes after the call's time ran out.
+  at its next `use_machine`. A machine removed from the list keeps its
+  connection, and keeps reconnecting after a drop, until the front ends.
+- **An `add_machine` that said "still connecting" leaves its connection
+  (not saved, in no list) until the next `add_machine` with the same settings
+  continues it, a `use_machine` or `stop_machine` lets it go, or the front
+  ends.** Any other end of the call, an error included, ends it at once.
 - **Unknown fields of a partition are kept only while the cluster still lists
   it.** A partition that disappears takes its extra fields along; the fields
   of the file, a machine, its cluster and its job defaults are kept.
@@ -130,10 +152,10 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Idle exit
 
-- **A runtime the link starts exits when idle**, as one `mcp` starts does
+- **A runtime a front's connection starts exits when idle**, as one `mcp` starts does
   (`connect --exit-idle`): once no notebook has been open for the idle
   limit. A runtime the app starts on a server stays up. If the app attaches
-  to a link-started runtime and leaves it with no notebook open for 48
+  to a runtime started this way and leaves it with no notebook open for 48
   hours, it ends under the app. Not yet confirmed as the wanted behaviour.
 - **`ENDEAVOR_IDLE_CHECK_SECS` panics on a negative or non-finite value.** It
   is a variable for tests.
@@ -143,12 +165,6 @@ _Started 2026-10-06, on the `client-library` branch._
 - **Compile-checked only.** The link's detached start, its console handler,
   the `taskkill` cancel path and the machines and projects file locations
   have never run on Windows.
-- **The detached link may inherit handles from the front.** std starts a
-  child with handle inheritance on and no handle list, so if the front's
-  own stdin or stdout pipes are inheritable the link holds copies for up to
-  8 hours and the harness never sees the front's output end. Not verified.
-  To close: check on a real machine; if so, clear the inherit flag on the
-  front's handles or start the link with an explicit handle list.
 
 ## Slurm
 
@@ -164,10 +180,10 @@ _Started 2026-10-06, on the `client-library` branch._
   the job's final state, except when the runtime already said how it ended
   (then it tries three times, 1.5 s, as before). The slow case did not come up again in eight runs,
   so the fix is not shown by a run.
-- **A queued job has no id in the link's status until it is submitted by
-  this link.** A link that re-attaches to a job already queued shows `queue`
+- **A queued job has no id in the session's status until it is submitted by
+  this session.** A session that re-attaches to a job already queued shows `queue`
   but no `job` until it runs, because the library's queued event carries no
-  id. A job already running shows its id, node and end time to a new link
+  id. A job already running shows its id, node and end time to a new session
   (`e2e_machines_slurm`). Queued and starting states have not been seen on
   real Slurm through the tools: the queue here is empty and a job runs at
   once, so their wording is checked against the fake Slurm only.
@@ -179,8 +195,8 @@ _Started 2026-10-06, on the `client-library` branch._
 
 - **Keys only.** A server that asks for a password or a code on every login
   is unsupported. A key with a passphrase needs `ssh-add` first, and a new
-  host needs one `ssh <host>` in a terminal. Planned: a sign-in page on the
-  link's loopback port.
+  host needs one `ssh <host>` in a terminal. Planned: a sign-in page on a
+  loopback port.
 
 ## Releases and installing
 
@@ -205,7 +221,7 @@ _Started 2026-10-06, on the `client-library` branch._
   fetched server helpers. To close: sign the release, or pin the key in the
   script.
 - **A Mac or Windows computer reaching a Linux server is wired and not run.**
-  The release logic is tested with a fake release, but `link/run.rs`'s call
+  The release logic is tested with a fake release, but `open_session`'s call
   to it is not exercised across platforms, because the tests' ssh stand-in
   always reports this computer's platform.
 - **A build whose key the release doesn't hold** (a branch built by hand with
@@ -218,7 +234,7 @@ _Started 2026-10-06, on the `client-library` branch._
   The server's `uname` is what is asked for, and the release has no Windows
   server helper.
 - **Fetched helpers of other builds are removed** when a helper is fetched or
-  reused, with no regard for a link of an older build that is about to
+  reused, with no regard for a front of an older build that is about to
   send one: its connect fails ("couldn't open") and the next connect
   fetches it again. On Windows a folder holding a locked file stays until a
   later fetch.
@@ -336,7 +352,7 @@ _Started 2026-10-06, on the `client-library` branch._
   not checked. A cluster's job counts when the user's `squeue` lists it as
   pending, running or configuring, and is reported as recorded when there is
   no `squeue` or it fails.
-- **An install a start needs is not retried by the link by itself.** After
+- **An install a start needs is not retried by the session by itself.** After
   `needs_install` for a runtime such as Julia it waits for `install: true` or
   for `add_machine` with a `julia` setting.
 - **A start that is already under way takes no later agreement.** A
@@ -344,7 +360,7 @@ _Started 2026-10-06, on the `client-library` branch._
   with `install: true` arrives keeps its own permission, so it can end with
   `needs_install` for what the start needs; the second call, made again, then
   goes through.
-- **The Julia decision is tested through the link and the tools** with a fake
+- **The Julia decision is tested through the tools** with a fake
   `curl`, not against a real download; its unit test would need a login shell
   that finds no Julia, which a developer's machine often has. That test
   skips itself where a login shell finds Julia.
@@ -353,16 +369,6 @@ _Started 2026-10-06, on the `client-library` branch._
   after compression by ssh). For another platform the helper is fetched only
   once the install is allowed, so the question gives no size. A platform the
   release has no helper for is found out then too.
-- **A link of another build that has a runtime on it is not sent `install`.**
-  `add_machine` says so in its result, and the user has to end the runtime, or
-  wait for the link to end, to install through a new link.
-- **A link of another protocol is read only for its machine, pid, state, runtime,
-  job and queue.** Its `state` reads as `unknown` when this build doesn't know
-  the word, and a field whose shape changed is dropped, not an error. That is
-  enough to decide whether to replace the link (nothing hangs on it and its
-  state is `connecting`, `connected`, `failed` or `needs_install`); an
-  `unknown` state is never replaced. What such a link wanted installed
-  (`needs_install`) is not shown.
 - **Julia is not known when a machine is added.** The helper has no call for
   it, so `add_machine` reports `found: []` until the first runtime start.
 - **Only Julia is installed through the item list.** The engine name picks
@@ -374,25 +380,19 @@ _Started 2026-10-06, on the `client-library` branch._
   helper is what looks for Julia, so the first question names the helper only;
   `use_machine`'s one yes then covers Julia too, and a start that finds Julia
   missing and had no yes asks a second time.
-- **Adding a cluster takes two connections.** The first link connects as a
-  plain server; `add_machine` quits it once Slurm is found.
-- **Time waited in the queue is not reported**: the link doesn't know when a
+- **Adding a cluster takes two connections.** The first connection is made as a
+  plain server; `add_machine` ends it once Slurm is found.
+- **Time waited in the queue is not reported**: the session doesn't know when a
   job from an earlier connection was submitted.
-- **The front's exit can wait up to 5 s** on a link that hangs.
-- **One run of the failing-`add_machine` test failed** while waiting for the
-  link to end. The wait was changed and it did not recur in 13 runs; the
-  cause was not found.
+- **The front's exit can wait up to 5 s** for a connection that hangs (the connections close together).
 - **Saved extra `sbatch` flags written as a flag and a separate value** (`"--qos"`,
   `"normal"`), from a pasted line in an earlier build or by hand, are refused
   at submit time with a message to write `--qos=normal`. `parse_salloc` now
   writes one entry, but records already saved are not rewritten.
 - **Changing a machine between Slurm jobs and direct** drops the saved job
   defaults (partition, resources, account) and is refused only while the
-  link shows a runtime, a start or a job. A runtime or job the link doesn't
+  connection shows a runtime, a start or a job. A runtime or job it doesn't
   know of is not seen.
-- **A link call or `ensure` that runs past a tool call's 45 s** is given up
-  on, and the work goes on in the background (it only starts or asks a
-  link).
 - **`stop_machine` waits 5 s** for the runtime's list of notebooks, and
   without `force` refuses when it doesn't come. A runtime busy for longer than
   that needs `force`.
@@ -403,9 +403,6 @@ _Started 2026-10-06, on the `client-library` branch._
   no test that forces them. The pairing is tested as a snapshot taken before
   a move, the lock by a call that waits out its deadline, and the order in
   `stop_local` by reading.
-- **A link of another build with a runtime on it** is used as it is and sent
-  no start or attach. Not tested with a real older build, only with a link
-  whose record names another build.
 
 ## CI
 

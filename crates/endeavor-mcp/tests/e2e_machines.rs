@@ -1,7 +1,7 @@
 //! The machine tools of `endeavor mcp` over real ssh and real Julia: an agent's
 //! harness (stdio) adds a machine, puts the session on it, works in a notebook
 //! there, reads its files and runs a command on it, opens the notebook's page
-//! through the link's port, and stops the runtime, until nothing is left
+//! through the front's port for the machine, and stops the runtime, until nothing is left
 //! running. It's ignored by default and runs only when `ENDEAVOR_TEST_SSH_HOST`
 //! names a host that this user can `ssh` to with a key (`localhost` is one):
 //!
@@ -11,7 +11,7 @@
 //! PATH, and it has to be at the same path on the host. Its depot is
 //! `e2e_client`'s, in `target/tmp/e2e-client/depot`, so run that test first or
 //! expect several minutes. The front's state, config and cache folders, the
-//! machines file, the link's records, and the helper's install and state
+//! machines file, and the helper's install and state
 //! folders are under `target/tmp/e2e-machines`. `HOME` stays the user's, where
 //! `ssh` finds its keys, so `list_machines` reads the real `~/.ssh/config`; the
 //! test doesn't look at what it lists. The front's own runtime (this computer's)
@@ -32,27 +32,23 @@ use common::{find_julia, pid_alive, wait_for};
 use endeavor_mcp::client::MachinesFile;
 use serde_json::{Value, json};
 
-/// A failed step leaves no link and no Julia behind.
+/// A failed step leaves no Julia behind.
 struct Ends {
     state: PathBuf,
-    links: PathBuf,
 }
 
 impl Drop for Ends {
     fn drop(&mut self) {
-        if let Ok(entries) = std::fs::read_dir(&self.links) {
-            for entry in entries.flatten() {
-                if let Some(pid) = std::fs::read_to_string(entry.path().join("link.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["pid"].as_i64()).filter(|&p| p > 1) {
-                    // SAFETY: plain syscall, on the link this test started.
-                    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                }
-            }
-        }
         if let Some(pid) = std::fs::read_to_string(self.state.join("runtime.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["pid"].as_i64()).filter(|&p| p > 1) {
             // SAFETY: plain syscall, on the runtime this test started: the core, Julia and its workers are one process group.
             unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
         }
     }
+}
+
+/// The helpers (`endeavor connect`) on this computer that have `state` as their state folder.
+fn helpers(state: &Path) -> Vec<u8> {
+    Command::new("pgrep").arg("-f").arg("--").arg(format!("connect --state-dir {}", state.display())).output().unwrap().stdout
 }
 
 /// One GET to `port`: the status line, the head and the body.
@@ -81,7 +77,7 @@ fn the_machine_tools_over_real_ssh() {
     let started = Instant::now();
     let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-machines");
     let depot = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-client/depot");
-    drop(Ends { state: work.join("state"), links: work.join("state-home/endeavor/links") });
+    drop(Ends { state: work.join("state") });
     let _ = std::fs::remove_dir_all(&work);
     for folder in ["root", "state", "notebooks", "project", "config", "state-home", "cache"] {
         std::fs::create_dir_all(work.join(folder)).unwrap();
@@ -94,7 +90,7 @@ fn the_machine_tools_over_real_ssh() {
         Some(app) => format!("{}:{}:", depot.display(), app.join("depot").display()),
         None => format!("{}:", depot.display()),
     };
-    let _ends = Ends { state: state.clone(), links: work.join("state-home/endeavor/links") };
+    let _ends = Ends { state: state.clone() };
     eprintln!("host: {host}, julia: {}", julia.display());
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
@@ -111,7 +107,6 @@ fn the_machine_tools_over_real_ssh() {
         .env("ENDEAVOR_LINK_ROOT", &root)
         .env("ENDEAVOR_LINK_STATE", &state)
         .env("ENDEAVOR_LINK_DEPOT", &depot_path)
-        .env("ENDEAVOR_LINK_IDLE_SECS", "3600")
         .env("ENDEAVOR_START_WAIT_SECS", "45")
         .current_dir(&project);
     let mut front = Front::spawn(command);
@@ -120,7 +115,7 @@ fn the_machine_tools_over_real_ssh() {
     let listed = front.ok("list_machines", json!({}));
     assert_eq!(listed["machines"], json!([]), "{listed}");
     assert!(listed["ssh_hosts_not_added"].is_array());
-    assert!(!work.join("state-home/endeavor/links").exists(), "no link yet");
+    assert!(helpers(&state).is_empty(), "listing connects to nothing");
 
     // The host may have Slurm, as a workstation or login node may; this test runs Julia there directly, not in a job.
     let looked = front.ok("add_machine", json!({ "host": host, "name": "e2e-machines", "julia": julia.display().to_string(), "slurm": false }));
@@ -151,6 +146,12 @@ fn the_machine_tools_over_real_ssh() {
     let page = used["browser_url"].as_str().unwrap().to_owned();
     let (port, token) = page.strip_prefix("http://localhost:").unwrap().split_once("/?token=").map(|(p, t)| (p.parse::<u16>().unwrap(), t.to_owned())).unwrap();
     assert_eq!(used["folder"], folder);
+    let remote_port = std::fs::read_to_string(state.join("runtime.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()).expect("the runtime's port in its record");
+    assert_eq!(used["remote_port"], remote_port, "{used}");
+    assert_ne!(u64::from(port), remote_port, "the page's address is this computer's own port");
+    let (ssh_host, ssh_port) = endeavor_mcp::client::Server::parse_target(&host).unwrap();
+    let via = ssh_port.map(|p| format!(" -p {p}")).unwrap_or_default();
+    assert!(used["message"].as_str().unwrap().contains(&format!("`ssh -L {remote_port}:127.0.0.1:{remote_port}{via} {ssh_host}`")), "{used}");
 
     let created = front.ok("new_notebook", json!({ "path": "analysis.jl" }));
     let notebook = created["notebook_id"].as_str().expect("a notebook").to_owned();
@@ -175,7 +176,7 @@ fn the_machine_tools_over_real_ssh() {
     let shell = front.ok("run_shell", json!({ "command": "pwd; hostname" }));
     assert!(shell.to_string().contains(&folder), "the session's folder: {shell}");
 
-    // The page, as a browser reaches it through the link's port.
+    // The page, as a browser reaches it through the front's port for the machine.
     let (line, head, _) = get(port, &format!("/edit?id={notebook}&token={token}"), "");
     assert_eq!(line, "HTTP/1.1 303 See Other", "{head}");
     let cookie = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap_or_else(|| panic!("no cookie: {head}")).split(';').next().unwrap().to_owned();
@@ -192,13 +193,8 @@ fn the_machine_tools_over_real_ssh() {
     assert!(failed && said.as_str().is_some_and(|t| t.contains("use_machine")), "{said}");
     front.finish();
 
-    // Nothing is left: the link goes with the test's own end of it.
-    let record: Value = serde_json::from_str(&std::fs::read_to_string(work.join("state-home/endeavor/links/e2e-machines/link.json")).unwrap()).unwrap();
-    let link_pid = record["pid"].as_i64().unwrap() as i32;
-    // SAFETY: plain syscall, on the link this test started.
-    unsafe { libc::kill(link_pid, libc::SIGTERM) };
-    wait_for("the link to end", || !pid_alive(link_pid));
-    wait_for("the helper to go", || Command::new("pgrep").arg("-f").arg("--").arg(format!("connect --state-dir {}", state.display())).output().unwrap().stdout.is_empty());
+    // Nothing is left: the front's end took its connection with it.
+    wait_for("the helper to go", || helpers(&state).is_empty());
     assert!(!state.join("runtime.json").exists());
     eprintln!("[{:?}] stopped; nothing left", started.elapsed());
 }

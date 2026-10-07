@@ -227,6 +227,9 @@ pub enum ToApp {
         /// The cluster job it runs in.
         #[serde(default)]
         job: Option<slurm::Job>,
+        /// The runtime's own port on `node`. A helper that doesn't say leaves it unknown.
+        #[serde(default)]
+        port: Option<u16>,
     },
     /// The runtime couldn't start (running on another node, …): the answer to the
     /// `StartRuntime` with this id. The helper stays connected, so
@@ -378,12 +381,15 @@ mod tests {
             token: "t".into(),
             reattached: true,
             job: None,
+            port: Some(41234),
         };
         let Frame::Control(json) = ready.frame() else { panic!() };
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(value["type"], "Ready");
         assert_eq!(value["launcher"], "process");
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), ready);
+        let older = r#"{"type":"Ready","id":4,"launcher":"process","node":"labbox3","pid":81234,"token":"t","reattached":true}"#;
+        assert!(matches!(serde_json::from_str::<ToApp>(older).unwrap(), ToApp::Ready { port: None, .. }), "a helper that says no port still reads");
         let files = ToHelper::Files { id: 3, request: files::Request::List { path: "~".into() } };
         let Frame::Control(json) = files.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);

@@ -41,6 +41,8 @@ pub struct Runtime {
     pub node: String,
     /// The cluster job it runs in.
     pub job: Option<wire::slurm::Job>,
+    /// The runtime's own port on `node`; none when the helper doesn't say.
+    pub remote_port: Option<u16>,
 }
 
 /// Why a runtime went away.
@@ -360,10 +362,10 @@ impl Channel {
         let runtime = loop {
             match events.recv() {
                 Ok(message @ (ToApp::Progress { .. } | ToApp::Found { .. } | ToApp::Submitted { .. } | ToApp::Queued { .. })) => on_message(message),
-                Ok(ToApp::Ready { node, pid, token, reattached, job, .. }) => {
+                Ok(ToApp::Ready { node, pid, token, reattached, job, port, .. }) => {
                     *self.listener.lock().unwrap() = Some(listener.clone());
                     listener.attach(self.mux.clone(), token.clone());
-                    break Runtime { port: listener.port(), mcp_url: listener.mcp_url(), page_url: listener.page_url(&token), token, pid, reattached, node, job };
+                    break Runtime { port: listener.port(), mcp_url: listener.mcp_url(), page_url: listener.page_url(&token), token, pid, reattached, node, job, remote_port: port };
                 }
                 Ok(ToApp::StartFailed { message, .. } | ToApp::Error { message }) => return Err(failed(message)),
                 Ok(ToApp::NeedsInstall { items, .. }) if items.is_empty() => return Err(failed("The helper says the start needs something installed, but not what.".into())),
