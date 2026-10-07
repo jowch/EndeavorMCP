@@ -486,6 +486,166 @@ fn a_machines_file_of_a_newer_schema_is_listed_and_not_rewritten() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), content, "untouched");
 }
 
+fn handed_host(place: &Place, id: &str) -> String {
+    let text = std::fs::read_to_string(place.links_dir().join(id).join("server.json")).unwrap_or_default();
+    serde_json::from_str::<Value>(&text).ok().and_then(|v| v["ssh_host"].as_str().map(str::to_owned)).unwrap_or_default()
+}
+
+fn link_pid(place: &Place, id: &str) -> Option<i64> {
+    serde_json::from_str::<Value>(&std::fs::read_to_string(place.record(id)).ok()?).ok()?["pid"].as_i64()
+}
+
+#[test]
+fn a_tool_acts_on_the_saved_settings_when_a_link_was_started_for_others_that_never_connected() {
+    let (place, _slurm) = slow_place("host-b", "");
+    place.add_lab();
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    // The new host doesn't connect in time: it stays unsaved, and the link for `lab` holds it.
+    let other = front.ok("add_machine", json!({ "host": "labb", "name": "lab", "julia": julia }));
+    assert_eq!((other["state"].as_str(), other["saved"].clone()), (Some("connecting"), json!(true)), "{other}");
+    assert!(other["message"].as_str().unwrap().contains("stays as it was"), "{other}");
+    assert_eq!(handed_host(&place, "lab"), "labb");
+    assert_eq!(place.machines().find_by_name("lab").unwrap().unwrap().ssh_host, "lab", "the file still has the old settings");
+    let before = link_pid(&place, "lab");
+
+    // A tool asks for the saved record, and gets a link made from it.
+    std::fs::write(place.dir.join("go"), "").unwrap();
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["state"], "ready", "{used}");
+    assert_eq!(handed_host(&place, "lab"), "lab");
+    assert_ne!(link_pid(&place, "lab"), before, "the link for the other host was replaced");
+    assert_eq!(front.ok("list_machines", json!({}))["machines"][0]["host"], "lab");
+    front.finish();
+}
+
+#[test]
+fn settings_that_changed_under_a_runtime_in_use_are_refused_in_plain_words() {
+    let place = Place::new("host-b-busy");
+    place.add_lab();
+    let mut front = place.front();
+    front.initialize();
+    assert_eq!(front.ok("use_machine", json!({ "machine": "lab" }))["state"], "ready");
+    let pid = link_pid(&place, "lab");
+    let (failed, said) = front.call("add_machine", json!({ "host": "labb", "name": "lab", "julia": place.julia.display().to_string() }));
+    assert!(failed && text(&said).contains("changed while Julia is in use") && text(&said).contains("stop_machine"), "{said}");
+    assert!(!text(&said).contains("link"), "{said}");
+    assert_eq!(link_pid(&place, "lab"), pid, "the link stays");
+    assert_eq!(place.machines().find_by_name("lab").unwrap().unwrap().ssh_host, "lab");
+    // The file's record is the one the tools use, so they keep working.
+    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab");
+    front.finish();
+}
+
+#[test]
+fn a_link_with_no_record_of_the_settings_it_was_started_with_is_replaced() {
+    let place = Place::new("no-handed");
+    place.add_lab();
+    let old = place.link("lab");
+    std::fs::remove_file(place.links_dir().join("lab/server.json")).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    assert_eq!(front.ok("use_machine", json!({ "machine": "lab" }))["state"], "ready");
+    assert_ne!(link_pid(&place, "lab"), Some(old.pid as i64));
+    assert_eq!(handed_host(&place, "lab"), "lab");
+    front.finish();
+}
+
+#[test]
+fn a_session_on_a_working_connection_does_not_need_the_machines_file() {
+    let place = Place::new("file-gone");
+    place.add_lab();
+    let mut front = place.front();
+    front.initialize();
+    front.ok("use_machine", json!({ "machine": "lab" }));
+    let path = place.machines().path().to_owned();
+    let text = std::fs::read_to_string(&path).unwrap();
+    place.machines().remove("lab").unwrap();
+    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab", "the machine left the list");
+    std::fs::write(&path, "{not json").unwrap();
+    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab", "the file is broken for a moment");
+    std::fs::write(&path, text).unwrap();
+    front.finish();
+}
+
+#[test]
+fn a_list_that_changed_while_connecting_is_not_saved_over_and_the_new_machines_link_ends() {
+    let (place, _slurm) = slow_place("changed-meanwhile", "");
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    let interfere = {
+        let (machines, record, go) = (place.machines(), place.record("box"), place.dir.join("go"));
+        std::thread::spawn(move || {
+            wait_for("the link to start", || record.exists());
+            let pid = serde_json::from_str::<Value>(&std::fs::read_to_string(&record).unwrap()).unwrap()["pid"].as_i64().unwrap();
+            machines.save(Server { id: "box".into(), name: "someone-elses".into(), ssh_host: "elsewhere".into(), ..Default::default() }).unwrap();
+            std::fs::write(go, "").unwrap();
+            pid
+        })
+    };
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "name": "box", "julia": julia }));
+    let pid = interfere.join().unwrap();
+    assert!(failed && text(&said).contains("changed while Endeavor was connecting") && text(&said).contains("add_machine"), "{said}");
+    let saved = place.machines().load().unwrap();
+    assert_eq!(saved.iter().map(|s| (s.id.as_str(), s.name.as_str())).collect::<Vec<_>>(), [("box", "someone-elses")], "the other record is intact");
+    wait_for("the link to end", || !pid_alive(pid as i32));
+    front.finish();
+}
+
+#[test]
+fn a_file_of_a_newer_shape_answers_every_tool_with_the_newer_message() {
+    let place = Place::new("newer-shape");
+    let path = place.machines().path().to_owned();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let content = r#"{"schema": 2, "hosts": []}"#;
+    std::fs::write(&path, content).unwrap();
+    let mut front = place.front();
+    front.initialize();
+    for (tool, args) in [("list_machines", json!({})), ("add_machine", json!({ "host": "lab" })), ("use_machine", json!({ "machine": "lab" }))] {
+        let (failed, said) = front.call(tool, args);
+        assert!(failed && text(&said).contains("A newer Endeavor wrote") && !text(&said).contains("remove the file"), "{tool}: {said}");
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    front.finish();
+}
+
+#[test]
+fn fields_inside_a_cluster_survive_the_changes_the_front_makes() {
+    let slurm = FakeSlurm::new("cluster-unknown");
+    let place = Place::with("cluster-unknown", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_hpc();
+    let path = place.machines().path().to_owned();
+    let mut raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    raw["machines"][0]["cluster"]["qos"] = "long".into();
+    raw["machines"][0]["cluster"]["resources"]["priority"] = 3.into();
+    raw["machines"][0]["cluster"]["partitions"][0]["features"] = json!(["a100"]);
+    std::fs::write(&path, raw.to_string()).unwrap();
+    let kept = || -> bool {
+        let now: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let cluster = &now["machines"][0]["cluster"];
+        cluster["qos"] == "long" && cluster["resources"]["priority"] == 3 && cluster["partitions"][0]["features"] == json!(["a100"])
+    };
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+
+    let queued = front.ok("use_machine", json!({ "machine": "hpc", "cpus": 4, "memory_gb": 16, "hours": 2, "partition": "shared" }));
+    assert_eq!(queued["state"], "queued", "{queued}");
+    assert_eq!(place.machines().find_by_name("hpc").unwrap().unwrap().cluster.unwrap().resources.cpus, 4, "the defaults were saved");
+    assert!(kept(), "after use_machine saved the defaults");
+
+    let added = front.ok("add_machine", json!({ "host": "other", "name": "other", "julia": julia }));
+    assert_eq!(added["state"], "connected", "{added}");
+    assert!(kept(), "after another machine was added");
+
+    let updated = front.ok("add_machine", json!({ "host": "hpc", "name": "hpc", "julia": julia }));
+    assert_eq!((updated["state"].as_str(), updated["cluster"].clone()), (Some("connected"), json!(true)), "{updated}");
+    assert!(kept(), "after the machine was updated and stayed a cluster");
+    front.finish();
+}
+
 /// A place whose link waits for the file `go` before it connects, with Slurm's commands on the PATH.
 fn slow_place(name: &str, then: &str) -> (Place, FakeSlurm) {
     let slurm = FakeSlurm::new(name);
@@ -992,6 +1152,8 @@ impl FakeLink {
         let record = json!({ "machine": machine, "pid": pid, "port": port, "token": "t", "build": "an-older-build", "protocol": protocol });
         std::fs::create_dir_all(place.record(machine).parent().unwrap()).unwrap();
         std::fs::write(place.record(machine), record.to_string()).unwrap();
+        let server = place.machines().find_by_id(machine).unwrap().expect("a saved machine");
+        std::fs::write(place.record(machine).with_file_name("server.json"), serde_json::to_string(&server).unwrap()).unwrap();
         FakeLink { requests, process }
     }
 

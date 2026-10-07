@@ -159,11 +159,11 @@ pub(crate) fn main(argv: &[String]) -> ! {
     crate::make_state_dir(&dir).unwrap_or_else(|e| fail(e));
     let server_path = dir.join(super::SERVER_FILE);
     let server: Server = match std::fs::read_to_string(&server_path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{} isn't a machine record: {e}", server_path.display()))),
-        Err(e) => fail(format!("Couldn't read {}, which the front writes before it starts a link: {e}", server_path.display())),
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("{} isn't readable as the machine's settings ({e}). Call the tool again to start the connection afresh.", server_path.display()))),
+        Err(e) => fail(format!("Couldn't read {} ({e}). It holds the machine's settings and is written when the connection is started, so call the tool again to start it.", server_path.display())),
     };
     if server.id != id {
-        fail(format!("{} is the record of {}, not of {id}.", server_path.display(), server.id));
+        fail(format!("{} holds the settings of {}, not of {id}. Call the tool again to start the connection afresh.", server_path.display(), server.id));
     }
     if let Some(running) = super::running(&dir, &id)
         && running.pid != std::process::id()

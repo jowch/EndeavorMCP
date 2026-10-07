@@ -35,16 +35,25 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The machines file
 
-- **A link keeps the machine record it was started with.** A change to a
-  machine in `machines.json` that the front didn't make (the app's, or a hand
-  edit) reaches a running link only when the link is replaced: it ends after
-  8 hours idle, or `add_machine` with other settings quits it. Julia
-  settings and addresses are the ones that matter; job defaults are read by
-  the front.
-- **An `add_machine` that is still connecting leaves a link running with a
-  record that is in no list.** It ends with the idle limit; the next
-  `add_machine` for the same name reuses it, or replaces it when the settings
-  differ.
+- **A link keeps the machine record it was started with, and a tool that
+  names the machine replaces it when the saved settings differ.** `use_machine`,
+  `stop_machine` and `add_machine` end a link whose address, port, Julia or
+  Slurm mode is not the one asked for (the saved record, or for `add_machine` the
+  new settings) and start another, or refuse in plain words if Julia is in use
+  through it. A session that is already working through a connection is not
+  checked on each call, so a change made to `machines.json` meanwhile reaches it
+  at its next `use_machine`.
+- **A link whose machine was removed from the list keeps reconnecting** until
+  its 8 hour idle limit (it used to stop with "isn't in the list"). It
+  holds the record it was started with.
+- **An `add_machine` that was still connecting leaves a link running with a
+  record that is in no list** (an update keeps its link too). It ends at the idle
+  limit; the next `add_machine` for the same name reuses it, or replaces it when
+  the settings differ. A call that ends in an error for a new machine ends the
+  link, and so does a start that finishes after the call's time ran out.
+- **Unknown fields of a partition are kept only while the cluster still lists
+  it.** A partition that disappears takes its extra fields along; the fields
+  of the file, a machine, its cluster and its job defaults are kept.
 - **Machine ids must be lower-case.** A hand-edited id with capitals is
   refused. Generated ids are lower-case already.
 

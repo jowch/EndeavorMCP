@@ -342,10 +342,14 @@ pub struct Link {
 pub(crate) const SERVER_FILE: &str = "server.json";
 
 /// The record the running link of `machine` was started with, if its folder has one that reads.
-pub(crate) fn handed(machine: &str) -> Option<Server> {
-    valid_id(machine).ok()?;
-    let text = std::fs::read_to_string(Spawn::here().ok()?.dir(machine).join(SERVER_FILE)).ok()?;
-    serde_json::from_str(&text).ok()
+pub(crate) fn handed(dir: &Path) -> Option<Server> {
+    serde_json::from_str(&std::fs::read_to_string(dir.join(SERVER_FILE)).ok()?).ok()
+}
+
+/// A link that no runtime hangs on (and that isn't starting or running one) can be replaced: a new link has
+/// another port, which would break a browser page of a runtime attached through the old one.
+pub(crate) fn replaceable(status: &Status) -> bool {
+    status.runtime.is_none() && matches!(status.state, State::Connecting | State::Connected | State::Failed | State::NeedsInstall)
 }
 
 /// The running link for `machine`, if there is one that answers; no link is started.
@@ -354,8 +358,10 @@ pub fn find(machine: &str) -> Result<Option<Link>, String> {
     Ok(running(&Spawn::here()?.dir(machine), machine))
 }
 
-/// The link for `server`, started with this record if none runs. A link that runs keeps the
-/// record it was started with, whatever `server` says: `handed` shows it.
+/// The link for `server`, started with this record if none runs. A link keeps the record it was
+/// started with, so one that runs with other connection settings (`Server::same_connection`), or with
+/// none written (one of an older build), is ended and replaced, and the record asked for wins. If a
+/// runtime is in use through it, that is an error that says the settings changed.
 pub fn ensure(server: &Server) -> Result<Link, String> {
     ensure_with(&Spawn::here()?, server)
 }
@@ -394,7 +400,19 @@ pub fn ensure_with_install(spawn: &Spawn, server: &Server, install: bool) -> Res
     let mut silent = 0;
     loop {
         match look(&dir, machine) {
-            Found::Link(link) => return Ok(link),
+            Found::Link(link) => match handed(&dir) {
+                Some(handed) if handed.same_connection(server) => return Ok(link),
+                _ => {
+                    let name = if server.name.is_empty() { machine } else { server.name.as_str() };
+                    match link.status(CALL_WAIT) {
+                        Ok(status) if replaceable(&status) => {
+                            let _ = link.quit();
+                            break;
+                        }
+                        _ => return Err(format!("The settings of {name} changed while Julia is in use on it with the old ones. Call `stop_machine` for {name} (with the user's agreement), or put the settings back.")),
+                    }
+                }
+            },
             Found::None => break,
             Found::Silent(pid) if silent >= SILENT_TRIES => return Err(format!("The link to {machine} (pid {pid}) isn't answering. Try again in a moment.")),
             Found::Silent(_) => {

@@ -41,7 +41,7 @@ untested._
 | Which build a plugin runs | The key in `release-key` beside the launcher. Empty or missing: the newest build |
 | Signing | Not needed for a `curl` install; wait |
 | State folder | One on each machine, yours included, for `serve`, `mcp`, the plugin and the app: the one `serve` uses today. The app stops choosing its own |
-| The list of machines | One file the binary owns: `machines.json`, `{"schema": 1, "machines": [...]}` with the app's server records, in `$XDG_CONFIG_HOME/endeavor/` (default `~/.config/endeavor/`, on macOS too), and in `%APPDATA%\Endeavor\` on Windows (built). The app will read and write it there. A bare list of records, the first shape, is read and rewritten as the object. Fields a build doesn't know, in the file or in a record, are kept when it rewrites the file. A file with a higher `schema` than a build knows is read and never rewritten: its writing tools answer that a newer Endeavor wrote it. A machine is written only after a connect has succeeded |
+| The list of machines | One file the binary owns: `machines.json`, `{"schema": 1, "machines": [...]}` with the app's server records, in `$XDG_CONFIG_HOME/endeavor/` (default `~/.config/endeavor/`, on macOS too), and in `%APPDATA%\Endeavor\` on Windows (built). The app will read and write it there. A bare list of records, the first shape, is read and rewritten as the object. Fields a build doesn't know, in the file, in a record, in its cluster, job defaults and partitions, are kept when it rewrites the file. A file with a higher `schema` than a build knows is read and never rewritten: its writing tools answer that a newer Endeavor wrote it. A machine is written only after a connect has succeeded |
 | State folder on a cluster | `~/.local/state/endeavor/cluster`, the same from every login node (built). The app's own is `~/.cache/endeavor/cluster-<id>` until it moves |
 | Jobs on a cluster | One at a time for each user. A second client attaches to the job as the first one asked for it, and is told its size |
 | Several clients on one runtime | Allowed. No client makes another exit |
@@ -94,8 +94,9 @@ disturb each other (see [Sharing a runtime](#sharing-a-runtime)).
 front starts it with `link::ensure(<server record>)`, which returns the link's control
 port and token. The front writes the record to `links/<id>/server.json` (owner-only) before
 it starts the link, which reads it once and keeps it, also when it reconnects: it doesn't read
-the machines file, and the machine need not be in it. A front that changes a machine's
-connection settings quits the link and starts a new one. The link connects as
+the machines file, and the machine need not be in it. A tool that asks for a link
+whose record has other connection settings, or none, quits it and starts a new one
+(or refuses, when Julia is in use through it). The link connects as
 the library does (batch sign-in), sends its own binary as the helper when the
 server's platform is this computer's (and else the release's helper for that
 platform, see [Installing the binary](#installing-the-binary)), and starts the one loopback port that

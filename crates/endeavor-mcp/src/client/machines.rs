@@ -39,9 +39,6 @@ pub struct Server {
     pub idle_stop: Option<IdleStop>,
     /// Set for a cluster: Julia runs in a Slurm job.
     pub cluster: Option<Cluster>,
-    /// Fields of the record that this version doesn't know, kept when the file is rewritten.
-    #[serde(flatten)]
-    pub other: Map<String, Value>,
 }
 
 /// A cluster's Slurm settings.
@@ -165,9 +162,11 @@ pub fn machines_path(var: &dyn Fn(&str) -> Option<String>) -> PathBuf {
 /// before the schema number, is read as schema 1 and written as an object.
 /// It is written whole to a temporary file that is then renamed, readable by this
 /// user only. A file that can't be read or parsed is an error that names it, and is
-/// never replaced. Fields this version doesn't know, in the file or in a record,
-/// are kept when it is rewritten. A file with a higher schema number is read but
-/// never written.
+/// never replaced. Fields this version doesn't know are kept when it rewrites the
+/// file: in the file itself, in a machine's record, and inside its cluster, job
+/// defaults and partitions (a rewrite puts back what the file had for the same machine,
+/// and, among partitions, for the same name). A file with a higher schema number is
+/// never written, and is read only if its machines have the shape this version knows.
 pub struct MachinesFile {
     path: PathBuf,
 }
@@ -179,13 +178,39 @@ pub const SCHEMA: u64 = 1;
 struct Contents {
     #[serde(default = "current_schema")]
     schema: u64,
-    machines: Vec<Server>,
+    /// The records as the file has them, so that a rewrite keeps what this version doesn't know.
+    machines: Vec<Value>,
     #[serde(flatten)]
     other: Map<String, Value>,
 }
 
 fn current_schema() -> u64 {
     SCHEMA
+}
+
+/// Put into `new` what `old` has and `new` lacks, at every depth. Partitions (arrays of objects with a `name`) are matched by name.
+fn restore_unknown(old: &Value, new: &mut Value) {
+    match (old, new) {
+        (Value::Object(old), Value::Object(new)) => {
+            for (key, old) in old {
+                match new.get_mut(key) {
+                    Some(new) => restore_unknown(old, new),
+                    None => {
+                        new.insert(key.clone(), old.clone());
+                    }
+                }
+            }
+        }
+        (Value::Array(old), Value::Array(new)) => {
+            for new in new {
+                let name = new.get("name").and_then(Value::as_str).map(str::to_owned);
+                if let Some(old) = name.and_then(|name| old.iter().find(|o| o.get("name").and_then(Value::as_str) == Some(name.as_str()))) {
+                    restore_unknown(old, new);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 impl MachinesFile {
@@ -204,17 +229,31 @@ impl MachinesFile {
 
     /// Every machine, in the order they were added; none if there is no file yet.
     pub fn load(&self) -> Result<Vec<Server>, String> {
-        Ok(self.read()?.machines)
+        self.servers(&self.read()?)
     }
 
-    /// An error if the file can't be changed: it can't be read, or a newer Endeavor wrote it.
-    pub fn check_writable(&self) -> Result<(), String> {
-        self.check_schema(&self.read()?)
+    /// `load`, for a caller that is about to write: an error if a newer Endeavor wrote the file.
+    pub fn load_writable(&self) -> Result<Vec<Server>, String> {
+        let contents = self.read()?;
+        self.check_schema(&contents)?;
+        self.servers(&contents)
+    }
+
+    fn servers(&self, contents: &Contents) -> Result<Vec<Server>, String> {
+        contents.machines.iter().map(|machine| serde_json::from_value(machine.clone()).map_err(|e| self.invalid(e))).collect()
+    }
+
+    fn invalid(&self, e: serde_json::Error) -> String {
+        format!("The list of machines in {} isn't valid ({e}). Fix or remove the file; Endeavor won't overwrite it.", self.path.display())
+    }
+
+    fn newer(&self, schema: u64, what: &str) -> String {
+        format!("A newer Endeavor wrote the list of machines in {} (schema {schema}; this Endeavor knows {SCHEMA}), so this one {what}. Update Endeavor.", self.path.display())
     }
 
     fn check_schema(&self, contents: &Contents) -> Result<(), String> {
         if contents.schema > SCHEMA {
-            return Err(format!("A newer Endeavor wrote the list of machines in {} (schema {}; this Endeavor knows {SCHEMA}), so this one doesn't change it. Update Endeavor.", self.path.display(), contents.schema));
+            return Err(self.newer(contents.schema, "doesn't change it"));
         }
         Ok(())
     }
@@ -225,10 +264,16 @@ impl MachinesFile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Contents { schema: SCHEMA, machines: Vec::new(), other: Map::new() }),
             Err(e) => return Err(format!("Couldn't read the list of machines in {}: {e}", self.path.display())),
         };
-        let invalid = |e: serde_json::Error| format!("The list of machines in {} isn't valid ({e}). Fix or remove the file; Endeavor won't overwrite it.", self.path.display());
-        match serde_json::from_str::<Value>(&text).map_err(invalid)? {
-            Value::Array(machines) => Ok(Contents { schema: SCHEMA, machines: serde_json::from_value(Value::Array(machines)).map_err(invalid)?, other: Map::new() }),
-            other => serde_json::from_value(other).map_err(invalid),
+        match serde_json::from_str::<Value>(&text).map_err(|e| self.invalid(e))? {
+            Value::Array(machines) => Ok(Contents { schema: SCHEMA, machines, other: Map::new() }),
+            value => {
+                let newer = value.get("schema").and_then(Value::as_u64).filter(|schema| *schema > SCHEMA);
+                let contents: Contents = serde_json::from_value(value).map_err(|e| match newer {
+                    Some(schema) => self.newer(schema, "can't read it"),
+                    None => self.invalid(e),
+                })?;
+                Ok(contents)
+            }
         }
     }
 
@@ -250,27 +295,44 @@ impl MachinesFile {
 
     /// Add `server`, or replace the one with its id where it stands.
     pub fn save(&self, server: Server) -> Result<(), String> {
-        self.change(|servers| match servers.iter_mut().find(|s| s.id == server.id) {
-            Some(known) => {
-                let other = std::mem::take(&mut known.other);
-                *known = Server { other, ..server };
+        self.try_change(|servers| {
+            match servers.iter_mut().find(|s| s.id == server.id) {
+                Some(known) => *known = server,
+                None => servers.push(server),
             }
-            None => servers.push(server),
+            Ok(())
         })
-        .map(|_| ())
     }
 
-    /// Remove the machine with this id. Whether there was one.
+    /// `save`, for a machine that was worked out from an earlier read of the list: `find` picks
+    /// the record `server` stands for out of a list, and `expected` is the id it picked then (None
+    /// for a new machine). If the list has changed so that `find` picks another record, or a new
+    /// machine's id is taken now, nothing is written and the error says so.
+    pub fn save_expecting(&self, server: Server, expected: Option<&str>, find: &dyn Fn(&[Server]) -> Option<String>) -> Result<(), String> {
+        self.try_change(|servers| {
+            let taken = expected.is_none() && servers.iter().any(|s| s.id == server.id);
+            if taken || find(servers).as_deref() != expected {
+                return Err(format!("The list of machines in {} changed while Endeavor was connecting (another session or the app changed it), so nothing was saved. Call `add_machine` again.", self.path.display()));
+            }
+            match servers.iter_mut().find(|s| s.id == server.id) {
+                Some(known) => *known = server,
+                None => servers.push(server),
+            }
+            Ok(())
+        })
+    }
+
+    /// Remove the machine with this id, and the fields of its record that this version doesn't know. Whether there was one.
     pub fn remove(&self, id: &str) -> Result<bool, String> {
-        self.change(|servers| {
+        self.try_change(|servers| {
             let before = servers.len();
             servers.retain(|s| s.id != id);
-            servers.len() != before
+            Ok(servers.len() != before)
         })
     }
 
-    /// Read, change and write back under a lock, so two processes don't lose each other's change.
-    fn change<T>(&self, change: impl FnOnce(&mut Vec<Server>) -> T) -> Result<T, String> {
+    /// Read, change and write back under a lock, so two processes don't lose each other's change. Nothing is written when `change` fails.
+    fn try_change<T>(&self, change: impl FnOnce(&mut Vec<Server>) -> Result<T, String>) -> Result<T, String> {
         let dir = self.path.parent().unwrap_or(Path::new("."));
         crate::make_state_dir(dir)?;
         let lock_path = self.path.with_extension("lock");
@@ -286,7 +348,18 @@ impl MachinesFile {
         }
         let mut contents = self.read()?;
         self.check_schema(&contents)?;
-        let result = change(&mut contents.machines);
+        let mut servers = self.servers(&contents)?;
+        let result = change(&mut servers)?;
+        contents.machines = servers
+            .iter()
+            .map(|server| {
+                let mut record = serde_json::to_value(server).map_err(|e| e.to_string())?;
+                if let Some(old) = contents.machines.iter().find(|old| old.get("id").and_then(Value::as_str) == Some(server.id.as_str())) {
+                    restore_unknown(old, &mut record);
+                }
+                Ok(record)
+            })
+            .collect::<Result<_, String>>()?;
         let text = serde_json::to_string_pretty(&contents).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension(format!("json.tmp{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);

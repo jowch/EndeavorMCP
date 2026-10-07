@@ -439,7 +439,7 @@ fn a_link_started_by_hand_without_a_record_says_so() {
     let out = Command::new(&place.spawn.exe).args(["link", "--machine", &place.id]).envs(env).output().unwrap();
     assert!(!out.status.success());
     let said = String::from_utf8_lossy(&out.stderr);
-    assert!(said.contains("server.json") && said.contains("front writes"), "{said}");
+    assert!(said.contains("server.json") && said.contains("call the tool again"), "{said}");
 }
 
 #[test]

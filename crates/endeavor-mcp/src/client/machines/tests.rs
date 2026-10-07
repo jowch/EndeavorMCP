@@ -272,8 +272,64 @@ fn a_file_of_a_newer_schema_is_read_and_never_written() {
     let text = r#"{"schema":2,"machines":[{"id":"a","name":"a","ssh_host":"a","new_thing":{"x":1}}],"extra":true}"#;
     std::fs::write(&path, text).unwrap();
     assert_eq!(file.find("a").unwrap().unwrap().id, "a");
-    for error in [file.save(machine("b", "b")).unwrap_err(), file.remove("a").unwrap_err(), file.check_writable().unwrap_err()] {
+    for error in [file.save(machine("b", "b")).unwrap_err(), file.remove("a").unwrap_err(), file.load_writable().unwrap_err()] {
         assert!(error.contains("newer Endeavor") && error.contains(&path.display().to_string()), "{error}");
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "untouched");
+}
+
+#[test]
+fn a_newer_file_of_another_shape_says_so_and_never_advises_removing_it() {
+    let dir = crate::client::scratch("machines-newer-shape");
+    let path = dir.join("machines.json");
+    let file = MachinesFile::at(&path);
+    let text = r#"{"schema":2,"hosts":[]}"#;
+    std::fs::write(&path, text).unwrap();
+    for error in [file.load().unwrap_err(), file.load_writable().unwrap_err(), file.save(machine("b", "b")).unwrap_err()] {
+        assert!(error.contains("A newer Endeavor wrote") && error.contains("schema 2") && !error.contains("remove the file"), "{error}");
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    std::fs::write(&path, r#"{"schema":1,"hosts":[]}"#).unwrap();
+    assert!(file.load().unwrap_err().contains("isn't valid"), "the same shape at a schema this version knows is a broken file");
+}
+
+#[test]
+fn fields_inside_a_cluster_survive_and_a_dropped_cluster_takes_them_along() {
+    let dir = crate::client::scratch("machines-nested");
+    let path = dir.join("machines.json");
+    let file = MachinesFile::at(&path);
+    let before = json!({"schema": 1, "machines": [{
+        "id": "a", "name": "a", "ssh_host": "a",
+        "cluster": {"account": null, "qos": "long", "resources": {"cpus": 4, "priority": 3},
+                    "partitions": [{"name": "p", "default": true, "max_minutes": null, "cpus": 2, "mem_mb": 1024, "features": ["x"]}]},
+    }]});
+    std::fs::write(&path, before.to_string()).unwrap();
+    let mut a = file.find_by_id("a").unwrap().unwrap();
+    a.cluster.as_mut().unwrap().resources.cpus = 8;
+    a.cluster.as_mut().unwrap().partitions[0].cpus = 16;
+    file.save(a.clone()).unwrap();
+    let now = raw(&path);
+    let cluster = &now["machines"][0]["cluster"];
+    assert_eq!((cluster["qos"].clone(), cluster["resources"]["priority"].clone(), cluster["partitions"][0]["features"].clone()), (json!("long"), json!(3), json!(["x"])), "{now}");
+    assert_eq!((cluster["resources"]["cpus"].clone(), cluster["partitions"][0]["cpus"].clone()), (json!(8), json!(16)), "the changes are made");
+    a.cluster = None;
+    file.save(a).unwrap();
+    assert!(!raw(&path).to_string().contains("qos"), "a cluster that was dropped takes its fields with it");
+}
+
+#[test]
+fn a_save_that_expected_another_list_writes_nothing() {
+    let dir = crate::client::scratch("machines-expecting");
+    let path = dir.join("machines.json");
+    let file = MachinesFile::at(&path);
+    let by_name = |name: &'static str| move |servers: &[Server]| servers.iter().find(|s| s.name == name).map(|s| s.id.clone());
+    file.save_expecting(machine("a", "lab"), None, &by_name("lab")).unwrap();
+    file.save(machine("b", "other")).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    // A new machine whose id is taken now, and one whose name now picks another record.
+    assert!(file.save_expecting(machine("b", "lab2"), None, &by_name("lab2")).unwrap_err().contains("changed while Endeavor was connecting"));
+    assert!(file.save_expecting(machine("c", "lab"), None, &by_name("lab")).unwrap_err().contains("changed"));
+    assert!(file.save_expecting(machine("b", "other"), Some("a"), &by_name("other")).unwrap_err().contains("changed"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "untouched");
+    file.save_expecting(machine("a", "lab"), Some("a"), &by_name("lab")).unwrap();
 }

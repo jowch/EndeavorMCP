@@ -111,10 +111,22 @@ impl Deadline {
         self.run(move || link::ensure(&server))?
     }
 
-    /// `ensure`, and a link that has to be started may install the helper at once.
-    fn ensure_install(self, server: &Server, install: bool) -> Result<Link, String> {
+    /// `ensure`, and a link that has to be started may install the helper at once. The work goes on
+    /// in the background when the time runs out. With `discard_late` a link it then starts is ended
+    /// (unless a runtime is in use on it), for a machine that isn't saved and that no tool could name;
+    /// without it that link stays, and the next call finds it and reuses it.
+    fn ensure_install(self, server: &Server, install: bool, discard_late: bool) -> Result<Link, String> {
         let server = server.clone();
-        self.run(move || link::ensure_install(&server, install))?
+        let (done, waited) = mpsc::channel();
+        std::thread::spawn(move || {
+            if let Err(mpsc::SendError(Ok(late))) = done.send(link::ensure_install(&server, install))
+                && discard_late
+                && late.status(link::CALL_WAIT).is_ok_and(|status| link::replaceable(&status))
+            {
+                let _ = late.quit();
+            }
+        });
+        waited.recv_timeout(self.left()).map_err(|_| "This call ran out of the time a tool call gets while it waited for the link. Call it again to continue.".to_owned())?
     }
 
     fn find(self, id: &str) -> Result<Option<Link>, String> {
@@ -301,19 +313,18 @@ fn needs_install_result(name: &str, status: &link::Status, tool: &str) -> Value 
     result
 }
 
+/// What a result that isn't a saved machine says about the file: nothing was written, or the machine stays as it was.
+fn unsaved_note(updating: bool) -> &'static str {
+    if updating { "The machine stays as it was; the new settings are saved once they have connected." } else { "The machine is saved when it has connected, and not before." }
+}
+
 /// End the link of `id` that `add_machine` started and could not use, unless a runtime is on it.
 fn quit_unless_in_use(id: &str) {
     if let Ok(Some(link)) = link::find(id)
-        && link.status(link::CALL_WAIT).is_ok_and(|status| replaceable(&status))
+        && link.status(link::CALL_WAIT).is_ok_and(|status| link::replaceable(&status))
     {
         let _ = link.quit();
     }
-}
-
-/// A link whose protocol isn't this front's is replaced (quit, then started again) only when no
-/// runtime hangs on it, since a new link has another port and the user's browser page would break.
-fn replaceable(status: &link::Status) -> bool {
-    status.runtime.is_none() && matches!(status.state, State::Connecting | State::Connected | State::Failed | State::NeedsInstall)
 }
 
 fn job_json(status: &link::Status) -> Option<Value> {
@@ -658,20 +669,25 @@ impl Relay {
 
     /// The machine's link and what it says, started if there is none or it has gone, after `link_rule`.
     fn machine_link(&self, machine: &Machine, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
-        let server = self.machines.find_by_id(&machine.id)?.ok_or_else(|| format!("{} isn't in the list of machines ({}) any more.", machine.name, self.machines.path().display()))?;
         let (link, status) = match machine.link.clone().and_then(|link| deadline.status(&link).ok().map(|status| (link, status))) {
             Some(found) => found,
             None => {
+                let server = self.listed(machine)?;
                 let link = deadline.ensure(&server)?;
                 let status = deadline.status(&link)?;
                 (link, status)
             }
         };
-        let (link, status, note) = self.link_rule(&server, link, status, deadline)?;
+        let (link, status, note) = self.link_rule(&machine.id, &machine.name, None, link, status, deadline)?;
         if machine.link.as_ref() != Some(&link) {
             self.update_machine(&machine.id, |m| m.link = Some(link.clone()));
         }
         Ok((link, status, note))
+    }
+
+    /// The machine's record in the list of machines.
+    fn listed(&self, machine: &Machine) -> Result<Server, String> {
+        self.machines.find_by_id(&machine.id)?.ok_or_else(|| format!("{} isn't in the list of machines ({}) any more.", machine.name, self.machines.path().display()))
     }
 
     /// The rule for a link, which every path to a link goes through before it asks for a runtime.
@@ -679,14 +695,18 @@ impl Relay {
     /// protocol is replaced (quit, then started again) only when no runtime hangs on it
     /// (`replaceable`), since a new link has another port and the user's browser page would
     /// break. Else it is used as it is, and the third is why; `ask` sends it no start, since it
-    /// may not know `only_running`. `status` is the link's.
-    fn link_rule(&self, server: &Server, link: Link, status: link::Status, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
+    /// may not know `only_running`. `status` is the link's. A replacement is started with `server`, or with the machine's record in the list when that is None.
+    fn link_rule(&self, id: &str, name: &str, server: Option<&Server>, link: Link, status: link::Status, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
         if link.protocol == link::PROTOCOL {
             return Ok((link, status, None));
         }
-        let (link, status) = if replaceable(&status) {
+        let (link, status) = if link::replaceable(&status) {
             let _ = link.quit();
-            let fresh = deadline.ensure(server)?;
+            let server = match server {
+                Some(server) => server.clone(),
+                None => self.machines.find_by_id(id)?.ok_or_else(|| format!("{name} isn't in the list of machines ({}) any more.", self.machines.path().display()))?,
+            };
+            let fresh = deadline.ensure(&server)?;
             let status = deadline.status(&fresh)?;
             (fresh, status)
         } else {
@@ -695,7 +715,6 @@ impl Relay {
         if link.protocol == link::PROTOCOL {
             return Ok((link, status, None));
         }
-        let name = display_name(server);
         let note = format!(
             "The link to {name} was started by another build of endeavor ({}) that works differently from this one, and goes on, because a runtime is in use through it and a new link would change the address of the user's browser page. It is replaced when it ends.",
             link.build
@@ -905,7 +924,21 @@ impl Relay {
         }))
     }
 
+    /// Adds or updates a machine (`add_machine_to`). Any error for a machine that wasn't saved ends the
+    /// link it started, unless a runtime is in use on it; the connecting and needs-install results keep it.
     fn add_machine(&self, args: &Value, deadline: Deadline) -> Result<Value, String> {
+        let mut unsaved = None;
+        let result = self.add_machine_to(args, deadline, &mut unsaved);
+        if result.is_err()
+            && let Some(id) = unsaved
+        {
+            quit_unless_in_use(&id);
+        }
+        result
+    }
+
+    /// `unsaved` is set to the id of a new machine as soon as a link may be started for it, and cleared once it is saved.
+    fn add_machine_to(&self, args: &Value, deadline: Deadline, unsaved: &mut Option<String>) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
         let typed = text_arg(args, "host")?.ok_or_else(|| invalid("host is required: an ssh alias from ~/.ssh/config, or user@host"))?;
         let (host, port) = Server::parse_target(&typed).map_err(invalid)?;
@@ -922,33 +955,40 @@ impl Relay {
             Some(Value::Bool(slurm)) => Some(*slurm),
             Some(_) => return Err(invalid("slurm must be true (run Julia in Slurm jobs) or false (run it directly on the machine)")),
         };
-        self.machines.check_writable()?;
-        let servers = self.machines.load()?;
-        let by_name = |n: &str| servers.iter().find(|s| s.name.eq_ignore_ascii_case(n)).cloned();
-        let existing = match &given_name {
-            Some(name) => by_name(name),
-            None => by_name(&name).or_else(|| servers.iter().find(|s| s.ssh_host == host && s.port == port).cloned()),
+        let servers = self.machines.load_writable()?;
+        // Which saved machine this call is about: by the name given, else by the name it would get, else by its host.
+        let find_existing = |servers: &[Server]| {
+            let by_name = |n: &str| servers.iter().find(|s| s.name.eq_ignore_ascii_case(n)).cloned();
+            match &given_name {
+                Some(name) => by_name(name),
+                None => by_name(&name).or_else(|| servers.iter().find(|s| s.ssh_host == host && s.port == port).cloned()),
+            }
         };
-        let prior = existing.clone();
+        let existing = find_existing(&servers);
+        let updating = existing.is_some();
         let mut record = match &existing {
             Some(existing) => existing.clone(),
             None => Server { id: new_id(&name, &servers)?, name: name.clone(), ..Default::default() },
         };
-        record.ssh_host = host;
+        record.ssh_host = host.clone();
         record.port = port;
         if julia.is_some() {
             record.julia = julia;
         }
-        // The record is saved only once it has connected: until then the link holds it, and a machine that never connects leaves nothing behind.
-        // A link that failed before, or that was started for other settings, connects afresh.
+        // The record is saved only once it has connected: until then the link holds it. A new machine that
+        // doesn't get saved has its link ended by `add_machine`, whatever way this ends in an error.
+        if !updating {
+            *unsaved = Some(record.id.clone());
+        }
+        // A link that failed before connects afresh. One with other settings is replaced by `ensure`.
         if let Some(old) = deadline.find(&record.id)?
-            && (link::handed(&record.id).is_some_and(|handed| !handed.same_connection(&record)) || old.status(link::CALL_WAIT).is_ok_and(|s| s.state == State::Failed))
+            && old.status(link::CALL_WAIT).is_ok_and(|s| s.state == State::Failed)
         {
             let _ = old.quit();
         }
-        let link = deadline.ensure_install(&record, install)?;
+        let link = deadline.ensure_install(&record, install, !updating)?;
         let first = deadline.status(&link)?;
-        let (link, _, kept) = self.link_rule(&record, link, first, deadline)?;
+        let (link, _, kept) = self.link_rule(&record.id, &record.name, Some(&record), link, first, deadline)?;
         let mut notes: Vec<String> = kept.into_iter().collect();
         if install && notes.is_empty() {
             deadline.install(&link)?;
@@ -961,8 +1001,8 @@ impl Relay {
                 State::NeedsInstall if status.needs_install.as_ref().is_some_and(link::InstallInfo::needs_helper) => {
                     let mut result = needs_install_result(&record.name, &status, "add_machine");
                     result["host"] = record.ssh_target().into();
-                    result["saved"] = false.into();
-                    result["message"] = format!("{} The machine is saved when it has connected, and not before.", result["message"].as_str().unwrap_or_default()).into();
+                    result["saved"] = updating.into();
+                    result["message"] = format!("{} {}", result["message"].as_str().unwrap_or_default(), unsaved_note(updating)).into();
                     return Ok(result);
                 }
                 State::Failed => {
@@ -975,9 +1015,9 @@ impl Relay {
                 }
                 State::Connecting if deadline.spent() => {
                     return Ok(json!({
-                        "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": false,
+                        "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": updating,
                         "step": status.step,
-                        "message": format!("Still connecting to {}. Call `add_machine` again with the same host to continue. The machine is saved when it has connected, and not before.", record.ssh_target()),
+                        "message": format!("Still connecting to {}. Call `add_machine` again with the same host to continue. {}", record.ssh_target(), unsaved_note(updating)),
                     }));
                 }
                 State::Connecting => {
@@ -992,14 +1032,14 @@ impl Relay {
         let mut status = status;
         let connected_as_cluster = record.cluster.is_some();
         let found = status.hello.as_ref().is_some_and(|h| h.slurm);
-        let cluster = match choose_mode(slurm, prior.as_ref(), found) {
+        let cluster = match choose_mode(slurm, existing.as_ref(), found) {
             Ok(cluster) => cluster,
             Err(why) => {
                 quit_unless_in_use(&record.id);
                 return Err(format!("{why}\nNothing was saved."));
             }
         };
-        if prior.as_ref().is_some_and(|p| p.cluster.is_some() != cluster) && (status.runtime.is_some() || status.job.is_some() || matches!(status.state, State::Starting | State::Queued | State::Ready)) {
+        if existing.as_ref().is_some_and(|p| p.cluster.is_some() != cluster) && (status.runtime.is_some() || status.job.is_some() || matches!(status.state, State::Starting | State::Queued | State::Ready)) {
             return Err(format!(
                 "Julia is running, or starting, on {} through the way it is saved now. Changing between running Julia in Slurm jobs and running it directly would leave that one where `stop_machine` can't reach it. Nothing was changed. Call `stop_machine` first (with the user's agreement), then call `add_machine` again.",
                 display_name(&record)
@@ -1016,9 +1056,9 @@ impl Relay {
         let hello = status.hello.clone().unwrap_or_default();
         if listed && hello.slurm && hello.partitions.is_none() && record.cluster.as_ref().is_none_or(|c| c.partitions.is_empty()) {
             return Ok(json!({
-                "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": false,
+                "machine": record.name, "host": record.ssh_target(), "state": "connecting", "saved": updating,
                 "step": status.step,
-                "message": format!("Connected to {}, but Slurm hasn't listed its partitions yet. Call `add_machine` again with the same host to continue. The machine is saved when it has connected, and not before.", record.ssh_target()),
+                "message": format!("Connected to {}, but Slurm hasn't listed its partitions yet. Call `add_machine` again with the same host to continue. {}", record.ssh_target(), unsaved_note(updating)),
             }));
         }
         if cluster {
@@ -1037,7 +1077,8 @@ impl Relay {
         } else {
             record.cluster = None;
         }
-        self.machines.save(record.clone())?;
+        self.machines.save_expecting(record.clone(), existing.as_ref().map(|e| e.id.as_str()), &|servers| find_existing(servers).map(|e| e.id))?;
+        *unsaved = None;
         if record.cluster.is_some() != connected_as_cluster {
             // It connected the other way: the next connection starts the helper for how it is saved now.
             let _ = link.quit();
@@ -1074,7 +1115,7 @@ impl Relay {
             "host": record.ssh_target(),
             "state": "connected",
             "saved": true,
-            "updated": prior.is_some(),
+            "updated": updating,
             "node": hello.node,
             "home": hello.home,
             "os": hello.os,
@@ -1105,7 +1146,7 @@ impl Relay {
     fn link_for_use(&self, server: &Server, deadline: Deadline) -> Result<(Link, link::Status, Option<String>), String> {
         let link = deadline.ensure(server)?;
         let status = deadline.status(&link)?;
-        self.link_rule(server, link, status, deadline)
+        self.link_rule(&server.id, &display_name(server), Some(server), link, status, deadline)
     }
 
     /// Wait up to `deadline` for the link to settle: ready, queued, failed, found nothing running, or

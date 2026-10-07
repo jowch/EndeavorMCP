@@ -15,7 +15,7 @@
 
 ## add_machine
 
-Result: `machine`, `host`, `node`, `home`, `slurm` (Slurm was found), `cluster` and `runs_in` (`slurm_jobs` or `directly`: what is used), `partitions` (name, `default`, `max_hours`, `cpus`, `memory_gb`), `scratch`, `julia` (null until Julia has been started there once), `message`. `state` is `connecting` when the 45 s ran out: call again with the same host; nothing is saved until a call has connected, and `saved` is false until then.
+Result: `machine`, `host`, `node`, `home`, `slurm` (Slurm was found), `cluster` and `runs_in` (`slurm_jobs` or `directly`: what is used), `partitions` (name, `default`, `max_hours`, `cpus`, `memory_gb`), `scratch`, `julia` (null until Julia has been started there once), `message`. `state` is `connecting` when the 45 s ran out: call again with the same host; a new machine is saved only once a call has connected (`saved` is false until then), and an existing one keeps its saved settings until the new ones have connected.
 
 `slurm`: `true` runs Julia in Slurm jobs (an error if Slurm isn't there), `false` runs it directly on the machine even if Slurm is there. Left out, a new machine uses jobs when Slurm is there and a machine added before stays as saved. Changing a machine between the two is refused while Julia runs there.
 

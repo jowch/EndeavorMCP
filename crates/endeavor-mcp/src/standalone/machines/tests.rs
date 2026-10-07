@@ -1,5 +1,5 @@
 use super::*;
-use crate::link::{JobInfo, QueueInfo};
+use crate::link::{JobInfo, QueueInfo, replaceable};
 use crate::standalone::{Command, Env, Options, parse};
 
 fn status(state: State) -> link::Status {
