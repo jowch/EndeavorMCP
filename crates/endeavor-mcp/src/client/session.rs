@@ -178,10 +178,25 @@ pub enum Want {
     /// Attach to a runtime that runs (on a cluster, a job that waits or runs) and start nothing
     /// otherwise. `install` is the user's agreement to the helper on the machine, if it lacks it.
     Attach { install: bool },
-    /// Start the runtime, or attach to the one running. `job` is what to submit on a cluster.
+    /// Start the runtime, or attach to the one running. `job` is what to submit on a cluster; on a
+    /// session that already has a runtime or a queued job it is not used, and the outcome is that
+    /// of what is there (a cluster has one job for each user, and the outcome says its size).
     /// `install` is the user's agreement to what is missing on the machine: the helper, and for
     /// this start only, whatever the helper finds the start needs (such as Julia).
     Start { job: Option<JobRequest>, install: bool },
+}
+
+impl Want {
+    fn install(&self) -> bool {
+        matches!(self, Want::Attach { install: true } | Want::Start { install: true, .. })
+    }
+
+    fn wish(&self) -> Wish {
+        match self {
+            Want::Attach { .. } => Wish { job: None, attach: true, install: false },
+            Want::Start { job, install } => Wish { job: job.clone(), attach: false, install: *install },
+        }
+    }
 }
 
 /// How it stands with what was wanted.
@@ -238,8 +253,8 @@ enum Msg {
     Quit,
     /// The helper of this connection ended by itself.
     Closed(u64),
-    /// A runtime start on this connection ended (`Inner::epoch` when it began).
-    Started(u64, u64, Result<Runtime, StartError>),
+    /// A runtime start on this connection ended (`Inner::epoch` when it began, and whether it was allowed to install).
+    Started(u64, u64, bool, Result<Runtime, StartError>),
     /// The attached runtime went away.
     Notice(u64, Notice),
 }
@@ -249,8 +264,8 @@ enum Msg {
 struct Wish {
     /// On a cluster, what to submit.
     job: Option<JobRequest>,
-    /// The start only attaches, and first asks the helper whether a runtime is there.
-    check: bool,
+    /// Only attach: first ask the helper whether a runtime is there, and start nothing if not.
+    attach: bool,
     /// The helper may install what this start needs: the `install` of the
     /// request, and not what was agreed for an earlier one. Never for a start
     /// that only attaches.
@@ -266,16 +281,6 @@ enum Run {
     /// The runtime went away before the end of its start was handled: that end is not a success.
     Gone,
     Attached(RuntimeInfo),
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Supervisor {
-    /// Waiting for a `Kick`, or for the end of a pause between attempts.
-    Waiting,
-    /// A `Kick` is in its inbox.
-    Kicked,
-    /// Connecting, which a start request needn't wake it for.
-    Connecting,
 }
 
 impl Inner {
@@ -316,8 +321,10 @@ struct Inner {
     /// Counts the stops, so the end of a start that one cut short is ignored.
     /// A stop counts before it asks the helper, which takes a while.
     epoch: u64,
-    /// What the supervisor is doing.
-    supervisor: Supervisor,
+    /// The supervisor waits for a `Kick` or for the end of a pause, and none is in its inbox.
+    may_kick: bool,
+    /// The state is `Failed` or `NeedsInstall` and no `ensure` has told it yet.
+    untold: bool,
     /// The last such start found nothing (`Status::nothing_running`).
     nothing_running: bool,
     /// What the machine needs installed, while the state is `needs_install`.
@@ -340,9 +347,6 @@ struct Shared {
     /// doesn't need it again. Julia's download is not part of it: it is asked for by each start
     /// (`Wish::install`).
     allow_install: AtomicBool,
-    /// What `ensure` last answered `StillWorking` to, so that the next call with the same want
-    /// tells how it ended instead of asking again.
-    owed: Mutex<Option<Want>>,
 }
 
 /// One machine's connection. Closing it, or dropping it, detaches from the machine's helper
@@ -380,7 +384,8 @@ impl Session {
             ended: None,
             run: Run::Idle,
             epoch: 0,
-            supervisor: Supervisor::Waiting,
+            may_kick: true,
+            untold: false,
             nothing_running: false,
             needs: None,
         };
@@ -393,7 +398,6 @@ impl Session {
             changed: Condvar::new(),
             cancel: Mutex::new(Arc::new(Cancel::default())),
             leaving: AtomicBool::new(false),
-            owed: Mutex::new(None),
         });
         let supervising = shared.clone();
         let name = format!("session-{}", shared.listener.port());
@@ -405,31 +409,48 @@ impl Session {
     }
 
     /// Ask for `want` and say how it stands, as soon as that is known or `wait` has passed
-    /// (`Outcome::StillWorking`). The work goes on meanwhile. The same want again while it is
-    /// under way only waits for it; once it has ended with something other than `Ready`, the call
-    /// that follows a `StillWorking` tells how, and the one after that tries again.
+    /// (`Outcome::StillWorking`). The work goes on meanwhile.
+    ///
+    /// What is asked for is judged from what the session holds, not from who asked: with a start or
+    /// an attach under way, or a runtime attached, the call only waits for it, so that any number of
+    /// callers can ask at once. `install: true` is an agreement and upgrades a start under way that
+    /// lacked it, and a start that ended `NeedsInstall` begins again with it. An `Attach` never
+    /// replaces a `Start` that is wanted or under way, and a `Start` is never answered
+    /// `NothingRunning`. A `Start` with a job on a session that already has a runtime or a queued job
+    /// gets what is there. A failure is told to the first call that finds it; the next call tries again.
     pub fn ensure(&self, want: Want, wait: Duration) -> Outcome {
-        let owed = self.shared.owed.lock().unwrap().as_ref() == Some(&want);
-        let settled = owed.then(|| outcome(&self.shared.inner())).flatten();
-        let outcome = settled.unwrap_or_else(|| {
-            // A want that is under way is waited for, not asked again: that would cut a pause between attempts short.
-            if !owed {
-                self.request(&want);
+        enum Next {
+            Tell(Outcome),
+            Begin,
+            Wait,
+        }
+        let next = self.shared.with(|i| {
+            if i.untold {
+                let told = match outcome(i) {
+                    Some(failed @ Outcome::Failed(_)) => Some(failed),
+                    Some(needs @ Outcome::NeedsInstall(_)) if !want.install() => Some(needs),
+                    _ => None,
+                };
+                if let Some(told) = told {
+                    i.untold = false;
+                    return Next::Tell(told);
+                }
             }
-            self.wait(wait)
+            if self.shared.ask(i, &want) { Next::Begin } else { Next::Wait }
         });
-        *self.shared.owed.lock().unwrap() = matches!(outcome, Outcome::StillWorking(_)).then_some(want);
-        outcome
+        match next {
+            Next::Tell(told) => told,
+            Next::Begin => {
+                self.shared.begin_start();
+                self.wait(wait)
+            }
+            Next::Wait => self.wait(wait),
+        }
     }
 
-    /// Ask for `want` and return at once; `status` has the rest. A start under way, or a runtime
-    /// attached, is not an error. A start after a failure tries again.
+    /// Ask for `want` as `ensure` does and return at once; `status` has the rest.
     pub fn request(&self, want: &Want) {
-        let (job, only_running, install) = match want {
-            Want::Attach { install } => (None, true, *install),
-            Want::Start { job, install } => (job.clone(), false, *install),
-        };
-        self.shared.request_start(job, only_running, install);
+        self.shared.request_start(want);
     }
 
     /// Where the session stands.
@@ -450,10 +471,14 @@ impl Session {
         }
     }
 
+    /// Whether the helper is connected, which `stop` needs.
+    pub fn connected(&self) -> bool {
+        self.shared.inner().channel.is_some()
+    }
+
     /// Stop the runtime, for every client of it, and wait until it is gone (up to a minute and a
     /// bit). The connection stays, and the error says why when the runtime didn't stop.
     pub fn stop(&self) -> Result<(), String> {
-        *self.shared.owed.lock().unwrap() = None;
         self.shared.request_stop()
     }
 
@@ -468,48 +493,67 @@ impl Session {
         self.shared.listener.port()
     }
 
-    /// Detach from the machine's helper, close the listener and end the session's thread. The
-    /// runtime keeps running. Calls after this answer `Outcome::Failed`.
+    /// Let go of the machine's helper (which leaves the runtime running, and discards what an
+    /// upload had written part way), end the connection, close the listener and end the session's
+    /// thread. A connect that is under way is cancelled at once. Nothing begins after this, and calls
+    /// answer `Outcome::Failed`.
     pub fn close(&self) {
         let shared = &self.shared;
         if shared.leaving.swap(true, Ordering::SeqCst) {
             return;
         }
-        shared.cancel.lock().unwrap().cancel();
+        // The helper is told before ssh is ended, or it would only see its input end.
+        let held = shared.with(|i| i.channel.take());
+        if held.is_none() {
+            shared.cancel.lock().unwrap().cancel();
+        }
         let _ = shared.inbox.send(Msg::Quit);
+        if let Some(channel) = held {
+            let_go(channel);
+        }
+        shared.cancel.lock().unwrap().cancel();
         if let Some(supervisor) = self.supervisor.lock().unwrap().take() {
             let _ = supervisor.join();
         }
+        // A connection that came while this waited.
         if let Some(channel) = shared.with(|i| i.channel.take()) {
-            // The helper goes when it has the word; a connection that is dead doesn't hold the close up.
-            let (done, waited) = mpsc::channel();
-            std::thread::spawn(move || {
-                channel.detach();
-                let _ = done.send(());
-            });
-            let _ = waited.recv_timeout(Duration::from_secs(5));
+            let_go(channel);
         }
         shared.listener.close();
         shared.with(|i| {
-            (i.state, i.run, i.wanted) = (State::Failed, Run::Idle, None);
+            (i.state, i.run, i.wanted, i.resume) = (State::Failed, Run::Idle, None, None);
+            (i.conn, i.epoch) = (i.conn + 1, i.epoch + 1);
             i.error = Some(format!("Endeavor's connection to {} was closed.", i.name));
         });
     }
 
     fn wait(&self, wait: Duration) -> Outcome {
-        let until = Instant::now() + wait;
-        let mut inner = self.shared.inner.lock().unwrap();
+        let until = Instant::now().checked_add(wait);
+        let mut inner = self.shared.inner();
         loop {
             if let Some(settled) = outcome(&inner) {
+                if matches!(settled, Outcome::Failed(_) | Outcome::NeedsInstall(_)) {
+                    inner.untold = false;
+                }
                 return settled;
             }
-            let left = until.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            let left = until.map_or(Duration::from_secs(3600), |until| until.saturating_duration_since(Instant::now()));
+            if until.is_some() && left.is_zero() {
                 return Outcome::StillWorking(inner.step.clone().unwrap_or_default());
             }
             inner = self.shared.changed.wait_timeout(inner, left).unwrap().0;
         }
     }
+}
+
+/// Tell the helper to let go, and wait a short time for it: a connection that is dead doesn't hold anything up.
+fn let_go(channel: Arc<Channel>) {
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        channel.detach();
+        let _ = done.send(());
+    });
+    let _ = waited.recv_timeout(Duration::from_secs(5));
 }
 
 impl Drop for Session {
@@ -532,7 +576,13 @@ fn outcome(i: &Inner) -> Option<Outcome> {
 
 impl Shared {
     fn with<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
-        let result = f(&mut self.inner.lock().unwrap());
+        let mut i = self.inner.lock().unwrap();
+        let before = i.state;
+        let result = f(&mut i);
+        if i.state != before {
+            i.untold = matches!(i.state, State::Failed | State::NeedsInstall);
+        }
+        drop(i);
         self.changed.notify_all();
         result
     }
@@ -588,11 +638,10 @@ impl Shared {
     fn begin_start(self: &Arc<Shared>) {
         let begun = self.with(|i| {
             let (Some(channel), Some(wish)) = (i.channel.clone(), i.wanted.clone()) else { return None };
-            if i.run != Run::Idle {
+            if i.run != Run::Idle || self.leaving.load(Ordering::SeqCst) {
                 return None;
             }
             i.run = Run::Starting;
-            i.wanted = Some(Wish { check: false, ..wish.clone() });
             i.ended = None;
             i.state = State::Starting;
             i.error = None;
@@ -604,39 +653,47 @@ impl Shared {
         let Some((channel, wish, conn, epoch)) = begun else { return };
         let shared = self.clone();
         std::thread::spawn(move || {
-            if wish.check && !shared.runtime_is_there(&channel, conn, epoch) {
-                return;
-            }
+            let wish = if wish.attach {
+                let Some(wish) = shared.runtime_is_there(&channel, conn, epoch) else { return };
+                wish
+            } else {
+                wish
+            };
             let tx = shared.inbox.clone();
             let options = StartOptions { job: wish.job, install: wish.install, ..StartOptions::default() };
             let result = start(&channel, &shared.listener, &options, &|event| shared.on_event(event), move |notice| drop(tx.send(Msg::Notice(conn, notice))));
-            let _ = shared.inbox.send(Msg::Started(conn, epoch, result));
+            let _ = shared.inbox.send(Msg::Started(conn, epoch, options.install, result));
         });
     }
 
-    /// For a start that only attaches: ask the helper whether a runtime runs or a
-    /// job waits. If not, end the start with nothing started. False then, and when
-    /// the answer was no use.
-    fn runtime_is_there(&self, channel: &Channel, conn: u64, epoch: u64) -> bool {
+    /// For a start that only attaches: ask the helper whether a runtime runs or a job waits, and
+    /// give the wish to go on with. If not, end the start with nothing started, unless the wish
+    /// became a start meanwhile. None then, and when the answer was no use.
+    fn runtime_is_there(&self, channel: &Channel, conn: u64, epoch: u64) -> Option<Wish> {
         let answer = channel.files(Request::Runtime);
-        let current = |i: &Inner| i.conn == conn && i.epoch == epoch;
+        // A stop or a close that came meanwhile has ended this start: nothing is attached to what it stopped.
+        let current = |i: &Inner| i.conn == conn && i.epoch == epoch && !self.leaving.load(Ordering::SeqCst);
         match answer {
-            // A stop that came meanwhile has ended this start: nothing is attached to what it stopped.
-            Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } }) => current(&self.inner()),
-            Ok(Reply::Runtime { runtime: RuntimeState::NotRunning }) => {
-                self.with(|i| {
-                    if current(i) {
-                        i.run = Run::Idle;
-                        i.wanted = None;
-                        i.nothing_running = true;
-                        i.state = State::Connected;
-                        i.step = Some(format!("No runtime is running on {}", i.name));
-                    }
-                });
-                false
+            Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } }) => {
+                let i = self.inner();
+                i.wanted.clone().filter(|_| current(&i))
             }
+            Ok(Reply::Runtime { runtime: RuntimeState::NotRunning }) => self.with(|i| {
+                if !current(i) {
+                    return None;
+                }
+                if let Some(wish) = i.wanted.clone().filter(|w| !w.attach) {
+                    return Some(wish);
+                }
+                i.run = Run::Idle;
+                i.wanted = None;
+                i.nothing_running = true;
+                i.state = State::Connected;
+                i.step = Some(format!("No runtime is running on {}", i.name));
+                None
+            }),
             // The connection went: `Closed` follows and takes the wish along to the next one.
-            Ok(_) | Err(_) if channel.is_closed() => false,
+            Ok(_) | Err(_) if channel.is_closed() => None,
             other => {
                 let trouble = other.map_or_else(|e| e, |reply| format!("The helper answered {reply:?}."));
                 self.with(|i| {
@@ -644,11 +701,11 @@ impl Shared {
                         i.run = Run::Idle;
                         i.wanted = None;
                         i.state = State::Failed;
-                        i.error = Some(format!("Endeavor couldn't find out whether Julia on {} is running ({trouble}). Call use_machine to try again.", i.name));
+                        i.error = Some(format!("Endeavor couldn't find out whether Julia on {} is running ({trouble}). Starting it again tries once more.", i.name));
                         i.step = i.error.clone();
                     }
                 });
-                false
+                None
             }
         }
     }
@@ -665,46 +722,59 @@ impl Shared {
 
     fn reconnect_now(&self, i: &mut Inner) {
         (i.state, i.error, i.needs) = (State::Connecting, None, None);
-        if i.supervisor == Supervisor::Waiting {
-            i.supervisor = Supervisor::Kicked;
+        self.kick(i);
+    }
+
+    /// Wake the supervisor if it waits. One wake-up is enough, and none while it connects.
+    fn kick(&self, i: &mut Inner) {
+        if i.may_kick {
+            i.may_kick = false;
             let _ = self.inbox.send(Msg::Kick);
         }
     }
 
-    fn request_start(self: &Arc<Shared>, job: Option<JobRequest>, only_running: bool, install: bool) {
-        let connected = self.with(|i| {
-            // Checked under the lock, as a close that came meanwhile has ended the supervisor and taken the connection.
-            if self.leaving.load(Ordering::SeqCst) {
-                return false;
-            }
-            // Only a start with no connection can mean the helper: with one, `install` is for what the start needs, and a
-            // yes to that mustn't be kept as one for the helper. Set under the lock, as the supervisor checks it.
-            if install && i.channel.is_none() {
-                self.allow_install.store(true, Ordering::SeqCst);
-            }
-            if i.run != Run::Idle {
-                return true;
-            }
-            i.wanted = Some(Wish { job, check: only_running, install: install && !only_running });
-            i.resume = None;
-            i.nothing_running = false;
-            if i.channel.is_some() {
-                return true;
-            }
-            // No connection: the supervisor starts the runtime once it has one, and
-            // tries now if it was waiting. One wake-up is enough, and none while it connects.
-            if matches!(i.state, State::Failed | State::NeedsInstall) {
-                (i.state, i.error, i.needs) = (State::Connecting, None, None);
-            }
-            if i.supervisor == Supervisor::Waiting {
-                i.supervisor = Supervisor::Kicked;
-                let _ = self.inbox.send(Msg::Kick);
-            }
-            false
-        });
-        if connected {
+    fn request_start(self: &Arc<Shared>, want: &Want) {
+        if self.with(|i| self.ask(i, want)) {
             self.begin_start();
         }
+    }
+
+    /// Record what `want` asks for, under the lock. True when the runtime should be started on the
+    /// connection that is there (`begin_start`, called with no lock held).
+    fn ask(&self, i: &mut Inner, want: &Want) -> bool {
+        // Checked under the lock, as a close that came meanwhile has ended the supervisor and taken the connection.
+        if self.leaving.load(Ordering::SeqCst) {
+            return false;
+        }
+        // Only a start with no connection can mean the helper: with one, `install` is for what the start needs, and a
+        // yes to that mustn't be kept as one for the helper. Set under the lock, as the supervisor checks it.
+        if want.install() && i.channel.is_none() {
+            self.allow_install.store(true, Ordering::SeqCst);
+        }
+        // What is wished, or held, is not asked for again: that would restart a start, or cut a pause between attempts short.
+        let wished = i.wanted.is_some() || i.resume.is_some();
+        if i.run != Run::Idle || (wished && !matches!(i.state, State::Failed | State::NeedsInstall)) {
+            if let Some(wish) = i.wanted.as_mut().or(i.resume.as_mut()) {
+                match want {
+                    // A start replaces an attach that has not found out yet, and never the other way round.
+                    Want::Start { job, install } if wish.attach => *wish = Wish { job: job.clone(), attach: false, install: *install },
+                    _ => wish.install |= want.wish().install,
+                }
+            }
+            return false;
+        }
+        i.wanted = Some(want.wish());
+        i.resume = None;
+        i.nothing_running = false;
+        if i.channel.is_some() {
+            return true;
+        }
+        // No connection: the supervisor starts the runtime once it has one, and tries now if it was waiting.
+        if matches!(i.state, State::Failed | State::NeedsInstall) {
+            (i.state, i.error, i.needs) = (State::Connecting, None, None);
+        }
+        self.kick(i);
+        false
     }
 
     fn request_stop(&self) -> Result<(), String> {
@@ -753,13 +823,13 @@ impl Shared {
     }
 }
 
-/// Why a stop can't reach the helper, and what to do about it.
+/// Why a stop can't reach the helper.
 fn not_connected_to_stop(i: &Inner) -> String {
     let name = &i.name;
     match i.state {
-        State::NeedsInstall => format!("Endeavor isn't connected to {name}: its helper isn't installed there, and stopping the runtime needs it. Ask the user whether Endeavor may install it, then call `stop_machine` again with `install: true`."),
-        State::Failed => format!("Endeavor isn't connected to {name}: {} Tell the user, and call `stop_machine` again once that is fixed.", i.error.as_deref().unwrap_or("the connection failed.")),
-        _ => format!("Endeavor isn't connected to {name} yet, so it can't stop the runtime. It is connecting: wait a few seconds, then call `stop_machine` again."),
+        State::NeedsInstall => format!("Endeavor isn't connected to {name}: its helper isn't installed there, and stopping the runtime needs it. Installing it wasn't agreed to."),
+        State::Failed => format!("Endeavor isn't connected to {name}: {}", i.error.as_deref().unwrap_or("the connection failed.")),
+        _ => format!("Endeavor isn't connected to {name} yet, so it can't stop the runtime. It is still connecting."),
     }
 }
 
@@ -775,7 +845,7 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
             i.conn = conn;
             i.channel = None;
             i.state = State::Connecting;
-            i.supervisor = Supervisor::Connecting;
+            i.may_kick = false;
             i.needs = None;
             i.step = Some(format!("Connecting to {}", i.name));
             i.name.clone()
@@ -801,7 +871,7 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                         if shared.allow_install.load(Ordering::SeqCst) {
                             return false;
                         }
-                        i.supervisor = Supervisor::Waiting;
+                        i.may_kick = true;
                         i.state = State::NeedsInstall;
                         i.error = None;
                         i.wanted = None;
@@ -824,7 +894,7 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                 let retry = reconnecting && error.retry && lost.elapsed() < RETRY_GIVE_UP;
                 eprintln!("The connection to {name} failed{}: {}", if retry { ", trying again" } else { "" }, error.message);
                 shared.with(|i| {
-                    i.supervisor = Supervisor::Waiting;
+                    i.may_kick = true;
                     i.state = if retry { State::Connecting } else { State::Failed };
                     i.error = (!retry).then(|| error.message.clone());
                     i.step = Some(if retry { format!("Lost the connection to {name}: {}", error.message) } else { error.message.clone() });
@@ -855,7 +925,7 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                     }
                 });
                 let resume = shared.with(|i| {
-                    i.supervisor = Supervisor::Waiting;
+                    i.may_kick = true;
                     i.channel = Some(channel.clone());
                     i.state = State::Connected;
                     i.error = None;
@@ -869,6 +939,10 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                     // A start asked for while the connection was away is the newer wish.
                     i.resume.take().filter(|_| i.wanted.is_none())
                 });
+                // A close that came during the connect detaches it, and nothing is started on it.
+                if shared.leaving.load(Ordering::SeqCst) {
+                    return;
+                }
                 if shared.inner().hello.as_ref().is_some_and(|h| h.slurm) {
                     let (shared, channel) = (shared.clone(), channel.clone());
                     std::thread::spawn(move || find_partitions(&shared, &channel, conn));
@@ -910,22 +984,31 @@ fn find_partitions(shared: &Shared, channel: &Channel, conn: u64) {
 /// An answer that isn't clear is asked for again, and then leaves the session `Failed`.
 fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
     let mut trouble = String::new();
+    // A stop or a close during the asking has ended what is brought back.
+    let epoch = shared.inner().epoch;
+    let current = |i: &Inner| i.epoch == epoch && !shared.leaving.load(Ordering::SeqCst);
     for attempt in 0..REATTACH_TRIES {
         if shared.leaving.load(Ordering::SeqCst) {
             return;
         }
         match channel.files(Request::Runtime) {
             Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } }) => {
-                shared.with(|i| i.wanted = Some(wish));
+                shared.with(|i| {
+                    if current(i) {
+                        i.wanted = Some(wish);
+                    }
+                });
                 return;
             }
             Ok(Reply::Runtime { runtime: RuntimeState::NotRunning }) => {
                 shared.with(|i| {
-                    i.state = State::Failed;
-                    i.job = None;
-                    let said = format!("Julia on {} is not running any more: it ended, or its start was cut short, while Endeavor was disconnected.", i.name);
-                    i.step = Some(said.clone());
-                    i.error = Some(said);
+                    if current(i) {
+                        i.state = State::Failed;
+                        i.job = None;
+                        let said = format!("Julia on {} is not running any more: it ended, or its start was cut short, while Endeavor was disconnected.", i.name);
+                        i.step = Some(said.clone());
+                        i.error = Some(said);
+                    }
                 });
                 shared.listener.disconnected();
                 return;
@@ -942,11 +1025,13 @@ fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
             std::thread::sleep(REATTACH_PAUSE);
         }
     }
-    eprintln!("Couldn't ask whether the runtime is still there: {trouble}");
     shared.with(|i| {
-        i.state = State::Failed;
-        i.error = Some(format!("Endeavor couldn't find out whether Julia on {} is still running ({trouble}). Call use_machine to try again.", i.name));
-        i.step = i.error.clone();
+        eprintln!("{}: couldn't ask whether the runtime is still there: {trouble}", i.name);
+        if current(i) {
+            i.state = State::Failed;
+            i.error = Some(format!("Endeavor couldn't find out whether Julia on {} is still running ({trouble}). Starting it again tries once more.", i.name));
+            i.step = i.error.clone();
+        }
     });
     shared.listener.disconnected();
 }
@@ -1009,7 +1094,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                 });
                 return true;
             }
-            Msg::Started(g, epoch, result) if g == conn => {
+            Msg::Started(g, epoch, installed, result) if g == conn => {
                 let current = shared.with(|i| i.epoch == epoch);
                 if !current {
                     continue;
@@ -1041,8 +1126,13 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                     Err(StartError::Failed(message)) if message == CLOSED => {}
                     Err(_) if shared.with(|i| i.channel.as_ref().is_some_and(|c| c.is_closed())) => {}
                     Err(StartError::NeedsInstall(items)) => {
-                        eprintln!("Starting the runtime needs {}, and installing wasn't allowed.", wire::items_text(&items));
+                        // The agreement came after this start began: it goes on with it.
+                        if !installed && shared.with(|i| i.wanted.as_ref().is_some_and(|w| w.install) && std::mem::replace(&mut i.run, Run::Idle) == Run::Starting) {
+                            shared.begin_start();
+                            continue;
+                        }
                         shared.with(|i| {
+                            eprintln!("{}: starting the runtime needs {}, and installing wasn't allowed.", i.name, wire::items_text(&items));
                             (i.run, i.job, i.queue) = (Run::Idle, None, None);
                             i.wanted = None;
                             i.state = State::NeedsInstall;
@@ -1053,8 +1143,8 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                         shared.listener.restart_failed();
                     }
                     Err(StartError::Failed(message)) => {
-                        eprintln!("Starting the runtime failed: {message}");
                         shared.with(|i| {
+                            eprintln!("{}: starting the runtime failed: {message}", i.name);
                             i.run = Run::Idle;
                             i.wanted = None;
                             i.state = State::Failed;
@@ -1090,7 +1180,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                     shared.listener.disconnected();
                 }
                 // The helper is gone; `Closed` follows.
-                Notice::Lost(message) => eprintln!("The helper said: {message}"),
+                Notice::Lost(message) => eprintln!("{}: the helper said: {message}", shared.inner().name),
             },
             _ => {}
         }

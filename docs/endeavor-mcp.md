@@ -311,7 +311,11 @@ does what the link's states describe: it connects, starts the runtime or
 attaches, retries and attaches again after a drop, and keeps one listener port
 through all of it. `Session::ensure(Want, wait)` answers with an `Outcome`
 (`Ready`, `Queued`, `NothingRunning`, `NeedsInstall`, `Failed`, `StillWorking`);
-`status()` has the states and fields `GET /link/status` shows. `close()` and
+`status()` has the states and fields `GET /link/status` shows. Asked for what
+is already wanted or under way, `ensure` only waits, so any number of callers can
+ask at once; `install: true` is an agreement and upgrades a start that lacked
+it; an attach never replaces a start. A failure is told to the first call that
+finds it, and the next call tries again. `close()` and
 dropping the session detach from the helper and end its thread, and never stop
 the runtime. The link process holds one and maps its control calls onto it.
 

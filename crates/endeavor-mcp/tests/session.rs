@@ -108,7 +108,7 @@ fn has_thread(name: &str) -> bool {
 fn ensure_answers_ready_with_the_listeners_port_and_again_the_same() {
     let place = Place::new("ready");
     let session = place.session();
-    let runtime = ready(session.ensure(start(), LONG));
+    let runtime = ready(session.ensure(start(), Duration::MAX));
     assert_eq!(runtime.port, session.port(), "the runtime is reached through the listener");
     assert!(runtime.page_url.contains(&format!(":{}/", runtime.port)) && runtime.mcp_url.ends_with("/mcp"), "{runtime:?}");
     assert!(pid_alive(runtime.pid as i32) && !runtime.reattached && runtime.token.len() == 64);
@@ -159,14 +159,19 @@ fn a_failed_sign_in_is_told_once_and_the_call_after_that_tries_again() {
     let attempts = || std::fs::read_to_string(&asked).map_or(0, |text| text.lines().count());
     let session = place.session_with(true, Some(ask));
     wait_for("the first attempt to fail", || attempts() == 1 && session.status().state == State::Failed);
-    // Asked now, it connects again, and the answer is not in yet.
-    assert!(matches!(session.ensure(start(), Duration::ZERO), Outcome::StillWorking(_)));
-    wait_for("the second attempt to fail", || attempts() == 2 && session.status().state == State::Failed);
+    // Nobody has been told yet: the first call is, and doesn't try again.
     let Outcome::Failed(why) = session.ensure(start(), LONG) else { panic!("it failed") };
     assert!(why.contains("refused the sign-in"), "{why}");
-    assert_eq!(attempts(), 2, "the same call tells how it ended and doesn't try again");
+    assert_eq!(attempts(), 1);
+    // The next asks for a new attempt, and the answer is not in yet.
+    assert!(matches!(session.ensure(start(), Duration::ZERO), Outcome::StillWorking(_)));
+    wait_for("the second attempt to fail", || attempts() == 2 && session.status().state == State::Failed);
+    // A call that finds it failed is the one that is told, and doesn't try again.
     let Outcome::Failed(again) = session.ensure(start(), LONG) else { panic!("it failed") };
-    assert_eq!((again, attempts()), (why, 3), "the one after that does");
+    assert_eq!((again, attempts()), (why.clone(), 2));
+    // And the one after that does.
+    let Outcome::Failed(third) = session.ensure(start(), LONG) else { panic!("it failed") };
+    assert_eq!((third, attempts()), (why, 3));
     assert!(place.helpers().is_empty() && !place.julia_ran());
 }
 
@@ -264,4 +269,90 @@ fn two_sessions_in_one_process_leave_each_other_alone() {
     assert!(listening(b.port) && one.helpers().is_empty() && !two.helpers().is_empty());
     let third = one.session();
     assert_ne!(ready(third.ensure(start(), LONG)).pid, a.pid);
+}
+
+#[test]
+fn an_agreement_goes_to_a_start_that_waits_for_it_and_to_one_that_was_refused() {
+    let place = Place::new("agreement");
+    // The helper is missing and the agreement comes with a later call, while the first still connects.
+    let session = place.session_with(false, Some("sleep 1".into()));
+    let plain = Want::Start { job: None, install: false };
+    assert!(matches!(session.ensure(plain.clone(), Duration::ZERO), Outcome::StillWorking(_)));
+    ready(session.ensure(start(), LONG));
+    assert_eq!(session.status().hello.and_then(|h| h.helper_installed), Some(true));
+    drop(session);
+
+    // Refused and told; the agreement given on its own, then the same call goes on.
+    let place = Place::new("agreement-apart");
+    let session = place.session_with(false, None);
+    assert!(matches!(session.ensure(plain.clone(), LONG), Outcome::NeedsInstall(needs) if needs.needs_helper()));
+    session.allow_install();
+    ready(session.ensure(plain, LONG));
+    assert!(place.dir.join("root").exists());
+}
+
+#[test]
+fn an_attach_never_replaces_a_start_and_a_start_is_never_told_nothing_runs() {
+    let place = Place::new("attach-while-start");
+    let hold = place.state.join("hold");
+    std::fs::write(&hold, "").unwrap();
+    let session = place.session();
+    let (starter, attacher) = std::thread::scope(|scope| {
+        let starter = scope.spawn(|| session.ensure(start(), LONG));
+        wait_for("the start to begin", || place.julia_ran() || session.status().state == State::Starting);
+        let attacher = scope.spawn(|| session.ensure(Want::Attach { install: false }, LONG));
+        std::thread::sleep(Duration::from_millis(500));
+        wait_for("Julia to start", || place.julia_ran());
+        std::fs::remove_file(&hold).unwrap();
+        (starter.join().unwrap(), attacher.join().unwrap())
+    });
+    let (started, attached) = (ready(starter), ready(attacher));
+    assert_eq!(started, attached, "the attach waited for the start");
+
+    // Asked at the same moment, the start is the one that decides, whichever comes first.
+    let place = Place::new("attach-and-start");
+    let session = place.session();
+    for _ in 0..3 {
+        let (starter, attacher) = std::thread::scope(|scope| {
+            let attacher = scope.spawn(|| session.ensure(Want::Attach { install: false }, LONG));
+            let starter = scope.spawn(|| session.ensure(start(), LONG));
+            (starter.join().unwrap(), attacher.join().unwrap())
+        });
+        let runtime = ready(starter);
+        assert!(matches!(attacher, Outcome::NothingRunning | Outcome::Ready(_)));
+        session.stop().expect("stop");
+        assert!(!pid_alive(runtime.pid as i32));
+    }
+}
+
+#[test]
+fn closing_during_a_start_lets_it_finish_without_the_client() {
+    let place = Place::new("close-starting");
+    let hold = place.state.join("hold");
+    std::fs::write(&hold, "").unwrap();
+    let session = place.session();
+    assert!(matches!(session.ensure(start(), Duration::from_millis(1500)), Outcome::StillWorking(_)));
+    wait_for("Julia to start", || place.julia_ran());
+    let began = Instant::now();
+    session.close();
+    assert!(began.elapsed() < Duration::from_secs(10));
+    assert!(place.helpers().is_empty(), "the helper let go");
+    assert!(matches!(session.ensure(start(), LONG), Outcome::Failed(why) if why.contains("closed")));
+    std::fs::remove_file(&hold).unwrap();
+    let recorded = place.state.join("runtime.json");
+    wait_for("the runtime to record itself", || recorded.exists());
+    let second = place.session();
+    assert!(ready(second.ensure(Want::Attach { install: false }, LONG)).reattached, "the start finished by itself");
+}
+
+#[test]
+fn closing_during_a_connect_cancels_it_and_starts_nothing() {
+    let place = Place::new("close-connecting");
+    let session = place.session_with(true, Some("sleep 30".into()));
+    assert!(matches!(session.ensure(start(), Duration::from_millis(300)), Outcome::StillWorking(_)));
+    let began = Instant::now();
+    session.close();
+    assert!(began.elapsed() < Duration::from_secs(10), "the connect was cancelled");
+    assert!(matches!(session.ensure(Want::Attach { install: false }, Duration::ZERO), Outcome::Failed(why) if why.contains("closed")));
+    assert!(place.helpers().is_empty() && !place.julia_ran());
 }

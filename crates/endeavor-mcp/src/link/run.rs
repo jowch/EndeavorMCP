@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use wire::slurm::JobRequest;
 
-use super::{Record, Status, valid_id};
+use super::{Record, State, Status, valid_id};
 use crate::client::{Config, Messages, Server, Session, Transport, Want, this_platform};
 use crate::http::{self, Framing, Head};
 use crate::standalone::Env;
@@ -255,7 +255,7 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
         }
         ("POST", "/link/stop") => match shared.session.stop() {
             Ok(()) => reply(&mut connection, "200 OK", &json!({ "ok": true })),
-            Err(message) => reply(&mut connection, "409 Conflict", &json!({ "error": message })),
+            Err(message) => reply(&mut connection, "409 Conflict", &json!({ "error": format!("{message}{}", stop_advice(&shared.session)) })),
         },
         ("POST", "/link/quit") => {
             if start_leaving(shared) {
@@ -266,6 +266,18 @@ fn control(shared: &Arc<Shared>, mut connection: TcpStream) -> std::io::Result<(
         }
         (_, "/link/status" | "/link/start" | "/link/install" | "/link/stop" | "/link/quit") => reply(&mut connection, "405 Method Not Allowed", &json!({ "error": "method_not_allowed" })),
         _ => reply(&mut connection, "404 Not Found", &json!({ "error": "not_found" })),
+    }
+}
+
+/// What to do about a stop that couldn't reach the helper, in the front's tools. Nothing for a stop the helper refused.
+fn stop_advice(session: &Session) -> &'static str {
+    if session.connected() {
+        return "";
+    }
+    match session.status().state {
+        State::NeedsInstall => " Ask the user whether Endeavor may install it, then call `stop_machine` again with `install: true`.",
+        State::Failed => " Tell the user, and call `stop_machine` again once that is fixed.",
+        _ => " Wait a few seconds, then call `stop_machine` again.",
     }
 }
 

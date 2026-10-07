@@ -54,9 +54,14 @@ _Started 2026-10-06, on the `client-library` branch._
   link's case; the default speaks in the app's words), batch sign-in only
   (`Auth::Batch`) and `exit_idle: true` for a runtime this session starts. Each
   would become a `Config` field.
-- **`ensure` remembers one want for each session.** A second caller that
-  asks with the same want right after a `StillWorking` is told how it ended
-  instead of the start trying again; the one after that tries again.
+- **A start that ended `NeedsInstall` and is begun again when the agreement
+  came meanwhile has no test.** Julia is given to every fake machine, so the
+  runtime item never appears; the helper item is tested.
+- **An attach is checked again after a reconnect.** Its wish stays an attach,
+  so the helper is asked once more whether a runtime runs, where a start would
+  be resumed on the reconnect's own check alone.
+- **`POST /link/start` with `only_running` drops `job`.** An attach carries none;
+  the link's start did keep it in the wish, where it was never used.
 
 ## The machines file
 
