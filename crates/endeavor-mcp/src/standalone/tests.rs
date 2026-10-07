@@ -309,7 +309,12 @@ fn relay(skills_plugin: bool, state_dir: PathBuf) -> (Arc<Relay>, Out) {
 /// A relay on this computer whose runtime is the stand-in on `port`, found as a recorded one is.
 fn ready_relay(port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool) -> (Arc<Relay>, Out) {
     let dir = crate::client::scratch(&format!("relay-{port}"));
-    let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "token": "t0k", "port": port });
+    // Windows takes a recorded process for alive only with the time it started.
+    #[cfg(windows)]
+    let started = crate::winproc::own_start_time();
+    #[cfg(not(windows))]
+    let started: Option<u64> = None;
+    let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "started": started, "token": "t0k", "port": port });
     std::fs::write(dir.join("runtime.json"), record.to_string()).unwrap();
     let (relay, out) = relay(skills_plugin, dir);
     match target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO) {
