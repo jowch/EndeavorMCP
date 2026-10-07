@@ -397,7 +397,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             for mut socket in listener.incoming().flatten() {
-                let _ = socket.read(&mut [0; 1024]);
+                // The whole request first: answering and closing with part of it unread resets the connection.
+                let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
+                while socket.read(&mut [0; 1024]).is_ok_and(|n| n > 0) {}
                 let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
             }
         });
