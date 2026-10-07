@@ -475,7 +475,7 @@ fn serves_the_agents_mcp_messages() {
     let guide = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"notebook_guide","arguments":{}}}"#;
     let guide: serde_json::Value = serde_json::from_str(&mcp(&core, guide, &caller).1).unwrap();
     assert_eq!(guide["result"]["isError"], false);
-    assert!(guide["result"]["content"][0]["text"].as_str().unwrap().contains("# Pluto workflow (cell editing)"));
+    assert!(guide["result"]["content"][0]["text"].as_str().unwrap().contains("# Working in a live notebook"));
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 
     assert_eq!(mcp(&core, "{nope", &caller), ("HTTP/1.1 400 Bad Request".into(), r#"{"error":"Invalid JSON"}"#.into()));

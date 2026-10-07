@@ -1,5 +1,5 @@
 {
   "name": "endeavor",
   "version": "0.1.0",
-  "description": "Endeavor's built-in Pluto skills, loaded into every agent session (successor to styx)."
+  "description": "Endeavor's built-in skills for working in live notebooks, loaded into every agent session."
 }

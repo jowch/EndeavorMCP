@@ -5,7 +5,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
 
 ## Where things stand
 
-- The notebook runtime, its MCP server and the Pluto skills live here. The
+- The notebook runtime, its MCP server and the skills live here. The
   Endeavor app depends on `wire` and `endeavor-mcp` as a Cargo git
   dependency pinned in its `Cargo.lock`, and takes `runtime/` and `plugin/`
   from the crate's embedded copies (`endeavor_mcp::embedded`).
@@ -96,9 +96,11 @@ Not yet checked:
   each sends back the `Mcp-Session-Id` from `initialize`, which gives it a
   notebook of its own. The spec requires it; no client is checked live yet,
   Claude Code included.
-- An agent following the skills without the app. They mark which parts
-  hold in the app and which without it, and `guide::STANDALONE` only names
-  the setting; no agent session has run against that text yet.
+- An agent following the skills without the app. The notebook skill
+  (`endeavor-notebooks`, rewritten 2026-10-06 from the three Pluto skills)
+  keeps what holds only in the app in `reference/app.md`, and
+  `guide::STANDALONE` tells the agent to skip it; no agent session has run
+  against that text yet.
 
 Known gaps:
 
