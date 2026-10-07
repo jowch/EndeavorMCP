@@ -888,6 +888,8 @@ impl Relay {
     }
 
     fn handle(self: &Arc<Self>, line: &str) {
+        // The call's whole time, from the moment it arrived: every wait for a runtime comes out of it.
+        let deadline = machines::Deadline::after(start_wait());
         let Ok(message) = serde_json::from_str::<Value>(line) else {
             return self.write(&to_json(&json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } })));
         };
@@ -906,7 +908,7 @@ impl Relay {
         }
         let tool = (message["method"] == "tools/call").then(|| message["params"]["name"].as_str().unwrap_or_default().to_owned());
         if let Some(tool) = tool.as_deref().filter(|tool| crate::mcp::MACHINE_NAMES.contains(tool)) {
-            return self.machine_tool(&message, tool);
+            return self.machine_tool(&message, tool, deadline);
         }
         let help = !self.options.skills_plugin;
         let (target, _) = self.placed();
@@ -925,7 +927,7 @@ impl Relay {
             return self.answer_call(&message, Some(tool), result.unwrap_or_else(|failed| failed));
         }
         // Only a call of a tool this build has starts a runtime.
-        if !self.held(&target).and_then(|provider| provider.settled()).is_some_and(|outcome| matches!(outcome, crate::client::Outcome::Ready(_))) {
+        if !self.held(&target).is_some_and(|provider| provider.status().state == crate::client::State::Ready) {
             let Some(id) = &id else { return };
             let Some(tool) = tool.as_deref() else {
                 if let Some(method) = message["method"].as_str() {
@@ -950,7 +952,7 @@ impl Relay {
             _ => Need::Start,
         };
         for attempt in 0..2 {
-            let route = match self.route(need) {
+            let route = match self.route(need, deadline) {
                 Ok(route) => route,
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };

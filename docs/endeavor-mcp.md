@@ -140,12 +140,27 @@ without starting one: `[]`, and `{pluto: "not running", notebooks: [], message}`
 no port, a process that doesn't answer) is a failure, not "not running": the
 status tool answers with `state` `failed` and the reason, and `list_notebooks`
 fails with it. A start another process has under way is a start under way, not
-"nothing runs". After a failed call the next one looks again. The first call that
-starts a runtime waits up to `start_wait()` (45 s), then fails with "Julia is
-starting on local ... call `pluto_session_status`", and the start goes on in a
-thread of the provider. A runtime that has gone (its process ended, or another
-client replaced it) is found out by the next call, which looks at the record
-before it uses the one it has.
+"nothing runs". Nothing running is never remembered: each such call looks again
+(this computer reads the state folder, a machine's connection asks the helper), so
+a runtime that another session or the app started since is found. The first call
+that starts a runtime waits up to `start_wait()` (45 s), then fails with "Julia is
+starting on this computer ... call `pluto_session_status`", and the start goes on in
+a thread of the provider.
+
+A failure is kept, the same on this computer and on a machine, and every call that
+asks is told it (`Provider::ensure` takes `retry`; a start that failed is not
+cleared by being told). Who asks to try again is decided in one place, `route`: a
+notebook call that needs a runtime reports a failure it has not reported yet and
+asks to try again on the call after that (`Target::failed`); `use_machine` and
+`stop_machine` always ask; `list_notebooks` and `pluto_session_status` never do and
+never use up the report, and the status tool's result for a failure carries
+`error`. A runtime that has gone (its process ended, it exited when idle, another
+connection stopped it or took it over) is just not running: the next notebook call
+that needs one starts one on this computer and on a plain server, and a cluster
+asks for a job. A runtime that ended while the connection to its machine was down
+is different: that is a failure, kept with its reason, since nobody saw it end.
+Whether to start is decided from the connection's own record of the machine (is it
+a cluster), not from a copy made when the session was pointed at it.
 
 The helper, `serve` and the front find or start the runtime with one function
 (`runtime::find_or_start`), look at what is running with one (`runtime::look`)
@@ -292,14 +307,25 @@ wait that runs out is a result that says what step it is at and to call again.
 and waits for it up to 20 s (`ENDEAVOR_STOP_LOCK_SECS` sets it for tests); the lock is
 held only for a look and a spawn, so it does not wait behind a whole start. If the lock
 isn't had it stops nothing and says so (an error). A start under way, this session's or
-another process's, is not stopped: without `force` the result names what would be cancelled,
-and with `force` it is an error that says Julia is still starting. It marks
+another process's, is not stopped: without `force` the result on a machine names what would be cancelled,
+and with `force` it is an error that says Julia is still starting; on this computer even
+the result without `force` only says Julia is still starting and to stop it once it
+is up, since a stop never cancels a start there. It marks
 the stop as made from a connection, so a client that finds the runtime gone is told "It
 was stopped from another connection." `endeavor stop` waits for the lock in the same way
 and keeps its own words ("It was stopped with `endeavor stop`.").
 
 No call waits longer than 45 seconds (`ENDEAVOR_START_WAIT_SECS` sets it for
-tests). A notebook call while the target's runtime isn't up fails with a plain
+tests): the deadline is taken once where a call arrives (`Relay::handle`), and every
+wait comes out of what is left of it, the attach, the start after it, the try again
+after a connection that didn't answer, the check for other sessions in
+`stop_machine` (at most 5 s) and the stop itself.
+
+`stop_machine` marks the session stopped before it ends the runtime, under the
+target's lock that `route` takes to check that and issue a start, so a start can't
+come between; a stop that fails, even after the call answered "taking a while", puts
+the session back. It uses the connection this front holds whatever the machine's
+settings are now, so a runtime in use through old settings can be stopped. A notebook call while the target's runtime isn't up fails with a plain
 message built from the `Outcome` of asking the connection; `pluto_session_status`
 is answered by the front from it (`{machine, state, ready, step, error, queue,
 job, message}`), and when the runtime is up it is relayed with `machine` (and for
@@ -334,11 +360,12 @@ result says so once.
 attaches, retries and attaches again after a drop, and keeps one listener port
 through all of it. `Session::ensure(Want, wait)` answers with an `Outcome`
 (`Ready`, `Queued`, `NothingRunning`, `NeedsInstall`, `Failed`, `StillWorking`);
-`status()` reads its fields, and `settled()` the outcome with nothing asked.
+`status()` reads its fields.
 Asked for what is already wanted or under way, `ensure` only waits, so any
 number of callers can ask at once; `install: true` is an agreement and upgrades
-a start that lacked it; an attach never replaces a start. A failure is told to
-the first call that finds it, and the next call tries again. `close()` and
+a start that lacked it; an attach never replaces a start. A failure is kept and
+given to every call until one passes `retry`, which begins again. An attach asks the machine
+each time nothing is known to run. `close()` and
 dropping the session detach from the helper and end its thread, and never stop
 the runtime.
 
@@ -357,14 +384,17 @@ What a machine tool says comes from the `Outcome`: `ready` (`RuntimeInfo`),
 `queued`, `connected` (nothing running), `needs_install`, `failed`, or, when
 the call's time ran out, `StillWorking(step)`, which is "still connecting" or
 "still starting, call again". A failure that has settled stays what the notebook
-calls and the status tool say until `use_machine` asks again.
+calls and the status tool say until a call asks to try again (`use_machine`, or
+the notebook call after the one that reported it).
 
-`add_machine` connects with a `Trial` (a `Held` that it owns) and puts it with
-the machine's connections only after `machines.json` was written, so every way
-out that doesn't save the machine ends the connection. A result that says "call
-again" (still connecting, partitions not listed yet) leaves it for the next
-`add_machine` with the same connection settings (`Server::same_connection`);
-`use_machine` and `stop_machine` let it go. If the machine's settings change
+`add_machine` connects with a `Held` that is not `saved`, in the same map as the
+others, and marks it saved only after `machines.json` was written; an `Unsaved`
+guard ends the connection on every way out that doesn't save the machine. A result
+that says "call again" (still connecting, partitions not listed yet) leaves it for the
+next `add_machine` with the same connection settings (`Server::same_connection`);
+`use_machine` and `stop_machine` end it. A connection that is replaced by one with new
+settings is ended at once, so a failed update leaves the machine's record as it was
+and its connection to be made again by the next call. If the machine's settings change
 (its address, port, Julia or whether it is a cluster) and a runtime is in use
 through its connection, the change is refused in plain words; with nothing in
 use the connection is replaced.

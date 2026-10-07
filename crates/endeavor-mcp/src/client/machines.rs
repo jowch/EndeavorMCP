@@ -104,6 +104,11 @@ impl Server {
         self.id == other.id && self.ssh_host == other.ssh_host && self.port == other.port && self.julia == other.julia && self.cluster.is_some() == other.cluster.is_some()
     }
 
+    /// The name the agent knows the machine by.
+    pub fn display_name(&self) -> String {
+        [&self.name, &self.ssh_host, &self.id].into_iter().find(|n| !n.trim().is_empty()).cloned().unwrap_or_default()
+    }
+
     /// The SSH host as typed: `host`, or `host:port`. An IPv6 address, whose
     /// colons would run into the port, is bracketed (`[::1]:2222`, or
     /// `user@[::1]:2222`).

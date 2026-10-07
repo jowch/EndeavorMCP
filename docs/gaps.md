@@ -69,12 +69,19 @@ _Started 2026-10-06, on the `client-library` branch._
   to say whether a runtime is there, so the first `pluto_session_status` of a
   session on a remembered machine can take that long over a slow network. It
   never waits for a start.
-- **A failure that settled is kept** by a machine's connection: notebook calls
-  and the status tool report it, and only `use_machine` (or a new
-  `add_machine`) tries again. A runtime that died is reported as "isn't
-  available" on every call until `use_machine` starts it again. On this
-  computer a failed start is told to one call and the next call starts again:
-  the two providers settle differently.
+- **A failure is told to every call that asks** until a call asks to try again
+  (`use_machine`, or the notebook call after the one that reported it). A
+  `list_notebooks` or `pluto_session_status` call on a machine whose connection
+  failed (sign-in refused, say) says so each time and does not try again; only the
+  next notebook call that needs a runtime does. A runtime that ended while the
+  connection was down is kept as a failure with its reason.
+- **A runtime that died while connected is "not running",** not a failure: its
+  reason (the job's time limit, say) is in the connection's last step, which
+  `pluto_session_status` shows as `step` until something else happens, and the
+  next notebook call starts another one.
+- **A failed `add_machine` that was updating a saved machine ends that
+  machine's connection** (it is made again by the next call), since one machine
+  has one connection and the new settings took its place while they were tried.
 - **A machine whose id is `local`** (only by editing `machines.json` by hand: `add_machine` refuses the name) is taken for this computer, and the tools can't reach it.
 - **On this computer a stop never cancels a start under way,** with `force`
   either (it says Julia is still starting); on a machine `force` cancels it.

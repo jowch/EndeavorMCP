@@ -457,6 +457,11 @@ mod tests {
         assert!(matches!(end(false), Ended::Starting));
         assert!(!dir.join("runtime.json").exists(), "the record of a process that is gone is removed");
         drop(core);
+        // The lock belongs to the open file description, which another test's forked child may still hold until it execs.
+        let until = Instant::now() + Duration::from_secs(10);
+        while starting(&dir) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(matches!(end(false), Ended::NotRunning));
 
         record(&dir, "another-node", std::process::id() as i64, Some(1));

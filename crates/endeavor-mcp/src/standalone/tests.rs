@@ -317,14 +317,14 @@ fn ready_relay(port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool
     let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "started": started, "token": "t0k", "port": port });
     std::fs::write(dir.join("runtime.json"), record.to_string()).unwrap();
     let (relay, out) = relay(skills_plugin, dir);
-    match target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO) {
+    match target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO, false) {
         crate::client::Outcome::Ready(_) => {}
         crate::client::Outcome::Failed(why) => panic!("the recorded runtime wasn't found: {why}"),
         crate::client::Outcome::NothingRunning => panic!("the recorded runtime wasn't found: nothing running"),
         _ => panic!("the recorded runtime wasn't found"),
     }
     // The first call to a runtime tells it the session's folder.
-    assert!(relay.route(machines::Need::Look).is_ok());
+    assert!(relay.route(machines::Need::Look, machines::Deadline::after(Duration::from_secs(5))).is_ok());
     seen.lock().unwrap().clear();
     (relay, out)
 }
@@ -355,6 +355,22 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     );
     assert_eq!(head.target(), "/mcp");
     assert_eq!(Some(client), crate::mcp::clean_label(&format!("claude-code on {}", crate::hostname())), "the agent's own name, and where it runs");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_runtime_replaced_by_another_process_is_noticed_and_the_new_one_is_found() {
+    let (port, seen) = fake_core();
+    let (relay, _) = ready_relay(port, &seen, true);
+    let before = target::Provider::status(&*relay.local).runtime.unwrap();
+    assert_eq!(before.pid, std::process::id());
+    // Another process has taken its place in the state folder: the parent of this test is one that is alive.
+    let other = std::os::unix::process::parent_id();
+    let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": other, "started": null, "token": "other", "port": port });
+    std::fs::write(relay.options.state_dir.join("runtime.json"), record.to_string()).unwrap();
+    assert_eq!(target::Provider::status(&*relay.local).state, crate::client::State::Connected, "the one that was attached to is forgotten");
+    let crate::client::Outcome::Ready(after) = target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO, false) else { panic!("the new runtime wasn't found") };
+    assert_eq!((after.pid, after.token.as_str()), (other, "other"));
 }
 
 #[test]

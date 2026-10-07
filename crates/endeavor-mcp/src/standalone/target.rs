@@ -15,24 +15,19 @@ use crate::stopped;
 /// Finding, starting, looking at and ending one runtime.
 pub(super) trait Provider: Send + Sync {
     /// Ask for `want` and say how it stands, as soon as that is known or `wait` has passed
-    /// (`Outcome::StillWorking`); a start goes on meanwhile. An `Attach` starts nothing.
-    fn ensure(&self, want: Want, wait: Duration) -> Outcome;
-    /// How it stands if that is settled, with nothing asked and nothing told.
-    fn settled(&self) -> Option<Outcome>;
+    /// (`Outcome::StillWorking`); a start goes on meanwhile. An `Attach` starts nothing and looks afresh
+    /// when nothing is known to run. A failure is kept and given to every call until one asks to `retry`.
+    fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome;
     fn status(&self) -> Status;
     /// End the runtime for every client of it, and wait until it is gone.
     fn stop(&self) -> Result<(), String>;
-    /// Whether a stop can reach the runtime.
-    fn connected(&self) -> bool;
+    /// Whether the machine is a Slurm cluster, by the record the connection was made with.
+    fn cluster(&self) -> bool;
 }
 
 impl Provider for Session {
-    fn ensure(&self, want: Want, wait: Duration) -> Outcome {
-        Session::ensure(self, want, wait)
-    }
-
-    fn settled(&self) -> Option<Outcome> {
-        Session::settled(self)
+    fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome {
+        Session::ensure(self, want, wait, retry)
     }
 
     fn status(&self) -> Status {
@@ -40,11 +35,21 @@ impl Provider for Session {
     }
 
     fn stop(&self) -> Result<(), String> {
-        Session::stop(self)
+        Session::stop(self).map_err(|why| {
+            // Nothing to do about a stop the helper refused.
+            if self.connected() {
+                return why;
+            }
+            match self.status().state {
+                State::NeedsInstall => format!("{why} Ask the user whether Endeavor may install it, then call `stop_machine` again with `install: true`."),
+                State::Failed => format!("{why} Tell the user, and call `stop_machine` again once that is fixed."),
+                _ => format!("{why} Wait a few seconds, then call `stop_machine` again."),
+            }
+        })
     }
 
-    fn connected(&self) -> bool {
-        Session::connected(self)
+    fn cluster(&self) -> bool {
+        Session::cluster(self)
     }
 }
 
@@ -55,18 +60,19 @@ pub(super) struct Target {
     pub id: String,
     /// What the agent calls it.
     pub name: String,
-    pub cluster: bool,
     /// The session's folder there, if `use_machine` was given one; else the server's home.
     pub folder: Option<String>,
     /// The session should have a runtime there: false after `stop_machine`.
     pub active: bool,
     /// The runtime (its pid) that was told this session's folder.
     pub told: Option<u32>,
+    /// The last notebook call that needed a runtime reported a failure, so the next one asks to try again.
+    pub failed: bool,
 }
 
 impl Target {
     pub(super) fn new(server: &Server, folder: Option<String>) -> Target {
-        Target { id: server.id.clone(), name: super::machines::display_name(server), cluster: server.cluster.is_some(), folder, active: true, told: None }
+        Target { id: server.id.clone(), name: server.display_name(), folder, active: true, told: None, failed: false }
     }
 
     pub(super) fn local(folder: &std::path::Path) -> Target {
@@ -101,7 +107,7 @@ enum Phase {
     /// A start is under way, at this step.
     Starting(String),
     Ready(RuntimeInfo),
-    /// A start ended with this. The next call to ask is told, and the one after tries again.
+    /// A start ended with this, which every call is told until one asks to try again.
     Failed(String),
 }
 
@@ -110,12 +116,15 @@ impl Local {
         Local { options, state: Arc::new((Mutex::new(Phase::Idle), Condvar::new())) }
     }
 
-    /// The phase, with a runtime that is no longer the one recorded forgotten.
+    /// The phase, with a runtime that is no longer the one recorded forgotten. The state folder is read with the lock let go.
     fn phase(&self) -> MutexGuard<'_, Phase> {
+        let ready = match &*self.state.0.lock().unwrap() {
+            Phase::Ready(runtime) => Some(runtime.pid),
+            _ => None,
+        };
+        let gone = ready.is_some_and(|pid| !matches!(runtime::look(&self.options.state_dir, false, false), Looked::Running(state, _) if state.pid as u32 == pid));
         let mut phase = self.state.0.lock().unwrap();
-        if let Phase::Ready(runtime) = &*phase
-            && !matches!(runtime::look(&self.options.state_dir, false, false), Looked::Running(state, _) if state.pid as u32 == runtime.pid)
-        {
+        if gone && matches!(&*phase, Phase::Ready(runtime) if Some(runtime.pid) == ready) {
             *phase = Phase::Idle;
         }
         phase
@@ -175,17 +184,16 @@ fn announce(options: &Options, state: &crate::State, port: u16, started: bool) -
 }
 
 impl Provider for Local {
-    fn ensure(&self, want: Want, wait: Duration) -> Outcome {
+    fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome {
         let until = Instant::now() + wait;
         let mut phase = self.phase();
+        if retry && matches!(*phase, Phase::Failed(_)) {
+            *phase = Phase::Idle;
+        }
         loop {
             match &*phase {
                 Phase::Ready(runtime) => return Outcome::Ready(runtime.clone()),
-                Phase::Failed(why) => {
-                    let failed = Outcome::Failed(why.clone());
-                    *phase = Phase::Idle;
-                    return failed;
-                }
+                Phase::Failed(why) => return Outcome::Failed(why.clone()),
                 Phase::Starting(step) => {
                     let left = until.saturating_duration_since(Instant::now());
                     if left.is_zero() {
@@ -210,13 +218,6 @@ impl Provider for Local {
                     self.begin();
                 }
             }
-        }
-    }
-
-    fn settled(&self) -> Option<Outcome> {
-        match &*self.phase() {
-            Phase::Ready(runtime) => Some(Outcome::Ready(runtime.clone())),
-            _ => None,
         }
     }
 
@@ -250,7 +251,7 @@ impl Provider for Local {
         Ok(())
     }
 
-    fn connected(&self) -> bool {
-        true
+    fn cluster(&self) -> bool {
+        false
     }
 }

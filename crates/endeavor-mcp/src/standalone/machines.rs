@@ -18,7 +18,7 @@ use wire::slurm::{Partition, Resources, check_extra_flag};
 
 use super::projects::Remembered;
 use super::target::{Provider, Target, local_server};
-use super::{Relay, Route, start_wait, tool_failure};
+use super::{Relay, Route, tool_failure};
 use crate::client::{Cluster, Config, InstallInfo, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
 use crate::mcp::{browser_link, to_json, tool_error};
 
@@ -32,10 +32,6 @@ pub(super) const LOCAL: &str = "local";
 
 /// Another session counts as active in a notebook if it called a tool this lately.
 const RECENT_SECONDS: u64 = 15 * 60;
-
-/// A stop waits for the helper as long as is left of the call's time, but at least this long: the
-/// helper may take longer.
-const STOP_FLOOR: Duration = Duration::from_secs(2);
 
 /// How long a runtime may say nothing to the question of who else is active before `stop_machine` gives up on it.
 const CHECK_WAIT: Duration = Duration::from_secs(5);
@@ -78,37 +74,18 @@ fn open_session(server: Server, allow_install: bool) -> Result<Session, String> 
     Session::new(config)
 }
 
-/// `ensure` for a call that asks for the machine on purpose: a failure that is still waiting to be told to
-/// someone is not what this call hears, since it asks to try again.
-fn ensure_again(provider: &dyn Provider, want: Want, wait: Duration) -> Outcome {
-    if provider.status().state == State::Failed {
-        let _ = provider.ensure(want.clone(), Duration::ZERO);
-    }
-    provider.ensure(want, wait)
-}
-
-/// What to do about a stop that couldn't reach the helper, in the tools. Nothing for a stop the helper refused.
-fn stop_advice(provider: &dyn Provider) -> &'static str {
-    if provider.connected() {
-        return "";
-    }
-    match provider.status().state {
-        State::NeedsInstall => " Ask the user whether Endeavor may install it, then call `stop_machine` again with `install: true`.",
-        State::Failed => " Tell the user, and call `stop_machine` again once that is fixed.",
-        _ => " Wait a few seconds, then call `stop_machine` again.",
-    }
-}
-
 /// A machine's connection and the settings it was made with, which a `Session` doesn't give back.
 /// Dropping it closes the session: it detaches from the machine's helper and leaves the runtime running.
 struct Held {
     server: Server,
     session: Arc<Session>,
+    /// The machine is in the machines file. An unsaved one is an `add_machine` still connecting.
+    saved: bool,
 }
 
 impl Held {
-    fn new(server: &Server, allow_install: bool) -> Result<Held, String> {
-        Ok(Held { server: server.clone(), session: Arc::new(open_session(server.clone(), allow_install)?) })
+    fn new(server: &Server, allow_install: bool, saved: bool) -> Result<Held, String> {
+        Ok(Held { server: server.clone(), session: Arc::new(open_session(server.clone(), allow_install)?), saved })
     }
 
     /// Whether nothing hangs on the connection, so that a new one can take its place without breaking
@@ -130,22 +107,26 @@ impl Drop for Held {
     }
 }
 
-/// This front's connections: one for each machine it has used, by machine id, and the one an
-/// `add_machine` that was still connecting leaves for its next call. A machine that is not saved is
-/// never among the first.
+/// This front's connections: one for each machine it has used, by machine id.
 #[derive(Default)]
 pub(super) struct Connections {
     held: Mutex<HashMap<String, Held>>,
-    adding: Mutex<Option<Held>>,
 }
 
-/// What `add_machine` connects with while the machine is not saved. A new connection it owns ends when
-/// this is dropped, so every way out that doesn't save the machine ends it; `park` keeps it for the next
-/// call and `Connections::keep` puts it with the saved ones.
-struct Trial {
-    session: Arc<Session>,
-    /// None when the connection is a saved machine's own, which stays where it is.
-    owned: Option<Held>,
+/// An `add_machine`'s hold on a connection while its machine is not saved: when it is dropped the
+/// connection ends, so every way out that doesn't save the machine ends it. `leave` keeps it for the next call.
+struct Unsaved<'a> {
+    connections: &'a Connections,
+    id: String,
+    leave: bool,
+}
+
+impl Drop for Unsaved<'_> {
+    fn drop(&mut self) {
+        if !self.leave {
+            self.connections.drop_unsaved(Some(&self.id));
+        }
+    }
 }
 
 fn settings_changed(name: &str) -> String {
@@ -153,9 +134,9 @@ fn settings_changed(name: &str) -> String {
 }
 
 impl Connections {
-    /// The connection to machine `id`, if the front has one. Makes none.
+    /// The connection to saved machine `id`, if the front has one. Makes none.
     fn get(&self, id: &str) -> Option<Arc<Session>> {
-        self.held.lock().unwrap().get(id).map(|held| held.session.clone())
+        self.held.lock().unwrap().get(id).filter(|held| held.saved).map(|held| held.session.clone())
     }
 
     /// The connection to `server`'s machine: the one held if it was made with the same settings, else a
@@ -163,15 +144,15 @@ impl Connections {
     /// is for a new one only.
     fn open(&self, server: &Server, allow_install: bool) -> Result<Arc<Session>, String> {
         let mut held = self.held.lock().unwrap();
-        if let Some(old) = held.get(&server.id) {
+        if let Some(old) = held.get(&server.id).filter(|old| old.saved) {
             if old.server.same_connection(server) {
                 return Ok(old.session.clone());
             }
             if !old.replaceable() {
-                return Err(settings_changed(&display_name(server)));
+                return Err(settings_changed(&server.display_name()));
             }
         }
-        let fresh = Held::new(server, allow_install)?;
+        let fresh = Held::new(server, allow_install, true)?;
         let session = fresh.session.clone();
         let old = held.insert(server.id.clone(), fresh);
         drop(held);
@@ -179,49 +160,38 @@ impl Connections {
         Ok(session)
     }
 
-    /// The connection `add_machine` tries `record` with: the saved machine's own when its settings are
-    /// the same and it hasn't failed, the one an earlier call left when it is for these settings, else a
-    /// new one. An error when a runtime is in use through a saved one made with other settings.
-    fn begin(&self, record: &Server, allow_install: bool) -> Result<Trial, String> {
-        let left = self.adding.lock().unwrap().take().filter(|left| left.server.same_connection(record));
-        if let Some(old) = self.held.lock().unwrap().get(&record.id) {
-            if old.server.same_connection(record) {
-                if old.session.status().state != State::Failed {
-                    return Ok(Trial { session: old.session.clone(), owned: None });
-                }
-            } else if !old.replaceable() {
-                return Err(settings_changed(&display_name(record)));
-            }
+    /// The connection `add_machine` tries `record` with: the one held if it was made with the same
+    /// settings (a saved machine's, or the one an earlier call left unsaved), else a new one that takes the
+    /// place of one nothing hangs on. An error when a runtime is in use through a saved one made with other
+    /// settings. Any other unsaved connection is ended.
+    fn trying(&self, record: &Server, allow_install: bool) -> Result<(Arc<Session>, Unsaved<'_>), String> {
+        let mut held = self.held.lock().unwrap();
+        let abandoned: Vec<Held> = held.extract_if(|id, h| !h.saved && *id != record.id).map(|(_, h)| h).collect();
+        let unsaved = || Unsaved { connections: self, id: record.id.clone(), leave: false };
+        match held.get(&record.id) {
+            Some(old) if old.server.same_connection(record) => return Ok((old.session.clone(), unsaved())),
+            Some(old) if old.saved && !old.replaceable() => return Err(settings_changed(&record.display_name())),
+            _ => {}
         }
-        let owned = match left {
-            Some(left) => left,
-            None => Held::new(record, allow_install)?,
-        };
-        Ok(Trial { session: owned.session.clone(), owned: Some(owned) })
+        let fresh = Held::new(record, allow_install, false)?;
+        let session = fresh.session.clone();
+        let old = held.insert(record.id.clone(), fresh);
+        drop(held);
+        drop((old, abandoned));
+        Ok((session, unsaved()))
     }
 
-    /// `trial`'s machine is saved as `record`: its connection is the machine's from now on, and it replaces
-    /// the one there was.
-    fn keep(&self, mut trial: Trial, record: &Server) {
-        let old = match trial.owned.take() {
-            Some(mut owned) => {
-                owned.server = record.clone();
-                self.held.lock().unwrap().insert(record.id.clone(), owned)
-            }
-            None => {
-                if let Some(held) = self.held.lock().unwrap().get_mut(&record.id) {
-                    held.server = record.clone();
-                }
-                None
-            }
-        };
-        drop(old);
+    /// `record` is saved: its connection is the machine's own from now on.
+    fn save(&self, record: &Server) {
+        if let Some(held) = self.held.lock().unwrap().get_mut(&record.id) {
+            (held.server, held.saved) = (record.clone(), true);
+        }
     }
 
-    /// An `add_machine` that said "still connecting" is abandoned: the connection it left ends.
-    fn abandon_adding(&self) {
-        let left = self.adding.lock().unwrap().take();
-        drop(left);
+    /// End the connections of machines that are not saved: `id`'s, or all of them.
+    fn drop_unsaved(&self, id: Option<&str>) {
+        let ended: Vec<Held> = self.held.lock().unwrap().extract_if(|key, held| !held.saved && id.is_none_or(|id| id == key)).map(|(_, held)| held).collect();
+        drop(ended);
     }
 
     /// End machine `id`'s connection, if there is one.
@@ -237,20 +207,12 @@ impl Connections {
 
     /// The input ended: every connection lets go of its machine, which leaves each runtime running.
     pub(super) fn close_all(&self) {
-        let mut all: Vec<Held> = self.held.lock().unwrap().drain().map(|(_, held)| held).collect();
-        all.extend(self.adding.lock().unwrap().take());
+        let all: Vec<Held> = self.held.lock().unwrap().drain().map(|(_, held)| held).collect();
         // Each may wait a few seconds for a machine that doesn't answer, and the front's end waits for all of them together.
         let ending: Vec<_> = all.into_iter().map(|held| std::thread::spawn(move || held.session.close())).collect();
         for ending in ending {
             let _ = ending.join();
         }
-    }
-}
-
-impl Trial {
-    /// Keep the connection, if it is a new one, for the next `add_machine` with these settings.
-    fn park(mut self, connections: &Connections) {
-        *connections.adding.lock().unwrap() = self.owned.take();
     }
 }
 
@@ -287,16 +249,23 @@ pub(super) struct NotReady {
     reached: Option<Box<Reached>>,
     /// Nothing runs and none was asked for: `list_notebooks` and `pluto_session_status` answer that.
     idle: bool,
+    /// `stop_machine` ended it.
+    stopped: bool,
 }
 
 impl NotReady {
     fn plain(message: impl Into<String>) -> NotReady {
-        NotReady { name: String::new(), message: message.into(), reached: None, idle: false }
+        NotReady { name: String::new(), message: message.into(), reached: None, idle: false, stopped: false }
     }
 
     fn of(name: &str, outcome: Outcome, status: Status, message: impl Into<String>) -> NotReady {
-        NotReady { name: name.to_owned(), message: message.into(), reached: Some(Box::new(Reached { outcome, status })), idle: false }
+        NotReady { name: name.to_owned(), message: message.into(), reached: Some(Box::new(Reached { outcome, status })), idle: false, stopped: false }
     }
+}
+
+/// How a message names a place: this computer, or the machine.
+fn place(name: &str) -> &str {
+    if name == LOCAL { "this computer" } else { name }
 }
 
 /// What a call needs of the runtime it is routed to.
@@ -345,31 +314,20 @@ fn queue_reason_text(reason: &str) -> String {
     }
 }
 
-/// The state a result names for how a machine stands.
-fn outcome_word(reached: &Reached) -> &'static str {
-    match &reached.outcome {
-        Outcome::Ready(_) => "ready",
-        Outcome::Queued { .. } => "queued",
-        Outcome::NothingRunning => "connected",
-        Outcome::NeedsInstall(_) => "needs_install",
-        Outcome::Failed(_) => "failed",
-        Outcome::StillWorking(_) => state_word(reached.status.state),
-    }
-}
-
 /// What a machine that isn't ready says, for the agent to relay and act on. This is where an
 /// outcome becomes words for a result.
 fn not_ready_message(name: &str, reached: &Reached) -> String {
+    let at = place(name);
     match &reached.outcome {
         Outcome::StillWorking(step) => {
             let step = if step.is_empty() { String::new() } else { format!(" Last step: {}.", step.trim_end_matches('.')) };
             if reached.status.state == State::Starting {
-                format!("Julia is starting on {name}. The first start installs packages and takes a few minutes.{step} Wait, then call `pluto_session_status` to see how far it got.")
+                format!("Julia is starting on {at}. The first start installs packages and takes a few minutes.{step} Wait, then call `pluto_session_status` to see how far it got.")
             } else {
                 format!("Endeavor is connecting to {name}.{step} Wait a little, then call `pluto_session_status` to see how far it got. If it stays like this, call `use_machine` again.")
             }
         }
-        Outcome::NothingRunning => format!("Julia isn't running on {name} right now. Call `use_machine` with machine \"{name}\" to start it."),
+        Outcome::NothingRunning => format!("Julia isn't running on {at} right now. Call `use_machine` with machine \"{name}\" to start it."),
         Outcome::Queued { job, queue } => {
             let job = job.as_ref().map(|j| format!(" {}", j.id)).unwrap_or_default();
             let what = if queue.state == "RUNNING" { format!("running on node {}, and Julia is starting there", queue.reason) } else { format!("waiting in the queue: {}", queue_reason_text(&queue.reason)) };
@@ -377,10 +335,10 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
         }
         Outcome::Failed(error) => {
             let error = if error.is_empty() { "it didn't say why" } else { error };
-            format!("Julia on {name} isn't available: {error}\nCall `use_machine` with machine \"{name}\" to try again, or tell the user.")
+            format!("Julia on {at} isn't available: {error}\nCall `use_machine` with machine \"{name}\" to try again, or tell the user.")
         }
         Outcome::NeedsInstall(info) => format!("{} Nothing was installed.", install_text(name, info, "use_machine")),
-        Outcome::Ready(_) => format!("Julia on {name} is ready."),
+        Outcome::Ready(_) => format!("Julia on {at} is ready."),
     }
 }
 
@@ -479,14 +437,14 @@ fn queue_json(status: &Status) -> Option<Value> {
 /// What `pluto_session_status` says when the machine's runtime isn't up.
 fn status_result(name: &str, reached: &Reached, message: &str) -> Value {
     let Reached { outcome, status } = reached;
-    let mut out = json!({ "machine": name, "state": outcome_word(reached), "ready": false, "message": message });
+    let mut out = json!({ "machine": name, "state": state_word(status.state), "ready": false, "message": message });
     let mut put = |key: &str, value: Option<Value>| {
         if let Some(value) = value {
             out[key] = value;
         }
     };
     put("step", status.step.clone().map(Into::into));
-    put("error", status.error.clone().map(Into::into));
+    put("error", status.error.clone().or_else(|| if let Outcome::Failed(why) = outcome { Some(why.clone()) } else { None }).map(Into::into));
     put("queue", queue_json(status));
     put("job", job_json(status));
     put("install", if let Outcome::NeedsInstall(info) = outcome { Some(install_json(info)) } else { None });
@@ -713,7 +671,7 @@ impl Relay {
         let Some(remembered) = remembered else { return };
         match self.machines.find_by_id(&remembered.machine) {
             Ok(Some(server)) => {
-                eprintln!("endeavor: this project uses the machine {}", display_name(&server));
+                eprintln!("endeavor: this project uses the machine {}", server.display_name());
                 *self.target.lock().unwrap() = Target::new(&server, remembered.folder);
             }
             Ok(None) => {
@@ -726,18 +684,17 @@ impl Relay {
         }
     }
 
-    /// Where a call goes, waiting up to `start_wait()` for a runtime that is on its way, and starting one
-    /// when `need` says so and none runs.
-    pub(super) fn route(&self, need: Need) -> Result<Route, NotReady> {
-        let deadline = Deadline::after(start_wait());
-        let moved = || NotReady::plain("This session moved to another machine while the call waited. Try the call again.");
+    /// Where a call goes, waiting until `deadline` for a runtime that is on its way, and starting one
+    /// when `need` says so and none runs. A plain server and this computer are started alike; a cluster
+    /// is not, since it needs a job the user agreed to. A failure is kept for every call; only a call that
+    /// needs a runtime and has reported it asks to try again.
+    pub(super) fn route(&self, need: Need, deadline: Deadline) -> Result<Route, NotReady> {
         let (target, key) = self.placed();
         let name = target.name.clone();
         if !target.active {
             return Err(self.stopped(&target));
         }
         let provider = self.provider(&target).map_err(NotReady::plain)?;
-        // A remembered machine is attached to. A cluster with nothing running is not started, since it needs a job the user agreed to. What has settled, a failure for one, stays until `use_machine` asks again.
         // The status tool doesn't wait for a start, but a connection only just made is waited for a moment, so that it can say what is there.
         let wait = if need != Need::Peek {
             deadline.left()
@@ -746,50 +703,63 @@ impl Relay {
         } else {
             Duration::ZERO
         };
-        let mut outcome = provider.settled().unwrap_or_else(|| provider.ensure(Want::Attach { install: false }, wait));
-        // Another tool call may have moved the session, replaced the connection or stopped the runtime meanwhile, and a runtime that was just stopped is not started again.
-        let changed = || {
-            let (now, now_key) = self.placed();
-            if now.id != target.id || now_key != key || !self.held(&target).is_some_and(|now| std::ptr::addr_eq(Arc::as_ptr(&now), Arc::as_ptr(&provider))) {
-                return Some(moved());
-            }
-            (!now.active).then(|| self.stopped(&now))
-        };
-        if need == Need::Start && matches!(outcome, Outcome::NothingRunning) && !target.cluster {
-            if let Some(unready) = changed() {
-                return Err(unready);
-            }
-            outcome = provider.ensure(Want::Start { job: None, install: false }, wait);
+        let mut outcome = provider.ensure(Want::Attach { install: false }, wait, need == Need::Start && target.failed);
+        if need == Need::Start && matches!(outcome, Outcome::NothingRunning) && !provider.cluster() {
+            // Checked and issued under the target's lock, which `stop_machine` also takes to mark the runtime stopped: a stop can't come between.
+            let issued = {
+                let now = self.target.lock().unwrap();
+                if let Some(unready) = self.moved(&now, &target, &key, &provider) {
+                    return Err(unready);
+                }
+                provider.ensure(Want::Start { job: None, install: false }, Duration::ZERO, false)
+            };
+            outcome = if matches!(issued, Outcome::StillWorking(_)) { provider.ensure(Want::Start { job: None, install: false }, deadline.left(), false) } else { issued };
         }
-        if let Some(unready) = changed() {
+        // Another tool call may have moved the session, replaced the connection or stopped the runtime during the wait.
+        if let Some(unready) = self.moved(&self.target.lock().unwrap(), &target, &key, &provider) {
             return Err(unready);
+        }
+        if need == Need::Start {
+            self.update_target(&target.id, |t| t.failed = matches!(outcome, Outcome::Failed(_)));
         }
         let status = provider.status();
         // A start another process has under way is not "nothing runs".
         let outcome = if matches!(outcome, Outcome::NothingRunning) && status.state == State::Starting { Outcome::StillWorking(String::new()) } else { outcome };
         match outcome {
             Outcome::Ready(runtime) => Ok(self.ready(&target, &runtime, status.hello.as_ref().map(|h| h.home.as_str()), &key)),
-            Outcome::NothingRunning if target.cluster => Err(NotReady::of(&name, Outcome::NothingRunning, status, self.needs_job_message(&target))),
+            Outcome::NothingRunning if provider.cluster() => Err(NotReady::of(&name, Outcome::NothingRunning, status, self.needs_job_message(&target))),
             Outcome::NothingRunning => {
-                let message = format!("Julia on {name} isn't running. It starts at the first notebook tool call, which then takes a few minutes the first time.");
+                let message = format!("Julia on {} isn't running. It starts at the first notebook tool call, which then takes a few minutes the first time.", place(&name));
                 Err(NotReady { idle: true, ..NotReady::of(&name, Outcome::NothingRunning, status, message) })
             }
             other => {
                 let reached = Reached { outcome: other, status };
                 let message = not_ready_message(&name, &reached);
-                Err(NotReady { name, message, reached: Some(Box::new(reached)), idle: false })
+                Err(NotReady { name, message, reached: Some(Box::new(reached)), idle: false, stopped: false })
             }
         }
+    }
+
+    /// Whether the session is no longer where `target` and `key` had it, with `provider`: the reason, if so.
+    fn moved(&self, now: &Target, target: &Target, key: &str, provider: &Arc<dyn Provider>) -> Option<NotReady> {
+        if now.id != target.id || *self.session.lock().unwrap() != key {
+            return Some(NotReady::plain("This session moved to another machine while the call waited. Try the call again."));
+        }
+        if !self.held(now).is_some_and(|now| std::ptr::addr_eq(Arc::as_ptr(&now), Arc::as_ptr(provider))) {
+            return Some(NotReady::plain(format!("Endeavor's connection to {} was replaced while the call waited. Try the call again.", now.name)));
+        }
+        (!now.active).then(|| self.stopped(now))
     }
 
     /// Why a call can't go to a runtime that `stop_machine` ended.
     fn stopped(&self, target: &Target) -> NotReady {
         let name = &target.name;
-        let message = format!("Julia on {name} was stopped from this session with stop_machine. Call `use_machine` with machine \"{name}\" to start it again.");
-        match self.held(target) {
+        let message = format!("Julia on {} was stopped from this session with stop_machine. Call `use_machine` with machine \"{name}\" to start it again.", place(name));
+        let unready = match self.held(target) {
             Some(provider) => NotReady::of(name, Outcome::NothingRunning, provider.status(), message),
             None => NotReady::plain(message),
-        }
+        };
+        NotReady { stopped: true, ..unready }
     }
 
     /// The machine's record in the list of machines.
@@ -830,7 +800,13 @@ impl Relay {
         let reply = match (tool, &unready.reached) {
             (Some("list_notebooks"), _) if unready.idle => answer(json!([])),
             (Some("pluto_session_status"), _) if unready.idle => answer(json!({ "pluto": "not running", "notebooks": [], "message": unready.message })),
-            (Some("pluto_session_status"), Some(reached)) => answer(status_result(&unready.name, reached, &unready.message)),
+            (Some("pluto_session_status"), Some(reached)) => {
+                let mut result = status_result(&unready.name, reached, &unready.message);
+                if unready.stopped {
+                    result["state"] = "stopped".into();
+                }
+                answer(result)
+            }
             _ => tool_failure(id, message, &unready.message),
         };
         self.write(&self.decorate(message, tool, reply));
@@ -865,9 +841,7 @@ impl Relay {
         let Some(Value::Object(mut fields)) = reply["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()) else { return false };
         fields.insert("machine".into(), machine.name.clone().into());
         if let Some(status) = self.connections.status(&machine.id) {
-            if machine.cluster
-                && let Some(job) = job_json(&status)
-            {
+            if let Some(job) = job_json(&status) {
                 fields.insert("job".into(), job);
             }
             if let Some(port) = status.runtime.and_then(|r| r.remote_port) {
@@ -879,8 +853,7 @@ impl Relay {
     }
 
     /// Answer a call to one of the machine tools.
-    pub(super) fn machine_tool(self: &Arc<Self>, message: &Value, tool: &str) {
-        let deadline = Deadline::after(start_wait());
+    pub(super) fn machine_tool(self: &Arc<Self>, message: &Value, tool: &str, deadline: Deadline) {
         if message.get("id").is_none_or(Value::is_null) {
             return;
         }
@@ -928,7 +901,7 @@ impl Relay {
             .map(|server| {
                 let status = self.connections.status(&server.id);
                 let state = status.as_ref().map_or("not connected", |s| state_word(s.state));
-                let mut entry = json!({ "name": display_name(server), "host": server.ssh_target(), "cluster": server.cluster.is_some(), "state": state, "this_session": target.id == server.id });
+                let mut entry = json!({ "name": server.display_name(), "host": server.ssh_target(), "cluster": server.cluster.is_some(), "state": state, "this_session": target.id == server.id });
                 if let Some(error) = status.and_then(|s| s.error) {
                     entry["error"] = error.into();
                 }
@@ -948,12 +921,12 @@ impl Relay {
             "local": { "name": LOCAL, "state": local_state, "this_session": target.is_local() },
             "this_session": { "machine": used },
             "ssh_hosts_not_added": ssh_hosts,
-            "message": format!("This session works on {used}. A machine shows a state only while this session is connected to it: \"not connected\" says nothing about whether Julia runs there, and `use_machine` finds out. `add_machine` adds a server from the ssh hosts listed; `use_machine` moves the session to a machine, or back to \"{LOCAL}\"."),
+            "message": format!("This session works on {}. A machine shows a state only while this session is connected to it: \"not connected\" says nothing about whether Julia runs there, and `use_machine` finds out. `add_machine` adds a server from the ssh hosts listed; `use_machine` moves the session to a machine, or back to \"{LOCAL}\".", place(used)),
         }))
     }
 
     /// Adds or updates a machine: connects to it, and saves it only once it has connected. The connection
-    /// it connects with is a `Trial`, so that a call that ends without saving ends the connection.
+    /// is `Unsaved` until then, so that a call that ends without saving ends it.
     fn add_machine(&self, args: &Value, deadline: Deadline) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
         let typed = text_arg(args, "host")?.ok_or_else(|| invalid("host is required: an ssh alias from ~/.ssh/config, or user@host"))?;
@@ -991,9 +964,8 @@ impl Relay {
         if julia.is_some() {
             record.julia = julia;
         }
-        let trial = self.connections.begin(&record, install)?;
-        let session = trial.session.clone();
-        let outcome = session.ensure(Want::Attach { install }, deadline.left());
+        let (session, mut unsaved) = self.connections.trying(&record, install)?;
+        let outcome = session.ensure(Want::Attach { install }, deadline.left(), true);
         match &outcome {
             Outcome::NeedsInstall(info) => {
                 let mut result = needs_install_result(&record.name, info, "add_machine");
@@ -1015,7 +987,7 @@ impl Relay {
                     "step": step,
                     "message": format!("Still connecting to {}. Call `add_machine` again with the same host to continue. {}", record.ssh_target(), unsaved_note(updating)),
                 });
-                trial.park(&self.connections);
+                unsaved.leave = true;
                 return Ok(result);
             }
             Outcome::Ready(_) | Outcome::Queued { .. } | Outcome::NothingRunning => {}
@@ -1030,7 +1002,7 @@ impl Relay {
         if existing.as_ref().is_some_and(|p| p.cluster.is_some() != cluster) && (status.runtime.is_some() || status.job.is_some() || matches!(status.state, State::Starting | State::Queued | State::Ready)) {
             return Err(format!(
                 "Julia is running, or starting, on {} through the way it is saved now. Changing between running Julia in Slurm jobs and running it directly would leave that one where `stop_machine` can't reach it. Nothing was changed. Call `stop_machine` first (with the user's agreement), then call `add_machine` again.",
-                display_name(&record)
+                record.display_name()
             ));
         }
         // Slurm is asked for the partitions after the connection is made, so they may come a moment later. They are reported, so they are waited for, except when the user said it is no cluster.
@@ -1045,7 +1017,7 @@ impl Relay {
                 "step": status.step,
                 "message": format!("Connected to {}, but Slurm hasn't listed its partitions yet. Call `add_machine` again with the same host to continue. {}", record.ssh_target(), unsaved_note(updating)),
             });
-            trial.park(&self.connections);
+            unsaved.leave = true;
             return Ok(result);
         }
         if cluster {
@@ -1068,9 +1040,8 @@ impl Relay {
         if record.cluster.is_some() != connected_as_cluster {
             // It connected the other way: the next connection starts the helper for how it is saved now.
             self.connections.forget(&record.id);
-            drop(trial);
         } else {
-            self.connections.keep(trial, &record);
+            self.connections.save(&record);
         }
         let partitions: Vec<Partition> = record.cluster.as_ref().map(|c| c.partitions.clone()).or_else(|| hello.partitions.clone()).unwrap_or_default();
         let mut message = format!("Connected to {} (node {}, home folder {}). ", record.ssh_target(), hello.node, hello.home);
@@ -1124,7 +1095,7 @@ impl Relay {
         match self.machines.find(key)? {
             Some(server) => Ok(server),
             None => {
-                let names: Vec<String> = self.machines.load()?.iter().map(display_name).collect();
+                let names: Vec<String> = self.machines.load()?.iter().map(Server::display_name).collect();
                 let known = if names.is_empty() { "No machine is added yet; `add_machine` adds one.".to_owned() } else { format!("Machines: {}.", names.join(", ")) };
                 Err(format!("ArgumentError: machine_not_found::There is no machine \"{key}\". {known} \"{LOCAL}\" is this computer."))
             }
@@ -1137,7 +1108,7 @@ impl Relay {
     /// of it as it was.
     fn use_machine(self: &Arc<Self>, args: &Value, deadline: Deadline) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
-        self.connections.abandon_adding();
+        self.connections.drop_unsaved(None);
         let key = text_arg(args, "machine")?.ok_or_else(|| invalid("machine is required: a name from list_machines, or \"local\""))?;
         let server = self.find_machine(&key)?;
         let local = server.id == LOCAL;
@@ -1152,28 +1123,28 @@ impl Relay {
             }
         };
         if given.any() && server.cluster.is_none() {
-            return Err(invalid(format!("{} isn't a Slurm cluster, so partition, cpus, memory_gb, hours, gpus, account and extra_sbatch_flags don't apply to it. Leave them out.", display_name(&server))));
+            return Err(invalid(format!("{} isn't a Slurm cluster, so partition, cpus, memory_gb, hours, gpus, account and extra_sbatch_flags don't apply to it. Leave them out.", if local { "This computer".to_owned() } else { server.display_name() })));
         }
         let planned = match &server.cluster {
             Some(cluster) if given.any() => Some(given.over(cluster)?),
             _ => None,
         };
-        let name = display_name(&server);
-        let provider = self.provider_for(&server, install)?;
+        let name = server.display_name();
+        let provider = self.provider_for(&server, install, false)?;
         let was_ready = provider.status().state == State::Ready;
         let mut notes: Vec<String> = Vec::new();
         let mut saved_resources = None;
         let outcome = match &server.cluster {
-            None => ensure_again(&*provider, Want::Start { job: None, install }, deadline.left()),
+            None => provider.ensure(Want::Start { job: None, install }, deadline.left(), true),
             Some(cluster) => {
-                let mut outcome = ensure_again(&*provider, Want::Attach { install }, deadline.left());
+                let mut outcome = provider.ensure(Want::Attach { install }, deadline.left(), true);
                 if matches!(outcome, Outcome::NothingRunning) {
                     let Some((resources, account)) = planned else { return Ok(self.needs_job(&name, cluster)) };
                     let mut job = cluster.job(&resources);
                     job.account = account.clone();
                     saved_resources = Some((resources, account));
-                    outcome = provider.ensure(Want::Start { job: Some(job), install }, deadline.left());
-                } else if given.any() && !matches!(outcome, Outcome::NeedsInstall(_)) {
+                    outcome = provider.ensure(Want::Start { job: Some(job), install }, deadline.left(), true);
+                } else if given.any() && matches!(outcome, Outcome::Ready(_) | Outcome::Queued { .. }) {
                     notes.push("A job is already queued or running there, so the resources you gave were not used.".into());
                 }
                 outcome
@@ -1208,9 +1179,17 @@ impl Relay {
 
     /// The provider of `server`'s runtime for a tool call that names the machine: a machine's connection
     /// is made when the front has none, with the settings of `server`. `install` is the user's agreement
-    /// to the helper, for a new one only.
-    fn provider_for(&self, server: &Server, install: bool) -> Result<Arc<dyn Provider>, String> {
-        if server.id == LOCAL { Ok(self.local.clone()) } else { self.connections.open(server, install).map(|session| session as Arc<dyn Provider>) }
+    /// to the helper, for a new one only. With `held`, the connection this front has is used whatever
+    /// its settings, which is how a runtime in use through old settings is reached to stop it.
+    fn provider_for(&self, server: &Server, install: bool, held: bool) -> Result<Arc<dyn Provider>, String> {
+        if server.id == LOCAL {
+            return Ok(self.local.clone());
+        }
+        match self.connections.get(&server.id).filter(|_| held) {
+            Some(session) => Ok(session),
+            None => self.connections.open(server, install),
+        }
+        .map(|session| session as Arc<dyn Provider>)
     }
 
     /// Put the saved defaults back as they are now in the file, with the cluster's resources and account from `saved`.
@@ -1231,7 +1210,7 @@ impl Relay {
     }
 
     fn use_result(&self, server: &Server, reached: Reached, was_ready: bool, notes: Vec<String>) -> Result<Value, String> {
-        let name = display_name(server);
+        let name = server.display_name();
         let notes = if notes.is_empty() { String::new() } else { format!(" {}", notes.join(" ")) };
         let Outcome::Ready(runtime) = &reached.outcome else {
             let mut result = status_result(&name, &reached, &format!("{}{notes}", not_ready_message(&name, &reached)));
@@ -1273,9 +1252,9 @@ impl Relay {
         Ok(result)
     }
 
-    fn stop_machine(&self, args: &Value, deadline: Deadline) -> Result<Value, String> {
+    fn stop_machine(self: &Arc<Self>, args: &Value, deadline: Deadline) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
-        self.connections.abandon_adding();
+        self.connections.drop_unsaved(None);
         let key = text_arg(args, "machine")?.ok_or_else(|| invalid("machine is required: a name from list_machines, or \"local\""))?;
         let force = match args.get("force") {
             None | Some(Value::Null) => false,
@@ -1284,12 +1263,13 @@ impl Relay {
         };
         let install = flag_arg(args, "install")?;
         let server = self.find_machine(&key)?;
-        let name = display_name(&server);
-        let provider = self.provider_for(&server, install)?;
+        let name = server.display_name();
+        let at = place(&name);
+        let provider = self.provider_for(&server, install, true)?;
         if !matches!(provider.status().state, State::Ready | State::Starting | State::Queued) {
-            match ensure_again(&*provider, Want::Attach { install }, deadline.left()) {
+            match provider.ensure(Want::Attach { install }, deadline.left(), true) {
                 Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, &info, "stop_machine")),
-                Outcome::NothingRunning => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Julia isn't running on {name}, so there is nothing to stop.") })),
+                Outcome::NothingRunning => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Julia isn't running on {at}, so there is nothing to stop.") })),
                 _ => {}
             }
         }
@@ -1301,7 +1281,7 @@ impl Relay {
             let key = self.session();
             let route = Route { port: runtime.port, token: runtime.token.clone(), session: key.clone(), host: Target::new(&server, None).host() };
             let on_this = self.placed().0.id == server.id;
-            let others = self.recent_others(&route, CHECK_WAIT);
+            let others = self.recent_others(&route, deadline.left().min(CHECK_WAIT));
             if !on_this {
                 self.end_session(route.port, &route.token, &key);
             }
@@ -1310,30 +1290,31 @@ impl Relay {
                 return Ok(others_result(&name, others));
             }
         }
-        // Marked before the runtime is ended, so that a notebook call meanwhile doesn't start it again.
+        // Marked before the runtime is ended, so that a notebook call meanwhile doesn't start it again (`route` checks and starts under the same lock). A stop that fails puts it back, whenever it fails.
         let mut was_active = false;
         self.update_target(&server.id, |t| {
             was_active = std::mem::replace(&mut t.active, false);
             t.told = None;
         });
-        let stopping = provider.clone();
+        let (stopping, relay, id) = (provider.clone(), self.clone(), server.id.clone());
         let (done, waited) = mpsc::channel();
-        std::thread::spawn(move || drop(done.send(stopping.stop())));
-        match waited.recv_timeout(deadline.left().max(STOP_FLOOR)) {
-            Ok(Ok(())) => {}
-            Ok(Err(why)) => {
-                if was_active {
-                    self.update_target(&server.id, |t| t.active = true);
-                }
-                return Err(format!("{why}{}", stop_advice(&*provider)));
+        std::thread::spawn(move || {
+            let stopped = stopping.stop();
+            if stopped.is_err() && was_active {
+                relay.update_target(&id, |t| t.active = true);
             }
-            Err(_) => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Stopping Julia on {name} is taking a while. It goes on in the background: call `pluto_session_status` or `list_machines` later to see whether it ended.") })),
+            drop(done.send(stopped));
+        });
+        match waited.recv_timeout(deadline.left()) {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => return Err(why),
+            Err(_) => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Stopping Julia on {at} is taking a while. It goes on in the background: call `pluto_session_status` or `list_machines` later to see whether it ended.") })),
         }
         let cluster = if server.cluster.is_some() { " and its Slurm job was cancelled" } else { "" };
         Ok(json!({
             "machine": name,
             "stopped": true,
-            "message": format!("Julia on {name} was stopped{cluster}. Every notebook running there ended. `use_machine` with machine \"{name}\" starts it again."),
+            "message": format!("Julia on {at} was stopped{cluster}. Every notebook running there ended. `use_machine` with machine \"{name}\" starts it again."),
         }))
     }
 
@@ -1386,11 +1367,6 @@ impl Relay {
     }
 }
 
-/// The name the agent knows a machine by.
-pub(super) fn display_name(server: &Server) -> String {
-    [&server.name, &server.ssh_host, &server.id].into_iter().find(|n| !n.trim().is_empty()).cloned().unwrap_or_default()
-}
-
 /// What to tell about opening the page when this session is not connected: it works only while the
 /// session is, and the runtime's own port on the machine is what a forward of the user's reaches.
 fn reach_text(server: &Server, runtime: &RuntimeInfo) -> String {
@@ -1403,21 +1379,25 @@ fn reach_text(server: &Server, runtime: &RuntimeInfo) -> String {
 }
 
 /// What `stop_machine` says, without `force`, when Julia is starting or a job is queued: other
-/// sessions that wait for it can't be seen, and stopping cancels it for them too.
+/// sessions that wait for it can't be seen, and stopping cancels it for them too. A start on this
+/// computer can't be cancelled.
 fn waiting_result(name: &str, status: &Status) -> Value {
-    let what = match (&status.job, &status.queue, status.state) {
+    let at = place(name);
+    let cancels = " Stopping cancels it. Endeavor can't see which other sessions are waiting for a runtime that isn't up yet, and they would lose it. Tell the user, and call `stop_machine` again with force true only if they agree.";
+    let (what, then) = match (&status.job, &status.queue, status.state) {
+        _ if name == LOCAL => (format!("Julia is still starting on {at}"), " A start can't be cancelled: call `stop_machine` again once it is up."),
         (job, Some(queue), State::Queued) => {
             let id = job.as_ref().map_or(String::new(), |j| format!(" {}", j.id));
-            format!("the Slurm job{id} on {name} is {} ({})", queue.state.to_lowercase(), queue_reason_text(&queue.reason))
+            (format!("the Slurm job{id} on {name} is {} ({})", queue.state.to_lowercase(), queue_reason_text(&queue.reason)), cancels)
         }
-        (Some(job), _, _) => format!("the Slurm job {} on {name} is starting Julia", job.id),
-        _ => format!("Julia is starting on {name}"),
+        (Some(job), _, _) => (format!("the Slurm job {} on {name} is starting Julia", job.id), cancels),
+        _ => (format!("Julia is starting on {name}"), cancels),
     };
     let mut result = json!({
         "machine": name,
         "stopped": false,
         "state": state_word(status.state),
-        "message": format!("Nothing was stopped: {what}. Stopping cancels it. Endeavor can't see which other sessions are waiting for a runtime that isn't up yet, and they would lose it. Tell the user, and call `stop_machine` again with force true only if they agree."),
+        "message": format!("Nothing was stopped: {what}.{then}"),
     });
     if let Some(job) = job_json(status) {
         result["job"] = job;
@@ -1466,7 +1446,7 @@ fn others_result(name: &str, others: Vec<Value>) -> Value {
         "machine": name,
         "stopped": false,
         "other_sessions": others,
-        "message": format!("Nothing was stopped: another session was active on {name} in the last 15 minutes: {}. Stopping ends their notebooks too. Tell the user, and call `stop_machine` again with force true only if they agree.", who.join("; ")),
+        "message": format!("Nothing was stopped: another session was active on {} in the last 15 minutes: {}. Stopping ends their notebooks too. Tell the user, and call `stop_machine` again with force true only if they agree.", place(name), who.join("; ")),
     })
 }
 

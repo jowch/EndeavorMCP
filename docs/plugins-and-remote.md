@@ -117,7 +117,8 @@ and Slurm launchers and `job.json`, the client library's `ssh` and channel,
 the machine tools, `machines.json` with its schema number and unknown
 fields (the app is a second writer; a machine is still saved only after a
 connect succeeded, which needs no hand-over now), `projects.json` and
-attach-only for a remembered project, the question before installing on a
+a remembered project that attaches first (a cluster never starts without a job
+the user agreed to), the question before installing on a
 server and none on this computer, the local runtime starting at the first
 call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 
@@ -169,10 +170,16 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    `client::Outcome` (this computer never with `NeedsInstall` or `Queued`).
    The machine tools and the notebook calls ask the provider and read its
    `Outcome`; there is one use, one stop, one route and one status. A runtime
-   that has gone is treated alike: a notebook call that needs one starts one
-   when nothing runs, on this computer and on a plain server (a cluster asks
-   for a job), and `list_notebooks` and `pluto_session_status` never start
-   one. `list_machines` shows the state only of the machines this front is
+   that has gone (died, exited when idle, stopped from elsewhere) is treated
+   alike: it is not running, and the next notebook call that needs one starts
+   one on this computer and on a plain server (a cluster asks for a job),
+   while `list_notebooks` and `pluto_session_status` never start one. Nothing
+   running is never remembered: each call that attaches looks again. A
+   failure is kept for every call, on this computer and on a machine, until a
+   call asks to try again: `use_machine` always does, a notebook call that
+   needs a runtime does after the one that reported the failure. A runtime
+   that ended while the connection was down is a kept failure, since nobody saw
+   it end. `list_machines` shows the state only of the machines this front is
    connected to and connects to nothing. `ToApp::Ready` has `port`
    (`#[serde(default)]`, protocol still 1), and `use_machine` and
    `pluto_session_status` give it as `remote_port`, with `ssh -L` for a
@@ -345,7 +352,7 @@ runtime.
 for each machine it uses (`Connections`, `standalone/machines.rs`), made by
 the first call that needs it. A call goes to the session's target, which is one
 type for this computer and for a machine (`Target`, `standalone/target.rs`):
-its `Provider` gives the runtime's port and token (`ensure`, `settled`,
+its `Provider` gives the runtime's port and token (`ensure`,
 `status`, `stop`). This computer's provider finds or starts the runtime in the
 state folder; a machine's is its session. A call that needs a runtime asks
 whether one runs, and starts one when none does, on this computer and on a
@@ -363,9 +370,11 @@ Windows) maps a project folder, the front's `--folder` as a canonical path, to
 and renamed, owner-only, under a lock, as `machines.json` is. `use_machine`
 writes it, and `"local"` removes the entry. A front that starts in such a project
 targets the machine and starts nothing; its first call attaches to a runtime
-that is there (`Want::Attach`). With none, a call that needs one starts it on a plain
-server, and a cluster submits nothing, so the call fails with a
-message that names the machine, the defaults and `use_machine`. A machine that
+that is there (`Want::Attach`). With none, a call that needs one starts it on a remembered plain
+server and on this computer, and a cluster submits nothing, so the call fails with a
+message that names the machine, the defaults and `use_machine`. Whether it is a
+cluster is the record the connection was made with, so a server that was added again as
+a cluster meanwhile submits nothing either. A machine that
 is no longer in the machines file is dropped from the session, and the first
 result says so.
 

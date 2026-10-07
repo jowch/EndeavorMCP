@@ -146,8 +146,10 @@ Julia under the real core, in plain `cargo test`, with every folder under
   (given to a start that waits for it, or alone) installs it. A reconnect
   installs it again when it was agreed to; an agreement given to a start with
   the helper there is for what the start needs and is not kept for the helper.
-- A failed sign-in is told once and tried again by the call after that; asking
-  again while connecting makes no other attempt.
+- A failed sign-in is kept and told to every call; only a call that asks to
+  retry tries again, and asking again while connecting makes no other attempt.
+  A runtime that ended while connected is not running, and a start after it
+  starts another; one that ended while the connection was down is a kept failure.
 - A start that takes long answers `StillWorking`, and the next call gets it.
 - A stop ends the runtime and not the connection, and a start after it works on
   the same port; a stop during a start is no failure.

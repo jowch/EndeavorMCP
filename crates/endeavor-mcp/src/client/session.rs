@@ -321,8 +321,6 @@ struct Inner {
     epoch: u64,
     /// The supervisor waits for a `Kick` or for the end of a pause, and none is in its inbox.
     may_kick: bool,
-    /// The state is `Failed` or `NeedsInstall` and no `ensure` has told it yet.
-    untold: bool,
     /// The last such start found nothing (`Status::nothing_running`).
     nothing_running: bool,
     /// What the machine needs installed, while the state is `needs_install`.
@@ -354,16 +352,11 @@ pub struct Session {
     supervisor: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
-/// The name the agent knows a machine by.
-fn display_name(server: &Server) -> String {
-    [&server.name, &server.ssh_host, &server.id].into_iter().find(|n| !n.trim().is_empty()).cloned().unwrap_or_default()
-}
-
 impl Session {
     /// Open the listener and begin connecting to the machine in a thread of its own; nothing is
     /// asked of the runtime until `ensure`.
     pub fn new(config: Config) -> Result<Session, String> {
-        let name = display_name(&config.server);
+        let name = config.server.display_name();
         let listener = Listener::new(&name, None, config.messages)?;
         let (inbox, messages) = mpsc::channel();
         let inner = Inner {
@@ -383,7 +376,6 @@ impl Session {
             run: Run::Idle,
             epoch: 0,
             may_kick: true,
-            untold: false,
             nothing_running: false,
             needs: None,
         };
@@ -415,35 +407,17 @@ impl Session {
     /// lacked it, and a start that ended `NeedsInstall` begins again with it. An `Attach` never
     /// replaces a `Start` that is wanted or under way, and a `Start` is never answered
     /// `NothingRunning`. A `Start` with a job on a session that already has a runtime or a queued job
-    /// gets what is there. A failure is told to the first call that finds it; the next call tries again.
-    pub fn ensure(&self, want: Want, wait: Duration) -> Outcome {
-        enum Next {
-            Tell(Outcome),
-            Begin,
-            Wait,
-        }
-        let next = self.shared.with(|i| {
-            if i.untold {
-                let told = match outcome(i) {
-                    Some(failed @ Outcome::Failed(_)) => Some(failed),
-                    Some(needs @ Outcome::NeedsInstall(_)) if !want.install() => Some(needs),
-                    _ => None,
-                };
-                if let Some(told) = told {
-                    i.untold = false;
-                    return Next::Tell(told);
-                }
-            }
-            if self.shared.ask(i, &want) { Next::Begin } else { Next::Wait }
+    /// gets what is there. A failure, and a need to install without `install`, is kept and given to every
+    /// call until one asks to `retry`, which begins again.
+    pub fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome {
+        let begin = self.shared.with(|i| {
+            let kept = matches!(i.state, State::Failed) || (i.state == State::NeedsInstall && !want.install());
+            !(kept && !retry) && self.shared.ask(i, &want)
         });
-        match next {
-            Next::Tell(told) => told,
-            Next::Begin => {
-                self.shared.begin_start();
-                self.wait(wait)
-            }
-            Next::Wait => self.wait(wait),
+        if begin {
+            self.shared.begin_start();
         }
+        self.wait(wait)
     }
 
     /// Ask for `want` as `ensure` does and return at once; `status` has the rest.
@@ -454,12 +428,6 @@ impl Session {
     /// Where the session stands.
     pub fn status(&self) -> Status {
         status_of(&self.shared.inner())
-    }
-
-    /// How it stands, if that is settled: the outcome `ensure` would give, with nothing asked, nothing
-    /// told (a failure stays to be told to `ensure`) and nothing retried.
-    pub fn settled(&self) -> Option<Outcome> {
-        outcome(&self.shared.inner())
     }
 
     /// Where the session stands once `done` is true of it, or after `wait` if it never is.
@@ -474,6 +442,11 @@ impl Session {
             }
             inner = self.shared.changed.wait_timeout(inner, left).unwrap().0;
         }
+    }
+
+    /// Whether the machine's record, as the session was made with it, is a Slurm cluster's.
+    pub fn cluster(&self) -> bool {
+        self.shared.config.server.cluster.is_some()
     }
 
     /// Whether the helper is connected, which `stop` needs.
@@ -537,9 +510,6 @@ impl Session {
         let mut inner = self.shared.inner();
         loop {
             if let Some(settled) = outcome(&inner) {
-                if matches!(settled, Outcome::Failed(_) | Outcome::NeedsInstall(_)) {
-                    inner.untold = false;
-                }
                 return settled;
             }
             let left = until.map_or(Duration::from_secs(3600), |until| until.saturating_duration_since(Instant::now()));
@@ -598,11 +568,7 @@ fn outcome(i: &Inner) -> Option<Outcome> {
 impl Shared {
     fn with<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
         let mut i = self.inner.lock().unwrap();
-        let before = i.state;
         let result = f(&mut i);
-        if i.state != before {
-            i.untold = matches!(i.state, State::Failed | State::NeedsInstall);
-        }
         drop(i);
         self.changed.notify_all();
         result
@@ -1093,6 +1059,21 @@ fn wait_for(inbox: &Receiver<Msg>, time: Duration) -> bool {
     }
 }
 
+/// The runtime went away, for `why`. A start it cut short failed, and so did a takeover by another connection (`kept`:
+/// attaching again would take it back and put the two at odds); a runtime that was up and ended is just not running,
+/// and asking for one again starts one.
+fn gone(i: &mut Inner, why: String, kept: bool) {
+    let starting = i.starting();
+    i.run = if starting { Run::Gone } else { Run::Idle };
+    (i.wanted, i.job, i.queue) = (None, None, None);
+    i.step = Some(why.clone());
+    if starting || kept {
+        (i.state, i.error) = (State::Failed, Some(why));
+    } else {
+        (i.state, i.error, i.nothing_running) = (State::Connected, None, true);
+    }
+}
+
 /// Follow connection number `conn` until it ends. False when the session is closing.
 fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> bool {
     loop {
@@ -1180,25 +1161,11 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
             }
             Msg::Notice(g, notice) if g == conn => match notice {
                 Notice::Died(reason) => {
-                    shared.with(|i| {
-                        i.run = if i.starting() { Run::Gone } else { Run::Idle };
-                        i.wanted = None;
-                        i.job = None;
-                        i.queue = None;
-                        i.state = State::Failed;
-                        i.error = Some(format!("Julia on {} stopped. {reason}", i.name).trim_end().to_owned());
-                    });
+                    shared.with(|i| gone(i, format!("Julia on {} stopped. {reason}", i.name).trim_end().to_owned(), false));
                     shared.listener.disconnected();
                 }
                 Notice::Replaced => {
-                    shared.with(|i| {
-                        i.run = if i.starting() { Run::Gone } else { Run::Idle };
-                        i.wanted = None;
-                        i.job = None;
-                        i.queue = None;
-                        i.state = State::Failed;
-                        i.error = Some(format!("Another connection took Julia on {} over.", i.name));
-                    });
+                    shared.with(|i| gone(i, format!("Another connection took Julia on {} over.", i.name), true));
                     shared.listener.disconnected();
                 }
                 // The helper is gone; `Closed` follows.

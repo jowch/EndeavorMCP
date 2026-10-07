@@ -360,7 +360,7 @@ fn the_status_of_a_session_on_a_machine_names_the_machine() {
 fn a_call_to_a_stopped_computer_says_to_call_use_machine() {
     let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
     relay.target.lock().unwrap().active = false;
-    let Err(unready) = relay.route(Need::Start) else { panic!("a stopped runtime has no route") };
+    let Err(unready) = relay.route(Need::Start, Deadline::after(Duration::from_secs(5))) else { panic!("a stopped runtime has no route") };
     assert!(unready.message.contains("stop_machine") && unready.message.contains("`use_machine` with machine \"local\""), "{}", unready.message);
 }
 
@@ -403,4 +403,87 @@ fn the_helper_item_keeps_what_was_found_on_the_machine() {
     }
     let json = install_json(&status);
     assert_eq!((json["update"].clone(), json["running"].clone(), json["os"].clone()), (json!(true), json!({ "process": 77 }), json!("Linux")));
+}
+
+#[test]
+fn this_computer_is_called_this_computer_in_what_an_agent_reads() {
+    let said = [
+        not_ready_message("local", &reached(Outcome::StillWorking(String::new()), status(State::Starting))),
+        not_ready_message("local", &reached(Outcome::NothingRunning, status(State::Connected))),
+        not_ready_message("local", &reached(Outcome::Failed("no julia".into()), status(State::Failed))),
+        waiting_result("local", &status(State::Starting))["message"].as_str().unwrap().to_owned(),
+        others_result("local", vec![json!({ "client": "Claude Code", "active_seconds_ago": 5, "notebook": "a.jl" })])["message"].as_str().unwrap().to_owned(),
+    ];
+    for said in &said {
+        assert!(said.contains("this computer") && !said.contains("on local"), "{said}");
+    }
+    assert!(said[1].contains("`use_machine` with machine \"local\""), "the argument is still local: {}", said[1]);
+    let waiting = &said[3];
+    assert!(waiting.contains("Julia is still starting on this computer") && waiting.contains("once it is up") && !waiting.contains("cancels") && !waiting.contains("force"), "a start there is not cancelled: {waiting}");
+    let on_machine = waiting_result("lab", &status(State::Starting))["message"].as_str().unwrap().to_owned();
+    assert!(on_machine.contains("Stopping cancels it") && on_machine.contains("force true"), "{on_machine}");
+}
+
+#[test]
+fn a_failed_start_on_this_computer_goes_to_every_caller_and_only_a_call_that_asks_clears_it() {
+    let dir = crate::client::scratch("local-failed");
+    let mut options = options();
+    options.state_dir = dir.join("state");
+    options.cache = dir.join("cache");
+    options.julia = crate::julia::Source::Path(dir.join("no-julia").display().to_string());
+    let local = Arc::new(super::super::target::Local::new(options));
+    let start = Want::Start { job: None, install: false };
+    let waiters: Vec<_> = (0..2)
+        .map(|_| {
+            let (local, start) = (local.clone(), start.clone());
+            std::thread::spawn(move || local.ensure(start, Duration::from_secs(60), false))
+        })
+        .collect();
+    let outcomes: Vec<Outcome> = waiters.into_iter().map(|waiter| waiter.join().unwrap()).collect();
+    let Outcome::Failed(why) = outcomes[0].clone() else { panic!("{:?}", outcomes[0]) };
+    assert!(why.contains("no-julia") && outcomes[1] == Outcome::Failed(why.clone()), "both waiters are told, and the start stopped at looking for Julia: {outcomes:?}");
+    let status = local.status();
+    assert_eq!((status.state, status.error.as_deref()), (State::Failed, Some(why.as_str())), "a status call has it too");
+    assert_eq!(local.ensure(Want::Attach { install: false }, Duration::ZERO, false), Outcome::Failed(why.clone()), "and a look doesn't use it up");
+    assert_eq!(local.ensure(start.clone(), Duration::ZERO, false), Outcome::Failed(why), "nor does another start that doesn't ask");
+    assert_eq!(local.ensure(Want::Attach { install: false }, Duration::ZERO, true), Outcome::NothingRunning, "a call that asks looks afresh");
+    assert!(local.status().error.is_none());
+}
+
+/// A Julia that fails, and notes in `log` each time it is run.
+#[cfg(unix)]
+fn failing_julia(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (script, log) = (dir.join("julia"), dir.join("runs"));
+    std::fs::write(&script, format!("#!/bin/sh\necho run >> {}\nexit 1\n", log.display())).unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    (script, log)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_notebook_call_reports_a_failed_start_once_and_the_next_one_tries_again_and_queries_never_do() {
+    let dir = crate::client::scratch("told-once");
+    let (script, log) = failing_julia(&dir);
+    let mut options = options();
+    options.state_dir = dir.join("state");
+    options.cache = dir.join("cache");
+    options.julia = crate::julia::Source::Path(script.display().to_string());
+    let relay = Relay::new(options, "s".into(), Box::new(std::io::sink()));
+    let runs = || std::fs::read_to_string(&log).map_or(0, |text| text.lines().count());
+    let route = |need| relay.route(need, Deadline::after(Duration::from_secs(60))).err().expect("no runtime comes up");
+    let first = route(Need::Start);
+    assert!(first.message.contains("isn't available") && first.message.contains("this computer"), "{}", first.message);
+    let tried = runs();
+    assert!(tried > 0 && relay.placed().0.failed);
+
+    let status = route(Need::Peek);
+    let reached = status.reached.expect("the status tool says how it stands");
+    assert!(reached.status.state == State::Failed && reached.status.error.is_some(), "the failure comes with its error");
+    assert!(route(Need::Look).message.contains("isn't available"));
+    assert!(route(Need::Peek).message.contains("isn't available"), "a query doesn't use up the report");
+    assert_eq!(runs(), tried, "no query tried again");
+    assert!(relay.placed().0.failed);
+
+    assert!(route(Need::Start).message.contains("isn't available"));
+    assert!(runs() > tried, "the notebook call after the report tried again");
 }
