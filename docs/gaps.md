@@ -370,6 +370,7 @@ _Started 2026-10-06, on the `client-library` branch._
   and one install test fail there because busybox runs its own built-in
   `uname`, `mkdir`, `timeout` and `wget` and ignores the fakes the tests put
   on the `PATH`. The scripts themselves were not run by hand under busybox.
-- **`endeavor mcp` starts the runtime when it starts**, not at the first
-  notebook call, so a session that never uses a notebook still starts Julia
-  on this computer. To weigh in the architecture review.
+- **`pluto_session_status` says "not running" while another process is starting the
+  runtime.** The start's record (`runtime.json`) is written when Julia is up, and
+  the front doesn't look at the start lock. The next call after the start
+  finds it. To close: report a held `start.lock` as starting.

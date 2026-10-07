@@ -72,8 +72,9 @@ harness ── stdio ── endeavor mcp ─┼─ 127.0.0.1:PORT ── link �
 browser ──────────────────────────┘
 ```
 
-- **On this computer** the front starts a runtime or finds the one already
-  recorded in the state folder, as it does today. No link is involved.
+- **On this computer** the front starts a runtime, or finds the one already
+  recorded in the state folder, when a call first needs it, not when the
+  front starts. No link is involved.
 - **On a server** the front asks the link for it. The link runs
   `ssh <alias> endeavor connect`, and opens one loopback port on your
   computer. Every connection to that port becomes a stream to the runtime's

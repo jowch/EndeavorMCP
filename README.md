@@ -222,8 +222,9 @@ folder. The port stays the same only if you fix it with `--port`.
 
 When the agent runs on the same machine as Julia, it can start Endeavor
 itself with `endeavor mcp`, which speaks MCP over stdin and stdout.
-`mcp` starts Julia in the background, or uses the one already running from
-the state folder, and relays the agent's messages to it. Julia keeps running
+`mcp` relays the agent's messages to Julia. It starts Julia at the first tool
+call that needs it (or uses the one already running from the state folder), so
+a session that never uses a notebook starts nothing. Julia keeps running
 after the agent exits, so the next session finds the notebook still open. It
 stops itself once no notebook has been open for the `--idle-stop` time, and
 `endeavor stop` stops it at once.
@@ -232,8 +233,8 @@ stops itself once no notebook has been open for the `--idle-stop` time, and
 for an agent that loads Endeavor's skills from a plugin. Each agent session
 gets its own `--folder`, even when they share one Julia.
 
-`mcp` answers the agent's handshake at once. A tool call while Julia is still
-starting waits up to 45 seconds, then says Julia is still starting, so the
+`mcp` answers the agent's handshake at once. The first tool call that needs
+Julia starts it and, like any call while Julia is still starting, waits up to 45 seconds, then says Julia is still starting, so the
 agent can try again. The first start installs packages and takes a few
 minutes.
 
