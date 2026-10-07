@@ -85,7 +85,8 @@ harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ─�
   go from `list_notebooks` and `pluto_session_status`, and the skill no
   longer tells the agent to mention them. Reading before writing
   (`stale_read`) and the check before a run (`run_conflict`) are what keep
-  two sessions from undoing each other, and they stay.
+  two sessions from undoing each other, and they stay. The note that names
+  cells another session changed lately (`other_session`) goes as well.
 - **One rule ends a notebook: the idle limit.** It is the same on this
   computer and on a server, whoever started the runtime, and it is recorded
   with the runtime. The app's "local notebooks quit with the app" is not
@@ -146,21 +147,29 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 5. One idle rule, recorded in `runtime.json`.
 6. One local state folder for the app and the plugin, with the paths module.
 
-**Open, to decide.**
+**Decided on the open points (2026-10-07).**
 
-- A cell that another session changed in the last two minutes is named in
-  results (`other_session`). It is not the other-sessions list. Keep it or
-  drop it?
-- `endeavor serve` has no idle exit today. Does it follow the one rule?
-- Codex on Windows puts an MCP server in a job object that its children
-  cannot leave (read from its source, not run), so a runtime started from
-  it would end with the session. It needs another way to be started there
-  before Windows is offered.
-- A session that ends while a runtime is still starting: checked for
-  neither this computer nor a server.
-- The later sign-in page for servers that ask for a password or a code was
-  to be on the link's port. Without a link it would be on a port the front
-  opens for the sign-in, or in the harness's own prompt; not chosen.
+- The note that names cells another session changed in the last two minutes
+  (`other_session`) goes too. It is added for any cell of the notebook, not
+  only the ones a session works on, and reading before writing already
+  covers those.
+- Codex on Windows is not supported for now: it puts an MCP server in a job
+  object that its children cannot leave (read from its source, not run), so
+  a runtime started from it would end with the session. In
+  [gaps.md](gaps.md).
+- Sign-in stays with keys only. A page for servers that ask for a password
+  or a code is not planned; it stays under "Not in the first version".
+- A start, once begun, finishes without the client that asked for it, so
+  the next session finds the runtime. It is made true and tested in step 1,
+  for this computer and for a server.
+
+**Open.**
+
+- `endeavor serve` runs in your terminal until you stop it and has no idle
+  exit, while a runtime that `mcp` or a server connection starts exits once
+  no notebook has been open for the idle limit. Proposed: keep that
+  difference, as an option of `serve`, and record in `runtime.json` whether
+  the runtime exits when idle, so every client can say which it is.
 
 ## Decided
 
