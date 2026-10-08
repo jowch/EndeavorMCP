@@ -12,7 +12,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
 - The binary is `endeavor` (package `endeavor-mcp`). It is the app's helper
   on servers (`endeavor connect`, `endeavor core`), the standalone command
   (`endeavor serve`, `endeavor mcp`, `endeavor stop`, see the
-  [README](../README.md)), and the Slurm relay.
+  [serve.md](serve.md)), and the Slurm relay.
 - The connection library (`client::Session`) is built and tested with a local
   shell for ssh (`tests/session.rs`) and, over real ssh and Julia, in
   `e2e_client` ([plugins-and-remote.md](plugins-and-remote.md)). There is no
@@ -35,7 +35,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
   Windows rename on Linux; not run on a Mac or Windows). `endeavor --version`
   prints the version and a build hash of the source, and on a release build
   a second line, `release <key>`. `serve` and `mcp` say when the running Julia
-  came from another build (README, "Update it").
+  came from another build (serve.md, "Update it").
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
   SHA-256 and keeps it (tested against a fake release; the wiring is
@@ -88,14 +88,14 @@ Not yet checked:
 
 - `endeavor update` replacing a binary with a newer build from the real
   Helpers release, and on macOS and Windows. The first build with `update` is
-  the newest one, so nothing older can update yet. On 2026-10-04 the README's install steps
+  the newest one, so nothing older can update yet. On 2026-10-04 the install steps (now in serve.md)
   fetched build `14eb0a67bda7` through `LATEST` in the Linux VM, the
   checksum passed, and `endeavor update` said it is up to date. The replace
   step is tested against a local server.
 - The message when `serve` or `mcp` reuse a Julia from another build, with a
   real Julia (unit-tested only).
 - Codex and Gemini against `endeavor serve` and `endeavor mcp`. Their config
-  lines in the README come from each tool's documentation. Over HTTP, that
+  lines in serve.md come from each tool's documentation. Over HTTP, that
   each sends back the `Mcp-Session-Id` from `initialize`, which gives it a
   notebook of its own. The spec requires it; no client is checked live yet,
   Claude Code included.

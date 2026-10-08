@@ -404,6 +404,11 @@ _Started 2026-10-06, on the `client-library` branch._
   earlier, and neither is told.** It happens when the second session read the
   cell after the first one wrote it: the edit is then valid for the cell as
   it is. Sessions leave each other no notes. Seen in the trial.
+- **The desktop app and the plugin on the same notebook.** Until the app is
+  revised to take its folders from `paths`, it keeps its runtime's state in
+  its own folders (its data folder on this computer, `~/.cache/endeavor/state`
+  on a server), and the plugin in `~/.local/state/endeavor/serve/<host>`. Each
+  would start its own runtime on the file. The README says not to.
 - **One notebook file open in two runtimes**, such as a shared disk opened
   on two servers. Each runtime saves over the other.
 

@@ -1,7 +1,7 @@
 # One port per runtime
 
 Steps 1–5 built and checked (2026-10-03). Step 5, the standalone command, is
-`endeavor serve` (user guide: [README.md](../README.md)). Each runtime exposes one port to clients
+`endeavor serve` (user guide: [serve.md](serve.md)). Each runtime exposes one port to clients
 instead of two. The runtime core answers it, passes Pluto's page through
 at `/`, and serves Endeavor's own endpoints under a reserved prefix. The
 app's relay, listener and state then carry one route instead of two. A
@@ -156,7 +156,7 @@ Planned as follows; what was built is under "As built" below.
 
 ### As built
 
-User guide: [README.md](../README.md). The binary is `endeavor`, in the
+User guide: [serve.md](serve.md). The binary is `endeavor`, in the
 package `endeavor-mcp`; it was `endeavor-remote` until the rename.
 
 - **Commands.** `endeavor serve` starts the runtime in the foreground,
@@ -234,7 +234,7 @@ package `endeavor-mcp`; it was `endeavor-remote` until the rename.
   the Helpers release (`LATEST` names its key), checked against the
   release's SHA-256 file and renamed over the running binary. It leaves the
   app's copies and cargo installs alone, and says when a running Julia came
-  from the older build (README, "Update it").
+  from the older build (serve.md, "Update it").
 
 ## To check
 
