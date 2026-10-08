@@ -83,6 +83,20 @@ normal start uses. `ENDEAVOR_TEST_SH` makes `tests/launcher.rs` and
 `tests/install.rs` run the scripts under another shell (`dash`, `bash`,
 `busybox sh`).
 
+## The runtime package's Julia tests
+
+`runtime/EndeavorRuntime/test/runtests.jl` tests the Julia side alone: the
+adapter, output rendering, the bridge, and starting and stopping Pluto. CI runs
+it on Linux and macOS. To run it, with Julia 1.12 on the PATH:
+
+```sh
+julia --project=runtime/EndeavorRuntime -e 'using Pkg; Pkg.test()'
+```
+
+It takes about 2 minutes once packages are installed. `Pkg.test` resolves its
+own `runtime/EndeavorRuntime/Manifest.toml` (ignored by git), so its package
+versions can differ slightly from `runtime/Manifest.toml`.
+
 ## Runtime tests against real Julia
 
 `crates/endeavor-mcp/tests/e2e_julia.rs` starts the helper and the core
