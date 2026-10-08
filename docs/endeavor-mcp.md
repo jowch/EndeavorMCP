@@ -228,30 +228,47 @@ ever taken from the process's working folder, which is the plugin's cache folder
   session, which has none: the runtime's working folder, as before) or
   `Unknown` (this mode). For `Unknown`, a relative path is the `invalid_path`
   error "Give an absolute path: this server was not told the project folder."
-  `~` is expanded first, so `~/x.jl` works. `new_notebook` without a `path`,
-  which would put the file in a folder the session does not know, gets the same
-  error. Only `open_notebook` and `new_notebook` take a path.
+  `new_notebook` without a `path`, which would put the file in a folder the
+  session does not know, gets the same error. Only `open_notebook` and
+  `new_notebook` take a path.
+- **What counts as absolute.** `~` is expanded first on Linux and macOS, so
+  `~/x.jl` works; `~user` is refused as `invalid_path` ("~user tilde expansion
+  not yet implemented"). On Windows `~` is not expanded (so `~/x.jl` is
+  relative and refused), and a path must name its root: a drive (`C:\x.jl`,
+  `C:/x.jl`) or `\\server\share`. `\x.jl` and `/x.jl` are rooted on the
+  working folder's drive, which this session does not know, so they are refused.
 - **The refusal comes before any effect.** The front calls
   `notebooks::path_refusal` after it checked the arguments and before it routes
   the call, so a refused call starts no runtime. The runtime calls it in the
   same place, after `check_arguments` and before `note_call`, so a refused call
   asks the user nothing, starts nothing, makes no file and is not the session's
-  activity.
-- **The runtime is told.** On this computer the front sends
-  `endeavor/set_session_folder` `{owner, no_folder: true}` where a session with
-  a folder gets `{owner, folder}`; the runtime then holds `Unknown` for that
-  session even if it has a folder of its own. A runtime a `--no-folder` front
-  starts gets `ENDEAVOR_NO_FOLDER=1` instead of `ENDEAVOR_FOLDER`: it is
-  a standalone runtime with no folder, it records none in `runtime.json` and
-  gives Pluto none, and a session it is not told a folder for (`serve`'s HTTP
-  clients) gets `Unknown` too. `endeavor status` therefore shows no notebooks
-  folder for it, and `pluto_session_status` has never had one.
+  activity. The front's tool list adds one sentence to the `path` descriptions of
+  `open_notebook` and `new_notebook`: on this computer give an absolute path.
+- **The runtime is told, and works in the home folder.** On this computer the
+  front sends `endeavor/set_session_folder` `{owner, no_folder: true}` where a
+  session with a folder gets `{owner, folder}`; the runtime then holds `Unknown`
+  for that session whatever folder it has itself. The front marks a runtime told
+  only when it took the message, so a failed telling is made again by the next
+  call. A runtime a `--no-folder` front starts gets `ENDEAVOR_NO_FOLDER=1`, and
+  the front clears `ENDEAVOR_FOLDER` from the core's environment (and the other
+  way round). Its folder is the user's home folder (`paths::Env::home`), not the
+  front's working folder, which for Codex is a plugin cache that an update can
+  delete: the core changes to it, Julia and Pluto start there, and Pluto's
+  "save as" suggests it. `runtime.json` records it as `folder` with
+  `"no_folder": true`, which tells it from a record of an older build that has
+  no folder at all. A session that was never told a folder (the app's `/call`
+  route, `serve`'s HTTP clients) resolves against that folder as it would
+  against any runtime's. `endeavor status` and `serve` say the runtime was
+  started without a project folder and that new notebooks without a path go
+  there; `pluto_session_status` has never had a folder field.
 - **No project is remembered.** `projects.json` is keyed by the folder, so a
   session without one reads and writes nothing there: `use_machine` works and
   the next session starts on this computer.
 - **A machine is as before.** After `use_machine` the session's folder is the
   `folder` argument or the machine's home, and relative paths start there.
-  `use_machine` with `"local"` returns to `Unknown`.
+  `use_machine` with `"local"` returns to `Unknown`. `Relay::local_folder` is the
+  one source of the session's folder in the front, for the check and for what
+  the runtime is told.
 
 ## Session identity
 

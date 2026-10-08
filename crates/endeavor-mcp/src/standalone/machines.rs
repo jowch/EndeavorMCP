@@ -21,6 +21,7 @@ use super::target::{Provider, Target, local_server};
 use super::{Relay, Route, tool_failure};
 use crate::client::{Cluster, Config, InstallInfo, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
 use crate::mcp::{browser_link, to_json, tool_error};
+use crate::notebooks::Folder;
 
 /// A tool call's result that is `text`.
 pub(super) fn text_result(text: &str) -> Value {
@@ -774,12 +775,16 @@ impl Relay {
     /// `home` is the machine's home folder, which is the session's folder when `use_machine` gave none.
     fn ready(&self, target: &Target, runtime: &RuntimeInfo, home: Option<&str>) -> Route {
         if target.told != Some(runtime.pid) {
-            let folder = target.folder.clone().or_else(|| home.filter(|h| !h.is_empty()).map(str::to_owned));
-            // A machine's runtime has a folder of its own to fall back on; this computer's has none to offer a `--no-folder` session.
-            if folder.is_some() || target.is_local() {
-                self.tell_session_folder(runtime.port, &runtime.token, folder.as_deref());
+            // A machine's runtime has a folder of its own to fall back on when the session has none and the machine said no home.
+            let folder = match self.local_folder(target) {
+                Some(Folder::In(folder)) => Some(Some(folder)),
+                Some(_) => Some(None),
+                None => target.folder.clone().or_else(|| home.filter(|h| !h.is_empty()).map(str::to_owned)).map(Some),
+            };
+            // A failed telling is made again by the next call.
+            if folder.is_none_or(|folder| self.tell_session_folder(runtime.port, &runtime.token, folder.as_deref())) {
+                self.update_target(&target.id, |t| t.told = Some(runtime.pid));
             }
-            self.update_target(&target.id, |t| t.told = Some(runtime.pid));
         }
         Route { port: runtime.port, token: runtime.token.clone(), host: target.host() }
     }

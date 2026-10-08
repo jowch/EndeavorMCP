@@ -2199,23 +2199,31 @@ fn a_front_without_a_folder_refuses_relative_paths_before_it_starts_a_runtime_or
     assert_eq!(joined["already_open"], true, "{joined}");
     assert!(place.local_runtime().is_some_and(pid_alive));
 
-    // The running runtime refuses a relative path too, for this session and for one that tells it nothing; its record names no folder.
+    // The running runtime refuses a relative path too, for this session. It works in the home folder, not the project's,
+    // and a session that says nothing about a folder is not refused: its relative paths start there.
     let (failed, said) = front.call("open_notebook", json!({ "path": "a.jl" }));
     assert!(failed && said["message"] == NO_FOLDER, "{said}");
+    let home = place.env.iter().find(|(name, _)| name == "HOME").unwrap().1.clone();
     let record = read_record(&place.local_state);
-    assert!(record.get("folder").is_none(), "{record}");
+    assert_eq!((record["folder"].as_str(), record["no_folder"].clone()), (Some(home.as_str()), json!(true)), "{record}");
     let port = record["port"].as_u64().unwrap() as u16;
     let other = other_agent(port, TOKEN, "someone-else", "open_notebook", json!({ "path": "a.jl" }));
-    assert_eq!((other["error"].as_str(), other["message"].as_str()), (Some("invalid_path"), Some(NO_FOLDER)), "{other}");
+    assert_eq!((other["error"].as_str(), other["message"].as_str()), (Some("file_not_found"), Some(format!("No file at '{home}/a.jl'").as_str())), "{other}");
     let relative: Vec<_> = local_engine_calls(&place).into_iter().filter(|(method, params)| matches!(method.as_str(), "open" | "new") && !params["path"].as_str().is_some_and(|path| path.starts_with('/'))).collect();
     assert!(relative.is_empty(), "the engine was asked to use a relative path: {relative:?}");
 
-    // The status names no folder.
+    // The tool list asks for absolute paths in the two descriptions that take one.
+    let tools = front.request("tools/list", json!({}));
+    let described = |name: &str| tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["inputSchema"]["properties"]["path"]["description"].as_str().unwrap().to_owned();
+    assert!(described("open_notebook").ends_with("On this computer give an absolute path: this server was not told the project folder."), "{}", described("open_notebook"));
+    assert!(described("new_notebook").ends_with("On this computer give an absolute path: this server was not told the project folder."));
+
+    // The status names no project folder.
     let status = front.ok("pluto_session_status", json!({}));
     assert!(status.get("folder").is_none(), "{status}");
     let said = Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["status", "--json", "--state-dir"]).arg(&place.local_state).env_clear().envs(place.env.iter().map(|(k, v)| (k, v))).output().unwrap();
     let report: Value = serde_json::from_slice(&said.stdout).unwrap();
-    assert_eq!((report["runtime"]["state"].as_str(), report["runtime"]["folder"].clone()), (Some("running"), Value::Null), "{report}");
+    assert_eq!((report["runtime"]["state"].as_str(), report["runtime"]["folder"].as_str(), report["runtime"]["no_folder"].clone()), (Some("running"), Some(home.as_str()), json!(true)), "{report}");
     assert_eq!(project_files(&place), ["a.jl"], "only the file the test made");
     front.finish();
 }

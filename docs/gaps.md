@@ -320,9 +320,6 @@ _Started 2026-10-06, on the `client-library` branch._
   - A project is remembered by its folder, so a session without one remembers
     no machine: `use_machine` works, and the next session starts on this
     computer.
-  - A `--no-folder` session on a runtime started by an older build is not
-    refused relative paths: from the code, the older runtime ignores the setting
-    and uses its own folder (not tried). `endeavor stop` ends it.
   - There is no early download. `codex-plugin/` has no hooks, so the first
     start downloads while the agent waits, and the plugin's entry names
     `--no-folder`, which only builds from this branch know. Until a release

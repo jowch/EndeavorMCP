@@ -192,10 +192,12 @@ package `endeavor-mcp`; it was `endeavor-remote` until the rename.
   second run leaves it alone. `scripts/helpers.sh`, `build-helpers.sh` and the
   Helpers workflow now count `runtime/` as helper source.
 - **The core without the app.** The helper passes the settings in the core's
-  environment (`ENDEAVOR_FOLDER`, `ENDEAVOR_PORT`, `ENDEAVOR_HOST_TOOLS`,
-  `ENDEAVOR_IDLE_HOURS`, `ENDEAVOR_EXIT_IDLE`); none reach Julia or
-  `run_shell`. With a folder the core is standalone (`mcp::Standalone`): it
-  works in that folder, gives it to Pluto's page (`endeavor/set_folder`), uses
+  environment (`ENDEAVOR_FOLDER` or `ENDEAVOR_NO_FOLDER`, `ENDEAVOR_PORT`,
+  `ENDEAVOR_HOST_TOOLS`, `ENDEAVOR_IDLE_HOURS`, `ENDEAVOR_EXIT_IDLE`); none
+  reach Julia or `run_shell`. With either of the first two the core is
+  standalone (`mcp::Standalone`): with `ENDEAVOR_NO_FOLDER` (and no
+  `ENDEAVOR_FOLDER`, which wins) the folder is the user's home folder and
+  `runtime.json` says `no_folder`. It works in that folder, gives it to Pluto's page (`endeavor/set_folder`), uses
   it for any session the app gave no folder, records it in `runtime.json`,
   adds `browser_url` to `new_notebook`, `open_notebook` and
   `pluto_session_status`, and adds to its MCP instructions what differs

@@ -511,9 +511,15 @@ const NO_FOLDER: &str = "Give an absolute path: this server was not told the pro
 fn a_runtime_without_a_folder_refuses_relative_paths_before_anything_is_asked_or_counted() {
     let dir = state_dir("core-no-folder");
     let bridge = FakeBridge::start(&dir);
-    let core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_NO_FOLDER", "1")]);
-    assert_eq!(read_json(&dir.join("runtime.json")).get("folder"), None, "no notebooks folder is recorded");
-    assert!(!bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")), "Pluto is not given one");
+    let home = temp_folder("core-no-folder-home");
+    let core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_NO_FOLDER", "1"), ("HOME", home.to_str().unwrap())]);
+    // It works in the home folder, not in the folder of the process that started it, and says it has no project folder.
+    let record = read_json(&dir.join("runtime.json"));
+    assert_eq!((record["folder"].as_str(), record["no_folder"].clone()), (home.to_str(), serde_json::json!(true)), "{record}");
+    let set_folder = bridge.seen().into_iter().find(|s| String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")).expect("Pluto hears a folder");
+    assert!(String::from_utf8_lossy(&set_folder.body).contains(&format!(r#""path":"{}""#, home.display())));
+    #[cfg(target_os = "linux")]
+    assert_eq!(std::fs::read_link(format!("/proc/{}/cwd", core.process.id())).unwrap(), home);
 
     let folder = temp_folder("core-no-folder-notebooks");
     let path = folder.join("a.jl").display().to_string();
@@ -527,31 +533,44 @@ fn a_runtime_without_a_folder_refuses_relative_paths_before_anything_is_asked_or
         mcp(&core, &message.to_string(), &[("X-Endeavor-Session", session)]).1
     };
     let asked = |method: &str| engine_calls(&bridge).into_iter().filter(|(m, _)| m == method).count();
+    let tell = |body: serde_json::Value| app_call(&core, &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": body }).to_string());
+
+    // A session that was never told a folder works from the home folder; it is not one that has none.
+    send("untold", 30, "new_notebook", serde_json::json!({}));
+    let (_, params) = engine_calls(&bridge).into_iter().find(|(m, _)| m == "new").expect("the engine was asked for a notebook");
+    assert_eq!(params, serde_json::json!({ "folder": home.to_str().unwrap() }));
+    let missing = send("untold", 31, "open_notebook", serde_json::json!({ "path": "nothing.jl" }));
+    assert!(missing.contains("file_not_found") && missing.contains(&format!("{}/nothing.jl", home.display())), "{missing}");
+    let was_asked = asked("new");
+
+    tell(serde_json::json!({ "owner": "s1", "no_folder": true }));
+    tell(serde_json::json!({ "owner": "s4", "no_folder": true }));
     let relative = [("open_notebook", serde_json::json!({ "path": "a.jl" })), ("new_notebook", serde_json::json!({ "path": "b.jl" })), ("new_notebook", serde_json::json!({ "path": "sub/../b.jl" })), ("new_notebook", serde_json::json!({}))];
     for (id, (name, arguments)) in (1..).zip(relative.clone()) {
         assert_eq!(send("s1", id, name, arguments), tool_error(id, "invalid_path", NO_FOLDER), "{name}");
     }
-    assert_eq!((asked("open"), asked("new")), (0, 0), "the engine was asked nothing");
+    assert_eq!(asked("new"), was_asked, "the engine was asked nothing more");
 
     // An absolute path goes through.
     let made = folder.join("made.jl").display().to_string();
     send("s1", 10, "new_notebook", serde_json::json!({ "path": made }));
-    let (_, params) = engine_calls(&bridge).into_iter().find(|(m, _)| m == "new").expect("the engine was asked for the notebook");
+    let (_, params) = engine_calls(&bridge).into_iter().filter(|(m, _)| m == "new").last().expect("the engine was asked for the notebook");
     assert_eq!(params["path"], made.as_str());
     assert!(!std::path::Path::new(&made).exists());
     let joined: serde_json::Value = serde_json::from_str(&send("s2", 11, "open_notebook", serde_json::json!({ "path": path }))).unwrap();
     assert!(joined["result"]["content"][0]["text"].as_str().unwrap().contains(r#""already_open":true"#), "{joined}");
 
     // A session that is told a folder has relative paths; one that is told it has none is refused, whatever the runtime's own folder.
-    let tell = |body: serde_json::Value| app_call(&core, &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": body }).to_string());
     tell(serde_json::json!({ "owner": "s3", "folder": folder }));
     let joined = send("s3", 12, "open_notebook", serde_json::json!({ "path": "a.jl" }));
     assert!(joined.contains(r#"already_open\":true"#), "{joined}");
     assert_eq!(send("s1", 13, "open_notebook", serde_json::json!({ "path": "a.jl" })), tool_error(13, "invalid_path", NO_FOLDER), "the other session still has none");
     tell(serde_json::json!({ "owner": "s3", "no_folder": true }));
     assert_eq!(send("s3", 14, "open_notebook", serde_json::json!({ "path": "a.jl" })), tool_error(14, "invalid_path", NO_FOLDER));
-    tell(serde_json::json!({ "owner": "s3", "folder": null }));
-    assert_eq!(send("s3", 15, "open_notebook", serde_json::json!({ "path": "a.jl" })), tool_error(15, "invalid_path", NO_FOLDER), "forgetting a folder leaves the runtime's, which is none");
+    tell(serde_json::json!({ "owner": "s5", "folder": folder }));
+    tell(serde_json::json!({ "owner": "s5", "folder": null }));
+    let forgotten = send("s5", 15, "open_notebook", serde_json::json!({ "path": "a.jl" }));
+    assert!(forgotten.contains("file_not_found") && forgotten.contains(&format!("{}/a.jl", home.display())), "forgetting a folder leaves the runtime's, which is the home folder: {forgotten}");
 
     // A refused call is not the session's activity.
     send("s4", 20, "open_notebook", serde_json::json!({ "path": path }));
@@ -565,6 +584,35 @@ fn a_runtime_without_a_folder_refuses_relative_paths_before_anything_is_asked_or
     assert!(ago() >= 2, "a refused call counted as activity");
     send("s4", 23, "list_notebooks", serde_json::json!({}));
     assert!(ago() < 2);
+}
+
+#[test]
+fn serve_and_status_say_a_runtime_has_no_project_folder_and_where_notebooks_go() {
+    let dir = state_dir("core-no-folder-report");
+    let bridge = FakeBridge::start(&dir);
+    let home = temp_folder("core-no-folder-report-home");
+    let _core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_NO_FOLDER", "1"), ("HOME", home.to_str().unwrap())]);
+    let command = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+        command.args(args).arg("--state-dir").arg(&dir).env_clear().env("HOME", &home).env("XDG_CACHE_HOME", dir.join("cache")).env("XDG_STATE_HOME", dir.join("state-home")).env("XDG_CONFIG_HOME", dir.join("config"));
+        command
+    };
+    let report: serde_json::Value = serde_json::from_slice(&command(&["status", "--json"]).output().unwrap().stdout).unwrap();
+    assert_eq!((report["runtime"]["folder"].as_str(), report["runtime"]["no_folder"].clone()), (home.to_str(), serde_json::json!(true)), "{report}");
+    let text = String::from_utf8(command(&["status"]).output().unwrap().stdout).unwrap();
+    assert!(text.contains(&format!("Notebooks folder: none (started without a project folder); new notebooks without a path go in {}", home.display())), "{text}");
+
+    let mut serve = command(&["serve", "--folder", dir.to_str().unwrap()]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut out = BufReader::new(serve.stdout.take().unwrap());
+    let mut said = String::new();
+    while !said.contains("Ctrl-C leaves this Julia running") {
+        let mut line = String::new();
+        assert!(out.read_line(&mut line).unwrap() > 0, "serve ended: {said}");
+        said.push_str(&line);
+    }
+    let _ = serve.kill();
+    let _ = serve.wait();
+    assert!(said.contains(&format!("This runtime has no project folder: new notebooks without a path go in {}", home.display())) && !said.contains("New notebooks go in"), "{said}");
 }
 
 #[test]

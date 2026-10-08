@@ -104,8 +104,8 @@ struct Args {
     /// (see `core::main`). The Slurm launcher passes it on to the job.
     exit_idle: bool,
     /// More of the core's environment: a standalone runtime's settings, and
-    /// ENDEAVOR_EXIT_IDLE when `exit_idle`. Set on a core this helper starts.
-    core_env: Vec<(&'static str, String)>,
+    /// ENDEAVOR_EXIT_IDLE when `exit_idle`. Set on a core this helper starts; none removes an inherited variable.
+    core_env: Vec<(&'static str, Option<String>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -138,6 +138,8 @@ struct State {
     build: Option<String>,
     /// The notebooks folder a standalone runtime recorded.
     folder: Option<String>,
+    /// It was started without a project folder, and `folder` is the home folder it works in.
+    no_folder: bool,
     /// Whether it ends itself when idle; none for a record from before this was written.
     exits_when_idle: Option<bool>,
 }
@@ -273,7 +275,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         any_node,
         build,
         exit_idle,
-        core_env: if exit_idle { vec![("ENDEAVOR_EXIT_IDLE", "1".into())] } else { Vec::new() },
+        core_env: if exit_idle { vec![("ENDEAVOR_EXIT_IDLE", Some("1".into()))] } else { Vec::new() },
     })
 }
 
@@ -1127,6 +1129,15 @@ fn dial(mux: &Arc<Mux>, id: u32, port: u16) {
     }
 }
 
+fn set_core_env(command: &mut Command, env: &[(&'static str, Option<String>)]) {
+    for (name, value) in env {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+}
+
 fn read_state(dir: &Path) -> Option<State> {
     parse_state(&serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?)
 }
@@ -1144,6 +1155,7 @@ fn parse_state(v: &Value) -> Option<State> {
         job: text("job").filter(|j| !j.is_empty()),
         build: text("build"),
         folder: text("folder"),
+        no_folder: v["no_folder"].as_bool().unwrap_or(false),
         exits_when_idle: v["exits_when_idle"].as_bool(),
     })
 }
@@ -1226,7 +1238,8 @@ fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child,
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let stderr = log.try_clone().map_err(|e| e.to_string())?;
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
-    command.stdout(log).stderr(stderr).envs(args.core_env.iter().map(|(k, v)| (k, v)));
+    command.stdout(log).stderr(stderr);
+    set_core_env(&mut command, &args.core_env);
     // SAFETY: setsid and sigprocmask are async-signal-safe.
     unsafe {
         command.pre_exec(|| {
@@ -1258,7 +1271,8 @@ fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child,
         .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
     let stderr = log.try_clone().map_err(|e| e.to_string())?;
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
-    command.stdout(log).stderr(stderr).envs(args.core_env.iter().map(|(k, v)| (k, v)));
+    command.stdout(log).stderr(stderr);
+    set_core_env(&mut command, &args.core_env);
     // Julia and Pluto's workers are console programs: with no console to
     // share, each would open a console window. CREATE_NO_WINDOW gives the core
     // one without a window, which they inherit. Breaking away from a job the

@@ -1125,22 +1125,28 @@ fn folder_unknown() -> String {
 fn requested_path(path: &str, folder: &Folder) -> Result<String, String> {
     let expanded = expand_user(path)?;
     match folder {
+        Folder::Unknown if is_fully_absolute(&expanded) => Ok(expanded),
+        Folder::Unknown => Err(folder_unknown()),
         _ if is_absolute(&expanded) => Ok(expanded),
         Folder::In(folder) => absolute_path(&format!("{folder}/{expanded}")),
         Folder::Process => Ok(expanded),
-        Folder::Unknown => Err(folder_unknown()),
     }
 }
 
 /// Why a session with no folder may not make this call: it gives a relative path, or none to
 /// `new_notebook`, which would put the notebook in a folder it does not know. Nothing else is refused.
-pub(crate) fn path_refusal(tool: &str, arguments: &Value, folder: &Folder) -> Option<String> {
+/// With the error, whether it already says what to do (so it needs no pointer to the guide).
+pub(crate) fn path_refusal(tool: &str, arguments: &Value, folder: &Folder) -> Option<(String, bool)> {
     if *folder != Folder::Unknown {
         return None;
     }
     match (tool, arguments.get("path").filter(|path| !path.is_null())) {
-        ("open_notebook" | "new_notebook", Some(Value::String(path))) => requested_path(path, folder).err(),
-        ("new_notebook", None) => Some(folder_unknown()),
+        ("open_notebook" | "new_notebook", Some(Value::String(path))) => match requested_path(path, folder) {
+            Ok(_) => None,
+            Err(error) if error == folder_unknown() => Some((error, true)),
+            Err(error) => Some((format!("ArgumentError: invalid_path::{}", error.trim_start_matches("ArgumentError: ")), false)),
+        },
+        ("new_notebook", None) => Some((folder_unknown(), true)),
         _ => None,
     }
 }
@@ -1179,6 +1185,16 @@ fn is_absolute(path: &str) -> bool {
     if cfg!(windows) {
         let drive = path.find(':').filter(|&colon| colon > 0 && path[..colon].bytes().all(|b| b.is_ascii_alphabetic())).map_or(0, |colon| colon + 1);
         return path[drive..].starts_with(['/', '\\']);
+    }
+    path.starts_with('/')
+}
+
+/// An absolute path that names its own root: on Windows, with a drive or as `\\server\share`; `\x` and
+/// `/x` are rooted on the working folder's drive, which a session with no folder does not know.
+fn is_fully_absolute(path: &str) -> bool {
+    if cfg!(windows) {
+        let drive = path.len() > 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.as_bytes()[1] == b':';
+        return (drive && path[2..].starts_with(['/', '\\'])) || path.starts_with("\\\\") || path.starts_with("//");
     }
     path.starts_with('/')
 }

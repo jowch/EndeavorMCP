@@ -68,8 +68,14 @@ fn no_folder_leaves_the_session_without_a_project_folder() {
     assert_eq!(parsed("mcp --folder /abs --no-folder").unwrap_err(), "give one of --folder and --no-folder");
     assert_eq!(parsed("serve --no-folder").unwrap_err(), "--no-folder isn't an option of serve");
     assert_eq!(parsed("stop --no-folder").unwrap_err(), "--no-folder isn't an option of stop");
-    let env = core_env(&parse(&["mcp", "--no-folder"].map(String::from), &env()).map(|c| match c { Command::Mcp(o) => o, _ => panic!() }).unwrap(), false);
-    assert!(env.contains(&("ENDEAVOR_NO_FOLDER", "1".to_owned())) && !env.iter().any(|(name, _)| *name == "ENDEAVOR_FOLDER"), "{env:?}");
+    let options = |line: &str| match parsed(line) {
+        Ok(Command::Mcp(o)) => o,
+        other => panic!("{other:?}"),
+    };
+    let without = core_env(&options("mcp --no-folder"), false);
+    assert!(without.contains(&("ENDEAVOR_NO_FOLDER", Some("1".to_owned()))) && without.contains(&("ENDEAVOR_FOLDER", None)), "an inherited folder is cleared: {without:?}");
+    let with = core_env(&options("mcp --folder /abs"), false);
+    assert!(with.contains(&("ENDEAVOR_FOLDER", Some("/abs".to_owned()))) && with.contains(&("ENDEAVOR_NO_FOLDER", None)), "an inherited lack of one is cleared: {with:?}");
 }
 
 #[test]
@@ -90,7 +96,7 @@ fn flags_that_dont_apply_are_refused() {
 
 #[test]
 fn connection_details_on_a_workstation() {
-    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: Some("/home/ada/project"), login: None });
+    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: "/home/ada/project", project: true, login: None });
     assert_eq!(
         text,
         r#"Endeavor's notebooks are running on lab3, port 8456. New notebooks go in /home/ada/project.
@@ -126,20 +132,20 @@ The token lets anyone who has it run code as you. Keep it to yourself.
 
 #[test]
 fn a_runtime_without_a_folder_says_so_where_the_folder_would_be() {
-    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: None, login: None });
-    assert!(text.starts_with("Endeavor's notebooks are running on lab3, port 8456. New notebooks need an absolute path: this runtime has no notebooks folder.\n\nOpen them"), "{text}");
+    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: "/home/ada", project: false, login: None });
+    assert!(text.starts_with("Endeavor's notebooks are running on lab3, port 8456. This runtime has no project folder: new notebooks without a path go in /home/ada, and agents give absolute paths.\n\nOpen them"), "{text}");
 }
 
 #[test]
 fn on_a_compute_node_the_tunnel_jumps_through_the_login_node() {
-    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "n2cn0216", folder: Some("/u/ada"), login: Some("login2") });
+    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "n2cn0216", folder: "/u/ada", project: true, login: Some("login2") });
     let forward = "From another computer, forward the port first:
     ssh -J login2 -L 8456:localhost:8456 n2cn0216
 (This is a cluster's compute node: the jump goes through the login node, login2; use the name you ssh to.)
 
 Connect";
     assert!(text.contains(forward), "{text}");
-    let one_machine = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: Some("/u/ada"), login: Some("lab3") });
+    let one_machine = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: "/u/ada", project: true, login: Some("lab3") });
     assert!(one_machine.contains("first:\n    ssh -L 8456:localhost:8456 lab3\n\nConnect"), "a job on the login node itself: {one_machine}");
 }
 

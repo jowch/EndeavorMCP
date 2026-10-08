@@ -55,6 +55,8 @@ struct RuntimeReport {
     /// What `standalone::other_build` says about it, when it is.
     other_build_note: Option<String>,
     folder: Option<String>,
+    /// It was started without a project folder; `folder` is then the home folder it works in.
+    no_folder: Option<bool>,
     exits_when_idle: Option<bool>,
     /// Whether it answered a ping; none when it was not asked.
     answers: Option<bool>,
@@ -163,6 +165,7 @@ fn runtime_report(dir: &Path) -> RuntimeReport {
         other_build: None,
         other_build_note: None,
         folder: None,
+        no_folder: None,
         exits_when_idle: None,
         answers: None,
         log: log.is_file().then_some(log),
@@ -193,6 +196,7 @@ fn runtime_report(dir: &Path) -> RuntimeReport {
             report.other_build = Some(report.other_build_note.is_some());
             report.build = recorded.build;
             report.folder = recorded.folder;
+            report.no_folder = Some(recorded.no_folder);
             report.exits_when_idle = recorded.exits_when_idle;
         }
     }
@@ -294,8 +298,10 @@ fn text(report: &Report) -> String {
             let port = runtime.port.map_or("no port recorded (an older build)".into(), |port| format!("port {port}"));
             line(format!("  Running: {pid}, {port}"));
             line(format!("  {}", runtime.other_build_note.as_deref().unwrap_or("Started from this build.")));
-            if let Some(folder) = &runtime.folder {
-                line(format!("  Notebooks folder: {folder}"));
+            match (&runtime.folder, runtime.no_folder) {
+                (Some(folder), Some(true)) => line(format!("  Notebooks folder: none (started without a project folder); new notebooks without a path go in {folder}")),
+                (Some(folder), _) => line(format!("  Notebooks folder: {folder}")),
+                _ => {}
             }
             let idle = runtime.exits_when_idle.map_or("not recorded", |idle| if idle { "yes" } else { "no" });
             line(format!("  Ends itself when idle: {idle}"));

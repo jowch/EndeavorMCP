@@ -1727,11 +1727,28 @@ fn a_session_with_no_folder_may_give_absolute_paths_and_nothing_else() {
     assert_eq!(requested_path("./a/../x.jl", &none), Err(refused.clone()));
     assert_eq!(requested_path("", &none), Err(refused.clone()));
     for (tool, arguments) in [("open_notebook", json!({ "path": "x.jl" })), ("new_notebook", json!({ "path": "x.jl" })), ("new_notebook", json!({})), ("new_notebook", json!({ "path": null }))] {
-        assert_eq!(path_refusal(tool, &arguments, &none), Some(refused.clone()), "{tool} {arguments}");
+        assert_eq!(path_refusal(tool, &arguments, &none), Some((refused.clone(), true)), "{tool} {arguments}");
         assert_eq!(path_refusal(tool, &arguments, &Folder::In("/work".into())), None, "a session with a folder");
         assert_eq!(path_refusal(tool, &arguments, &Folder::Process), None, "the app's session");
     }
+    assert_eq!(
+        path_refusal("open_notebook", &json!({ "path": "~bob/x.jl" }), &none),
+        Some(("ArgumentError: invalid_path::~user tilde expansion not yet implemented".to_owned(), false)),
+        "the kind of a bad path, and not told to read the guide as the refusal that says what to do is not"
+    );
     for (tool, arguments) in [("open_notebook", json!({ "path": "/a/x.jl" })), ("new_notebook", json!({ "path": "/a/x.jl" })), ("open_notebook", json!({})), ("open_notebook", json!({ "path": 5 })), ("read_cell", json!({ "path": "x.jl" })), ("list_notebooks", json!({}))] {
         assert_eq!(path_refusal(tool, &arguments, &none), None, "{tool} {arguments}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_path_with_no_drive_is_not_absolute_enough_for_a_session_with_no_folder() {
+    for path in ["C:\\x.jl", "c:/x.jl", "\\\\server\\share\\x.jl"] {
+        assert!(is_fully_absolute(path), "{path}");
+    }
+    for path in ["\\x.jl", "/x.jl", "x.jl", "C:x.jl"] {
+        assert!(!is_fully_absolute(path), "{path}");
+        assert!(requested_path(path, &Folder::Unknown).is_err(), "{path}");
     }
 }

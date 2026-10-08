@@ -111,9 +111,10 @@ pub struct Standalone {
     /// The runtime's one port, which the user's browser reaches as
     /// `localhost` (here, or through `ssh -L` with the same port).
     pub port: u16,
-    /// Where notebooks go for a session the app gave no folder; none when the runtime was started
-    /// without one, and such a session is not told where relative paths start.
-    pub folder: Option<String>,
+    /// Where notebooks go for a session that was told no folder. For a runtime started without a
+    /// project folder (`no_folder`) it is the home folder.
+    pub folder: String,
+    pub no_folder: bool,
     /// Host tools for every session, as on this host (`--host-tools`), for an
     /// agent on another machine.
     pub host: Option<String>,
@@ -161,6 +162,8 @@ pub struct Caller {
     /// The caller is the stdio front (`endeavor mcp`), which also lists the host
     /// tools and the machine tools, and answers the machine tools itself.
     pub front: bool,
+    /// The front was started without a project folder, so on this computer the tools take absolute paths only.
+    pub no_folder: bool,
 }
 
 /// A name that goes in a header or a message: printable characters only,
@@ -178,7 +181,7 @@ impl Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
         let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
         let browser_port = request.header("X-Endeavor-Browser-Port").and_then(|port| port.trim().parse().ok()).filter(|&port| port != 0);
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false }
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false }
     }
 }
 
@@ -218,7 +221,7 @@ impl Bridge {
             Some(Some(dir)) => Folder::In(dir.clone()),
             Some(None) => Folder::Unknown,
             None => match &self.standalone {
-                Some(standalone) => standalone.folder.clone().map_or(Folder::Unknown, Folder::In),
+                Some(standalone) => Folder::In(standalone.folder.clone()),
                 None => Folder::Process,
             },
         }
@@ -373,8 +376,8 @@ impl Bridge {
             if let Err(result) = check_arguments(name, &arguments, help) {
                 return result;
             }
-            if let Some(why) = notebooks::path_refusal(name, &arguments, &self.folder(&caller.owner)) {
-                return tool_error(&why, false);
+            if let Some((why, says_what_to_do)) = notebooks::path_refusal(name, &arguments, &self.folder(&caller.owner)) {
+                return tool_error(&why, help && !says_what_to_do);
             }
         }
         self.notebooks.note_call(&caller.owner);
@@ -768,6 +771,11 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
                 tools.extend(MACHINE_TOOLS.as_array().cloned().unwrap_or_default());
             }
             for tool in &mut tools {
+                if caller.no_folder && matches!(tool["name"].as_str(), Some("open_notebook" | "new_notebook")) {
+                    // Its description says relative paths go in the session's folder, and that a name is generated there.
+                    let path = &mut tool["inputSchema"]["properties"]["path"]["description"];
+                    *path = format!("{} {NO_FOLDER_PATHS}", path.as_str().unwrap_or_default()).into();
+                }
                 // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
                 // open_notebook can run the notebook, so it is not read-only either.
                 let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name) || name == "open_notebook" || (MACHINE_NAMES.contains(&name) && name != "list_machines"));
@@ -780,6 +788,9 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
     }
 }
 
+/// Added to the `path` descriptions of the tools that take one, in a front without a project folder.
+const NO_FOLDER_PATHS: &str = "On this computer give an absolute path: this server was not told the project folder.";
+
 /// The reply to a JSON-RPC message while the app can't reach the runtime:
 /// what the core would say, except that a tool call fails with `why`, plain
 /// text Claude reads before trying again.
@@ -790,9 +801,9 @@ pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> 
 /// The reply to a message a standalone runtime's stdio relay answers itself
 /// (`initialize`, `ping`, `tools/list`), as the runtime would to an agent
 /// with the plugin's skills or without (`has_skills`). None for anything else.
-pub(crate) fn answer_locally(message: &Value, has_skills: bool) -> Option<String> {
+pub(crate) fn answer_locally(message: &Value, has_skills: bool, no_folder: bool) -> Option<String> {
     let local = matches!(message["method"].as_str(), Some("initialize" | "ping" | "tools/list"));
-    let caller = Caller { has_skills, front: true, ..Caller::default() };
+    let caller = Caller { has_skills, front: true, no_folder, ..Caller::default() };
     local.then(|| answer(message, &caller, true, |_| unreachable!("tools/call isn't answered locally"))).flatten()
 }
 
@@ -926,6 +937,30 @@ mod tests {
     fn writes_json_as_julia_does() {
         let value = json!({ "b": 1, "A": [true, null, 2.5], "a": { "z": "x\u{7f}\u{1}/\"é", "_": {} }, "aa": [] });
         assert_eq!(to_json(&value), r#"{"A":[true,null,2.5],"a":{"_":{},"z":"x\u007f\u0001/\"é"},"aa":[],"b":1}"#);
+    }
+
+    #[test]
+    fn a_front_without_a_folder_lists_the_same_tools_with_two_path_descriptions_longer() {
+        let list = |no_folder: bool| {
+            let caller = Caller { has_skills: true, front: true, no_folder, ..Caller::default() };
+            let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }), &caller, true, |_| json!(null)).unwrap();
+            serde_json::from_str::<Value>(&reply).unwrap()["result"]["tools"].clone()
+        };
+        let (with, without) = (list(false), list(true));
+        let mut changed = Vec::new();
+        for (a, b) in with.as_array().unwrap().iter().zip(without.as_array().unwrap()) {
+            if a != b {
+                let (before, after) = (a["inputSchema"]["properties"]["path"]["description"].as_str().unwrap(), b["inputSchema"]["properties"]["path"]["description"].as_str().unwrap());
+                assert_eq!(after, format!("{before} {NO_FOLDER_PATHS}"));
+                let (mut a, mut b) = (a.clone(), b.clone());
+                a["inputSchema"]["properties"]["path"]["description"] = Value::Null;
+                b["inputSchema"]["properties"]["path"]["description"] = Value::Null;
+                assert_eq!(a, b, "nothing else about the tool differs");
+                changed.push(a["name"].as_str().unwrap().to_owned());
+            }
+        }
+        assert_eq!(with.as_array().unwrap().len(), without.as_array().unwrap().len());
+        assert_eq!(changed, ["open_notebook", "new_notebook"]);
     }
 
     #[test]

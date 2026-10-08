@@ -536,3 +536,26 @@ fn a_notebook_call_reports_a_failed_start_once_and_the_next_one_tries_again_and_
     assert!(route(Need::Start).message.contains("isn't available"));
     assert!(runs() > tried, "the notebook call after the report tried again");
 }
+
+#[test]
+fn a_session_is_marked_told_its_folder_only_when_the_runtime_took_it() {
+    let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
+    let info = |port| RuntimeInfo { port, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n".into(), pid: 7, reattached: false, job: None, remote_port: None };
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    relay.ready(&relay.current(), &info(closed), None);
+    assert_eq!(relay.current().told, None, "nobody answered, so the next call tells it again");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let heard = std::thread::spawn(move || {
+        let mut client = listener.accept().unwrap().0;
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let head = crate::http::Head::read(&mut reader).unwrap().unwrap();
+        let body = String::from_utf8(crate::http::read_body(&mut reader, head.request_body().unwrap()).unwrap()).unwrap();
+        crate::http::respond(&mut client, "200 OK", Some("application/json"), b"{}", false).unwrap();
+        body
+    });
+    relay.ready(&relay.current(), &info(port), None);
+    assert_eq!(relay.current().told, Some(7));
+    assert!(heard.join().unwrap().contains(r#""folder":"/home/ada/project""#));
+}

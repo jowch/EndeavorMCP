@@ -71,8 +71,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 ///
 /// Started without the app (`standalone`), the environment also has
 /// ENDEAVOR_FOLDER, the notebooks' folder, which makes it a standalone
-/// runtime, or ENDEAVOR_NO_FOLDER, which makes it one with no notebooks
-/// folder (a session not told its own gives absolute paths only);
+/// runtime, or ENDEAVOR_NO_FOLDER, which makes it one with no project folder:
+/// it works in the user's home folder, and only a session that says it has none
+/// gives absolute paths only;
 /// ENDEAVOR_PORT, a fixed port; ENDEAVOR_HOST_TOOLS, the host name
 /// under which every session gets the host tools; and ENDEAVOR_IDLE_HOURS, the
 /// idle stop (48 hours when not set). ENDEAVOR_EXIT_IDLE, to end the runtime
@@ -99,7 +100,17 @@ pub fn main(argv: &[String]) -> ! {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let fixed_port: u16 = env("ENDEAVOR_PORT").and_then(|p| p.parse().ok()).unwrap_or(0);
     let folder = env("ENDEAVOR_FOLDER");
-    let standalone = folder.is_some() || env("ENDEAVOR_NO_FOLDER").is_some();
+    let no_folder = folder.is_none() && env("ENDEAVOR_NO_FOLDER").is_some();
+    // Not the client's working folder, which may be one a plugin update removes.
+    let folder = folder.or_else(|| {
+        no_folder.then(|| {
+            let home = crate::paths::Env::here().home;
+            if home.as_os_str().is_empty() {
+                fail("Couldn't find the home folder, where a runtime without a project folder works".into());
+            }
+            home.display().to_string()
+        })
+    });
     if let Some(folder) = &folder {
         // Relative paths in the tools, and Julia's, start in the notebooks' folder.
         std::env::set_current_dir(folder).unwrap_or_else(|e| fail(format!("Couldn't use {folder} as the notebooks' folder: {e}")));
@@ -130,7 +141,7 @@ pub fn main(argv: &[String]) -> ! {
     let cookie = cookie_name(&token);
     let port = listener.local_addr().unwrap().port();
     let mut bridge = Bridge::new(token, &args.depot);
-    bridge.standalone = standalone.then(|| crate::mcp::Standalone { port, folder, host: env("ENDEAVOR_HOST_TOOLS") });
+    bridge.standalone = folder.map(|folder| crate::mcp::Standalone { port, folder, no_folder, host: env("ENDEAVOR_HOST_TOOLS") });
     if let Ok(build) = std::env::var("ENDEAVOR_BUILD") {
         let _ = bridge.notebooks.build.set(build);
     }
@@ -221,8 +232,8 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge,
         return None;
     }
     // Before `runtime.json` says the runtime is ready: whoever finds it then may rely on the folder.
-    if let Some(folder) = bridge.standalone.as_ref().and_then(|standalone| standalone.folder.as_deref()) {
-        set_pluto_folder(ready.bridge_port, token, folder);
+    if let Some(standalone) = &bridge.standalone {
+        set_pluto_folder(ready.bridge_port, token, &standalone.folder);
     }
     // With the pid, what tells the core from a later process given its pid.
     let started = crate::own_start_time();
@@ -231,8 +242,11 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge,
         "launcher": julia["launcher"], "node": julia["node"], "job": julia["job"],
         "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": token, "exits_when_idle": bridge.notebooks.exits_when_idle,
     });
-    if let Some(folder) = bridge.standalone.as_ref().and_then(|standalone| standalone.folder.clone()) {
-        state["folder"] = folder.into();
+    if let Some(standalone) = &bridge.standalone {
+        state["folder"] = standalone.folder.clone().into();
+        if standalone.no_folder {
+            state["no_folder"] = true.into();
+        }
     }
     if let Some(build) = bridge.notebooks.build.get() {
         state["build"] = build.clone().into();
