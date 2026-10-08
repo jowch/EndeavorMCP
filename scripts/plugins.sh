@@ -3,12 +3,14 @@
 #
 #   plugin/skills/                         the skills
 #   scripts/endeavor-mcp.sh, install.sh    the launcher and its installer
-#   scripts/release-key                    the pinned build (empty: the newest)
+#   scripts/release-key                    the pinned build
 #
-# `sync` writes the copies; `check` fails if any copy differs. Each plugin
-# holds the launcher files in launch/ and a copy of the skills, not a link: an
-# agent may not follow a link out of the plugin's folder, and a checkout
-# without symlink support turns a link into a text file.
+# `sync` writes the copies; `check` fails if any copy differs, or if
+# release-key isn't the build of this commit's helper source
+# (scripts/helpers.sh --key), so that a plugin's skills and binary come from
+# one commit. Each plugin holds the launcher files in launch/ and a copy of the
+# skills, not a link: an agent may not follow a link out of the plugin's
+# folder, and a checkout without symlink support turns a link into a text file.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,6 +26,13 @@ case $mode in
 esac
 
 bad=0
+if [ "$mode" = check ]; then
+  want=$(sh scripts/helpers.sh --key)
+  if [ "$(head -n 1 scripts/release-key | tr -d ' \t\r\n')" != "$want" ]; then
+    echo "scripts/release-key doesn't name this commit's build ($want). With the helper source change committed, run: scripts/helpers.sh --key > scripts/release-key && sh scripts/plugins.sh sync" >&2
+    bad=1
+  fi
+fi
 for plugin in claude-plugin codex-plugin antigravity-plugin; do
   if [ "$mode" = sync ]; then
     mkdir -p "$plugin/launch"
