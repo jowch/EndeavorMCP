@@ -251,7 +251,7 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, served: &Served,
     if let Some(build) = bridge.notebooks.build.get() {
         state["build"] = build.clone().into();
     }
-    // Before the record: a client that finds it may call at once, and is refused until these are set.
+    // Before the record: a client that finds it may call at once, so these must be set first.
     let bridge_port = ready.bridge_port;
     let _ = served.pluto.set(ready.pluto);
     let _ = bridge.julia.port.set(bridge_port);
