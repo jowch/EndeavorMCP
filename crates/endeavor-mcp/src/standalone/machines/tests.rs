@@ -5,7 +5,7 @@ use crate::client::{JobInfo, QueueInfo};
 use crate::standalone::{Command, Env, Options, parse};
 
 fn status(state: State) -> Status {
-    Status { machine: "lab".into(), name: "lab".into(), state, step: None, error: None, hello: None, runtime: None, job: None, queue: None, nothing_running: false, needs_install: None }
+    Status { machine: "lab".into(), name: "lab".into(), state, step: None, hello: None, job: None }
 }
 
 fn reached(outcome: Outcome, status: Status) -> Reached {
@@ -37,21 +37,21 @@ fn a_machine_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
     let said = not_ready_message("lab", &reached(Outcome::StillWorking("Connecting to lab".into()), connecting));
     assert!(said.starts_with("Endeavor is connecting to lab. Last step: Connecting to lab") && said.contains("call the notebook tool you want again") && said.contains("don't call it repeatedly") && said.contains("`use_machine` again"), "{said}");
 
-    let said = not_ready_message("lab", &reached(Outcome::StillWorking("Found Julia 1.12.0".into()), status(State::Starting)));
+    let said = not_ready_message("lab", &reached(Outcome::StillWorking("Found Julia 1.12.0".into()), status(State::Starting { queue: None })));
     assert!(said.contains("Julia is starting on lab") && said.contains("Last step: Found Julia 1.12.0") && said.contains("each call waits up to 45 seconds") && !said.contains("how far it got"), "{said}");
 
     let job = Some(JobInfo { id: "4242".into(), ..Default::default() });
     let queued = Outcome::Queued { job: job.clone(), queue: QueueInfo { state: "PENDING".into(), reason: "Priority".into() } };
-    let said = not_ready_message("hpc", &reached(queued, status(State::Queued)));
+    let said = not_ready_message("hpc", &reached(queued, status(State::Queued(QueueInfo { state: "PENDING".into(), reason: "Priority".into() }))));
     assert_eq!(said, "The Slurm job 4242 on hpc is waiting in the queue: other jobs are ahead of it. Tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds. `pluto_session_status` answers at once and only shows the job's state, so don't call it repeatedly. A queued job can wait minutes or hours: after a few tries, stop and let the user say when to check again.");
     let running = Outcome::Queued { job, queue: QueueInfo { state: "RUNNING".into(), reason: "n123".into() } };
-    let said = not_ready_message("hpc", &reached(running, status(State::Queued)));
+    let said = not_ready_message("hpc", &reached(running, status(State::Starting { queue: Some(QueueInfo { state: "RUNNING".into(), reason: "n123".into() }) })));
     assert!(said.contains("running on node n123, and Julia is starting there") && said.contains("call the notebook tool you want again") && !said.contains("minutes or hours"), "{said}");
 
-    let said = not_ready_message("lab", &reached(Outcome::Failed("lab refused the sign-in.".into()), status(State::Failed)));
+    let said = not_ready_message("lab", &reached(Outcome::Failed("lab refused the sign-in.".into()), status(State::Failed("lab refused the sign-in.".into()))));
     assert!(said.starts_with("Julia on lab isn't available: lab refused the sign-in.") && said.contains("`use_machine` with machine \"lab\""), "{said}");
 
-    let said = not_ready_message("lab", &reached(Outcome::NothingRunning, status(State::Connected)));
+    let said = not_ready_message("lab", &reached(Outcome::NothingRunning, status(State::NothingRunning)));
     assert!(said.contains("Julia isn't running on lab") && said.contains("`use_machine`"), "{said}");
 }
 
@@ -65,11 +65,11 @@ fn slurm_reasons_are_put_in_words() {
 
 #[test]
 fn a_status_result_has_what_the_agent_needs() {
-    let mut queued = status(State::Queued);
+    let queue = QueueInfo { state: "PENDING".into(), reason: "Resources".into() };
+    let mut queued = status(State::Queued(queue.clone()));
     queued.step = Some("Submitted job 7".into());
     queued.job = Some(JobInfo { id: "7".into(), summary: Some("8 CPUs · 32 GB · 8 h".into()), ..Default::default() });
-    queued.queue = Some(QueueInfo { state: "PENDING".into(), reason: "Resources".into() });
-    let outcome = Outcome::Queued { job: queued.job.clone(), queue: queued.queue.clone().unwrap() };
+    let outcome = Outcome::Queued { job: queued.job.clone(), queue };
     let result = status_result("hpc", &reached(outcome, queued), "waits");
     assert_eq!(
         result,
@@ -79,35 +79,36 @@ fn a_status_result_has_what_the_agent_needs() {
             "job": { "id": "7", "summary": "8 CPUs · 32 GB · 8 h" },
         })
     );
-    let mut failed = status(State::Failed);
-    failed.error = Some("boom".into());
-    assert_eq!(status_result("lab", &reached(Outcome::Failed("boom".into()), failed), "m")["error"], "boom");
-    let result = status_result("lab", &reached(Outcome::NothingRunning, status(State::Connected)), "m");
+    assert_eq!(status_result("lab", &reached(Outcome::Failed("boom".into()), status(State::Failed("boom".into()))), "m")["error"], "boom");
+    let result = status_result("lab", &reached(Outcome::NothingRunning, status(State::NothingRunning)), "m");
     assert!(result.get("queue").is_none() && result["state"] == "connected");
-    assert_eq!(status_result("lab", &reached(Outcome::StillWorking(String::new()), status(State::Starting)), "m")["state"], "starting");
+    assert_eq!(status_result("lab", &reached(Outcome::StillWorking(String::new()), status(State::Starting { queue: None })), "m")["state"], "starting");
 }
 
 #[test]
 fn a_job_says_when_it_ends() {
-    let mut ready = status(State::Ready);
+    let mut ready = status(State::Ready(attached_runtime()));
     let now = unix_now();
     ready.job = Some(JobInfo { id: "9".into(), summary: None, node: Some("n1".into()), ends_at: Some(now + 3 * 3600 + 30) });
     let job = job_json(&ready).unwrap();
     assert_eq!((job["id"].as_str(), job["node"].as_str(), job["ends_at"].as_u64(), job["ends_in_minutes"].as_u64()), (Some("9"), Some("n1"), Some(now + 3 * 3600 + 30), Some(180)));
-    assert!(job_json(&status(State::Ready)).is_none());
+    assert!(job_json(&status(State::Ready(attached_runtime()))).is_none());
 }
 
 #[test]
 fn only_a_connection_nothing_hangs_on_is_replaced() {
-    for state in [State::Connecting, State::Connected, State::Failed, State::NeedsInstall] {
-        assert!(replaceable(&status(state)), "{state:?}");
+    let needs = InstallInfo { items: Vec::new(), helper: None };
+    for state in [State::Connecting, State::Connected, State::NothingRunning, State::Failed("no".into()), State::NeedsInstall(needs)] {
+        assert!(replaceable(&status(state.clone())), "{state:?}");
     }
-    for state in [State::Starting, State::Queued, State::Ready] {
-        assert!(!replaceable(&status(state)), "{state:?}");
+    let queue = QueueInfo { state: "PENDING".into(), reason: "Priority".into() };
+    for state in [State::Starting { queue: None }, State::Queued(queue), State::Ready(attached_runtime())] {
+        assert!(!replaceable(&status(state.clone())), "{state:?}");
     }
-    let mut attached = status(State::Connected);
-    attached.runtime = Some(RuntimeInfo { port: 1, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n".into(), pid: 2, reattached: false, job: None, remote_port: None });
-    assert!(!replaceable(&attached));
+}
+
+fn attached_runtime() -> RuntimeInfo {
+    RuntimeInfo { port: 1, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n".into(), pid: 2, reattached: false, job: None, remote_port: None }
 }
 
 #[test]
@@ -246,14 +247,13 @@ fn slurm_is_chosen_by_the_argument_else_by_what_was_saved_else_by_what_was_found
 
 #[test]
 fn stopping_without_force_a_start_that_is_under_way_names_what_would_be_cancelled() {
-    let mut queued = status(State::Queued);
+    let mut queued = status(State::Queued(QueueInfo { state: "PENDING".into(), reason: "Priority".into() }));
     queued.job = Some(JobInfo { id: "4242".into(), ..Default::default() });
-    queued.queue = Some(QueueInfo { state: "PENDING".into(), reason: "Priority".into() });
     let said = waiting_result("hpc", &queued);
     let message = said["message"].as_str().unwrap();
     assert_eq!((said["stopped"].clone(), said["job"]["id"].clone(), said["state"].clone()), (json!(false), json!("4242"), json!("queued")));
     assert!(message.contains("the Slurm job 4242 on hpc is pending (other jobs are ahead of it)") && message.contains("can't see which other sessions are waiting") && message.contains("force true"), "{message}");
-    let said = waiting_result("lab", &status(State::Starting));
+    let said = waiting_result("lab", &status(State::Starting { queue: None }));
     assert!(said["message"].as_str().unwrap().contains("Julia is starting on lab") && said["job"].is_null(), "{said}");
 }
 
@@ -457,10 +457,10 @@ fn the_helper_item_keeps_what_was_found_on_the_machine() {
 #[test]
 fn this_computer_is_called_this_computer_in_what_an_agent_reads() {
     let said = [
-        not_ready_message("local", &reached(Outcome::StillWorking(String::new()), status(State::Starting))),
+        not_ready_message("local", &reached(Outcome::StillWorking(String::new()), status(State::Starting { queue: None }))),
         not_ready_message("local", &reached(Outcome::NothingRunning, status(State::Connected))),
-        not_ready_message("local", &reached(Outcome::Failed("no julia".into()), status(State::Failed))),
-        waiting_result("local", &status(State::Starting))["message"].as_str().unwrap().to_owned(),
+        not_ready_message("local", &reached(Outcome::Failed("no julia".into()), status(State::Failed("no julia".into())))),
+        waiting_result("local", &status(State::Starting { queue: None }))["message"].as_str().unwrap().to_owned(),
         others_result("local", &Others { count: 1, seconds_ago: 5 })["message"].as_str().unwrap().to_owned(),
     ];
     for said in &said {
@@ -469,7 +469,7 @@ fn this_computer_is_called_this_computer_in_what_an_agent_reads() {
     assert!(said[1].contains("`use_machine` with machine \"local\""), "the argument is still local: {}", said[1]);
     let waiting = &said[3];
     assert!(waiting.contains("Julia is starting on this computer") && waiting.contains("Stopping cancels it") && waiting.contains("force true"), "a start there is cancelled by a forced stop: {waiting}");
-    let on_machine = waiting_result("lab", &status(State::Starting))["message"].as_str().unwrap().to_owned();
+    let on_machine = waiting_result("lab", &status(State::Starting { queue: None }))["message"].as_str().unwrap().to_owned();
     assert!(on_machine.contains("Stopping cancels it") && on_machine.contains("force true"), "{on_machine}");
     assert_eq!(waiting.replace("this computer", "lab"), on_machine, "this computer and a machine are told the same");
 }
@@ -492,12 +492,11 @@ fn a_failed_start_on_this_computer_goes_to_every_caller_and_only_a_call_that_ask
     let outcomes: Vec<Outcome> = waiters.into_iter().map(|waiter| waiter.join().unwrap()).collect();
     let Outcome::Failed(why) = outcomes[0].clone() else { panic!("{:?}", outcomes[0]) };
     assert!(why.contains("no-julia") && outcomes[1] == Outcome::Failed(why.clone()), "both waiters are told, and the start stopped at looking for Julia: {outcomes:?}");
-    let status = local.status();
-    assert_eq!((status.state, status.error.as_deref()), (State::Failed, Some(why.as_str())), "a status call has it too");
+    assert_eq!(local.status().state, State::Failed(why.clone()), "a status call has it too");
     assert_eq!(local.ensure(Want::Attach { install: false }, Duration::ZERO, false), Outcome::Failed(why.clone()), "and a look doesn't use it up");
     assert_eq!(local.ensure(start.clone(), Duration::ZERO, false), Outcome::Failed(why), "nor does another start that doesn't ask");
     assert_eq!(local.ensure(Want::Attach { install: false }, Duration::ZERO, true), Outcome::NothingRunning, "a call that asks looks afresh");
-    assert!(local.status().error.is_none());
+    assert!(local.status().state.error().is_none());
 }
 
 /// A Julia that fails, and notes in `log` each time it is run.
@@ -528,7 +527,7 @@ fn a_notebook_call_reports_a_failed_start_once_and_the_next_one_tries_again_and_
 
     let status = route(Need::Peek);
     let reached = status.reached.expect("the status tool says how it stands");
-    assert!(reached.status.state == State::Failed && reached.status.error.is_some(), "the failure comes with its error");
+    assert!(matches!(reached.status.state, State::Failed(_)), "the failure comes with its error");
     assert!(route(Need::Look).message.contains("isn't available"));
     assert!(route(Need::Peek).message.contains("isn't available"), "a query doesn't use up the report");
     assert_eq!(runs(), tried, "no query tried again");

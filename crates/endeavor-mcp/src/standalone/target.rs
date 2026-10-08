@@ -42,8 +42,8 @@ impl Provider for Session {
                 return why;
             }
             match self.status().state {
-                State::NeedsInstall => format!("{why} Ask the user whether Endeavor may install it, then call `stop_machine` again with `install: true`."),
-                State::Failed => format!("{why} Tell the user, and call `stop_machine` again once that is fixed."),
+                State::NeedsInstall(_) => format!("{why} Ask the user whether Endeavor may install it, then call `stop_machine` again with `install: true`."),
+                State::Failed(_) => format!("{why} Tell the user, and call `stop_machine` again once that is fixed."),
                 _ => format!("{why} Wait a few seconds, then call `stop_machine` again."),
             }
         })
@@ -230,15 +230,15 @@ impl Provider for Local {
     }
 
     fn status(&self) -> Status {
-        let (state, step, error, runtime) = match &*self.phase() {
+        let (state, step) = match &*self.phase() {
             // A start another process has under way is a start under way.
-            Phase::Idle if runtime::lock_state(&self.options.state_dir).is_held() => (State::Starting, None, None, None),
-            Phase::Idle => (State::Connected, None, None, None),
-            Phase::Starting(step) => (State::Starting, Some(step.clone()).filter(|step| !step.is_empty()), None, None),
-            Phase::Ready(runtime) => (State::Ready, None, None, Some(runtime.clone())),
-            Phase::Failed(why) => (State::Failed, None, Some(why.clone()), None),
+            Phase::Idle if runtime::lock_state(&self.options.state_dir).is_held() => (State::Starting { queue: None }, None),
+            Phase::Idle => (State::Connected, None),
+            Phase::Starting(step) => (State::Starting { queue: None }, Some(step.clone()).filter(|step| !step.is_empty())),
+            Phase::Ready(runtime) => (State::Ready(runtime.clone()), None),
+            Phase::Failed(why) => (State::Failed(why.clone()), None),
         };
-        Status { machine: LOCAL.into(), name: LOCAL.into(), state, step, error, hello: None, runtime, job: None, queue: None, nothing_running: false, needs_install: None }
+        Status { machine: LOCAL.into(), name: LOCAL.into(), state, step, hello: None, job: None }
     }
 
     fn stop(&self, force: bool) -> Result<(), String> {

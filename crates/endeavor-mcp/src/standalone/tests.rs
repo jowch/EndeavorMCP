@@ -390,7 +390,7 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
 fn a_runtime_replaced_by_another_process_is_noticed_and_the_new_one_is_found() {
     let (port, seen) = fake_core();
     let (relay, _) = ready_relay(port, &seen, true);
-    let before = target::Provider::status(&*relay.local).runtime.unwrap();
+    let crate::client::State::Ready(before) = target::Provider::status(&*relay.local).state else { panic!("the runtime was found") };
     assert_eq!(before.pid, std::process::id());
     // Another process has taken its place in the state folder: the parent of this test is one that is alive.
     let other = std::os::unix::process::parent_id();

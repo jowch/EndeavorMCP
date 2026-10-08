@@ -102,7 +102,7 @@ impl Held {
 }
 
 fn replaceable(status: &Status) -> bool {
-    status.runtime.is_none() && matches!(status.state, State::Connecting | State::Connected | State::Failed | State::NeedsInstall)
+    matches!(status.state, State::Connecting | State::Connected | State::NothingRunning | State::Failed(_) | State::NeedsInstall(_))
 }
 
 impl Drop for Held {
@@ -293,15 +293,15 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-fn state_word(state: State) -> &'static str {
+fn state_word(state: &State) -> &'static str {
     match state {
         State::Connecting => "connecting",
-        State::Connected => "connected",
-        State::Starting => "starting",
-        State::Queued => "queued",
-        State::Ready => "ready",
-        State::Failed => "failed",
-        State::NeedsInstall => "needs_install",
+        State::Connected | State::NothingRunning => "connected",
+        State::Starting { .. } => "starting",
+        State::Queued(_) => "queued",
+        State::Ready(_) => "ready",
+        State::Failed(_) => "failed",
+        State::NeedsInstall(_) => "needs_install",
     }
 }
 
@@ -327,7 +327,7 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
     match &reached.outcome {
         Outcome::StillWorking(step) => {
             let step = if step.is_empty() { String::new() } else { format!(" Last step: {}.", step.trim_end_matches('.')) };
-            if reached.status.state == State::Starting {
+            if matches!(reached.status.state, State::Starting { .. }) {
                 format!("Julia is starting on {at}. The first start installs packages and takes a few minutes.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds for Julia. `pluto_session_status` answers at once and only shows the step, so don't call it repeatedly.")
             } else {
                 format!("Endeavor is connecting to {name}.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds. `pluto_session_status` answers at once and only shows the step, so don't call it repeatedly. If it stays like this, call `use_machine` again.")
@@ -440,21 +440,21 @@ fn job_json(status: &Status) -> Option<Value> {
 }
 
 fn queue_json(status: &Status) -> Option<Value> {
-    let queue = status.queue.as_ref()?;
+    let queue = status.state.queue()?;
     Some(json!({ "state": queue.state, "reason": queue.reason, "reason_text": queue_reason_text(&queue.reason) }))
 }
 
 /// What `pluto_session_status` says when the machine's runtime isn't up.
 fn status_result(name: &str, reached: &Reached, message: &str) -> Value {
     let Reached { outcome, status } = reached;
-    let mut out = json!({ "machine": name, "state": state_word(status.state), "ready": false, "message": message });
+    let mut out = json!({ "machine": name, "state": state_word(&status.state), "ready": false, "message": message });
     let mut put = |key: &str, value: Option<Value>| {
         if let Some(value) = value {
             out[key] = value;
         }
     };
     put("step", status.step.clone().map(Into::into));
-    put("error", status.error.clone().or_else(|| if let Outcome::Failed(why) = outcome { Some(why.clone()) } else { None }).map(Into::into));
+    put("error", status.state.error().map(str::to_owned).or_else(|| if let Outcome::Failed(why) = outcome { Some(why.clone()) } else { None }).map(Into::into));
     put("queue", queue_json(status));
     put("job", job_json(status));
     put("install", if let Outcome::NeedsInstall(info) = outcome { Some(install_json(info)) } else { None });
@@ -706,7 +706,7 @@ impl Relay {
         // The status tool doesn't wait for a start, but a connection only just made is waited for a moment, so that it can say what is there.
         let wait = if need != Need::Peek {
             deadline.left()
-        } else if matches!(provider.status().state, State::Connecting | State::Connected) {
+        } else if matches!(provider.status().state, State::Connecting | State::Connected | State::NothingRunning) {
             deadline.left().min(CONNECT_WAIT)
         } else {
             Duration::ZERO
@@ -732,7 +732,7 @@ impl Relay {
         }
         let status = provider.status();
         // A start another process has under way is not "nothing runs".
-        let outcome = if matches!(outcome, Outcome::NothingRunning) && status.state == State::Starting { Outcome::StillWorking(String::new()) } else { outcome };
+        let outcome = if matches!(outcome, Outcome::NothingRunning) && matches!(status.state, State::Starting { .. }) { Outcome::StillWorking(String::new()) } else { outcome };
         match outcome {
             Outcome::Ready(runtime) => Ok(self.ready(&target, &runtime, status.hello.as_ref().map(|h| h.home.as_str()))),
             Outcome::NothingRunning if provider.cluster() => Err(NotReady::of(&name, Outcome::NothingRunning, status, self.needs_job_message(&target))),
@@ -857,7 +857,7 @@ impl Relay {
             if let Some(job) = job_json(&status) {
                 fields.insert("job".into(), job);
             }
-            if let Some(port) = status.runtime.and_then(|r| r.remote_port) {
+            if let Some(port) = status.state.runtime().and_then(|r| r.remote_port) {
                 fields.insert("remote_port".into(), port.into());
             }
         }
@@ -916,9 +916,9 @@ impl Relay {
             .iter()
             .map(|server| {
                 let status = self.connections.status(&server.id);
-                let state = status.as_ref().map_or("not connected", |s| state_word(s.state));
+                let state = status.as_ref().map_or("not connected", |s| state_word(&s.state));
                 let mut entry = json!({ "name": server.display_name(), "host": server.ssh_target(), "cluster": server.cluster.is_some(), "state": state, "this_session": target.id == server.id });
-                if let Some(error) = status.and_then(|s| s.error) {
+                if let Some(error) = status.as_ref().and_then(|s| s.state.error()) {
                     entry["error"] = error.into();
                 }
                 entry
@@ -1015,7 +1015,7 @@ impl Relay {
             Ok(cluster) => cluster,
             Err(why) => return Err(format!("{why}\nNothing was saved.")),
         };
-        if existing.as_ref().is_some_and(|p| p.cluster.is_some() != cluster) && (status.runtime.is_some() || status.job.is_some() || matches!(status.state, State::Starting | State::Queued | State::Ready)) {
+        if existing.as_ref().is_some_and(|p| p.cluster.is_some() != cluster) && (status.job.is_some() || matches!(status.state, State::Starting { .. } | State::Queued(_) | State::Ready(_))) {
             return Err(format!(
                 "Julia is running, or starting, on {} through the way it is saved now. Changing between running Julia in Slurm jobs and running it directly would leave that one where `stop_machine` can't reach it. Nothing was changed. Call `stop_machine` first (with the user's agreement), then call `add_machine` again.",
                 record.display_name()
@@ -1152,7 +1152,7 @@ impl Relay {
         };
         let name = server.display_name();
         let provider = self.provider_for(&server, install, false)?;
-        let was_ready = provider.status().state == State::Ready;
+        let was_ready = matches!(provider.status().state, State::Ready(_));
         let mut notes: Vec<String> = Vec::new();
         let mut saved_resources = None;
         let outcome = match &server.cluster {
@@ -1277,7 +1277,7 @@ impl Relay {
         let name = server.display_name();
         let at = place(&name);
         let provider = self.provider_for(&server, install, true)?;
-        if !matches!(provider.status().state, State::Ready | State::Starting | State::Queued) {
+        if !matches!(provider.status().state, State::Ready(_) | State::Starting { .. } | State::Queued(_)) {
             match provider.ensure(Want::Attach { install }, deadline.left(), true) {
                 Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, &info, "stop_machine")),
                 Outcome::NothingRunning => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Julia isn't running on {at}, so there is nothing to stop.") })),
@@ -1285,10 +1285,10 @@ impl Relay {
             }
         }
         let status = provider.status();
-        if !force && matches!(status.state, State::Starting | State::Queued) {
+        if !force && matches!(status.state, State::Starting { .. } | State::Queued(_)) {
             return Ok(waiting_result(&name, &status));
         }
-        if !force && let Some(runtime) = status.runtime.as_ref() {
+        if !force && let Some(runtime) = status.state.runtime() {
             let others = self.recent_others(runtime.port, &runtime.token, deadline.left().min(CHECK_WAIT))?;
             if others.count > 0 {
                 return Ok(others_result(&name, &others));
@@ -1382,19 +1382,19 @@ fn reach_text(server: &Server, runtime: &RuntimeInfo) -> String {
 fn waiting_result(name: &str, status: &Status) -> Value {
     let at = place(name);
     let cancels = " Stopping cancels it. Endeavor can't see which other sessions are waiting for a runtime that isn't up yet, and they would lose it. Tell the user, and call `stop_machine` again with force true only if they agree.";
-    let (what, then) = match (&status.job, &status.queue, status.state) {
+    let (what, then) = match (&status.job, &status.state) {
         _ if name == LOCAL => (format!("Julia is starting on {at}"), cancels),
-        (job, Some(queue), State::Queued) => {
+        (job, State::Queued(queue)) => {
             let id = job.as_ref().map_or(String::new(), |j| format!(" {}", j.id));
             (format!("the Slurm job{id} on {name} is {} ({})", queue.state.to_lowercase(), queue_reason_text(&queue.reason)), cancels)
         }
-        (Some(job), _, _) => (format!("the Slurm job {} on {name} is starting Julia", job.id), cancels),
+        (Some(job), _) => (format!("the Slurm job {} on {name} is starting Julia", job.id), cancels),
         _ => (format!("Julia is starting on {name}"), cancels),
     };
     let mut result = json!({
         "machine": name,
         "stopped": false,
-        "state": state_word(status.state),
+        "state": state_word(&status.state),
         "message": format!("Nothing was stopped: {what}.{then}"),
     });
     if let Some(job) = job_json(status) {

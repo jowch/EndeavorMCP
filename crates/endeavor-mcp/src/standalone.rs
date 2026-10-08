@@ -868,7 +868,7 @@ impl Relay {
             }
         }
         // Only a call of a tool this build has starts a runtime.
-        if !self.held(&target).is_some_and(|provider| provider.status().state == crate::client::State::Ready) {
+        if !self.held(&target).is_some_and(|provider| matches!(provider.status().state, crate::client::State::Ready(_))) {
             let Some(id) = &id else { return };
             if tool.is_none() {
                 if let Some(method) = message["method"].as_str() {
