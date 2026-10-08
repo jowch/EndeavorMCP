@@ -71,6 +71,9 @@ pub enum RuntimeState {
     /// A cluster job for it waits in the queue (`state` PENDING and the like),
     /// or has a node (`state` RUNNING) and Julia is starting there.
     Queued { job: String, state: String, reason: String },
+    /// Julia is starting here and has not recorded itself yet: no start is needed, and asking for one
+    /// waits for it.
+    Starting,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -511,6 +514,10 @@ mod tests {
         let json = serde_json::to_value(&queued).unwrap();
         assert_eq!((json["kind"].as_str(), json["runtime"]["is"].as_str()), (Some("Runtime"), Some("Queued")));
         assert_eq!(serde_json::from_value::<Reply>(json).unwrap(), queued);
+        let starting = Reply::Runtime { runtime: RuntimeState::Starting };
+        let json = serde_json::to_value(&starting).unwrap();
+        assert_eq!(json["runtime"], serde_json::json!({ "is": "Starting" }));
+        assert_eq!(serde_json::from_value::<Reply>(json).unwrap(), starting);
         let piece = Request::Write { folder: "~/s".into(), path: "data/a.csv".into(), offset: 0, bytes: b"t,y\n".to_vec(), last: true };
         let json = serde_json::to_value(&piece).unwrap();
         assert_eq!(json["bytes"], "dCx5Cg==", "bytes go as base64");

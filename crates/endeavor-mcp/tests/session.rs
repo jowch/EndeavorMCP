@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{FakeBridge, TOKEN, pid_alive, serving_julia, wait_for};
+use common::{FakeBridge, TOKEN, julia_pids, pid_alive, serving_julia, wait_for};
 use endeavor_mcp::client::{Config, Outcome, RuntimeInfo, Server, Session, State, Transport, Want};
 
 /// One machine called `lab-NAME` whose helper and runtime live in a folder of the test's own.
@@ -88,7 +88,9 @@ impl Drop for Place {
 /// End the runtime a test of `dir` started (the core, Julia and its workers are one process group).
 fn end_runtime(dir: &Path) {
     let recorded = std::fs::read_to_string(dir.join("runtime-state/runtime.json")).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    if let Some(pid) = recorded.and_then(|v| v["pid"].as_i64()).filter(|&p| p > 1) {
+    // A core that is still starting has no record, but names itself in `starting.lock`.
+    let starting = std::fs::read_to_string(dir.join("runtime-state/starting.lock")).ok().and_then(|t| t.split_whitespace().next().and_then(|p| p.parse::<i64>().ok()));
+    if let Some(pid) = recorded.and_then(|v| v["pid"].as_i64()).or(starting).filter(|&p| p > 1) {
         // SAFETY: plain syscall, on the runtime this test started.
         unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
     }
@@ -447,6 +449,38 @@ fn a_connection_lost_while_the_runtime_starts_is_resumed_after_the_reconnect() {
     std::fs::remove_file(&gate).unwrap();
     let runtime = ready(session.ensure(start(), LONG, false));
     assert_eq!((Some(runtime.pid as i32), runtime.reattached), (place.runtime(), true));
+}
+
+#[test]
+fn a_connection_lost_and_back_while_the_core_still_starts_sees_the_start_and_waits_for_it() {
+    // The core holds `starting.lock` and has no record from before the connection drops until the reconnect
+    // is over: `hold` keeps Julia from being ready, and `gate` keeps the connection from coming back.
+    let place = Place::new("lost-starting-held");
+    let (hold, gate) = (place.state.join("hold"), place.dir.join("gate"));
+    std::fs::write(&hold, "").unwrap();
+    let session = place.session_with(true, Some(format!("while [ -e {} ]; do sleep 0.1; done", gate.display())));
+    assert!(matches!(session.ensure(start(), Duration::from_millis(1500), false), Outcome::StillWorking(_)));
+    wait_for("Julia to be asked for", || place.julia_ran());
+    std::fs::write(&gate, "").unwrap();
+    place.drop_connection();
+    wait_for("the connection lost", || session.status().state == State::Connecting);
+    assert!(place.runtime().is_none(), "the core has not recorded itself");
+    std::fs::remove_file(&gate).unwrap();
+
+    wait_for("the new connection to see the start", || {
+        let status = session.status();
+        status.state == State::Starting && status.step.as_deref().is_some_and(|step| step.contains("waiting for it"))
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let status = session.status();
+    assert_eq!((status.state, status.error), (State::Starting, None), "not \"not running\", while the core is still starting");
+    assert!(place.runtime().is_none());
+
+    std::fs::remove_file(&hold).unwrap();
+    let runtime = ready(session.ensure(start(), LONG, false));
+    assert_eq!((Some(runtime.pid as i32), runtime.reattached), (place.runtime(), true), "the start it did not begin");
+    assert_eq!(julia_pids(&place.state).len(), 1, "one core ran: the second connection started none");
+    assert_eq!(session.status().state, State::Ready);
 }
 
 #[test]

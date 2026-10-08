@@ -47,9 +47,9 @@ pub fn find_julia() -> Option<(PathBuf, Option<PathBuf>)> {
     path.starts_with('/').then(|| (PathBuf::from(path), None))
 }
 
-/// A julia that says it's 1.12, records its arguments, writes its state for the
-/// core naming `bridge`'s ports, and sleeps as its own pid. It waits first while
-/// the file `hold` is in `dir`.
+/// A julia that says it's 1.12, records its arguments and its pid (a line of `julia.pids` per run), writes
+/// its state for the core naming `bridge`'s ports, and sleeps as its own pid. It waits first while the file
+/// `hold` is in `dir`.
 pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
     let bin = dir.join("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -58,6 +58,7 @@ pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
         r#"#!/bin/sh
 [ "$1" = --version ] && {{ echo 'julia version 1.12.0'; exit 0; }}
 echo "$@" > "{dir}/julia.args"
+echo $$ >> "{dir}/julia.pids"
 echo "booting"
 while [ -e "{dir}/hold" ]; do sleep 0.1; done
 printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"token":"%s","pluto_secret":"{PLUTO_SECRET}","job":"%s"}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$ENDEAVOR_TOKEN" "$FAKE_JOB" > "$ENDEAVOR_STATE.tmp"
@@ -79,7 +80,7 @@ pub fn require_debug_build() {
 }
 
 pub fn state_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("endeavor-mcp-{name}-{}", std::process::id()));
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("endeavor-mcp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -108,6 +109,11 @@ pub fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
 
 pub fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The pids of the Julia runs `serving_julia` made in `dir`, one per start.
+pub fn julia_pids(dir: &Path) -> Vec<i32> {
+    std::fs::read_to_string(dir.join("julia.pids")).map(|text| text.split_whitespace().filter_map(|p| p.parse().ok()).collect()).unwrap_or_default()
 }
 
 pub fn pid_alive(pid: i32) -> bool {

@@ -233,6 +233,18 @@ fn a_start_under_way_is_reported_beside_whatever_is_recorded() {
     assert!(text.contains("Not running.") && text.contains("Start under way: yes"), "{text}");
     assert_eq!((runtime(&json_out)["state"].clone(), runtime(&json_out)["starting"].clone(), runtime(&json_out)["pid"].clone()), (json!("not_running"), json!(true), Value::Null));
 
+    assert_eq!(runtime(&json_out)["starting_pid"], Value::Null, "no process is named in the file");
+
+    // A core names itself in the file it holds.
+    let core = std::process::id();
+    std::os::unix::fs::FileExt::write_all_at(&lock, format!("{core:>11} {:>20}\n", 0).as_bytes(), 0).unwrap();
+    let (text, json_out) = home.both(&["--state-dir", dir_arg]);
+    assert!(text.contains(&format!("Start under way: yes (pid {core} holds starting.lock")), "{text}");
+    assert_eq!(runtime(&json_out)["starting_pid"], json!(core));
+    // A pid that is no process is not named.
+    std::os::unix::fs::FileExt::write_all_at(&lock, format!("{:>11} {:>20}\n", i32::MAX, 0).as_bytes(), 0).unwrap();
+    assert_eq!(runtime(&home.both(&["--state-dir", dir_arg]).1)["starting_pid"], Value::Null);
+
     // A record whose process is gone is still named stale; the start is separate.
     record(&dir, json!({ "pid": i32::MAX, "port": 4321 }));
     let (text, json_out) = home.both(&["--state-dir", dir_arg]);

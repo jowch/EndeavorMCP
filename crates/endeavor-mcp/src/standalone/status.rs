@@ -40,6 +40,9 @@ struct RuntimeReport {
     state: &'static str,
     /// A core holds `starting.lock`: a start is under way, whatever `state` says.
     starting: bool,
+    /// The process that holds it, as `starting.lock` names it, when it is that process; none for a core
+    /// of an older build, or one that has just taken the lock.
+    starting_pid: Option<i32>,
     /// The record's, for `running` and `stale` only; `other_computer` has its `node` alone.
     pid: Option<i32>,
     port: Option<u16>,
@@ -151,6 +154,7 @@ fn runtime_report(dir: &Path) -> RuntimeReport {
         state_dir: dir.to_owned(),
         state: "not_running",
         starting: runtime::starting(dir),
+        starting_pid: runtime::starting_core(dir).map(|core| core.pid),
         pid: None,
         port: None,
         node: None,
@@ -301,7 +305,12 @@ fn text(report: &Report) -> String {
         "other_computer" => line(format!("  Recorded by {}, not this computer ({}), so not checked.", runtime.node.as_deref().unwrap_or("another computer"), hostname())),
         _ => line("  Not running.".into()),
     }
-    line(format!("  Start under way: {}", if runtime.starting { "yes (a runtime holds starting.lock and has not recorded itself yet)" } else { "no" }));
+    let under_way = match (runtime.starting, runtime.starting_pid) {
+        (false, _) => "no".to_owned(),
+        (true, Some(pid)) => format!("yes (pid {pid} holds starting.lock and has not recorded itself yet; `endeavor stop --force` cancels it)"),
+        (true, None) => "yes (a runtime holds starting.lock and has not recorded itself yet)".to_owned(),
+    };
+    line(format!("  Start under way: {under_way}"));
     if let Some(log) = &runtime.log {
         line(format!("  Log: {}", log.display()));
     }

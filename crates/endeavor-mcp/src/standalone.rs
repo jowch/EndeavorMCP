@@ -41,7 +41,7 @@ mod target;
 
 const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Julia here and print how to connect (Ctrl-C stops it)
        endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
-       endeavor stop              stop the Julia that serve or mcp started
+       endeavor stop [--force]    stop the Julia that serve or mcp started; --force cancels a start under way
        endeavor status [--json]   show what Endeavor has on this computer; changes nothing
 
 options:
@@ -55,6 +55,7 @@ options:
   --idle-stop HOURS    stop notebooks unused this long; 0 never (default 48)
   --state-dir DIR      the runtime's state (default ~/.local/state/endeavor/serve/<host>) [serve, mcp, stop, status]
   --json               print the facts as one JSON object [status]
+  --force              end Julia while it is still starting, with what it began [stop]
 ";
 
 /// How long a relayed call, and each machine tool, waits for a runtime that is
@@ -68,7 +69,7 @@ fn start_wait() -> Duration {
 pub(crate) enum Command {
     Serve(Options),
     Mcp(Options),
-    Stop { state_dir: PathBuf },
+    Stop { state_dir: PathBuf, force: bool },
     Status { state_dir: PathBuf, json: bool },
 }
 
@@ -95,7 +96,7 @@ pub(crate) struct Options {
 pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     let (command, rest) = argv.split_first().ok_or("expected serve, mcp, stop or status")?;
     let (mut state_dir, mut julia, mut depot, mut folder, mut port) = (None, None::<julia::Source>, None, None, 0);
-    let (mut host_tools, mut idle_hours, mut skills_plugin, mut json) = (false, crate::notebooks::IDLE_HOURS, false, false);
+    let (mut host_tools, mut idle_hours, mut skills_plugin, mut json, mut force) = (false, crate::notebooks::IDLE_HOURS, false, false, false);
     let mut args = rest.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or(format!("{arg} needs a value"));
@@ -131,6 +132,10 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
                 only(&["status"])?;
                 json = true
             }
+            "--force" => {
+                only(&["stop"])?;
+                force = true
+            }
             "--host-tools" => {
                 only(&["serve"])?;
                 host_tools = true
@@ -147,7 +152,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     }
     let state_dir = state_dir.unwrap_or_else(|| env.state_dir());
     match command.as_str() {
-        "stop" => return Ok(Command::Stop { state_dir }),
+        "stop" => return Ok(Command::Stop { state_dir, force }),
         "status" => return Ok(Command::Status { state_dir, json }),
         _ => {}
     }
@@ -188,7 +193,7 @@ pub fn main(argv: &[String]) -> ! {
     match command {
         Command::Serve(options) => serve(options),
         Command::Mcp(options) => relay(options),
-        Command::Stop { state_dir } => stop(&state_dir),
+        Command::Stop { state_dir, force } => stop(&state_dir, force),
         Command::Status { state_dir, json } => status::main(&env, &state_dir, json),
     }
 }
@@ -654,18 +659,20 @@ fn serve(options: Options) -> ! {
     std::process::exit(0)
 }
 
-fn stop(dir: &Path) -> ! {
+fn stop(dir: &Path, force: bool) -> ! {
     let failed = |message: String| -> ! {
         eprintln!("{message}");
         std::process::exit(1)
     };
     let _starting = stop_lock(dir).unwrap_or_else(|why| failed(why));
     let (events, _) = mpsc::channel();
-    match runtime::end(dir, false, stopped::How::Stop, &events) {
+    match runtime::end(dir, false, stopped::How::Stop, force, &events) {
         Ended::NotRunning => println!("No Julia is running from {}.", dir.display()),
         Ended::Elsewhere(node) => failed(format!("The Julia recorded in {} runs on {node}, not here ({}). Stop it there.", dir.display(), crate::hostname())),
         Ended::Alive(pid) => failed(format!("Julia (pid {pid}) is still running.")),
-        Ended::Starting => failed(format!("Julia is still starting in {}. Try again once it is up.", dir.display())),
+        Ended::Starting => failed(format!("Julia is still starting in {}. `endeavor stop --force` cancels the start.", dir.display())),
+        Ended::Unidentified => failed(runtime::START_UNIDENTIFIED.into()),
+        Ended::Cancelled(pid) => println!("Cancelled the start of Julia (pid {pid})."),
         Ended::Stopped(pid) => println!("Stopped Julia (pid {pid})."),
     }
     std::process::exit(0)

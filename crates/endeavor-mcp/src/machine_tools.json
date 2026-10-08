@@ -99,7 +99,7 @@
     "name": "use_machine"
   },
   {
-    "description": "Stop the Julia runtime on a machine (\"local\" is this computer) for every client, and on a cluster cancel its job. This ends all notebooks running there, other people's too. Only when the user asks. Without `force` it stops nothing, and says why, if another session was active in the last 15 minutes, Julia is still starting or a job is queued, or it can't check: tell the user, and call again with `force` true only if they agree. A start on this computer can't be cancelled. If Endeavor's program there is missing or too old, the result is `needs_install`: ask the user, and set `install` only if they agree. This session stays pointed at the machine; `use_machine` starts it again.",
+    "description": "Stop the Julia runtime on a machine (\"local\" is this computer) for every client, and on a cluster cancel its job. This ends all notebooks running there, other people's too. Only when the user asks. Without `force` it stops nothing, and says why, if another session was active in the last 15 minutes, Julia is still starting or a job is queued, or it can't check: tell the user, and call again with `force` true only if they agree. With `force` a start that is under way is cancelled, on this computer too. If Endeavor's program there is missing or too old, the result is `needs_install`: ask the user, and set `install` only if they agree. This session stays pointed at the machine; `use_machine` starts it again.",
     "inputSchema": {
       "properties": {
         "force": {

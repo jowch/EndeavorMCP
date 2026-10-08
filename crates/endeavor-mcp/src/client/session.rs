@@ -661,7 +661,7 @@ impl Shared {
         // A stop or a close that came meanwhile has ended this start: nothing is attached to what it stopped.
         let current = |i: &Inner| i.conn == conn && i.epoch == epoch && !self.leaving.load(Ordering::SeqCst);
         match answer {
-            Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } }) => {
+            Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } | RuntimeState::Starting }) => {
                 let i = self.inner();
                 i.wanted.clone().filter(|_| current(&i))
             }
@@ -966,7 +966,7 @@ fn find_partitions(shared: &Shared, channel: &Channel, conn: u64) {
 }
 
 /// After a reconnect, attach to the runtime that was asked for only if the
-/// helper says it is still there (running, or a job that waits): a start would
+/// helper says it is still there (running, starting, or a job that waits): a start would
 /// otherwise begin a new runtime, or on a cluster submit a job nobody asked for.
 /// An answer that isn't clear is asked for again, and then leaves the session `Failed`.
 fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
@@ -979,7 +979,7 @@ fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
             return;
         }
         match channel.files(Request::Runtime) {
-            Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } }) => {
+            Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } | RuntimeState::Starting }) => {
                 shared.with(|i| {
                     if current(i) {
                         i.wanted = Some(wish);

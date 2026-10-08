@@ -9,16 +9,6 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The connection library
 
-- **A start cut short by a lost connection is reported as "not running".**
-  After a reconnect the session only re-attaches to a runtime the helper can
-  see. A core that was still booting when the connection dropped has no
-  `runtime.json` yet, so the helper's runtime check says nothing is running,
-  though the core goes on and records itself, and the next `StartRuntime`
-  waits for it (`starting.lock`). The session never starts one by itself; the
-  next `use_machine` does. To close: have the check report a start under way.
-- **The test for a connection lost during a start doesn't force the order
-  of messages that caused the bug.** It passes on the old code too. The fix
-  is covered by reading, not by the test.
 - **A runtime that dies in the moment its start succeeds** is handled
   (`Run::Gone`, in `client/session.rs`) but has no test: the order can't be forced.
 - **A stop that fails while a start is under way** restores the start's
@@ -86,8 +76,19 @@ _Started 2026-10-06, on the `client-library` branch._
 - **`list_machines` says "not running" for a local runtime recorded on another
   node** (a state folder shared between computers). A notebook call then says
   where it is running. To close: a third state for "running on another node".
-- **On this computer a stop never cancels a start under way,** with `force`
-  either (it says Julia is still starting); on a machine `force` cancels it.
+- **A forced stop cancels a start only when `starting.lock` names its core.**
+  `endeavor stop --force` and `stop_machine` with `force` on this computer end
+  the core the file names, if the lock is held and that process started when the
+  file says. A core of an older build writes no pid, and a core that has just
+  taken the lock has not yet: the stop then says it can't tell which process is
+  starting Julia and stops nothing. Find the process with `ps` and end it, or
+  try again in a moment.
+- **On a machine, a stop cannot cancel a start another connection began.** The
+  helper's `Stop` has no `force`, so `stop_machine` with `force` ends a start
+  that this session's own connection is waiting on, and for another process's
+  start the helper still says it is still starting. Run `endeavor stop --force`
+  on the machine, with the helper's `--state-dir`. To close: a `force` on the
+  `Stop` message.
 - **Five variables for tests are read by release builds.**
   `ENDEAVOR_START_WAIT_SECS`, `ENDEAVOR_IDLE_CHECK_SECS`,
   `ENDEAVOR_START_LOCK_SECS`, `ENDEAVOR_STOP_LOCK_SECS` and
@@ -120,14 +121,22 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Stopping and the client
 
-- **A start that hangs, with no client left, is ended only by ending its
-  process by hand.** Clients that wait for it never stop it, and a stop says it
-  is still starting. Find the core with `ps` and end it.
+- **A start that hangs, with no client left, is ended only by a forced stop.**
+  Clients that wait for it never stop it, and a stop without `force` says it is
+  still starting. On this computer `endeavor stop --force` ends it; on a machine
+  see "On a machine, a stop cannot cancel a start another connection began".
+  There is no deadline for a start.
 - **`starting.lock` is a file lock, which a home folder shared by several
   machines may not carry between them.** A client on another machine may then
   not see a start under way and start a second runtime. A recorded runtime of
   another node is still refused by name (`runtime.json`); this is only for a
   start with no record yet.
+- **A recorded pid is compared with its start time only where the platform gives
+  one.** Linux (`/proc/PID/stat`) and macOS (`proc_pidinfo`) do. The macOS code
+  is built, and its unit test run, only by CI (`macos-15`); nobody has run it by hand. A
+  start time that can't be read (another user's process under `hidepid`) counts
+  as not the process. When a stale pid is another program's, a runtime's leftover
+  notebook workers are not signalled, since their group id may be that program's.
 - **A helper started with `--quit-with-client` stops, when its input ends
   during a start, only a runtime it started itself.** One it was waiting for
   (another process began it) is left to finish. Once it is attached, the end
@@ -180,6 +189,20 @@ _Started 2026-10-06, on the `client-library` branch._
   ends the job with the session (read from its source, not run). Endeavor
   asks to leave the job and starts inside it when refused. To close: start
   the runtime there another way, before Windows is offered.
+- **The byte lock on `starting.lock` is not run on Windows.** Windows locks bytes
+  against other processes' reads, and std's `File::lock` and `try_lock_shared`
+  lock every byte (`LockFileEx` from offset 0 over the largest length, read in
+  std's source), so the core locks one byte at offset 4096, past the 33 bytes
+  the file holds, with `LockFileEx` itself and the pid stays readable. It works
+  for any lock from offset 0 longer than 4 KiB. CI compiles and tests this on
+  `windows-latest` with a stand-in Julia, but the pid and the cancel are not
+  tested there (the tests that use them are Unix only). A core that can't write
+  its pid in the file does not start.
+- **A call that only attaches can wait for a start.** After a reconnect or in
+  `list_notebooks`, a runtime that is starting counts as there, so the call sends
+  `StartRuntime`, which waits for the start. If that start dies without a stop
+  noted, the helper starts a runtime, where before the call answered "not
+  running" at once.
 
 ## Slurm
 
@@ -370,8 +393,13 @@ _Started 2026-10-06, on the `client-library` branch._
   as the files it holds. It asks a running runtime for up to two pings, each
   limited to 5 seconds in all, so it takes about 10 seconds at most. A ping sends
   the recorded token to the recorded port on 127.0.0.1 (every pinging `look`
-  does, including `endeavor status`; a stale record whose port another local
-  program now uses would show it the token). It reads `runtime.json` through
+  does, including `endeavor status`), and only if the recorded pid is the process
+  that started then (its start time is recorded). That still leaves a record
+  without a start time, which an older build wrote or a Unix system that gives
+  none, and Linux's start time is in clock ticks after boot, so after a reboot a
+  process with the same pid that started in the same tick is not told apart. In
+  those cases a stale record whose port another local program now uses would show
+  it the token. It reads `runtime.json` through
   `State`, while `standalone::recorded_folder` and `other_build_than` still read
   the file on their own (their tests write partial records), so the record has
   two readers. `bridge_rpc` (the app's calls) still has per-read timeouts only. To

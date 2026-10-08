@@ -155,7 +155,7 @@ pub fn main(argv: &[String]) -> ! {
         std::thread::sleep(Duration::from_millis(100));
     };
     let _ = std::fs::remove_file(&julia_state);
-    remove_state(&args.state_dir, std::process::id() as i32);
+    remove_state(&args.state_dir, std::process::id() as i32, None);
     exit_like(status)
 }
 
@@ -222,10 +222,7 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge,
         set_pluto_folder(ready.bridge_port, token, &standalone.folder);
     }
     // With the pid, what tells the core from a later process given its pid.
-    #[cfg(windows)]
-    let started = crate::winproc::own_start_time();
-    #[cfg(unix)]
-    let started: Option<u64> = None;
+    let started = crate::own_start_time();
     let mut state = json!({
         "launcher": julia["launcher"], "node": julia["node"], "job": julia["job"],
         "pid": std::process::id(), "started": started, "port": port, "token": token, "exits_when_idle": bridge.notebooks.exits_when_idle,
@@ -241,7 +238,9 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge,
         return None;
     }
     // Let go after the record is written: whoever sees the lock free and no record knows the start died.
-    drop(starting.take());
+    if let Some(file) = starting.take() {
+        crate::runtime::release_starting(file);
+    }
     Some(ready)
 }
 

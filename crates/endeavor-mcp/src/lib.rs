@@ -31,6 +31,8 @@ mod slurm;
 mod standalone;
 mod stopped;
 mod update;
+#[cfg(unix)]
+mod unixproc;
 #[cfg(windows)]
 mod winproc;
 
@@ -119,8 +121,9 @@ struct State {
     launcher: String,
     node: String,
     pid: i32,
-    /// When that process started (Windows: its creation time, which tells it
-    /// from a later process given the same pid); none on Unix.
+    /// When that process started (`unixproc::start_time`, `winproc::start_time`), which tells it from a
+    /// later process given the same pid; none for a record from a build before it was written, and on
+    /// a Unix system that gives no start time.
     started: Option<u64>,
     /// The runtime's one port (the core's). None for a runtime from a build
     /// before one port per runtime, which this helper can stop but not relay to.
@@ -460,7 +463,7 @@ impl Attached {
         *routes.write().unwrap() = Route::None;
         match &self.how {
             How::Process(runtime, _) => {
-                if !stop_marked(&args.state_dir, &self.state, runtime, stopped::How::Connection) {
+                if !stop_marked(&args.state_dir, Some(&self.state), runtime, stopped::How::Connection) {
                     *routes.write().unwrap() = self.route();
                     return Err(Box::new((self, STILL_RUNNING.into())));
                 }
@@ -480,12 +483,12 @@ const STILL_RUNNING: &str = "Julia was not stopped: it is still running.";
 
 /// Stop `runtime`, leaving a note for the other clients of how it was stopped
 /// (see `stopped`), and taking the note back if it is still alive. Whether it
-/// is gone.
-fn stop_marked(dir: &Path, state: &State, runtime: &Runtime, how: stopped::How) -> bool {
-    let of = stopped::Of::Runtime(state.pid);
+/// is gone. `state` is its record, which a runtime that is starting does not have yet.
+fn stop_marked(dir: &Path, state: Option<&State>, runtime: &Runtime, how: stopped::How) -> bool {
+    let of = stopped::Of::Runtime(runtime.pid);
     stopped::mark(dir, of, how);
-    runtime.stop(Some(state));
-    let gone = !pid_alive(state.pid, state.started);
+    runtime.stop(state);
+    let gone = !pid_alive(runtime.pid, runtime.started);
     if !gone {
         stopped::unmark(dir, of);
     }
@@ -730,11 +733,11 @@ fn stop_recorded(args: &Args, inbox: &mut Inbox, events: &Sender<Event>) -> Resu
     let dir = &args.state_dir;
     let _starting = lock_stop(dir, inbox, standalone::stop_lock_limit())?;
     match args.launcher {
-        Launcher::Process => match runtime::end(dir, args.any_node, stopped::How::Connection, events) {
-            Ended::NotRunning | Ended::Stopped(_) => {}
+        Launcher::Process => match runtime::end(dir, args.any_node, stopped::How::Connection, false, events) {
+            Ended::NotRunning | Ended::Stopped(_) | Ended::Cancelled(_) => {}
             Ended::Elsewhere(node) => return Err(format!("Julia was not stopped. {}", runtime::other_node_text(&node))),
             Ended::Alive(_) => return Err(STILL_RUNNING.into()),
-            Ended::Starting => return Err(runtime::STILL_STARTING.into()),
+            Ended::Starting | Ended::Unidentified => return Err(runtime::STILL_STARTING.into()),
         },
         Launcher::Slurm => slurm::cancel_recorded(dir),
     }
@@ -754,7 +757,10 @@ fn check(dir: &Path, launcher: Launcher, any_node: bool) -> RuntimeState {
     if launcher == Launcher::Slurm {
         return slurm::check(dir);
     }
+    // Before the look: a core writes its record before it lets go of the lock.
+    let starting = runtime::starting(dir);
     match runtime::look(dir, any_node, true) {
+        runtime::Looked::NotRunning | runtime::Looked::Dead(_) if starting => RuntimeState::Starting,
         runtime::Looked::NotRunning | runtime::Looked::Dead(_) | runtime::Looked::Silent(_) => RuntimeState::NotRunning,
         runtime::Looked::OtherNode(state) | runtime::Looked::Older(state) => RuntimeState::Running { node: state.node, notebooks: None, job: None },
         runtime::Looked::Running(state, port) => RuntimeState::Running { notebooks: open_notebooks(port, &state.token), node: state.node, job: None },
@@ -774,7 +780,6 @@ fn open_notebooks(port: u16, token: &str) -> Option<u32> {
 struct Runtime {
     pid: i32,
     /// As in `State`: what `kill` checks the pid against before ending it.
-    #[cfg(windows)]
     started: Option<u64>,
     exit: Arc<Exit>,
     state_dir: PathBuf,
@@ -786,9 +791,10 @@ impl Runtime {
         let pid = child.id() as i32;
         #[cfg(windows)]
         let started = winproc::start_time(std::os::windows::io::AsRawHandle::as_raw_handle(&child));
+        #[cfg(unix)]
+        let started = unixproc::start_time(pid);
         Runtime {
             pid,
-            #[cfg(windows)]
             started,
             exit: Exit::watch_child(child, pid, events.clone()),
             state_dir: state_dir.to_path_buf(),
@@ -797,14 +803,12 @@ impl Runtime {
 
     /// The runtime `state` records, which some earlier helper started.
     fn recorded(state: &State, state_dir: &Path, events: &Sender<Event>) -> Runtime {
-        let exit = Exit::watch_pid(state.pid, state.started, events.clone());
-        Runtime {
-            pid: state.pid,
-            #[cfg(windows)]
-            started: state.started,
-            exit,
-            state_dir: state_dir.to_path_buf(),
-        }
+        Runtime::of(state.pid, state.started, state_dir, events)
+    }
+
+    /// The runtime process `pid`, which started at `started`, though it has no record.
+    fn of(pid: i32, started: Option<u64>, state_dir: &Path, events: &Sender<Event>) -> Runtime {
+        Runtime { pid, started, exit: Exit::watch_pid(pid, started, events.clone()), state_dir: state_dir.to_path_buf() }
     }
 
     /// It exited: clean up after it and say so, and if another connection
@@ -814,7 +818,7 @@ impl Runtime {
         let log_tail = log_tail(&self.state_dir.join("runtime.log"));
         // Its notebook workers are no use without it.
         stop_workers(self.pid);
-        remove_state(&self.state_dir, self.pid);
+        remove_state(&self.state_dir, self.pid, self.started);
         (status, log_tail)
     }
 
@@ -832,7 +836,8 @@ impl Runtime {
     #[cfg(unix)]
     fn kill(&self) {
         for signal in [libc::SIGTERM, libc::SIGKILL] {
-            if self.exit.status().is_some() {
+            // A pid that is now another process's is not signalled.
+            if self.exit.status().is_some() || !pid_alive(self.pid, self.started) {
                 break;
             }
             signal_group(self.pid, signal);
@@ -840,8 +845,8 @@ impl Runtime {
         }
         stop_workers(self.pid);
         // A runtime that survived stays on record for the clients that can still reach it.
-        if !pid_alive(self.pid, None) {
-            remove_state(&self.state_dir, self.pid);
+        if !pid_alive(self.pid, self.started) {
+            remove_state(&self.state_dir, self.pid, self.started);
         }
     }
 
@@ -855,7 +860,7 @@ impl Runtime {
             }
             self.exit.wait(Duration::from_secs(5));
         }
-        remove_state(&self.state_dir, self.pid);
+        remove_state(&self.state_dir, self.pid, self.started);
     }
 }
 
@@ -871,9 +876,13 @@ fn signal_group(pid: i32, signal: i32) {
 
 /// Notebook workers left behind by a runtime that exited without taking them
 /// along. Only the group: once the runtime is reaped its pid may be reused, but
-/// a group id isn't while any member is left.
+/// a group id isn't while any member is left. Not when `pid` now belongs to a process, which may lead a group
+/// of its own: the runtime's record may be from before a reboot.
 #[cfg(unix)]
 fn stop_workers(pid: i32) {
+    if pid_alive(pid, None) {
+        return;
+    }
     // SAFETY: plain syscall.
     unsafe { libc::kill(-pid, libc::SIGTERM) };
 }
@@ -930,10 +939,14 @@ impl Exit {
     }
 }
 
+/// Whether the process `pid` runs, and when `started` is known, is the one that started then: a pid that
+/// is recorded outlives a reboot, and is then another program's. Everything that trusts or signals a
+/// recorded pid asks this.
 #[cfg(unix)]
-fn pid_alive(pid: i32, _started: Option<u64>) -> bool {
+fn pid_alive(pid: i32, started: Option<u64>) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
-    pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+    let exists = pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
+    exists && started.is_none_or(|started| unixproc::start_time(pid) == Some(started))
 }
 
 /// Windows reuses pids quickly, so the process must also have started when
@@ -941,6 +954,14 @@ fn pid_alive(pid: i32, _started: Option<u64>) -> bool {
 #[cfg(windows)]
 fn pid_alive(pid: i32, started: Option<u64>) -> bool {
     winproc::Process::open(pid, started).is_some_and(|process| process.alive())
+}
+
+/// When this process started, as `runtime.json` and `starting.lock` record it.
+fn own_start_time() -> Option<u64> {
+    #[cfg(unix)]
+    return unixproc::start_time(std::process::id() as i32);
+    #[cfg(windows)]
+    return winproc::own_start_time();
 }
 
 /// End the runtime recorded with `pid` and `started` (runtime.json), with
@@ -1094,11 +1115,13 @@ fn parse_state(v: &Value) -> Option<State> {
     })
 }
 
-/// Remove `runtime.json` if it still describes the runtime `pid`.
-fn remove_state(dir: &Path, pid: i32) {
+/// Remove `runtime.json` if it still describes the runtime `pid`, which started at `started` when that
+/// is known and the record says.
+fn remove_state(dir: &Path, pid: i32, started: Option<u64>) {
     let path = dir.join("runtime.json");
     let current = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
-    if current.is_none_or(|v| v["pid"].as_i64() == Some(pid as i64)) {
+    let same = |v: &Value| v["pid"].as_i64() == Some(pid as i64) && started.is_none_or(|started| v["started"].as_u64().is_none_or(|recorded| recorded == started));
+    if current.is_none_or(|v| same(&v)) {
         let _ = std::fs::remove_file(path);
     }
 }

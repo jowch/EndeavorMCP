@@ -1363,8 +1363,11 @@ fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call
 /// Hold `dir/start.lock`, as a process in the middle of a start does.
 fn hold_start_lock(dir: &Path) -> std::fs::File {
     let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("start.lock")).unwrap();
-    // SAFETY: plain syscall on a file we hold open.
-    assert_eq!(unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    // The front holds the lock for a moment around each look, so one try can meet it.
+    wait_for("the start lock to be free", || {
+        // SAFETY: plain syscall on a file we hold open.
+        unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    });
     file
 }
 
@@ -1391,6 +1394,89 @@ fn stopping_this_computer_waits_for_a_start_under_way_and_leaves_the_note_of_a_s
 }
 
 #[test]
+fn a_forced_stop_cancels_a_start_another_process_began_and_the_next_call_starts_afresh() {
+    let place = Place::new("lazy-cancel");
+    let path = local_notebook(&place, "cancelled.jl");
+    std::fs::write(place.local_state.join("hold"), "").unwrap();
+    let short = [("ENDEAVOR_START_WAIT_SECS", "2")];
+    let mut first = start_front(&place, &short);
+    first.initialize();
+    let (failed, said) = first.call("open_notebook", json!({ "path": path }));
+    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    let started = core_of(&place);
+    let julia = common::julia_pids(&place.local_state);
+    assert_eq!((started.len(), julia.len()), (1, 1), "{started:?} {julia:?}");
+    first.finish();
+
+    let mut second = start_front(&place, &short);
+    second.initialize();
+    let status = second.ok("pluto_session_status", json!({}));
+    assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("starting"), json!(false)), "{status}");
+    let refused = second.ok("stop_machine", json!({ "machine": "local" }));
+    assert_eq!(refused["stopped"], false, "{refused}");
+    assert_eq!(core_of(&place), started);
+
+    let stopped = second.ok("stop_machine", json!({ "machine": "local", "force": true }));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    wait_for("the core and Julia to end", || !pid_alive(started[0]) && !pid_alive(julia[0]));
+    assert!(core_of(&place).is_empty() && !place.local_state.join("runtime.json").exists(), "nothing of the start is left");
+    wait_for("the lock to be let go", || std::fs::File::open(place.local_state.join("starting.lock")).is_ok_and(|file| file.try_lock_shared().is_ok()));
+    assert_eq!(std::fs::read_to_string(place.local_state.join("stopped")).unwrap(), format!("{} connection", started[0]));
+    let status = second.ok("pluto_session_status", json!({}));
+    assert_eq!(status["state"], "stopped", "the cancelled start is a stop, not a failed start: {status}");
+    let again = second.ok("stop_machine", json!({ "machine": "local", "force": true }));
+    assert_eq!(again["stopped"], false, "{again}");
+    assert!(again["message"].as_str().unwrap().contains("isn't running"), "{again}");
+
+    // Asked to start again, it starts a new runtime.
+    std::fs::remove_file(place.local_state.join("hold")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let used = second.ok("use_machine", json!({ "machine": "local" }));
+        if used["ready"] == true {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{used}");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert_eq!(common::julia_pids(&place.local_state).len(), 2, "a second core ran after the first was cancelled");
+    assert!(place.local_runtime().is_some_and(|pid| pid != started[0] && pid_alive(pid)));
+    second.finish();
+}
+
+#[test]
+fn a_forced_stop_cancels_the_start_this_session_began_and_it_is_not_left_as_a_failure() {
+    let place = Place::new("lazy-cancel-own");
+    let path = local_notebook(&place, "own.jl");
+    std::fs::write(place.local_state.join("hold"), "").unwrap();
+    let mut front = start_front(&place, &[("ENDEAVOR_START_WAIT_SECS", "2")]);
+    front.initialize();
+    let (failed, said) = front.call("open_notebook", json!({ "path": path }));
+    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    let started = core_of(&place);
+    assert_eq!(started.len(), 1, "{started:?}");
+
+    let refused = front.ok("stop_machine", json!({ "machine": "local" }));
+    assert_eq!(refused["stopped"], false, "{refused}");
+    assert_eq!(core_of(&place), started);
+    let stopped = front.ok("stop_machine", json!({ "machine": "local", "force": true }));
+    assert_eq!(stopped["stopped"], true, "{stopped}");
+    wait_for("the core to end", || !pid_alive(started[0]));
+    let status = front.ok("pluto_session_status", json!({}));
+    assert_eq!(status["state"], "stopped", "{status}");
+    let used = front.ok("use_machine", json!({ "machine": "local" }));
+    assert_ne!(used["state"], "failed", "the start it cancelled is not held against the next one: {used}");
+    std::fs::remove_file(place.local_state.join("hold")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while front.ok("use_machine", json!({ "machine": "local" }))["ready"] != true {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert_eq!(common::julia_pids(&place.local_state).len(), 2);
+    front.finish();
+}
+
+#[test]
 fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_attaches_to_it() {
     let place = Place::new("lazy-abandoned");
     let path = local_notebook(&place, "abandoned.jl");
@@ -1412,16 +1498,11 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("starting"), json!(false)), "another process's start is a start: {status}");
     let refused = second.ok("stop_machine", json!({ "machine": "local" }));
     let said = refused["message"].as_str().unwrap();
-    assert!(refused["stopped"] == false && refused["state"] == "starting" && said.contains("Julia is still starting on this computer") && said.contains("once it is up") && !said.contains("cancels") && !said.contains("force"), "{refused}");
-    let (failed, said) = second.call("stop_machine", json!({ "machine": "local", "force": true }));
-    assert!(failed && text(&said).contains("still starting"), "a stop leaves another process's start alone: {said}");
-    assert_eq!(core_of(&place), started);
+    assert!(refused["stopped"] == false && refused["state"] == "starting" && said.contains("Julia is starting on this computer") && said.contains("Stopping cancels it") && said.contains("force true"), "{refused}");
+    assert_eq!(core_of(&place), started, "a stop without force leaves another process's start alone");
     let (failed, said) = second.call("open_notebook", json!({ "path": path }));
     assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
     assert_eq!(core_of(&place), started, "no second runtime was started");
-    let (failed, said) = second.call("stop_machine", json!({ "machine": "local", "force": true }));
-    assert!(failed && text(&said).contains("still starting"), "a stop leaves a start under way alone: {said}");
-    assert_eq!(core_of(&place), started);
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {

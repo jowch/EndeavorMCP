@@ -19,8 +19,9 @@ pub(super) trait Provider: Send + Sync {
     /// when nothing is known to run. A failure is kept and given to every call until one asks to `retry`.
     fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome;
     fn status(&self) -> Status;
-    /// End the runtime for every client of it, and wait until it is gone.
-    fn stop(&self) -> Result<(), String>;
+    /// End the runtime for every client of it, and wait until it is gone. With `force` a start that is
+    /// under way is cancelled (a machine's is, whether or not it is given).
+    fn stop(&self, force: bool) -> Result<(), String>;
     /// Whether the machine is a Slurm cluster, by the record the connection was made with.
     fn cluster(&self) -> bool;
 }
@@ -34,7 +35,7 @@ impl Provider for Session {
         Session::status(self)
     }
 
-    fn stop(&self) -> Result<(), String> {
+    fn stop(&self, _force: bool) -> Result<(), String> {
         Session::stop(self).map_err(|why| {
             // Nothing to do about a stop the helper refused.
             if self.connected() {
@@ -235,19 +236,29 @@ impl Provider for Local {
         Status { machine: LOCAL.into(), name: LOCAL.into(), state, step, error, hello: None, runtime, job: None, queue: None, nothing_running: false, needs_install: None }
     }
 
-    fn stop(&self) -> Result<(), String> {
+    fn stop(&self, force: bool) -> Result<(), String> {
         let dir = &self.options.state_dir;
         // First, so that a start another process has under way is waited for, not missed.
-        let _starting = super::stop_lock(dir)?;
+        let starting = super::stop_lock(dir)?;
         let (events, _) = mpsc::channel();
-        match runtime::end(dir, false, stopped::How::Connection, &events) {
-            Ended::Stopped(_) | Ended::NotRunning => {}
+        let ended = runtime::end(dir, false, stopped::How::Connection, force, &events);
+        // Let go before waiting for this process's own start to settle: it may wait for the lock.
+        drop(starting);
+        match ended {
+            Ended::Stopped(_) | Ended::NotRunning | Ended::Cancelled(_) => {}
             Ended::Alive(pid) => return Err(format!("Julia (pid {pid}) is still running after the stop.")),
             Ended::Elsewhere(node) => return Err(format!("The Julia recorded here runs on {node}, not on this computer.")),
-            Ended::Starting => return Err(runtime::STILL_STARTING.into()),
+            Ended::Starting => return Err(runtime::STILL_STARTING_FORCE.into()),
+            Ended::Unidentified => return Err(runtime::START_UNIDENTIFIED.into()),
         }
+        // A start of this process that was cancelled ends in a failure, which is its own doing and is not kept.
         let mut phase = self.state.0.lock().unwrap();
-        if matches!(*phase, Phase::Ready(_)) {
+        let was_starting = matches!(*phase, Phase::Starting(_));
+        let until = Instant::now() + Duration::from_secs(10);
+        while matches!(*phase, Phase::Starting(_)) && Instant::now() < until {
+            phase = self.state.1.wait_timeout(phase, until.saturating_duration_since(Instant::now())).unwrap().0;
+        }
+        if matches!(*phase, Phase::Ready(_)) || (was_starting && matches!(*phase, Phase::Failed(_))) {
             *phase = Phase::Idle;
         }
         Ok(())

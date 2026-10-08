@@ -1272,7 +1272,7 @@ impl Relay {
         let (stopping, relay, id) = (provider.clone(), self.clone(), server.id.clone());
         let (done, waited) = mpsc::channel();
         std::thread::spawn(move || {
-            let stopped = stopping.stop();
+            let stopped = stopping.stop(force);
             if stopped.is_err() && was_active {
                 relay.update_target(&id, |t| t.active = true);
             }
@@ -1347,13 +1347,12 @@ fn reach_text(server: &Server, runtime: &RuntimeInfo) -> String {
 }
 
 /// What `stop_machine` says, without `force`, when Julia is starting or a job is queued: other
-/// sessions that wait for it can't be seen, and stopping cancels it for them too. A start on this
-/// computer can't be cancelled.
+/// sessions that wait for it can't be seen, and stopping cancels it for them too.
 fn waiting_result(name: &str, status: &Status) -> Value {
     let at = place(name);
     let cancels = " Stopping cancels it. Endeavor can't see which other sessions are waiting for a runtime that isn't up yet, and they would lose it. Tell the user, and call `stop_machine` again with force true only if they agree.";
     let (what, then) = match (&status.job, &status.queue, status.state) {
-        _ if name == LOCAL => (format!("Julia is still starting on {at}"), " A start can't be cancelled: call `stop_machine` again once it is up."),
+        _ if name == LOCAL => (format!("Julia is starting on {at}"), cancels),
         (job, Some(queue), State::Queued) => {
             let id = job.as_ref().map_or(String::new(), |j| format!(" {}", j.id));
             (format!("the Slurm job{id} on {name} is {} ({})", queue.state.to_lowercase(), queue_reason_text(&queue.reason)), cancels)

@@ -472,7 +472,8 @@ fn a_stop_during_a_start_whose_client_has_gone_stops_nothing_and_says_it_is_stil
     drop(held);
 
     let refused = endeavor(&dir, &["stop"]).output().unwrap();
-    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("still starting"), "{refused:?}");
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success() && said.contains("still starting") && said.contains("endeavor stop --force"), "{refused:?}");
     let mut other = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
     other.hello();
     let stop = other.request_stop();
@@ -491,6 +492,103 @@ fn a_stop_during_a_start_whose_client_has_gone_stops_nothing_and_says_it_is_stil
     common::wait_for("the core to end", || !common::pid_alive(core));
     other.stdin.0.lock().unwrap().take();
     other.exits();
+}
+
+/// Whether nothing holds `starting.lock` in `dir`.
+fn start_lock_free(dir: &Path) -> bool {
+    std::fs::File::open(dir.join("starting.lock")).is_ok_and(|file| file.try_lock_shared().is_ok())
+}
+
+#[test]
+fn a_forced_stop_cancels_a_start_that_is_under_way_and_leaves_nothing_of_it() {
+    let (dir, cores, julia) = held_dir("start-force-cli");
+    let mut first = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    let julia_pid = common::julia_pids(&dir)[0];
+    first.send(ToHelper::Detach);
+    first.exits();
+    // Another client waits for the start the first began.
+    let waiter = held_start(&dir, &julia, &[]);
+    assert_eq!(cores.pids(), [core]);
+
+    // The helper's check, which a client asks after a reconnect, sees the start.
+    let mut asker = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    asker.hello();
+    assert_eq!(check(&asker, 70), RuntimeState::Starting);
+
+    let status = endeavor(&dir, &["status", "--json"]).output().unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!((status["runtime"]["starting"].clone(), status["runtime"]["starting_pid"].clone()), (serde_json::json!(true), serde_json::json!(core)), "{status}");
+    let text = String::from_utf8_lossy(&endeavor(&dir, &["status"]).output().unwrap().stdout).into_owned();
+    assert!(text.contains(&format!("Start under way: yes (pid {core}")), "{text}");
+
+    let held = hold_start_lock(&dir);
+    let cancel = endeavor(&dir, &["stop", "--force"]).env("ENDEAVOR_STOP_LOCK_SECS", "1").output().unwrap();
+    assert!(!cancel.status.success() && common::pid_alive(core), "the start lock is held: {cancel:?}");
+    drop(held);
+    let cancel = endeavor(&dir, &["stop", "--force"]).output().unwrap();
+    assert!(cancel.status.success(), "{cancel:?}");
+    assert_eq!(String::from_utf8_lossy(&cancel.stdout), format!("Cancelled the start of Julia (pid {core}).\n"));
+
+    common::wait_for("the core and Julia to end", || !common::pid_alive(core) && !common::pid_alive(julia_pid));
+    common::wait_for("the lock to be let go", || start_lock_free(&dir));
+    assert!(cores.pids().is_empty(), "{:?}", cores.pids());
+    assert!(!dir.join("runtime.json").exists() && !dir.join("runtime.json.tmp").exists(), "no record was left");
+    assert_eq!(std::fs::read_to_string(dir.join("stopped")).unwrap(), format!("{core} stop"), "the clients are told why");
+    let ToApp::StartFailed { message, .. } = waiter.after_progress() else { panic!("expected StartFailed") };
+    assert!(message.contains("stopped while it was starting") && message.contains("`endeavor stop`"), "the waiter is told, and does not start another: {message}");
+    assert!(cores.pids().is_empty() && common::julia_pids(&dir) == [julia_pid]);
+    assert_eq!(check(&asker, 71), RuntimeState::NotRunning, "and a cancelled start is none");
+    asker.stdin.0.lock().unwrap().take();
+    asker.exits();
+
+    // Nothing is in the way of the next start.
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    let mut next = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    next.hello();
+    next.request_start(None, true);
+    let ToApp::Ready { pid, reattached, .. } = after_start(&next) else { panic!("expected Ready") };
+    assert!(!reattached && pid as i32 != core);
+    let again = endeavor(&dir, &["stop", "--force"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&again.stdout), format!("Stopped Julia (pid {pid}).\n"), "a runtime that is up is stopped as usual");
+    let none = endeavor(&dir, &["stop", "--force"]).output().unwrap();
+    assert!(none.status.success() && String::from_utf8_lossy(&none.stdout).starts_with("No Julia is running"), "{none:?}");
+    next.stdin.0.lock().unwrap().take();
+    next.exits();
+}
+
+#[test]
+fn a_forced_stop_does_not_end_a_core_the_file_does_not_name() {
+    let (dir, cores, julia) = held_dir("start-force-unnamed");
+    let mut first = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    first.send(ToHelper::Detach);
+    first.exits();
+    // The core is told apart from whatever the file names: a start time that is not its own.
+    let file = std::fs::OpenOptions::new().write(true).open(dir.join("starting.lock")).unwrap();
+    std::os::unix::fs::FileExt::write_all_at(&file, format!("{core:>11} {:>20}\n", 1).as_bytes(), 0).unwrap();
+    let refused = endeavor(&dir, &["stop", "--force"]).output().unwrap();
+    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("can't tell which process"), "{refused:?}");
+    assert!(common::pid_alive(core) && !dir.join("stopped").exists(), "nothing was signalled");
+}
+
+#[test]
+fn a_recorded_pid_that_started_at_another_time_is_stale_and_a_stop_leaves_the_process_alone() {
+    let dir = state_dir("stale-start-time");
+    let runtime = FakeRuntime::start(&dir, &this_host());
+    let record = |started: serde_json::Value| {
+        let mut state = common::read_json(&dir.join("runtime.json"));
+        state["started"] = started;
+        std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
+    };
+    // The pid belongs to a process that did not start then: a record from before a reboot.
+    record(serde_json::json!(1));
+    let status: serde_json::Value = serde_json::from_slice(&endeavor(&dir, &["status", "--json"]).output().unwrap().stdout).unwrap();
+    assert_eq!((status["runtime"]["state"].clone(), status["runtime"]["answers"].clone()), (serde_json::json!("stale"), serde_json::Value::Null), "{status}");
+    let stop = endeavor(&dir, &["stop", "--force"]).output().unwrap();
+    assert!(stop.status.success() && String::from_utf8_lossy(&stop.stdout).starts_with("No Julia is running"), "{stop:?}");
+    assert!(runtime.alive(), "the process was not signalled, and its port was not asked to shut down");
+    assert!(!dir.join("runtime.json").exists() && !dir.join("stopped").exists());
 }
 
 #[test]

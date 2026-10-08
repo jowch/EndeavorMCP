@@ -467,9 +467,10 @@ fn this_computer_is_called_this_computer_in_what_an_agent_reads() {
     }
     assert!(said[1].contains("`use_machine` with machine \"local\""), "the argument is still local: {}", said[1]);
     let waiting = &said[3];
-    assert!(waiting.contains("Julia is still starting on this computer") && waiting.contains("once it is up") && !waiting.contains("cancels") && !waiting.contains("force"), "a start there is not cancelled: {waiting}");
+    assert!(waiting.contains("Julia is starting on this computer") && waiting.contains("Stopping cancels it") && waiting.contains("force true"), "a start there is cancelled by a forced stop: {waiting}");
     let on_machine = waiting_result("lab", &status(State::Starting))["message"].as_str().unwrap().to_owned();
     assert!(on_machine.contains("Stopping cancels it") && on_machine.contains("force true"), "{on_machine}");
+    assert_eq!(waiting.replace("this computer", "lab"), on_machine, "this computer and a machine are told the same");
 }
 
 #[test]

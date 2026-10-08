@@ -55,7 +55,7 @@ A call that fails (a bad argument or partition, a machine that can't be reached)
 Result `stopped` true, or false with a `message`. Without `force` it stops nothing and says to ask the user when:
 
 - another session working in an open notebook made a tool call in the last 15 minutes: `active_sessions` and `active_seconds_ago` (how many, and how long ago the latest did);
-- Julia is starting or a job is queued: `state` `starting` or `queued` with `job` and `queue`. Stopping cancels it for any session waiting for it, which can't be seen. On this computer a start can't be cancelled: call again once Julia is up.
+- Julia is starting or a job is queued: `state` `starting` or `queued` with `job` and `queue`. Stopping cancels it for any session waiting for it, which can't be seen; this holds on this computer too.
 
 It is an error, naming `force: true`, when it can't find out who else is active. `force: true` stops anyway, only after the user agreed. If nothing is running, `stopped` is false and the message says so. If Endeavor's program on the machine is missing or older than this plugin's, the result is `needs_install` with `stopped` false and nothing is stopped.
 

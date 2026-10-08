@@ -51,7 +51,9 @@ fn flags_set_what_they_name() {
     let shell = parse(&["mcp", "--julia-shell", "module load julia", "--skills", "plugin", "--folder", "/abs"].map(String::from), &env());
     let Ok(Command::Mcp(o)) = shell else { panic!() };
     assert_eq!((o.julia, o.skills_plugin, o.folder), (julia::Source::Shell("module load julia".into()), true, PathBuf::from("/abs")));
-    assert_eq!(parsed("stop --state-dir /s").unwrap(), Command::Stop { state_dir: PathBuf::from("/s") });
+    assert_eq!(parsed("stop --state-dir /s").unwrap(), Command::Stop { state_dir: PathBuf::from("/s"), force: false });
+    assert_eq!(parsed("stop --force --state-dir /s").unwrap(), Command::Stop { state_dir: PathBuf::from("/s"), force: true });
+    assert!(parsed("status --force").unwrap_err().contains("--force isn't an option of status"));
     assert_eq!(parsed("status --json --state-dir /s").unwrap(), Command::Status { state_dir: PathBuf::from("/s"), json: true });
     assert!(matches!(parsed("status").unwrap(), Command::Status { json: false, .. }));
 }

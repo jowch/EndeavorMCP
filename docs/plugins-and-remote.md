@@ -150,7 +150,9 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    _Built 2026-10-07:_ `runtime::find_or_start`, `runtime::look` and
    `runtime::end`; the local stop, `stop_machine` and `endeavor stop`, take
    `start.lock` (held for a look and a spawn) and say so when Julia is still
-   starting; a start outlives the client that asked for it (below).
+   starting; a start outlives the client that asked for it (below). With
+   `force` they cancel a start that is under way (`endeavor stop --force`,
+   `stop_machine` with `force`): the core names itself in `starting.lock`.
 2. Connect, retry and re-attach as one library type that answers with an
    outcome.
    _Built 2026-10-07:_ `client::Session` (`src/client/session.rs`) holds one
@@ -347,8 +349,10 @@ refuses when Julia is in use through it.
 When the connection drops, the session connects again (waiting 1 s, then more,
 up to 30 s apart, for 10 minutes; a name that doesn't resolve or a network
 that is down is retried too) and attaches to the runtime it had, if the
-helper says it is still running or its job still waits, on the same listener
-port. A start that the drop cut short is taken up again the same way. A
+helper says it is still running, still starting (`starting.lock` held, no record
+yet: `RuntimeState::Starting`) or its job still waits, on the same listener
+port. A start that the drop cut short is taken up again the same way: the
+session asks for the runtime, and the helper waits for the core that is starting. A
 runtime that is gone is not started again by the reconnect: the state is
 `failed` and says so. A failed sign-in or host key is not retried, nor is
 giving up after 10 minutes: the state is `failed` with the message, the
@@ -508,7 +512,8 @@ together, and the client refuses a helper of another number when it connects
 another version of Endeavor). A stop waits 20 s for
 `start.lock`, so it does not stop a runtime that another helper is still
 starting; it says so instead. `stop_machine` on this computer and `endeavor stop`
-do the same, and the first marks the stop as made from a connection.
+do the same, and the first marks the stop as made from a connection. Those two, with `force`,
+cancel a start under way; the helper's Stop has no `force`.
 
 **A runtime from another build** is used, as `serve` and `mcp` do today.
 `use_machine` and `pluto_session_status` say that the runtime there is from

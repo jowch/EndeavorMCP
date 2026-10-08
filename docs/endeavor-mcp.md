@@ -174,25 +174,33 @@ The helper, `serve` and the front find or start the runtime with one function
 (`runtime::find_or_start`), look at what is running with one (`runtime::look`)
 and stop it with one (`runtime::end`). A start, once begun, finishes without the
 process that asked for it. The core is its own session. As the first thing it
-does it holds `starting.lock` in the state folder, and lets go only after it has
-written `runtime.json`; the OS lets go if it dies. The process that spawned it
+does it holds `starting.lock` in the state folder, writes its pid and start time
+into that file, and lets go only after it has written `runtime.json` and blanked
+them; the OS lets go if it dies. The process that spawned it
 holds `start.lock` for the look and the spawn, until the core holds its own lock,
 and waits for the runtime without it. A client that takes `start.lock` and finds
 no usable record but `starting.lock` held waits for that runtime, and looks again
 when the lock comes free (the record is written first, so "free and no record"
-means that start died; it then starts its own). A client that waits never stops
-the start of another process: a `Stop` to the helper, Ctrl-C in `serve`, the end
-of input and `--quit-with-client` end only a start this process spawned. A stop
+means that start died; it then starts its own, unless the start was stopped, and
+then it is told so). A client that waits never stops the start of another
+process: a `Stop` to the helper, Ctrl-C in `serve`, the end of input and
+`--quit-with-client` end only a start this process spawned. A stop
 (`endeavor stop`, `stop_machine` for this computer, the helper's Stop for a
-runtime it is not attached to) finds no record and `starting.lock` held, and
-stops nothing: it says Julia is still starting and to try again once it is up.
+runtime it is not attached to) that finds no record and `starting.lock` held
+stops nothing, and says Julia is still starting. `endeavor stop --force` and
+`stop_machine` with `force` on this computer cancel it: `runtime::end` reads the
+pid and start time from `starting.lock`, and ends that core and its process group
+(as it ends a runtime that is up, with the same note in `stopped`) only if the
+lock is held and the pid is the process that started then, checked again just
+before the signal. A core of an older build writes no pid, and then nothing is
+stopped. The helper's Stop has no `force`, so it still stops nothing.
 
 `endeavor status [--state-dir DIR] [--json]` reports what Endeavor has on this
 computer and changes nothing: it makes no folder or file, starts nothing and
 opens no ssh connection. It reads the state folder with `runtime::look` (not
 running, running, recorded with its process gone, or recorded by another
 computer) and reports separately whether a start is under way
-(`starting.lock` held). It asks a running runtime for a ping on its loopback port
+(`starting.lock` held, and the pid of the core that holds it when the file names one). It asks a running runtime for a ping on its loopback port
 to learn whether it answers: up to two pings, each given 5 seconds in all
 (`bridge_call`, one deadline for connecting, sending and reading the head), so
 the command takes about 10 seconds at most. That is the only request it makes. It reads the machines file and `projects.json` without
@@ -350,10 +358,9 @@ wait that runs out is a result that says what step it is at and to call again.
 and waits for it up to 20 s (`ENDEAVOR_STOP_LOCK_SECS` sets it for tests); the lock is
 held only for a look and a spawn, so it does not wait behind a whole start. If the lock
 isn't had it stops nothing and says so (an error). A start under way, this session's or
-another process's, is not stopped: without `force` the result on a machine names what would be cancelled,
-and with `force` it is an error that says Julia is still starting; on this computer even
-the result without `force` only says Julia is still starting and to stop it once it
-is up, since a stop never cancels a start there. It marks
+another process's, is not stopped without `force`: the result names what would be cancelled
+(the same words on a machine and on this computer), and with `force` the start is
+cancelled. It marks
 the stop as made from a connection, so a client that finds the runtime gone is told "It
 was stopped from another connection." `endeavor stop` waits for the lock in the same way
 and keeps its own words ("It was stopped with `endeavor stop`.").
