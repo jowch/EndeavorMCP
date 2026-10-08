@@ -160,7 +160,7 @@
     "name": "delete_cell"
   },
   {
-    "description": "Run one cell and the cells that depend on it, whether or not it was edited. After edits, use `submit_changes` instead. Returns at once unless `wait_for_completion` is true; read the cell for its result.",
+    "description": "Run one cell and the cells that depend on it, whether or not it was edited. After edits, use `submit_changes` instead. Returns at once unless `wait_for_completion` is true, which waits at most 45 seconds; read the cell for its result.",
     "inputSchema": {
       "properties": {
         "cell_id": {
@@ -170,7 +170,7 @@
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Block until the run ends, with no time limit. Use it only for a run that takes a few seconds. Default: false.",
+          "description": "Wait for the run to end, at most 45 seconds. If it is still going then, the result has `execution.status` `running` and the cells in `execution.still_running`; the run continues, so read the cells later and do not run them again. Default: false.",
           "type": "boolean"
         }
       },
@@ -183,7 +183,7 @@
     "name": "execute_cell"
   },
   {
-    "description": "Run the cells staged by edits (`pending_run`) and the cells that depend on them. Call it once after a batch of edits. Returns at once unless `wait_for_completion` is true; read the cells for their results. In safe preview nothing runs and the result warns `execution_blocked`.",
+    "description": "Run the cells staged by edits (`pending_run`) and the cells that depend on them. Call it once after a batch of edits. Returns at once unless `wait_for_completion` is true, which waits at most 45 seconds; read the cells for their results. In safe preview nothing runs and the result warns `execution_blocked`.",
     "inputSchema": {
       "properties": {
         "cell_ids": {
@@ -201,7 +201,7 @@
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Block until the run ends, with no time limit. Use it only for a run that takes a few seconds. Default: false.",
+          "description": "Wait for the run to end, at most 45 seconds. If it is still going then, the result has `execution.status` `running` and the cells in `execution.still_running`; the run continues, so read the cells later and do not run them again. Default: false.",
           "type": "boolean"
         }
       },
@@ -220,7 +220,7 @@
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Block until the run ends, with no time limit. Use it only for a run that takes a few seconds. Default: false.",
+          "description": "Wait for the run to end, at most 45 seconds. If it is still going then, the result has `execution.status` `running` and the cells in `execution.still_running`; the run continues, so read the cells later and do not run them again. Default: false.",
           "type": "boolean"
         }
       },

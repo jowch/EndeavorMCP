@@ -429,6 +429,21 @@ end
                   Dict("accepted" => true, "process_status" => "ready")
             @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [X])
 
+            # A waited run that outlasts `timeout` returns when it passes, with the cell
+            # that finished and the dependent still running; the run goes on.
+            insert(code, index) = only(result("apply", ops(Dict("op" => "insert", "code" => code, "folded" => false, "index" => index)))["inserted"])
+            w, slow = insert("w = 5", 3), insert("slow = (sleep(4); w)", 4)
+            began = time()
+            capped = result("run", Dict("notebook_id" => nid, "cells" => [w], "wait" => true, "timeout" => 1))
+            @test time() - began < 3.5
+            @test capped == Dict("accepted" => true, "process_status" => "ready", "completed" => [w], "timed_out" => [slow])
+            @test nb.cells_dict[UUID(w)].output.body == "5"
+            @test nb.cells_dict[UUID(slow)].running || nb.cells_dict[UUID(slow)].queued
+            @test timedwait(() -> !(nb.cells_dict[UUID(slow)].running || nb.cells_dict[UUID(slow)].queued), 60) == :ok
+            @test nb.cells_dict[UUID(slow)].output.body == "5"
+            @test result("snapshot", Dict("notebook_id" => nid))["cells"][5]["running"] == false
+            result("apply", ops(Dict("op" => "delete", "cell_id" => slow), Dict("op" => "delete", "cell_id" => w)))
+
             # Move and delete, then the cleanup run that follows a delete.
             result("apply", ops(Dict("op" => "move", "cell_id" => z, "index" => 0)))
             @test string.(nb.cell_order) == [z, X, Y]

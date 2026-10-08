@@ -70,6 +70,8 @@ struct Engine {
     seq: Mutex<u64>,
     calls: Mutex<Vec<String>>,
     made: Mutex<u32>,
+    /// The `timeout` of each waited `run`.
+    waits: Mutex<Vec<f64>>,
 }
 
 impl Engine {
@@ -262,15 +264,21 @@ impl Engine {
                     }
                     return Ok(reply);
                 }
-                for cell in nb.cells.iter_mut().filter(|c| cells.contains(&c.id)) {
+                // `linger()` keeps running: a waited run returns with it unfinished.
+                let (lingering, finishing): (Vec<String>, Vec<String>) = cells.iter().cloned().partition(|id| nb.cells.iter().any(|c| c.id == *id && c.code.contains("linger()")));
+                for cell in nb.cells.iter_mut().filter(|c| lingering.contains(&c.id)) {
+                    cell.running = true;
+                }
+                for cell in nb.cells.iter_mut().filter(|c| finishing.contains(&c.id)) {
                     cell.last_run = now;
                     cell.errored = cell.code.contains("error(");
                     cell.output = if cell.errored { "boom".into() } else { format!("ran {}", cell.code) };
                 }
                 let mut reply = json!({ "accepted": true, "process_status": "ready" });
                 if params["wait"] == true {
-                    reply["completed"] = json!(cells);
-                    reply["timed_out"] = json!([]);
+                    self.waits.lock().unwrap().push(params["timeout"].as_f64().unwrap());
+                    reply["completed"] = json!(finishing);
+                    reply["timed_out"] = json!(lingering);
                 }
                 Ok(reply)
             }
@@ -788,6 +796,49 @@ fn safe_preview_keeps_edits_staged_until_execution_is_allowed() {
     assert_eq!((&again["already_allowed"], &again.get("run_warnings")), (&json!(true), &None));
     let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
     assert_eq!((&ran["execution"]["status"], &ran["pending_run"]), (&json!("completed"), &json!([])));
+}
+
+#[test]
+fn a_waited_run_that_outlasts_the_cap_returns_with_its_cells_still_running() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);
+    s.read("", NB, X);
+    s.read("", NB, Y);
+    s.edit("", NB, X, "x = 10");
+    s.edit("", NB, Y, "y = linger()");
+
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    let cap = s.engine.waits.lock().unwrap()[0];
+    assert!(cap <= super::tools::WAIT_SECONDS && cap > super::tools::WAIT_SECONDS - 5.0, "the run is given what is left of the cap: {cap}");
+    assert_eq!(ran["execution"], json!({ "status": "running", "still_running": [Y] }));
+    assert_eq!(ran["affected_cells"], json!([X, Y]));
+    assert_eq!(ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| c["cell_id"].clone()).collect::<Vec<_>>(), vec![json!(X)], "a cell still running has no output of this run");
+    assert_eq!(ran["pending_run"], json!([Y]), "the cell that did not finish is still staged");
+    assert_eq!(ran["warnings"].as_array().unwrap().len(), 1);
+    assert!(ran["warnings"][0].as_str().unwrap().starts_with("execution_timeout::"), "{ran}");
+    assert!(ran["message"].as_str().unwrap().contains("list_notebooks"), "{ran}");
+
+    // A read shows the cell running, then finished; the staged cell clears.
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap()["running"], true);
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["running"], json!([Y]));
+    s.seconds(5.0);
+    let now = *s.clock.lock().unwrap();
+    s.engine.with(NB, |nb| {
+        nb.cells[1].running = false;
+        nb.cells[1].last_run = now;
+        nb.cells[1].output = "done".into();
+    });
+    let listed = s.call("", "list_notebooks", json!({})).unwrap();
+    assert_eq!((&listed[0]["running"], &listed[0]["pending_run"]), (&json!([]), &json!([])));
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap()["running"], false);
+
+    // A run that finishes in time is as before.
+    s.seconds(1.0);
+    s.read("", NB, Y);
+    s.edit("", NB, Y, "y = 3");
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["execution"], json!({ "status": "completed" }));
+    assert_eq!((ran.get("message"), &ran["warnings"]), (None, &json!([])));
 }
 
 #[test]

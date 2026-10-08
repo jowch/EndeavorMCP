@@ -36,7 +36,7 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 |---|---|
 | `async_execution` | The run was started and not waited for. Read the cells for results |
 | `execution_blocked` | Nothing ran: the notebook is in safe preview, or its process is stopped. The cells stay in `pending_run` |
-| `execution_timeout` | A waited run returned with the named cell still running or queued. Rare: a waited run blocks until the run ends. Read the cell later |
+| `execution_timeout` | A waited run was still going after 45 seconds and the call returned. The run continues; `execution.still_running` names the cells. Read them later and do not run them again |
 | `also_ran` | The run also ran the named cells: ones your cells depend on that had never run |
 | `already_ran` | The user ran your staged cells before your run reached them, so they were not run a second time. The outputs are from that run |
 | `run_conflict` | From `add_cell` or `edit_cell` with `run_after`: the edit was made and staged, not run. Read the named cells, then `submit_changes` |

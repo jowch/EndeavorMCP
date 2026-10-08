@@ -389,12 +389,13 @@ _Started 2026-10-06, on the `client-library` branch._
   Still untested: the new text against the old (the trial in the skills audit)
   and whether a current model needs any rule that was cut.
 
-- **A waited run has no time limit.** `wait_for_completion=true` blocks until
-  the whole run ends (`run_cells!` calls Pluto with `run_async=false`), so the
-  60-second `TIMEOUT_SECONDS` never applies and the agent client's own tool
-  timeout is the only bound. The skill and the tool descriptions say to wait
-  only for a run that takes a few seconds. To close: run async and wait in
-  `_wait_cells!`, which would give the cap and make `execution_timeout` real.
+- **A waited run stops waiting at 45 seconds, and nothing stops a second
+  run of the same cells.** The cap is `WAIT_SECONDS` in `notebooks/tools.rs`;
+  no argument changes it, and a real agent client has not been run against it
+  (it is chosen from the 45 to 60 second tool timeouts). The call returns with
+  `execution.status` `running`, and the run goes on. If the agent runs the
+  still-running cells again, Pluto queues the run as it does for an unwaited
+  one; `run_conflict` only covers another session's edits.
 
 ## Not checked
 
@@ -522,6 +523,13 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Tests
 
+- **The Julia unit test `lifecycle: stop releases HTTP and Pluto ports` fails**
+  (`runtests.jl:191`), with and without the waited-run change of 2026-10-07.
+  The Julia tests are not in CI and `docs/testing.md` has no command for them;
+  they were run with a depot under `target/tmp`. Not looked into.
+- **`a_helper_that_ends_unexpectedly_is_a_drop_and_after_the_client_let_it_go_is_not`
+  hung once** in a full workspace run on 2026-10-07 and passed alone and in
+  the next full runs. Not reproduced.
 - **A failed or interrupted test run can leave its fake runtime behind.** One
   run left a fake `endeavor core` from the `machines` tests under
   `target/tmp`, which had to be ended by hand. The tests clean up when they

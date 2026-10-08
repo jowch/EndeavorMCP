@@ -16,8 +16,13 @@ use super::{Change, GraphQuery, Notebooks, Snapshot, absolute_path, canonical_pa
 use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
 
-/// How long a waited-for run may take, per cell.
+/// How long the runtime watches an unwaited run for its cells to finish, and
+/// how long the app's report of a user's run counts.
 pub(super) const TIMEOUT_SECONDS: f64 = 60.0;
+/// The most a tool call waits for a run, from the start of the call: under the
+/// 60 seconds that some agent clients give a tool call. The wait for the user's
+/// own run of the same cells (`ran_after_user`) comes out of it.
+pub(super) const WAIT_SECONDS: f64 = 45.0;
 /// Claude accepts images up to about 5 MB; plots are typically tens of KB.
 const MAX_IMAGE_BYTES: usize = 4_000_000;
 /// How `read_notebook_code` starts each cell, as Pluto's file does.
@@ -37,7 +42,7 @@ impl Notebooks {
     /// error Julia raised for it. `folder` is the session's working folder,
     /// where `new_notebook` puts notebooks and relative paths start.
     pub fn tool(&self, owner: &str, name: &str, args: &Value, folder: Option<&str>) -> Result<Reply, String> {
-        let t = Call { nbs: self, owner, args };
+        let t = Call { nbs: self, owner, args, began: Instant::now() };
         let result = match name {
             "list_notebooks" => t.list_notebooks(),
             "read_cell" => t.read_cell(),
@@ -102,7 +107,7 @@ impl Notebooks {
     /// whole-notebook run loads, in notebook order. For `allow_execution`,
     /// `count` is the notebook's size whether or not it runs.
     pub fn run_preview(&self, tool: &str, args: &Value) -> Result<Value, String> {
-        let t = Call { nbs: self, owner: "", args };
+        let t = Call { nbs: self, owner: "", args, began: Instant::now() };
         let nb = t.notebook()?;
         let graph = self.graph(&nb.id, GraphQuery { refresh: true, edges: true, ..Default::default() })?;
         let targets: Vec<String> = if tool == "submit_changes" {
@@ -172,9 +177,15 @@ struct Call<'a> {
     nbs: &'a Notebooks,
     owner: &'a str,
     args: &'a Value,
+    began: Instant,
 }
 
 impl Call<'_> {
+    /// What is left of `WAIT_SECONDS`.
+    fn wait_left(&self) -> Duration {
+        Duration::from_secs_f64(WAIT_SECONDS).saturating_sub(self.began.elapsed())
+    }
+
     fn arg(&self, name: &str) -> Result<&Value, String> {
         self.args.get(name).ok_or_else(|| key_error(name))
     }
@@ -286,7 +297,8 @@ impl Call<'_> {
         self.nbs.with_state(&nb.id, |state| state.prune(nb));
         let needed = self.nbs.never_run_upstream(nb, targets)?;
         let cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
-        let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": TIMEOUT_SECONDS }))?;
+        let timeout = if wait { self.wait_left().as_secs_f64() } else { TIMEOUT_SECONDS };
+        let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout }))?;
         let ids = |key: &str| reply[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
         if reply.get("exited").is_some() {
             let graph = self.nbs.graph(&nb.id, GraphQuery::default()).ok();
@@ -302,8 +314,8 @@ impl Call<'_> {
             }
             warnings.push(warning);
         } else if wait {
-            for cell in ids("timed_out") {
-                warnings.push(format!("execution_timeout::Cell {cell} did not finish within {TIMEOUT_SECONDS:?}s"));
+            if !ids("timed_out").is_empty() {
+                warnings.push(format!("execution_timeout::The run was still going when the wait ended after at most {WAIT_SECONDS}s"));
             }
             self.nbs.with_state(&nb.id, |state| {
                 for cell in ids("completed") {
@@ -345,7 +357,7 @@ impl Call<'_> {
     /// while the agent's approval card waited: cells the tools changed and
     /// haven't run since that have run since anyway, or cells the app just
     /// said the user ran anyway (`endeavor/run_anyway`). A run of them still
-    /// under way is waited for, as long as a waited run may take.
+    /// under way is waited for, within the call's `WAIT_SECONDS`.
     fn ran_after_user(&self, nb: &Snapshot, targets: &[String]) -> Result<bool, String> {
         let now = self.now();
         let marks: Option<Vec<(Option<f64>, Option<f64>)>> = self.nbs.with_state(&nb.id, |state| {
@@ -361,7 +373,7 @@ impl Call<'_> {
         let ran = |cell: &super::Cell, (edited, before): &(Option<f64>, Option<f64>)| {
             edited.is_some_and(|edited| cell.ran_since(edited)) || before.is_some_and(|before| !(cell.running || cell.queued) && cell.last_run > before)
         };
-        let deadline = Instant::now() + Duration::from_secs_f64(TIMEOUT_SECONDS);
+        let deadline = Instant::now() + self.wait_left();
         loop {
             let now = self.nbs.snapshot(&nb.id)?;
             let Some(cells) = targets.iter().map(|c| now.cells.get(c)).collect::<Option<Vec<_>>>() else { return Ok(false) };
@@ -395,14 +407,31 @@ impl Call<'_> {
     }
 
     /// What every change reports: the notebook's order and run state after it.
-    fn receipt(&self, id: &str, mutation: Value, cells_run: &[String], warnings: Vec<String>, status: Option<&str>) -> Result<(Map<String, Value>, Snapshot), String> {
+    fn receipt(&self, id: &str, mutation: Value, cells_run: &[String], mut warnings: Vec<String>, status: Option<&str>) -> Result<(Map<String, Value>, Snapshot), String> {
         let nb = self.nbs.snapshot(id)?;
         let graph = self.nbs.graph(id, GraphQuery::default())?;
-        let status = status.map_or_else(|| execution_status(&nb, cells_run, &warnings), str::to_owned);
+        // A waited run that ran out of time: what is running now, read after the wait,
+        // since cells may have finished meanwhile.
+        let waited_out = warnings.iter().any(|w| w.starts_with("execution_timeout::"));
+        let still_running: Vec<String> = if waited_out {
+            nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect()
+        } else {
+            Vec::new()
+        };
+        if still_running.is_empty() {
+            warnings.retain(|w| !w.starts_with("execution_timeout::"));
+        }
+        let status = match status {
+            Some(status) => status.to_owned(),
+            None if !still_running.is_empty() => "running".to_owned(),
+            None => execution_status(&nb, cells_run, &warnings),
+        };
         // A blocked run touched no cell; existing outputs are not this run's result.
+        // A cell still running has the output of its last run.
         let ran: &[String] = if status == "blocked" { &[] } else { cells_run };
         let changed: Vec<Value> = ran
             .iter()
+            .filter(|id| !still_running.contains(id))
             .filter_map(|id| Some((id, nb.cells.get(id)?)))
             .filter(|(_, cell)| !cell.output.is_empty())
             .map(|(id, cell)| {
@@ -428,7 +457,17 @@ impl Call<'_> {
             "pending_run": pending,
             "warnings": warnings,
         });
-        let Value::Object(receipt) = receipt else { unreachable!() };
+        let Value::Object(mut receipt) = receipt else { unreachable!() };
+        if !still_running.is_empty() {
+            receipt["execution"]["still_running"] = json!(still_running);
+            receipt.insert(
+                "message".into(),
+                json!(format!(
+                    "The run is still going and continues: a waited run returns after at most {WAIT_SECONDS} seconds. \
+                     Call list_notebooks (`running` lists the cells still running) or read_cell to see when it ends. Don't run these cells again."
+                )),
+            );
+        }
         Ok((receipt, nb))
     }
 
@@ -962,8 +1001,6 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
     let warned = |kind: &str| warnings.iter().any(|w| w.starts_with(kind));
     let status = if warned("execution_blocked::") {
         "blocked"
-    } else if warned("execution_timeout::") {
-        "timeout"
     } else if warned("async_execution::") {
         "running"
     } else if cells_run.is_empty() {

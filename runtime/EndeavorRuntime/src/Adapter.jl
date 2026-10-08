@@ -104,18 +104,18 @@ function _notify_browser(session, notebook)
     end
 end
 
-# Each cell in turn until it has finished, for up to `timeout` seconds each:
-# the ids that finished and those that didn't.
-function _wait_cells!(cells; timeout)
-    completed = UUID[]
-    timed_out = UUID[]
-    for cell in cells
-        t = time()
-        while (cell.running || cell.queued) && time() - t <= timeout
-            sleep(0.05)
-        end
-        push!(cell.running || cell.queued ? timed_out : completed, cell.cell_id)
+# Until `run`, the Pluto task of a run, has ended or `timeout` seconds have
+# passed in all. The ids of `cells` that finished and those that didn't; if the
+# run is still going, the latter are every cell of the notebook that is running
+# or queued, which includes the dependents Pluto added to the run.
+function _wait_cells!(nb, cells, run; timeout)
+    t = time()
+    while !istaskdone(run) && time() - t <= timeout
+        sleep(0.05)
     end
+    unfinished(c) = c.running || c.queued
+    timed_out = [c.cell_id for c in (istaskdone(run) ? cells : nb.cells) if unfinished(c)]
+    completed = [c.cell_id for c in cells if !(c.cell_id in timed_out)]
     return completed, timed_out
 end
 
@@ -272,26 +272,29 @@ end
 
 # Run cells; none is Pluto's reactive cleanup after a delete. Not accepted when
 # the notebook won't run code (safe preview, a stopped process). With `wait`,
-# the reply says which cells finished within `timeout` seconds each, and
-# `exited` the cells that were running if its process ended by itself
-# meanwhile; without, a `run_finished` notification says so later.
+# the reply says which cells finished within `timeout` seconds in all, which
+# were still running or queued then (the run goes on), and `exited` the cells
+# that were running if its process ended by itself meanwhile; without, a
+# `run_finished` notification says which finished later.
 function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
     accepted = Pluto.will_run_code(nb)
-    # Pluto marks cells queued only inside its (possibly async) run task, after
-    # package sync; mark them now, as its own run button does, so a caller that
-    # looks right away sees them waiting.
+    # Pluto marks cells queued only inside its run task, after package sync;
+    # mark them now, as its own run button does, so a caller that looks right
+    # away sees them waiting.
     accepted && foreach(c -> c.queued = true, cells)
-    Pluto.update_save_run!(session, nb, cells; run_async=!wait, save=true)
+    run = Pluto.update_save_run!(session, nb, cells; run_async=true, save=true)
     result = Dict{String,Any}("accepted" => accepted, "process_status" => string(nb.process_status))
     if accepted && wait
-        completed, timed_out = _wait_cells!(cells; timeout)
+        completed, timed_out = _wait_cells!(nb, cells, run; timeout)
+        istaskfailed(run) && fetch(run)
+        result["process_status"] = string(nb.process_status)
         result["completed"] = [string(id) for id in completed]
         result["timed_out"] = [string(id) for id in timed_out]
         exited = exited_cells(nb)
         exited === nothing || (result["exited"] = exited)
     elseif accepted && !isempty(cells)
         @async begin
-            completed, = _wait_cells!(cells; timeout)
+            completed, = _wait_cells!(nb, cells, run; timeout)
             notify!("run_finished", Dict{String,Any}("notebook_id" => string(nb.notebook_id), "cells" => [string(id) for id in completed]))
         end
     end
