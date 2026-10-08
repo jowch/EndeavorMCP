@@ -2,7 +2,6 @@
 # Pluto's events tell the core.
 
 const _STANDALONE_SESSION = Ref{Any}(nothing)
-const _STANDALONE_HTTP_TASK = Ref{Union{Nothing,Task}}(nothing)
 const _STANDALONE_HTTP_SERVER = Ref{Any}(nothing)
 const _STANDALONE_PLUTO_SERVER = Ref{Any}(nothing)
 const _STANDALONE_PLUTO_TASK = Ref{Union{Nothing,Task}}(nothing)
@@ -199,7 +198,8 @@ end
     start_pluto_stack!(; pluto_port, mcp_port, require_secret_for_access, launch_browser, notebook, http_async)
 
 Start Pluto.run! and, when no HTTP bridge is already up, the MCP HTTP bridge.
-Idempotent when Pluto is already running.
+Returns once both are listening. If the bridge can't start, stops Pluto and
+throws. Idempotent when Pluto is already running.
 """
 function start_pluto_stack!(;
     pluto_port::Union{Int,Nothing} = nothing,
@@ -228,16 +228,11 @@ function start_pluto_stack!(;
     _STANDALONE_SESSION[] = sess
 
     if http_async && _STANDALONE_HTTP_SERVER[] === nothing
-        _STANDALONE_HTTP_TASK[] = @async begin
-            try
-                http_server = _HTTP_BRIDGE_RUNNER[](sess, resolved_mcp; listenany=false)
-                _STANDALONE_HTTP_SERVER[] = http_server
-                wait(http_server)
-            catch e
-                isa(e, InterruptException) || rethrow()
-            finally
-                _STANDALONE_HTTP_SERVER[] = nothing
-            end
+        _STANDALONE_HTTP_SERVER[] = try
+            _HTTP_BRIDGE_RUNNER[](sess, resolved_mcp; listenany=false)
+        catch e
+            stop_pluto_stack!()
+            error("Couldn't start the bridge on port $resolved_mcp: $(sprint(showerror, e))")
         end
     end
 
@@ -256,18 +251,6 @@ function _close_standalone_http!()
         end
         _STANDALONE_HTTP_SERVER[] = nothing
     end
-    t = _STANDALONE_HTTP_TASK[]
-    if t !== nothing && t !== current_task()
-        try
-            schedule(t, InterruptException(); error=true)
-        catch
-        end
-        try
-            wait(t)
-        catch
-        end
-    end
-    _STANDALONE_HTTP_TASK[] = nothing
 end
 
 function _close_standalone_pluto!()

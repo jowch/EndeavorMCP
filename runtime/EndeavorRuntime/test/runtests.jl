@@ -26,6 +26,14 @@ function make_session_with_notebook(cells...)
     session, nb, nb_cells
 end
 
+# No retries, so a port must answer as soon as start returns. The long read
+# timeout is for the first request, which compiles its handler.
+answers(url) = try
+    HTTP.get(url, ["Connection" => "close"]; retry=false, readtimeout=60, status_exception=false).status == 200
+catch
+    false
+end
+
 # ---------------------------------------------------------------------------
 # Unit tests — no Pluto web server required
 # ---------------------------------------------------------------------------
@@ -180,13 +188,6 @@ end
         EndeavorRuntime.stop_pluto_stack!()
         pluto_port = 1250 + rand(0:99)
         mcp_port = 2450 + rand(0:99)
-        # No retries, so the ports must answer as soon as start returns. The long
-        # read timeout is for the first request, which compiles its handler.
-        answers(url) = try
-            HTTP.get(url, ["Connection" => "close"]; retry=false, readtimeout=60, status_exception=false).status == 200
-        catch
-            false
-        end
         try
             for _ in 1:2
                 EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
@@ -198,6 +199,28 @@ end
                 @test !answers("http://127.0.0.1:$pluto_port/ping")
             end
         finally
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
+    @testset "lifecycle: a start whose bridge port is taken fails and leaves nothing running" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        pluto_port = 1550 + rand(0:99)
+        mcp_port = 2750 + rand(0:99)
+        taken = listen(IPv4("127.0.0.1"), mcp_port)
+        try
+            err = try
+                EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
+                ""
+            catch e
+                sprint(showerror, e)
+            end
+            @test startswith(err, "Couldn't start the bridge on port $mcp_port: ")
+            @test EndeavorRuntime.session_status_dict()["pluto"] == "stopped"
+            @test !answers("http://127.0.0.1:$pluto_port/ping")
+            @test (close(listen(IPv4("127.0.0.1"), pluto_port)); true)
+        finally
+            close(taken)
             EndeavorRuntime.stop_pluto_stack!()
         end
     end

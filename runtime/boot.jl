@@ -33,13 +33,6 @@ EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port, token)
 EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false)
 secret = EndeavorRuntime.standalone_session().secret
 
-# The helper checks the bridge answers before using it; wait here too, so the state
-# file never names a runtime that isn't serving yet.
-for _ in 1:600
-    EndeavorRuntime._STANDALONE_HTTP_SERVER[] !== nothing && break
-    sleep(0.05)
-end
-
 # Made private before the token goes in, then moved into place whole, so a reader
 # never sees half a file and nobody else can read the token.
 tmp = state * ".tmp"
