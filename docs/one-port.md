@@ -115,7 +115,9 @@ What came out differently from the design above, or wasn't settled by it:
   (`guard.rs`, for a runtime from another build) does the same, and now sees
   every connection, Pluto's included; each request on a connection is still
   checked, and an upgraded connection was checked at its upgrade.
-- **`runtime.json`** is `{launcher, node, pid, started, port, token, job, exits_when_idle}`.
+- **`runtime.json`** is `{launcher, node, pid, started, port, token, job, exits_when_idle, build, interface}`.
+  `interface` is `core::INTERFACE`, the number for what the core offers its callers; a caller of
+  another build uses a runtime with its own number as it is ([endeavor-mcp.md](endeavor-mcp.md)).
   `started` is when the core's process started (a platform's own unit); a pid is
   trusted only while the process has that start time (and `boot`, the boot id, on
   Linux, where it counts ticks after boot). Both are absent from a record an older

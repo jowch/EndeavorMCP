@@ -535,16 +535,20 @@ fn recorded_folder(dir: &Path) -> Option<(String, bool)> {
 }
 
 /// What to tell the user when the runtime recorded in `dir` came from
-/// another build than this binary (`embedded::BUILD_VERSION`); none when it's
-/// this build's, or nothing is recorded. The runtime keeps working as it was
-/// started: stopping it is the user's call.
+/// another build than this binary (`embedded::BUILD_VERSION`) and doesn't offer
+/// its interface (`core::INTERFACE`); none when it's this build's or offers it,
+/// or nothing is recorded. The runtime keeps working as it was started:
+/// stopping it is the user's call.
 pub(crate) fn other_build(dir: &Path) -> Option<String> {
-    other_build_than(dir, embedded::BUILD_VERSION)
+    other_build_than(dir, embedded::BUILD_VERSION, Some(crate::core::INTERFACE))
 }
 
-/// `other_build`, against build `this`.
-pub(crate) fn other_build_than(dir: &Path, this: &str) -> Option<String> {
+/// `other_build`, against build `this` and its interface, when that is known.
+pub(crate) fn other_build_than(dir: &Path, this: &str, interface: Option<u32>) -> Option<String> {
     let state: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?;
+    if interface.is_some() && state["interface"].as_u64() == interface.map(u64::from) {
+        return None;
+    }
     let which = match state["build"].as_str() {
         Some(build) if build == this => return None,
         Some(build) => format!("build {build}"),

@@ -31,6 +31,14 @@ use crate::http::{self, Head};
 use crate::mcp::Bridge;
 use crate::{USAGE, bridge_call, owner_only, remove_state};
 
+/// The number for what a core offers the processes that use it, recorded in `runtime.json` as
+/// `interface`: the notebook tools' names and arguments at `/mcp`, the app's `/endeavor/call`s and
+/// `/endeavor/events`, and the record's own fields. A front or a client of another build uses a
+/// runtime with the same number as it is, and treats one with another number (or none) as another
+/// build's. Raise it with a change that a caller of the build before would get wrong; a test in
+/// `mcp.rs` fails when the notebook tools' names or arguments change, so that this is decided.
+pub const INTERFACE: u32 = 1;
+
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
 
@@ -241,6 +249,7 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, served: &Served,
     let mut state = json!({
         "launcher": julia["launcher"], "node": julia["node"], "job": julia["job"],
         "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": token, "exits_when_idle": bridge.notebooks.exits_when_idle,
+        "interface": INTERFACE,
     });
     if let Some(standalone) = &bridge.standalone {
         state["folder"] = standalone.folder.clone().into();

@@ -110,8 +110,10 @@ Other installs update the way they were installed:
   with the plugin. `endeavor update` refuses to replace it.
 
 A Julia that's already running keeps running from the build that started
-it. `endeavor update`, `serve` and `mcp` tell you when the running Julia
-came from another build. To switch, run `endeavor stop`, then start it again.
+it. Another build uses it as it is when the two builds offer the same tools
+and calls. `serve` and `mcp` tell you when the running Julia came from a build
+that doesn't, and `endeavor update` when it came from a build other than the
+new one. To switch, run `endeavor stop`, then start it again.
 
 ## Start it
 

@@ -168,6 +168,12 @@ fn a_runtime_from_another_build_is_named() {
     assert!(message.contains("(build 0.1.0-0000000000000000; this is build ") && message.contains("run `endeavor stop`, then start it again"), "{message}");
     write(json!({ "pid": 1 }));
     assert!(other_build(&dir).unwrap().contains("(an earlier build; this is build "));
+    // Another build that offers this build's interface is used as it is; one that offers another isn't.
+    write(json!({ "pid": 1, "build": "0.1.0-0000000000000000", "interface": crate::core::INTERFACE }));
+    assert_eq!(other_build(&dir), None, "the same interface");
+    assert!(other_build_than(&dir, embedded::BUILD_VERSION, None).is_some(), "compared by build when the interface isn't known");
+    write(json!({ "pid": 1, "build": "0.1.0-0000000000000000", "interface": crate::core::INTERFACE + 1 }));
+    assert!(other_build(&dir).unwrap().contains("(build 0.1.0-0000000000000000; this is build "));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

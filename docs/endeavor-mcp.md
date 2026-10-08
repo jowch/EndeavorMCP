@@ -367,6 +367,22 @@ is not in the file, since it can change: `pluto_session_status` carries
 or non-finite one) and `exits_when_idle`. A runtime with `exits_when_idle` true
 and `idle_stop_hours` 0 never ends. The app reads `runtime.json` and calls the runtime in the same way.
 
+**A runtime from another build.** `runtime.json` records the build that
+started the runtime (`build`) and a number for what its core offers its
+callers (`interface`, `core::INTERFACE`, re-exported as
+`endeavor_mcp::CORE_INTERFACE`): the notebook tools' names and arguments, the
+app's `/endeavor/` calls and events, and the record's fields. A front, `serve`
+or `status` of another build uses a runtime with the same number as it is and
+says nothing. One with another number, or none (from before it was recorded),
+is treated as before: a front stops it if it started it in the background and
+no notebook is open, else keeps it and tells the agent once; `serve` and
+`status` tell the user. `endeavor update` compares the build, since the new
+binary's number isn't known to the old one. The number goes up with a change
+a caller of the build before would get wrong. A test in `mcp.rs` holds a
+fingerprint of the notebook tools' names and arguments (descriptions left
+out), so changing them means deciding; the other parts of the interface are
+the author's to judge.
+
 ## The machine tools
 
 _Built 2026-10-06, in `endeavor mcp` only._

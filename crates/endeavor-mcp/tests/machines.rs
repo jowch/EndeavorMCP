@@ -1305,11 +1305,39 @@ fn a_status_query_after_the_runtime_it_used_has_exited_starts_none() {
 
 const ANOTHER_BUILD: &str = "0.0.1-0123456789abcdef";
 
-/// The local runtime's record says another build started it, as one that outlived an update would.
+/// The local runtime's record says another build started it, as one that outlived an update would:
+/// one from before the interface was recorded.
 fn from_another_build(place: &Place) {
     let mut record = read_record(&place.local_state);
     record["build"] = ANOTHER_BUILD.into();
+    record.as_object_mut().unwrap().remove("interface");
     std::fs::write(place.local_state.join("runtime.json"), record.to_string()).unwrap();
+}
+
+#[test]
+fn a_runtime_of_another_build_that_offers_this_builds_interface_is_used_as_it_is() {
+    let place = Place::new("other-build-same-interface");
+    let path = place.project.join("idle.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let mut first = place.front();
+    first.initialize();
+    first.call("open_notebook", json!({ "path": path }));
+    let old = place.local_runtime().expect("started by the call");
+    first.finish();
+    let mut record = read_record(&place.local_state);
+    assert_eq!(record["interface"], endeavor_mcp::CORE_INTERFACE, "the core records its interface");
+    record["build"] = ANOTHER_BUILD.into();
+    std::fs::write(place.local_state.join("runtime.json"), record.to_string()).unwrap();
+
+    // No notebook is open, and the call may start one: it is still used, and nothing is said.
+    let mut second = place.front();
+    second.initialize();
+    let (failed, said) = second.contents("list_notebooks", json!({}));
+    assert!(!failed && said == [json!([])], "nothing added: {said:?}");
+    second.call("open_notebook", json!({ "path": path }));
+    assert_eq!(place.local_runtime(), Some(old), "kept");
+    assert!(!second.said().iter().any(|line| line.contains("was started by")), "{:?}", second.said());
+    second.finish();
 }
 
 #[test]

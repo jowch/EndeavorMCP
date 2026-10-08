@@ -545,7 +545,9 @@ it with the relay.
   session it drops is left to go quiet; the runtime forgets it after 7 days.
 - Its rule for a runtime from another build compares builds for equality,
   so it would hold back runs in Ask to run whenever the plugin's build
-  started the runtime. It should ask what the runtime can do.
+  started the runtime. It should compare `runtime.json`'s `interface` with
+  `endeavor_mcp::CORE_INTERFACE` instead, as the library does since
+  2026-10-08 ([endeavor-mcp.md](endeavor-mcp.md)).
 - Its own calls to the runtime (`/endeavor/…`) change together with the app
   today. An app from one build now meets a runtime from another, so those
   calls need a version ([endeavor-mcp.md](endeavor-mcp.md), "The control

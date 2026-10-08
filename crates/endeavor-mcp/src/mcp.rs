@@ -949,6 +949,33 @@ fn write_string(out: &mut String, text: &str) {
 mod tests {
     use super::*;
 
+    /// The notebook tools' names and arguments, without their descriptions: what a front of another
+    /// build sends to this core.
+    fn tools_fingerprint() -> String {
+        fn without_descriptions(value: &mut Value) {
+            match value {
+                Value::Object(map) => {
+                    map.remove("description");
+                    map.values_mut().for_each(without_descriptions);
+                }
+                Value::Array(items) => items.iter_mut().for_each(without_descriptions),
+                _ => {}
+            }
+        }
+        let mut tools: Vec<Value> = NOTEBOOK_TOOLS.as_array().unwrap().iter().map(|tool| json!({ "name": tool["name"], "inputSchema": tool["inputSchema"] })).collect();
+        tools.iter_mut().for_each(without_descriptions);
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(serde_json::to_string(&tools).unwrap());
+        digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn the_notebook_tools_names_and_arguments_are_those_of_the_cores_interface() {
+        // When this fails, the notebook tools' names or arguments changed. If a front of the build before
+        // would now call this core wrongly (a tool gone or renamed, an argument it needs or reads
+        // differently), raise `core::INTERFACE`. Either way, record the new fingerprint with the number.
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (1, "162714c5ccd13efa"), "see the comment in this test");
+    }
+
     #[test]
     fn writes_json_as_julia_does() {
         let value = json!({ "b": 1, "A": [true, null, 2.5], "a": { "z": "x\u{7f}\u{1}/\"é", "_": {} }, "aa": [] });
