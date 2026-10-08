@@ -14,7 +14,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use common::{FakeBridge, TOKEN, julia_pids, pid_alive, serving_julia, wait_for, write_executable};
-use endeavor_mcp::client::{Config, Launcher, Outcome, RuntimeInfo, Server, Session, State, Transport, Want};
+use endeavor_mcp::client::{Auth, Config, Event, Launcher, Outcome, RuntimeInfo, Server, Session, SessionEvent, State, Transport, Want};
 
 /// One machine called `lab-NAME` whose helper and runtime live in a folder of the test's own.
 struct Place {
@@ -601,11 +601,7 @@ fn an_attach_that_found_nothing_looks_again_and_finds_what_has_come_up_since() {
 
 /// The `--launcher` the helper of this connection was started with.
 fn helper_launcher(place: &Place) -> Vec<String> {
-    place.helpers().into_iter().map(|pid| {
-        let args = Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().unwrap();
-        let args = String::from_utf8_lossy(&args.stdout).into_owned();
-        args.split_whitespace().skip_while(|a| *a != "--launcher").nth(1).unwrap_or_default().to_owned()
-    }).collect()
+    helper_args(place).iter().map(|args| args.split_whitespace().skip_while(|a| *a != "--launcher").nth(1).unwrap_or_default().to_owned()).collect()
 }
 
 #[test]
@@ -648,4 +644,66 @@ fn a_reconnect_asks_for_the_launcher_the_first_helper_settled_on() {
     assert_eq!(helper_launcher(&place), ["slurm"]);
     assert_eq!(session.status().hello.and_then(|h| h.launcher).as_deref(), Some("slurm"));
     assert!(session.cluster() && !place.julia_ran(), "still a cluster, and nothing started directly");
+}
+
+#[test]
+fn a_session_tells_its_caller_its_steps_and_its_trouble_as_events() {
+    use std::sync::{Arc, Mutex};
+    let place = Place::new("events");
+    let heard: Arc<Mutex<Vec<SessionEvent>>> = Arc::default();
+    let mut config = place.config(true, None);
+    config.on_event = Box::new({
+        let heard = heard.clone();
+        move |event| heard.lock().unwrap().push(event)
+    });
+    let session = Session::new(config).expect("a session");
+    ready(session.ensure(start(), LONG, false));
+    let steps = heard.lock().unwrap().clone();
+    assert!(steps.iter().any(|e| matches!(e, SessionEvent::Step(Event::Connected { .. }))), "{steps:?}");
+    assert!(steps.iter().any(|e| matches!(e, SessionEvent::Step(Event::Started { .. }))), "{steps:?}");
+    assert!(!steps.iter().any(|e| matches!(e, SessionEvent::Trouble(_))), "{steps:?}");
+
+    // A sign-in that is refused is told as trouble.
+    let place = Place::new("events-refused");
+    let heard: Arc<Mutex<Vec<SessionEvent>>> = Arc::default();
+    let mut config = place.config(true, Some("echo 'jc@lab: Permission denied (publickey).' >&2; exit 255".into()));
+    config.on_event = Box::new({
+        let heard = heard.clone();
+        move |event| heard.lock().unwrap().push(event)
+    });
+    let session = Session::new(config).expect("a session");
+    assert!(matches!(session.ensure(start(), LONG, false), Outcome::Failed(_)));
+    let trouble: Vec<String> = heard.lock().unwrap().iter().filter_map(|e| if let SessionEvent::Trouble(text) = e { Some(text.clone()) } else { None }).collect();
+    assert!(trouble.len() == 1 && trouble[0].contains("The connection to lab failed") && trouble[0].contains("refused the sign-in"), "{trouble:?}");
+}
+
+#[test]
+fn a_session_signs_in_and_ends_its_runtime_as_its_config_says() {
+    // `auth` sets ssh's variables: the sign-in here passes only with the one it names.
+    let place = Place::new("auth-env");
+    let ask = Some("[ \"$ENDEAVOR_TEST_ASKPASS\" = yes ] || { echo 'jc@lab: Permission denied (password).' >&2; exit 255; }".to_owned());
+    let mut config = place.config(true, ask.clone());
+    config.auth = Auth::Env(vec![("ENDEAVOR_TEST_ASKPASS".into(), "yes".into())]);
+    let session = Session::new(config).expect("a session");
+    wait_for("the connection", || session.status().state == State::Connected);
+    assert_eq!(helper_args(&place).iter().filter(|a| a.contains("--exit-idle")).count(), 1, "the default ends its runtime when idle");
+    drop(session);
+    let refused = Session::new(place.config(true, ask)).expect("a session");
+    assert!(matches!(refused.ensure(start(), LONG, false), Outcome::Failed(why) if why.contains("refused the sign-in")), "without the variable it names");
+
+    // `exit_idle` false: the helper isn't asked to end the runtime it starts.
+    let place = Place::new("no-exit-idle");
+    let mut config = place.config(true, None);
+    config.exit_idle = false;
+    let session = Session::new(config).expect("a session");
+    wait_for("the connection", || session.status().state == State::Connected);
+    assert_eq!(helper_args(&place).iter().filter(|a| a.contains("--exit-idle")).count(), 0);
+}
+
+/// The command lines of the helpers of this machine.
+fn helper_args(place: &Place) -> Vec<String> {
+    place.helpers().into_iter().map(|pid| {
+        let args = Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&args.stdout).into_owned()
+    }).collect()
 }
