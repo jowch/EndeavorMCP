@@ -93,6 +93,7 @@ fn machine<'a>(listed: &'a Value, name: &str) -> &'a Value {
 #[test]
 #[ignore = "needs ENDEAVOR_TEST_SSH_HOST and Slurm, submits one small real job, several minutes the first time: ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines_slurm -- --ignored"]
 fn the_machine_tools_over_real_slurm() {
+    common::require_debug_build();
     let Ok(host) = std::env::var("ENDEAVOR_TEST_SSH_HOST") else {
         eprintln!("SKIPPED: ENDEAVOR_TEST_SSH_HOST isn't set. Name a host this user can ssh to with a key and that has Slurm, such as localhost.");
         return;

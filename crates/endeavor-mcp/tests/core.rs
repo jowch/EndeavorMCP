@@ -148,8 +148,8 @@ fn starts_julia_and_writes_its_own_runtime_json() {
     let ports: Vec<u16> = args[3..].iter().map(|p| p.parse().unwrap()).collect();
     assert!(ports.len() == 2 && ports[0] != ports[1] && !ports.contains(&core.port), "{ports:?}");
 
-    let ping = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.0").expect("checked Julia's bridge answers");
-    assert!(String::from_utf8_lossy(&ping.body).contains("ping"));
+    let ping = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1" && String::from_utf8_lossy(&s.body).contains("\"ping\"")).expect("checked Julia's bridge answers");
+    assert!(ping.header("Authorization").is_some_and(|a| a.starts_with("Bearer ")));
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
     assert_eq!(reply["result"]["body"].as_str(), Some(body));
 
-    let seen = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1").expect("Julia's `/call`");
+    let seen = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1" && String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")).expect("Julia's `/call`");
     assert_eq!(seen.header("Host"), Some(format!("127.0.0.1:{}", bridge.port).as_str()));
     assert_eq!(seen.header("Authorization"), Some(format!("Bearer {TOKEN}").as_str()));
     assert_eq!(seen.header("Content-Type"), Some("application/json"));

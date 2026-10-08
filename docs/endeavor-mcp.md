@@ -190,9 +190,12 @@ stops nothing: it says Julia is still starting and to try again once it is up.
 `endeavor status [--state-dir DIR] [--json]` reports what Endeavor has on this
 computer and changes nothing: it makes no folder or file, starts nothing and
 opens no ssh connection. It reads the state folder with `runtime::look` (not
-running, starting, running, or recorded with its process gone) and asks a running
-runtime one ping on its loopback port to learn whether it answers; that is the
-only request it makes. It reads the machines file and `projects.json` without
+running, running, recorded with its process gone, or recorded by another
+computer) and reports separately whether a start is under way
+(`starting.lock` held). It asks a running runtime for a ping on its loopback port
+to learn whether it answers: up to two pings, each given 5 seconds in all
+(`bridge_call`, one deadline for connecting, sending and reading the head), so
+the command takes about 10 seconds at most. That is the only request it makes. It reads the machines file and `projects.json` without
 rewriting them, and names the plugin binary store (with its builds), the helpers
 cache, `serve`'s unpacked runtime, the server root and the default depot. The first
 three get a size when they have few entries; the server root and the depot are

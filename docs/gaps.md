@@ -89,7 +89,10 @@ _Started 2026-10-06, on the `client-library` branch._
   `_ASK`**; `{id}` in the last four stands for the machine's id, so that two
   machines in one test don't share a runtime. A release build ignores them
   (`cfg!(debug_assertions)`, in `test_var` in `standalone/machines.rs`), so a
-  shipped binary's ssh can't be redirected to a local shell. Two other
+  shipped binary's ssh can't be redirected to a local shell. The tests that set
+  them (`tests/machines.rs`, `e2e_machines.rs`, `e2e_machines_slurm.rs`) panic in
+  a release build (`common::require_debug_build`), since they would run real
+  `ssh lab` and `ssh hpc` with default folders. Two other
   variables are for tests and are not gated, since they only change a wait:
   `ENDEAVOR_START_WAIT_SECS` (how long a call waits for a starting runtime) and
   `ENDEAVOR_IDLE_CHECK_SECS` (how often an idle runtime checks). The other
@@ -357,9 +360,14 @@ _Started 2026-10-06, on the `client-library` branch._
 - **`endeavor status` is limited to this computer, and is read-only.** It
   shows the state folder it is given (the default one, or `--state-dir`), not a
   server's runtime or a machine's connection, and the cluster state folder only
-  as the files it holds. It asks a running runtime one ping, which sends the
-  recorded token to the recorded port on 127.0.0.1 (every `look` does; a stale
-  record whose port another local program now uses would show it the token). To
+  as the files it holds. It asks a running runtime for up to two pings, each
+  limited to 5 seconds in all, so it takes about 10 seconds at most. A ping sends
+  the recorded token to the recorded port on 127.0.0.1 (every pinging `look`
+  does, including `endeavor status`; a stale record whose port another local
+  program now uses would show it the token). It reads `runtime.json` through
+  `State`, while `standalone::recorded_folder` and `other_build_than` still read
+  the file on their own (their tests write partial records), so the record has
+  two readers. `bridge_rpc` (the app's calls) still has per-read timeouts only. To
   see whether a start is under way it takes `starting.lock` shared for an
   instant, as every `look` does. A folder with more than 20,000 entries is not
   sized. Nothing cleans up or uninstalls (see Uninstalling a plugin).

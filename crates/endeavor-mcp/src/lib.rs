@@ -50,7 +50,7 @@ pub mod embedded {
 }
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -1294,25 +1294,51 @@ fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::R
     serde_json::from_str(payload).map_err(|_| std::io::ErrorKind::InvalidData.into())
 }
 
-/// POST one JSON-RPC call to `path` on the loopback server at `port`; its HTTP status.
+/// How long `bridge_call` has, connecting, sending and reading the response's head, all told.
+const BRIDGE_CALL_WAIT: Duration = Duration::from_secs(5);
+
+/// POST one JSON-RPC call to `path` on the loopback server at `port`; its HTTP status. A server that
+/// answers slowly, or a little at a time, does not keep it past `BRIDGE_CALL_WAIT`.
 fn bridge_call(port: u16, path: &str, token: &str, method: &str) -> std::io::Result<u16> {
-    let mut socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(2))?;
-    socket.set_read_timeout(Some(Duration::from_secs(3)))?;
-    socket.set_write_timeout(Some(Duration::from_secs(3)))?;
+    bridge_call_within(port, path, token, method, BRIDGE_CALL_WAIT)
+}
+
+fn bridge_call_within(port: u16, path: &str, token: &str, method: &str, wait: Duration) -> std::io::Result<u16> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} }).to_string();
-    write!(
-        socket,
-        "POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    )?;
-    let mut status = String::new();
-    BufReader::new(socket).read_line(&mut status)?;
-    status.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or_else(|| std::io::ErrorKind::InvalidData.into())
+    let bearer = format!("Bearer {token}");
+    let headers = [("Authorization", bearer.as_str()), ("Content-Type", "application/json")];
+    http::post_status_by(port, path, &headers, body.as_bytes(), std::time::Instant::now() + wait)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_gives_up_on_a_server_that_answers_a_little_at_a_time() {
+        use std::time::Instant;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = done.clone();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            // A byte every 50 ms, never a newline: no single read ever times out.
+            while !stop.load(Ordering::SeqCst) {
+                if socket.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let started = Instant::now();
+        let result = bridge_call_within(port, CALL, "t", "ping", Duration::from_millis(400));
+        let took = started.elapsed();
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        assert!(result.is_err(), "{result:?}");
+        assert!(took >= Duration::from_millis(350) && took < Duration::from_secs(3), "{took:?}");
+    }
 
     #[test]
     fn redacts_pluto_secret() {

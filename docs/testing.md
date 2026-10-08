@@ -171,7 +171,13 @@ runtime for "this computer". The front gets nothing but its own variables: HOME,
 `target/tmp`, which is also where `list_machines` finds the ssh config (it
 reads `$HOME/.ssh/config`), and `ENDEAVOR_TEST_ROOT`, `_STATE` and `_DEPOT`
 keep the helper's folders there (`{id}` in them is the machine's id, for a test
-that uses two machines). `ENDEAVOR_START_WAIT_SECS` shortens the front's waits. A machine with Slurm
+that uses two machines). `ENDEAVOR_START_WAIT_SECS` shortens the front's waits. The `ENDEAVOR_TEST_*`
+variables work only in a debug build, so `cargo test --release` would run real
+`ssh lab` and `ssh hpc` with the machine's default folders. `machines.rs`
+(`Place::bare`), `e2e_machines.rs` and `e2e_machines_slurm.rs` call
+`common::require_debug_build()` first and panic in a release build: "these
+tests need a debug build: a release build ignores ENDEAVOR_TEST_*, and would use
+real ssh". A machine with Slurm
 installed reports `slurm: true` to every helper (`wire::slurm::has` looks in
 `/usr/bin`), so the `add_machine` test uses the fake Slurm and the other
 tests save their machines. It covers:

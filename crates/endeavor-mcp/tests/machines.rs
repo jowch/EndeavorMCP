@@ -60,6 +60,7 @@ impl Place {
     /// With more variables, or other values for those set here; `{dir}` is this place's folder.
     /// The machine has no helper.
     fn bare(name: &str, more: &[(&str, &str)]) -> Place {
+        common::require_debug_build();
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("machines-{name}"));
         end_leftovers(&dir);
         let _ = std::fs::remove_dir_all(&dir);

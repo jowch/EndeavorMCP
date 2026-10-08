@@ -345,6 +345,15 @@ impl Read for Timed<'_> {
 
 /// `post`, which fails with `TimedOut` if the whole exchange isn't done by `deadline`.
 pub fn post_by(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadline: Option<Instant>) -> io::Result<(u16, Vec<u8>)> {
+    exchange(port, path, headers, body, deadline, true).map(|(status, body)| (status, body.unwrap_or_default()))
+}
+
+/// `post_by`, for a caller that wants only the status: it returns once the response's head is read, and the body is left unread.
+pub fn post_status_by(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadline: Instant) -> io::Result<u16> {
+    exchange(port, path, headers, body, Some(deadline), false).map(|(status, _)| status)
+}
+
+fn exchange(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadline: Option<Instant>, want_body: bool) -> io::Result<(u16, Option<Vec<u8>>)> {
     let connect = deadline.map_or(Duration::from_secs(5), |deadline| deadline.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_secs(5)));
     let upstream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), connect)?;
     let _ = upstream.set_nodelay(true);
@@ -365,8 +374,11 @@ pub fn post_by(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], dea
             break response;
         }
     };
+    if !want_body {
+        return Ok((response.status(), None));
+    }
     let body = read_body(&mut reader, response.response_body("POST")?)?;
-    Ok((response.status(), body))
+    Ok((response.status(), Some(body)))
 }
 
 /// Relay a response body from `upstream` to `client` as it arrives, like

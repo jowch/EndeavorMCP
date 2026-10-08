@@ -1,7 +1,8 @@
 //! `endeavor status`: what Endeavor has on this computer, for a user or whoever helps them. It
 //! only reads. It makes no folder or file and starts and stops nothing. It asks the runtime
-//! recorded in the state folder one local ping, to know whether it answers; there is no ssh and
-//! no other network request. It never prints the runtime's token.
+//! recorded in the state folder for a local ping on 127.0.0.1, to know whether it answers: up to
+//! two pings of at most 5 seconds each (`look`), so at most about 10 seconds in all. There is no
+//! ssh and no other network request. It never prints the runtime's token.
 
 use std::path::{Path, PathBuf};
 
@@ -34,17 +35,22 @@ struct Report {
 #[derive(Serialize)]
 struct RuntimeReport {
     state_dir: PathBuf,
-    /// `not_running`, `starting`, `running`, `stale` (recorded, its process gone) or `other_computer`
+    /// `not_running`, `running`, `stale` (recorded, its process gone) or `other_computer`
     /// (recorded by another computer that shares the home folder, and not asked).
     state: &'static str,
+    /// A core holds `starting.lock`: a start is under way, whatever `state` says.
+    starting: bool,
+    /// The record's, for `running` and `stale` only; `other_computer` has its `node` alone.
     pid: Option<i32>,
     port: Option<u16>,
     /// The computer that recorded it.
     node: Option<String>,
     /// The build that started it.
     build: Option<String>,
-    /// Whether that is not this build.
+    /// Whether that is not this build (`running` only).
     other_build: Option<bool>,
+    /// What `standalone::other_build` says about it, when it is.
+    other_build_note: Option<String>,
     folder: Option<String>,
     exits_when_idle: Option<bool>,
     /// Whether it answered a ping; none when it was not asked.
@@ -144,20 +150,21 @@ fn runtime_report(dir: &Path) -> RuntimeReport {
     let mut report = RuntimeReport {
         state_dir: dir.to_owned(),
         state: "not_running",
+        starting: runtime::starting(dir),
         pid: None,
         port: None,
         node: None,
         build: None,
         other_build: None,
+        other_build_note: None,
         folder: None,
         exits_when_idle: None,
         answers: None,
         log: log.is_file().then_some(log),
     };
-    let starting = runtime::starting(dir);
     let (state, recorded) = match runtime::look(dir, false, true) {
-        Looked::NotRunning => (if starting { "starting" } else { "not_running" }, None),
-        Looked::Dead(state) => (if starting { "starting" } else { "stale" }, Some(state)),
+        Looked::NotRunning => ("not_running", None),
+        Looked::Dead(state) => ("stale", Some(state)),
         Looked::OtherNode(state) => ("other_computer", Some(state)),
         Looked::Running(state, _) => {
             report.answers = Some(true);
@@ -171,11 +178,14 @@ fn runtime_report(dir: &Path) -> RuntimeReport {
     };
     report.state = state;
     if let Some(recorded) = recorded {
-        report.pid = Some(recorded.pid);
-        report.port = recorded.port;
         report.node = Some(recorded.node);
+        if state != "other_computer" {
+            report.pid = Some(recorded.pid);
+        }
         if state == "running" {
-            report.other_build = Some(recorded.build.as_deref() != Some(embedded::BUILD_VERSION));
+            report.port = recorded.port;
+            report.other_build_note = super::other_build(dir);
+            report.other_build = Some(report.other_build_note.is_some());
             report.build = recorded.build;
             report.folder = recorded.folder;
             report.exits_when_idle = recorded.exits_when_idle;
@@ -218,7 +228,7 @@ fn plugin_binaries(path: &Path) -> PluginBinaries {
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|entry| entry.path().is_dir())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| !name.starts_with('.'))
         .collect();
@@ -275,15 +285,10 @@ fn text(report: &Report) -> String {
     line(format!("  State folder: {}", runtime.state_dir.display()));
     let pid = runtime.pid.map(|pid| format!("pid {pid}")).unwrap_or_default();
     match runtime.state {
-        "starting" => line("  Starting: a runtime is being started and has not recorded itself yet.".into()),
         "running" => {
             let port = runtime.port.map_or("no port recorded (an older build)".into(), |port| format!("port {port}"));
             line(format!("  Running: {pid}, {port}"));
-            match (&runtime.build, runtime.other_build) {
-                (Some(build), Some(true)) => line(format!("  Started from build {build}, not this build. To use this build, run `endeavor stop`, then start it again.")),
-                (None, _) => line("  Started from an earlier build, not this build. To use this build, run `endeavor stop`, then start it again.".into()),
-                _ => line("  Started from this build.".into()),
-            }
+            line(format!("  {}", runtime.other_build_note.as_deref().unwrap_or("Started from this build.")));
             if let Some(folder) = &runtime.folder {
                 line(format!("  Notebooks folder: {folder}"));
             }
@@ -296,6 +301,7 @@ fn text(report: &Report) -> String {
         "other_computer" => line(format!("  Recorded by {}, not this computer ({}), so not checked.", runtime.node.as_deref().unwrap_or("another computer"), hostname())),
         _ => line("  Not running.".into()),
     }
+    line(format!("  Start under way: {}", if runtime.starting { "yes (a runtime holds starting.lock and has not recorded itself yet)" } else { "no" }));
     if let Some(log) = &runtime.log {
         line(format!("  Log: {}", log.display()));
     }

@@ -73,6 +73,11 @@ exec sleep 600
     julia
 }
 
+/// For a test that sets an `ENDEAVOR_TEST_*` variable for the binary: a release build ignores them.
+pub fn require_debug_build() {
+    assert!(cfg!(debug_assertions), "these tests need a debug build: a release build ignores ENDEAVOR_TEST_*, and would use real ssh");
+}
+
 pub fn state_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("endeavor-mcp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

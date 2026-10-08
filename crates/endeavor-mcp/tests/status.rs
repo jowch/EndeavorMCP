@@ -21,7 +21,7 @@ struct Home {
 
 impl Home {
     fn new(name: &str) -> Home {
-        let root = std::env::temp_dir().join(format!("endeavor-status-{name}-{}", std::process::id()));
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("status-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         for folder in ["home", "state", "cache", "config", "data", "cwd"] {
             std::fs::create_dir_all(root.join(folder)).unwrap();
@@ -196,7 +196,7 @@ fn a_running_runtime_is_described_without_its_token() {
     let dir_arg = dir.to_str().unwrap();
     let (text, json_out) = home.both(&["--state-dir", dir_arg]);
     assert!(text.contains(&format!("Running: pid {me}, port ")), "{text}");
-    assert!(text.contains("Started from build 0.1.0-aaaa, not this build."), "{text}");
+    assert!(text.contains("started by another version of endeavor (build 0.1.0-aaaa; this is build "), "{text}");
     assert!(text.contains("Notebooks folder: /work/notebooks") && text.contains("Ends itself when idle: yes") && text.contains("Answers: yes"), "{text}");
     assert_eq!(json_out["runtime"]["state"], "running");
     assert_eq!(json_out["runtime"]["answers"], true);
@@ -207,7 +207,7 @@ fn a_running_runtime_is_described_without_its_token() {
     record(&dir, json!({ "pid": me, "port": closed_port() }));
     let (text, json_out) = home.both(&["--state-dir", dir_arg]);
     assert!(text.contains("Ends itself when idle: not recorded") && text.contains("Answers: no, though its process is alive"), "{text}");
-    assert!(text.contains("Started from an earlier build"), "{text}");
+    assert!(text.contains("(an earlier build; this is build "), "{text}");
     assert_eq!(json_out["runtime"]["answers"], false);
     assert_eq!(json_out["runtime"]["exits_when_idle"], Value::Null);
 
@@ -220,20 +220,58 @@ fn a_running_runtime_is_described_without_its_token() {
 }
 
 #[test]
-fn a_runtime_that_is_starting_is_named_and_no_lock_file_is_made() {
+fn a_start_under_way_is_reported_beside_whatever_is_recorded() {
     let home = Home::new("starting");
     let dir = home.path("state").join("starting");
     std::fs::create_dir_all(&dir).unwrap();
+    let dir_arg = dir.to_str().unwrap();
     let lock = File::create(dir.join("starting.lock")).unwrap();
     lock.lock().unwrap();
-    let (text, json_out) = home.both(&["--state-dir", dir.to_str().unwrap()]);
-    assert!(text.contains("Starting:"), "{text}");
-    assert_eq!(json_out["runtime"]["state"], "starting");
+    let runtime = |json_out: &Value| json_out["runtime"].clone();
+
+    let (text, json_out) = home.both(&["--state-dir", dir_arg]);
+    assert!(text.contains("Not running.") && text.contains("Start under way: yes"), "{text}");
+    assert_eq!((runtime(&json_out)["state"].clone(), runtime(&json_out)["starting"].clone(), runtime(&json_out)["pid"].clone()), (json!("not_running"), json!(true), Value::Null));
+
+    // A record whose process is gone is still named stale; the start is separate.
+    record(&dir, json!({ "pid": i32::MAX, "port": 4321 }));
+    let (text, json_out) = home.both(&["--state-dir", dir_arg]);
+    assert!(text.contains("Recorded, but its process is gone (pid 2147483647)") && text.contains("Start under way: yes"), "{text}");
+    let r = runtime(&json_out);
+    assert_eq!((&r["state"], &r["starting"], &r["pid"], &r["port"]), (&json!("stale"), &json!(true), &json!(i32::MAX), &Value::Null));
+
+    // A runtime that is alive and silent, and another computer's record.
+    record(&dir, json!({ "pid": std::process::id(), "port": closed_port() }));
+    let (text, json_out) = home.both(&["--state-dir", dir_arg]);
+    assert!(text.contains("Answers: no") && text.contains("Start under way: yes"), "{text}");
+    let r = runtime(&json_out);
+    assert_eq!((&r["state"], &r["starting"], &r["answers"]), (&json!("running"), &json!(true), &json!(false)));
+
+    record(&dir, json!({ "pid": std::process::id(), "port": closed_port(), "node": "another-computer" }));
+    let (text, json_out) = home.both(&["--state-dir", dir_arg]);
+    assert!(text.contains("Recorded by another-computer") && text.contains("Start under way: yes"), "{text}");
+    let r = runtime(&json_out);
+    assert_eq!((&r["state"], &r["starting"], &r["pid"], &r["port"], &r["node"]), (&json!("other_computer"), &json!(true), &Value::Null, &Value::Null, &json!("another-computer")));
     drop(lock);
+
+    std::fs::remove_file(dir.join("runtime.json")).unwrap();
+    let (text, json_out) = home.both(&["--state-dir", dir_arg]);
+    assert!(text.contains("Start under way: no"), "{text}");
+    assert_eq!(json_out["runtime"]["starting"], false);
 
     let free = home.path("state").join("free");
     std::fs::create_dir_all(&free).unwrap();
     let (text, _) = home.both(&["--state-dir", free.to_str().unwrap()]);
     assert!(text.contains("Not running."), "{text}");
     assert_eq!(std::fs::read_dir(&free).unwrap().count(), 0, "no starting.lock is made");
+}
+
+#[test]
+fn a_build_listed_by_a_link_is_not_a_build() {
+    let home = Home::new("links");
+    let bin = home.path("data").join("endeavor/bin");
+    std::fs::create_dir_all(bin.join("0123456789ab")).unwrap();
+    std::os::unix::fs::symlink(bin.join("0123456789ab"), bin.join("link")).unwrap();
+    let (_, json_out) = home.both(&[]);
+    assert_eq!(json_out["folders"]["plugin_binaries"]["builds"], json!(["0123456789ab"]));
 }

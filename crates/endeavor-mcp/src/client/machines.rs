@@ -238,16 +238,14 @@ impl MachinesFile {
     /// `load`, for a caller that is about to write: an error if a newer Endeavor wrote the file.
     pub fn load_writable(&self) -> Result<Vec<Server>, String> {
         let contents = self.read()?;
-        self.check_schema(&contents)?;
+        self.check_schema(&contents, "doesn't change it")?;
         self.servers(&contents)
     }
 
     /// `load`, for a caller that only reports the machines: a file a newer Endeavor wrote is an error, whatever its shape.
     pub fn load_known(&self) -> Result<Vec<Server>, String> {
         let contents = self.read()?;
-        if contents.schema > SCHEMA {
-            return Err(self.newer(contents.schema, "doesn't list it"));
-        }
+        self.check_schema(&contents, "doesn't list it")?;
         self.servers(&contents)
     }
 
@@ -263,9 +261,9 @@ impl MachinesFile {
         format!("A newer Endeavor wrote the list of machines in {} (schema {schema}; this Endeavor knows {SCHEMA}), so this one {what}. Update Endeavor.", self.path.display())
     }
 
-    fn check_schema(&self, contents: &Contents) -> Result<(), String> {
+    fn check_schema(&self, contents: &Contents, what: &str) -> Result<(), String> {
         if contents.schema > SCHEMA {
-            return Err(self.newer(contents.schema, "doesn't change it"));
+            return Err(self.newer(contents.schema, what));
         }
         Ok(())
     }
@@ -359,7 +357,7 @@ impl MachinesFile {
             std::thread::sleep(Duration::from_millis(50));
         }
         let mut contents = self.read()?;
-        self.check_schema(&contents)?;
+        self.check_schema(&contents, "doesn't change it")?;
         let mut servers = self.servers(&contents)?;
         let result = change(&mut servers)?;
         contents.machines = servers
