@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{FakeBridge, TOKEN, julia_pids, pid_alive, serving_julia, wait_for};
-use endeavor_mcp::client::{Config, Outcome, RuntimeInfo, Server, Session, State, Transport, Want};
+use common::{FakeBridge, TOKEN, julia_pids, pid_alive, serving_julia, wait_for, write_executable};
+use endeavor_mcp::client::{Config, Launcher, Outcome, RuntimeInfo, Server, Session, State, Transport, Want};
 
 /// One machine called `lab-NAME` whose helper and runtime live in a folder of the test's own.
 struct Place {
@@ -42,12 +42,16 @@ impl Place {
 
     /// A session for the machine. `install`: the user agreed to the helper. `ask` runs before each sign-in.
     fn session_with(&self, install: bool, ask: Option<String>) -> Session {
+        Session::new(self.config(install, ask)).expect("a session")
+    }
+
+    fn config(&self, install: bool, ask: Option<String>) -> Config {
         let path = |name: &str| self.dir.join(name).display().to_string();
         let mut config = Config::new(self.server.clone(), |_, _| Ok(PathBuf::from(env!("CARGO_BIN_EXE_endeavor"))));
         let env = [("HOME", path("home")), ("XDG_STATE_HOME", path("state-home")), ("XDG_CONFIG_HOME", path("config")), ("XDG_CACHE_HOME", path("cache"))];
         config.transport = Transport::Shell { env: env.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(), ask };
         (config.root, config.state, config.depot, config.allow_install) = (path("root"), self.state.display().to_string(), path("depot"), install);
-        Session::new(config).expect("a session")
+        config
     }
 
     fn session(&self) -> Session {
@@ -593,4 +597,55 @@ fn an_attach_that_found_nothing_looks_again_and_finds_what_has_come_up_since() {
     let other = place.session();
     let started = ready(other.ensure(start(), LONG, false));
     assert_eq!(ready(session.ensure(Want::Attach { install: false }, LONG, false)).pid, started.pid);
+}
+
+/// The `--launcher` the helper of this connection was started with.
+fn helper_launcher(place: &Place) -> Vec<String> {
+    place.helpers().into_iter().map(|pid| {
+        let args = Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().unwrap();
+        let args = String::from_utf8_lossy(&args.stdout).into_owned();
+        args.split_whitespace().skip_while(|a| *a != "--launcher").nth(1).unwrap_or_default().to_owned()
+    }).collect()
+}
+
+#[test]
+fn an_auto_launcher_counts_as_slurm_until_the_helper_says_otherwise() {
+    let place = Place::new("auto-unsettled");
+    // The sign-in takes 2 s, so the helper hasn't said yet when it is asked.
+    let mut config = place.config(true, Some("sleep 2".into()));
+    config.launcher = Some(Launcher::Auto);
+    let session = Session::new(config).expect("a session");
+    assert!(session.status().hello.and_then(|h| h.launcher).is_none() && session.cluster(), "unsettled, nothing may start Julia directly");
+    let mut config = place.config(true, Some("sleep 2".into()));
+    config.launcher = Some(Launcher::Process);
+    assert!(!Session::new(config).expect("a session").cluster(), "a launcher named process is not a cluster");
+    wait_for("the hello", || session.status().hello.is_some_and(|h| h.launcher.is_some()));
+    let said = session.status().hello.and_then(|h| h.launcher).expect("the helper says which launcher");
+    assert_eq!(session.cluster(), said == "slurm", "then it follows the helper: {said}");
+}
+
+#[test]
+fn a_reconnect_asks_for_the_launcher_the_first_helper_settled_on() {
+    let place = Place::new("auto-reconnect");
+    let sinfo = place.dir.join("bin/sinfo");
+    std::fs::create_dir_all(place.dir.join("bin")).unwrap();
+    write_executable(&sinfo, "#!/bin/sh\nexit 0\n");
+    let mut config = place.config(true, None);
+    let Transport::Shell { env, .. } = &mut config.transport else { unreachable!() };
+    env.push(("PATH".into(), format!("{}:{}", place.dir.join("bin").display(), std::env::var("PATH").unwrap())));
+    config.launcher = Some(Launcher::Auto);
+    let session = Session::new(config).expect("a session");
+    wait_for("the connection", || session.status().state == State::Connected);
+    assert_eq!(session.status().hello.and_then(|h| h.launcher).as_deref(), Some("slurm"), "sinfo is on the PATH");
+    assert_eq!(helper_launcher(&place), ["slurm"]);
+
+    // Slurm goes from the PATH and the connection drops: the reconnect still asks for Slurm, not auto again.
+    std::fs::remove_file(&sinfo).unwrap();
+    let lost = place.helpers();
+    place.drop_connection();
+    wait_for("the helper to change", || place.helpers().iter().all(|p| !lost.contains(p)) && !place.helpers().is_empty());
+    wait_for("the connection", || session.status().state == State::Connected);
+    assert_eq!(helper_launcher(&place), ["slurm"]);
+    assert_eq!(session.status().hello.and_then(|h| h.launcher).as_deref(), Some("slurm"));
+    assert!(session.cluster() && !place.julia_ran(), "still a cluster, and nothing started directly");
 }
