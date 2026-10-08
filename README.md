@@ -164,12 +164,13 @@ script, other folders and building from source are in
 
 ## Update and remove
 
-The plugin keeps its program in `~/.local/share/endeavor/bin/BUILD/`. It pins
-no build yet, so it runs the newest one it has, looks for a newer one at the
-start of a Claude Code session and once a day, and uses a newer one from the
-next start. Once a plugin version names a build, it runs exactly that build and
-updating the plugin updates the program. A runtime that is already running
-keeps its build: run `endeavor stop`, then start a new session.
+The plugin keeps its program in `~/.local/share/endeavor/bin/BUILD/`. Each
+copy of the plugin names one build, the one made from the same source as its
+skills, and runs only that build, downloading it at the first start that needs
+it. A new copy of the plugin therefore brings its own build. Until the first
+release the plugin's version stays 0.1.0, so your agent may keep the copy it
+first installed after the repository has changed. A runtime that is already
+running keeps its build: run `endeavor stop`, then start a new session.
 
 For a copy installed by hand, run `endeavor update`. It refuses to replace the
 plugin's copy.

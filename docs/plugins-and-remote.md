@@ -265,7 +265,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 | Installing on a server | Only after the user agreed. Installing the plugin is the agreement to the binary on your own computer; the helper on a server, an update of it, and Endeavor's own Julia there each need a question first, the helper's first and Julia's only if none is found (built). Looking at what is there needs none beyond the harness's prompt for the tool call. The tools take `install: true` only after the user said yes |
 | Installing the binary | The plugin does it: its launcher is the MCP command, and on first start it downloads the build the plugin pins from the GitHub release. Installing the plugin is the user's agreement to that. `scripts/install.sh` or `scripts/install.ps1`, run from the web, is the fallback (built). npm later, once there are version tags |
 | Where the plugin's binary lives | `${XDG_DATA_HOME:-~/.local/share}/endeavor/bin/<key>/endeavor`, the same for every agent and every platform (`endeavor.exe` under Git Bash on Windows), so Claude Code, Codex and Antigravity share one download. Not the helpers cache, which prunes other keys |
-| Which build a plugin runs | The key in `release-key` beside the launcher. Empty or missing: the newest build |
+| Which build a plugin runs | The key in `release-key` beside the launcher: the build of the same commit's helper source, which `plugins.sh check` enforces. Empty or missing: the newest build |
 | Signing | Not needed for a `curl` install; wait |
 | State folder | One on each machine, yours included, for `serve`, `mcp`, the plugin and the app: the one `serve` uses today. The app stops choosing its own |
 | The list of machines | One file the binary owns: `machines.json`, `{"schema": 1, "machines": [...]}` with the app's server records, in `$XDG_CONFIG_HOME/endeavor/` (default `~/.config/endeavor/`, on macOS too), and in `%APPDATA%\Endeavor\` on Windows (built). The app will read and write it there. A bare list of records, the first shape, is read and rewritten as the object. Fields a build doesn't know, in the file, in a record, in its cluster, job defaults and partitions, are kept when it rewrites the file. A file with a higher `schema` than a build knows is read and never rewritten: its writing tools answer that a newer Endeavor wrote it. A machine is written only after a connect has succeeded |
@@ -853,7 +853,11 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
 - **A download cut short** (the agent kills a server that takes over 30 s)
   leaves at most a temporary folder in `<bin>`, never a partial binary. The
   next start downloads again and removes temporary folders older than an hour.
-- **Failure** is non-zero with a last line starting `endeavor:`.
+- **Failure** is non-zero with a last line starting `endeavor:`. A pinned
+  build that the release doesn't hold yet (the release answers `LATEST` but
+  has no `endeavor-<key>.sha256`; `install.sh` exits 3) fails with "still
+  being published", since the Helpers workflow publishes a change to `main`
+  a few minutes after the push. No older build is run in its place.
 - `--fetch-only` only gets the binary. Claude Code's `SessionStart` hook
   (matcher `startup`, so not on resume, clear or compact) runs it in the
   background so the download is usually done before the server starts.
@@ -890,12 +894,17 @@ it doesn't depend on the file's execute bit.
 
 One source for each part: `plugin/skills/` for the skills, `scripts/` for the
 launcher, `install.sh` and `release-key`. `scripts/plugins.sh sync` writes the
-copies and `check` fails if any differs or if a `skills` folder is a link; CI
-runs `check`. All three folders hold copies: some agents may not follow a link
+copies and `check` fails if any differs, if a `skills` folder is a link, or
+if `release-key` isn't `scripts/helpers.sh --key` of the commit; CI runs
+`check`. All three folders hold copies: some agents may not follow a link
 out of the plugin, and a Windows checkout without `core.symlinks` turns a link
 into a text file.
 `release-key` is not in `plugin/`, because that folder is hashed into the
-build's key.
+build's key. The key hashes the committed tree, so after committing a change
+to the helper source, run `scripts/helpers.sh --key > scripts/release-key &&
+sh scripts/plugins.sh sync` and amend the commit; the amend keeps the key.
+Because the key covers `plugin/`, a matching pin also
+means the binary embeds the skills the plugins ship.
 
 **What the documentation says, and what was seen.** Antigravity
 ([antigravity.google/docs/plugins](https://antigravity.google/docs/plugins)):
