@@ -256,4 +256,15 @@ mod tests {
         assert_eq!(expand_home("~/julia/bin/julia"), format!("{}/julia/bin/julia", home.display()));
         assert_eq!(expand_home("/opt/julia"), "/opt/julia");
     }
+
+    /// The cloud VMs' setup script installs this Julia and the pinned Rust too (Endeavor's docs/cloud.md).
+    #[test]
+    fn the_cloud_setup_script_pins_the_same_julia() {
+        let script = include_str!("../../../scripts/cloud-setup.sh");
+        let (_, _, url, sha, _) = TARBALLS.iter().find(|t| t.0 == "Linux" && t.1 == "x86_64").unwrap();
+        let rust = include_str!("../../../rust-toolchain.toml").lines().find_map(|l| l.strip_prefix("channel = ")).unwrap().trim_matches('"');
+        for line in [format!("JULIA_VERSION={JULIA_VERSION}"), format!("JULIA_URL={url}"), format!("JULIA_SHA256={sha}"), format!("RUST_TOOLCHAIN={rust}")] {
+            assert!(script.lines().any(|l| l == line), "scripts/cloud-setup.sh should have `{line}`");
+        }
+    }
 }
