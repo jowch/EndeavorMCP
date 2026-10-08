@@ -1228,14 +1228,19 @@ fn follow_log(path: PathBuf, mux: Arc<Mux>, ready: Arc<AtomicBool>, exit: Arc<Ex
 
 /// The end of the runtime's log, secrets masked.
 fn log_tail(path: &Path) -> Vec<String> {
-    let Ok(mut file) = File::open(path) else { return Vec::new() };
+    let text = log_end(path);
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(LOG_TAIL)..].iter().map(|l| redact_secret(l)).collect()
+}
+
+/// The last 64 KB of the log at `path`, empty if it can't be read.
+fn log_end(path: &Path) -> String {
+    let Ok(mut file) = File::open(path) else { return String::new() };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let _ = file.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)));
     let mut bytes = Vec::new();
     let _ = file.read_to_end(&mut bytes);
-    let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<&str> = text.lines().collect();
-    lines[lines.len().saturating_sub(LOG_TAIL)..].iter().map(|l| redact_secret(l)).collect()
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Mask Pluto's `secret=…` URL token.

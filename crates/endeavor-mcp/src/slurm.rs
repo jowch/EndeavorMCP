@@ -78,8 +78,7 @@ impl Running {
         scancel(&self.job);
         forget(dir, &self.job);
         let (status, log_tail) = said.unwrap_or_else(|| ("exited".into(), log_tail(&dir.join("runtime.log"))));
-        let status = reason.map(str::to_owned).unwrap_or(status);
-        ToApp::Died { status: if status.is_empty() { "exited".into() } else { status }, log_tail }
+        ToApp::Died { status: died_status(reason, status), log_tail }
     }
 
     /// Ask the runtime to shut down through the relay, then cancel the job.
@@ -584,6 +583,17 @@ fn scancel(job: &str) {
     let _ = Command::new("scancel").arg(job).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
+/// What the app is told when the runtime's job ended: Slurm's reason if there
+/// is one, else how the runtime exited, else a plain sentence. "exited" is
+/// what a runtime nobody waited on reports, and the app has nothing to say for it.
+fn died_status(reason: Option<&str>, status: String) -> String {
+    match reason {
+        Some(reason) => reason.to_owned(),
+        None if status.is_empty() || status == "exited" => "Its Slurm job ended.".into(),
+        None => status,
+    }
+}
+
 /// Whether a runtime's exit status says it exited on its own, with a code. A
 /// signal (or an exit nobody saw) may be Slurm ending the job, which the job's
 /// state says and the status doesn't.
@@ -602,6 +612,8 @@ fn end_reason(job: &str, dir: &Path, patient: bool) -> Option<&'static str> {
     };
     // sacct can lag the job's end by a moment, and a job on its way out still
     // reads RUNNING or COMPLETING, which hides why it ends, for a few seconds.
+    // Slurm's own words in the log come when the job is signalled, so they are
+    // read on every try.
     for tries in 0..if patient { 20 } else { 3 } {
         if let Some(state) = run("sacct", &["-j", job, "-X", "-n", "-P", "-o", "State"]) {
             if let Some(text) = s::ended_text(&state) {
@@ -615,24 +627,32 @@ fn end_reason(job: &str, dir: &Path, patient: bool) -> Option<&'static str> {
         if let Some(text) = queued.as_deref().and_then(s::ended_text) {
             return Some(text);
         }
+        if let Some(text) = log_reason(&log_end(&dir.join("runtime.log"))) {
+            return Some(text);
+        }
         let ending = queued.as_deref().is_some_and(|state| state.starts_with("RUNNING") || state.starts_with("COMPLETING"));
         if tries >= 2 && !ending {
             break;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    let log = log_tail(&dir.join("runtime.log")).join("\n");
-    if log.contains("DUE TO TIME LIMIT") {
-        Some(s::ended_text("TIMEOUT").unwrap())
+    None
+}
+
+/// What Slurm said in the job's log as it ended the job.
+fn log_reason(log: &str) -> Option<&'static str> {
+    let state = if log.contains("DUE TO TIME LIMIT") {
+        "TIMEOUT"
     } else if log.contains("DUE TO PREEMPTION") {
-        Some(s::ended_text("PREEMPTED").unwrap())
+        "PREEMPTED"
     } else if log.contains("oom-kill") || log.contains("Out Of Memory") {
-        Some(s::ended_text("OUT_OF_MEMORY").unwrap())
+        "OUT_OF_MEMORY"
     } else if log.contains("CANCELLED AT") {
-        Some(s::ended_text("CANCELLED").unwrap())
+        "CANCELLED"
     } else {
-        None
-    }
+        return None;
+    };
+    s::ended_text(state)
 }
 
 /// `text` as one word for `sh`.
@@ -729,6 +749,26 @@ fn exec(_command: Command) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_job_that_ended_is_never_reported_with_nothing_to_say() {
+        assert_eq!(died_status(Some("Its Slurm job was cancelled."), "exited".into()), "Its Slurm job was cancelled.");
+        assert_eq!(died_status(None, "exited".into()), "Its Slurm job ended.");
+        assert_eq!(died_status(None, String::new()), "Its Slurm job ended.");
+        assert_eq!(died_status(None, "exit status: 1".into()), "exit status: 1");
+        assert_eq!(died_status(None, "signal: 15 (SIGTERM)".into()), "signal: 15 (SIGTERM)");
+    }
+
+    #[test]
+    fn slurms_words_in_the_log_are_found_below_a_long_shutdown_trace() {
+        let dir = crate::client::scratch("slurm-log-reason");
+        let trace = "    [1] error(...)\n".repeat(200);
+        let log = format!("Runtime ready\nslurmstepd-n1: error: *** JOB 7 ON n1 CANCELLED AT 2026-01-01T00:00:00 ***\n{trace}");
+        std::fs::write(dir.join("runtime.log"), log).unwrap();
+        assert_eq!(log_reason(&log_end(&dir.join("runtime.log"))), s::ended_text("CANCELLED"));
+        assert_eq!(log_reason("Runtime ready\n"), None);
+        assert_eq!(log_reason("slurmstepd: error: *** JOB 7 ON n1 CANCELLED AT 2026 DUE TO TIME LIMIT ***"), s::ended_text("TIMEOUT"));
+    }
 
     #[test]
     fn only_an_exit_with_a_code_is_the_runtimes_own() {

@@ -179,8 +179,16 @@ _Started 2026-10-06, on the `client-library` branch._
   because the helper asked while Slurm still listed the job as running or
   completing, and gave up after 1.5 s. The helper now waits up to 10 s for
   the job's final state, except when the runtime already said how it ended
-  (then it tries three times, 1.5 s, as before). The slow case did not come up again in eight runs,
-  so the fix is not shown by a run.
+  (then it tries three times, 1.5 s, as before). It came back twice in six
+  runs on 2026-10-07: the client was told after the whole 10 s, with nothing.
+  Now the helper also reads the job's log on every try (Slurm writes
+  "CANCELLED AT" or "DUE TO TIME LIMIT" there when it signals the job), over
+  the last 64 KB and not the last 40 lines, and a job that ended is never
+  reported with nothing: at worst "Its Slurm job ended." The failing case was
+  not reproduced in 14 runs, so why the log check missed it is inferred (a
+  long shutdown trace below Slurm's line), and the fix is not shown by a run.
+  If a job stays in COMPLETING past 10 s and its log never says why, the user
+  is told only that it ended.
 - **A queued job has no id in the session's status until it is submitted by
   this session.** A session that re-attaches to a job already queued shows `queue`
   but no `job` until it runs, because the library's queued event carries no
