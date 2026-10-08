@@ -17,8 +17,6 @@ priority on 2026-10-08._
 
 Every P1:
 
-- `release-key` is empty in every plugin, so the plugin's binary follows
-  `LATEST` while its skills stay put ([Releases and plugins](#releases-and-plugins)).
 - A front and its runtime can be of different builds after an update, and the
   agent can't see it ([Releases and plugins](#releases-and-plugins)).
 - No marketplace install of the Claude Code plugin has listed its skills
@@ -34,18 +32,6 @@ Every P1:
 
 ## Releases and plugins
 
-- [P1] **`release-key` is empty in all three plugins, so the binary follows
-  `LATEST`.** Unpinned, a start uses the build it already has, and looks for a
-  newer one in the background at most once a day (and Claude Code's
-  `SessionStart` hook does at startup, on every session start and not once a
-  day: one request for `LATEST`, seen in the trial with Claude Code), so a
-  newer build applies from the start after it is found. The skills the user
-  has don't move with it (see the plugin version below), so skills and binary
-  drift apart. If the agent kills the launcher's children, the background check
-  may never finish, and it is retried only the next day. The release from `main`
-  (key `ed283c702b22`) is out, so the key can be pinned now. To close: pin the
-  key when releasing; then drop the unpinned mode
-  ([architecture-review.md](architecture-review.md), P7).
 - [P1] **A front and its runtime can be of different builds after an update,
   and the agent can't see it.** A runtime outlives the front that started it,
   so after a plugin update the new front attaches to the old build's runtime.
@@ -92,13 +78,15 @@ Every P1:
   same version likely never reaches a user who installed it. To act on at the
   first release: change the version with each release, or drop it, so that
   updates are delivered.
-- [P2] **Nothing checks that a plugin's skills match its binary.** Once the key
-  is pinned, the skills in a plugin can be newer than the pinned binary's
-  embedded copy, and the binary's own `notebook_guide` and the skills can then
-  disagree about the tools. To catch it: have `mcp --skills plugin` compare a
-  hash of the plugin's skills, passed by the launcher, with its embedded
-  `PLUGIN_VERSION`, and say so in its instructions; or check in CI that
-  `release-key` names a build embedding the same `plugin/skills`.
+- [P2] **Every commit that changes the helper's source needs a new pin and a
+  new build.** `release-key` must equal `scripts/helpers.sh --key`
+  (`plugins.sh check`, run in CI), and the key covers `crates/`, `runtime/` and
+  `plugin/`, so a skill edit or a code comment changes it. Each such push to
+  `main` publishes five builds, and until Helpers finishes (1 to 6 minutes) a
+  plugin updated to that commit says the build is still being published. A
+  branch's build is published only by a manual run, so a plugin installed from
+  a branch waits for it. To ease: narrow the key to what the binary needs, if
+  the skills embedded in it can be checked another way.
 - [P2] **`endeavor update` on macOS and Windows has never run.** The logic is
   the Linux code with other asset names, and the Windows rename-aside is
   tested on Linux with the same function; `cfg(windows)` paths are
@@ -108,9 +96,11 @@ Every P1:
   guards against a damaged or cut-short download and not against a tampered
   release, and the same holds for the install scripts, `update` and the
   fetched server helpers. To close: sign the release, or pin the key in the
-  script. For plugin installs, the pinned-key file could also carry the SHA-256
-  of each platform's binary, which would make the plugin's check independent of
-  the release; not built.
+  script. For plugin installs, `release-key` could also carry the SHA-256 of each
+  platform's binary, which would make the plugin's check independent of the
+  release; not built. It needs Helpers to refuse to replace a key's published
+  files (a rerun with `--clobber` would break a pinned checksum) and a release
+  step that writes the sums into `release-key` after publishing.
 - [P2] **A partly failed Helpers run replaces the checksum file** with one that
   lists only the builds it published, so a macOS or Windows build published by
   an earlier run of the same key stops being found until the next successful
