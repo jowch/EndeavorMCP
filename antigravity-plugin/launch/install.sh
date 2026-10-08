@@ -234,4 +234,4 @@ case ":${PATH:-}:" in
 esac
 
 echo
-echo "Next, install the plugin for your agent (Claude Code, Codex or Gemini CLI). The steps are in the README: https://github.com/jowch/EndeavorMCP#readme"
+echo "Next, install the plugin for your agent (Claude Code or Codex). The steps are in the README: https://github.com/jowch/EndeavorMCP#readme"

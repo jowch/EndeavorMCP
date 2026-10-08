@@ -119,5 +119,5 @@
     }
 
     Write-Host ""
-    Write-Host "Next, install the plugin for your agent (Claude Code, Codex or Gemini CLI). The steps are in the README: https://github.com/jowch/EndeavorMCP#readme"
+    Write-Host "Next, install the plugin for your agent (Claude Code or Codex). The steps are in the README: https://github.com/jowch/EndeavorMCP#readme"
 } @args
