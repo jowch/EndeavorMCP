@@ -169,6 +169,10 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             Looked::Running(state, port) => return Outcome::Ready(up(want, state, port, None)),
             unusable @ (Looked::OtherNode(_) | Looked::Older(_)) => return Outcome::Unusable(unusable),
             Looked::Silent(state) if !starting && !want.attach_only => eprintln!("endeavor: the recorded runtime (pid {}) isn't answering; starting a new one", state.pid),
+            // Its core was killed: what it started may still run, and open the same notebooks as the new one.
+            Looked::Dead(state) if !starting && !want.attach_only && crate::stop_workers(state.pid, state.started, state.boot.as_deref()) => {
+                hooks.progress(format!("Stopped what the last Julia here left running when it ended (pid {}).", state.pid));
+            }
             _ => {}
         }
         if starting {
@@ -481,6 +485,7 @@ pub(crate) fn end(dir: &Path, any_node: bool, how: stopped::How, force: bool, ev
         Looked::OtherNode(state) => Ended::Elsewhere(state.node),
         Looked::Running(state, _) | Looked::Older(state) | Looked::Silent(state) => stop_up(dir, state, how, events),
         Looked::Dead(state) => {
+            crate::stop_workers(state.pid, state.started, state.boot.as_deref());
             crate::remove_state(dir, state.pid, state.started);
             without_runtime(dir, any_node, lock, how, force, events)
         }

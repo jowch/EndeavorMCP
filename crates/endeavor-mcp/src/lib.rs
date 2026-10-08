@@ -830,7 +830,7 @@ impl Runtime {
         let status = stopped::why(&self.state_dir, stopped::Of::Runtime(self.pid)).map_or(status, |how| stopped_text(how).into());
         let log_tail = log_tail(&self.state_dir.join("runtime.log"));
         // Its notebook workers are no use without it.
-        stop_workers(self.pid);
+        stop_workers(self.pid, self.started, self.boot.as_deref());
         remove_state(&self.state_dir, self.pid, self.started);
         (status, log_tail)
     }
@@ -863,7 +863,7 @@ impl Runtime {
             }
             self.exit.wait(Duration::from_secs(5));
         }
-        stop_workers(self.pid);
+        stop_workers(self.pid, self.started, self.boot.as_deref());
         // A runtime that survived stays on record for the clients that can still reach it.
         if !self.is_it() {
             remove_state(&self.state_dir, self.pid, self.started);
@@ -901,23 +901,42 @@ fn signal_group(pid: i32, signal: i32) {
     }
 }
 
-/// Notebook workers left behind by a runtime that exited without taking them
-/// along. Only the group: once the runtime is reaped its pid may be reused, but
-/// a group id isn't while any member is left. Not when `pid` now belongs to a process, which may lead a group
-/// of its own: the runtime's record may be from before a reboot.
+/// End what is left of the process group of a runtime whose core `pid` (which started at `started`, on
+/// boot `boot`) is gone, and wait until it is: notebook workers, and on macOS, where nothing ties Julia to
+/// the core, Julia itself, which would otherwise go on saving the notebooks a new runtime opens. Only the
+/// group: once the core is reaped its pid may be reused, but a group id isn't while any member is left. Not
+/// when `pid` now belongs to a process, which may lead a group of its own, nor when the record is from an
+/// earlier boot, whose group ids mean nothing now. Whether anything was left.
 #[cfg(unix)]
-fn stop_workers(pid: i32) {
-    if pid_alive(pid, None, None) {
-        return;
+fn stop_workers(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
+    if pid <= 0 || pid_alive(pid, None, None) || !unixproc::this_boot(started, boot) {
+        return false;
     }
-    // SAFETY: plain syscall.
-    unsafe { libc::kill(-pid, libc::SIGTERM) };
+    // SAFETY: signal 0 only checks; a group of another user's processes (EPERM) is not the runtime's.
+    let left = || unsafe { libc::kill(-pid, 0) } == 0;
+    if !left() {
+        return false;
+    }
+    for signal in [libc::SIGTERM, libc::SIGKILL] {
+        // SAFETY: plain syscall.
+        unsafe { libc::kill(-pid, signal) };
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while left() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !left() {
+            break;
+        }
+    }
+    true
 }
 
-/// Nothing to do on Windows: the core's Job Object ends Julia's workers when
-/// the core ends.
+/// Nothing to do on Windows: the core's Job Object ends Julia and its workers
+/// when the core ends.
 #[cfg(windows)]
-fn stop_workers(_pid: i32) {}
+fn stop_workers(_pid: i32, _started: Option<u64>, _boot: Option<&str>) -> bool {
+    false
+}
 
 /// Whether and how the runtime exited.
 #[derive(Default)]

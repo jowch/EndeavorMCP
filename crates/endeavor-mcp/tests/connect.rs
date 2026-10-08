@@ -679,6 +679,42 @@ fn a_core_killed_while_starting_leaves_the_next_client_to_start_a_new_one_at_onc
 }
 
 #[test]
+fn the_julia_a_killed_core_leaves_behind_is_stopped_before_the_next_start() {
+    let dir = state_dir("core-killed");
+    let cores = Cores(dir.clone());
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let mut first = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    first.hello();
+    first.request_start(None, true);
+    let ToApp::Ready { pid: core, .. } = after_start(&first) else { panic!("expected Ready") };
+    first.send(ToHelper::Detach);
+    first.exits();
+    let left = common::julia_pids(&dir)[0];
+    // SAFETY: plain syscall, on the core alone, as an OOM kill or `kill -9` would end it.
+    unsafe { libc::kill(core as i32, libc::SIGKILL) };
+    common::wait_for("the core to end", || !common::pid_alive(core as i32));
+    // Linux ends Julia with its core (PR_SET_PDEATHSIG); on macOS nothing does, so it is still running here.
+    assert!(cfg!(target_os = "linux") || common::pid_alive(left), "Julia outlived its core");
+    assert!(dir.join("runtime.json").exists(), "the killed core left its record");
+
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let mut second = held_start(&dir, &julia, &[]);
+    let started = common::julia_pids(&dir);
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert!(!common::pid_alive(left), "the Julia left behind was stopped before another started");
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    let ToApp::Ready { pid, reattached, .. } = after_start(&second) else { panic!("expected Ready") };
+    assert!(pid != core && !reattached);
+    assert_eq!(cores.pids(), [pid as i32]);
+    let stop = second.request_stop();
+    assert_eq!(second.next(), ToApp::Stopped { id: stop });
+    second.stdin.0.lock().unwrap().take();
+    second.exits();
+}
+
+#[test]
 fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_and_leaving_does_not_stop_it() {
     let (dir, cores, julia) = held_dir("start-waiters");
     let mut first = held_start(&dir, &julia, &[]);

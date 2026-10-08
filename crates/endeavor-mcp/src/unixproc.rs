@@ -105,6 +105,29 @@ pub fn same_boot(recorded: Option<&str>) -> bool {
     }
 }
 
+/// Whether a process recorded as started at `started` (`start_time`) on boot `boot` (`boot_id`) is from
+/// this boot of the computer, so that a process group named after it may still be its. Linux tells by the
+/// boot id, macOS by the time it booted; where neither is known, it is taken to be.
+pub fn this_boot(started: Option<u64>, boot: Option<&str>) -> bool {
+    same_boot(boot) && started.zip(boot_time()).is_none_or(|(started, booted)| started >= booted)
+}
+
+/// When this computer booted, in `start_time`'s unit, where that unit is an absolute time (macOS).
+#[cfg(target_os = "macos")]
+fn boot_time() -> Option<u64> {
+    let mut booted: libc::timeval = libc::timeval { tv_sec: 0, tv_usec: 0 };
+    let mut size = std::mem::size_of::<libc::timeval>();
+    let mut name = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+    // SAFETY: the name has the length given, and `booted` is plain data of the size given.
+    let got = unsafe { libc::sysctl(name.as_mut_ptr(), 2, (&raw mut booted).cast(), &mut size, std::ptr::null_mut(), 0) };
+    (got == 0 && booted.tv_sec > 0).then(|| booted.tv_sec as u64 * 1_000_000 + booted.tv_usec as u64)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn boot_time() -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +172,19 @@ mod tests {
         assert_eq!(start_time(-1), Start::Gone);
         // A pid that is in no process: the largest a pid can be is far below this.
         assert_eq!(start_time(i32::MAX), Start::Gone);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_process_of_this_boot_is_of_this_boot_and_one_recorded_before_it_is_not() {
+        let me = start_time(std::process::id() as i32).at();
+        assert!(this_boot(me, boot_id().as_deref()));
+        assert!(this_boot(None, None), "nothing recorded: as before");
+        if cfg!(target_os = "macos") {
+            assert!(!this_boot(Some(1), None), "started a microsecond after 1970");
+        } else {
+            assert!(!this_boot(me, Some("not-this-boot")));
+        }
     }
 
     #[cfg(target_os = "linux")]
