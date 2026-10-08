@@ -367,13 +367,32 @@ struct Served {
 /// few (the helper's relayed streams).
 fn accept(listener: TcpListener, served: Arc<Served>) {
     std::thread::spawn(move || {
-        for client in listener.incoming().map_while(Result::ok) {
+        each_connection(listener.incoming(), |client| {
             let served = served.clone();
             std::thread::spawn(move || {
                 let _ = serve_client(client, &served);
             });
-        }
+        })
     });
+}
+
+/// Give `serve` each connection `incoming` accepts, for as long as the port is open. A failed accept (a
+/// connection reset before it was taken, or no descriptors left) doesn't close the port, and a later one
+/// succeeds once descriptors are free; the pause keeps a lasting failure from spinning.
+fn each_connection<C>(incoming: impl Iterator<Item = io::Result<C>>, mut serve: impl FnMut(C)) {
+    let mut said: Option<std::time::Instant> = None;
+    for client in incoming {
+        match client {
+            Ok(client) => serve(client),
+            Err(e) => {
+                if said.is_none_or(|said| said.elapsed() > Duration::from_secs(60)) {
+                    eprintln!("endeavor core: couldn't accept a connection: {e}");
+                    said = Some(std::time::Instant::now());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 /// Where a request on the runtime's port goes, by its path.
@@ -641,6 +660,14 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connections_are_served_after_an_accept_that_failed() {
+        let incoming = vec![Ok(1), Err(io::Error::from_raw_os_error(24)), Ok(2), Err(io::ErrorKind::ConnectionAborted.into()), Ok(3)];
+        let mut served = Vec::new();
+        each_connection(incoming.into_iter(), |client| served.push(client));
+        assert_eq!(served, [1, 2, 3]);
+    }
 
     fn head(text: &str) -> Head {
         Head::read(&mut text.as_bytes()).unwrap().unwrap()
