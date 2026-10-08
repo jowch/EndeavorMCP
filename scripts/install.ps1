@@ -119,5 +119,6 @@
     }
 
     Write-Host ""
-    Write-Host "Next, install the plugin for your agent (Claude Code or Codex). The steps are in the README: https://github.com/jowch/EndeavorMCP#readme"
+    Write-Host "This copy is for running endeavor yourself, such as endeavor serve or endeavor status. The plugins keep their own copy and don't use this one."
+    Write-Host "To install the plugin for your agent (Claude Code or Codex), see the README: https://github.com/jowch/EndeavorMCP#install"
 } @args

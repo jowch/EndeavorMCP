@@ -37,7 +37,9 @@ Start Codex in your project folder. It differs from Claude Code in three ways:
   ```
 
 - Codex has no start hook, so the first start downloads the program while the
-  agent waits.
+  agent waits. That can take longer than Codex lets a server start. If the
+  notebook tools don't appear, ask the agent to finish the download; it asks
+  before running anything.
 
 Without the plugin, Codex can run `endeavor mcp` as an MCP server instead
 ([serve.md](docs/serve.md#on-the-same-machine-the-stdio-form)); it then starts
