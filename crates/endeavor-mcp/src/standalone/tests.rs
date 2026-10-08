@@ -52,6 +52,8 @@ fn flags_set_what_they_name() {
     let Ok(Command::Mcp(o)) = shell else { panic!() };
     assert_eq!((o.julia, o.skills_plugin, o.folder), (julia::Source::Shell("module load julia".into()), true, PathBuf::from("/abs")));
     assert_eq!(parsed("stop --state-dir /s").unwrap(), Command::Stop { state_dir: PathBuf::from("/s") });
+    assert_eq!(parsed("status --json --state-dir /s").unwrap(), Command::Status { state_dir: PathBuf::from("/s"), json: true });
+    assert!(matches!(parsed("status").unwrap(), Command::Status { json: false, .. }));
 }
 
 #[test]
@@ -60,6 +62,8 @@ fn flags_that_dont_apply_are_refused() {
     assert_eq!(error("mcp --host-tools"), "--host-tools isn't an option of mcp");
     assert_eq!(error("serve --skills plugin"), "--skills isn't an option of serve");
     assert_eq!(error("stop --port 1"), "--port isn't an option of stop");
+    assert_eq!(error("serve --json"), "--json isn't an option of serve");
+    assert_eq!(error("status --port 1"), "--port isn't an option of status");
     assert_eq!(error("mcp --skills all"), "--skills takes `plugin`, not all");
     assert_eq!(error("serve --idle-stop -1"), "--idle-stop needs a number of hours (0: never)");
     assert_eq!(error("serve --port http"), "--port needs a port number");

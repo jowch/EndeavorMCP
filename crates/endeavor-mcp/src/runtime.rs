@@ -243,8 +243,9 @@ pub(crate) fn hold_starting(dir: &Path) -> std::io::Result<File> {
 /// Whether a core holds `starting.lock`: a start is under way. Asked with a shared lock, so that two who
 /// ask never make each other see it held. On a home folder shared by several machines the lock may not
 /// reach them all.
+/// It makes no file: a core makes `starting.lock` before it holds it, so none means no start.
 pub(crate) fn starting(dir: &Path) -> bool {
-    open_starting(dir).is_ok_and(|file| file.try_lock_shared().is_err())
+    File::open(dir.join("starting.lock")).is_ok_and(|file| file.try_lock_shared().is_err())
 }
 
 /// The core `runtime` was just spawned: wait until it holds `starting.lock`, so that nothing that takes

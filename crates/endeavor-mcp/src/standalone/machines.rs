@@ -42,11 +42,16 @@ const CONNECT_WAIT: Duration = Duration::from_secs(10);
 /// A call isn't begun with less than this left of the call's time.
 const MIN_CALL: Duration = Duration::from_millis(300);
 
+/// An `ENDEAVOR_TEST_*` variable. A release build never reads them, so they cannot redirect a shipped binary's ssh.
+fn test_var(name: &str) -> Option<std::ffi::OsString> {
+    if cfg!(debug_assertions) { std::env::var_os(name) } else { None }
+}
+
 /// A connection to `server`: the one place that makes a `Session`. The helper it sends to the machine is this program when the machine's
 /// platform is this computer's, else the release's for that platform. `allow_install` is the user's
 /// agreement to the helper on the machine.
 ///
-/// For tests only, read from the environment: `ENDEAVOR_TEST_SHELL` (any value) runs the helper on this
+/// For tests only, read from the environment, and only by a debug build (`test_var`): `ENDEAVOR_TEST_SHELL` (any value) runs the helper on this
 /// computer through `sh`, as `Transport::Shell` does, so no sshd is needed; `ENDEAVOR_TEST_ROOT`,
 /// `ENDEAVOR_TEST_STATE` and `ENDEAVOR_TEST_DEPOT` set `Options::root`, `state` and `depot`, which otherwise
 /// are the machine's own default folders (`{id}` in them is the machine's id, so that two machines don't
@@ -54,7 +59,7 @@ const MIN_CALL: Duration = Duration::from_millis(300);
 /// (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
 fn open_session(server: Server, allow_install: bool) -> Result<Session, String> {
     let id = server.id.clone();
-    let var = |name: &str| std::env::var(name).unwrap_or_default().replace("{id}", &id);
+    let var = |name: &str| test_var(name).and_then(|v| v.into_string().ok()).unwrap_or_default().replace("{id}", &id);
     let helper = |os: &str, arch: &str| {
         if (os.to_owned(), arch.to_owned()) == this_platform() {
             std::env::current_exe().map_err(|e| format!("Couldn't find the endeavor program itself: {e}"))
@@ -63,8 +68,8 @@ fn open_session(server: Server, allow_install: bool) -> Result<Session, String> 
         }
     };
     let mut config = Config::new(server, helper);
-    if std::env::var_os("ENDEAVOR_TEST_SHELL").is_some() {
-        config.transport = Transport::Shell { env: Vec::new(), ask: std::env::var("ENDEAVOR_TEST_ASK").ok() };
+    if test_var("ENDEAVOR_TEST_SHELL").is_some() {
+        config.transport = Transport::Shell { env: Vec::new(), ask: test_var("ENDEAVOR_TEST_ASK").and_then(|v| v.into_string().ok()) };
     }
     (config.root, config.state, config.depot, config.allow_install) = (var("ENDEAVOR_TEST_ROOT"), var("ENDEAVOR_TEST_STATE"), var("ENDEAVOR_TEST_DEPOT"), allow_install);
     config.messages = Messages {

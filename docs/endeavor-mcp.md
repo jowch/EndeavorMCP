@@ -187,6 +187,19 @@ of input and `--quit-with-client` end only a start this process spawned. A stop
 runtime it is not attached to) finds no record and `starting.lock` held, and
 stops nothing: it says Julia is still starting and to try again once it is up.
 
+`endeavor status [--state-dir DIR] [--json]` reports what Endeavor has on this
+computer and changes nothing: it makes no folder or file, starts nothing and
+opens no ssh connection. It reads the state folder with `runtime::look` (not
+running, starting, running, or recorded with its process gone) and asks a running
+runtime one ping on its loopback port to learn whether it answers; that is the
+only request it makes. It reads the machines file and `projects.json` without
+rewriting them, and names the plugin binary store (with its builds), the helpers
+cache, `serve`'s unpacked runtime, the server root and the default depot. The first
+three get a size when they have few entries; the server root and the depot are
+named and never walked. It never prints the runtime's token. `--json` prints the
+same facts as one object. It exits 0 whenever it could report, including when
+nothing is running.
+
 ## Session identity
 
 _Built 2026-10-03._

@@ -128,6 +128,12 @@ struct State {
     token: String,
     /// The Slurm job it runs in.
     job: Option<String>,
+    /// The build that started it (`embedded::BUILD_VERSION`); none for one from before builds were recorded.
+    build: Option<String>,
+    /// The notebooks folder a standalone runtime recorded.
+    folder: Option<String>,
+    /// Whether it ends itself when idle; none for a record from before this was written.
+    exits_when_idle: Option<bool>,
 }
 
 /// Why a runtime from a build before one port per runtime can't be used.
@@ -179,7 +185,7 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some("relay") => slurm::relay_main(&argv[1..]),
         Some("node-start") => slurm::node_start_main(&argv[1..]),
         Some("core") => core::main(&argv[1..]),
-        Some("serve" | "mcp" | "stop") => standalone::main(&argv),
+        Some("serve" | "mcp" | "stop" | "status") => standalone::main(&argv),
         Some("--version" | "-V" | "version") => update::print_version(),
         Some("update") => update::main(&argv[1..]),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
@@ -1082,6 +1088,9 @@ fn parse_state(v: &Value) -> Option<State> {
         port: v["port"].as_u64().and_then(|p| u16::try_from(p).ok()),
         token: text("token")?,
         job: text("job").filter(|j| !j.is_empty()),
+        build: text("build"),
+        folder: text("folder"),
+        exits_when_idle: v["exits_when_idle"].as_bool(),
     })
 }
 

@@ -87,7 +87,14 @@ _Started 2026-10-06, on the `client-library` branch._
   either (it says Julia is still starting); on a machine `force` cancels it.
 - **The test variables are `ENDEAVOR_TEST_SHELL`, `_ROOT`, `_STATE`, `_DEPOT` and
   `_ASK`**; `{id}` in the last four stands for the machine's id, so that two
-  machines in one test don't share a runtime. They work in release builds.
+  machines in one test don't share a runtime. A release build ignores them
+  (`cfg!(debug_assertions)`, in `test_var` in `standalone/machines.rs`), so a
+  shipped binary's ssh can't be redirected to a local shell. Two other
+  variables are for tests and are not gated, since they only change a wait:
+  `ENDEAVOR_START_WAIT_SECS` (how long a call waits for a starting runtime) and
+  `ENDEAVOR_IDLE_CHECK_SECS` (how often an idle runtime checks). The other
+  wait-length variables (`ENDEAVOR_START_LOCK_SECS`, `_STOP_LOCK_SECS`,
+  `_SLURM_POLL_MS`) are not gated either.
 
 ## The machines file
 
@@ -347,6 +354,15 @@ _Started 2026-10-06, on the `client-library` branch._
 - **`Env::from_vars` still reads the real process** for the home fallback
   (`home_dir`), the working folder and the host name, so a test that fakes the
   variables does not fake those three.
+- **`endeavor status` is limited to this computer, and is read-only.** It
+  shows the state folder it is given (the default one, or `--state-dir`), not a
+  server's runtime or a machine's connection, and the cluster state folder only
+  as the files it holds. It asks a running runtime one ping, which sends the
+  recorded token to the recorded port on 127.0.0.1 (every `look` does; a stale
+  record whose port another local program now uses would show it the token). To
+  see whether a start is under way it takes `starting.lock` shared for an
+  instant, as every `look` does. A folder with more than 20,000 entries is not
+  sized. Nothing cleans up or uninstalls (see Uninstalling a plugin).
 
 ## The skills
 

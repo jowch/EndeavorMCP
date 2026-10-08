@@ -49,7 +49,7 @@ file the app will share, so doing it later means doing the app's side twice.
 | P6 | The launcher (process or Slurm) chosen per start, not per connection | Yes if done | Unclear | Not sure. It would end the two connections for a new cluster and the link restart on a mode change, but the helper would have to look in two state folders. Worth a short spike before deciding |
 | P7 | Drop the launcher's unpinned mode once every release pins its build | No | Small | Do it at the first release from `main`. Until then the unpinned mode is what makes the plugin usable |
 | N1 | Hide "link" and "helper" from what an agent reads; say "runtime" and name the engine only when it matters | No | Small | Do it with the skills rewrite |
-| N2 | `endeavor status` (links, runtimes, cached binaries, paths, logs) and keeping the previous `link.log` | No | Days | Do it before real users. It is most of what support would need |
+| N2 | `endeavor status` (links, runtimes, cached binaries, paths, logs) and keeping the previous `link.log` | No | Days | **`endeavor status` is built** (read-only: runtime, machines, projects, folders, `--json`). Still missing: a clean-up or uninstall command, and keeping the previous log |
 | N3 | One public module for every on-disk path, the scripts pinned to it by tests (not through a hidden `endeavor paths`: both scripts run before the binary exists) | Yes for the module | Days | Do it. The server state folder is already defined twice, in Rust and in the bootstrap script, and the two differ |
 | N4 | Collapse the near-duplicate library calls (`connect`/`connect_checked`, `start`/`start_with`, the `_within` twins) | Yes | Small | Do it with P1 to P3 |
 | N5 | Gate the 14 test-only `ENDEAVOR_*` variables behind one switch | No | Small | Do it. Two of them make the link run a local shell instead of ssh |
@@ -151,13 +151,13 @@ Mostly yes. Three drifts:
 - **`endeavor update`.** Needed for `serve` users on servers. The guard for plugin-managed binaries is small.
 - **Helper cache pruning.** Slightly wrong (gaps.md) but cheap. Can wait.
 - **`--exit-idle`.** The mechanism is fine. The problem is that idle policy depends on who started the runtime (gaps.md, "Idle exit"). Record the policy in `runtime.json` and show it; decide one default.
-- **Test-only variables.** 14 of 29 `ENDEAVOR_*` variables are for tests (`LINK_SHELL`, `LINK_ROOT`, `LINK_STATE`, `LINK_DEPOT`, `LINK_ASK`, `LINK_IDLE_SECS`, `FRONT_PING_SECS`, `START_WAIT_SECS`, `START_LOCK_SECS`, `STOP_LOCK_SECS`, `SLURM_POLL_MS`, `IDLE_CHECK_SECS`, `JOB_TEST_PIDS`, `JOB_TEST_ROLE`). They work in release builds. `ENDEAVOR_TEST_SHELL` and `ENDEAVOR_TEST_ASK` make the link run local shell commands instead of ssh. Low risk, since anyone who can set them can already run code, but they should be gated behind one switch or a debug build.
+- **Test-only variables.** 14 of 29 `ENDEAVOR_*` variables are for tests (`LINK_SHELL`, `LINK_ROOT`, `LINK_STATE`, `LINK_DEPOT`, `LINK_ASK`, `LINK_IDLE_SECS`, `FRONT_PING_SECS`, `START_WAIT_SECS`, `START_LOCK_SECS`, `STOP_LOCK_SECS`, `SLURM_POLL_MS`, `IDLE_CHECK_SECS`, `JOB_TEST_PIDS`, `JOB_TEST_ROLE`). They worked in release builds. `ENDEAVOR_TEST_SHELL` and `ENDEAVOR_TEST_ASK` make the connection run local shell commands instead of ssh. Now the `ENDEAVOR_TEST_*` ones are read only by debug builds (gaps.md); the wait-length ones (`START_WAIT_SECS`, `IDLE_CHECK_SECS` and others) are not gated.
 
 ### 3. What is missing
 
 - **Protocol versions.** See P1. The app's `/endeavor/call` methods have none either (the docs say so).
-- **A command to see and clean up.** There is `serve`, `mcp`, `stop`, `update`, `--version`, and hidden `link`, `connect`, `core`, `relay`. Nothing lists links, runtimes, cached binaries or state. A user with a stuck link must find `~/.local/state/endeavor/links/<id>/link.json` and kill a pid. `endeavor status` (read-only) and `endeavor link stop <machine>` would cover most support cases.
-- **Logs a user can find.** `link.log` is opened with `truncate(true)` each time a link starts (link.rs:363). After a crash, the next front erases the reason. The front logs to stderr, which the harness may or may not keep. Keep the previous log (`link.log.1`) and print the paths in `endeavor status`.
+- **A command to see and clean up.** `endeavor status` (read-only, with `--json`) now lists the runtime on this computer, the machines, the projects and the folders Endeavor uses, with sizes where cheap. Still missing: a command that cleans up or uninstalls (see Uninstall below), and one that lists or ends a machine's runtime on a server. `endeavor stop` ends this computer's runtime.
+- **Logs a user can find.** `link.log` is opened with `truncate(true)` each time a link starts (link.rs:363). After a crash, the next front erases the reason. The front logs to stderr, which the harness may or may not keep. Keep the previous log (`link.log.1`). `endeavor status` prints the path of `runtime.log`.
 - **Failures outside a tool call.** A link that gives up after 10 minutes sets `failed` and waits. The user learns of it at the next tool call, or from a dead browser page. The listener's "not connected" page is the only signal. Acceptable for now; say so in the docs.
 - **Uninstall.** Nothing removes `~/.local/share/endeavor/bin/*`, the helpers cache, the state folders, or the per-build helper folders on servers. I found no pruning of `<root>/<build>/` in the bootstrap script, so each plugin update leaves another helper folder on every server. I did not check whether the helper prunes them itself.
 - **One place for paths.** `Env` has seven path functions (standalone.rs:122 to :180), `machines_path` is in `client/machines.rs`, the binary store is defined only in shell, and the server state folder is defined a second time in the bootstrap script (ssh.rs:216: `${XDG_STATE_HOME:-$HOME/.local/state}/endeavor/serve/$(uname -n)`). The two copies already differ: Rust accepts `XDG_STATE_HOME` only if absolute and uses `hostname()`; the shell takes any value and uses `uname -n`. `Env::depot` uses `~/.cache` and ignores `XDG_CACHE_HOME`, unlike `Env::cache`. Put all of them in one public module the app can call, and check the scripts against it by tests, since neither script can call a command of a binary that isn't installed yet.
@@ -212,7 +212,7 @@ An agent meets: machine, local, link, helper, runtime, Julia, job, session, note
 **Can wait:**
 - The internal rewrite of `run.rs` once its public shape is fixed.
 - P5's "local as a machine" (but do the lazy start and the Julia question now).
-- P7, cache pruning, uninstall, `endeavor status`, log rotation, gating the test variables, splitting the large files.
+- P7, cache pruning, uninstall, log rotation, splitting the large files.
 
 ### What is good and should be left alone
 

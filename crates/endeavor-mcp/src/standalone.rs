@@ -11,6 +11,7 @@
 //!   outlives the agent and ends itself after the idle stop, and relays MCP
 //!   between stdin/stdout and the runtime's `/mcp`.
 //! - `stop` ends the runtime running from the state folder.
+//! - `status` says what Endeavor has on this computer, and changes nothing.
 //!
 //! `runtime/` is built into this binary (build.rs) and unpacked to a folder
 //! named by its version on first use, so the binary is all a user installs.
@@ -34,12 +35,14 @@ use target::{Local, Target};
 
 mod machines;
 mod projects;
+mod status;
 mod target;
 
 
 const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Julia here and print how to connect (Ctrl-C stops it)
        endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
        endeavor stop              stop the Julia that serve or mcp started
+       endeavor status [--json]   show what Endeavor has on this computer; changes nothing
 
 options:
   --folder DIR         where new notebooks go (default: the current folder)
@@ -50,7 +53,8 @@ options:
   --julia-shell LINE   a shell line that puts julia on the PATH, such as 'module load julia'
   --depot DEPOT        JULIA_DEPOT_PATH (default ~/.cache/endeavor/depot:, or $SCRATCH/endeavor/depot:)
   --idle-stop HOURS    stop notebooks unused this long; 0 never (default 48)
-  --state-dir DIR      the runtime's state (default ~/.local/state/endeavor/serve/<host>)
+  --state-dir DIR      the runtime's state (default ~/.local/state/endeavor/serve/<host>) [serve, mcp, stop, status]
+  --json               print the facts as one JSON object [status]
 ";
 
 /// How long a relayed call, and each machine tool, waits for a runtime that is
@@ -65,6 +69,7 @@ pub(crate) enum Command {
     Serve(Options),
     Mcp(Options),
     Stop { state_dir: PathBuf },
+    Status { state_dir: PathBuf, json: bool },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,9 +93,9 @@ pub(crate) struct Options {
 }
 
 pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
-    let (command, rest) = argv.split_first().ok_or("expected serve, mcp or stop")?;
+    let (command, rest) = argv.split_first().ok_or("expected serve, mcp, stop or status")?;
     let (mut state_dir, mut julia, mut depot, mut folder, mut port) = (None, None::<julia::Source>, None, None, 0);
-    let (mut host_tools, mut idle_hours, mut skills_plugin) = (false, crate::notebooks::IDLE_HOURS, false);
+    let (mut host_tools, mut idle_hours, mut skills_plugin, mut json) = (false, crate::notebooks::IDLE_HOURS, false, false);
     let mut args = rest.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or(format!("{arg} needs a value"));
@@ -122,6 +127,10 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
                 only(&["serve", "mcp"])?;
                 idle_hours = value()?.parse().ok().filter(|h: &f64| *h >= 0.0).ok_or("--idle-stop needs a number of hours (0: never)")?
             }
+            "--json" => {
+                only(&["status"])?;
+                json = true
+            }
             "--host-tools" => {
                 only(&["serve"])?;
                 host_tools = true
@@ -137,8 +146,10 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
         }
     }
     let state_dir = state_dir.unwrap_or_else(|| env.state_dir());
-    if command == "stop" {
-        return Ok(Command::Stop { state_dir });
+    match command.as_str() {
+        "stop" => return Ok(Command::Stop { state_dir }),
+        "status" => return Ok(Command::Status { state_dir, json }),
+        _ => {}
     }
     let folder = match folder {
         Some(folder) if folder.is_relative() => env.cwd.join(folder),
@@ -163,13 +174,14 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     }
 }
 
-/// `endeavor serve|mcp|stop …`.
+/// `endeavor serve|mcp|stop|status …`.
 pub fn main(argv: &[String]) -> ! {
     if argv.iter().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
         std::process::exit(0);
     }
-    let command = parse(argv, &Env::here()).unwrap_or_else(|e| {
+    let env = Env::here();
+    let command = parse(argv, &env).unwrap_or_else(|e| {
         eprintln!("{e}\n{USAGE}");
         std::process::exit(2);
     });
@@ -177,6 +189,7 @@ pub fn main(argv: &[String]) -> ! {
         Command::Serve(options) => serve(options),
         Command::Mcp(options) => relay(options),
         Command::Stop { state_dir } => stop(&state_dir),
+        Command::Status { state_dir, json } => status::main(&env, &state_dir, json),
     }
 }
 

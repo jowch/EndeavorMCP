@@ -242,6 +242,15 @@ impl MachinesFile {
         self.servers(&contents)
     }
 
+    /// `load`, for a caller that only reports the machines: a file a newer Endeavor wrote is an error, whatever its shape.
+    pub fn load_known(&self) -> Result<Vec<Server>, String> {
+        let contents = self.read()?;
+        if contents.schema > SCHEMA {
+            return Err(self.newer(contents.schema, "doesn't list it"));
+        }
+        self.servers(&contents)
+    }
+
     fn servers(&self, contents: &Contents) -> Result<Vec<Server>, String> {
         contents.machines.iter().map(|machine| serde_json::from_value(machine.clone()).map_err(|e| self.invalid(e))).collect()
     }

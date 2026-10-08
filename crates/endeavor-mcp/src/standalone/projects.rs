@@ -41,6 +41,11 @@ impl Projects {
         Ok(self.load()?.remove(&key(folder)))
     }
 
+    /// How many projects are remembered; 0 if there is no file.
+    pub fn count(&self) -> Result<usize, String> {
+        Ok(self.load()?.len())
+    }
+
     /// Remember `what` for `folder`, or forget what it remembers.
     pub fn set(&self, folder: &Path, what: Option<Remembered>) -> Result<(), String> {
         let key = key(folder);
