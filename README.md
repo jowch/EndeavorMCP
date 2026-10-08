@@ -15,15 +15,10 @@ claude plugin install endeavor@endeavor
 
 Then start Claude Code in your project folder. New notebooks go there.
 
-**Antigravity** (not run on a real install): clone this repository and run
-`agy plugin install` with its `antigravity-plugin/` folder.
-
-**Codex** (not run on a real install): the command is
-`codex plugin marketplace add`; the plugin is the `codex-plugin/` folder.
-
-The Codex and Antigravity folders were built to those agents' documentation.
-Whether they start the server, find the project folder and load the skills is
-not known ([gaps.md](docs/gaps.md)).
+**Antigravity and Codex** are not supported yet. The `antigravity-plugin/` and
+`codex-plugin/` folders were built to those agents' documentation and have
+never been installed. Whether they start the server, find the project folder
+and load the skills is not known ([gaps.md](docs/gaps.md)).
 
 You need nothing else. The first start:
 

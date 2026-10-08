@@ -268,6 +268,16 @@ _Started 2026-10-06, on the `client-library` branch._
   lists only the builds it published, so a macOS or Windows build published
   by an earlier run of the same key stops being found until the next
   successful run. The Linux builds are always in it.
+- **The Claude Code plugin reaches its skills through a link.**
+  `claude-plugin/skills` links to `../plugin/skills`. Claude Code's
+  documentation says a link to elsewhere in the same marketplace is replaced
+  by a copy of its target when the plugin is installed, so the skills should
+  arrive; no marketplace install has been made to see it (the trial loaded a
+  copy of the folder with `--plugin-dir`). On Windows a git checkout without
+  `core.symlinks` turns the link into a text file, and the plugin would have
+  no skills. To close: install from the marketplace once after the first
+  release and list the skills; for Windows, make `claude-plugin/skills` a
+  synced copy like the other two plugins'.
 - **The plugin's launcher has never run on Windows.** `install.sh` knows Git
   Bash's `uname` (tested with a fake one), but whether Claude Code can start
   a `sh` script as an MCP command on Windows is undocumented. To close: try
