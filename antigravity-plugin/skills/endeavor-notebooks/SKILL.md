@@ -46,7 +46,7 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
 
 ## Outputs
 
-- For tables and other rich values, `output` only names the type and `output_text` has the value as text. Read that; don't edit the cell to print it. A run's result calls the first `output_summary` and cuts `output_text` at 2000 bytes; `read_cell` gives up to 16 KB.
+- For tables and other rich values, `output` only names the type and `output_text` has the value as text. Read that; don't edit the cell to print it. In a run's result, `output` is named `output_summary`, and `output_text` is cut at 2000 bytes; `read_cell` gives up to 16 KB.
 - For a plot, call `view_cell_output` and look at it before you say it is right. Code that runs can still draw the wrong thing.
 - Fold cells that hold only prose (`add_cell` with `folded=true`, or `fold_cell`), so the reader sees the rendered text and not its source.
 
