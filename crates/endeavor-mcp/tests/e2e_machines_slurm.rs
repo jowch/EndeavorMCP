@@ -160,9 +160,10 @@ fn the_machine_tools_over_real_slurm() {
     let ours = partitions.iter().find(|p| p["name"] == json!(partition)).unwrap_or_else(|| panic!("partition {partition} is listed: {added}"));
     assert!(ours["cpus"].as_u64().is_some_and(|c| c >= 1) && ours["memory_gb"].as_u64().is_some_and(|m| m >= 2), "{ours}");
     assert!(added["message"].as_str().unwrap().contains("Slurm"), "{added}");
+    // The connection add_machine made is kept for the job (it connected as Slurm).
     let listing = one.ok("list_machines", json!({}));
     let entry = machine(&listing, "e2e-slurm");
-    assert_eq!((entry["cluster"].clone(), entry["state"].as_str(), entry["this_session"].clone()), (json!(true), Some("not connected"), json!(false)), "{listing}");
+    assert_eq!((entry["cluster"].clone(), entry["state"].as_str(), entry["this_session"].clone()), (json!(true), Some("connected"), json!(false)), "{listing}");
 
     // No resources: asked for, nothing submitted, the session where it was.
     let asked = one.ok("use_machine", json!({ "machine": "e2e-slurm", "folder": notebooks.display().to_string() }));
