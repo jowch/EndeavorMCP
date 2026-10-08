@@ -29,7 +29,7 @@
           "type": "string"
         },
         "slurm": {
-          "description": "true: run Julia in Slurm jobs (an error without Slurm). false: run it directly, even if Slurm is there. Left out: a new machine uses jobs if Slurm is there; one added before stays as saved. Ask the user when Slurm is there and they haven't said. Refused while Julia runs there.",
+          "description": "true: run Julia in Slurm jobs (an error without Slurm). false: run it directly, even if Slurm is there. Left out: a new machine uses jobs if Slurm is there; one added before stays as saved. If the user hasn't said, leave it out, and if the result says Julia runs in Slurm jobs, check with the user before `use_machine`. Pass false only for the user's own workstation, or once the user confirms the machine isn't a shared cluster: on a cluster it runs Julia on the login node, which other people share. Refused while Julia runs there.",
           "type": "boolean"
         }
       },
@@ -41,7 +41,7 @@
     "name": "add_machine"
   },
   {
-    "description": "Put this session's notebooks on a machine from list_machines, or back on \"local\". It attaches to the Julia already running there, starts it, or on a Slurm cluster submits a job for it. Only when the user asks. Returns within 45 seconds with a `state`. `ready`: give the user `browser_url` (it works while this session is connected); `remote_port` is Julia's own port on the machine, which the user can forward by hand after this session ends. `starting`, `queued`: not up yet; to wait, call a notebook tool (each call waits up to 45 seconds); `pluto_session_status` answers at once and only shows the step, so do not call it repeatedly. `needs_job`: a cluster with no job running and no resources given; nothing was submitted. Show the user the `defaults` and call again with the resources they agree to; never submit a job with resources they have not agreed to. `needs_install`: ask the user, and call again with `install` true only if they agree to what the result names. A failed call, `needs_job` and `needs_install` leave the session where it was. Afterwards `list_folder`, `read_file` and `run_shell` act on that machine, and the session has no notebook there until it makes or opens one.",
+    "description": "Put this session's notebooks on a machine from list_machines, or back on \"local\". It attaches to the Julia already running there, starts it, or on a Slurm cluster submits a job for it. Only when the user asks. Returns within 45 seconds with a `state`. `ready`: give the user `browser_url` (it works while this session is connected); `remote_port` is Julia's own port on the machine: on a plain server the `message` gives an ssh command the user can run to reach it after this session ends; on a cluster it is on the job's node, behind the login node, and there is no such command. `starting`, `queued`: not up yet; to wait, call a notebook tool (each call waits up to 45 seconds); `pluto_session_status` answers at once and only shows the step, so do not call it repeatedly. `needs_job`: a cluster with no job running and no resources given; nothing was submitted. Show the user the `defaults` and call again with the resources they agree to; never submit a job with resources they have not agreed to. `needs_install`: ask the user, and call again with `install` true only if they agree to what the result names. A failed call, `needs_job` and `needs_install` leave the session where it was. Afterwards `list_folder`, `read_file` and `run_shell` act on that machine, and the session has no notebook there until it makes or opens one.",
     "inputSchema": {
       "properties": {
         "account": {
@@ -53,14 +53,14 @@
           "type": "integer"
         },
         "extra_sbatch_flags": {
-          "description": "Cluster only: more sbatch flags, each one string with flag and value together, such as \"--constraint=a100\".",
+          "description": "Cluster only: more sbatch flags, each one string that starts with `-` and holds the flag and its value together, such as \"--constraint=a100\". `--wrap` and line breaks are refused.",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
         "folder": {
-          "description": "The session's folder on the machine: where new notebooks go and relative paths start. Default: the project's remembered folder for it, else its home.",
+          "description": "The session's folder on the machine: where new notebooks go, where a notebook tool's relative path starts, and where `run_shell` runs by default. Default: the project's remembered folder for it, else its home.",
           "type": "string"
         },
         "gpus": {

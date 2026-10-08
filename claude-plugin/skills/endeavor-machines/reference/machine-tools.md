@@ -28,21 +28,21 @@ Waits up to 45 seconds. Result: `machine`, `host`, `state` `connected`, `saved`,
 
 `state` `connecting` means the 45 seconds ran out: call again with the same host. A new machine is saved only once a call has connected (`saved` is false until then), and an existing one keeps its saved settings until the new ones have connected. If it can't connect, nothing is saved and the call is an error.
 
-`slurm`: `true` runs Julia in Slurm jobs (an error if Slurm isn't there), `false` runs it directly on the machine even if Slurm is there. Left out, a new machine uses jobs when Slurm is there and a machine added before stays as saved. Changing a machine between the two is refused while Julia runs there; `stop_machine` first, with the user's agreement.
+`slurm`: `true` runs Julia in Slurm jobs (an error if Slurm isn't there), `false` runs it directly on the machine even if Slurm is there (on a cluster that is the shared login node, so only for the user's own workstation or once the user confirms it isn't a shared cluster). Left out, a new machine uses jobs when Slurm is there and a machine added before stays as saved. Changing a machine between the two is refused while Julia runs there; `stop_machine` first, with the user's agreement.
 
 ## use_machine
 
 | Argument | Meaning |
 |----------|---------|
-| `folder` | The session's folder on the machine. Default: the folder the project remembers for it, else its home folder. Not used for `"local"` |
+| `folder` | The session's folder on the machine: where new notebooks go, where a notebook tool's relative path starts, and where `run_shell` runs by default. Default: the folder the project remembers for it, else its home folder. Not used for `"local"` |
 | `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | Cluster only (an error on a plain server or `"local"`). What isn't given comes from the machine's saved defaults; what is submitted is saved as the new defaults. `gpus: 0` means no GPU and clears a saved default. Each `extra_sbatch_flags` entry starts with `-` and holds a flag and its value together (`"--constraint=a100"`); `--wrap` and line breaks are refused. If a job is already queued or running, the resources are not used |
 
 Result `state`:
 
 | `state` | Meaning |
 |---------|---------|
-| `ready` | Julia answers. `browser_url` (works while this session is connected) and `folder`. On a machine also `node`, `remote_port` (Julia's own port on the machine, or on the job's node for a cluster, which the user can forward by hand after the session ends), `already_running` (it was running before this call), and for a cluster `job` (`id`, `node`, `ends_at`, `ends_in_minutes`) |
-| `starting`, `queued` | Not up yet. `step`, and for a job `job` and `queue` (`state`, `reason`, `reason_text`). Wait by calling a notebook tool again (each call waits up to 45 seconds); `pluto_session_status` shows the step at once |
+| `ready` | Julia answers. `browser_url` (works while this session is connected) and `folder`. On a machine also `node`, `remote_port` (Julia's own port on the machine: on a plain server `message` gives an ssh command the user can run to reach it after the session ends; on a cluster it is on the job's node, behind the login node, and there is no such command), `already_running` (it was running before this call), and for a cluster `job` (`id`, `node`, `ends_at`, `ends_in_minutes`) |
+| `starting`, `queued` | Not up yet. `step`, and for a job `job` and `queue` (`state`, `reason`, `reason_text`). Wait by calling a notebook tool again (each call waits up to 45 seconds); a queued job can wait minutes or hours, so after a few tries let the user say when to check again. `pluto_session_status` shows the step at once |
 | `needs_install` | The machine lacks Endeavor's program (or an update of it), or Julia. `install` says what. Ask the user, then call again with `install: true`; the session did not move |
 | `needs_job` | Cluster, nothing running, no resources given. `defaults` has what would be submitted and `partitions` what the cluster offers. Nothing was submitted and the session did not move (the project is unchanged). Ask the user, then call again with the values |
 

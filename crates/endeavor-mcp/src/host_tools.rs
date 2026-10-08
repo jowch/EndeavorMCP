@@ -62,7 +62,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "run_shell",
-            "description": "Run a shell command on the server this session works on (only for a session on a server), in the user's login shell, with no input. The user may be asked to approve each run, so put related steps in one command and don't use it to wait. Returns exit_code, stdout, stderr (long output keeps its start and end) and timed_out. Don't write notebook files with it: the runtime rewrites them; change notebooks with the notebook tools.",
+            "description": "Run a shell command on the server this session works on (only for a session on a server), in the user's login shell, with no input. On a Slurm cluster it runs inside the session's job, on the job's node, so only once the job has started. Otherwise it runs on the machine itself, which other people may share: ask the user before a long or heavy command. Don't submit or cancel Slurm jobs with it unless the user asks. The user may be asked to approve each run, so put related steps in one command and don't use it to wait. Returns exit_code, stdout, stderr (long output keeps its start and end) and timed_out. Don't write notebook files with it: the runtime rewrites them; change notebooks with the notebook tools.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -43,9 +43,10 @@ fn a_machine_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
     let job = Some(JobInfo { id: "4242".into(), ..Default::default() });
     let queued = Outcome::Queued { job: job.clone(), queue: QueueInfo { state: "PENDING".into(), reason: "Priority".into() } };
     let said = not_ready_message("hpc", &reached(queued, status(State::Queued)));
-    assert_eq!(said, "The Slurm job 4242 on hpc is waiting in the queue: other jobs are ahead of it. Tell the user, wait, and call `pluto_session_status` to follow it.");
+    assert_eq!(said, "The Slurm job 4242 on hpc is waiting in the queue: other jobs are ahead of it. Tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds. `pluto_session_status` answers at once and only shows the job's state, so don't call it repeatedly. A queued job can wait minutes or hours: after a few tries, stop and let the user say when to check again.");
     let running = Outcome::Queued { job, queue: QueueInfo { state: "RUNNING".into(), reason: "n123".into() } };
-    assert!(not_ready_message("hpc", &reached(running, status(State::Queued))).contains("running on node n123, and Julia is starting there"));
+    let said = not_ready_message("hpc", &reached(running, status(State::Queued)));
+    assert!(said.contains("running on node n123, and Julia is starting there") && said.contains("call the notebook tool you want again") && !said.contains("minutes or hours"), "{said}");
 
     let said = not_ready_message("lab", &reached(Outcome::Failed("lab refused the sign-in.".into()), status(State::Failed)));
     assert!(said.starts_with("Julia on lab isn't available: lab refused the sign-in.") && said.contains("`use_machine` with machine \"lab\""), "{said}");

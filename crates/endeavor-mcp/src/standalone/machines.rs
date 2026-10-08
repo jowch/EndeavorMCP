@@ -336,8 +336,12 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
         Outcome::NothingRunning => format!("Julia isn't running on {at} right now. Call `use_machine` with machine \"{name}\" to start it."),
         Outcome::Queued { job, queue } => {
             let job = job.as_ref().map(|j| format!(" {}", j.id)).unwrap_or_default();
-            let what = if queue.state == "RUNNING" { format!("running on node {}, and Julia is starting there", queue.reason) } else { format!("waiting in the queue: {}", queue_reason_text(&queue.reason)) };
-            format!("The Slurm job{job} on {name} is {what}. Tell the user, wait, and call `pluto_session_status` to follow it.")
+            let (what, wait) = if queue.state == "RUNNING" {
+                (format!("running on node {}, and Julia is starting there", queue.reason), "")
+            } else {
+                (format!("waiting in the queue: {}", queue_reason_text(&queue.reason)), " A queued job can wait minutes or hours: after a few tries, stop and let the user say when to check again.")
+            };
+            format!("The Slurm job{job} on {name} is {what}. Tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds. `pluto_session_status` answers at once and only shows the job's state, so don't call it repeatedly.{wait}")
         }
         Outcome::Failed(error) => {
             let error = if error.is_empty() { "it didn't say why" } else { error };
@@ -1065,7 +1069,7 @@ impl Relay {
                 message.push_str(&format!(". Partitions: {}. ", partitions.iter().map(partition_text).collect::<Vec<_>>().join("; ")));
             }
             message.push_str(&format!("Default job: {}. ", saved.resources.summary()));
-            message.push_str("To run Julia directly on the machine instead, call `add_machine` again with slurm false (the saved job defaults are then dropped). ");
+            message.push_str("To run Julia directly on the machine instead, call `add_machine` again with slurm false (the saved job defaults are then dropped), but only if the machine is the user's own workstation or the user confirms it isn't a shared cluster: on a cluster that runs Julia on the login node, which other people share. ");
         } else if hello.slurm {
             let why = if slurm == Some(false) { "as asked" } else { "since it was saved before as a plain server" };
             message.push_str(&format!("It has Slurm, but Julia runs on it directly and not in a job, {why}. To run Julia in Slurm jobs instead, call `add_machine` again with slurm true. "));
@@ -1078,7 +1082,12 @@ impl Relay {
         for found in &hello.found {
             message.push_str(&format!("{} {} is at {}. ", found.name, found.version, found.path));
         }
-        message.push_str(&format!("The machine is saved as \"{}\". Call `use_machine` to work on it.", record.name));
+        message.push_str(&format!("The machine is saved as \"{}\". ", record.name));
+        message.push_str(if record.cluster.is_some() && slurm != Some(true) {
+            "Unless the user already said Julia should run in Slurm jobs here, tell them it will and check they agree before calling `use_machine`."
+        } else {
+            "Call `use_machine` to work on it."
+        });
         Ok(json!({
             "machine": record.name,
             "host": record.ssh_target(),
