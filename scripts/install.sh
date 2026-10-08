@@ -196,7 +196,15 @@ if [ -n "$into" ]; then
 fi
 
 name=endeavor-$key-$platform$suffix
-fetch "$release/endeavor-$key.sha256" "$tmp/sums" || fail "couldn't download $release/endeavor-$key.sha256."
+if ! fetch "$release/endeavor-$key.sha256" "$tmp/sums"; then
+  # A build from main is published a few minutes after the push. Exit 3 tells
+  # the launcher that the release answered but doesn't hold this build yet.
+  if [ -z "$newest" ] && fetch "$release/LATEST" >/dev/null 2>&1; then
+    echo "install.sh: the release doesn't hold build $key yet." >&2
+    exit 3
+  fi
+  fail "couldn't download $release/endeavor-$key.sha256."
+fi
 want=$(awk -v n="endeavor-$key-$platform$suffix" '{ f = $2; sub(/^\*/, "", f); if (f == n) { print tolower($1); exit } }' "$tmp/sums")
 [ -n "$want" ] || fail "the newest build ($key) has no binary for $platform."
 

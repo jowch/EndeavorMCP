@@ -168,8 +168,9 @@ find "$base" -maxdepth 1 -name '.endeavor-install.*' -mmin +60 -exec rm -rf {} +
 if [ ! -f "$here/install.sh" ]; then
   fail "install.sh is missing from $here. Install endeavor by hand: $manual"
 fi
+status=0
 if [ -n "$key" ]; then
-  have || sh "$here/install.sh" --quiet --into "$base" --key "$key" </dev/null || true
+  have || sh "$here/install.sh" --quiet --into "$base" --key "$key" </dev/null || status=$?
 else
   : >"$base/.checked" 2>/dev/null || true
   sh "$here/install.sh" --quiet --into "$base" </dev/null || true
@@ -180,4 +181,6 @@ if have; then
   unlock
   run "$@"
 fi
+# install.sh exits 3 when the release is reachable but doesn't hold the pinned build.
+[ "$status" -ne 3 ] || fail "build $key is still being published. Reconnect in a few minutes."
 fail "couldn't get endeavor${key:+ (build $key)}. The reason is above. Install it by hand: $manual"
