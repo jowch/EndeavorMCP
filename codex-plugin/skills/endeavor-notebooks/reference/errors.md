@@ -6,7 +6,7 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 
 | `error` | Meaning | Do |
 |---|---|---|
-| `invalid_argument` | The call named an argument the tool doesn't have, or left out a required one; the message lists the tool's arguments | Call again with the arguments it names |
+| `invalid_argument` | The call named an argument the tool doesn't have, or left out a required one such as `notebook_id` or `path`; the message lists the tool's arguments | Call again with the arguments it names |
 | `read_required`, `stale_read` | You haven't read the cell, or it changed since you did | Read it, then retry. `edit_cells` refuses the whole batch if one cell fails this |
 | `placement_required` | `add_cell` without `after_cell_id` in a notebook that has cells | Pass the cell to add after |
 | `not_staged` | `submit_changes` was given a `cell_ids` entry that isn't in `pending_run` | Leave `cell_ids` out, or use `execute_cell` for a cell you didn't edit |
@@ -15,7 +15,7 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `notebook_not_found`, `cell_not_found` | The id is wrong, or the notebook was closed or the cell deleted | `list_notebooks`, or read the notebook again |
 | `file_exists` | `new_notebook` on a path that exists | `open_notebook` it, or pick another name |
 | `file_not_found` | `open_notebook` on a path with no file | Check the path; a relative path starts in the session's folder |
-| `invalid_path` | `open_notebook` had no path or a path that isn't a string; `new_notebook` had a path that doesn't end in `.jl` or whose folder doesn't exist | Fix the path |
+| `invalid_path` | `open_notebook` had a null path or one that isn't a string; `new_notebook` had a path that doesn't end in `.jl` or whose folder doesn't exist | Fix the path |
 | `execution_not_gated` | `allow_execution` on a notebook that isn't in safe preview | Nothing to do; it can already run |
 | `invalid_keep` | `keep_notebook_alive` without `keep` as true or false | Pass `keep` |
 | `no_image` | The output has no image form, the cell errored, or the notebook isn't running code and the output isn't already an image | `read_cell` |

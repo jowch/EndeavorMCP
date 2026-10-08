@@ -1229,7 +1229,7 @@ fn only_a_call_of_a_known_tool_starts_the_local_runtime() {
     }
     let (failed, said) = front.call("no_such_tool", json!({}));
     assert!(failed && said["error"] == "unknown_tool" && said["message"].as_str().unwrap().contains("Unknown tool: 'no_such_tool'"), "{said}");
-    let reply = front.request("tools/call", json!({ "name": "notebook_guide", "arguments": null }));
+    let reply = front.request("tools/call", json!({ "name": "notebook_guide", "arguments": 5 }));
     assert_eq!(reply["result"]["isError"], true, "{reply}");
     assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("arguments must be an object"), "{reply}");
     let guide = front.request("tools/call", json!({ "name": "notebook_guide", "arguments": {} }));
@@ -1240,6 +1240,8 @@ fn only_a_call_of_a_known_tool_starts_the_local_runtime() {
     assert!(failed && said["error"] == "invalid_argument" && said["message"].as_str().unwrap().starts_with("`edit_cell` needs `code`."), "{said}");
     let (failed, said) = front.call("use_machine", json!({}));
     assert!(failed && said["error"] == "invalid_argument" && said["message"] == "`use_machine` needs `machine`.", "{said}");
+    let listed = front.request("tools/call", json!({ "name": "list_machines", "arguments": null }));
+    assert_eq!(listed["result"]["isError"], false, "null arguments are none: {listed}");
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "hostname": "x" }));
     let message = said["message"].as_str().unwrap();
     assert!(failed && message.starts_with("`hostname` is not an argument of `add_machine`. Its arguments: ") && message.contains("`host`") && message.contains("`slurm`"), "{said}");

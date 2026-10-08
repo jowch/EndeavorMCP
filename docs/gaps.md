@@ -390,6 +390,9 @@ _Started 2026-10-06, on the `client-library` branch._
   `use_machine` is given `folder`. A notebook made there with `new_notebook`
   and no path lands in the home folder (seen in the trial). To close: tell the
   agent where the notebook went, or ask for a folder when the session has none.
+- **The front and the runtime each check a call's argument names against their
+  own build's tools.** A newer front's new argument is rejected by an older
+  runtime with that runtime's message.
 - **A runtime without the helper is looked for by `sh`.** The bootstrap reads
   `runtime.json` with shell patterns (the first `pid` followed by a quote and
   a colon, and the first `job` the same way), so a node name that holds

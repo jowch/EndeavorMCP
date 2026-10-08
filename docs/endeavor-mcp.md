@@ -126,14 +126,17 @@ runtime's check that `arguments` is an object; on a machine the call goes to tha
 machine's runtime), the host tools (the front refuses them for a session on this
 computer, with the runtime's text), `list_machines`, `add_machine`,
 `stop_machine`, or a session whose project is on a machine. While the target's
-runtime isn't up, a notification is dropped, a request that is not a
-`tools/call` gets JSON-RPC -32601, and a `tools/call` of an unknown tool gets
-the runtime's `unknown_tool` result, and so does one whose argument names
-don't fit the tool's `inputSchema` (`mcp::check_arguments`: a name the schema
-lacks, or a required one missing; no types) get `invalid_argument` without a
-runtime being started. The runtime runs the same check on every call before
-anything counts as the session's activity, and the machine tools run it too;
-with a runtime up all of these are forwarded as before. A notebook call that finds none running starts one, on this
+runtime isn't up, a notification is dropped and a request that is not a
+`tools/call` gets JSON-RPC -32601. Every `tools/call`, with a runtime up or not,
+is first checked by the front against the tools of its own build, and a call
+that fails is answered there, not forwarded, and starts no runtime: a tool this
+build lacks gets `unknown_tool`, and arguments that don't fit the tool's
+`inputSchema` (`mcp::check_arguments`: a name the schema lacks, or a required one
+missing; no types; a tool whose schema has no properties ignores its arguments)
+get `invalid_argument`. The machine tools, which the front answers itself, take
+the same check. A call that passes goes to the runtime, which checks it again
+against its own schema, after its refusals (plan mode, host tools) and before the
+call counts as the session's activity. Missing or null `arguments` is `{}`. A notebook call that finds none running starts one, on this
 computer and on a plain server alike; on a cluster it asks for a job instead.
 `list_notebooks` and `pluto_session_status` use a runtime that is running (the
 provider's `Want::Attach`: this computer's looks in the state folder, the

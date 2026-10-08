@@ -118,6 +118,7 @@
           "type": "string"
         },
         "code": {
+          "description": "The cell's code. Default: an empty cell.",
           "type": "string"
         },
         "folded": {
@@ -133,8 +134,7 @@
         }
       },
       "required": [
-        "notebook_id",
-        "code"
+        "notebook_id"
       ],
       "type": "object"
     },

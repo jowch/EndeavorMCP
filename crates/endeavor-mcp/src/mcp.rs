@@ -57,9 +57,9 @@ pub const MACHINE_NAMES: [&str; 4] = ["list_machines", "add_machine", "use_machi
 /// ending the process.
 const JULIA_CALLS: [&str; 2] = ["endeavor/set_folder", "endeavor/shutdown"];
 
-/// Whether this server offers a tool by this name, to some session.
+/// Whether a runtime offers a tool by this name, to some session. The machine tools are the front's.
 pub fn is_tool(name: &str) -> bool {
-    name == guide::TOOL || host_tools::NAMES.contains(&name) || NOTEBOOK_TOOLS.as_array().is_some_and(|tools| tools.iter().any(|t| t["name"] == name))
+    known_tool(name, false).is_some()
 }
 
 /// Tools that change the notebook or run code, here or on the server.
@@ -349,14 +349,21 @@ impl Bridge {
         // differently, not a host-tool mistake (its own tools, not these) or a
         // refusal that already says exactly what to do.
         let help = !caller.has_skills;
-        // Before anything runs or counts as the session's activity.
-        let (name, arguments) = match checked_call(params, help) {
+        let (name, arguments) = match call_parts(params, help, false) {
             Ok(call) => call,
             Err(result) => return result,
         };
+        // A refusal answers first: a call that can never run is not told to fix its arguments. A call
+        // with the wrong arguments runs nothing and is not the session's activity.
+        let refusal = self.refusal(caller, name, &arguments);
+        if refusal.is_none()
+            && let Err(result) = check_arguments(name, &arguments, help)
+        {
+            return result;
+        }
         self.notebooks.note_call(&caller.owner);
         self.notebooks.note_activity(&arguments);
-        if let Some(refusal) = self.refusal(caller, name, &arguments) {
+        if let Some(refusal) = refusal {
             return tool_error(&refusal, false);
         }
         if name == guide::TOOL {
@@ -485,51 +492,53 @@ pub(crate) fn host_tool_refusal(tool: &str) -> String {
     format!("ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on the user's computer: use your own file and shell tools.")
 }
 
-/// The arguments of a `tools/call` (none is `{}`), or the failed result for ones that aren't an object.
+/// The arguments of a `tools/call` (missing or null is `{}`), or the failed result for ones that aren't an object.
 pub(crate) fn call_arguments(params: &Value, help: bool) -> Result<Value, Value> {
-    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-    if arguments.is_object() { Ok(arguments) } else { Err(tool_error("ArgumentError: invalid_argument::arguments must be an object", help)) }
+    match params.get("arguments") {
+        None | Some(Value::Null) => Ok(json!({})),
+        Some(arguments) if arguments.is_object() => Ok(arguments.clone()),
+        Some(_) => Err(tool_error("ArgumentError: invalid_argument::arguments must be an object", help)),
+    }
 }
 
 fn unknown_tool_result(name: &str, help: bool) -> Value {
     tool_error(&format!("ArgumentError: unknown_tool::Unknown tool: '{name}'"), help)
 }
 
-/// The failed result a runtime gives a `tools/call` whose tool this build doesn't have; None if it has it.
-pub(crate) fn unknown_tool(params: &Value, help: bool) -> Option<Value> {
-    match params.get("name") {
-        Some(Value::String(name)) if is_tool(name) => None,
-        Some(Value::String(name)) => Some(unknown_tool_result(name, help)),
-        Some(other) => Some(unknown_tool_result(&julia_string(other), help)),
-        None => Some(unknown_tool_result("", help)),
-    }
-}
+/// Each tool's `inputSchema` by name: the one list of the tools this build has, the machine tools included.
+static INPUT_SCHEMAS: LazyLock<HashMap<String, Value>> = LazyLock::new(|| {
+    let listed = |tools: &Value| tools.as_array().cloned().unwrap_or_default();
+    let tools = [listed(&NOTEBOOK_TOOLS), listed(&MACHINE_TOOLS), host_tools::schemas(), vec![guide::schema()]];
+    (tools.into_iter().flatten())
+        .filter_map(|tool| Some((tool["name"].as_str()?.to_owned(), tool["inputSchema"].clone())))
+        .collect()
+});
 
-/// A tool's `inputSchema`, if this build lists the tool.
-fn input_schema(tool: &str) -> Option<Value> {
-    let listed = |tools: &[Value]| tools.iter().find(|t| t["name"] == tool).map(|t| t["inputSchema"].clone());
-    listed(NOTEBOOK_TOOLS.as_array()?)
-        .or_else(|| listed(MACHINE_TOOLS.as_array()?))
-        .or_else(|| listed(&host_tools::schemas()))
-        .or_else(|| listed(&[guide::schema()]))
+/// The `inputSchema` of tool `name`, if this build has the tool. `machines`: whether the machine
+/// tools count (they do in the front; a runtime has none).
+fn known_tool(name: &str, machines: bool) -> Option<&'static Value> {
+    INPUT_SCHEMAS.get(name).filter(|_| machines || !MACHINE_NAMES.contains(&name))
 }
 
 /// The one check of a call's argument names against the tool's `inputSchema`: a name the schema
 /// lacks, or a required one missing, is a failed result that says what the tool takes. Types and
-/// nested values are the tool's to check. A tool without a schema passes.
+/// nested values are the tool's to check. A tool whose schema has no properties ignores its
+/// arguments (some clients can't send an empty object and add a placeholder). A tool without a
+/// schema passes.
 pub(crate) fn check_arguments(tool: &str, arguments: &Value, help: bool) -> Result<(), Value> {
-    let Some(schema) = input_schema(tool) else { return Ok(()) };
-    let given = arguments.as_object().into_iter().flatten().map(|(name, _)| name.as_str());
+    let Some(schema) = known_tool(tool, true) else { return Ok(()) };
     let known: Vec<&str> = schema["properties"].as_object().into_iter().flatten().map(|(name, _)| name.as_str()).collect();
+    if known.is_empty() {
+        return Ok(());
+    }
     let quote = |names: &[&str]| names.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ");
-    let unknown: Vec<&str> = given.filter(|name| !known.contains(name)).collect();
+    let unknown: Vec<&str> = (arguments.as_object().into_iter().flatten()).map(|(name, _)| name.as_str()).filter(|name| !known.contains(name)).collect();
     // The guide covers the notebook tools, not the host tools (see `call_tool`).
     let help = help && !host_tools::NAMES.contains(&tool);
     let fail = |message: String| Err(tool_error(&format!("ArgumentError: invalid_argument::{message}"), help));
     if !unknown.is_empty() {
         let (these, are) = if unknown.len() == 1 { ("is", "an argument") } else { ("are", "arguments") };
-        let takes = if known.is_empty() { "It takes no arguments.".to_owned() } else { format!("Its arguments: {}.", quote(&known)) };
-        return fail(format!("{} {these} not {are} of `{tool}`. {takes}", quote(&unknown)));
+        return fail(format!("{} {these} not {are} of `{tool}`. Its arguments: {}.", quote(&unknown), quote(&known)));
     }
     let missing: Vec<&str> = (schema["required"].as_array().into_iter().flatten())
         .filter_map(Value::as_str)
@@ -541,15 +550,22 @@ pub(crate) fn check_arguments(tool: &str, arguments: &Value, help: bool) -> Resu
     Ok(())
 }
 
-/// A `tools/call` that this build can run: its tool's name and arguments, or the failed result for
-/// a call that can't be: arguments that aren't an object, a tool this build lacks, or arguments
-/// that don't fit the tool's schema (`check_arguments`).
-pub(crate) fn checked_call(params: &Value, help: bool) -> Result<(&str, Value), Value> {
+/// A `tools/call` of a tool this build has: its name and arguments, or the failed result for
+/// arguments that aren't an object or a tool it lacks. `machines`: see `known_tool`. The check of
+/// the argument names (`check_arguments`) is separate, for the runtime to refuse a call first.
+pub(crate) fn call_parts(params: &Value, help: bool, machines: bool) -> Result<(&str, Value), Value> {
     let arguments = call_arguments(params, help)?;
-    if let Some(result) = unknown_tool(params, help) {
-        return Err(result);
+    match params.get("name") {
+        Some(Value::String(name)) if known_tool(name, machines).is_some() => Ok((name, arguments)),
+        Some(Value::String(name)) => Err(unknown_tool_result(name, help)),
+        Some(other) => Err(unknown_tool_result(&julia_string(other), help)),
+        None => Err(unknown_tool_result("", help)),
     }
-    let name = params["name"].as_str().unwrap_or_default();
+}
+
+/// `call_parts`, then `check_arguments`: a call the front can pass on.
+pub(crate) fn checked_call(params: &Value, help: bool, machines: bool) -> Result<(&str, Value), Value> {
+    let (name, arguments) = call_parts(params, help, machines)?;
     check_arguments(name, &arguments, help)?;
     Ok((name, arguments))
 }
@@ -925,7 +941,9 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         let message = |tool: &str, arguments: Value| said(tool, arguments).map(|said| (said["error"].as_str().unwrap().to_owned(), said["message"].as_str().unwrap().to_owned()));
         let invalid = |text: &str| Some(("invalid_argument".to_owned(), text.to_owned()));
         assert_eq!(message("new_notebook", json!({ "name": "remote.jl" })), invalid("`name` is not an argument of `new_notebook`. Its arguments: `path`."));
-        assert_eq!(message("list_notebooks", json!({ "x": 1 })), invalid("`x` is not an argument of `list_notebooks`. It takes no arguments."));
+        assert_eq!(message("list_notebooks", json!({ "input": "" })), None, "a tool with no properties ignores what it is given");
+        assert_eq!(message("list_machines", json!({ "input": "" })), None);
+        assert_eq!(message("add_cell", json!({ "notebook_id": "n" })), None, "an empty cell is a call");
         assert_eq!(message("read_cell", json!({ "notebook_id": "n", "cell_id": "c", "a": 1, "b": 2 })).unwrap().1.split(". ").next(), Some("`a`, `b` are not arguments of `read_cell`"));
         assert_eq!(message("edit_cell", json!({ "code": "1" })), invalid("`edit_cell` needs `notebook_id`, `cell_id`."));
         assert_eq!(message("use_machine", json!({})), invalid("`use_machine` needs `machine`."));
@@ -938,6 +956,21 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         assert!(guided["content"][0]["text"].as_str().unwrap().contains("See `notebook_guide`"));
         let host = check_arguments("run_shell", &json!({}), true).unwrap_err();
         assert!(!host["content"][0]["text"].as_str().unwrap().contains("notebook_guide"), "the guide is for the notebook tools");
+    }
+
+    #[test]
+    fn missing_or_null_arguments_are_none_and_a_tool_is_known_from_its_schema() {
+        let call = |params: Value, machines: bool| checked_call(&params, false, machines).map(|(name, arguments)| (name.to_owned(), arguments)).map_err(|result| result["content"][0]["text"].as_str().unwrap().to_owned());
+        for params in [json!({ "name": "list_notebooks" }), json!({ "name": "list_notebooks", "arguments": null })] {
+            assert_eq!(call(params, false), Ok(("list_notebooks".to_owned(), json!({}))));
+        }
+        assert_eq!(call(json!({ "name": "list_machines", "arguments": null }), true), Ok(("list_machines".to_owned(), json!({}))));
+        assert!(call(json!({ "name": "list_notebooks", "arguments": 5 }), false).unwrap_err().contains("arguments must be an object"));
+        assert!(call(json!({ "name": "list_notebooks", "arguments": [] }), false).unwrap_err().contains("arguments must be an object"));
+        assert!(call(json!({ "name": "list_machines" }), false).unwrap_err().contains("Unknown tool: 'list_machines'"), "a runtime has no machine tools");
+        assert!(call(json!({ "name": "edit_cell", "arguments": {} }), false).unwrap_err().contains("needs `notebook_id`"));
+        assert!(call(json!({ "arguments": {} }), true).unwrap_err().contains("Unknown tool: ''"));
+        assert!(is_tool("run_shell") && is_tool("notebook_guide") && !is_tool("use_machine"));
     }
 
     #[test]

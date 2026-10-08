@@ -779,26 +779,34 @@ impl Relay {
             if id.is_none() {
                 return;
             }
-            let result = crate::mcp::checked_call(&message["params"], help).and_then(|(_, arguments)| {
-                if tool == crate::guide::TOOL {
-                    crate::guide::read(&arguments).map(|guide| machines::text_result(&guide)).map_err(|error| crate::mcp::tool_error(&error, false))
-                } else {
-                    Err(crate::mcp::tool_error(&crate::mcp::host_tool_refusal(tool), false))
+            // The host-tool refusal comes before the check of the arguments, as the runtime's does.
+            let result = crate::mcp::call_parts(&message["params"], help, true).and_then(|(_, arguments)| {
+                if tool != crate::guide::TOOL {
+                    return Err(crate::mcp::tool_error(&crate::mcp::host_tool_refusal(tool), false));
                 }
+                crate::mcp::check_arguments(tool, &arguments, help)?;
+                crate::guide::read(&arguments).map(|guide| machines::text_result(&guide)).map_err(|error| crate::mcp::tool_error(&error, false))
             });
             return self.answer_call(&message, Some(tool), result.unwrap_or_else(|failed| failed));
+        }
+        // The front lists the tools of its own build, so it checks every call against that, whether or
+        // not a runtime is up; the runtime checks against its own.
+        if let Some(tool) = tool.as_deref()
+            && let Err(result) = crate::mcp::checked_call(&message["params"], help, true)
+        {
+            if id.is_some() {
+                self.answer_call(&message, Some(tool), result);
+            }
+            return;
         }
         // Only a call of a tool this build has starts a runtime.
         if !self.held(&target).is_some_and(|provider| provider.status().state == crate::client::State::Ready) {
             let Some(id) = &id else { return };
-            let Some(tool) = tool.as_deref() else {
+            if tool.is_none() {
                 if let Some(method) = message["method"].as_str() {
                     self.write(&self.decorate(&message, None, crate::mcp::method_not_found(id, method)));
                 }
                 return;
-            };
-            if let Err(result) = crate::mcp::checked_call(&message["params"], help) {
-                return self.answer_call(&message, Some(tool), result);
             }
         }
         let failed = |why: String| {

@@ -839,13 +839,10 @@ impl Relay {
         if message.get("id").is_none_or(Value::is_null) {
             return;
         }
-        let arguments = match crate::mcp::call_arguments(&message["params"], false) {
-            Ok(arguments) => arguments,
+        let arguments = match crate::mcp::checked_call(&message["params"], false, true) {
+            Ok((_, arguments)) => arguments,
             Err(result) => return self.answer_call(message, Some(tool), result),
         };
-        if let Err(result) = crate::mcp::check_arguments(tool, &arguments, false) {
-            return self.answer_call(message, Some(tool), result);
-        }
         let result = match tool {
             "list_machines" => self.list_machines(),
             "add_machine" => self.add_machine(&arguments, deadline),

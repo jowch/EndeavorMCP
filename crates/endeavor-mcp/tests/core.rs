@@ -472,10 +472,8 @@ fn a_call_with_arguments_the_tool_does_not_take_is_refused_and_is_not_the_sessio
         send(1, "new_notebook", serde_json::json!({ "name": "remote.jl" })),
         tool_error(1, "invalid_argument", &format!("`name` is not an argument of `new_notebook`. Its arguments: `path`.{guide}"))
     );
-    assert_eq!(
-        send(2, "list_notebooks", serde_json::json!({ "path": "x" })),
-        tool_error(2, "invalid_argument", &format!("`path` is not an argument of `list_notebooks`. It takes no arguments.{guide}"))
-    );
+    assert!(!send(2, "list_notebooks", serde_json::json!({ "input": "" })).contains("invalid_argument"), "a tool with no arguments ignores what it is given");
+    assert!(send(10, "add_cell", serde_json::json!({ "notebook_id": "n1" })).contains("invalid_notebook_id"), "add_cell without code passes the check");
     assert_eq!(
         send(3, "edit_cell", serde_json::json!({ "code": "1" })),
         tool_error(3, "invalid_argument", &format!("`edit_cell` needs `notebook_id`, `cell_id`.{guide}"))
@@ -893,12 +891,12 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let dir = state_dir("core-policy");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
-    let tool = |id: u32, name: &str| {
+    let tool = |id: u32, name: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"notebook_id":"n1"}}}}}}"#);
+    // A call that passes the check of its arguments, which a refusal comes before.
+    let valid = |id: u32, name: &str| {
         let arguments = match name {
             "edit_cell" => r#"{"notebook_id":"n1","cell_id":"c1","code":"x"}"#,
-            "read_cell" => r#"{"notebook_id":"n1","cell_id":"c1"}"#,
-            "run_shell" => r#"{"command":"true"}"#,
-            _ => "{}",
+            _ => r#"{"notebook_id":"n1","cell_id":"c1"}"#,
         };
         format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#)
     };
@@ -917,9 +915,9 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     assert!(reads() > before, "the app hears the notebooks' state after it");
 
     // Reads pass, and so do other sessions' writes and the app's own.
-    assert_eq!(mcp(&core, &tool(2, "read_cell"), &seven).1, not_a_notebook(2));
-    assert_eq!(mcp(&core, &tool(3, "edit_cell"), &[("X-Endeavor-Session", "8")]).1, not_a_notebook(3));
-    assert_eq!(app_call(&core, &tool(4, "edit_cell")), not_a_notebook(4));
+    assert_eq!(mcp(&core, &valid(2, "read_cell"), &seven).1, not_a_notebook(2));
+    assert_eq!(mcp(&core, &valid(3, "edit_cell"), &[("X-Endeavor-Session", "8")]).1, not_a_notebook(3));
+    assert_eq!(app_call(&core, &valid(4, "edit_cell")), not_a_notebook(4));
 
     // Opening a notebook is refused in Plan mode only when it would run it.
     let open = |id: u32, run: bool| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"open_notebook","arguments":{{"path":"/nope.jl","run_notebook":{run}}}}}}}"#);
@@ -935,11 +933,14 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     assert_eq!(mcp(&core, &tool(6, "run_shell"), &seven).1, tool_error(6, "host_tools", &not_here("run_shell")), "the host check comes first");
     assert_eq!(app_call(&core, &tool(7, "list_folder")), tool_error(7, "host_tools", &not_here("list_folder")));
 
+    // Null arguments are none: the plan refusal comes first. Others that aren't an object are refused.
     let null_args = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":null}}"#;
-    assert_eq!(mcp(&core, null_args, &seven).1, tool_error(8, "invalid_argument", "arguments must be an object\nSee `notebook_guide` for how to use these tools."));
+    assert_eq!(mcp(&core, null_args, &seven).1, tool_error(8, "plan_mode", plan_edit));
+    let list_args = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":[]}}"#;
+    assert_eq!(mcp(&core, list_args, &seven).1, tool_error(8, "invalid_argument", "arguments must be an object\nSee `notebook_guide` for how to use these tools."));
 
     assert_eq!(app_call(&core, &set.replace("plan", "ask")), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
-    assert_eq!(mcp(&core, &tool(9, "edit_cell"), &seven).1, not_a_notebook(9));
+    assert_eq!(mcp(&core, &valid(9, "edit_cell"), &seven).1, not_a_notebook(9));
 
     // Every tool says whether it only reads, for Claude Code's own plan mode.
     let (_, body) = mcp(&core, r#"{"jsonrpc":"2.0","id":10,"method":"tools/list"}"#, &seven);

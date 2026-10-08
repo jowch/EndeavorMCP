@@ -257,8 +257,8 @@ impl Out {
     }
 }
 
-/// A stand-in for the runtime's `/mcp`: answers `tools/call` "json" as JSON,
-/// "sse" as an event stream (a progress notification, then the reply), and
+/// A stand-in for the runtime's `/mcp`: answers `tools/call` `pluto_session_status` as JSON,
+/// `list_notebooks` as an event stream (a progress notification, then the reply), and
 /// a notification with `202`. What each request's head and body were.
 fn fake_core() -> (u16, Arc<Mutex<Vec<(Head, String)>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -276,7 +276,7 @@ fn fake_core() -> (u16, Arc<Mutex<Vec<(Head, String)>>>) {
             let id = message["id"].clone();
             match message["params"]["name"].as_str() {
                 _ if id.is_null() => http::respond(&mut client, "202 Accepted", None, b"", false).unwrap(),
-                Some("sse") => {
+                Some("list_notebooks") => {
                     write!(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nMcp-Session-Id: s-1\r\n\r\n").unwrap();
                     http::write_chunk(&mut client, b": waiting\n\n").unwrap();
                     let progress = r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1,"progressToken":"p"}}"#;
@@ -340,11 +340,11 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     assert_eq!(init["result"]["instructions"], format!("{} {}", crate::guide::STANDALONE, crate::guide::MACHINES), "with the plugin's skills, what differs without the app, and the machine tools");
     assert!(seen.lock().unwrap().is_empty(), "the runtime saw neither");
 
-    relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
+    relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"pluto_session_status","arguments":{}}}"#);
     assert_eq!(out.lines()[1], r#"{"id":1,"jsonrpc":"2.0","result":{"content":[]}}"#);
     let seen = seen.lock().unwrap();
     let (head, body) = &seen[0];
-    assert_eq!(body, r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
+    assert_eq!(body, r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"pluto_session_status","arguments":{}}}"#);
     let header = |name| head.header(name).unwrap_or("(none)");
     assert_eq!(
         [header("Authorization"), header("X-Endeavor-Session"), header("X-Endeavor-Skills"), header("MCP-Protocol-Version"), header("Accept")],
@@ -373,7 +373,7 @@ fn a_runtime_replaced_by_another_process_is_noticed_and_the_new_one_is_found() {
 fn the_relay_passes_on_an_event_stream_event_by_event() {
     let (port, seen) = fake_core();
     let (relay, out) = ready_relay(port, &seen, false);
-    relay.handle(r#"{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"sse","arguments":{},"_meta":{"progressToken":"p"}}}"#);
+    relay.handle(r#"{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"list_notebooks","arguments":{},"_meta":{"progressToken":"p"}}}"#);
     assert_eq!(
         out.lines(),
         [
@@ -382,9 +382,27 @@ fn the_relay_passes_on_an_event_stream_event_by_event() {
         ]
     );
     // The session id the runtime gave goes back with the next request.
-    relay.handle(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"json","arguments":{}}}"#);
+    relay.handle(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pluto_session_status","arguments":{}}}"#);
     assert_eq!(seen.lock().unwrap()[1].0.header("Mcp-Session-Id"), Some("s-1"));
     assert!(seen.lock().unwrap()[0].0.header("X-Endeavor-Skills").is_none(), "no plugin, no header");
+}
+
+#[test]
+fn a_call_with_the_wrong_arguments_is_answered_by_the_front_and_not_passed_on() {
+    let (port, seen) = fake_core();
+    let (relay, out) = ready_relay(port, &seen, false);
+    let call = |id: u32, name: &str, arguments: &str| relay.handle(&format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#));
+    call(1, "new_notebook", r#"{"name":"remote.jl"}"#);
+    call(2, "edit_cell", r#"{"notebook_id":"n","cell_id":"c"}"#);
+    call(3, "no_such_tool", "{}");
+    relay.handle(r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"new_notebook","arguments":{"name":"x"}}}"#);
+    assert!(seen.lock().unwrap().is_empty(), "the runtime saw none of them");
+    let said: Vec<Value> = out.lines().iter().map(|l| serde_json::from_str::<Value>(l).unwrap()).map(|r| serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap()).collect();
+    assert_eq!(said.len(), 3, "a notification gets no answer: {said:?}");
+    assert_eq!(said.iter().map(|s| s["error"].as_str().unwrap()).collect::<Vec<_>>(), ["invalid_argument", "invalid_argument", "unknown_tool"]);
+    assert!(said[0]["message"].as_str().unwrap().starts_with("`name` is not an argument of `new_notebook`. Its arguments: `path`."), "{said:?}");
+    call(4, "list_notebooks", r#"{"placeholder":""}"#);
+    assert_eq!(seen.lock().unwrap().len(), 1, "a tool with no arguments ignores them and the call goes on");
 }
 
 #[test]
