@@ -192,17 +192,29 @@ impl Local {
         phase
     }
 
-    /// The runtime recorded in the state folder, if there is one; none is started.
-    fn look(&self) -> Outcome {
+    /// The runtime recorded in the state folder, if there is one; none is started. One that is alive and
+    /// doesn't answer is asked again for up to `wait`, and counts as stuck once `silent_wait` has passed.
+    fn look(&self, wait: Duration) -> Outcome {
+        let dir = &self.options.state_dir;
+        let looked_at = Instant::now();
         // Before the look: a core writes its record before it lets go of the lock.
-        let starting = runtime::lock_state(&self.options.state_dir).is_held();
-        match runtime::look(&self.options.state_dir, false, true) {
+        let starting = runtime::lock_state(dir).is_held();
+        let mut looked = runtime::look(dir, false, true);
+        if matches!(looked, Looked::Silent(_)) && !starting && !wait.is_zero() {
+            let pause = &mut || {
+                std::thread::sleep(Duration::from_millis(200));
+                true
+            };
+            looked = runtime::ask_again(dir, false, looked_at, wait.min(runtime::silent_wait()), pause).expect("a pause that never stops the wait");
+        }
+        match looked {
             // A start another process has under way is a start under way, not nothing.
             Looked::NotRunning | Looked::Dead(_) | Looked::Silent(_) if starting => Outcome::StillWorking("Another process is starting Julia".into()),
             Looked::NotRunning | Looked::Dead(_) => Outcome::NothingRunning,
             Looked::Running(state, port) => Outcome::Ready(announce(&self.options, &state, port, false)),
             Looked::OtherNode(state) => Outcome::Failed(runtime::other_node_text(&state.node)),
             Looked::Older(_) => Outcome::Failed(super::OLDER_RUNTIME_HERE.into()),
+            Looked::Silent(state) if looked_at.elapsed() >= runtime::silent_wait() => Outcome::Failed(runtime::silent_text(state.pid)),
             Looked::Silent(state) => Outcome::Failed(format!("Julia on this computer (pid {}) is running but isn't answering. Try again in a moment.", state.pid)),
         }
     }
@@ -270,7 +282,7 @@ impl Provider for Local {
                 // Looked at with the phase let go: a runtime that is slow to answer holds up no other call.
                 Phase::Idle if matches!(want, Want::Attach { .. }) => {
                     drop(phase);
-                    let outcome = self.look();
+                    let outcome = self.look(wait);
                     if let Outcome::Ready(runtime) = &outcome {
                         let mut phase = self.state.0.lock().unwrap();
                         if matches!(*phase, Phase::Idle) {

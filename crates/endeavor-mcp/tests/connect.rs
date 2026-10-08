@@ -619,6 +619,79 @@ fn the_helpers_check_says_a_start_is_under_way_beside_a_hung_runtime_and_not_aft
     helper.stdin.0.lock().unwrap().take();
 }
 
+/// A runtime's port that takes connections and says nothing for `quiet`, as a computer waking from sleep
+/// or a runtime under heavy load does, and then answers every call.
+fn quiet_for(quiet: Duration) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let until = std::time::Instant::now() + quiet;
+    std::thread::spawn(move || {
+        for mut socket in listener.incoming().flatten() {
+            if std::time::Instant::now() < until {
+                continue;
+            }
+            // The whole request first: answering and closing with part of it unread resets the connection.
+            let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
+            while socket.read(&mut [0; 1024]).is_ok_and(|n| n > 0) {}
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        }
+    });
+    port
+}
+
+/// The runtime recorded in `dir` now listens on `port`.
+fn record_port(dir: &Path, port: u16) {
+    let mut state = common::read_json(&dir.join("runtime.json"));
+    state["port"] = port.into();
+    std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
+}
+
+#[test]
+fn a_runtime_that_is_silent_for_a_while_is_waited_for_and_used_and_none_is_started_beside_it() {
+    let dir = state_dir("silent-a-while");
+    let cores = Cores(dir.clone());
+    let runtime = FakeRuntime::start(&dir, &this_host());
+    record_port(&dir, quiet_for(Duration::from_secs(2)));
+    let julia = fake_julia(&dir);
+    let helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[("ENDEAVOR_TEST_SILENT_WAIT_SECS", "20")]);
+    helper.hello();
+    helper.request_start(None, true);
+    let ToApp::Progress { line } = helper.next() else { panic!("expected Progress") };
+    assert_eq!(line, format!("Julia here (pid {}) isn't answering; asking it again for up to 20 seconds.", runtime.pid));
+    let ToApp::Ready { pid, reattached, .. } = after_start(&helper) else { panic!("expected Ready") };
+    assert_eq!((pid, reattached), (runtime.pid, true));
+    assert!(cores.pids().is_empty() && runtime.alive());
+    helper.stdin.0.lock().unwrap().take();
+}
+
+#[test]
+fn a_runtime_that_stays_silent_is_neither_stopped_nor_replaced_and_every_client_says_why() {
+    let dir = state_dir("silent-stuck");
+    let cores = Cores(dir.clone());
+    let runtime = FakeRuntime::start(&dir, &this_host());
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    record_port(&dir, closed);
+    let julia = fake_julia(&dir);
+    let wait = ("ENDEAVOR_TEST_SILENT_WAIT_SECS", "2");
+    let said = format!("Julia here (pid {}) is running but hasn't answered for 2 seconds, so no second one was started beside it.", runtime.pid);
+
+    let helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[wait]);
+    helper.hello();
+    let began = std::time::Instant::now();
+    helper.request_start(None, true);
+    let ToApp::StartFailed { message, .. } = after_start(&helper) else { panic!("expected StartFailed") };
+    assert!(message.starts_with(&said) && message.contains("`endeavor stop`"), "{message}");
+    assert!(began.elapsed() >= Duration::from_secs(2), "{:?}", began.elapsed());
+    helper.stdin.0.lock().unwrap().take();
+
+    let serve = endeavor(&dir, &["serve", "--julia", julia.to_str().unwrap(), "--depot", "/opt/depot:"]).env(wait.0, wait.1).output().unwrap();
+    let stderr = String::from_utf8_lossy(&serve.stderr);
+    assert!(serve.status.code() == Some(1) && stderr.contains(&format!("endeavor: {said}")), "{serve:?}");
+
+    assert!(runtime.alive(), "not stopped");
+    assert!(cores.pids().is_empty() && common::julia_pids(&dir).is_empty(), "nothing was started");
+}
+
 #[test]
 fn a_forced_stop_does_not_end_a_core_the_file_does_not_name() {
     let (dir, cores, julia) = held_dir("start-force-unnamed");

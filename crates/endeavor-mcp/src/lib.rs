@@ -694,7 +694,7 @@ impl Hooks for Client<'_> {
     }
 
     fn wait(&mut self, wait: Duration, waiting: Waiting) -> bool {
-        if waiting != Waiting::Ready && !self.told {
+        if matches!(waiting, Waiting::Lock | Waiting::Other) && !self.told {
             self.progress("Another connection is starting Julia here; waiting for it.".into());
             self.told = true;
         }

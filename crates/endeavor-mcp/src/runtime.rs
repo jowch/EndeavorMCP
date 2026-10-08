@@ -69,6 +69,39 @@ fn answers(port: u16, token: &str) -> bool {
     crate::bridge_call(port, crate::CALL, token, "ping").is_ok_and(|status| status == 200)
 }
 
+/// How long a runtime that is alive and doesn't answer is asked again before it counts as stuck: long
+/// enough for a computer that just woke from sleep or a moment of heavy load, and well within the 45 s an
+/// agent's call waits.
+const SILENT_WAIT: Duration = Duration::from_secs(30);
+
+/// `SILENT_WAIT`, or in a debug build `ENDEAVOR_TEST_SILENT_WAIT_SECS`.
+pub(crate) fn silent_wait() -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_SILENT_WAIT_SECS").ok()?.parse().ok()).flatten();
+    test.map_or(SILENT_WAIT, Duration::from_secs)
+}
+
+/// Look again, after each `pause`, at the runtime in `dir`, which was alive and didn't answer at `since`,
+/// until it answers or goes, or `limit` has passed since then. None when `pause` says to stop.
+pub(crate) fn ask_again(dir: &Path, any_node: bool, since: Instant, limit: Duration, pause: &mut dyn FnMut() -> bool) -> Option<Looked> {
+    loop {
+        if !pause() {
+            return None;
+        }
+        let looked = look(dir, any_node, true);
+        if !matches!(looked, Looked::Silent(_)) || since.elapsed() >= limit {
+            return Some(looked);
+        }
+    }
+}
+
+/// Why no runtime is started beside one that is alive and doesn't answer.
+pub(crate) fn silent_text(pid: i32) -> String {
+    format!(
+        "Julia here (pid {pid}) is running but hasn't answered for {} seconds, so no second one was started beside it. It may be busy, for example out of memory, or stuck. Stopping it (`endeavor stop`, or Stop in the Endeavor app) lets a new one start, and ends what it holds in memory.",
+        silent_wait().as_secs()
+    )
+}
+
 /// Why the runtime recorded in a state folder is not used.
 pub(crate) fn other_node_text(node: &str) -> String {
     let here = crate::hostname();
@@ -110,6 +143,8 @@ pub(crate) enum Waiting {
     Other,
     /// For a runtime this process started.
     Ready,
+    /// For a runtime that is alive and silent to answer again.
+    Silent,
 }
 
 /// A runtime that can be used.
@@ -163,12 +198,23 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             Ok(lock) => lock,
             Err(outcome) => return outcome,
         };
+        let looked_at = Instant::now();
         // Before the look: a core that records itself and lets go in between is then found by the look.
         let starting = lock_state(dir).is_held();
         match look(dir, want.args.any_node, true) {
             Looked::Running(state, port) => return Outcome::Ready(up(want, state, port, None)),
             unusable @ (Looked::OtherNode(_) | Looked::Older(_)) => return Outcome::Unusable(unusable),
-            Looked::Silent(state) if !starting && !want.attach_only => eprintln!("endeavor: the recorded runtime (pid {}) isn't answering; starting a new one", state.pid),
+            // Never a second runtime beside one that is alive: both would open the same notebooks.
+            Looked::Silent(state) if !starting && !want.attach_only => {
+                drop(lock);
+                hooks.progress(format!("Julia here (pid {}) isn't answering; asking it again for up to {} seconds.", state.pid, silent_wait().as_secs()));
+                match ask_again(dir, want.args.any_node, looked_at, silent_wait(), &mut || hooks.wait(POLL, Waiting::Silent)) {
+                    None => return Outcome::Cancelled,
+                    Some(Looked::Silent(state)) => return Outcome::Failed(silent_text(state.pid)),
+                    // It answered or went: looked at again with the lock.
+                    Some(_) => continue,
+                }
+            }
             // Its core was killed: what it started may still run, and open the same notebooks as the new one.
             Looked::Dead(state) if !starting && !want.attach_only && crate::stop_workers(state.pid, state.started, state.boot.as_deref()) => {
                 hooks.progress(format!("Stopped what the last Julia here left running when it ended (pid {}).", state.pid));

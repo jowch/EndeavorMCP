@@ -1392,6 +1392,26 @@ fn a_recorded_runtime_that_cannot_be_used_is_an_error_for_the_two_queries_and_st
 }
 
 #[test]
+fn a_notebook_call_waits_for_a_silent_local_runtime_then_says_it_is_stuck_and_starts_none() {
+    let place = Place::new("lazy-silent");
+    let mut front = start_front(&place, &[("ENDEAVOR_TEST_SILENT_WAIT_SECS", "2")]);
+    front.initialize();
+    let mut sleeper = Command::new("sleep").arg("600").spawn().unwrap();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let record = json!({ "launcher": "process", "node": this_host(), "pid": sleeper.id(), "token": "t", "port": closed });
+    std::fs::write(place.local_state.join("runtime.json"), record.to_string()).unwrap();
+    let began = Instant::now();
+    let (failed, said) = front.call("list_notebooks", json!({}));
+    assert!(failed && text(&said).contains(&format!("(pid {}) is running but hasn't answered for 2 seconds, so no second one was started beside it", sleeper.id())), "{said}");
+    assert!(began.elapsed() >= Duration::from_secs(2), "{:?}", began.elapsed());
+    assert!(core_of(&place).is_empty(), "no runtime was started");
+    assert!(sleeper.try_wait().unwrap().is_none(), "not stopped");
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    front.finish();
+}
+
+#[test]
 fn use_machine_local_starts_the_local_runtime() {
     let place = Place::new("lazy-use-local");
     let mut front = place.front();
