@@ -83,21 +83,19 @@ _Started 2026-10-06, on the `client-library` branch._
   machine's connection** (it is made again by the next call), since one machine
   has one connection and the new settings took its place while they were tried.
 - **A machine whose id is `local`** (only by editing `machines.json` by hand: `add_machine` refuses the name) is taken for this computer, and the tools can't reach it.
+- **`list_machines` says "not running" for a local runtime recorded on another
+  node** (a state folder shared between computers). A notebook call then says
+  where it is running. To close: a third state for "running on another node".
 - **On this computer a stop never cancels a start under way,** with `force`
   either (it says Julia is still starting); on a machine `force` cancels it.
-- **The test variables are `ENDEAVOR_TEST_SHELL`, `_ROOT`, `_STATE`, `_DEPOT` and
-  `_ASK`**; `{id}` in the last four stands for the machine's id, so that two
-  machines in one test don't share a runtime. A release build ignores them
-  (`cfg!(debug_assertions)`, in `test_var` in `standalone/machines.rs`), so a
-  shipped binary's ssh can't be redirected to a local shell. The tests that set
-  them (`tests/machines.rs`, `e2e_machines.rs`, `e2e_machines_slurm.rs`) panic in
-  a release build (`common::require_debug_build`), since they would run real
-  `ssh lab` and `ssh hpc` with default folders. Two other
-  variables are for tests and are not gated, since they only change a wait:
-  `ENDEAVOR_START_WAIT_SECS` (how long a call waits for a starting runtime) and
-  `ENDEAVOR_IDLE_CHECK_SECS` (how often an idle runtime checks). The other
-  wait-length variables (`ENDEAVOR_START_LOCK_SECS`, `_STOP_LOCK_SECS`,
-  `_SLURM_POLL_MS`) are not gated either.
+- **Five variables for tests are read by release builds.**
+  `ENDEAVOR_START_WAIT_SECS`, `ENDEAVOR_IDLE_CHECK_SECS`,
+  `ENDEAVOR_START_LOCK_SECS`, `ENDEAVOR_STOP_LOCK_SECS` and
+  `ENDEAVOR_SLURM_POLL_MS` only change a wait or a check interval, and are not
+  gated. The variables that redirect ssh to a local shell (`ENDEAVOR_TEST_SHELL`,
+  `_ROOT`, `_STATE`, `_DEPOT`, `_ASK`) are ignored by release builds, so the tests
+  that set them (`tests/machines.rs` and the `e2e_machines*` tests) need a debug
+  build and panic in a release build (`common::require_debug_build`).
 
 ## The machines file
 
@@ -173,9 +171,15 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Windows
 
-- **Compile-checked only.** The runtime's detached start, its console handler,
-  the `taskkill` cancel path and the machines and projects file locations
-  have never run on Windows.
+- **No person has run Endeavor on Windows.** CI runs `cargo test` on
+  `windows-latest` and the tests pass, but they use a stand-in Julia and fake
+  ssh and Slurm. CI does not cover the runtime's detached start with real Julia,
+  its console handler, the `taskkill` cancel path, or a real ssh from Windows.
+- **Under Codex on Windows a runtime would end with the session.** Codex
+  puts an MCP server in a job object that its children cannot leave, and
+  ends the job with the session (read from its source, not run). Endeavor
+  asks to leave the job and starts inside it when refused. To close: start
+  the runtime there another way, before Windows is offered.
 
 ## Slurm
 
@@ -185,20 +189,15 @@ _Started 2026-10-06, on the `client-library` branch._
 - **The end reason read from the job's log** (used where `sacct` is off) is
   not exercised by a real test.
 - **The reason a job ended could come back empty.** `e2e_slurm` failed about
-  one run in six: a job cancelled from outside was reported with no reason,
-  because the helper asked while Slurm still listed the job as running or
-  completing, and gave up after 1.5 s. The helper now waits up to 10 s for
-  the job's final state, except when the runtime already said how it ended
-  (then it tries three times, 1.5 s, as before). It came back twice in six
-  runs on 2026-10-07: the client was told after the whole 10 s, with nothing.
-  Now the helper also reads the job's log on every try (Slurm writes
-  "CANCELLED AT" or "DUE TO TIME LIMIT" there when it signals the job), over
-  the last 64 KB and not the last 40 lines, and a job that ended is never
-  reported with nothing: at worst "Its Slurm job ended." The failing case was
-  not reproduced in 14 runs, so why the log check missed it is inferred (a
-  long shutdown trace below Slurm's line), and the fix is not shown by a run.
-  If a job stays in COMPLETING past 10 s and its log never says why, the user
-  is told only that it ended.
+  one run in six on 2026-10-07: a job cancelled from outside was reported with
+  no reason, because the helper asked while Slurm still listed the job as running
+  or completing. The helper now waits up to 10 s for the job's final state and
+  reads the job's log (last 64 KB) on every try; a job that ended is never
+  reported with nothing, at worst "Its Slurm job ended." The failure was not
+  reproduced in 14 runs, so the cause is inferred (a long
+  shutdown trace below Slurm's line) and the fix is not shown by a run. If a job
+  stays in COMPLETING past 10 s and its log never says why, the user is told only
+  that it ended.
 - **A queued job has no id in the session's status until it is submitted by
   this session.** A session that re-attaches to a job already queued shows `queue`
   but no `job` until it runs, because the library's queued event carries no
@@ -214,21 +213,22 @@ _Started 2026-10-06, on the `client-library` branch._
 
 - **Keys only.** A server that asks for a password or a code on every login
   is unsupported. A key with a passphrase needs `ssh-add` first, and a new
-  host needs one `ssh <host>` in a terminal. Planned: a sign-in page on a
-  loopback port.
+  host needs one `ssh <host>` in a terminal. There is no sign-in page.
 
 ## Releases and installing
 
 - **`install.ps1` has never run.** There is no PowerShell here. It is read
   against PowerShell 5.1's behaviour only. To close: run it on Windows
   against a fake release (`ENDEAVOR_RELEASE_URL`) and the real one.
-- **The workflow's macOS and Windows rows and the key check have never
+- **The Helpers workflow's macOS and Windows rows and the key check have never
   run.** They run on the next push to `main`; the YAML parses and was read
-  through. The `darwin-x86_64` build is cross-built on an Apple Silicon
-  runner and its key is checked by searching the file for it, not by running
-  it. Nothing has run the macOS or Windows builds, so a Mac or Windows
-  binary may fail to link or start. Until a release holds them, the install
-  scripts and `endeavor update` on those platforms find no asset and say so.
+  through. CI (`ci.yml`) builds and runs `cargo test` on `macos-15` and
+  `windows-latest`, and the tests pass there, but no person has run the macOS
+  or Windows binaries, and CI does not cover real Julia, real ssh or the
+  install scripts there. The `darwin-x86_64` build is cross-built on an Apple
+  Silicon runner and its key is checked by searching the file for it, not by
+  running it. Until a release holds them, the install scripts and `endeavor
+  update` on those platforms find no asset and say so.
 - **`endeavor update` on macOS and Windows has never run.** The logic is the
   Linux code with other asset names, and the Windows rename-aside is tested
   on Linux with the same function; `cfg(windows)` paths are compile-checked.
@@ -238,7 +238,9 @@ _Started 2026-10-06, on the `client-library` branch._
   against a damaged or cut-short download and not against a tampered
   release, and the same holds for the install scripts, `update` and the
   fetched server helpers. To close: sign the release, or pin the key in the
-  script.
+  script. For plugin installs, the pinned-key file could also carry the SHA-256
+  of each platform's binary, which would make the plugin's check independent of
+  the release; not built, because no release holds this build yet.
 - **A Mac or Windows computer reaching a Linux server is wired and not run.**
   The release logic is tested with a fake release, but `open_session`'s call
   to it is not exercised across platforms, because the tests' ssh stand-in
@@ -271,11 +273,13 @@ _Started 2026-10-06, on the `client-library` branch._
   a `sh` script as an MCP command on Windows is undocumented. To close: try
   it under Git Bash, and give Windows a `.cmd` or PowerShell launcher if not.
 - **The Codex and Antigravity plugin folders were built to their
-  documentation and tried on no real install.** Codex's page shows no stdio
-  entry and no variable for an MCP command (`${PLUGIN_ROOT}` is documented for
-  hooks only); Antigravity's gives no shape for `mcp_config.json`. Whether
-  they start the server in the project folder, expand the variable, and load
-  the skills is unknown. To close: install each and call a tool.
+  documentation and tried on no real install.** The manifest and MCP file
+  names, that a plugin's server starts in the project folder, the tool timeout
+  and that each loads the skills all come from their documentation. Codex's page
+  shows no stdio entry and no variable for an MCP command (`${PLUGIN_ROOT}` is
+  documented for hooks only); Antigravity's gives no shape for `mcp_config.json`.
+  Whether they start the server in the project folder, expand the variable, and
+  load the skills is unknown. To close: install each and call a tool.
 - **The pinned key can only be set after a release from `main` holds that
   build.** Until then `release-key` is empty and the plugin takes the newest
   build. Unpinned, a start uses the build it already has, and looks for a
@@ -285,10 +289,6 @@ _Started 2026-10-06, on the `client-library` branch._
   newer build applies from the start after it is found. If the agent kills the launcher's children, the
   background check may never finish, and it is retried only the next day. To
   close: pin the key when releasing.
-- **The pinned-key file could also carry the SHA-256 of each platform's
-  binary.** The plugin's check would then be independent of the release, and
-  would close "The checksum file comes from the same release as the binary"
-  for plugin installs. Not built, because no release holds this build yet.
 - **Skills in a plugin can be newer than the pinned binary's embedded copy.**
   The binary's own `notebook_guide` and the skills in the plugin can then
   disagree about the tools. To catch it: have `mcp --skills plugin` compare a
@@ -351,9 +351,6 @@ _Started 2026-10-06, on the `client-library` branch._
   (`Env::from_vars`); a Slurm job (`wire::slurm::scratch()`) also asks a login
   shell. On a cluster that sets it only in the login profile, the two use
   different depots. To close: one rule in `paths`.
-- **On Windows `endeavor update` finds the plugins' binary store from an
-  absolute `HOME` before the profile folder**, as the launcher script does. It
-  used the profile folder only.
 - **`Env::from_vars` still reads the real process** for the home fallback
   (`home_dir`), the working folder and the host name, so a test that fakes the
   variables does not fake those three.
@@ -374,17 +371,13 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The skills
 
-- **`endeavor-machines` says "helper".** The file says "helper", which an
-  agent should not have to read.
-- **The notebook skill is untried.** No agent session has run against
-  `endeavor-notebooks` or the shorter tool descriptions, and no rule that was
-  cut has been tested for whether a current model needs it. To close: the
-  trial in the skills audit, old text against new.
-- **`notebook_guide` does not include the engine's reference.** An agent
-  without skills gets the notebook skill, then has to ask for
-  `endeavor-notebooks/reference/pluto.md` before its first cell. Every
-  notebook is Pluto today, so this is one more call each session. Left so
-  that the guide needs no change when a second engine arrives.
+- **The skills were tried only in short runs.** On 2026-10-07 Claude Code
+  created a notebook, edited and re-ran cells, handled a `stale_read` collision,
+  and loaded the plugin's skills with `--plugin-dir`. The `endeavor-machines`
+  skill was loaded by name in one run, and an agent drove the machine tools
+  through `add_machine`, `needs_install`, `use_machine` and switching back.
+  Still untested: the new text against the old (the trial in the skills audit)
+  and whether a current model needs any rule that was cut.
 
 - **A waited run has no time limit.** `wait_for_completion=true` blocks until
   the whole run ends (`run_cells!` calls Pluto with `run_async=false`), so the
@@ -395,10 +388,8 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Not checked
 
-- **Codex and Antigravity** facts in the design come from their
-  documentation: the manifest and MCP file names, that a plugin's server
-  starts in the project folder, the tool timeout, and that each loads the
-  skills (see "Releases and installing" for the plugin folders).
+- **`endeavor serve` over HTTP has not been tried with a real agent client.**
+  The skills trial used `endeavor mcp` over stdio.
 - **`run_conflict` was not provoked in the trial** with the real Claude Code
   CLI. It is covered by the unit tests only.
 - **Gatekeeper and SmartScreen** behaviour for a binary installed with
@@ -419,9 +410,10 @@ _Started 2026-10-06, on the `client-library` branch._
 ## The machine tools
 
 - **A new session on a machine starts in the machine's home folder** unless
-  `use_machine` is given `folder`. A notebook made there with `new_notebook`
-  and no path lands in the home folder (seen in the trial). To close: tell the
-  agent where the notebook went, or ask for a folder when the session has none.
+  `use_machine` is given `folder`. In a trial an agent made a notebook there with
+  `new_notebook` and no path. The `endeavor-machines` skill now tells the agent to
+  ask the user where it should go (or to pass `folder`) before making a notebook,
+  and says the result's `folder` is where new notebooks go. Nothing enforces it.
 - **The front and the runtime each check a call's argument names against their
   own build's tools.** A newer front's new argument is rejected by an older
   runtime with that runtime's message.
@@ -478,9 +470,7 @@ _Started 2026-10-06, on the `client-library` branch._
   know of is not seen.
 - **`stop_machine` waits 5 s** for the runtime to say how many other sessions
   called lately, and without `force` refuses when it doesn't come. A runtime
-  busy for longer than that needs `force`. A runtime started by a build from
-  before `endeavor/recent_sessions` doesn't know the question, so it is
-  refused the same way until it is restarted or `force` is given. So is an
+  busy for longer than that needs `force`. A refusal also follows an
   answer that is not well formed, or a call that has no time left.
 - **A session that has left still counts for 15 minutes while its notebook is
   open.** Nothing signs a session out, so `stop_machine` without `force` is
@@ -495,15 +485,10 @@ _Started 2026-10-06, on the `client-library` branch._
   notebook has closed or idle-stopped meanwhile, the binding is dropped when
   it is next found out, and the session can make or open another.
 - **A session that goes away leaves its run policy and folder in the
-  runtime's memory** until the runtime ends: the sign-out cleared them, and
-  the 7-day forgetting does not. They are a few strings for each session.
+  runtime's memory** until the runtime ends; the 7-day forgetting
+  does not clear them. They are a few strings for each session.
   A session the app drops does not clear them either, since the app's call
   (`endeavor/end_session`) is gone.
-- **A front from before this change, with a runtime from after it, loses the
-  `stop_machine` check without saying so.** It reads `other_sessions` from
-  `list_notebooks`, which is gone, so it sees no other session and stops
-  without asking. Nothing was released before this change, so there is no
-  code for it.
 - **Not run against a host with no Slurm.** On this workstation the helper
   finds Slurm in `/usr/bin`, so the "no Slurm" message and `slurm: true`
   without Slurm are covered by unit tests of the decision only.
@@ -516,13 +501,9 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## CI
 
-- **CI runs on every push, on Linux, macOS and Windows**, and was red on macOS
-  for most of this work without being looked at. It showed one product
-  fault the Linux runs could not: when a runtime's end was reported before
-  the connection dropped, the connection forgot the reason on reconnecting and
-  said only "connected". Fixed; the order that shows it only happens on
-  macOS, so the test for it is CI's.
-
+- **CI does not run the tests against real Julia or real Slurm.** The `e2e_*`
+  tests are ignored by default and are run by hand, on the author's Linux
+  workstation; CI runs the stand-in tests on Linux, macOS and Windows.
 
 ## Tests
 
@@ -541,11 +522,3 @@ _Started 2026-10-06, on the `client-library` branch._
   and one install test fail there because busybox runs its own built-in
   `uname`, `mkdir`, `timeout` and `wget` and ignores the fakes the tests put
   on the `PATH`. The scripts themselves were not run by hand under busybox.
-- **Under Codex on Windows a runtime would end with the session.** Codex
-  puts an MCP server in a job object that its children cannot leave, and
-  ends the job with the session (read from its source, not run). Endeavor
-  asks to leave the job and starts inside it when refused. To close: start
-  the runtime there another way, before Windows is offered.
-- **`list_machines` says "not running" for a local runtime recorded on another
-  node** (a state folder shared between computers). A notebook call then says
-  where it is running. To close: a third state for "running on another node".

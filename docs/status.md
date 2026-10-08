@@ -81,8 +81,10 @@ Checked live on 2026-10-03:
 Not yet checked:
 
 - The machine tools against a real cluster (`e2e_slurm` covers the helper
-  and Slurm, `tests/machines.rs` the tools with fake Slurm), and an agent
-  following the `endeavor-machines` skill.
+  and Slurm, `tests/machines.rs` the tools with fake Slurm). On 2026-10-07 an
+  agent drove the machine tools through `add_machine`, `needs_install`,
+  `use_machine` and switching back; the `endeavor-machines` skill was loaded
+  by name in one run only, and no agent has followed it through a cluster.
 
 - `endeavor update` replacing a binary with a newer build from the real
   Helpers release, and on macOS and Windows. The first build with `update` is
@@ -100,8 +102,10 @@ Not yet checked:
 - An agent following the skills without the app. The notebook skill
   (`endeavor-notebooks`, rewritten 2026-10-06 from the three Pluto skills)
   keeps what holds only in the app in `reference/app.md`, and
-  `guide::STANDALONE` tells the agent to skip it; no agent session has run
-  against that text yet.
+  `guide::STANDALONE` tells the agent to skip it. Short Claude Code runs on
+  2026-10-07 (`endeavor mcp` over stdio, the plugin loaded with `--plugin-dir`)
+  made a notebook, edited and re-ran cells and handled a `stale_read`
+  collision; the new text has not been compared with the old.
 
 Known gaps:
 
