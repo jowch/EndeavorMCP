@@ -157,11 +157,9 @@ pub fn main(argv: &[String]) -> ! {
         if let Some(status) = julia.try_wait().unwrap_or(None) {
             break status;
         }
-        if let Some(ready) = julia_ready(&julia_state, &args.state_dir, port, &served.bridge, &mut starting) {
-            let _ = served.pluto.set(ready.pluto);
-            let _ = served.bridge.julia.port.set(ready.bridge_port);
+        if let Some(bridge_port) = julia_ready(&julia_state, &args.state_dir, port, &served, &mut starting) {
             if exit_idle {
-                exit_when_idle(served.clone(), ready.bridge_port);
+                exit_when_idle(served.clone(), bridge_port);
             }
             served.bridge.notebooks.start();
             break julia.wait().unwrap_or_else(|e| fail(format!("waiting for Julia: {e}")));
@@ -220,7 +218,9 @@ struct JuliaReady {
 /// Once Julia has written its state and its bridge answers, write
 /// `runtime.json` for the helper: the core's pid and its one `port`, and
 /// Julia's launcher, node and job, and whether it ends itself when idle. Pluto's port and secret stay out of it.
-fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge, starting: &mut Option<File>) -> Option<JuliaReady> {
+/// Gives Julia's bridge port.
+fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, served: &Served, starting: &mut Option<File>) -> Option<u16> {
+    let bridge = &served.bridge;
     let token = &bridge.token;
     let julia: Value = serde_json::from_str(&std::fs::read_to_string(julia_state).ok()?).ok()?;
     let port_of = |key: &str| julia[key].as_u64().and_then(|p| u16::try_from(p).ok());
@@ -251,6 +251,10 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge,
     if let Some(build) = bridge.notebooks.build.get() {
         state["build"] = build.clone().into();
     }
+    // Before the record: a client that finds it may call at once, and is refused until these are set.
+    let bridge_port = ready.bridge_port;
+    let _ = served.pluto.set(ready.pluto);
+    let _ = bridge.julia.port.set(bridge_port);
     if let Err(e) = write_private(&state_dir.join("runtime.json"), state.to_string().as_bytes()) {
         eprintln!("endeavor core: {e}");
         return None;
@@ -259,7 +263,7 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge,
     if let Some(file) = starting.take() {
         crate::runtime::release_starting(file);
     }
-    Some(ready)
+    Some(bridge_port)
 }
 
 /// Have Pluto's page suggest the notebooks' folder for new notebooks, as the
