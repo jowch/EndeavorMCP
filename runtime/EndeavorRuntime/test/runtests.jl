@@ -176,24 +176,27 @@ end
         @test_throws ArgumentError EndeavorRuntime.adapter_call(nothing, "snapshot", Dict{String,Any}())
     end
 
-    @testset "lifecycle: stop releases HTTP and Pluto ports" begin
+    @testset "lifecycle: start serves both ports, stop frees them for a restart" begin
         EndeavorRuntime.stop_pluto_stack!()
         pluto_port = 1250 + rand(0:99)
         mcp_port = 2450 + rand(0:99)
-        port_up(url) = try
-            HTTP.get(url; readtimeout=1, connect_timeout=1, status_exception=false).status == 200
+        # No retries, so the ports must answer as soon as start returns. The long
+        # read timeout is for the first request, which compiles its handler.
+        answers(url) = try
+            HTTP.get(url, ["Connection" => "close"]; retry=false, readtimeout=60, status_exception=false).status == 200
         catch
             false
         end
         try
-            EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
-            @test EndeavorRuntime.session_status_dict()["pluto"] == "running"
-            @test port_up("http://127.0.0.1:$mcp_port/health")
-            @test port_up("http://127.0.0.1:$pluto_port/ping")
-            EndeavorRuntime.stop_pluto_stack!()
-            sleep(0.5)
-            @test !port_up("http://127.0.0.1:$mcp_port/health")
-            @test !port_up("http://127.0.0.1:$pluto_port/ping")
+            for _ in 1:2
+                EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
+                @test EndeavorRuntime.session_status_dict()["pluto"] == "running"
+                @test answers("http://127.0.0.1:$mcp_port/health")
+                @test answers("http://127.0.0.1:$pluto_port/ping")
+                EndeavorRuntime.stop_pluto_stack!()
+                @test !answers("http://127.0.0.1:$mcp_port/health")
+                @test !answers("http://127.0.0.1:$pluto_port/ping")
+            end
         finally
             EndeavorRuntime.stop_pluto_stack!()
         end
