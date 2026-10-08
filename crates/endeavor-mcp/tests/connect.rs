@@ -1818,15 +1818,16 @@ fn the_end_of_input_during_a_stop_that_fails_still_stops_the_runtime_with_quit_w
 #[test]
 fn a_runtime_that_is_still_alive_after_the_stop_is_not_stopped_and_stays_attached() {
     let dir = state_dir("wont-die");
-    // It ignores the shutdown call, and the signals leave a zombie that nobody reaps, which still counts as alive.
+    // It ignores the shutdown call, and the helper sends it no signals, as if it were stuck in the kernel.
     let runtime = FakeRuntime::slow_to_exit(&dir, "labbox3", Duration::from_secs(3600));
-    let mut helper = Helper::start(&dir, &["--any-node"]);
+    let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--any-node"], &[("ENDEAVOR_TEST_UNKILLABLE", "1")]);
     assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
     helper.request_stop();
     let ToApp::NotStopped { message, .. } = helper.next_within(Duration::from_secs(60)) else { panic!("expected NotStopped") };
     assert!(message.contains("still running"), "{message}");
     assert!(dir.join("runtime.json").exists(), "it stays on record");
     assert!(call(&helper).ends_with(CALL_REPLY_ENDS), "its route is back");
+    assert!(runtime.alive(), "it really is still running");
     runtime.kill();
     helper.stdin.0.lock().unwrap().take();
     helper.exits();

@@ -32,11 +32,20 @@ pub fn start_time(pid: i32) -> Start {
         return Start::Gone;
     }
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // A zombie has ended and only waits to be reaped, which a container whose PID 1 doesn't reap
+        // never does, so it is gone even though `kill(pid, 0)` still finds it.
+        Ok(stat) if zombie(&stat) => Start::Gone,
         Ok(stat) => parse_stat(&stat).map_or(Start::Unknown, Start::At),
         // The file goes with the process; ESRCH is what a process that is exiting gives.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ESRCH) => Start::Gone,
         Err(_) => Start::Unknown,
     }
+}
+
+/// Whether field 3 of `/proc/PID/stat`, the state, is Z (zombie) or X (dead).
+#[cfg(any(target_os = "linux", test))]
+fn zombie(stat: &str) -> bool {
+    stat.rfind(')').and_then(|end| stat[end + 1..].split_whitespace().next()).is_some_and(|state| state == "Z" || state == "X")
 }
 
 /// Field 22 of `/proc/PID/stat`, the start in clock ticks after boot. The name in field 2 is in
@@ -106,6 +115,22 @@ mod tests {
         assert_eq!(parse_stat(stat), Some(987654));
         assert_eq!(parse_stat("1 (init) S 0 1"), None, "too few fields");
         assert_eq!(parse_stat("no name"), None);
+        assert!(zombie("123 (a) (b) c) Z 1 123") && zombie("9 (x) X 1"));
+        assert!(!zombie(stat) && !zombie("no name"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ended_child_not_yet_reaped_is_gone() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| zombie(&stat)) {
+            assert!(std::time::Instant::now() < deadline, "the child never ended");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(start_time(pid), Start::Gone, "a zombie");
+        child.wait().unwrap();
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -68,10 +68,8 @@ including the network hosts Julia needs, are in Endeavor's `docs/cloud.md`.
 - Without `julialang-s3.julialang.org` and `pkg.julialang.org` allowed, there
   is no Julia, and the real-Julia tests can't run. Say so; don't work around it.
 - The VM runs as root, and its PID 1 doesn't reap orphaned processes, so an
-  ended detached process stays a zombie that `kill -0` still finds.
-  `machines::a_forced_stop_cancels_a_start_another_process_began_and_the_next_call_starts_afresh`
-  fails here for that reason (the runtime treats a zombie as alive). It passes
-  on macOS and GitHub's runners. Don't chase it as a regression.
+  ended detached process stays a zombie. The runtime counts a zombie as gone
+  (`unixproc::start_time`); test helpers that use `kill -0` must too.
 - marimo is installed as a uv tool (`marimo` on PATH, not importable from the
   system Python). For scripts, use `uv run --with marimo==0.25.1 ...`.
 
