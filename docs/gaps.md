@@ -598,13 +598,6 @@ pin of this repository was 84 commits behind `main` on 2026-10-08. That is the p
 defect: the MCP side's design is to settle before the app moves to
 `client::Session`.
 
-- [P2] **`client::Session`'s public state lets impossible states through.**
-  `Status` is a flat `State` with optional `runtime`, `job`, `queue`,
-  `needs_install`, `error` and a `nothing_running` flag beside it, so, for
-  example, `Failed` with a runtime or `needs_install` without `NeedsInstall`
-  can be built. The single enum carrying its data that
-  [architecture-review.md](architecture-review.md) (P3) proposed was not done.
-  Cheaper to change before the app adopts it.
 - [P2] **Adopting `Session` in the app needs three settings it fixes now:** the
   wording of the listener's messages (`Config::messages` names MCP tools in the
   front's case; the default speaks in the app's words), batch sign-in only
@@ -626,13 +619,14 @@ defect: the MCP side's design is to settle before the app moves to
 
 ## Tests and CI
 
-- [P2] **CI does not run the tests against real Julia or real Slurm.** The
-  `e2e_*` tests are ignored by default and are run by hand, on the author's
-  Linux workstation; CI runs the stand-in tests on Linux, macOS and Windows.
-- [P2] **The Julia tests are not in CI, and one fails.** `lifecycle: stop
-  releases HTTP and Pluto ports` (`runtests.jl:191`) fails, with and without
-  the waited-run change of 2026-10-07. `docs/testing.md` has no command for the
-  Julia tests; they were run with a depot under `target/tmp`. Not looked into.
+- [P2] **CI does not run the end-to-end tests against real Julia or real
+  Slurm.** The `e2e_*` tests are ignored by default and are run by hand, on the
+  author's Linux workstation; CI runs the stand-in tests on Linux, macOS and
+  Windows, and the runtime package's Julia tests on Linux and macOS.
+- [P3] **Parallel builds in one target folder break each other's tests.** Test
+  binaries from two worktrees have the same names, so a build in one replaces
+  the binaries another is running. Give each worktree its own
+  `CARGO_TARGET_DIR`.
 - [P3] **A failed or interrupted test run can leave its fake runtime behind.**
   One run left a fake `endeavor core` from the `machines` tests under
   `target/tmp`, which had to be ended by hand. The tests clean up when they

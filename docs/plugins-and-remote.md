@@ -341,7 +341,7 @@ refuses when Julia is in use through it.
 |---|---|
 | `ensure(Want::Attach { install }, wait)` | Attach to a runtime that runs, or a job that waits or runs, and start nothing otherwise: the outcome is `NothingRunning` |
 | `ensure(Want::Start { job, install }, wait)` | Start the runtime, or attach to the one running. Returns as soon as the outcome is known: `Ready` (the listener's port, the runtime's token, the page address, pid, node, job), `Queued`, `NeedsInstall` (what), `Failed` (why) or `StillWorking` (which step, when `wait` ran out). A later call with the same want goes on from there. `install` is the user's agreement to what the start needs (the helper if missing, then whatever the start finds it needs) |
-| `status()` | The state (connecting, connected, starting, queued, ready, failed, needs_install), the last step, an error, what the helper said, the runtime once ready, and for a job its job and queue |
+| `status()` | The state, which carries its own data: connecting, connected, nothing running, starting (with the job's queue state once it runs), queued (the queue), ready (the runtime), needs install (what to install) or failed (the error). Beside it: the last step, what the helper said, and for a job the job |
 | `stop()` | Stop the runtime for every client, and say why it didn't. The connection stays |
 | `allow_install()` | The user agreed to the helper alone, without a start |
 | `close()` | Detach and end the session's thread and port. The runtime goes on |
