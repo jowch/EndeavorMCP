@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 const KEY: &str = "0123456789ab";
 const OTHER: &str = "ba9876543210";
 const BIN: &[u8] = b"#!/bin/sh\necho \"args: $*\"\necho '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'\n";
-const MANUAL: &str = "install.sh | sh";
+const MANUAL: &str = "endeavor-mcp.sh\" --fetch-only";
 
 fn sha(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()

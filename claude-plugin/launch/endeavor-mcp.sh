@@ -29,7 +29,9 @@ set -eu
 exec 3>&1 1>&2
 
 here=$(cd "$(dirname "$0")" && pwd)
-manual='curl -fsSL https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.sh | sh (Windows: scripts/install.ps1)'
+# A start runs only a binary in its own folder (or ENDEAVOR_BIN), so a copy
+# installed elsewhere wouldn't help: the advice is to fetch into that folder.
+manual="Run this in a terminal to download it, then reconnect the server: sh \"$here/endeavor-mcp.sh\" --fetch-only"
 
 fail() {
   echo "endeavor: $*" >&2
@@ -60,7 +62,7 @@ case ${XDG_DATA_HOME:-} in
   *)
     case ${HOME:-} in
       /*) data=$HOME/.local/share ;;
-      *) fail "HOME isn't set to an absolute path, so there is nowhere to keep endeavor. Install it by hand: $manual" ;;
+      *) fail "HOME isn't set to an absolute path, so there is nowhere to keep endeavor. $manual" ;;
     esac
     ;;
 esac
@@ -113,14 +115,14 @@ if have && { [ -n "$key" ] || [ -z "$fetch_only" ]; }; then
   run "$@"
 fi
 
-mkdir -p "$base" || fail "couldn't create $base. Install endeavor by hand: $manual"
+mkdir -p "$base" || fail "couldn't create $base. $manual"
 lock=$base/.lock
 waited=0
 until err=$(mkdir "$lock" 2>&1); do
   if [ ! -d "$lock" ]; then
     # The owner may have just let go of it.
     err=$(mkdir "$lock" 2>&1) && break
-    [ -d "$lock" ] || fail "can't make $lock, so $base can't be written ($err). Install endeavor by hand: $manual"
+    [ -d "$lock" ] || fail "can't make $lock, so $base can't be written ($err). $manual"
   fi
   # The lock folder is made when the lock is taken, and its age is the lock's.
   owner=$(cat "$lock/pid" 2>/dev/null || true)
@@ -142,7 +144,7 @@ until err=$(mkdir "$lock" 2>&1); do
     fi
   fi
   if [ "$waited" -ge 25 ]; then
-    fail "another start has been downloading endeavor for $waited seconds. Reconnect in a minute, or install it by hand: $manual"
+    fail "another start has been downloading endeavor for $waited seconds. Reconnect in a minute. $manual"
   fi
   sleep 1
   waited=$((waited + 1))
@@ -166,7 +168,7 @@ echo $$ >"$lock/pid"
 find "$base" -maxdepth 1 -name '.endeavor-install.*' -mmin +60 -exec rm -rf {} + >/dev/null 2>&1 || true
 
 if [ ! -f "$here/install.sh" ]; then
-  fail "install.sh is missing from $here. Install endeavor by hand: $manual"
+  fail "install.sh is missing from $here. Reinstall the plugin."
 fi
 status=0
 if [ -n "$key" ]; then
@@ -183,4 +185,4 @@ if have; then
 fi
 # install.sh exits 3 when the release is reachable but doesn't hold the pinned build.
 [ "$status" -ne 3 ] || fail "build $key is still being published. Reconnect in a few minutes."
-fail "couldn't get endeavor${key:+ (build $key)}. The reason is above. Install it by hand: $manual"
+fail "couldn't get endeavor${key:+ (build $key)}. The reason is above. $manual"
