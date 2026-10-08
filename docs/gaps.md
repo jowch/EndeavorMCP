@@ -17,8 +17,6 @@ priority on 2026-10-08._
 
 Every P1:
 
-- A front and its runtime can be of different builds after an update, and the
-  agent can't see it ([Releases and plugins](#releases-and-plugins)).
 - No marketplace install of the Claude Code plugin has listed its skills
   ([Releases and plugins](#releases-and-plugins)).
 - The Codex plugin has not been installed from GitHub
@@ -27,22 +25,16 @@ Every P1:
   ([Releases and plugins](#releases-and-plugins)).
 - A Mac or Windows computer reaching a Linux server is wired and not run
   ([Releases and plugins](#releases-and-plugins)).
-- On macOS a core that dies leaves Julia running, and a runtime that doesn't
-  answer is replaced without being stopped ([Runtime lifecycle](#runtime-lifecycle)).
 
 ## Releases and plugins
 
-- [P1] **A front and its runtime can be of different builds after an update,
-  and the agent can't see it.** A runtime outlives the front that started it,
-  so after a plugin update the new front attaches to the old build's runtime.
-  Only stderr says so (`other_build`, when a front attaches), which the agent
-  doesn't read. Each checks a call's argument names against its own build's
-  tools, so a newer front's new argument is rejected by an older runtime with
-  that runtime's message. It also goes the other way: before the release of
-  2026-10-08 the launcher once fetched the then-newest build (key
-  `14eb0a67bda7`) and ran it against a runtime of this branch, and it attached
-  and answered read-only calls. Nothing compares the two builds before a front
-  uses a runtime.
+- [P2] **Only `endeavor mcp` checks the build of the runtime it uses.** A front
+  of `mcp` compares the build in `runtime.json` with its own: it replaces a
+  runtime of another build that a front started, with no notebook open, on the
+  first call that may start one, and otherwise tells the agent once. Another
+  session can open a notebook between that check and the stop. A machine's
+  runtime is not checked, because the helper's `Ready` doesn't carry a build.
+  `serve` doesn't need it: the agent talks to the core itself.
 - [P1] **No marketplace install of the Claude Code plugin has listed its
   skills.** `claude-plugin/skills` is a synced copy of `plugin/skills`, like
   the other two plugins', so it survives a Windows checkout without
@@ -192,20 +184,23 @@ Every P1:
 
 Starting, stopping, idle exit and updates.
 
-- [P1] **On macOS a core that dies leaves Julia running, and a runtime that
-  doesn't answer is replaced without being stopped.** Linux ends Julia with its
-  core (`PR_SET_PDEATHSIG`) and Windows with the core's job object; macOS has
-  neither. The next start finds the core's pid gone and starts a new runtime
-  while the old Julia still runs, so two runtimes hold the same notebook files
-  (see "One notebook file open in two runtimes"). A runtime that is alive but
-  doesn't answer its pings (`Looked::Silent`) is treated the same way: a start
-  says "isn't answering; starting a new one" and leaves the old one running.
-  What to do with a runtime that is alive and silent is not decided.
-- [P2] **`endeavor update` while a `serve` or `mcp` from that binary runs breaks
-  its later starts.** A start runs `endeavor core` from the program's own path
-  (`current_exe`). After the binary is replaced, on Linux that path names the
-  deleted old file, and on macOS it names the new build, so the core is not its
-  front's build. Restarting the front avoids it.
+- [P2] **A runtime that is alive and doesn't answer stops new starts until
+  someone stops it.** A start asks it again for 30 s (`SILENT_WAIT`) and then
+  fails with a message naming its pid and how to stop it; no second runtime is
+  started beside it, and it is not stopped for the user, since it may be busy
+  with a large computation. Until someone stops it, the session has no
+  notebooks. The helper's `check` and an attach-only request report it as not
+  running.
+- [P3] **A dead core's leftover process group is ended by pid.** Before a
+  start, the group of a core that died is stopped, checked by the core's start
+  time and boot. On the same boot, a reused pid whose new process made its own
+  group and exited leaving members would have that group signalled. On macOS a
+  large forward clock jump makes the boot check skip the cleanup.
+- [P3] **A stop forces Julia after 15 s.** A stop asks Julia to shut down and
+  waits 10 s, then signals the group and waits 5 s, then kills it. A cell that
+  ignores the interrupt, or a slow network folder, can be cut off. Pluto writes
+  a notebook in place (`write(path, content)`, not a temporary file renamed
+  over it), so a kill during that write can leave the file cut short.
 - [P2] **A start that hangs, with no client left, is ended only by a forced
   stop.** Clients that wait for it never stop it, and a stop without `force`
   says it is still starting. On this computer `endeavor stop --force` ends it;
