@@ -63,7 +63,7 @@ fn open_session(server: Server, allow_install: bool) -> Result<Session, String> 
     let var = |name: &str| test_var(name).and_then(|v| v.into_string().ok()).unwrap_or_default().replace("{id}", &id);
     let helper = |os: &str, arch: &str| {
         if (os.to_owned(), arch.to_owned()) == this_platform() {
-            std::env::current_exe().map_err(|e| format!("Couldn't find the endeavor program itself: {e}"))
+            crate::this_program()
         } else {
             crate::release::helper_for(os, arch, &crate::paths::Env::here().helpers_dir())
         }

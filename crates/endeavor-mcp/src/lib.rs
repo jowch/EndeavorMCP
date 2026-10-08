@@ -1252,18 +1252,18 @@ fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_
     Ok(command)
 }
 
-/// The file this process runs from, to start a core of this build. `endeavor update` may have put another
+/// The file this process runs from, to start a core of this build or send this build to a server. `endeavor update` may have put another
 /// build at this program's path since it started, and a core of that build would run with this build's
 /// `runtime/`. Linux keeps the file this process started from.
 #[cfg(target_os = "linux")]
-fn this_program() -> Result<PathBuf, String> {
+pub(crate) fn this_program() -> Result<PathBuf, String> {
     Ok(PathBuf::from("/proc/self/exe"))
 }
 
 /// Elsewhere the program at the path is asked its build, and another build is refused. Not in the app
 /// (`HELPER_ARGS`), whose copy only the app's own update replaces.
 #[cfg(not(target_os = "linux"))]
-fn this_program() -> Result<PathBuf, String> {
+pub(crate) fn this_program() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     if HELPER_ARGS.get().is_some_and(|args| !args.is_empty()) {
         return Ok(exe);
