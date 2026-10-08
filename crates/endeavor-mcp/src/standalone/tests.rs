@@ -344,7 +344,7 @@ fn ready_relay(port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool
     let started = crate::winproc::own_start_time();
     #[cfg(not(windows))]
     let started: Option<u64> = None;
-    let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "started": started, "token": "t0k", "port": port });
+    let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "started": started, "token": "t0k", "port": port, "build": crate::embedded::BUILD_VERSION });
     std::fs::write(dir.join("runtime.json"), record.to_string()).unwrap();
     let (relay, out) = relay(skills_plugin, dir);
     match target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO, false) {

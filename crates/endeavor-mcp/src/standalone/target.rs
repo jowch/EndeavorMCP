@@ -103,6 +103,26 @@ pub(super) fn local_server() -> Server {
 pub(super) struct Local {
     options: Options,
     state: Arc<(Mutex<Phase>, Condvar)>,
+    builds: Mutex<Builds>,
+}
+
+/// What `Local::other_build` has done so far.
+#[derive(Default)]
+struct Builds {
+    /// The runtime whose build was checked.
+    checked: Option<u32>,
+    /// A runtime of another build was stopped. It is done once, so that two fronts of different builds don't take turns.
+    stopped_one: bool,
+}
+
+/// What `Local::other_build` came to.
+pub(super) enum OtherBuild {
+    /// The runtime is this build's, was checked already, or is left for a call that may start one.
+    Fine,
+    /// It was another build's and idle, and was stopped: the call starts one of this build.
+    Stopped,
+    /// It is another build's and was kept: what to tell the agent, once.
+    Kept(String),
 }
 
 enum Phase {
@@ -117,7 +137,45 @@ enum Phase {
 
 impl Local {
     pub(super) fn new(options: Options) -> Local {
-        Local { options, state: Arc::new((Mutex::new(Phase::Idle), Condvar::new())) }
+        Local { options, state: Arc::new((Mutex::new(Phase::Idle), Condvar::new())), builds: Mutex::default() }
+    }
+
+    /// This front lists its own build's tools, and the runtime it found running here (`runtime`) runs the
+    /// calls. Once per runtime: one another build started is stopped if a front started it in the
+    /// background (it ends itself when idle, so nobody relies on its port), no notebook is open in it, and
+    /// the call may start a runtime (`may_start`), so that the call starts one of this build. Any other is
+    /// kept, and the agent is told. A runtime with no notebook open is left for a call that may start one.
+    pub(super) fn other_build(&self, runtime: &RuntimeInfo, may_start: bool) -> OtherBuild {
+        let mut builds = self.builds.lock().unwrap();
+        if !runtime.reattached || builds.checked == Some(runtime.pid) {
+            return OtherBuild::Fine;
+        }
+        let dir = &self.options.state_dir;
+        let Some(state) = crate::read_state(dir).filter(|state| state.pid as u32 == runtime.pid) else { return OtherBuild::Fine };
+        let this = crate::embedded::BUILD_VERSION;
+        if state.build.as_deref() == Some(this) {
+            builds.checked = Some(runtime.pid);
+            return OtherBuild::Fine;
+        }
+        let open = crate::open_notebooks(runtime.port, &runtime.token);
+        let idle = open == Some(0) && state.exits_when_idle == Some(true) && !builds.stopped_one;
+        if idle && !may_start {
+            return OtherBuild::Fine;
+        }
+        builds.checked = Some(runtime.pid);
+        let which = state.build.as_deref().map_or("an earlier build".to_owned(), |build| format!("build {build}"));
+        if idle {
+            builds.stopped_one = true;
+            eprintln!("endeavor: Julia here (pid {}) was started by {which}, and no notebook is open in it; stopping it so that this build ({this}) starts its own", runtime.pid);
+            match self.stop(false) {
+                Ok(()) => return OtherBuild::Stopped,
+                Err(e) => eprintln!("endeavor: {e}"),
+            }
+        }
+        let open = open.filter(|n| *n > 0).map_or(String::new(), |n| format!(", with {n} notebook{} open", if n == 1 { "" } else { "s" }));
+        OtherBuild::Kept(format!(
+            "Note: Julia on this computer was started by another version of Endeavor ({which}{open}), and this session's tools are build {this}'s, so a tool may behave differently from its description or be refused. It keeps running as it is. Stopping it (`stop_machine` with machine \"local\", only with the user's agreement, since it ends its notebooks) lets the next call start this version."
+        ))
     }
 
     /// The phase, with a runtime that is no longer the one recorded forgotten. The state folder is read with the lock let go.

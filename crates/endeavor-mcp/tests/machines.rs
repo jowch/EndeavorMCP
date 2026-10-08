@@ -1283,6 +1283,65 @@ fn a_status_query_after_the_runtime_it_used_has_exited_starts_none() {
     first.finish();
 }
 
+const ANOTHER_BUILD: &str = "0.0.1-0123456789abcdef";
+
+/// The local runtime's record says another build started it, as one that outlived an update would.
+fn from_another_build(place: &Place) {
+    let mut record = read_record(&place.local_state);
+    record["build"] = ANOTHER_BUILD.into();
+    std::fs::write(place.local_state.join("runtime.json"), record.to_string()).unwrap();
+}
+
+#[test]
+fn a_runtime_of_another_build_with_no_notebook_open_is_replaced_by_the_first_call_that_may_start_one() {
+    let place = Place::new("other-build-idle");
+    let path = place.project.join("idle.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let mut first = place.front();
+    first.initialize();
+    // The stand-in has no such notebook to open, but the call starts the runtime.
+    first.call("open_notebook", json!({ "path": path }));
+    let old = place.local_runtime().expect("started by the call");
+    first.finish();
+    from_another_build(&place);
+
+    let mut second = place.front();
+    second.initialize();
+    let (failed, listed) = second.contents("list_notebooks", json!({}));
+    assert!(!failed && listed == [json!([])], "a query is answered by the runtime there, with nothing to add: {listed:?}");
+    assert_eq!(place.local_runtime(), Some(old), "a query starts nothing, so it stops nothing");
+    second.call("open_notebook", json!({ "path": path }));
+    let new = place.local_runtime().expect("a runtime");
+    assert!(new != old && !pid_alive(old), "{old} was stopped and {new} started");
+    assert_ne!(read_record(&place.local_state)["build"], ANOTHER_BUILD);
+    assert!(second.said().iter().any(|line| line.contains(&format!("(pid {old}) was started by build {ANOTHER_BUILD}, and no notebook is open in it"))), "{:?}", second.said());
+    second.finish();
+}
+
+#[test]
+fn a_runtime_of_another_build_with_a_notebook_open_is_kept_and_the_agent_is_told_once() {
+    let place = Place::new("other-build-open");
+    let path = local_notebook(&place, "kept.jl");
+    let mut first = place.front();
+    first.initialize();
+    first.ok("open_notebook", json!({ "path": path }));
+    let runtime = place.local_runtime().expect("started by the call");
+    first.finish();
+    from_another_build(&place);
+
+    let mut second = place.front();
+    second.initialize();
+    let (failed, said) = second.contents("list_notebooks", json!({}));
+    assert!(!failed && said[0][0]["path"] == path.as_str(), "{said:?}");
+    let notice = said[1].as_str().unwrap_or_default();
+    assert!(notice.contains(&format!("another version of Endeavor (build {ANOTHER_BUILD}, with 1 notebook open)")) && notice.contains("`stop_machine`"), "{notice}");
+    second.ok("open_notebook", json!({ "path": path }));
+    let (_, again) = second.contents("list_notebooks", json!({}));
+    assert_eq!(again.len(), 1, "said once: {again:?}");
+    assert_eq!(place.local_runtime(), Some(runtime), "kept");
+    second.finish();
+}
+
 #[test]
 fn a_front_that_attaches_through_list_notebooks_says_where_the_notebooks_are() {
     let place = Place::new("lazy-attach");

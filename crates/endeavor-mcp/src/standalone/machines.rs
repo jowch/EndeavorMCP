@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use wire::slurm::{Partition, Resources, check_extra_flag};
 
 use super::projects::Remembered;
-use super::target::{Provider, Target, local_server};
+use super::target::{OtherBuild, Provider, Target, local_server};
 use super::{Relay, Route, tool_failure};
 use crate::client::{Cluster, Config, InstallInfo, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
 use crate::mcp::{browser_link, to_json, tool_error};
@@ -733,6 +733,15 @@ impl Relay {
         let status = provider.status();
         // A start another process has under way is not "nothing runs".
         let outcome = if matches!(outcome, Outcome::NothingRunning) && matches!(status.state, State::Starting { .. }) { Outcome::StillWorking(String::new()) } else { outcome };
+        if let Outcome::Ready(runtime) = &outcome
+            && target.is_local()
+        {
+            match self.local.other_build(runtime, need == Need::Start) {
+                OtherBuild::Stopped => return self.route(need, deadline),
+                OtherBuild::Kept(notice) => self.add_notice(notice),
+                OtherBuild::Fine => {}
+            }
+        }
         match outcome {
             Outcome::Ready(runtime) => Ok(self.ready(&target, &runtime, status.hello.as_ref().map(|h| h.home.as_str()))),
             Outcome::NothingRunning if provider.cluster() => Err(NotReady::of(&name, Outcome::NothingRunning, status, self.needs_job_message(&target))),
@@ -746,6 +755,15 @@ impl Relay {
                 Err(NotReady { name, message, reached: Some(Box::new(reached)), idle: false, stopped: false })
             }
         }
+    }
+
+    /// Say `notice` with the next result, after any notice not said yet.
+    fn add_notice(&self, notice: String) {
+        let mut owed = self.notice.lock().unwrap();
+        *owed = Some(match owed.take() {
+            Some(earlier) => format!("{earlier} {notice}"),
+            None => notice,
+        });
     }
 
     /// Whether the session is no longer where `target` had it, with `provider`: the reason, if so.
