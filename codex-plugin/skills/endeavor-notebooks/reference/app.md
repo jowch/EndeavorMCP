@@ -2,7 +2,7 @@
 
 Read this only when you work inside the Endeavor app. Nothing here applies to an agent that reaches the notebooks from its own client.
 
-The user sees the notebook in a pane next to the chat. `new_notebook` and `open_notebook` switch the pane to that notebook, so there is no address to give and nothing to tell the user to open.
+The user sees the notebook in a pane next to the chat. `new_notebook` and `open_notebook` switch the pane to that notebook, so there is no address to give and nothing to tell the user to open, unless a result carries `browser_url`: then give it to the user.
 
 ## Which notebook and cells a prompt means
 
@@ -13,6 +13,7 @@ The user sees the notebook in a pane next to the chat. `new_notebook` and `open_
 
 The user chooses when the app asks them first, and a call that asks waits for their answer.
 
+- **Auto:** nothing asks; calls run as you make them.
 - **Ask to run:** calls that run code ask: `execute_cell`, `submit_changes`, `run_all_cells`, `allow_execution`, `delete_cell`, `run_shell`, `open_notebook` with `run_notebook=true`, and `add_cell` or `edit_cell` with `run_after=true`. Stage your edits and run once, so the user is asked once.
 - **Manual:** every change to the notebook asks too, including edits, moves, folds and `new_notebook`.
 - **Plan mode:** calls that change or run anything (including `open_notebook` with `run_notebook=true`) fail with `plan_mode`. Read what you need and finish the plan; the user switches modes to carry it out. Write the plan as a short title and numbered one-sentence steps, with caveats after the list.

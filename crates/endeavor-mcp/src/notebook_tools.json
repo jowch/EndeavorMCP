@@ -1,6 +1,6 @@
 [
   {
-    "description": "List the notebooks open in the runtime, with each one's run state. `this_session` marks this session's notebook; if none has it, the session has no notebook yet and `new_notebook` makes one. `pending_run` is the edited cells not yet run, `running` the cells queued or running, and `execution_allowed` is false in safe preview or while the notebook's process is stopped. Don't change a notebook whose `this_session` is false unless the user asks you to work in it.",
+    "description": "List the notebooks open in the runtime, with each one's run state. `this_session` marks this session's notebook; if none has it, the session has no notebook yet and `new_notebook` makes one. `pending_run` is the edited cells not yet run, `running` the cells queued or running, and `execution_allowed` is false in safe preview or while the notebook's process is stopped. A session changes only its own notebook. If the user asks you to work in one whose `this_session` is false: when this session has no notebook yet, `open_notebook` with its path joins it; otherwise tell the user that needs a new session.",
     "inputSchema": {
       "properties": {},
       "required": [],
@@ -9,7 +9,7 @@
     "name": "list_notebooks"
   },
   {
-    "description": "Read one cell: its code, its output, and whether it is running, queued, errored, folded or `stale` (edited and not yet run). Counts as the read an edit needs. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`.",
+    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run). Counts as the read an edit needs. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`.",
     "inputSchema": {
       "properties": {
         "cell_id": {
@@ -47,7 +47,7 @@
     "name": "view_cell_output"
   },
   {
-    "description": "Replace a cell's code. The cell must have been read (`read_cell` or `read_notebook_code`) since it last changed, or the call fails with `read_required` or `stale_read`. The edit is staged, not run: `submit_changes` runs staged cells.",
+    "description": "Replace a cell's code. The cell must have been read (`read_cell` or `read_notebook_code`) since it last changed, or the call fails with `read_required` or `stale_read`. The edit is staged, not run, unless `run_after` is true: `submit_changes` runs staged cells.",
     "inputSchema": {
       "properties": {
         "cell_id": {
@@ -413,7 +413,7 @@
     "name": "find_symbol_references"
   },
   {
-    "description": "Check proposed code for a cell against the engine's parse rules, without changing the notebook. Returns `valid` and `errors`.",
+    "description": "Check proposed code for a cell against the engine's parse rules, without changing the notebook. Returns `valid` and `errors`. It does not check names other cells define: use `find_symbol_definitions` for that.",
     "inputSchema": {
       "properties": {
         "cell_id": {
