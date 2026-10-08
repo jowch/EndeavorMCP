@@ -232,13 +232,19 @@ pub enum Outcome {
 pub type HelperFor = Box<dyn Fn(&str, &str) -> Result<PathBuf, String> + Send + Sync>;
 
 /// What a session tells its caller as it goes (`Config::on_event`). It comes on a thread of the
-/// session's, with no lock of the session held, so the caller may ask the session for its status.
+/// session's, after the session has recorded it and with no lock of the session held, so the
+/// caller may ask the session for its status and sees the state the event brought. The callback
+/// should return quickly, and must not close or drop the session: it runs on the session's own
+/// threads. Not every change of state comes with an event (a runtime that is ready, or found not
+/// running, doesn't), so a caller that shows the state still reads `Session::status`.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum SessionEvent {
     /// A step of connecting or starting, as the helper reported it.
     Step(Event),
     /// Something that went wrong or waits on the user, in plain words: a lost connection, a start
-    /// that failed or needs an install, a wait for the agreement to install the helper.
+    /// that failed or needs an install, a wait for the agreement to install the helper, a runtime
+    /// that stopped or that another connection took over.
     Trouble(String),
 }
 
@@ -619,7 +625,7 @@ impl Shared {
 
     /// Hear what connecting and starting say, and pass it on.
     fn on_event(&self, event: Event) {
-        (self.config.on_event)(SessionEvent::Step(event.clone()));
+        let step = SessionEvent::Step(event.clone());
         self.with(|i| match event {
             Event::Connected { os, arch } => {
                 let hello = i.hello.get_or_insert_with(HelloInfo::default);
@@ -658,6 +664,7 @@ impl Shared {
             Event::Started { node, .. } => i.step = Some(format!("Ready on {node}")),
             Event::Slurm(_) | Event::Finished { .. } => {}
         });
+        (self.config.on_event)(step);
     }
 
     /// Start the runtime on the connection if one is asked for and none is under
@@ -886,7 +893,6 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                     if shared.allow_install.load(Ordering::SeqCst) {
                         continue;
                     }
-                    shared.trouble(format!("The helper isn't installed on {name}; waiting for the user's agreement to install it"));
                     let parked = shared.with(|i| {
                         // Checked with the lock held, so that a permission is never lost between the two.
                         if shared.allow_install.load(Ordering::SeqCst) {
@@ -902,6 +908,7 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                     if !parked {
                         continue;
                     }
+                    shared.trouble(format!("The helper isn't installed on {name}; waiting for the user's agreement to install it"));
                     (reconnecting, lost_since, delay) = (false, None, RETRY_FIRST);
                     shared.listener.disconnected();
                     if !wait_for(inbox, Duration::MAX) {
@@ -911,12 +918,12 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                 }
                 let lost = *lost_since.get_or_insert_with(Instant::now);
                 let retry = reconnecting && error.retry && lost.elapsed() < RETRY_GIVE_UP;
-                shared.trouble(format!("The connection to {name} failed{}: {}", if retry { ", trying again" } else { "" }, error.message));
                 shared.with(|i| {
                     i.may_kick = true;
                     i.state = if retry { State::Connecting } else { State::Failed(error.message.clone()) };
                     i.step = Some(if retry { format!("Lost the connection to {name}: {}", error.message) } else { error.message.clone() });
                 });
+                shared.trouble(format!("The connection to {name} failed{}: {}", if retry { ", trying again" } else { "" }, error.message));
                 if retry {
                     if !wait_for(inbox, delay) {
                         return;
@@ -1040,14 +1047,15 @@ fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
             std::thread::sleep(REATTACH_PAUSE);
         }
     }
-    shared.trouble(format!("{}: couldn't ask whether the runtime is still there: {trouble}", shared.inner().name));
-    shared.with(|i| {
+    let name = shared.with(|i| {
         if current(i) {
             let why = format!("Endeavor couldn't find out whether Julia on {} is still running ({trouble}). Starting it again tries once more.", i.name);
             i.step = Some(why.clone());
             i.state = State::Failed(why);
         }
+        i.name.clone()
     });
+    shared.trouble(format!("{name}: couldn't ask whether the runtime is still there: {trouble}"));
     shared.listener.disconnected();
 }
 
@@ -1157,13 +1165,15 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             shared.begin_start();
                             continue;
                         }
-                        shared.trouble(format!("{}: starting the runtime needs {}, and installing wasn't allowed.", shared.inner().name, wire::items_text(&items)));
-                        shared.with(|i| {
+                        let text = shared.with(|i| {
                             (i.run, i.job) = (Run::Idle, None);
                             i.wanted = None;
                             i.step = Some(format!("{} Waiting for the user's yes, which is for this start only.", wire::needs_text(&items, &i.name)));
+                            let text = format!("{}: starting the runtime needs {}, and installing wasn't allowed.", i.name, wire::items_text(&items));
                             i.state = State::NeedsInstall(InstallInfo { items, helper: None });
+                            text
                         });
+                        shared.trouble(text);
                         shared.listener.restart_failed();
                     }
                     Err(StartError::NotRunning) => {
@@ -1183,24 +1193,35 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                         }
                     }
                     Err(StartError::Failed(message)) => {
-                        shared.trouble(format!("{}: starting the runtime failed: {message}", shared.inner().name));
-                        shared.with(|i| {
+                        let name = shared.with(|i| {
                             i.run = Run::Idle;
                             i.wanted = None;
                             i.job = None;
-                            i.state = State::Failed(message);
+                            i.state = State::Failed(message.clone());
+                            i.name.clone()
                         });
+                        shared.trouble(format!("{name}: starting the runtime failed: {message}"));
                         shared.listener.restart_failed();
                     }
                 }
             }
             Msg::Notice(g, notice) if g == conn => match notice {
                 Notice::Died(reason) => {
-                    shared.with(|i| gone(i, format!("Julia on {} stopped. {reason}", i.name).trim_end().to_owned(), false));
+                    let text = shared.with(|i| {
+                        let text = format!("Julia on {} stopped. {reason}", i.name).trim_end().to_owned();
+                        gone(i, text.clone(), false);
+                        text
+                    });
+                    shared.trouble(text);
                     shared.listener.disconnected();
                 }
                 Notice::Replaced => {
-                    shared.with(|i| gone(i, format!("Another connection took Julia on {} over.", i.name), true));
+                    let text = shared.with(|i| {
+                        let text = format!("Another connection took Julia on {} over.", i.name);
+                        gone(i, text.clone(), true);
+                        text
+                    });
+                    shared.trouble(text);
                     shared.listener.disconnected();
                 }
                 // The helper is gone; `Closed` follows.

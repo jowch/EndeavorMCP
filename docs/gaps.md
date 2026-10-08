@@ -621,8 +621,9 @@ plugins). The rest of this file can wait or go alongside.
 - [P3] **The layers under a session still write a few lines to stderr.** A
   session's own progress and trouble go to `Config::on_event` (since
   2026-10-08). Below it, ssh's stderr (`ssh: ...`), lines a login script prints
-  before the bootstrap's, the channel's "helper exited" line and the listener's
-  first failed accept still go to the process's stderr. A desktop app sees none
+  before the bootstrap's, the channel's "helper exited" and "sent an unreadable
+  message" lines and the listener's first failed accept still go to the
+  process's stderr. A desktop app sees none
   of them, but they are diagnostics: a sign-in failure's reason also reaches
   the session's error. To close: an optional log sink in `Options`, the channel
   and the listener, which the session points at `on_event`.
