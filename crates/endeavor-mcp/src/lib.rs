@@ -1229,8 +1229,7 @@ pub(crate) fn random_hex<const N: usize>() -> Result<String, String> {
 /// `endeavor core`, which starts `julia boot.jl` (see core).
 fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str, build: Option<&str>) -> Result<Command, String> {
     let _ = std::fs::remove_file(state_dir.join("runtime.json"));
-    let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
-    let mut command = Command::new(exe);
+    let mut command = Command::new(this_program()?);
     // `ps` shows `endeavor core` (`endeavor --helper core` from the app), not the binary's path.
     #[cfg(unix)]
     command.arg0("endeavor");
@@ -1251,6 +1250,35 @@ fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_
         command.env("ENDEAVOR_BUILD", build);
     }
     Ok(command)
+}
+
+/// The file this process runs from, to start a core of this build. `endeavor update` may have put another
+/// build at this program's path since it started, and a core of that build would run with this build's
+/// `runtime/`. Linux keeps the file this process started from.
+#[cfg(target_os = "linux")]
+fn this_program() -> Result<PathBuf, String> {
+    Ok(PathBuf::from("/proc/self/exe"))
+}
+
+/// Elsewhere the program at the path is asked its build, and another build is refused. Not in the app
+/// (`HELPER_ARGS`), whose copy only the app's own update replaces.
+#[cfg(not(target_os = "linux"))]
+fn this_program() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
+    if HELPER_ARGS.get().is_some_and(|args| !args.is_empty()) {
+        return Ok(exe);
+    }
+    let ours = update::version_line();
+    let theirs = Command::new(&exe).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().map(|out| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().to_owned());
+    match theirs {
+        Ok(theirs) if theirs == ours => Ok(exe),
+        Ok(theirs) => Err(format!(
+            "{} was replaced after this endeavor started (it is now {}; this is {ours}), so Julia was not started. Start this endeavor again, or reconnect the agent's MCP server, to use the new one.",
+            exe.display(),
+            if theirs.is_empty() { "a program that doesn't say its version".to_owned() } else { format!("`{theirs}`") }
+        )),
+        Err(e) => Err(format!("Couldn't run {} to start Julia: {e}. If endeavor was updated or moved, start it again.", exe.display())),
+    }
 }
 
 /// Start the runtime detached from us (its own session, no terminal, stdin from

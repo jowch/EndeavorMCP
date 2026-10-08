@@ -715,6 +715,43 @@ fn the_julia_a_killed_core_leaves_behind_is_stopped_before_the_next_start() {
 }
 
 #[test]
+fn a_helper_whose_binary_was_replaced_never_starts_a_core_of_the_new_build() {
+    let dir = state_dir("replaced");
+    let cores = Cores(dir.clone());
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("endeavor");
+    std::fs::copy(env!("CARGO_BIN_EXE_endeavor"), &exe).unwrap();
+    let mut command = Command::new(&exe);
+    command.args(["connect", "--state-dir"]).arg(&dir).args(["--runtime", "/nonexistent", "--depot", "/nonexistent", "--julia", julia.to_str().unwrap()]);
+    let mut helper = Helper::spawn(command);
+    helper.hello();
+    // As `endeavor update` puts a new build in place: renamed over the running one.
+    let part = bin.join("endeavor.part");
+    std::fs::write(&part, "#!/bin/sh\necho 'endeavor 9.9.9 (build 9.9.9-0123456789abcdef)'\n").unwrap();
+    std::fs::set_permissions(&part, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::rename(&part, &exe).unwrap();
+    helper.request_start(None, true);
+    if cfg!(target_os = "linux") {
+        // The core starts from the file the helper runs from, which the rename did not remove.
+        let ToApp::Ready { pid, .. } = after_start(&helper) else { panic!("expected Ready") };
+        let program = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+        assert!(program.to_string_lossy().ends_with("(deleted)"), "{}", program.display());
+        let stop = helper.request_stop();
+        assert_eq!(helper.next(), ToApp::Stopped { id: stop });
+    } else {
+        let ToApp::StartFailed { message, .. } = after_start(&helper) else { panic!("expected StartFailed") };
+        assert!(message.contains("was replaced") && message.contains("build 9.9.9-0123456789abcdef") && message.contains("again"), "{message}");
+        assert!(cores.pids().is_empty() && common::julia_pids(&dir).is_empty(), "nothing was started");
+    }
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
 fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_and_leaving_does_not_stop_it() {
     let (dir, cores, julia) = held_dir("start-waiters");
     let mut first = held_start(&dir, &julia, &[]);
