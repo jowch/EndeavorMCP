@@ -227,7 +227,7 @@ package `endeavor-mcp`; it was `endeavor-remote` until the rename.
 - **Opening a notebook from disk** runs nothing, from the tools or from
   Pluto's start page (checked in `tests/e2e_serve.rs`); Pluto's
   **Run notebook code** runs it.
-- **Packaging.** `claude-plugin/` is the Claude Code plugin: a link to
+- **Packaging.** `claude-plugin/` is the Claude Code plugin: a copy of
   `plugin/skills` and an `.mcp.json` running `endeavor mcp --skills
   plugin --folder ${CLAUDE_PROJECT_DIR}`. `.claude-plugin/marketplace.json`
   makes the repository its marketplace. The app still loads `plugin/` alone,

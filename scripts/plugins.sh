@@ -6,9 +6,9 @@
 #   scripts/release-key                    the pinned build (empty: the newest)
 #
 # `sync` writes the copies; `check` fails if any copy differs. Each plugin
-# holds the launcher files in launch/. claude-plugin/skills is a link to
-# plugin/skills; the other two plugins hold a copy, since an agent may not
-# follow a link out of the plugin's folder.
+# holds the launcher files in launch/ and a copy of the skills, not a link: an
+# agent may not follow a link out of the plugin's folder, and a checkout
+# without symlink support turns a link into a text file.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -42,14 +42,12 @@ for plugin in claude-plugin codex-plugin antigravity-plugin; do
       [ -f "scripts/$(basename "$have")" ] || { echo "$have has no source in scripts/" >&2; bad=1; }
     done
   fi
-  if [ "$plugin" = claude-plugin ]; then
-    if [ "$(readlink claude-plugin/skills 2>/dev/null)" != ../plugin/skills ]; then
-      echo "claude-plugin/skills isn't a link to ../plugin/skills" >&2
-      bad=1
-    fi
-  elif [ "$mode" = sync ]; then
+  if [ "$mode" = sync ]; then
     rm -rf "$plugin/skills"
     cp -R plugin/skills "$plugin/skills"
+  elif [ -L "$plugin/skills" ]; then
+    echo "$plugin/skills is a link; it must be a copy of plugin/skills" >&2
+    bad=1
   elif ! diff -r plugin/skills "$plugin/skills" >&2; then
     echo "$plugin/skills differs from plugin/skills" >&2
     bad=1

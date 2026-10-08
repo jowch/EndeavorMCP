@@ -877,7 +877,7 @@ to what their documentation says and tried on no real install.
 | Manifest | `.claude-plugin/plugin.json` | `plugin.json` at the root | `plugin.json` at the root |
 | MCP file | `.mcp.json` | `mcp.json` | `mcp_config.json` |
 | Command | `sh ${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh ${PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh -c` that finds the plugin in `~/.gemini/antigravity-cli/plugins/endeavor` and runs the launcher |
-| Skills | `skills/` (a link) | `skills/` (a copy) | `skills/` (a copy) |
+| Skills | `skills/` (a copy) | `skills/` (a copy) | `skills/` (a copy) |
 | Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
 | Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add` | `agy plugin install <folder>` |
 | Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | the folder `mcp` starts in | the folder `mcp` starts in |
@@ -888,9 +888,10 @@ it doesn't depend on the file's execute bit.
 
 One source for each part: `plugin/skills/` for the skills, `scripts/` for the
 launcher, `install.sh` and `release-key`. `scripts/plugins.sh sync` writes the
-copies and `check` fails if any differs; CI runs `check`. `claude-plugin/skills`
-stays a link to `../plugin/skills`, which works there; the other two folders
-hold copies, since those agents may not follow a link out of the plugin.
+copies and `check` fails if any differs or if a `skills` folder is a link; CI
+runs `check`. All three folders hold copies: some agents may not follow a link
+out of the plugin, and a Windows checkout without `core.symlinks` turns a link
+into a text file.
 `release-key` is not in `plugin/`, because that folder is hashed into the
 build's key.
 
