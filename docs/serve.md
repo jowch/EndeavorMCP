@@ -184,7 +184,8 @@ often share one home folder.
 Run the agent where it can reach `localhost:PORT`: on the same machine, or on
 your computer after you forward the port. No real agent client has been tried
 against `serve` over HTTP yet ([gaps.md](gaps.md)), and the Codex and Gemini
-lines below come from those tools' documentation.
+lines below come from those tools' documentation. (Codex was tried with the
+stdio form, below.)
 
 **Claude Code.** Paste the `claude mcp add` line that `serve` printed.
 
@@ -230,13 +231,20 @@ Julia starts it and, like any call while Julia is still starting, waits up to
 45 seconds, then says Julia is still starting, so the agent can try again. The
 first start installs packages and takes a few minutes.
 
-**Codex**, in `~/.codex/config.toml`:
+**Codex**, in `~/.codex/config.toml` (tried on Linux with Codex 0.161.0 through
+`codex exec`):
 
 ```toml
 [mcp_servers.endeavor]
 command = "endeavor"
 args = ["mcp"]
+default_tools_approval_mode = "approve"
 ```
+
+`codex exec` fails every tool that changes something ("MCP tool call requires
+approval, but approval policy is never") unless the server has
+`default_tools_approval_mode = "approve"`; Codex's sandbox stays on. Codex
+starts the server in the folder Codex was started in, so new notebooks go there.
 
 **Gemini CLI**, in `~/.gemini/settings.json`:
 

@@ -6,8 +6,8 @@ cluster. A design; what is built is marked.
 
 _Drafted 2026-10-05, rewritten the same day after reading the Endeavor app's
 remote code ([remote-sessions.md](https://github.com/jowch/Endeavor/blob/main/docs/remote-sessions.md)).
-Facts about Codex and Antigravity come from their documentation and are
-untested._
+Facts about Antigravity come from its documentation and are untested; Codex
+was tried on 2026-10-08 (see "What was seen with Codex")._
 
 _Revised 2026-10-07: see [The revision](#the-revision-decided-2026-10-07).
 It removed the link process, a background process for each server, and the
@@ -805,7 +805,8 @@ fetched with `curl` carries no quarantine mark, so Gatekeeper and SmartScreen
 shouldn't check it, and the Rust linker signs Apple Silicon binaries ad hoc.
 Untested.
 
-**Built, not run on a real agent:** the plugin's launcher, below.
+**Built, run on a real agent only once:** the plugin's launcher, below. Its
+download ran once on Linux, by accident, under Codex ([gaps.md](gaps.md)).
 
 When the launcher can't get the binary, it exits with one line saying what
 failed and the manual install line. The server then fails to start, but the
@@ -869,18 +870,19 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
 
 One plugin per harness with the same content: the skills, the launcher and one
 stdio entry that runs it. `claude-plugin/` is checked live with the launcher
-replaced by `ENDEAVOR_BIN`. `codex-plugin/` and `antigravity-plugin/` are built
-to what their documentation says and tried on no real install.
+replaced by `ENDEAVOR_BIN`. `antigravity-plugin/` is built to what its
+documentation says and tried on no real install. `codex-plugin/` was installed
+and does not work yet (below).
 
 | | Claude Code | Codex | Antigravity |
 |---|---|---|---|
 | Manifest | `.claude-plugin/plugin.json` | `plugin.json` at the root | `plugin.json` at the root |
 | MCP file | `.mcp.json` | `mcp.json` | `mcp_config.json` |
-| Command | `sh ${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh ${PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh -c` that finds the plugin in `~/.gemini/antigravity-cli/plugins/endeavor` and runs the launcher |
+| Command | `sh ${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh ${PLUGIN_ROOT}/launch/endeavor-mcp.sh …` (expanded in `args`) | `sh -c` that finds the plugin in `~/.gemini/antigravity-cli/plugins/endeavor` and runs the launcher |
 | Skills | `skills/` (a copy) | `skills/` (a copy) | `skills/` (a copy) |
 | Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
-| Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add` | `agy plugin install <folder>` |
-| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | the folder `mcp` starts in | the folder `mcp` starts in |
+| Install | `claude plugin marketplace add`, `claude plugin install` | a marketplace file `.agents/plugins/marketplace.json` (the repo has none), `codex plugin marketplace add`, `codex plugin add endeavor@endeavor` | `agy plugin install <folder>` |
+| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `mcp` starts in the plugin's cache folder and Codex gives no project variable | the folder `mcp` starts in (from documentation) |
 
 Each plugin folder holds `launch/endeavor-mcp.sh`, `launch/install.sh` and
 `launch/release-key`. The command is `sh` with the script as its argument, so
@@ -895,21 +897,52 @@ into a text file.
 `release-key` is not in `plugin/`, because that folder is hashed into the
 build's key.
 
-**What the documentation says.** Codex
-([developers.openai.com/plugins/build/plugins](https://developers.openai.com/plugins/build/plugins)):
-`plugin.json` at the root, `skills/<name>/SKILL.md`, MCP servers in `mcp.json`
-with `mcpServers`, `PLUGIN_ROOT` and `PLUGIN_DATA` for lifecycle hooks. It
-shows no stdio entry, so the entry is by analogy with the HTTP one. Antigravity
+**What the documentation says, and what was seen.** Antigravity
 ([antigravity.google/docs/plugins](https://antigravity.google/docs/plugins)):
 `plugin.json`, `mcp_config.json`, `hooks.json`, `skills/`, installed to
 `~/.gemini/antigravity-cli/plugins/<name>/`. It gives no shape for
 `mcp_config.json` or `hooks.json`, so the file uses the `mcpServers` shape the
-others use, and no variable is assumed.
+others use, and no variable is assumed. Not tried.
 
-To check: that Codex expands `${PLUGIN_ROOT}` in an MCP entry, that Codex and
-Antigravity accept the entries, start a plugin's server in the project folder,
-and load the skills, and that Claude Code's `SessionStart` hook runs before the
-server starts (if not, the first start downloads, as in the other agents).
+**What was seen with Codex** (0.161.0, Linux, through `codex exec`;
+[developers.openai.com/plugins/build/plugins](https://developers.openai.com/plugins/build/plugins)
+was the documentation used to build the folder):
+
+- `codex plugin marketplace add <repo>` reads `.claude-plugin/marketplace.json`
+  and so offers the Claude plugin. A file `.agents/plugins/marketplace.json`
+  naming `./codex-plugin`, then `codex plugin add endeavor@endeavor`, installs
+  the folder into Codex's `plugins/cache/` and lists its three skills to the
+  model. The repo has no such file.
+- Codex expands `${PLUGIN_ROOT}` in `args` and sets `PLUGIN_ROOT` and
+  `PLUGIN_DATA` in the environment. It starts the server with the plugin's
+  cache folder as its working folder, gives it no variable naming the project,
+  and allows a plugin entry's `cwd` only inside the plugin. A relative path
+  such as `trial.jl` was looked for in the cache folder; absolute paths worked.
+  So `mcp` cannot find the project folder.
+- Codex does not pass its own environment to a plugin's server (`ENDEAVOR_BIN`
+  and `XDG_*` from the shell were absent); an `env` object in the entry is
+  passed.
+- At the end of a turn Codex sends SIGTERM to the server's process group. The
+  runtime is in its own session and, with Julia, survived each session's end;
+  a second session reattached. One server runs per `exec` run.
+- The server given as an ordinary entry (`mcp_servers.endeavor`, `command`
+  `endeavor`, `args` `["mcp"]`) works and starts in the folder Codex was
+  started in. There are no skills on that route; the agent read the guide
+  through `notebook_guide`.
+- Tool approval is per server. In `codex exec` the tools that change something
+  fail ("MCP tool call requires approval, but approval policy is never") until
+  the server has `default_tools_approval_mode = "approve"`; read-only tools ran
+  without it.
+- `codex-plugin/` has no hooks, so nothing fetches the binary early.
+
+Still from documentation or not tried: Codex's job object on Windows,
+subagents, the tool timeout (default 60 s), interactive `codex` (where the
+user is asked to approve), and Antigravity.
+
+To check: that Antigravity accepts its entry, starts the server in the project
+folder and loads the skills, and that Claude Code's `SessionStart` hook runs
+before the server starts (if not, the first start downloads, as in the other
+agents).
 
 ## Windows
 
@@ -975,8 +1008,9 @@ server starts (if not, the first start downloads, as in the other agents).
    (built; the workflow's new rows and the PowerShell script are unrun, see
    [gaps.md](gaps.md)).
 6. The plugin gets the binary itself: the launcher, the Claude Code plugin
-   using it, Codex and Antigravity plugin folders (built to their documentation
-   and unverified), the `endeavor-setup` skill, and `endeavor update` leaving a
+   using it, the Codex plugin folder (installed in a trial; it does not find the
+   project folder) and the Antigravity one (built to its documentation and
+   unverified), the `endeavor-setup` skill, and `endeavor update` leaving a
    plugin's binary alone. The pinned key is set after the first release from
    `main`.
 7. The revision of 2026-10-07, in the order given in

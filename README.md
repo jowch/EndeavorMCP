@@ -15,12 +15,30 @@ claude plugin install endeavor@endeavor
 
 Then start Claude Code in your project folder. New notebooks go there.
 
-**Antigravity and Codex** are not supported yet. The `antigravity-plugin/` and
-`codex-plugin/` folders were built to those agents' documentation and have
-never been installed. Whether they start the server, find the project folder
-and load the skills is not known ([gaps.md](docs/gaps.md)).
+**Codex** works as an MCP server, not as a plugin. [Install
+`endeavor` by hand](#without-a-plugin), then add this to `~/.codex/config.toml`:
 
-You need nothing else. The first start:
+```toml
+[mcp_servers.endeavor]
+command = "endeavor"
+args = ["mcp"]
+default_tools_approval_mode = "approve"
+```
+
+Start Codex in your project folder; new notebooks go there. The last line is
+for `codex exec`, where every tool that changes something fails with "MCP tool
+call requires approval, but approval policy is never" without it. It leaves
+Codex's sandbox on. There are no skills on this route: the agent reads the
+guide through the `notebook_guide` tool. `codex-plugin/` does not work yet
+(Codex gives a plugin's server no way to learn the project folder,
+[gaps.md](docs/gaps.md)). This was tried on Linux with Codex 0.161.0 through
+`codex exec`.
+
+**Antigravity** is not supported yet. The `antigravity-plugin/` folder was
+built to its documentation and has never been installed
+([gaps.md](docs/gaps.md)).
+
+With the Claude Code plugin you need nothing else. The first start:
 
 - Downloads the `endeavor` program, about 30 MB, into
   `~/.local/share/endeavor/bin/`.

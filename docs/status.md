@@ -94,8 +94,10 @@ Not yet checked:
   step is tested against a local server.
 - The message when `serve` or `mcp` reuse a Julia from another build, with a
   real Julia (unit-tested only).
-- Codex and Gemini against `endeavor serve` and `endeavor mcp`. Their config
-  lines in serve.md come from each tool's documentation. Over HTTP, that
+- Gemini against `endeavor serve` and `endeavor mcp`, and Codex against
+  `serve`. Their config lines in serve.md come from each tool's documentation.
+  (Codex against `endeavor mcp` over stdio was tried through `codex exec` on
+  Linux; see [gaps.md](gaps.md).) Over HTTP, that
   each sends back the `Mcp-Session-Id` from `initialize`, which gives it a
   notebook of its own. The spec requires it; no client is checked live yet,
   Claude Code included.

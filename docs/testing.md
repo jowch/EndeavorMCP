@@ -41,7 +41,9 @@ mkdir -p ~/endeavor-try && cd ~/endeavor-try
 claude --plugin-dir "$ENDEAVOR_PLUGIN"
 ```
 
-`ENDEAVOR_BIN` must be set in the shell that starts `claude`. Julia is found on
+`ENDEAVOR_BIN` must be set in the shell that starts `claude`. Codex does not
+pass it to a plugin's server; put it in the entry's `env`. (The Codex trial gave
+the server with `-c 'mcp_servers.endeavor.command=...'`, not as a plugin.) Julia is found on
 your `PATH`, or downloaded into `~/.cache/endeavor/` if there is none. The
 first notebook installs Julia packages into `~/.cache/endeavor/depot`, which
 takes a few minutes; the Endeavor app uses the same folder. Don't open a

@@ -301,14 +301,47 @@ _Started 2026-10-06, on the `client-library` branch._
   Bash's `uname` (tested with a fake one), but whether Claude Code can start
   a `sh` script as an MCP command on Windows is undocumented. To close: try
   it under Git Bash, and give Windows a `.cmd` or PowerShell launcher if not.
-- **The Codex and Antigravity plugin folders were built to their
-  documentation and tried on no real install.** The manifest and MCP file
-  names, that a plugin's server starts in the project folder, the tool timeout
-  and that each loads the skills all come from their documentation. Codex's page
-  shows no stdio entry and no variable for an MCP command (`${PLUGIN_ROOT}` is
-  documented for hooks only); Antigravity's gives no shape for `mcp_config.json`.
-  Whether they start the server in the project folder, expand the variable, and
-  load the skills is unknown. To close: install each and call a tool.
+- **The Codex plugin folder does not work.** Tried with Codex 0.161.0 on Linux
+  (`codex exec`). Two causes. (1) The repo has no Codex marketplace file:
+  `codex plugin marketplace add <repo>` reads `.claude-plugin/marketplace.json`
+  and offers the Claude plugin. A file `.agents/plugins/marketplace.json` naming
+  `./codex-plugin`, then `codex plugin add endeavor@endeavor`, did install the
+  folder, and Codex listed its three skills to the model. (2) Codex starts a
+  plugin's server in the plugin's cache folder, gives it no variable naming the
+  project, and allows a plugin entry's `cwd` only inside the plugin, so
+  `mcp` cannot learn the project folder: `open_notebook {"path":"trial.jl"}`
+  looked in the cache folder and only absolute paths worked. To close: add
+  `.agents/plugins/marketplace.json`, and have the server learn the project
+  folder, for example by asking the client for its roots (`roots/list`), which
+  was not tried. Not added until then, since the file would offer a plugin that
+  does not work. Codex does work as an ordinary MCP entry (README).
+- **The Antigravity plugin folder was built to its documentation and tried on no
+  real install.** The manifest and MCP file names, that a plugin's server starts
+  in the project folder, the tool timeout and that it loads the skills all
+  come from its documentation, which gives no shape for `mcp_config.json`.
+  To close: install it and call a tool.
+- **Codex does not pass `ENDEAVOR_BIN` to a plugin's server.** It passes no
+  part of its own environment (`XDG_*` too); only an `env` object in the plugin
+  entry reaches the server. A pre-release trial through the Codex plugin route
+  must put `ENDEAVOR_BIN` in that entry, and without it the launcher downloads.
+- **`codex exec` needs `default_tools_approval_mode = "approve"` for the
+  server.** Without it every tool that changes something fails with "MCP tool
+  call requires approval, but approval policy is never"; read-only tools ran.
+  The setting is per server (`[mcp_servers.endeavor]`, or `-c
+  'mcp_servers.endeavor.default_tools_approval_mode="approve"'`) and keeps
+  Codex's sandbox on. Today `tools/list` declares `readOnlyHint` (true for the
+  read tools; false for the write tools, `open_notebook` and the machine tools
+  but `list_machines`). Whether Codex's approval could be avoided by what the
+  tools declare is not looked into. Interactive `codex`, where the user is asked,
+  was not tried.
+- **Before the first release from this branch, a plugin install gets an older
+  build.** The launcher takes the newest build on the Helpers release, which is
+  an older build from `main` (seen: key `14eb0a67bda7`, 3.3 MB). In the Codex
+  trial Codex did not pass `ENDEAVOR_BIN`, so the launcher's real download ran
+  once: it fetched that build into the real `~/.local/share/endeavor/bin/`,
+  checked it and ran it, and it attached to the newer runtime and answered
+  read-only calls. To close: release from this branch before the plugin is
+  offered, and pin the key.
 - **The pinned key can only be set after a release from `main` holds that
   build.** Until then `release-key` is empty and the plugin takes the newest
   build. Unpinned, a start uses the build it already has, and looks for a
@@ -329,7 +362,9 @@ _Started 2026-10-06, on the `client-library` branch._
   the launcher can't tell which. About 30 MB each. To close: delete all but
   the pinned and the newest at a start, when no `endeavor` from there is
   running.
-- **The first start can outlast the agent's 30 s limit.** The download goes
+- **The first start can outlast the agent's 30 s limit.** The launcher's
+  download ran once, on Linux, by accident under Codex (see the entry on the
+  older build below); how long it took was not recorded. The download goes
   on in the background only if the agent doesn't kill the launcher's children;
   either way the next start finishes or redoes it, and `endeavor-setup` tells
   the agent to ask the user to reconnect. Claude Code's hook usually avoids it,
@@ -412,6 +447,12 @@ _Started 2026-10-06, on the `client-library` branch._
   Still untested: the new text against the old (the trial in the skills audit)
   and whether a current model needs any rule that was cut.
 
+- **A tool call during a start ends after 45 seconds with `isError` true.** The
+  text says Julia is starting and to call the tool again. Codex shows it as a
+  failed call, as the trial saw. The 45 seconds are chosen to stay under the
+  agents' tool timeouts. To close: decide whether a start still under way should
+  be an error; nothing changed for now.
+
 - **A waited run stops waiting at 45 seconds, and nothing stops a second
   run of the same cells.** The cap is `WAIT_SECONDS` in `notebooks/tools.rs`,
   counted from the start of the tool call (an approval card's time included),
@@ -426,6 +467,10 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Not checked
 
+- **Codex beyond `codex exec` on Linux.** Interactive `codex` (where the user
+  is asked to approve a tool), Codex subagents, the tool timeout (default 60 s)
+  and Codex on Windows are not tried. Codex's end-of-turn SIGTERM to the
+  server's process group was seen on Linux only.
 - **`endeavor serve` over HTTP has not been tried with a real agent client.**
   The skills trial used `endeavor mcp` over stdio.
 - **`run_conflict` was not provoked in the trial** with the real Claude Code
@@ -452,6 +497,13 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## The machine tools
 
+- **An agent can add a machine under a name the user did not give.** Told "the
+  machine localhost", a Codex agent called `add_machine` with host `self`, an
+  alias `list_machines` showed in `ssh_hosts_not_added`, and told the user that
+  alias "reached the requested host", which no tool had said. The `host`
+  description and the `endeavor-machines` skill now say to use the host the
+  user named, to say which other name was used, and not to claim a machine was
+  reached without a tool result. Text only; not tried again.
 - **A new session on a machine starts in the machine's home folder** unless
   `use_machine` is given `folder`. In a trial an agent made a notebook there with
   `new_notebook` and no path. The `endeavor-machines` skill now tells the agent to

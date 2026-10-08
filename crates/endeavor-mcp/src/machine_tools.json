@@ -13,7 +13,7 @@
     "inputSchema": {
       "properties": {
         "host": {
-          "description": "An ssh alias from ~/.ssh/config, or user@host, optionally with :port.",
+          "description": "An ssh alias from ~/.ssh/config, or user@host, optionally with :port. Use the host the user named; if you use a different name from list_machines, tell the user which.",
           "type": "string"
         },
         "install": {
