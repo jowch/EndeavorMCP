@@ -35,8 +35,12 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// `interface`: the notebook tools' names and arguments at `/mcp`, the app's `/endeavor/call`s and
 /// `/endeavor/events`, and the record's own fields. A front or a client of another build uses a
 /// runtime with the same number as it is, and treats one with another number (or none) as another
-/// build's. Raise it with a change that a caller of the build before would get wrong; a test in
-/// `mcp.rs` fails when the notebook tools' names or arguments change, so that this is decided.
+/// build's. Two builds with one number must take each other's calls both ways: a newer front meets
+/// an older core as often as the reverse, and lists its own build's tools. So raise it with any
+/// change to those, additions included (a tool, an argument, a call, a field), and with a change in
+/// what one returns or does while its arguments stay the same. Descriptions and changes inside the
+/// core don't count. A test in `mcp.rs` fails when the notebook tools' names or arguments change;
+/// nothing catches the rest.
 pub const INTERFACE: u32 = 1;
 
 /// Where boot.jl writes its state for the core, in the state folder.

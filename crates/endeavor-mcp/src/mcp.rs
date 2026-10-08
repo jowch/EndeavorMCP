@@ -970,9 +970,9 @@ mod tests {
 
     #[test]
     fn the_notebook_tools_names_and_arguments_are_those_of_the_cores_interface() {
-        // When this fails, the notebook tools' names or arguments changed. If a front of the build before
-        // would now call this core wrongly (a tool gone or renamed, an argument it needs or reads
-        // differently), raise `core::INTERFACE`. Either way, record the new fingerprint with the number.
+        // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
+        // record the new fingerprint with the new number. An addition counts too, since a newer front
+        // lists its own tools to an agent whose calls an older core with the same number would refuse.
         assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (1, "162714c5ccd13efa"), "see the comment in this test");
     }
 

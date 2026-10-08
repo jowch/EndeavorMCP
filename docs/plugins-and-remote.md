@@ -549,9 +549,9 @@ it with the relay.
   `endeavor_mcp::CORE_INTERFACE` instead, as the library does since
   2026-10-08 ([endeavor-mcp.md](endeavor-mcp.md)).
 - Its own calls to the runtime (`/endeavor/…`) change together with the app
-  today. An app from one build now meets a runtime from another, so those
-  calls need a version ([endeavor-mcp.md](endeavor-mcp.md), "The control
-  API").
+  today. An app from one build now meets a runtime from another; the core's
+  `interface` number versions those calls, so the app checks it like the
+  front does ([endeavor-mcp.md](endeavor-mcp.md), "The control API").
 
 - The library API changed in the last two commits:
   - `client::Options.allow_install` is required: whether a connection may
