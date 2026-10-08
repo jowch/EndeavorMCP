@@ -1234,6 +1234,15 @@ fn only_a_call_of_a_known_tool_starts_the_local_runtime() {
     assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("arguments must be an object"), "{reply}");
     let guide = front.request("tools/call", json!({ "name": "notebook_guide", "arguments": {} }));
     assert_eq!(guide["result"]["isError"], false, "{guide}");
+    let (failed, said) = front.call("new_notebook", json!({ "name": "remote.jl" }));
+    assert!(failed && said["error"] == "invalid_argument" && said["message"].as_str().unwrap().starts_with("`name` is not an argument of `new_notebook`. Its arguments: `path`."), "{said}");
+    let (failed, said) = front.call("edit_cell", json!({ "notebook_id": NOTEBOOK, "cell_id": "c" }));
+    assert!(failed && said["error"] == "invalid_argument" && said["message"].as_str().unwrap().starts_with("`edit_cell` needs `code`."), "{said}");
+    let (failed, said) = front.call("use_machine", json!({}));
+    assert!(failed && said["error"] == "invalid_argument" && said["message"] == "`use_machine` needs `machine`.", "{said}");
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "hostname": "x" }));
+    let message = said["message"].as_str().unwrap();
+    assert!(failed && message.starts_with("`hostname` is not an argument of `add_machine`. Its arguments: ") && message.contains("`host`") && message.contains("`slurm`"), "{said}");
     std::thread::sleep(Duration::from_millis(500));
     assert!(place_none(&place), "{:?}", core_of(&place));
     front.finish();

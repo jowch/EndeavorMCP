@@ -128,8 +128,12 @@ computer, with the runtime's text), `list_machines`, `add_machine`,
 `stop_machine`, or a session whose project is on a machine. While the target's
 runtime isn't up, a notification is dropped, a request that is not a
 `tools/call` gets JSON-RPC -32601, and a `tools/call` of an unknown tool gets
-the runtime's `unknown_tool` result; with a runtime up all of these are
-forwarded as before. A notebook call that finds none running starts one, on this
+the runtime's `unknown_tool` result, and so does one whose argument names
+don't fit the tool's `inputSchema` (`mcp::check_arguments`: a name the schema
+lacks, or a required one missing; no types) get `invalid_argument` without a
+runtime being started. The runtime runs the same check on every call before
+anything counts as the session's activity, and the machine tools run it too;
+with a runtime up all of these are forwarded as before. A notebook call that finds none running starts one, on this
 computer and on a plain server alike; on a cluster it asks for a job instead.
 `list_notebooks` and `pluto_session_status` use a runtime that is running (the
 provider's `Want::Attach`: this computer's looks in the state folder, the
@@ -144,7 +148,8 @@ fails with it. A start another process has under way is a start under way, not
 (this computer reads the state folder, a machine's connection asks the helper), so
 a runtime that another session or the app started since is found. The first call
 that starts a runtime waits up to `start_wait()` (45 s), then fails with "Julia is
-starting on this computer ... call `pluto_session_status`", and the start goes on in
+starting on this computer ... call the notebook tool again" (each call waits again;
+`pluto_session_status` answers at once), and the start goes on in
 a thread of the provider.
 
 A failure is kept, the same on this computer and on a machine, and every call that

@@ -720,9 +720,14 @@ impl Call<'_> {
         };
         let mut ids = Vec::new();
         let mut blocks = Vec::new();
+        let mut left_out = 0;
         for id in cells {
             let Some(cell) = nb.cells.get(&id) else { continue };
-            if cell.hidden || (cell.markdown && !markdown) {
+            if cell.hidden {
+                continue;
+            }
+            if cell.markdown && !markdown {
+                left_out += 1;
                 continue;
             }
             let body = if cell.markdown {
@@ -740,7 +745,7 @@ impl Call<'_> {
         }
         let pending = self.pending_run(&nb);
         let stale: Vec<&String> = nb.order.iter().filter(|id| pending.contains(id)).collect();
-        Ok(json!({
+        let mut result = json!({
             "notebook_id": nb.id,
             "path": nb.path,
             "order": order,
@@ -748,7 +753,11 @@ impl Call<'_> {
             "stale_cell_ids": stale,
             "pending_run": pending,
             "code": blocks.join("\n\n"),
-        }))
+        });
+        if left_out > 0 {
+            result["markdown_cells_left_out"] = left_out.into();
+        }
+        Ok(result)
     }
 
     fn get_cell_order(&self) -> Result<Value, String> {

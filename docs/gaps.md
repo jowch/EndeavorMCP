@@ -262,8 +262,9 @@ _Started 2026-10-06, on the `client-library` branch._
   build.** Until then `release-key` is empty and the plugin takes the newest
   build. Unpinned, a start uses the build it already has, and looks for a
   newer one in the background at most once a day (and Claude Code's
-  `SessionStart` hook does at startup), so a newer build applies from the
-  start after it is found. If the agent kills the launcher's children, the
+  `SessionStart` hook does at startup, on every session start and not once a
+  day: one request for `LATEST`, seen in the trial with Claude Code), so a
+  newer build applies from the start after it is found. If the agent kills the launcher's children, the
   background check may never finish, and it is retried only the next day. To
   close: pin the key when releasing.
 - **The pinned-key file could also carry the SHA-256 of each platform's
@@ -366,6 +367,8 @@ _Started 2026-10-06, on the `client-library` branch._
   documentation: the manifest and MCP file names, that a plugin's server
   starts in the project folder, the tool timeout, and that each loads the
   skills (see "Releases and installing" for the plugin folders).
+- **`run_conflict` was not provoked in the trial** with the real Claude Code
+  CLI. It is covered by the unit tests only.
 - **Gatekeeper and SmartScreen** behaviour for a binary installed with
   `curl`.
 - **The app's side of sharing a runtime** is read from its code, not run:
@@ -374,11 +377,19 @@ _Started 2026-10-06, on the `client-library` branch._
 
 ## Not covered by design
 
+- **A second session's edit can replace a first session's edit made a moment
+  earlier, and neither is told.** It happens when the second session read the
+  cell after the first one wrote it: the edit is then valid for the cell as
+  it is. Sessions leave each other no notes. Seen in the trial.
 - **One notebook file open in two runtimes**, such as a shared disk opened
   on two servers. Each runtime saves over the other.
 
 ## The machine tools
 
+- **A new session on a machine starts in the machine's home folder** unless
+  `use_machine` is given `folder`. A notebook made there with `new_notebook`
+  and no path lands in the home folder (seen in the trial). To close: tell the
+  agent where the notebook went, or ask for a folder when the session has none.
 - **A runtime without the helper is looked for by `sh`.** The bootstrap reads
   `runtime.json` with shell patterns (the first `pid` followed by a quote and
   a colon, and the first `job` the same way), so a node name that holds

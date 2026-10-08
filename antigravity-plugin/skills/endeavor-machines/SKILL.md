@@ -30,7 +30,7 @@ Only after the user agrees to what the result names, call the same tool again wi
 
 ## The first time
 
-1. `list_machines`: the machines already added, and the `Host` names in the user's `~/.ssh/config` that are not added yet. If the user named a machine that is listed, skip to step 3.
+1. `list_machines`: the machines already added, and the `Host` names in the user's `~/.ssh/config` that are not added yet. Use it to find a machine; don't read `~/.ssh` yourself. If the user named a machine that is listed, skip to step 3.
 2. `add_machine(host)`: connects and reports the node, home folder, and for Slurm the partitions and their limits. It waits up to 45 seconds; if it says it is still connecting, call it again with the same host (nothing is saved until a call has connected). If it returns `needs_install`, see above.
    Whether Julia runs in Slurm jobs or directly on the machine is the user's choice. When the machine has Slurm and the user hasn't said, ask: a workstation can have Slurm's tools without being a cluster. Pass `slurm: true` (jobs) or `slurm: false` (directly). The result says which it used (`cluster`, `runs_in`).
 3. `use_machine(machine)`: puts this session on it and starts or attaches to the Julia there. On a plain server that is all. On a cluster with no job running it submits nothing and returns `needs_job` with the saved default resources: propose them to the user (for example "8 CPUs, 32 GB, 8 hours on `shared`?"), and once they agree call `use_machine` again with those values.
@@ -38,7 +38,7 @@ Only after the user agrees to what the result names, call the same tool again wi
 
 ## Waiting
 
-No call waits longer than 45 seconds. If `use_machine` returns `starting` or `queued`, tell the user and check with `pluto_session_status`: it gives the state, the queue's state and reason, the job, and when it is up, when the job ends. A notebook tool called too early fails with the same facts. Don't poll in a tight loop and don't use `run_shell` to wait: look again when the user says so or after real work in between.
+No call waits longer than 45 seconds. If `use_machine` returns `starting` or `queued`, tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds for Julia, and a first start takes a few minutes. `pluto_session_status` answers at once and only shows the step: the state, the queue's state and reason, the job, and when the job ends. Don't call it repeatedly, and don't use `run_shell` to wait.
 
 ## Files are on the machine
 
@@ -63,7 +63,7 @@ Each tool's arguments and results: [machine-tools.md](reference/machine-tools.md
 | Let a machine with Slurm tools become a cluster without asking | Ask whether Julia should run in Slurm jobs, and pass `slurm` |
 | Read a server's files with `Read` or `Bash` | `read_file` and `run_shell`; your own tools see the user's computer |
 | Ask the user for a password or passphrase | Never. Tell the user the failure and what it says to do in a terminal |
-| Keep calling a notebook tool while the job is queued | Tell the user it is queued; check `pluto_session_status` later |
+| Call `pluto_session_status` again and again while Julia starts | It answers at once and does not wait. Call the notebook tool you want again: each call waits up to 45 seconds |
 | `stop_machine` to fix a problem in one notebook | Restart or fix that notebook; stopping ends everyone's work on the machine |
 | Treat `ready` as a sign the notebook is there | The session starts empty on a machine: `new_notebook` or `open_notebook` there |
 

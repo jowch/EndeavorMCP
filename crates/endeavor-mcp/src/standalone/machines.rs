@@ -322,9 +322,9 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
         Outcome::StillWorking(step) => {
             let step = if step.is_empty() { String::new() } else { format!(" Last step: {}.", step.trim_end_matches('.')) };
             if reached.status.state == State::Starting {
-                format!("Julia is starting on {at}. The first start installs packages and takes a few minutes.{step} Wait, then call `pluto_session_status` to see how far it got.")
+                format!("Julia is starting on {at}. The first start installs packages and takes a few minutes.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds for Julia. `pluto_session_status` answers at once and only shows the step, so don't call it repeatedly.")
             } else {
-                format!("Endeavor is connecting to {name}.{step} Wait a little, then call `pluto_session_status` to see how far it got. If it stays like this, call `use_machine` again.")
+                format!("Endeavor is connecting to {name}.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds. `pluto_session_status` answers at once and only shows the step, so don't call it repeatedly. If it stays like this, call `use_machine` again.")
             }
         }
         Outcome::NothingRunning => format!("Julia isn't running on {at} right now. Call `use_machine` with machine \"{name}\" to start it."),
@@ -839,7 +839,13 @@ impl Relay {
         if message.get("id").is_none_or(Value::is_null) {
             return;
         }
-        let arguments = message["params"].get("arguments").filter(|a| a.is_object()).cloned().unwrap_or_else(|| json!({}));
+        let arguments = match crate::mcp::call_arguments(&message["params"], false) {
+            Ok(arguments) => arguments,
+            Err(result) => return self.answer_call(message, Some(tool), result),
+        };
+        if let Err(result) = crate::mcp::check_arguments(tool, &arguments, false) {
+            return self.answer_call(message, Some(tool), result);
+        }
         let result = match tool {
             "list_machines" => self.list_machines(),
             "add_machine" => self.add_machine(&arguments, deadline),

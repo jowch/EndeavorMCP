@@ -35,10 +35,10 @@ fn a_machine_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
     let mut connecting = status(State::Connecting);
     connecting.step = Some("Connecting to lab".into());
     let said = not_ready_message("lab", &reached(Outcome::StillWorking("Connecting to lab".into()), connecting));
-    assert!(said.starts_with("Endeavor is connecting to lab. Last step: Connecting to lab") && said.contains("`pluto_session_status`") && said.contains("`use_machine` again"), "{said}");
+    assert!(said.starts_with("Endeavor is connecting to lab. Last step: Connecting to lab") && said.contains("call the notebook tool you want again") && said.contains("don't call it repeatedly") && said.contains("`use_machine` again"), "{said}");
 
     let said = not_ready_message("lab", &reached(Outcome::StillWorking("Found Julia 1.12.0".into()), status(State::Starting)));
-    assert!(said.contains("Julia is starting on lab") && said.contains("Last step: Found Julia 1.12.0") && said.contains("`pluto_session_status`"), "{said}");
+    assert!(said.contains("Julia is starting on lab") && said.contains("Last step: Found Julia 1.12.0") && said.contains("each call waits up to 45 seconds") && !said.contains("how far it got"), "{said}");
 
     let job = Some(JobInfo { id: "4242".into(), ..Default::default() });
     let queued = Outcome::Queued { job: job.clone(), queue: QueueInfo { state: "PENDING".into(), reason: "Priority".into() } };

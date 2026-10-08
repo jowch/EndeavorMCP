@@ -779,7 +779,7 @@ impl Relay {
             if id.is_none() {
                 return;
             }
-            let result = crate::mcp::call_arguments(&message["params"], help).and_then(|arguments| {
+            let result = crate::mcp::checked_call(&message["params"], help).and_then(|(_, arguments)| {
                 if tool == crate::guide::TOOL {
                     crate::guide::read(&arguments).map(|guide| machines::text_result(&guide)).map_err(|error| crate::mcp::tool_error(&error, false))
                 } else {
@@ -797,7 +797,7 @@ impl Relay {
                 }
                 return;
             };
-            if let Some(result) = crate::mcp::call_arguments(&message["params"], help).err().or_else(|| crate::mcp::unknown_tool(&message["params"], help)) {
+            if let Err(result) = crate::mcp::checked_call(&message["params"], help) {
                 return self.answer_call(&message, Some(tool), result);
             }
         }

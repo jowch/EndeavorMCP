@@ -741,7 +741,9 @@ fn reading_the_notebook_as_code_hides_boilerplate_and_counts_as_reading_it() {
     assert_eq!(code["cell_ids"], json!([X, "33333333-3333-3333-3333-333333333333"]));
     assert_eq!(code["code"], format!("# ╔═╡ {X}\nx = 1\n\n# ╔═╡ 33333333-3333-3333-3333-333333333333\n# (empty)"));
     assert_eq!(code["order"], "execution");
+    assert_eq!(code["markdown_cells_left_out"], 1);
     let with_markdown = read(json!({ "notebook_id": NB, "order": "visual", "include_markdown": true }));
+    assert!(with_markdown.get("markdown_cells_left_out").is_none());
     assert!(with_markdown["code"].as_str().unwrap().contains(&format!("# ╔═╡ {Y}\n# md:\nmd\"# Title\"")));
     assert_eq!(
         s.call("", "read_notebook_code", json!({ "notebook_id": NB, "order": "bogus" })),

@@ -6,6 +6,7 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 
 | `error` | Meaning | Do |
 |---|---|---|
+| `invalid_argument` | The call named an argument the tool doesn't have, or left out a required one; the message lists the tool's arguments | Call again with the arguments it names |
 | `read_required`, `stale_read` | You haven't read the cell, or it changed since you did | Read it, then retry. `edit_cells` refuses the whole batch if one cell fails this |
 | `placement_required` | `add_cell` without `after_cell_id` in a notebook that has cells | Pass the cell to add after |
 | `not_staged` | `submit_changes` was given a `cell_ids` entry that isn't in `pending_run` | Leave `cell_ids` out, or use `execute_cell` for a cell you didn't edit |

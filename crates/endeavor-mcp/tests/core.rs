@@ -451,6 +451,57 @@ fn sessions_join_an_open_notebook_and_the_runtime_says_how_many_called_lately() 
 }
 
 #[test]
+fn a_call_with_arguments_the_tool_does_not_take_is_refused_and_is_not_the_sessions_activity() {
+    let dir = state_dir("core-arguments");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let folder = temp_folder("core-arguments-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let mut open = notebook("aaaaaaaa-0000-0000-0000-000000000001", "x = 1");
+    open["path"] = path.as_str().into();
+    bridge.set_notebooks(vec![open]);
+
+    let caller = [("X-Endeavor-Session", "s1")];
+    let send = |id: u32, name: &str, arguments: serde_json::Value| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        mcp(&core, &message.to_string(), &caller).1
+    };
+    let guide = "\nSee `notebook_guide` for how to use these tools.";
+    assert_eq!(
+        send(1, "new_notebook", serde_json::json!({ "name": "remote.jl" })),
+        tool_error(1, "invalid_argument", &format!("`name` is not an argument of `new_notebook`. Its arguments: `path`.{guide}"))
+    );
+    assert_eq!(
+        send(2, "list_notebooks", serde_json::json!({ "path": "x" })),
+        tool_error(2, "invalid_argument", &format!("`path` is not an argument of `list_notebooks`. It takes no arguments.{guide}"))
+    );
+    assert_eq!(
+        send(3, "edit_cell", serde_json::json!({ "code": "1" })),
+        tool_error(3, "invalid_argument", &format!("`edit_cell` needs `notebook_id`, `cell_id`.{guide}"))
+    );
+    assert_eq!(
+        send(4, "read_notebook_code", serde_json::json!({})),
+        tool_error(4, "invalid_argument", &format!("`read_notebook_code` needs `notebook_id`.{guide}"))
+    );
+    assert!(!send(5, "list_notebooks", serde_json::json!({})).contains("invalid_argument"), "a valid call still runs");
+
+    // Calls that were refused leave no mark on the session: its last call stays the one that opened the notebook.
+    let opened = serde_json::json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "open_notebook", "arguments": { "path": path } } });
+    mcp(&core, &opened.to_string(), &caller);
+    std::thread::sleep(Duration::from_millis(2100));
+    let ago = || {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/recent_sessions", "params": { "owner": "", "within_seconds": 900 } });
+        serde_json::from_str::<serde_json::Value>(&app_call(&core, &body.to_string())).unwrap()["result"]["active_seconds_ago"].as_u64().unwrap()
+    };
+    send(7, "new_notebook", serde_json::json!({ "name": "remote.jl" }));
+    send(8, "edit_cell", serde_json::json!({}));
+    assert!(ago() >= 2, "a refused call counted as activity");
+    send(9, "list_notebooks", serde_json::json!({}));
+    assert!(ago() < 2);
+}
+
+#[test]
 fn serves_the_agents_mcp_messages() {
     let dir = state_dir("core-mcp");
     let bridge = FakeBridge::start(&dir);
@@ -842,7 +893,15 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let dir = state_dir("core-policy");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
-    let tool = |id: u32, name: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"notebook_id":"n1"}}}}}}"#);
+    let tool = |id: u32, name: &str| {
+        let arguments = match name {
+            "edit_cell" => r#"{"notebook_id":"n1","cell_id":"c1","code":"x"}"#,
+            "read_cell" => r#"{"notebook_id":"n1","cell_id":"c1"}"#,
+            "run_shell" => r#"{"command":"true"}"#,
+            _ => "{}",
+        };
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#)
+    };
     // The core reads the notebooks' state after every tool call, to tell the app.
     let reads = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).count();
     let plan_edit = "Plan mode is read-only: `edit_cell` would change or run the notebook. Finish the plan; the user switches modes to carry it out.";
@@ -1156,7 +1215,8 @@ fn run_shell_runs_in_the_login_shell_and_keeps_to_its_limits() {
 
     let error = |kind: &str, message: &str| Err(serde_json::json!({ "error": kind, "message": message }));
     assert_eq!(server.call("", "run_shell", serde_json::json!({ "command": "  " })), error("invalid_argument", "command is empty"));
-    assert_eq!(server.call("", "run_shell", serde_json::json!({})), error("invalid_argument", "command must be a string"));
+    assert_eq!(server.call("", "run_shell", serde_json::json!({})), error("invalid_argument", "`run_shell` needs `command`."));
+    assert_eq!(server.call("", "run_shell", serde_json::json!({ "command": 5 })), error("invalid_argument", "command must be a string"));
     assert_eq!(server.call("", "run_shell", serde_json::json!({ "command": "true", "cwd": "nope" })), error("not_found", &format!("No folder at {}/nope", home.display())));
     assert_eq!(server.call("", "run_shell", serde_json::json!({ "command": "true", "timeout_seconds": "x" })), error("invalid_argument", "timeout_seconds must be a whole number"));
 

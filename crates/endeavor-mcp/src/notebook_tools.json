@@ -280,11 +280,11 @@
     "name": "fold_cell"
   },
   {
-    "description": "Read the whole notebook as one string, each cell under a marker line with its id. Counts as a read of every cell it returns. Prose (Markdown) cells are left out unless `include_markdown` is true, and the engine's own package cells always are.",
+    "description": "Read the whole notebook as one string, each cell under a marker line with its id. Counts as a read of every cell it returns. Markdown (prose) cells are left out unless `include_markdown` is true, so `cell_ids` can have fewer ids than the notebook has cells (`get_cell_order` lists all of them); when any are left out, `markdown_cells_left_out` says how many. The engine's own package cells are always left out.",
     "inputSchema": {
       "properties": {
         "include_markdown": {
-          "description": "Include prose cells, each marked `# md:`. Default: false.",
+          "description": "Markdown cells are left out unless this is true; then each is included, marked `# md:`. Default: false.",
           "type": "boolean"
         },
         "notebook_id": {
