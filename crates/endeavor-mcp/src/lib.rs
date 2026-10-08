@@ -75,8 +75,9 @@ use wire::slurm::JobRequest;
 use runtime::{Ended, Hooks, Looked, Outcome, Up, Waiting, Want};
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
-                        (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster)
+const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
+                        (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster;
+                         auto is slurm where Slurm's sinfo is, else process)
        endeavor relay --state-dir DIR
        endeavor node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
        endeavor core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
@@ -114,6 +115,21 @@ enum Launcher {
     Process,
     /// A Slurm job; this machine is a login node.
     Slurm,
+}
+
+impl Launcher {
+    /// What `--launcher auto` is here: Slurm when its `sinfo` is, as the bootstrap script's
+    /// `PICK_LAUNCHER_SH` settles it before the helper starts.
+    fn here() -> Launcher {
+        if wire::slurm::has("sinfo") { Launcher::Slurm } else { Launcher::Process }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Launcher::Process => "process",
+            Launcher::Slurm => "slurm",
+        }
+    }
 }
 
 /// `runtime.json`, written by the core once the runtime is ready.
@@ -252,6 +268,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
                 launcher = match value()?.as_str() {
                     "process" => Launcher::Process,
                     "slurm" => Launcher::Slurm,
+                    "auto" => Launcher::here(),
                     other => return Err(format!("unknown launcher {other}")),
                 }
             }
@@ -314,7 +331,7 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
     relay_stdin(mux.clone(), routes.clone(), events.clone(), answer, parts.clone());
     let home = wire::files::home().display().to_string();
     let slurm_here = wire::slurm::has("sinfo");
-    let hello = ToApp::Hello { protocol: wire::PROTOCOL, version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: slurm_here, uploads: true };
+    let hello = ToApp::Hello { protocol: wire::PROTOCOL, version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: slurm_here, uploads: true, launcher: args.launcher.word().into() };
     let _ = mux.send(&hello.frame());
 
     let mut attached: Option<Attached> = None;
@@ -328,7 +345,7 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                 }
                 let result = match args.launcher {
                     Launcher::Process => attach(args, mux, &mut inbox, &events, &parts, &engine, install, attach_only),
-                    Launcher::Slurm => slurm::attach(args, mux, &mut inbox, &events, &parts, job.unwrap_or_default(), &engine, install),
+                    Launcher::Slurm => slurm::attach(args, mux, &mut inbox, &events, &parts, job.unwrap_or_default(), &engine, install, attach_only),
                 };
                 match result {
                     Ok(now) => {
@@ -1506,6 +1523,7 @@ mod tests {
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().julia, julia::Source::Auto);
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --launcher slurm").unwrap().launcher, Launcher::Slurm);
         assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --launcher pbs").is_err());
+        assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --launcher auto").unwrap().launcher, Launcher::here(), "auto is settled as the helper starts");
         let shell = parse_args(["connect", "--julia-shell", "module load julia", "--state-dir", "/s", "--runtime", "/r", "--depot", "/d"].map(String::from).to_vec());
         assert_eq!(shell.unwrap().julia, julia::Source::Shell("module load julia".into()));
         assert!(args("connect --state-dir /s --julia /j --julia-shell x --runtime /r --depot /d").is_err());

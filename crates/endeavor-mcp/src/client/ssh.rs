@@ -21,7 +21,7 @@ use wire::ToApp;
 use super::channel::{Channel, Hello, Notice, Runtime, StartError, StartOptions};
 use super::listener::Listener;
 use crate::paths::PICK_STATE_DIR_SH;
-use super::machines::Server;
+use super::machines::{Launcher, Server};
 
 /// What happened so far while connecting.
 #[derive(Clone, Debug, PartialEq)]
@@ -166,6 +166,9 @@ pub struct Options<'a> {
     /// `connect` ends with `ConnectError::needs`. The app, which asks its user
     /// itself, passes true. (What a start needs is asked for by each start, `StartOptions::install`; `test` uses this for both.)
     pub allow_install: bool,
+    /// How the helper runs the runtime; None is the server record's way (`Server::launcher`).
+    /// `Hello::launcher` says what an `Auto` became.
+    pub launcher: Option<Launcher>,
     /// The helper binary to send to a server whose `uname -s` is `os` and
     /// `uname -m` is `arch`, as `linux` and `x86_64` (`arm64` as `aarch64`).
     /// Asked only when the server has no helper of this build yet and
@@ -184,7 +187,7 @@ pub fn no_helper(os: &str, arch: &str) -> String {
 ///
 /// It reads six lines (the install root, the state folder, the depot, the
 /// helper's Julia flag and its value, and its launcher; see `Options` for the
-/// empty ones), and prints `ENDEAVOR <os> <arch> have`, or when this build's
+/// empty ones), settles a launcher of `auto` (`PICK_LAUNCHER_SH`), and prints `ENDEAVOR <os> <arch> have`, or when this build's
 /// helper isn't installed `ENDEAVOR <os> <arch> need <seen> <older|first> <folder>`,
 /// the folder being the rest of the line:
 /// `seen` is `none`, or for a runtime recorded in the state folder the helper
@@ -204,6 +207,7 @@ pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
     [
         &format!("v={version}"),
         r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln || exit 1"#,
+        PICK_LAUNCHER_SH,
         r#"case "$rt" in [~]|[~]/*) rt="$HOME${rt#?}";; esac"#,
         r#"case "$st" in [~]|[~]/*) st="$HOME${st#?}";; esac"#,
         r#"case "$dp" in [~]|[~]/*|[~]:*) dp="$HOME${dp#?}";; esac"#,
@@ -222,10 +226,15 @@ pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
     .join("; ")
 }
 
+/// Shell for the bootstrap script: a launcher (`$ln`) of `auto` becomes `slurm` when `sinfo` is
+/// a file in a folder of `$PATH` or of `wire::slurm::FOLDERS` (where `wire::slurm::has` looks), else
+/// `process`, as the helper itself would settle it. The helper is then started with the settled one.
+pub(crate) const PICK_LAUNCHER_SH: &str = r#"if [ "$ln" = auto ]; then ln=process; pp="$PATH:/usr/bin:/usr/local/bin:/opt/slurm/bin"; while [ -n "$pp" ]; do pb=${pp%%:*}; if [ -n "$pb" ] && [ -f "$pb/sinfo" ]; then ln=slurm; fi; case "$pp" in *:*) pp=${pp#*:};; *) pp=;; esac; done; fi"#;
+
 /// The six lines the script reads first.
 fn preamble(server: &Server, options: &Options) -> Result<Vec<u8>, String> {
     let [flag, value] = server.julia_args();
-    let [launcher, _] = server.launcher();
+    let launcher = options.launcher.unwrap_or_else(|| server.launcher()).word().to_owned();
     let lines = [("install folder", &options.root), ("state folder", &options.state), ("depot", &options.depot), ("Julia setting", &flag), ("Julia setting", &value), ("launcher", &launcher)];
     for (what, line) in lines {
         if line.contains('\n') {
@@ -553,8 +562,8 @@ pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions
 /// installed is installed only if `options.allow_install`; else the test fails
 /// naming it.
 pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(), String> {
-    let (channel, _) = connect(server, transport, options, cancel, on).map_err(|e| e.message)?;
-    if server.cluster.is_some() {
+    let (channel, hello) = connect(server, transport, options, cancel, on).map_err(|e| e.message)?;
+    if hello.launcher.map_or(server.cluster.is_some(), |l| l == Launcher::Slurm) {
         let reply = channel.files(wire::files::Request::Slurm);
         channel.detach();
         return match reply.map_err(|e| or_cancelled(cancel, e))? {

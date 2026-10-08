@@ -149,8 +149,9 @@ impl Link {
 /// waiting, or a new job. The start lock is held while it reads `job.json`,
 /// decides and submits, so two helpers never submit two jobs, and let go
 /// before the wait in the queue: a helper that comes in meanwhile finds
-/// `job.json` and waits for the same job.
-pub fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, request: JobRequest, engine: &str, install: bool) -> Result<Attached, Unstarted> {
+/// `job.json` and waits for the same job. With `attach_only` nothing is
+/// submitted: no job runs or waits is `NotRunning`.
+pub fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, request: JobRequest, engine: &str, install: bool, attach_only: bool) -> Result<Attached, Unstarted> {
     let mut client = Client::new(args, mux, &mut *inbox, parts);
     let starting = client.lock_start()?;
     let dir = &args.state_dir;
@@ -165,6 +166,7 @@ pub fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Ev
         // A helper waiting for the job removes `job.json` once the runtime is up, which this didn't see before.
         None => match running(args, mux, events)? {
             Some(attached) => return Ok(attached),
+            None if attach_only => return Err(Unstarted::NotRunning),
             None => {
                 stopped::clear(dir);
                 submit(args, &mut client, &request, engine, install)?
@@ -676,7 +678,7 @@ pub fn relay_main(argv: &[String]) -> ! {
     let mux = stdout_mux();
     let (events, rx) = mpsc::channel();
     let home = wire::files::home().display().to_string();
-    let _ = mux.send(&ToApp::Hello { protocol: wire::PROTOCOL, version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false }.frame());
+    let _ = mux.send(&ToApp::Hello { protocol: wire::PROTOCOL, version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false, launcher: String::new() }.frame());
     let runtime::Looked::Running(state, port) = runtime::look(&dir, false, true) else {
         let _ = mux.send(&ToApp::StartFailed { id: 0, message: format!("Julia isn't running on {}.", hostname()) }.frame());
         std::process::exit(1);

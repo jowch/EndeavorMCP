@@ -340,10 +340,11 @@ fn add_machine_reports_and_saves_a_cluster_and_list_machines_connects_to_nothing
     let cluster = saved.cluster.expect("a cluster, since Slurm is there");
     assert_eq!(cluster.partitions.len(), 1);
     assert_eq!((cluster.resources.cpus, cluster.resources.mem_gb, cluster.resources.minutes), (8, 7, 480), "a medium job, kept within the partition");
-    wait_for("the connection that connected as a plain server to end, so that the next one connects for Slurm", || place.helpers().is_empty());
+    // It connected for Slurm jobs from the start, so the connection is kept for the next call.
+    assert_eq!(place.helpers().len(), 1, "one helper");
 
     let listed = front.ok("list_machines", json!({}));
-    assert_eq!(listed["machines"], json!([{ "name": "hpc", "host": "hpc", "cluster": true, "state": "not connected", "this_session": false }]));
+    assert_eq!(listed["machines"], json!([{ "name": "hpc", "host": "hpc", "cluster": true, "state": "connected", "this_session": false }]));
     assert_eq!(listed["ssh_hosts_not_added"], json!(["other"]));
 
     // Adding it again updates it.
@@ -664,9 +665,28 @@ fn an_add_machine_that_is_still_connecting_saves_nothing_until_a_second_call_has
     assert_eq!(place.machines().load().unwrap().len(), 1, "one record");
     assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_some());
     let listed = front.ok("list_machines", json!({}));
-    assert_eq!((listed["machines"][0]["cluster"].clone(), listed["machines"][0]["state"].clone()), (json!(true), json!("not connected")), "{listed}");
+    assert_eq!((listed["machines"][0]["cluster"].clone(), listed["machines"][0]["state"].clone()), (json!(true), json!("connected")), "{listed}");
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!(used["state"], "needs_job", "{used}");
+    assert_eq!(attempts(&place), 2, "use_machine went on with the connection add_machine made: no second sign-in");
+}
+
+#[test]
+fn an_add_machine_saying_slurm_false_after_one_still_connecting_connects_again_and_submits_nothing() {
+    let (place, slurm) = slow_place("connecting-then-plain", "");
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!(first["state"], "connecting", "{first}");
+    std::fs::write(place.dir.join("go"), "").unwrap();
+    // That connection settles as Slurm (sinfo is on the PATH); the user says it isn't a cluster.
+    let added = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "slurm": false }));
+    assert_eq!((added["state"].as_str(), added["cluster"].clone(), added["runs_in"].clone()), (Some("connected"), json!(false), json!("directly")), "{added}");
+    assert_eq!(attempts(&place), 2, "a new connection for the launcher asked for, not the one made for auto");
+    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "saved as a plain server");
+    assert_eq!(slurm.read("sbatch.args"), "", "nothing was submitted");
+    assert_eq!(front.ok("list_machines", json!({}))["machines"][0]["state"], "connected", "and the connection it made is kept");
 }
 
 #[test]

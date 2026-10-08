@@ -13,7 +13,7 @@ fn no_helper_here(os: &str, arch: &str) -> Result<PathBuf, String> {
 }
 
 fn options(root: &str, state: &str, depot: &str) -> Options<'static> {
-    Options { auth: Auth::Batch, root: root.into(), state: state.into(), depot: depot.into(), exit_idle: false, allow_install: true, helper: &no_helper_here }
+    Options { auth: Auth::Batch, root: root.into(), state: state.into(), depot: depot.into(), exit_idle: false, allow_install: true, helper: &no_helper_here, launcher: None }
 }
 
 #[test]
@@ -433,7 +433,7 @@ fn the_collected_stderr_survives_a_line_that_is_not_utf8() {
 fn a_cancel_holds_ssh_while_the_helper_lives_and_lets_go_once_it_has_exited() {
     use std::os::unix::fs::PermissionsExt;
     let dir = crate::client::scratch("cancel-pid");
-    std::fs::write(dir.join("frames"), ToApp::Hello { protocol: wire::PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false }.frame().encode()).unwrap();
+    std::fs::write(dir.join("frames"), ToApp::Hello { protocol: wire::PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false, launcher: String::new() }.frame().encode()).unwrap();
     // Says hello, then stays until the client sends it anything (a detach).
     let script = dir.join("helper");
     std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", dir.join("frames").display())).unwrap();
@@ -454,7 +454,7 @@ fn a_cancel_holds_ssh_while_the_helper_lives_and_lets_go_once_it_has_exited() {
 fn a_helper_of_another_protocol_is_refused_at_once_and_not_retried() {
     use std::os::unix::fs::PermissionsExt;
     let dir = crate::client::scratch("other-protocol");
-    let with_protocol = ToApp::Hello { protocol: 0, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false }.frame().encode();
+    let with_protocol = ToApp::Hello { protocol: 0, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false, launcher: String::new() }.frame().encode();
     let without = wire::Frame::Control(br#"{"type":"Hello","version":"0","node":"n","home":"/"}"#.to_vec()).encode();
     for (name, hello) in [("says 0", with_protocol), ("says none", without)] {
         std::fs::write(dir.join("frames"), hello).unwrap();
@@ -524,4 +524,30 @@ fn only_sign_in_and_host_key_failures_end_a_reconnect() {
         assert!(!retry(needs_the_user), "{needs_the_user}");
     }
     assert!(!explain_retry(&lab(), &ask, &[], None, true, false).1, "a cancel");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_bootstrap_script_settles_auto_as_the_helper_does() {
+    assert!(bootstrap_script("v1", false).contains(PICK_LAUNCHER_SH), "the script holds the shell text that is tested");
+    for folder in wire::slurm::FOLDERS {
+        assert!(PICK_LAUNCHER_SH.contains(&format!(":{folder}:")) || PICK_LAUNCHER_SH.contains(&format!(":{folder}\"")), "the script looks in {folder}, as `has` does");
+    }
+    let dir = crate::client::scratch("pick-launcher");
+    let (with, without) = (dir.join("with bin"), dir.join("without"));
+    std::fs::create_dir_all(&with).unwrap();
+    std::fs::create_dir_all(&without).unwrap();
+    std::fs::write(with.join("sinfo"), "").unwrap();
+    let pick = |ln: &str, path: &str| {
+        let output = Command::new("/bin/sh").arg("-c").arg(format!("{PICK_LAUNCHER_SH}; printf %s \"$ln\"")).env_clear().env("PATH", path).env("ln", ln).output().unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let fixed = wire::slurm::FOLDERS.iter().any(|d| Path::new(d).join("sinfo").is_file());
+    let (with, without) = (with.display().to_string(), without.display().to_string());
+    assert_eq!(pick("auto", &format!("{without}:{with}")), "slurm", "sinfo in a folder of PATH, one with a space in its name");
+    assert_eq!(pick("auto", &format!("{without}::")), if fixed { "slurm" } else { "process" }, "else the fixed folders decide");
+    assert_eq!(pick("process", &with), "process", "a launcher that is named is left as it is");
+    assert_eq!(pick("slurm", &without), "slurm");
+    let path = std::env::var("PATH").unwrap();
+    assert_eq!(pick("auto", &path), if wire::slurm::has("sinfo") { "slurm" } else { "process" }, "on this computer's PATH the script and `has` agree");
 }

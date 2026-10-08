@@ -450,10 +450,14 @@ pub struct Scheduler {
     pub scratch: Option<String>,
 }
 
-/// Whether `program` is on the PATH or in the usual places.
+/// Where `has` looks for Slurm's commands besides the PATH. The bootstrap script repeats this list
+/// (endeavor-mcp's `PICK_LAUNCHER_SH`), and a test there checks it does.
+pub const FOLDERS: [&str; 3] = ["/usr/bin", "/usr/local/bin", "/opt/slurm/bin"];
+
+/// Whether `program` is on the PATH or in one of `FOLDERS`.
 pub fn has(program: &str) -> bool {
     let on_path = std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()));
-    on_path || ["/usr/bin", "/usr/local/bin", "/opt/slurm/bin"].iter().any(|d| std::path::Path::new(d).join(program).is_file())
+    on_path || FOLDERS.iter().any(|d| std::path::Path::new(d).join(program).is_file())
 }
 
 /// Ask this machine's Slurm about itself (for Test connection).

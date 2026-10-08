@@ -18,7 +18,7 @@ use wire::slurm::{JobRequest, Partition};
 
 use super::channel::{CLOSED, Channel, Notice, Runtime, StartError, StartOptions};
 use super::listener::{Listener, Messages};
-use super::machines::Server;
+use super::machines::{Launcher, Server};
 use super::ssh::{Auth, Cancel, ConnectError, Event, NeedsInstall, Options, Transport, connect, start};
 
 /// How long a reconnect waits after its first failure, doubling up to `RETRY_LAST`.
@@ -107,6 +107,8 @@ pub struct HelloInfo {
     pub home: String,
     pub slurm: bool,
     pub uploads: bool,
+    /// How the helper runs the runtime on this connection: "process" or "slurm"; None from a helper that doesn't say.
+    pub launcher: Option<String>,
     /// `uname`'s words for the machine, as `linux` and `x86_64`.
     pub os: Option<String>,
     pub arch: Option<String>,
@@ -245,13 +247,15 @@ pub struct Config {
     /// What the listener tells an agent whose runtime is away.
     pub messages: Messages,
     pub helper: HelperFor,
+    /// How the helper runs the runtime (`Options::launcher`); None is the record's way.
+    pub launcher: Option<Launcher>,
 }
 
 impl Config {
     /// Over `ssh` to `server`, with the machine's default folders. `helper` finds the helper to send to a machine that lacks it.
     pub fn new(server: Server, helper: impl Fn(&str, &str) -> Result<PathBuf, String> + Send + Sync + 'static) -> Config {
         let transport = Transport::for_server(&server);
-        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper) }
+        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper), launcher: None }
     }
 }
 
@@ -330,6 +334,9 @@ struct Inner {
     epoch: u64,
     /// The supervisor waits for a `Kick` or for the end of a pause, and none is in its inbox.
     may_kick: bool,
+    /// What the first helper settled `Launcher::Auto` as: a reconnect asks for the same, so the
+    /// session never changes how it runs the runtime (if Slurm was installed meanwhile, say).
+    settled: Option<Launcher>,
 }
 
 struct Shared {
@@ -379,6 +386,7 @@ impl Session {
             run: Run::Idle,
             epoch: 0,
             may_kick: true,
+            settled: None,
         };
         let shared = Arc::new(Shared {
             allow_install: AtomicBool::new(config.allow_install),
@@ -445,9 +453,12 @@ impl Session {
         }
     }
 
-    /// Whether the machine's record, as the session was made with it, is a Slurm cluster's.
+    /// Whether the runtime runs in Slurm jobs through this session: as the helper said, else as the
+    /// session was made. A launcher of `Auto` the helper hasn't settled yet counts as Slurm, so that
+    /// nothing takes it for a machine where a start runs Julia directly.
     pub fn cluster(&self) -> bool {
-        self.shared.config.server.cluster.is_some()
+        let settled = self.shared.inner().settled;
+        settled.or(self.shared.config.launcher).unwrap_or_else(|| self.shared.config.server.launcher()) != Launcher::Process
     }
 
     /// Whether the helper is connected, which `stop` needs.
@@ -1011,7 +1022,8 @@ fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
 fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
     let config = &shared.config;
     let allowed = shared.allow_install.load(Ordering::SeqCst);
-    let options = Options { auth: Auth::Batch, root: config.root.clone(), state: config.state.clone(), depot: config.depot.clone(), exit_idle: true, allow_install: allowed, helper: &*config.helper };
+    let launcher = shared.inner().settled.or(config.launcher);
+    let options = Options { auth: Auth::Batch, root: config.root.clone(), state: config.state.clone(), depot: config.depot.clone(), exit_idle: true, allow_install: allowed, helper: &*config.helper, launcher };
     let cancel = Arc::new(Cancel::default());
     *shared.cancel.lock().unwrap() = cancel.clone();
     if shared.leaving.load(Ordering::SeqCst) {
@@ -1022,6 +1034,8 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
     shared.with(|i| {
         let hello_info = i.hello.get_or_insert_with(HelloInfo::default);
         (hello_info.node, hello_info.home, hello_info.slurm, hello_info.uploads) = (hello.node, hello.home.display().to_string(), hello.slurm, hello.uploads);
+        hello_info.launcher = hello.launcher.map(|l| l.word().to_owned());
+        i.settled = i.settled.or(hello.launcher);
     });
     Ok(Arc::new(channel))
 }

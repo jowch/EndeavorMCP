@@ -28,11 +28,11 @@ fn julia_setting_becomes_helper_arguments() {
 }
 
 #[test]
-fn a_cluster_keeps_its_own_state_folder() {
+fn a_cluster_is_connected_for_slurm_jobs() {
     let server = Server { id: "server-1".into(), ..Default::default() };
-    assert_eq!(server.launcher(), ["process", "state"]);
+    assert_eq!(server.launcher(), Launcher::Process);
     let cluster = Server { cluster: Some(Cluster::default()), ..server };
-    assert_eq!(cluster.launcher(), ["slurm", "cluster-server-1"]);
+    assert_eq!(cluster.launcher(), Launcher::Slurm);
     let saved = serde_json::to_string(&cluster).unwrap();
     assert_eq!(serde_json::from_str::<Server>(&saved).unwrap(), cluster);
     assert!(serde_json::from_str::<Server>(r#"{"id":"a","ssh_host":"lab"}"#).unwrap().cluster.is_none());

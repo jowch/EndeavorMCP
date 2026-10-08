@@ -16,6 +16,7 @@ use wire::slurm::JobRequest;
 use wire::{Frame, ToApp, ToHelper};
 
 use super::listener::Listener;
+use super::machines::Launcher;
 
 /// How long `stop` waits for the helper's answer: the helper waits up to 20 s
 /// for the start lock, then stopping takes up to 20 s more.
@@ -112,6 +113,8 @@ pub struct Hello {
     pub slurm: bool,
     /// It can save attached files into a session's folder (`files::Request::Write`).
     pub uploads: bool,
+    /// How it runs the runtime on this connection (what `Launcher::Auto` became); None from a helper that doesn't say.
+    pub launcher: Option<Launcher>,
 }
 
 impl Hello {
@@ -322,7 +325,14 @@ impl Channel {
     pub fn wait_hello(&self, vanished: impl FnOnce() -> String) -> Result<Hello, String> {
         let Some(hello) = self.hello.lock().unwrap().take() else { return Err("Already said hello.".into()) };
         match hello.recv() {
-            Ok(ToApp::Hello { protocol, node, home, slurm, uploads, .. }) => Ok(Hello { protocol, node, home: PathBuf::from(home), slurm, uploads }),
+            Ok(ToApp::Hello { protocol, node, home, slurm, uploads, launcher, .. }) => {
+                let launcher = match launcher.as_str() {
+                    "process" => Some(Launcher::Process),
+                    "slurm" => Some(Launcher::Slurm),
+                    _ => None,
+                };
+                Ok(Hello { protocol, node, home: PathBuf::from(home), slurm, uploads, launcher })
+            }
             Ok(ToApp::Error { message }) => Err(message),
             Ok(other) => Err(format!("Endeavor's helper said {other:?} before hello.")),
             Err(_) => Err(vanished()),
