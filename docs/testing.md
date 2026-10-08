@@ -20,6 +20,53 @@ The launcher then runs `$ENDEAVOR_BIN mcp ...` and fetches nothing. Run
 `scripts/plugins.sh check` (which CI runs) fails when a plugin folder's copy
 differs.
 
+### A first run on another computer (a Mac)
+
+No person has run the plugin on macOS; CI only runs the tests there. To try it
+before a release, with Claude Code and git installed:
+
+```sh
+# 1. Rust, if you don't have it. The repository pins its toolchain.
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 2. The branch and a build (a few minutes).
+git clone https://github.com/jowch/EndeavorMCP && cd EndeavorMCP
+git checkout client-library
+cargo build --release -p endeavor-mcp
+export ENDEAVOR_BIN=$PWD/target/release/endeavor
+export ENDEAVOR_PLUGIN=$PWD/claude-plugin
+
+# 3. Claude Code with the plugin, in a scratch project folder.
+mkdir -p ~/endeavor-try && cd ~/endeavor-try
+claude --plugin-dir "$ENDEAVOR_PLUGIN"
+```
+
+`ENDEAVOR_BIN` must be set in the shell that starts `claude`. Julia is found on
+your `PATH`, or downloaded into `~/.cache/endeavor/` if there is none. The
+first notebook installs Julia packages into `~/.cache/endeavor/depot`, which
+takes a few minutes; the Endeavor app uses the same folder. Don't open a
+notebook that the app has open: the two don't share a runtime yet.
+
+Then, in Claude Code:
+
+1. `/mcp` shows `plugin:endeavor:endeavor` as connected, and `/skills` lists
+   three `endeavor:` skills.
+2. "Make a notebook called hello.jl with a cell showing 1 + 1, and give me the
+   address." Open the address in a browser.
+3. "Change it to 2 + 2." The page changes while you watch.
+4. Quit Claude Code, start it again the same way, and ask "what does hello.jl
+   show?" It should find the notebook still running, without a new start.
+5. In a terminal: `$ENDEAVOR_BIN status`, then `$ENDEAVOR_BIN stop`, then
+   `$ENDEAVOR_BIN status` again (not running).
+
+What to send back if something fails: the output of `$ENDEAVOR_BIN status`,
+the file it names as the log (`runtime.log`), what `/mcp` shows for the
+server, and the agent's last message. This was run on Linux on 2026-10-08
+with the same command (the server connected, the skills were listed, a
+notebook was made); the macOS-only parts are the process start time
+(`unixproc`) and whatever Gatekeeper says about a binary built locally, which
+should be nothing.
+
 `ENDEAVOR_RELEASE_URL` replaces the release's address in `install.sh` and the
 launcher. It is for tests and development only: the launcher keeps what it
 fetches from such a release in `bin-from/<address>/`, apart from the folder a
