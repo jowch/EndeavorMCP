@@ -314,7 +314,7 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     assert_eq!(
         error["message"],
         "No notebook with id 'aaaaaaaa-0000-0000-0000-000000000000' in the current session. Run list_notebooks to see what's open.\n\
-         See `notebook_guide` for how to use these tools."
+         See `notebook_guide` with `topic` set to `endeavor-notebooks/reference/errors.md` for what this error means and what to do."
     );
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 }
@@ -467,7 +467,7 @@ fn a_call_with_arguments_the_tool_does_not_take_is_refused_and_is_not_the_sessio
         let message = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
         mcp(&core, &message.to_string(), &caller).1
     };
-    let guide = "\nSee `notebook_guide` for how to use these tools.";
+    let guide = "\nSee `notebook_guide` with `topic` set to `endeavor-notebooks/reference/errors.md` for what this error means and what to do.";
     assert_eq!(
         send(1, "new_notebook", serde_json::json!({ "name": "remote.jl" })),
         tool_error(1, "invalid_argument", &format!("`name` is not an argument of `new_notebook`. Its arguments: `path`.{guide}"))
@@ -1078,7 +1078,7 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let null_args = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":null}}"#;
     assert_eq!(mcp(&core, null_args, &seven).1, tool_error(8, "plan_mode", plan_edit));
     let list_args = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":[]}}"#;
-    assert_eq!(mcp(&core, list_args, &seven).1, tool_error(8, "invalid_argument", "arguments must be an object\nSee `notebook_guide` for how to use these tools."));
+    assert_eq!(mcp(&core, list_args, &seven).1, tool_error(8, "invalid_argument", "arguments must be an object\nSee `notebook_guide` with `topic` set to `endeavor-notebooks/reference/errors.md` for what this error means and what to do."));
 
     assert_eq!(app_call(&core, &set.replace("plan", "ask")), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
     assert_eq!(mcp(&core, &valid(9, "edit_cell"), &seven).1, not_a_notebook(9));

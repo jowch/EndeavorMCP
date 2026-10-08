@@ -771,10 +771,15 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
                 tools.extend(MACHINE_TOOLS.as_array().cloned().unwrap_or_default());
             }
             for tool in &mut tools {
-                if caller.no_folder && matches!(tool["name"].as_str(), Some("open_notebook" | "new_notebook")) {
-                    // Its description says relative paths go in the session's folder, and that a name is generated there.
-                    let path = &mut tool["inputSchema"]["properties"]["path"]["description"];
-                    *path = format!("{} {NO_FOLDER_PATHS}", path.as_str().unwrap_or_default()).into();
+                if caller.no_folder {
+                    let described = match tool["name"].as_str() {
+                        Some("new_notebook") => Some(NO_FOLDER_NEW),
+                        Some("open_notebook") => Some(NO_FOLDER_OPEN),
+                        _ => None,
+                    };
+                    if let Some(described) = described {
+                        tool["inputSchema"]["properties"]["path"]["description"] = described.into();
+                    }
                 }
                 // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
                 // open_notebook can run the notebook, so it is not read-only either.
@@ -788,8 +793,13 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
     }
 }
 
-/// Added to the `path` descriptions of the tools that take one, in a front without a project folder.
-const NO_FOLDER_PATHS: &str = "On this computer give an absolute path: this server was not told the project folder.";
+/// The `path` descriptions of the tools that take one, in a front without a project folder: the usual
+/// ones say relative paths go in the session's folder, and that a name is generated there.
+const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl`. The file must not exist yet and its folder must. \
+Required on this computer: this server was not told the project folder, so it can't choose one. \
+On a server after `use_machine`, a relative path starts in the session's folder there.";
+const NO_FOLDER_OPEN: &str = "The notebook file, as an absolute path: this server was not told the project folder. \
+On a server after `use_machine`, a relative path starts in the session's folder there.";
 
 /// The reply to a JSON-RPC message while the app can't reach the runtime:
 /// what the core would say, except that a tool call fails with `why`, plain
@@ -818,6 +828,10 @@ const MISUSE_KINDS: [&str; 14] = [
     "read_required", "stale_read", "placement_required", "not_staged", "one_notebook", "run_conflict",
 ];
 
+/// The misuse kinds that only the guide's errors topic explains, not the guide itself.
+const ERRORS_TOPIC_KINDS: [&str; 6] = ["invalid_argument", "cell_not_found", "notebook_not_found", "invalid_path", "placement_required", "not_staged"];
+const ERRORS_TOPIC_HINT: &str = "See `notebook_guide` with `topic` set to `endeavor-notebooks/reference/errors.md` for what this error means and what to do.";
+
 /// A failed tool call's result, from the text of the error Julia raised:
 /// `ArgumentError: kind::message` names its kind; anything else is a
 /// `tool_error`. `help`: whether to point a misuse kind at `notebook_guide`,
@@ -834,7 +848,9 @@ pub(crate) fn tool_error(raw: &str, help: bool) -> Value {
         }
         None => ("tool_error", raw),
     };
-    let message = if help && MISUSE_KINDS.contains(&kind) {
+    let message = if help && ERRORS_TOPIC_KINDS.contains(&kind) {
+        format!("{message}\n{ERRORS_TOPIC_HINT}")
+    } else if help && MISUSE_KINDS.contains(&kind) {
         format!("{message}\nSee `notebook_guide` for how to use these tools.")
     } else {
         message.to_owned()
@@ -940,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn a_front_without_a_folder_lists_the_same_tools_with_two_path_descriptions_longer() {
+    fn a_front_without_a_folder_lists_the_same_tools_with_two_path_descriptions_replaced() {
         let list = |no_folder: bool| {
             let caller = Caller { has_skills: true, front: true, no_folder, ..Caller::default() };
             let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }), &caller, true, |_| json!(null)).unwrap();
@@ -951,7 +967,8 @@ mod tests {
         for (a, b) in with.as_array().unwrap().iter().zip(without.as_array().unwrap()) {
             if a != b {
                 let (before, after) = (a["inputSchema"]["properties"]["path"]["description"].as_str().unwrap(), b["inputSchema"]["properties"]["path"]["description"].as_str().unwrap());
-                assert_eq!(after, format!("{before} {NO_FOLDER_PATHS}"));
+                assert!(before.contains("a relative path is inside the session's folder"), "{before}");
+                assert!(after.contains("absolute path") && after.contains("this server was not told the project folder") && !after.contains("is inside the session's folder") && !after.contains("generated"), "{after}");
                 let (mut a, mut b) = (a.clone(), b.clone());
                 a["inputSchema"]["properties"]["path"]["description"] = Value::Null;
                 b["inputSchema"]["properties"]["path"]["description"] = Value::Null;
@@ -1096,8 +1113,12 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         let notebook_not_found = "ArgumentError: notebook_not_found::No notebook with id 'x' in the current session.";
         assert_eq!(
             text(notebook_not_found, true),
-            r#"{"error":"notebook_not_found","message":"No notebook with id 'x' in the current session.\nSee `notebook_guide` for how to use these tools."}"#,
-            "an agent without the plugin, on a kind the guide explains"
+            r#"{"error":"notebook_not_found","message":"No notebook with id 'x' in the current session.\nSee `notebook_guide` with `topic` set to `endeavor-notebooks/reference/errors.md` for what this error means and what to do."}"#,
+            "an agent without the plugin, on a kind the errors topic explains"
+        );
+        assert!(
+            text("ArgumentError: stale_read::Cell c1 changed since you read it.", true).ends_with(r#"\nSee `notebook_guide` for how to use these tools."}"#),
+            "a kind the guide itself explains"
         );
         assert_eq!(
             text(notebook_not_found, false),
