@@ -132,8 +132,9 @@ fn update(here: &Here) -> Result<String, String> {
     let _ = std::fs::remove_file(&part);
     let new_build = installed?;
     let mut message = format!("Updated {} to the newest build ({key}).", exe.display());
+    // The new binary's interface isn't known here, so its build is compared.
     if running(&here.state_dir)
-        && let Some(note) = standalone::other_build_than(&here.state_dir, new_build.as_deref().unwrap_or_default())
+        && let Some(note) = standalone::other_build_than(&here.state_dir, new_build.as_deref().unwrap_or_default(), None)
     {
         message.push_str(&format!("\n{note}"));
     }

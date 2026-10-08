@@ -38,7 +38,7 @@ mod winproc;
 
 /// The wire crate, for the types in this crate's signatures (`wire::Item`, `wire::KIND_RUNTIME`, `wire::ENGINE_PLUTO`).
 pub use wire;
-pub use core::serve_unreachable;
+pub use core::{INTERFACE as CORE_INTERFACE, serve_unreachable};
 pub use guard::serve_guarded;
 pub use mcp::{NOTEBOOK_TOOLS_JSON, asks_first, changes_notebook, is_tool, runs_code};
 pub use standalone::{Lease, lease, unpack};
@@ -152,12 +152,21 @@ struct State {
     job: Option<String>,
     /// The build that started it (`embedded::BUILD_VERSION`); none for one from before builds were recorded.
     build: Option<String>,
+    /// What it offers its callers (`core::INTERFACE`); none for one from before it was recorded.
+    interface: Option<u32>,
     /// The notebooks folder a standalone runtime recorded.
     folder: Option<String>,
     /// It was started without a project folder, and `folder` is the home folder it works in.
     no_folder: bool,
     /// Whether it ends itself when idle; none for a record from before this was written.
     exits_when_idle: Option<bool>,
+}
+
+impl State {
+    /// This build's callers can use it as it is: it offers this build's interface, or it is this build.
+    fn usable_as_is(&self) -> bool {
+        self.interface == Some(core::INTERFACE) || self.build.as_deref() == Some(embedded::BUILD_VERSION)
+    }
 }
 
 /// Why a runtime from a build before one port per runtime can't be used.
@@ -1199,6 +1208,7 @@ fn parse_state(v: &Value) -> Option<State> {
         token: text("token")?,
         job: text("job").filter(|j| !j.is_empty()),
         build: text("build"),
+        interface: v["interface"].as_u64().and_then(|n| u32::try_from(n).ok()),
         folder: text("folder"),
         no_folder: v["no_folder"].as_bool().unwrap_or(false),
         exits_when_idle: v["exits_when_idle"].as_bool(),

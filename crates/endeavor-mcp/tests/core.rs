@@ -150,10 +150,11 @@ fn starts_julia_and_writes_its_own_runtime_json() {
     assert!(core.port != bridge.port && core.port != bridge.pluto_port, "the core's own port");
     let mut keys: Vec<&str> = state.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort();
-    assert_eq!(keys, ["boot", "build", "exits_when_idle", "job", "launcher", "node", "pid", "port", "started", "token"], "nothing of Pluto's");
+    assert_eq!(keys, ["boot", "build", "exits_when_idle", "interface", "job", "launcher", "node", "pid", "port", "started", "token"], "nothing of Pluto's");
     assert_eq!(state["exits_when_idle"], false, "started without ENDEAVOR_EXIT_IDLE");
     assert_eq!((state["token"].as_str(), state["launcher"].as_str()), (Some(TOKEN), Some("process")));
     assert_eq!(state["build"].as_str(), Some("1.0.0-abc"), "the build it was started from");
+    assert_eq!(state["interface"], endeavor_mcp::CORE_INTERFACE, "what it offers its callers");
     let mode = std::fs::metadata(dir.join("runtime.json")).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
 

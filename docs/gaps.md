@@ -599,22 +599,20 @@ defect: the MCP side's design is to settle before the app moves to
 
 Before the app adopts the library, in this order (assessed 2026-10-08; the
 launcher per start, architecture-review.md P6, was decided against on
-2026-10-08 and an `auto` launcher built instead): a compatibility rule for
-builds that share a runtime, the three
+2026-10-08 and an `auto` launcher built instead; the compatibility rule for
+builds that share a runtime was built on 2026-10-08, `interface` in
+`runtime.json`): the three
 `Config` settings and events instead of stderr below, and one real run from a
 Mac to the Linux test VM through `client::Session` (the P1 in Releases and
 plugins). The rest of this file can wait or go alongside.
 
-- [P2] **The app and the plugin on one computer will run different builds
-  against one runtime.** The plan is one state folder for both, so one runtime
-  ([plugins-and-remote.md](plugins-and-remote.md), item 6). `mcp`'s check
-  compares the exact build (`Local::other_build` in `standalone/target.rs`). The
-  plugin's build changes with every change to the helper's source, the app's
-  only with an app release, so once they share a folder a mismatch is the
-  usual case: the plugin replaces the app's idle runtime, or tells the agent at
-  every connect. To close before the app moves folders: record a compatibility
-  number for the core's interface in `runtime.json`, compare that instead of
-  the build, and replace a runtime only when it differs.
+- [P2] **The app still compares builds for a runtime it shares.** The
+  library compares `runtime.json`'s `interface` with its own
+  (`CORE_INTERFACE`) since 2026-10-08, so a front of another build uses a
+  runtime that offers the same tools and calls as it is. The app's own rule
+  compares the exact build, and once the app and the plugin share a state
+  folder a mismatch is the usual case. To close when the app adopts: compare
+  `interface` as the library does.
 - [P2] **The app becomes a second pinned consumer of the Helpers release.** The
   app pins this repository by commit, so its helper key is that commit's, and
   servers can only fetch it once Helpers has published it. Push this

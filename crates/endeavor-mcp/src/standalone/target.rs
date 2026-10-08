@@ -141,7 +141,8 @@ impl Local {
     }
 
     /// This front lists its own build's tools, and the runtime it found running here (`runtime`) runs the
-    /// calls. Once per runtime: one another build started is stopped if a front started it in the
+    /// calls. One of another build that offers this build's interface (`core::INTERFACE`) is used as it is.
+    /// Otherwise, once per runtime: one another build started is stopped if a front started it in the
     /// background (it ends itself when idle, so nobody relies on its port), no notebook is open in it, and
     /// the call may start a runtime (`may_start`), so that the call starts one of this build. Any other is
     /// kept, and the agent is told. A runtime with no notebook open is left for a call that may start one.
@@ -153,7 +154,7 @@ impl Local {
         let dir = &self.options.state_dir;
         let Some(state) = crate::read_state(dir).filter(|state| state.pid as u32 == runtime.pid) else { return OtherBuild::Fine };
         let this = crate::embedded::BUILD_VERSION;
-        if state.build.as_deref() == Some(this) {
+        if state.usable_as_is() {
             builds.checked = Some(runtime.pid);
             return OtherBuild::Fine;
         }
