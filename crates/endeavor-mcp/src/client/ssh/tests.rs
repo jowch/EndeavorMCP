@@ -530,7 +530,10 @@ fn only_sign_in_and_host_key_failures_end_a_reconnect() {
 #[test]
 fn the_bootstrap_script_settles_auto_as_the_helper_does() {
     assert!(bootstrap_script("v1", false).contains(PICK_LAUNCHER_SH), "the script holds the shell text that is tested");
-    let dir = std::env::temp_dir().join(format!("endeavor-pick-launcher-{}", std::process::id()));
+    for folder in wire::slurm::FOLDERS {
+        assert!(PICK_LAUNCHER_SH.contains(&format!(":{folder}:")) || PICK_LAUNCHER_SH.contains(&format!(":{folder}\"")), "the script looks in {folder}, as `has` does");
+    }
+    let dir = crate::client::scratch("pick-launcher");
     let (with, without) = (dir.join("with bin"), dir.join("without"));
     std::fs::create_dir_all(&with).unwrap();
     std::fs::create_dir_all(&without).unwrap();
@@ -539,11 +542,12 @@ fn the_bootstrap_script_settles_auto_as_the_helper_does() {
         let output = Command::new("/bin/sh").arg("-c").arg(format!("{PICK_LAUNCHER_SH}; printf %s \"$ln\"")).env_clear().env("PATH", path).env("ln", ln).output().unwrap();
         String::from_utf8(output.stdout).unwrap()
     };
-    let fixed = ["/usr/bin", "/usr/local/bin", "/opt/slurm/bin"].iter().any(|d| Path::new(d).join("sinfo").is_file());
+    let fixed = wire::slurm::FOLDERS.iter().any(|d| Path::new(d).join("sinfo").is_file());
     let (with, without) = (with.display().to_string(), without.display().to_string());
     assert_eq!(pick("auto", &format!("{without}:{with}")), "slurm", "sinfo in a folder of PATH, one with a space in its name");
     assert_eq!(pick("auto", &format!("{without}::")), if fixed { "slurm" } else { "process" }, "else the fixed folders decide");
     assert_eq!(pick("process", &with), "process", "a launcher that is named is left as it is");
     assert_eq!(pick("slurm", &without), "slurm");
-    let _ = std::fs::remove_dir_all(&dir);
+    let path = std::env::var("PATH").unwrap();
+    assert_eq!(pick("auto", &path), if wire::slurm::has("sinfo") { "slurm" } else { "process" }, "on this computer's PATH the script and `has` agree");
 }

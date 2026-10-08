@@ -672,6 +672,24 @@ fn an_add_machine_that_is_still_connecting_saves_nothing_until_a_second_call_has
 }
 
 #[test]
+fn an_add_machine_saying_slurm_false_after_one_still_connecting_connects_again_and_submits_nothing() {
+    let (place, slurm) = slow_place("connecting-then-plain", "");
+    let mut front = place.front();
+    front.initialize();
+    let julia = place.julia.display().to_string();
+    let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!(first["state"], "connecting", "{first}");
+    std::fs::write(place.dir.join("go"), "").unwrap();
+    // That connection settles as Slurm (sinfo is on the PATH); the user says it isn't a cluster.
+    let added = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "slurm": false }));
+    assert_eq!((added["state"].as_str(), added["cluster"].clone(), added["runs_in"].clone()), (Some("connected"), json!(false), json!("directly")), "{added}");
+    assert_eq!(attempts(&place), 2, "a new connection for the launcher asked for, not the one made for auto");
+    assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "saved as a plain server");
+    assert_eq!(slurm.read("sbatch.args"), "", "nothing was submitted");
+    assert_eq!(front.ok("list_machines", json!({}))["machines"][0]["state"], "connected", "and the connection it made is kept");
+}
+
+#[test]
 fn a_second_add_machine_that_fails_leaves_the_machines_file_as_it_was() {
     let (place, _slurm) = slow_place("connecting-fails", "; echo 'Permission denied (publickey)' >&2; false");
     let mut front = place.front();

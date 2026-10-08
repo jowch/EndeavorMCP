@@ -110,18 +110,8 @@ impl Server {
         format!("server-{nanos:x}")
     }
 
-    /// The helper's launcher and its state folder's name under the install
-    /// root. A cluster's folder is its own, so the same machine can also be a
-    /// plain server entry without the two sharing a runtime.
-    pub fn launcher(&self) -> [String; 2] {
-        match &self.cluster {
-            None => ["process".into(), "state".into()],
-            Some(_) => ["slurm".into(), format!("cluster-{}", self.id)],
-        }
-    }
-
     /// How a connection made for this record runs the runtime: in Slurm jobs for a cluster, else as a process.
-    pub fn launcher_kind(&self) -> Launcher {
+    pub fn launcher(&self) -> Launcher {
         if self.cluster.is_some() { Launcher::Slurm } else { Launcher::Process }
     }
 

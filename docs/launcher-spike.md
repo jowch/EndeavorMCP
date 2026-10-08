@@ -1,7 +1,8 @@
 # Launcher per start (P6): what it changes for Slurm
 
 A spike for architecture-review.md P6, written 2026-10-08 from the code on
-`main` at 65fbe36. Nothing was built or run for it.
+`main` at 65fbe36. Nothing was built or run for the spike itself; what was
+decided is built in PR #3.
 
 ## Decided
 
@@ -99,11 +100,14 @@ user edits the machine, and a reconnect then is fine.
   same test that fills `Hello.slurm`, and the same answer `choose_mode` gives a
   new machine with no `slurm` argument (`machines.rs:1429`). `Hello` says which
   launcher it chose, in a new field with a default.
-- `PICK_STATE_DIR_SH` resolves `auto` the same way (`command -v sinfo`, plus the
-  fixed folders `has` checks), tested against `has` the way the state folder
-  rule is tested against `paths.rs`.
+- The bootstrap settles `auto` the same way, in its own `PICK_LAUNCHER_SH`, run
+  before `PICK_STATE_DIR_SH`: `slurm` when a file named `sinfo` (`-f`) is in a
+  folder of `$PATH` or of `wire::slurm::FOLDERS`, the list `has` uses. A test
+  checks the script holds each of those folders and agrees with `has` on the
+  test machine's PATH.
 - `add_machine`: a new machine with `slurm` unset connects `auto`, `slurm: true`
-  connects `slurm`, `slurm: false` connects `process`. A saved machine connects
+  connects `slurm`, `slurm: false` connects `process`. A connection left by an
+  earlier call is reused only when it was asked for the same launcher. A saved machine connects
   as saved. `connected_as_cluster` comes from `Hello`, so the connection is
   dropped only on a real mode switch.
 - `StartRuntime`, `Stop` and `files::Request` don't change.

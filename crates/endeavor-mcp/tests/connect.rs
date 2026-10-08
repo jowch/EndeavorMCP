@@ -1714,7 +1714,7 @@ fn launcher_auto_is_slurm_where_sinfo_is_and_says_so() {
     assert!(xdg.join("endeavor/cluster/job.json").exists(), "the cluster's state folder");
 
     // With no sinfo to be found it runs the runtime as a process (unless this computer has Slurm in a folder `has` always looks in).
-    let fixed = ["/usr/bin", "/usr/local/bin", "/opt/slurm/bin"].iter().any(|d| Path::new(d).join("sinfo").is_file());
+    let fixed = wire::slurm::FOLDERS.iter().any(|d| Path::new(d).join("sinfo").is_file());
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command.args(["connect", "--launcher", "auto", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent", "--depot", "/nonexistent"]).env("PATH", "/nonexistent").env("HOME", &home).env("XDG_STATE_HOME", &xdg);
     let helper = Helper::spawn(command);

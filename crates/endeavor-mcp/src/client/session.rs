@@ -458,7 +458,7 @@ impl Session {
     /// nothing takes it for a machine where a start runs Julia directly.
     pub fn cluster(&self) -> bool {
         let settled = self.shared.inner().settled;
-        settled.or(self.shared.config.launcher).unwrap_or_else(|| self.shared.config.server.launcher_kind()) != Launcher::Process
+        settled.or(self.shared.config.launcher).unwrap_or_else(|| self.shared.config.server.launcher()) != Launcher::Process
     }
 
     /// Whether the helper is connected, which `stop` needs.

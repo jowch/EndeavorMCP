@@ -166,7 +166,7 @@ pub struct Options<'a> {
     /// `connect` ends with `ConnectError::needs`. The app, which asks its user
     /// itself, passes true. (What a start needs is asked for by each start, `StartOptions::install`; `test` uses this for both.)
     pub allow_install: bool,
-    /// How the helper runs the runtime; None is the server record's way (`Server::launcher_kind`).
+    /// How the helper runs the runtime; None is the server record's way (`Server::launcher`).
     /// `Hello::launcher` says what an `Auto` became.
     pub launcher: Option<Launcher>,
     /// The helper binary to send to a server whose `uname -s` is `os` and
@@ -227,14 +227,14 @@ pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
 }
 
 /// Shell for the bootstrap script: a launcher (`$ln`) of `auto` becomes `slurm` when `sinfo` is
-/// a file in a folder of `$PATH` or in one of the folders `wire::slurm::has` also looks in, else
+/// a file in a folder of `$PATH` or of `wire::slurm::FOLDERS` (where `wire::slurm::has` looks), else
 /// `process`, as the helper itself would settle it. The helper is then started with the settled one.
 pub(crate) const PICK_LAUNCHER_SH: &str = r#"if [ "$ln" = auto ]; then ln=process; pp="$PATH:/usr/bin:/usr/local/bin:/opt/slurm/bin"; while [ -n "$pp" ]; do pb=${pp%%:*}; if [ -n "$pb" ] && [ -f "$pb/sinfo" ]; then ln=slurm; fi; case "$pp" in *:*) pp=${pp#*:};; *) pp=;; esac; done; fi"#;
 
 /// The six lines the script reads first.
 fn preamble(server: &Server, options: &Options) -> Result<Vec<u8>, String> {
     let [flag, value] = server.julia_args();
-    let launcher = options.launcher.unwrap_or_else(|| server.launcher_kind()).word().to_owned();
+    let launcher = options.launcher.unwrap_or_else(|| server.launcher()).word().to_owned();
     let lines = [("install folder", &options.root), ("state folder", &options.state), ("depot", &options.depot), ("Julia setting", &flag), ("Julia setting", &value), ("launcher", &launcher)];
     for (what, line) in lines {
         if line.contains('\n') {

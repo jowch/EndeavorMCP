@@ -88,11 +88,13 @@ struct Held {
     session: Arc<Session>,
     /// The machine is in the machines file. An unsaved one is an `add_machine` still connecting.
     saved: bool,
+    /// The launcher the connection was asked for, when not the record's (`Config::launcher`).
+    launcher: Option<Launcher>,
 }
 
 impl Held {
     fn new(server: &Server, allow_install: bool, saved: bool, launcher: Option<Launcher>) -> Result<Held, String> {
-        Ok(Held { server: server.clone(), session: Arc::new(open_session(server.clone(), allow_install, launcher)?), saved })
+        Ok(Held { server: server.clone(), session: Arc::new(open_session(server.clone(), allow_install, launcher)?), saved, launcher })
     }
 
     /// Whether nothing hangs on the connection, so that a new one can take its place without breaking
@@ -168,15 +170,17 @@ impl Connections {
     }
 
     /// The connection `add_machine` tries `record` with: the one held if it was made with the same
-    /// settings (a saved machine's, or the one an earlier call left unsaved), else a new one, made with
-    /// `launcher` (None: the record's), that takes the place of one nothing hangs on. An error when a runtime is in use through a saved one made with other
+    /// settings (a saved machine's, or the one an earlier call left unsaved, if it was asked for the same
+    /// `launcher`), else a new one, made with `launcher` (None: the record's), that takes the place of one
+    /// nothing hangs on. An error when a runtime is in use through a saved one made with other
     /// settings. Any other unsaved connection is ended.
     fn trying(&self, record: &Server, allow_install: bool, launcher: Option<Launcher>) -> Result<(Arc<Session>, Unsaved<'_>), String> {
         let mut held = self.held.lock().unwrap();
         let abandoned: Vec<Held> = held.extract_if(|id, h| !h.saved && *id != record.id).map(|(_, h)| h).collect();
         let unsaved = || Unsaved { connections: self, id: record.id.clone(), leave: false };
         match held.get(&record.id) {
-            Some(old) if old.server.same_connection(record) => return Ok((old.session.clone(), unsaved())),
+            // A connection asked for another launcher may run Slurm jobs where the user said not to, or the reverse.
+            Some(old) if old.server.same_connection(record) && (launcher.is_none() || old.launcher == launcher) => return Ok((old.session.clone(), unsaved())),
             Some(old) if old.saved && !old.replaceable() => return Err(settings_changed(&record.display_name())),
             _ => {}
         }
