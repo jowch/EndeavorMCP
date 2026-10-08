@@ -411,7 +411,8 @@ fn said_standalone() -> &'static str {
     "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
 the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
 `new_notebook` and `open_notebook` return `browser_url`: give it to the user. \
-Skip what Endeavor's notes on these tools say holds only in the Endeavor app. \
+Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
+such as the reference `app.md`: skip those parts. \
 This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
-that the user reaches over ssh. Use them only when the user asks to work on a machine; they say how to continue."
+that the user reaches over ssh. `list_machines` only reads and is fine any time; call the other three only when the user asks."
 }

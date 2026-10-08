@@ -464,7 +464,8 @@ fn without_the_plugin_the_handshake_points_to_the_guide() {
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
     let lines: Vec<Value> = out.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
     let instructions = lines[0]["result"]["instructions"].as_str().unwrap();
-    assert!(instructions.starts_with(&format!("{} {}\n\nBefore your first notebook tool call in a session, call `notebook_guide` once", crate::guide::STANDALONE, crate::guide::MACHINES)), "{instructions}");
+    assert!(instructions.starts_with(&format!("{} {} Before your first `add_machine`", crate::guide::STANDALONE, crate::guide::MACHINES)), "{instructions}");
+    assert!(instructions.contains("\n\nBefore your first notebook tool call in a session, call `notebook_guide` once"), "{instructions}");
     assert_eq!(lines[1]["result"]["tools"][0]["name"], "notebook_guide");
     let names: Vec<&str> = lines[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     for tool in ["run_shell", "read_file", "list_folder", "list_machines", "add_machine", "use_machine", "stop_machine"] {

@@ -25,7 +25,10 @@ const PLUTO: &str = "endeavor-notebooks/reference/pluto.md";
 
 /// Points an agent without the plugin's skills to the guide.
 const READ_GUIDE: &str = "Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
-how to find this session's notebook, the read-edit-run loop, and the rules for a Pluto cell. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
+how to find this session's notebook, the read-edit-run loop, and the rules for a Pluto cell.";
+
+/// Where the guide keeps what only the app needs, for an agent in the app without the skills.
+const APP_GUIDE: &str = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
 
 /// What a runtime with the app tells an agent without the skills.
 const APP: &str = "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat.";
@@ -36,22 +39,31 @@ const APP: &str = "These tools edit and run a live Pluto (Julia) notebook that t
 pub const STANDALONE: &str = "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
 the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
 `new_notebook` and `open_notebook` return `browser_url`: give it to the user. \
-Skip what Endeavor's notes on these tools say holds only in the Endeavor app.";
+Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
+such as the reference `app.md`: skip those parts.";
 
 /// What `endeavor mcp` adds to what it tells every agent: it has the machine tools.
 pub const MACHINES: &str = "This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
-that the user reaches over ssh. Use them only when the user asks to work on a machine; they say how to continue.";
+that the user reaches over ssh. `list_machines` only reads and is fine any time; call the other three only when the user asks.";
+
+/// What an agent without the skills is told about the machine tools on top of `MACHINES`.
+const MACHINES_GUIDE: &str = "Before your first `add_machine`, `use_machine` or `stop_machine` call, \
+call `notebook_guide` with `topic` set to `endeavor-machines/SKILL.md` and follow it.";
 
 /// The server's MCP `instructions` for an agent with the plugin's skills or
 /// without (`has_skills`), on a runtime with the app or without (`standalone`);
 /// `machines`: from `endeavor mcp`, which has the machine tools.
 pub fn instructions(standalone: bool, has_skills: bool, machines: bool) -> Option<String> {
-    let standalone_text = if machines { format!("{STANDALONE} {MACHINES}") } else { STANDALONE.to_owned() };
+    let machines_text = match (machines, has_skills) {
+        (false, _) => String::new(),
+        (true, true) => format!(" {MACHINES}"),
+        (true, false) => format!(" {MACHINES} {MACHINES_GUIDE}"),
+    };
     match (standalone, has_skills) {
         (false, true) => None,
-        (false, false) => Some(format!("{APP} {READ_GUIDE}")),
-        (true, true) => Some(standalone_text),
-        (true, false) => Some(format!("{standalone_text}\n\n{READ_GUIDE}")),
+        (false, false) => Some(format!("{APP} {READ_GUIDE} {APP_GUIDE}")),
+        (true, true) => Some(format!("{STANDALONE}{machines_text}")),
+        (true, false) => Some(format!("{STANDALONE}{machines_text}\n\n{READ_GUIDE}")),
     }
 }
 
@@ -92,7 +104,8 @@ fn whole() -> String {
         served(path, text)
     };
     format!(
-        "Links to .md paths in this guide are further topics: call `notebook_guide` with `topic` set to the path when the guide says to read one.\n\n\
+        "This guide is the notebook skill followed by the Pluto reference (`endeavor-notebooks/reference/pluto.md`), so where the skill says to read that reference, it is below: don't ask for it again. \
+         Other links to .md paths in this guide are further topics: call `notebook_guide` with `topic` set to the path when the guide says to read one.\n\n\
          {}\n---\n\n\
          {}\n---\n\n\
          If you have the tool `list_machines`, the notebooks can run on a server or cluster: call `notebook_guide` with `topic` set to `endeavor-machines` for how.\n",
@@ -183,6 +196,24 @@ mod tests {
             assert!(read(&json!({ "topic": link })).is_ok(), "the guide links to {link}, which isn't a topic");
         }
         assert!(read(&json!({ "topic": "endeavor-machines" })).is_ok(), "the topic the guide's last line names");
+    }
+
+    #[test]
+    fn only_an_agent_without_the_skills_is_pointed_at_the_machines_guide() {
+        let pointer = "call `notebook_guide` with `topic` set to `endeavor-machines/SKILL.md` and follow it";
+        let with_skills = instructions(true, true, true).unwrap();
+        let without_skills = instructions(true, false, true).unwrap();
+        assert!(!with_skills.contains(pointer), "{with_skills}");
+        assert!(without_skills.contains(pointer), "{without_skills}");
+        assert!(read(&json!({ "topic": "endeavor-machines/SKILL.md" })).is_ok(), "the topic it names");
+        assert!(!instructions(true, false, false).unwrap().contains("endeavor-machines"), "no machine tools, no pointer");
+    }
+
+    #[test]
+    fn only_an_agent_in_the_app_is_pointed_at_the_app_topic() {
+        let approval = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
+        assert!(instructions(false, false, false).unwrap().ends_with(approval));
+        assert!(!instructions(true, false, true).unwrap().contains(approval));
     }
 
     #[test]
