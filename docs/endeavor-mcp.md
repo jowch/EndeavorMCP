@@ -216,6 +216,43 @@ named and never walked. It never prints the runtime's token. `--json` prints the
 same facts as one object. It exits 0 whenever it could report, including when
 nothing is running.
 
+## A session without a project folder
+
+`endeavor mcp --no-folder` (it excludes `--folder`, and only `mcp` takes it) is
+for an agent that cannot tell the server its project folder, as Codex's plugin
+cannot. On this computer such a session resolves no relative path: nothing is
+ever taken from the process's working folder, which is the plugin's cache folder.
+
+- **The rule is one function.** `notebooks::requested_path` resolves a path the
+  agent gave against the session's `Folder`: `In(dir)`, `Process` (the app's
+  session, which has none: the runtime's working folder, as before) or
+  `Unknown` (this mode). For `Unknown`, a relative path is the `invalid_path`
+  error "Give an absolute path: this server was not told the project folder."
+  `~` is expanded first, so `~/x.jl` works. `new_notebook` without a `path`,
+  which would put the file in a folder the session does not know, gets the same
+  error. Only `open_notebook` and `new_notebook` take a path.
+- **The refusal comes before any effect.** The front calls
+  `notebooks::path_refusal` after it checked the arguments and before it routes
+  the call, so a refused call starts no runtime. The runtime calls it in the
+  same place, after `check_arguments` and before `note_call`, so a refused call
+  asks the user nothing, starts nothing, makes no file and is not the session's
+  activity.
+- **The runtime is told.** On this computer the front sends
+  `endeavor/set_session_folder` `{owner, no_folder: true}` where a session with
+  a folder gets `{owner, folder}`; the runtime then holds `Unknown` for that
+  session even if it has a folder of its own. A runtime a `--no-folder` front
+  starts gets `ENDEAVOR_NO_FOLDER=1` instead of `ENDEAVOR_FOLDER`: it is
+  a standalone runtime with no folder, it records none in `runtime.json` and
+  gives Pluto none, and a session it is not told a folder for (`serve`'s HTTP
+  clients) gets `Unknown` too. `endeavor status` therefore shows no notebooks
+  folder for it, and `pluto_session_status` has never had one.
+- **No project is remembered.** `projects.json` is keyed by the folder, so a
+  session without one reads and writes nothing there: `use_machine` works and
+  the next session starts on this computer.
+- **A machine is as before.** After `use_machine` the session's folder is the
+  `folder` argument or the machine's home, and relative paths start there.
+  `use_machine` with `"local"` returns to `Unknown`.
+
 ## Session identity
 
 _Built 2026-10-03._

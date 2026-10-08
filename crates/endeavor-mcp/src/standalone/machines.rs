@@ -646,9 +646,25 @@ impl Relay {
         *target = Target { moves: target.moves + 1, ..next };
     }
 
+    /// What the project remembers. A session without a project folder has no project, so nothing.
+    fn remembered(&self) -> Result<Option<Remembered>, String> {
+        match &self.options.folder {
+            Some(folder) => self.projects.get(folder),
+            None => Ok(None),
+        }
+    }
+
+    /// Remember `what` for the project, or forget what it remembers; a session without a project folder keeps nothing.
+    fn remember(&self, what: Option<Remembered>) -> Result<(), String> {
+        match &self.options.folder {
+            Some(folder) => self.projects.set(folder, what),
+            None => Ok(()),
+        }
+    }
+
     /// The project's remembered machine becomes the target, without starting anything.
     pub(super) fn target_from_project(&self) {
-        let remembered = match self.projects.get(&self.options.folder) {
+        let remembered = match self.remembered() {
             Ok(remembered) => remembered,
             Err(e) => {
                 eprintln!("endeavor: {e}");
@@ -759,8 +775,9 @@ impl Relay {
     fn ready(&self, target: &Target, runtime: &RuntimeInfo, home: Option<&str>) -> Route {
         if target.told != Some(runtime.pid) {
             let folder = target.folder.clone().or_else(|| home.filter(|h| !h.is_empty()).map(str::to_owned));
-            if let Some(folder) = folder {
-                self.tell_session_folder(runtime.port, &runtime.token, &folder);
+            // A machine's runtime has a folder of its own to fall back on; this computer's has none to offer a `--no-folder` session.
+            if folder.is_some() || target.is_local() {
+                self.tell_session_folder(runtime.port, &runtime.token, folder.as_deref());
             }
             self.update_target(&target.id, |t| t.told = Some(runtime.pid));
         }
@@ -1105,11 +1122,11 @@ impl Relay {
         let install = flag_arg(args, "install")?;
         let given = Given::parse(args)?;
         let folder = if local {
-            Some(self.options.folder.display().to_string())
+            self.options.folder.as_ref().map(|folder| folder.display().to_string())
         } else {
             match text_arg(args, "folder")? {
                 Some(folder) => Some(folder),
-                None => self.projects.get(&self.options.folder).ok().flatten().filter(|remembered| remembered.machine == server.id).and_then(|remembered| remembered.folder),
+                None => self.remembered().ok().flatten().filter(|remembered| remembered.machine == server.id).and_then(|remembered| remembered.folder),
             }
         };
         if given.any() && server.cluster.is_none() {
@@ -1158,7 +1175,7 @@ impl Relay {
             }
         }
         let remembered = (!local).then(|| Remembered { machine: server.id.clone(), folder });
-        if let Err(e) = self.projects.set(&self.options.folder, remembered) {
+        if let Err(e) = self.remember(remembered) {
             notes.push(format!("The project's remembered machine wasn't updated: {e}"));
         }
         self.use_result(&server, reached, was_ready, notes)

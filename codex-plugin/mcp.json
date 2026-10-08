@@ -4,7 +4,7 @@
     "endeavor": {
       "type": "stdio",
       "command": "sh",
-      "args": ["${PLUGIN_ROOT}/launch/endeavor-mcp.sh", "--skills", "plugin"]
+      "args": ["${PLUGIN_ROOT}/launch/endeavor-mcp.sh", "--skills", "plugin", "--no-folder"]
     }
   }
 }

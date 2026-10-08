@@ -301,20 +301,35 @@ _Started 2026-10-06, on the `client-library` branch._
   Bash's `uname` (tested with a fake one), but whether Claude Code can start
   a `sh` script as an MCP command on Windows is undocumented. To close: try
   it under Git Bash, and give Windows a `.cmd` or PowerShell launcher if not.
-- **The Codex plugin folder does not work.** Tried with Codex 0.161.0 on Linux
-  (`codex exec`). Two causes. (1) The repo has no Codex marketplace file:
-  `codex plugin marketplace add <repo>` reads `.claude-plugin/marketplace.json`
-  and offers the Claude plugin. A file `.agents/plugins/marketplace.json` naming
-  `./codex-plugin`, then `codex plugin add endeavor@endeavor`, did install the
-  folder, and Codex listed its three skills to the model. (2) Codex starts a
-  plugin's server in the plugin's cache folder, gives it no variable naming the
-  project, and allows a plugin entry's `cwd` only inside the plugin, so
-  `mcp` cannot learn the project folder: `open_notebook {"path":"trial.jl"}`
-  looked in the cache folder and only absolute paths worked. To close: add
-  `.agents/plugins/marketplace.json`, and have the server learn the project
-  folder, for example by asking the client for its roots (`roots/list`), which
-  was not tried. Not added until then, since the file would offer a plugin that
-  does not work. Codex does work as an ordinary MCP entry (README).
+- **The Codex plugin was tried only from a local copy of the repository.**
+  With Codex 0.161.0 on Linux (`codex exec`), `codex plugin marketplace add`
+  of a folder with `.agents/plugins/marketplace.json` (beside
+  `.claude-plugin/marketplace.json`; Codex used the first) and `codex plugin add
+  endeavor@endeavor` installed `codex-plugin/`, and two runs created and
+  reopened a notebook through it. The GitHub form
+  (`codex plugin marketplace add jowch/EndeavorMCP`) was not run, since the
+  branch is not on `main`. What remains:
+  - The workspace is not known. Codex starts the plugin's server in the
+    plugin's cache folder and gives it no project folder (`roots/list` is
+    empty; an entry's `cwd` may only be inside the plugin), so the entry passes
+    `--no-folder` and the server refuses relative notebook paths. Nothing
+    breaks: the agent gives absolute paths, or gets the refusal and retries.
+    Each `tools/call` carries `_meta["x-codex-turn-metadata"].workspaces`, an
+    object whose keys are workspace paths (undocumented). It is not used. To
+    close: read it, or find a documented way, so that relative paths work.
+  - A project is remembered by its folder, so a session without one remembers
+    no machine: `use_machine` works, and the next session starts on this
+    computer.
+  - A `--no-folder` session on a runtime started by an older build is not
+    refused relative paths: from the code, the older runtime ignores the setting
+    and uses its own folder (not tried). `endeavor stop` ends it.
+  - There is no early download. `codex-plugin/` has no hooks, so the first
+    start downloads while the agent waits, and the plugin's entry names
+    `--no-folder`, which only builds from this branch know. Until a release
+    holds one, a plugin install gets an older build that refuses to start (see
+    the entry on the first release below).
+  - `codex exec` needs `default_tools_approval_mode` (below).
+  - Interactive `codex`, subagents and Windows are untried.
 - **The Antigravity plugin folder was built to its documentation and tried on no
   real install.** The manifest and MCP file names, that a plugin's server starts
   in the project folder, the tool timeout and that it loads the skills all
@@ -327,7 +342,8 @@ _Started 2026-10-06, on the `client-library` branch._
 - **`codex exec` needs `default_tools_approval_mode = "approve"` for the
   server.** Without it every tool that changes something fails with "MCP tool
   call requires approval, but approval policy is never"; read-only tools ran.
-  The setting is per server (`[mcp_servers.endeavor]`, or `-c
+  The setting is per server (`[mcp_servers.endeavor]`, or for the plugin
+  `[plugins."endeavor@endeavor".mcp_servers.endeavor]`, or `-c
   'mcp_servers.endeavor.default_tools_approval_mode="approve"'`) and keeps
   Codex's sandbox on. Today `tools/list` declares `readOnlyHint` (true for the
   read tools; false for the write tools, `open_notebook` and the machine tools

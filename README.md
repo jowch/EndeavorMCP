@@ -15,30 +15,41 @@ claude plugin install endeavor@endeavor
 
 Then start Claude Code in your project folder. New notebooks go there.
 
-**Codex** works as an MCP server, not as a plugin. [Install
-`endeavor` by hand](#without-a-plugin), then add this to `~/.codex/config.toml`:
+**Codex:**
 
-```toml
-[mcp_servers.endeavor]
-command = "endeavor"
-args = ["mcp"]
-default_tools_approval_mode = "approve"
+```
+codex plugin marketplace add jowch/EndeavorMCP
+codex plugin add endeavor@endeavor
 ```
 
-Start Codex in your project folder; new notebooks go there. The last line is
-for `codex exec`, where every tool that changes something fails with "MCP tool
-call requires approval, but approval policy is never" without it. It leaves
-Codex's sandbox on. There are no skills on this route: the agent reads the
-guide through the `notebook_guide` tool. `codex-plugin/` does not work yet
-(Codex gives a plugin's server no way to learn the project folder,
-[gaps.md](docs/gaps.md)). This was tried on Linux with Codex 0.161.0 through
-`codex exec`.
+Start Codex in your project folder. It differs from Claude Code in three ways:
+
+- Codex does not tell the plugin's server the project folder, so notebook paths
+  must be absolute. The agent gives its working folder plus the file name, or
+  the server refuses a relative path and says so.
+- `codex exec` fails every tool that changes something ("MCP tool call requires
+  approval, but approval policy is never") unless you approve the plugin's server
+  in `~/.codex/config.toml`. This leaves Codex's sandbox on:
+
+  ```toml
+  [plugins."endeavor@endeavor".mcp_servers.endeavor]
+  default_tools_approval_mode = "approve"
+  ```
+
+- Codex has no start hook, so the first start downloads the program while the
+  agent waits.
+
+Without the plugin, Codex can run `endeavor mcp` as an MCP server instead
+([serve.md](docs/serve.md#on-the-same-machine-the-stdio-form)); it then starts
+the server in the folder Codex was started in. This was tried on Linux with
+Codex 0.161.0 through `codex exec`, installing the plugin from a local copy of
+this repository (the `owner/repo` form above was not run).
 
 **Antigravity** is not supported yet. The `antigravity-plugin/` folder was
 built to its documentation and has never been installed
 ([gaps.md](docs/gaps.md)).
 
-With the Claude Code plugin you need nothing else. The first start:
+With a plugin you need nothing else. The first start:
 
 - Downloads the `endeavor` program, about 30 MB, into
   `~/.local/share/endeavor/bin/`.
@@ -186,8 +197,8 @@ app with a Claude Code agent beside a live Pluto notebook, which uses the same
 - `crates/wire/`: the protocol between Endeavor and its helper on servers.
 - `runtime/`: the Julia side, built into the binary.
 - `plugin/`: the skills. `claude-plugin/` (listed in
-  `.claude-plugin/marketplace.json`), `codex-plugin/` and
-  `antigravity-plugin/` are the plugins; `scripts/plugins.sh` keeps their copies
+  `.claude-plugin/marketplace.json`), `codex-plugin/` (listed in
+  `.agents/plugins/marketplace.json`) and `antigravity-plugin/` are the plugins; `scripts/plugins.sh` keeps their copies
   in step.
 - `scripts/`: the install scripts, the plugins' launcher and the helper builds.
 - `docs/`: [plugins-and-remote.md](docs/plugins-and-remote.md) (the design),

@@ -61,7 +61,8 @@ pub(super) struct Target {
     pub id: String,
     /// What the agent calls it.
     pub name: String,
-    /// The session's folder there, if `use_machine` was given one; else the server's home.
+    /// The session's folder there, if `use_machine` was given one; else the server's home. On this
+    /// computer none means the front was started with `--no-folder`.
     pub folder: Option<String>,
     /// The session should have a runtime there: false after `stop_machine`.
     pub active: bool,
@@ -78,8 +79,8 @@ impl Target {
         Target { id: server.id.clone(), name: server.display_name(), folder, active: true, told: None, failed: false, moves: 0 }
     }
 
-    pub(super) fn local(folder: &std::path::Path) -> Target {
-        Target::new(&local_server(), Some(folder.display().to_string()))
+    pub(super) fn local(folder: Option<&std::path::Path>) -> Target {
+        Target::new(&local_server(), folder.map(|folder| folder.display().to_string()))
     }
 
     pub(super) fn is_local(&self) -> bool {

@@ -154,6 +154,11 @@ impl Place {
     fn front(&self) -> Front {
         start_front(self, &[])
     }
+
+    /// A front started with `--no-folder`, in the project folder.
+    fn front_without_folder(&self) -> Front {
+        spawn_front(self, &["--no-folder"], &[])
+    }
 }
 
 impl Drop for Place {
@@ -221,10 +226,15 @@ fn end_leftovers(dir: &Path) {
 }
 
 fn start_front(place: &Place, more: &[(&str, &str)]) -> Front {
+    spawn_front(place, &["--folder", &place.project.display().to_string()], more)
+}
+
+/// A front with `folder_args` (`--folder DIR` or `--no-folder`), whose working folder is the project.
+fn spawn_front(place: &Place, folder_args: &[&str], more: &[(&str, &str)]) -> Front {
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command
-        .args(["mcp", "--skills", "plugin", "--folder"])
-        .arg(&place.project)
+        .args(["mcp", "--skills", "plugin"])
+        .args(folder_args)
         .arg("--julia")
         .arg(&place.local_julia)
         .arg("--depot")
@@ -2150,5 +2160,105 @@ fn an_update_of_a_saved_machine_that_is_still_connecting_is_not_used_by_anything
     assert_eq!(status["machine"], "lab", "{status}");
     assert_eq!(attempts(&place), 2, "a new connection, not the one being tried");
     assert_eq!(place.machines().find_by_name("lab").unwrap().unwrap().ssh_host, "lab");
+    front.finish();
+}
+
+const NO_FOLDER: &str = "Give an absolute path: this server was not told the project folder.";
+
+/// What the local engine was asked, by method and parameters.
+fn local_engine_calls(place: &Place) -> Vec<(String, Value)> {
+    let calls = place.local_bridge.seen().into_iter().filter(|s| s.line.starts_with("POST /adapter"));
+    calls.map(|s| serde_json::from_slice::<Value>(&s.body).unwrap()).map(|c| (c["method"].as_str().unwrap().to_owned(), c["params"].clone())).collect()
+}
+
+fn project_files(place: &Place) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(&place.project).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_front_without_a_folder_refuses_relative_paths_before_it_starts_a_runtime_or_makes_a_file() {
+    let place = Place::new("no-folder");
+    let mut front = place.front_without_folder();
+    front.initialize();
+    for (name, arguments) in [("new_notebook", json!({ "path": "hello.jl" })), ("new_notebook", json!({ "path": "./sub/../hello.jl" })), ("new_notebook", json!({})), ("new_notebook", json!({ "path": null })), ("open_notebook", json!({ "path": "hello.jl" }))] {
+        let (failed, said) = front.call(name, arguments.clone());
+        assert!(failed && said["error"] == "invalid_path" && said["message"] == NO_FOLDER, "{name} {arguments}: {said}");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(place_none(&place), "a refused call started a runtime: {:?}", core_of(&place));
+    assert!(project_files(&place).is_empty(), "{:?}", project_files(&place));
+
+    // An absolute path starts the runtime and reaches the engine as given.
+    let made = place.project.join("made.jl").display().to_string();
+    front.call("new_notebook", json!({ "path": made }));
+    assert_eq!(local_engine_calls(&place).into_iter().find(|(method, _)| method == "new").map(|(_, params)| params), Some(json!({ "path": made })));
+    let existing = local_notebook(&place, "a.jl");
+    let joined = front.ok("open_notebook", json!({ "path": existing }));
+    assert_eq!(joined["already_open"], true, "{joined}");
+    assert!(place.local_runtime().is_some_and(pid_alive));
+
+    // The running runtime refuses a relative path too, for this session and for one that tells it nothing; its record names no folder.
+    let (failed, said) = front.call("open_notebook", json!({ "path": "a.jl" }));
+    assert!(failed && said["message"] == NO_FOLDER, "{said}");
+    let record = read_record(&place.local_state);
+    assert!(record.get("folder").is_none(), "{record}");
+    let port = record["port"].as_u64().unwrap() as u16;
+    let other = other_agent(port, TOKEN, "someone-else", "open_notebook", json!({ "path": "a.jl" }));
+    assert_eq!((other["error"].as_str(), other["message"].as_str()), (Some("invalid_path"), Some(NO_FOLDER)), "{other}");
+    let relative: Vec<_> = local_engine_calls(&place).into_iter().filter(|(method, params)| matches!(method.as_str(), "open" | "new") && !params["path"].as_str().is_some_and(|path| path.starts_with('/'))).collect();
+    assert!(relative.is_empty(), "the engine was asked to use a relative path: {relative:?}");
+
+    // The status names no folder.
+    let status = front.ok("pluto_session_status", json!({}));
+    assert!(status.get("folder").is_none(), "{status}");
+    let said = Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["status", "--json", "--state-dir"]).arg(&place.local_state).env_clear().envs(place.env.iter().map(|(k, v)| (k, v))).output().unwrap();
+    let report: Value = serde_json::from_slice(&said.stdout).unwrap();
+    assert_eq!((report["runtime"]["state"].as_str(), report["runtime"]["folder"].clone()), (Some("running"), Value::Null), "{report}");
+    assert_eq!(project_files(&place), ["a.jl"], "only the file the test made");
+    front.finish();
+}
+
+#[test]
+fn a_front_without_a_folder_remembers_no_project_and_a_machine_resolves_relative_paths_as_before() {
+    let place = Place::new("no-folder-machine");
+    place.add_lab();
+    let machine_notebook = place.notebook("machine.jl");
+    let mut first = place.front_without_folder();
+    first.initialize();
+    let used = first.ok("use_machine", json!({ "machine": "lab", "folder": place.project.display().to_string() }));
+    assert_eq!(used["state"], "ready", "{used}");
+    let joined = first.ok("open_notebook", json!({ "path": "machine.jl" }));
+    assert_eq!((joined["already_open"].clone(), joined["path"].as_str()), (json!(true), Some(machine_notebook.as_str())), "a relative path starts in the machine's folder: {joined}");
+    assert_eq!(place.projects(), Value::Null, "nothing is remembered for a session without a folder");
+    assert!(place_none(&place), "this computer's runtime was not started");
+
+    // Back on this computer the session has no folder again.
+    first.ok("use_machine", json!({ "machine": "local" }));
+    let (failed, said) = first.call("open_notebook", json!({ "path": "machine.jl" }));
+    assert!(failed && said["message"] == NO_FOLDER, "{said}");
+    assert_eq!(place.projects(), Value::Null);
+    first.ok("use_machine", json!({ "machine": "lab", "folder": place.project.display().to_string() }));
+    assert_eq!(first.ok("open_notebook", json!({ "path": "machine.jl" }))["already_open"], true, "and the machine's folder is the one it was told");
+    first.finish();
+
+    // A second front without a folder does not come up on the machine.
+    let mut second = place.front_without_folder();
+    second.initialize();
+    let status = second.ok("pluto_session_status", json!({}));
+    assert!(status.get("machine").is_none(), "{status}");
+    second.finish();
+}
+
+#[test]
+fn a_front_with_a_folder_still_resolves_relative_paths_in_it() {
+    let place = Place::new("with-folder");
+    let path = local_notebook(&place, "a.jl");
+    let mut front = place.front();
+    front.initialize();
+    let joined = front.ok("open_notebook", json!({ "path": "a.jl" }));
+    assert_eq!((joined["already_open"].clone(), joined["path"].as_str()), (json!(true), Some(path.as_str())), "{joined}");
+    assert!(read_record(&place.local_state)["folder"].as_str().is_some());
     front.finish();
 }

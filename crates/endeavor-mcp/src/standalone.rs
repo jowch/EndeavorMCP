@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 
 use crate::http::Head;
 use crate::mcp::to_json;
+use crate::notebooks::Folder;
 use crate::paths::Env;
 use crate::runtime::{self, Ended, Hooks, Looked, Outcome, Up, Waiting, Want};
 use crate::{Args, Launcher, embedded, julia, stopped};
@@ -46,6 +47,7 @@ const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Julia here and print 
 
 options:
   --folder DIR         where new notebooks go (default: the current folder)
+  --no-folder          the agent is not told a project folder: its notebook paths must be absolute [mcp]
   --port PORT          the port to listen on, on 127.0.0.1 (default: a free one) [serve, mcp]
   --host-tools         give every agent session list_folder, read_file and run_shell here [serve]
   --skills plugin      the agent has Endeavor's skills from its plugin [mcp]
@@ -82,8 +84,8 @@ pub(crate) struct Options {
     julia: julia::Source,
     /// JULIA_DEPOT_PATH.
     depot: String,
-    /// Where notebooks are created, and relative paths start.
-    folder: PathBuf,
+    /// Where notebooks are created, and relative paths start; none for `--no-folder`.
+    folder: Option<PathBuf>,
     /// The runtime's port; 0 picks a free one.
     port: u16,
     /// Every MCP session gets the host tools (`serve` only).
@@ -96,7 +98,7 @@ pub(crate) struct Options {
 pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     let (command, rest) = argv.split_first().ok_or("expected serve, mcp, stop or status")?;
     let (mut state_dir, mut julia, mut depot, mut folder, mut port) = (None, None::<julia::Source>, None, None, 0);
-    let (mut host_tools, mut idle_hours, mut skills_plugin, mut json, mut force) = (false, crate::notebooks::IDLE_HOURS, false, false, false);
+    let (mut host_tools, mut idle_hours, mut skills_plugin, mut json, mut force, mut no_folder) = (false, crate::notebooks::IDLE_HOURS, false, false, false, false);
     let mut args = rest.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or(format!("{arg} needs a value"));
@@ -119,6 +121,10 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
             "--folder" => {
                 only(&["serve", "mcp"])?;
                 folder = Some(PathBuf::from(value()?))
+            }
+            "--no-folder" => {
+                only(&["mcp"])?;
+                no_folder = true
             }
             "--port" => {
                 only(&["serve", "mcp"])?;
@@ -157,9 +163,11 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
         _ => {}
     }
     let folder = match folder {
-        Some(folder) if folder.is_relative() => env.cwd.join(folder),
-        Some(folder) => folder,
-        None => env.cwd.clone(),
+        Some(_) if no_folder => return Err("give one of --folder and --no-folder".into()),
+        Some(folder) if folder.is_relative() => Some(env.cwd.join(folder)),
+        Some(folder) => Some(folder),
+        None if no_folder => None,
+        None => Some(env.cwd.clone()),
     };
     let options = Options {
         state_dir,
@@ -365,7 +373,11 @@ const OLDER_RUNTIME_HERE: &str = "The Julia running here was started by an older
 
 /// The core's environment for a standalone runtime (see `core::main`).
 fn core_env(options: &Options, exit_idle: bool) -> Vec<(&'static str, String)> {
-    let mut env = vec![("ENDEAVOR_FOLDER", options.folder.display().to_string()), ("ENDEAVOR_IDLE_HOURS", options.idle_hours.to_string())];
+    let mut env = vec![("ENDEAVOR_IDLE_HOURS", options.idle_hours.to_string())];
+    match &options.folder {
+        Some(folder) => env.push(("ENDEAVOR_FOLDER", folder.display().to_string())),
+        None => env.push(("ENDEAVOR_NO_FOLDER", "1".into())),
+    }
     if options.port != 0 {
         env.push(("ENDEAVOR_PORT", options.port.to_string()));
     }
@@ -463,7 +475,8 @@ pub(crate) struct Connection<'a> {
     pub token: &'a str,
     /// This machine, as `ssh` from the user's computer names it (its host name).
     pub node: &'a str,
-    pub folder: &'a str,
+    /// None for a runtime started without one: agents give absolute paths.
+    pub folder: Option<&'a str>,
     /// In a Slurm job, the login node it was submitted from (`SLURM_SUBMIT_HOST`).
     pub login: Option<&'a str>,
 }
@@ -478,8 +491,9 @@ pub(crate) fn connection_text(c: &Connection) -> String {
     if let Some(login) = c.login.filter(|login| login != node) {
         ssh = format!("    ssh -J {login} -L {port}:localhost:{port} {node}\n(This is a cluster's compute node: the jump goes through the login node, {login}; use the name you ssh to.)\n");
     }
+    let folder = folder.map_or("New notebooks need an absolute path: this runtime has no notebooks folder.".to_owned(), |folder| format!("New notebooks go in {folder}."));
     format!(
-        "Endeavor's notebooks are running on {node}, port {port}. New notebooks go in {folder}.
+        "Endeavor's notebooks are running on {node}, port {port}. {folder}
 
 Open them in a browser:
     http://localhost:{port}/?token={token}
@@ -612,14 +626,18 @@ fn serve(options: Options) -> ! {
         std::process::exit(1)
     });
     let dir = &options.state_dir;
-    let folder = recorded_folder(dir).unwrap_or_else(|| options.folder.display().to_string());
+    let started_with = options.folder.as_ref().map(|folder| folder.display().to_string());
+    let folder = recorded_folder(dir).or_else(|| started_with.clone());
     if !up.started {
         eprintln!("Julia was already running from {} (pid {}); using it as it was started.", dir.display(), up.state.pid);
         if options.port != 0 && options.port != up.port {
             eprintln!("It listens on port {}, not {}. To change that, stop it first (`endeavor stop`).", up.port, options.port);
         }
-        if folder != options.folder.display().to_string() {
-            eprintln!("Its notebooks folder is {folder}.");
+        if folder != started_with {
+            match &folder {
+                Some(folder) => eprintln!("Its notebooks folder is {folder}."),
+                None => eprintln!("It has no notebooks folder: agents give absolute paths."),
+            }
         }
         if let Some(message) = other_build(dir) {
             eprintln!("{message}");
@@ -627,7 +645,7 @@ fn serve(options: Options) -> ! {
     }
     let login = std::env::var("SLURM_SUBMIT_HOST").ok().filter(|_| std::env::var_os("SLURM_JOB_ID").is_some());
     let node = crate::hostname();
-    print!("\n{}", connection_text(&Connection { port: up.port, token: &up.state.token, node: &node, folder: &folder, login: login.as_deref() }));
+    print!("\n{}", connection_text(&Connection { port: up.port, token: &up.state.token, node: &node, folder: folder.as_deref(), login: login.as_deref() }));
     if up.started {
         println!("Press Ctrl-C to stop Julia.");
     } else {
@@ -728,7 +746,7 @@ fn relay(options: Options) -> ! {
 impl Relay {
     fn new(options: Options, session: String, out: Box<dyn Write + Send>) -> Relay {
         Relay {
-            target: Mutex::new(Target::local(&options.folder)),
+            target: Mutex::new(Target::local(options.folder.as_deref())),
             local: Arc::new(Local::new(options.clone())),
             options,
             session,
@@ -763,9 +781,13 @@ impl Relay {
     }
 
     /// Give the runtime on `port` this session's folder, which is `folder` there: the
-    /// runtime may have been started from another folder.
-    fn tell_session_folder(&self, port: u16, token: &str, folder: &str) {
-        let params = json!({ "owner": self.session, "folder": folder });
+    /// runtime may have been started from another folder. With none, the session is told it has no
+    /// project folder, so that relative paths are refused.
+    fn tell_session_folder(&self, port: u16, token: &str, folder: Option<&str>) {
+        let params = match folder {
+            Some(folder) => json!({ "owner": self.session, "folder": folder }),
+            None => json!({ "owner": self.session, "no_folder": true }),
+        };
         if let Err(e) = Relay::tell(port, token, "endeavor/set_session_folder", params, None) {
             eprintln!("endeavor: couldn't give the runtime this session's folder: {e}");
         }
@@ -812,13 +834,21 @@ impl Relay {
         }
         // The front lists the tools of its own build, so it checks every call against that, whether or
         // not a runtime is up; the runtime checks against its own.
-        if let Some(tool) = tool.as_deref()
-            && let Err(result) = crate::mcp::checked_call(&message["params"], help, true)
-        {
-            if id.is_some() {
-                self.answer_call(&message, Some(tool), result);
+        if let Some(tool) = tool.as_deref() {
+            let checked = crate::mcp::checked_call(&message["params"], help, true).and_then(|(_, arguments)| {
+                // A path the runtime would refuse is refused here, before a runtime is started for it.
+                let unknown = target.is_local() && target.folder.is_none();
+                match crate::notebooks::path_refusal(tool, &arguments, &if unknown { Folder::Unknown } else { Folder::Process }) {
+                    Some(refusal) => Err(crate::mcp::tool_error(&refusal, false)),
+                    None => Ok(()),
+                }
+            });
+            if let Err(result) = checked {
+                if id.is_some() {
+                    self.answer_call(&message, Some(tool), result);
+                }
+                return;
             }
-            return;
         }
         // Only a call of a tool this build has starts a runtime.
         if !self.held(&target).is_some_and(|provider| provider.status().state == crate::client::State::Ready) {

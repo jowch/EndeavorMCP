@@ -20,6 +20,7 @@ The notebook is reactive. Running a cell also runs every cell that depends on it
 
 - **Engine.** Each engine limits what one cell may hold, and code that would be fine in a script fails. Read the engine's reference before you write a cell. Pluto (Julia, `.jl`): [reference/pluto.md](reference/pluto.md).
 - **Host.** You are in the Endeavor app unless the server's instructions say the notebooks run without it. In the app, read [reference/app.md](reference/app.md): prompts name the notebook, and the user approves runs. Without the app, skip it; `new_notebook` and `open_notebook` return `browser_url`, which you give to the user so they can watch.
+- **Paths.** If a tool says the server was not told the project folder, give absolute paths: your working folder plus the file name.
 - **On a server.** When the notebook runs on a server, its files are there. Use `list_folder`, `read_file` and `run_shell` for them; your own file tools see the user's computer, and may find a copy of the project there and show no error.
 
 ## One notebook per session

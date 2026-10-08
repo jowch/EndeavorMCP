@@ -872,7 +872,7 @@ One plugin per harness with the same content: the skills, the launcher and one
 stdio entry that runs it. `claude-plugin/` is checked live with the launcher
 replaced by `ENDEAVOR_BIN`. `antigravity-plugin/` is built to what its
 documentation says and tried on no real install. `codex-plugin/` was installed
-and does not work yet (below).
+from a local copy of the repository and used through `codex exec` (below).
 
 | | Claude Code | Codex | Antigravity |
 |---|---|---|---|
@@ -881,8 +881,8 @@ and does not work yet (below).
 | Command | `sh ${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh ${PLUGIN_ROOT}/launch/endeavor-mcp.sh …` (expanded in `args`) | `sh -c` that finds the plugin in `~/.gemini/antigravity-cli/plugins/endeavor` and runs the launcher |
 | Skills | `skills/` (a copy) | `skills/` (a copy) | `skills/` (a copy) |
 | Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
-| Install | `claude plugin marketplace add`, `claude plugin install` | a marketplace file `.agents/plugins/marketplace.json` (the repo has none), `codex plugin marketplace add`, `codex plugin add endeavor@endeavor` | `agy plugin install <folder>` |
-| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `mcp` starts in the plugin's cache folder and Codex gives no project variable | the folder `mcp` starts in (from documentation) |
+| Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add`, `codex plugin add endeavor@endeavor`, from `.agents/plugins/marketplace.json` | `agy plugin install <folder>` |
+| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable, so notebook paths must be absolute | the folder `mcp` starts in (from documentation) |
 
 Each plugin folder holds `launch/endeavor-mcp.sh`, `launch/install.sh` and
 `launch/release-key`. The command is `sh` with the script as its argument, so
@@ -909,16 +909,22 @@ others use, and no variable is assumed. Not tried.
 was the documentation used to build the folder):
 
 - `codex plugin marketplace add <repo>` reads `.claude-plugin/marketplace.json`
-  and so offers the Claude plugin. A file `.agents/plugins/marketplace.json`
-  naming `./codex-plugin`, then `codex plugin add endeavor@endeavor`, installs
-  the folder into Codex's `plugins/cache/` and lists its three skills to the
-  model. The repo has no such file.
+  if that is the only marketplace file, and so offers the Claude plugin. With
+  both it and `.agents/plugins/marketplace.json` in the folder, Codex used the
+  `.agents` one: `codex plugin list` showed `endeavor@endeavor` with the source
+  `./codex-plugin`. `codex plugin add endeavor@endeavor` installs the folder into
+  Codex's `plugins/cache/` and lists its three skills to the model. The repo
+  has the `.agents` file. The `owner/repo` form of `marketplace add` is in
+  `--help`; only a local folder was run.
 - Codex expands `${PLUGIN_ROOT}` in `args` and sets `PLUGIN_ROOT` and
   `PLUGIN_DATA` in the environment. It starts the server with the plugin's
   cache folder as its working folder, gives it no variable naming the project,
   and allows a plugin entry's `cwd` only inside the plugin. A relative path
   such as `trial.jl` was looked for in the cache folder; absolute paths worked.
-  So `mcp` cannot find the project folder.
+  So `mcp` cannot find the project folder, and the entry passes `--no-folder`
+  (see [`--no-folder`](endeavor-mcp.md)). Each `tools/call` carries
+  `_meta["x-codex-turn-metadata"].workspaces`, an object whose keys are workspace
+  paths; it is undocumented and not used.
 - Codex does not pass its own environment to a plugin's server (`ENDEAVOR_BIN`
   and `XDG_*` from the shell were absent); an `env` object in the entry is
   passed.
@@ -934,6 +940,16 @@ was the documentation used to build the folder):
   the server has `default_tools_approval_mode = "approve"`; read-only tools ran
   without it.
 - `codex-plugin/` has no hooks, so nothing fetches the binary early.
+- With the plugin installed under a separate `CODEX_HOME` (its entry given an
+  `env`), two `codex exec` runs in a folder outside any git repository created
+  `hello.jl` there and reopened it. The first run's agent read the skills
+  and gave an absolute path at once: `new_notebook`, `edit_cell`,
+  `submit_changes` and `read_cell`, four calls. The second used `open_notebook`
+  (`already_open`: the runtime had survived), `edit_cell`, `submit_changes` and
+  `read_cell`. A third run told to open `hello.jl` as a relative path got
+  `invalid_path` ("Give an absolute path: this server was not told the project
+  folder.") and retried with the absolute path. Nothing was created in the
+  plugin's cache folder.
 
 Still from documentation or not tried: Codex's job object on Windows,
 subagents, the tool timeout (default 60 s), interactive `codex` (where the
@@ -1008,8 +1024,8 @@ agents).
    (built; the workflow's new rows and the PowerShell script are unrun, see
    [gaps.md](gaps.md)).
 6. The plugin gets the binary itself: the launcher, the Claude Code plugin
-   using it, the Codex plugin folder (installed in a trial; it does not find the
-   project folder) and the Antigravity one (built to its documentation and
+   using it, the Codex plugin folder (used in a trial through
+   `codex exec`, with absolute paths only) and the Antigravity one (built to its documentation and
    unverified), the `endeavor-setup` skill, and `endeavor update` leaving a
    plugin's binary alone. The pinned key is set after the first release from
    `main`.

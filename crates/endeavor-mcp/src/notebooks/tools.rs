@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use super::{Change, GraphQuery, Notebooks, Snapshot, absolute_path, canonical_path, uuid_value};
+use super::{Change, Folder, GraphQuery, Notebooks, Snapshot, absolute_path, canonical_path, uuid_value};
 use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
 
@@ -45,7 +45,7 @@ impl Notebooks {
     /// error Julia raised for it. `folder` is the session's working folder,
     /// where `new_notebook` puts notebooks and relative paths start. `began` is
     /// when the call arrived, which a waited run's cap counts from.
-    pub fn tool(&self, owner: &str, name: &str, args: &Value, folder: Option<&str>, began: Instant) -> Result<Reply, String> {
+    pub fn tool(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant) -> Result<Reply, String> {
         let t = Call { nbs: self, owner, args, began };
         let result = match name {
             "list_notebooks" => t.list_notebooks(),
@@ -91,7 +91,7 @@ impl Notebooks {
 
     /// An edit that was to run after (`run_after`), when the user chose not
     /// to run it: the edit is made, staged and not run, and its receipt says why.
-    pub fn tool_unrun(&self, owner: &str, name: &str, args: &Value, folder: Option<&str>, began: Instant) -> Result<Reply, String> {
+    pub fn tool_unrun(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant) -> Result<Reply, String> {
         let mut args = args.clone();
         args["run_after"] = false.into();
         let mut reply = self.tool(owner, name, &args, folder, began)?;
@@ -895,7 +895,7 @@ impl Call<'_> {
         Ok(Value::Array(found))
     }
 
-    fn open_notebook(&self, folder: Option<&str>) -> Result<Value, String> {
+    fn open_notebook(&self, folder: &Folder) -> Result<Value, String> {
         let path = match self.args.get("path") {
             None | Some(Value::Null) => return Err(argument_error("invalid_path::path is required")),
             Some(Value::String(path)) => path,
@@ -945,19 +945,16 @@ impl Call<'_> {
         })))
     }
 
-    fn new_notebook(&self, folder: Option<&str>) -> Result<Value, String> {
+    fn new_notebook(&self, folder: &Folder) -> Result<Value, String> {
         let params = match self.args.get("path").filter(|p| !p.is_null()) {
-            None => match folder.filter(|f| std::path::Path::new(f).is_dir()) {
+            None => match folder {
+                Folder::Unknown => return Err(super::folder_unknown()),
                 // Pluto's own naming, like "Create a new notebook", in the session's folder.
-                Some(folder) => json!({ "folder": folder }),
-                None => json!({}),
+                Folder::In(folder) if std::path::Path::new(folder).is_dir() => json!({ "folder": folder }),
+                _ => json!({}),
             },
             Some(Value::String(requested)) => {
-                let expanded = super::expand_user(requested)?;
-                let path = match folder {
-                    Some(folder) if !super::is_absolute(&expanded) => absolute_path(&format!("{folder}/{expanded}"))?,
-                    _ => absolute_path(&expanded)?,
-                };
+                let path = absolute_path(&super::requested_path(requested, folder)?)?;
                 if !path.ends_with(".jl") {
                     return Err(argument_error(&format!("invalid_path::Notebook path must end in .jl: '{path}'")));
                 }

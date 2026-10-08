@@ -32,7 +32,7 @@ use crate::asks::{Answer, Ask, Outcome};
 use crate::guide;
 use crate::host_tools;
 use crate::http::{self, Head};
-use crate::notebooks::{self, IDLE_HOURS, Julia, Notebooks, Reply};
+use crate::notebooks::{self, Folder, IDLE_HOURS, Julia, Notebooks, Reply};
 use crate::results::Results;
 
 /// Protocol versions this server understands, most recent first: `initialize`
@@ -111,8 +111,9 @@ pub struct Standalone {
     /// The runtime's one port, which the user's browser reaches as
     /// `localhost` (here, or through `ssh -L` with the same port).
     pub port: u16,
-    /// Where notebooks go for a session the app gave no folder.
-    pub folder: String,
+    /// Where notebooks go for a session the app gave no folder; none when the runtime was started
+    /// without one, and such a session is not told where relative paths start.
+    pub folder: Option<String>,
     /// Host tools for every session, as on this host (`--host-tools`), for an
     /// agent on another machine.
     pub host: Option<String>,
@@ -131,8 +132,9 @@ pub struct Bridge {
     pub token: String,
     /// Each agent session's policy, by its key.
     policies: Mutex<HashMap<String, Policy>>,
-    /// Each agent session's working folder on this machine, by its key.
-    folders: Mutex<HashMap<String, String>>,
+    /// Each agent session's working folder on this machine, by its key; none is a session that was
+    /// told it has no project folder.
+    folders: Mutex<HashMap<String, Option<String>>>,
     /// Each agent session's last tool results, for the app to look up.
     results: Results,
     /// `run_shell`'s environment, changed from ours as Julia's was: its
@@ -191,6 +193,7 @@ impl Bridge {
             ("ENDEAVOR_BUILD", None),
             ("ENDEAVOR_PORT", None),
             ("ENDEAVOR_FOLDER", None),
+            ("ENDEAVOR_NO_FOLDER", None),
             ("ENDEAVOR_HOST_TOOLS", None),
             ("ENDEAVOR_IDLE_HOURS", None),
             ("ENDEAVOR_EXIT_IDLE", None),
@@ -209,10 +212,16 @@ impl Bridge {
         }
     }
 
-    /// A session's working folder: the one the app gave, else the standalone runtime's.
-    fn folder(&self, owner: &str) -> Option<String> {
-        let given = self.folders.lock().unwrap().get(owner).cloned();
-        given.or_else(|| self.standalone.as_ref().map(|s| s.folder.clone()))
+    /// A session's working folder: the one it was given, else the standalone runtime's.
+    fn folder(&self, owner: &str) -> Folder {
+        match self.folders.lock().unwrap().get(owner) {
+            Some(Some(dir)) => Folder::In(dir.clone()),
+            Some(None) => Folder::Unknown,
+            None => match &self.standalone {
+                Some(standalone) => standalone.folder.clone().map_or(Folder::Unknown, Folder::In),
+                None => Folder::Process,
+            },
+        }
     }
 
     /// The reply to one of the app's `/call`s, if the core answers it; `None`
@@ -281,10 +290,12 @@ impl Bridge {
             "endeavor/set_session_folder" => {
                 let (owner, folder) = (text("owner", ""), params.get("folder").filter(|f| !f.is_null()).map_or(String::new(), julia_string));
                 let mut folders = self.folders.lock().unwrap();
-                if folder.is_empty() {
+                if params["no_folder"] == true {
+                    folders.insert(owner, None);
+                } else if folder.is_empty() {
                     folders.remove(&owner);
                 } else {
-                    folders.insert(owner, folder);
+                    folders.insert(owner, Some(folder));
                 }
             }
             "endeavor/tool_result" => {
@@ -302,7 +313,7 @@ impl Bridge {
             "endeavor/new_notebook" => {
                 let owner = text("owner", "");
                 let folder = self.folder(&owner);
-                return Some(answer(self.notebooks.new_for(&owner, folder.as_deref())));
+                return Some(answer(self.notebooks.new_for(&owner, &folder)));
             }
             method if JULIA_CALLS.contains(&method) => return None,
             _ => return Some(self.dispatch(&message, &Caller::default(), &|| false).unwrap_or_else(|| "{}".into())),
@@ -355,12 +366,16 @@ impl Bridge {
             Err(result) => return result,
         };
         // A refusal answers first: a call that can never run is not told to fix its arguments. A call
-        // with the wrong arguments runs nothing and is not the session's activity.
+        // with the wrong arguments, or a relative path the session cannot resolve, runs nothing and is
+        // not the session's activity.
         let refusal = self.refusal(caller, name, &arguments);
-        if refusal.is_none()
-            && let Err(result) = check_arguments(name, &arguments, help)
-        {
-            return result;
+        if refusal.is_none() {
+            if let Err(result) = check_arguments(name, &arguments, help) {
+                return result;
+            }
+            if let Some(why) = notebooks::path_refusal(name, &arguments, &self.folder(&caller.owner)) {
+                return tool_error(&why, false);
+            }
         }
         self.notebooks.note_call(&caller.owner);
         self.notebooks.note_activity(&arguments);
@@ -379,7 +394,7 @@ impl Bridge {
             }
             let folder = self.folder(&caller.owner);
             let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
-            return match host_tools::call(name, &arguments, &host_tools::Shell { folder: folder.as_deref(), env: &env }) {
+            return match host_tools::call(name, &arguments, &host_tools::Shell { folder: folder.dir(), env: &env }) {
                 Ok(result) => text(&result),
                 Err(error) => tool_error(&error, false),
             };
@@ -388,7 +403,7 @@ impl Bridge {
             return self.notebooks.keep_alive(&arguments).map_or_else(|e| tool_error(&e, help), |r| text(&r));
         }
         let folder = self.folder(&caller.owner);
-        if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments, folder.as_deref()) {
+        if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments, &folder) {
             return tool_error(&refusal, help);
         }
         let run = match self.ask_first(call, name, &arguments) {
@@ -396,9 +411,9 @@ impl Bridge {
             Err(result) => return result,
         };
         let reply = if run {
-            self.notebooks.tool(&caller.owner, name, &arguments, folder.as_deref(), call.began)
+            self.notebooks.tool(&caller.owner, name, &arguments, &folder, call.began)
         } else {
-            self.notebooks.tool_unrun(&caller.owner, name, &arguments, folder.as_deref(), call.began)
+            self.notebooks.tool_unrun(&caller.owner, name, &arguments, &folder, call.began)
         };
         match reply {
             Ok(Reply::Json(mut result)) => {

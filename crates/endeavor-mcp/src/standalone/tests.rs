@@ -26,7 +26,7 @@ fn serve_without_flags_uses_this_folder_and_per_host_state() {
             cache: PathBuf::from("/home/ada/.cache/endeavor/serve"),
             julia: julia::Source::Auto,
             depot: "/home/ada/.cache/endeavor/depot:".into(),
-            folder: PathBuf::from("/home/ada/project"),
+            folder: Some(PathBuf::from("/home/ada/project")),
             port: 0,
             host_tools: false,
             idle_hours: 48.0,
@@ -46,16 +46,30 @@ fn flags_set_what_they_name() {
     let Ok(Command::Serve(o)) = parsed("serve --port 8456 --folder data --host-tools --idle-stop 0 --julia /opt/julia/bin/julia --depot /d: --state-dir /s") else {
         panic!()
     };
-    assert_eq!((o.port, o.folder, o.host_tools, o.idle_hours), (8456, PathBuf::from("/home/ada/project/data"), true, 0.0));
+    assert_eq!((o.port, o.folder, o.host_tools, o.idle_hours), (8456, Some(PathBuf::from("/home/ada/project/data")), true, 0.0));
     assert_eq!((o.julia, o.depot.as_str(), o.state_dir), (julia::Source::Path("/opt/julia/bin/julia".into()), "/d:", PathBuf::from("/s")));
     let shell = parse(&["mcp", "--julia-shell", "module load julia", "--skills", "plugin", "--folder", "/abs"].map(String::from), &env());
     let Ok(Command::Mcp(o)) = shell else { panic!() };
-    assert_eq!((o.julia, o.skills_plugin, o.folder), (julia::Source::Shell("module load julia".into()), true, PathBuf::from("/abs")));
+    assert_eq!((o.julia, o.skills_plugin, o.folder), (julia::Source::Shell("module load julia".into()), true, Some(PathBuf::from("/abs"))));
     assert_eq!(parsed("stop --state-dir /s").unwrap(), Command::Stop { state_dir: PathBuf::from("/s"), force: false });
     assert_eq!(parsed("stop --force --state-dir /s").unwrap(), Command::Stop { state_dir: PathBuf::from("/s"), force: true });
     assert!(parsed("status --force").unwrap_err().contains("--force isn't an option of status"));
     assert_eq!(parsed("status --json --state-dir /s").unwrap(), Command::Status { state_dir: PathBuf::from("/s"), json: true });
     assert!(matches!(parsed("status").unwrap(), Command::Status { json: false, .. }));
+}
+
+#[test]
+fn no_folder_leaves_the_session_without_a_project_folder() {
+    let Ok(Command::Mcp(o)) = parsed("mcp --no-folder --skills plugin") else { panic!() };
+    assert_eq!(o.folder, None, "not the current folder");
+    let Ok(Command::Mcp(o)) = parsed("mcp --skills plugin") else { panic!() };
+    assert_eq!(o.folder, Some(PathBuf::from("/home/ada/project")), "the default is unchanged");
+    assert_eq!(parsed("mcp --no-folder --folder /abs").unwrap_err(), "give one of --folder and --no-folder");
+    assert_eq!(parsed("mcp --folder /abs --no-folder").unwrap_err(), "give one of --folder and --no-folder");
+    assert_eq!(parsed("serve --no-folder").unwrap_err(), "--no-folder isn't an option of serve");
+    assert_eq!(parsed("stop --no-folder").unwrap_err(), "--no-folder isn't an option of stop");
+    let env = core_env(&parse(&["mcp", "--no-folder"].map(String::from), &env()).map(|c| match c { Command::Mcp(o) => o, _ => panic!() }).unwrap(), false);
+    assert!(env.contains(&("ENDEAVOR_NO_FOLDER", "1".to_owned())) && !env.iter().any(|(name, _)| *name == "ENDEAVOR_FOLDER"), "{env:?}");
 }
 
 #[test]
@@ -76,7 +90,7 @@ fn flags_that_dont_apply_are_refused() {
 
 #[test]
 fn connection_details_on_a_workstation() {
-    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: "/home/ada/project", login: None });
+    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: Some("/home/ada/project"), login: None });
     assert_eq!(
         text,
         r#"Endeavor's notebooks are running on lab3, port 8456. New notebooks go in /home/ada/project.
@@ -111,15 +125,21 @@ The token lets anyone who has it run code as you. Keep it to yourself.
 }
 
 #[test]
+fn a_runtime_without_a_folder_says_so_where_the_folder_would_be() {
+    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: None, login: None });
+    assert!(text.starts_with("Endeavor's notebooks are running on lab3, port 8456. New notebooks need an absolute path: this runtime has no notebooks folder.\n\nOpen them"), "{text}");
+}
+
+#[test]
 fn on_a_compute_node_the_tunnel_jumps_through_the_login_node() {
-    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "n2cn0216", folder: "/u/ada", login: Some("login2") });
+    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "n2cn0216", folder: Some("/u/ada"), login: Some("login2") });
     let forward = "From another computer, forward the port first:
     ssh -J login2 -L 8456:localhost:8456 n2cn0216
 (This is a cluster's compute node: the jump goes through the login node, login2; use the name you ssh to.)
 
 Connect";
     assert!(text.contains(forward), "{text}");
-    let one_machine = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: "/u/ada", login: Some("lab3") });
+    let one_machine = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: Some("/u/ada"), login: Some("lab3") });
     assert!(one_machine.contains("first:\n    ssh -L 8456:localhost:8456 lab3\n\nConnect"), "a job on the login node itself: {one_machine}");
 }
 
@@ -419,11 +439,16 @@ fn a_notification_is_passed_on_and_gets_no_answer() {
     assert_eq!(seen.lock().unwrap()[0].1, r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#);
     assert!(out.lines().is_empty());
     relay.handle("not json");
-    relay.tell_session_folder(port, "t0k", &relay.options.folder.display().to_string());
-    let (head, body) = &seen.lock().unwrap()[1];
-    assert_eq!(head.target(), "/endeavor/call");
-    assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/set_session_folder","params":{"folder":"/home/ada/project","owner":"stdio-7"}}"#);
+    relay.tell_session_folder(port, "t0k", relay.options.folder.as_ref().and_then(|folder| folder.to_str()));
+    {
+        let (head, body) = &seen.lock().unwrap()[1];
+        assert_eq!(head.target(), "/endeavor/call");
+        assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/set_session_folder","params":{"folder":"/home/ada/project","owner":"stdio-7"}}"#);
+    }
     assert_eq!(out.lines(), [r#"{"error":{"code":-32700,"message":"Parse error"},"id":null,"jsonrpc":"2.0"}"#]);
+    relay.tell_session_folder(port, "t0k", None);
+    let (_, body) = &seen.lock().unwrap()[2];
+    assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/set_session_folder","params":{"no_folder":true,"owner":"stdio-7"}}"#);
 }
 
 #[test]

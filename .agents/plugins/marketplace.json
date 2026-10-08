@@ -1,0 +1,10 @@
+{
+  "name": "endeavor",
+  "plugins": [
+    {
+      "name": "endeavor",
+      "source": "./codex-plugin",
+      "description": "Live Pluto (Julia) notebooks your agent edits and runs, which you watch in a browser."
+    }
+  ]
+}

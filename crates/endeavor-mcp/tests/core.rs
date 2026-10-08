@@ -499,6 +499,99 @@ fn a_call_with_arguments_the_tool_does_not_take_is_refused_and_is_not_the_sessio
     assert!(ago() < 2);
 }
 
+/// The engine calls the core made, by method and parameters.
+fn engine_calls(bridge: &FakeBridge) -> Vec<(String, serde_json::Value)> {
+    let calls = bridge.seen().into_iter().filter(|s| s.line.starts_with("POST /adapter"));
+    calls.map(|s| serde_json::from_slice::<serde_json::Value>(&s.body).unwrap()).map(|c| (c["method"].as_str().unwrap().to_owned(), c["params"].clone())).collect()
+}
+
+const NO_FOLDER: &str = "Give an absolute path: this server was not told the project folder.";
+
+#[test]
+fn a_runtime_without_a_folder_refuses_relative_paths_before_anything_is_asked_or_counted() {
+    let dir = state_dir("core-no-folder");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_NO_FOLDER", "1")]);
+    assert_eq!(read_json(&dir.join("runtime.json")).get("folder"), None, "no notebooks folder is recorded");
+    assert!(!bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")), "Pluto is not given one");
+
+    let folder = temp_folder("core-no-folder-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let mut open = notebook("aaaaaaaa-0000-0000-0000-000000000001", "x = 1");
+    open["path"] = path.as_str().into();
+    bridge.set_notebooks(vec![open]);
+
+    let send = |session: &str, id: u32, name: &str, arguments: serde_json::Value| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        mcp(&core, &message.to_string(), &[("X-Endeavor-Session", session)]).1
+    };
+    let asked = |method: &str| engine_calls(&bridge).into_iter().filter(|(m, _)| m == method).count();
+    let relative = [("open_notebook", serde_json::json!({ "path": "a.jl" })), ("new_notebook", serde_json::json!({ "path": "b.jl" })), ("new_notebook", serde_json::json!({ "path": "sub/../b.jl" })), ("new_notebook", serde_json::json!({}))];
+    for (id, (name, arguments)) in (1..).zip(relative.clone()) {
+        assert_eq!(send("s1", id, name, arguments), tool_error(id, "invalid_path", NO_FOLDER), "{name}");
+    }
+    assert_eq!((asked("open"), asked("new")), (0, 0), "the engine was asked nothing");
+
+    // An absolute path goes through.
+    let made = folder.join("made.jl").display().to_string();
+    send("s1", 10, "new_notebook", serde_json::json!({ "path": made }));
+    let (_, params) = engine_calls(&bridge).into_iter().find(|(m, _)| m == "new").expect("the engine was asked for the notebook");
+    assert_eq!(params["path"], made.as_str());
+    assert!(!std::path::Path::new(&made).exists());
+    let joined: serde_json::Value = serde_json::from_str(&send("s2", 11, "open_notebook", serde_json::json!({ "path": path }))).unwrap();
+    assert!(joined["result"]["content"][0]["text"].as_str().unwrap().contains(r#""already_open":true"#), "{joined}");
+
+    // A session that is told a folder has relative paths; one that is told it has none is refused, whatever the runtime's own folder.
+    let tell = |body: serde_json::Value| app_call(&core, &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": body }).to_string());
+    tell(serde_json::json!({ "owner": "s3", "folder": folder }));
+    let joined = send("s3", 12, "open_notebook", serde_json::json!({ "path": "a.jl" }));
+    assert!(joined.contains(r#"already_open\":true"#), "{joined}");
+    assert_eq!(send("s1", 13, "open_notebook", serde_json::json!({ "path": "a.jl" })), tool_error(13, "invalid_path", NO_FOLDER), "the other session still has none");
+    tell(serde_json::json!({ "owner": "s3", "no_folder": true }));
+    assert_eq!(send("s3", 14, "open_notebook", serde_json::json!({ "path": "a.jl" })), tool_error(14, "invalid_path", NO_FOLDER));
+    tell(serde_json::json!({ "owner": "s3", "folder": null }));
+    assert_eq!(send("s3", 15, "open_notebook", serde_json::json!({ "path": "a.jl" })), tool_error(15, "invalid_path", NO_FOLDER), "forgetting a folder leaves the runtime's, which is none");
+
+    // A refused call is not the session's activity.
+    send("s4", 20, "open_notebook", serde_json::json!({ "path": path }));
+    std::thread::sleep(Duration::from_millis(2100));
+    let ago = || {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/recent_sessions", "params": { "owner": "", "within_seconds": 900 } });
+        serde_json::from_str::<serde_json::Value>(&app_call(&core, &body.to_string())).unwrap()["result"]["active_seconds_ago"].as_u64().unwrap()
+    };
+    send("s4", 21, "open_notebook", serde_json::json!({ "path": "a.jl" }));
+    send("s4", 22, "new_notebook", serde_json::json!({}));
+    assert!(ago() >= 2, "a refused call counted as activity");
+    send("s4", 23, "list_notebooks", serde_json::json!({}));
+    assert!(ago() < 2);
+}
+
+#[test]
+fn a_session_told_it_has_no_folder_is_refused_in_a_runtime_that_has_one() {
+    let dir = state_dir("core-no-folder-session");
+    let bridge = FakeBridge::start(&dir);
+    let folder = temp_folder("core-no-folder-session-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let mut open = notebook("aaaaaaaa-0000-0000-0000-000000000001", "x = 1");
+    open["path"] = path.as_str().into();
+    bridge.set_notebooks(vec![open]);
+    let core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_FOLDER", folder.to_str().unwrap())]);
+    let send = |session: &str, id: u32, name: &str, arguments: serde_json::Value| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        mcp(&core, &message.to_string(), &[("X-Endeavor-Session", session)]).1
+    };
+    let tell = |body: serde_json::Value| app_call(&core, &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": body }).to_string());
+    assert!(send("a", 1, "open_notebook", serde_json::json!({ "path": "a.jl" })).contains(r#"already_open\":true"#), "the runtime's folder");
+    tell(serde_json::json!({ "owner": "b", "no_folder": true }));
+    assert_eq!(send("b", 2, "open_notebook", serde_json::json!({ "path": "a.jl" })), tool_error(2, "invalid_path", NO_FOLDER));
+    assert!(send("b", 3, "open_notebook", serde_json::json!({ "path": path })).contains(r#"already_open\":true"#));
+    assert!(send("c", 4, "open_notebook", serde_json::json!({ "path": "a.jl" })).contains(r#"already_open\":true"#), "another session keeps the runtime's folder");
+    tell(serde_json::json!({ "owner": "b", "folder": null }));
+    assert!(send("b", 5, "open_notebook", serde_json::json!({ "path": "a.jl" })).contains(r#"already_open\":true"#), "forgetting it gives the runtime's folder back");
+}
+
 #[test]
 fn serves_the_agents_mcp_messages() {
     let dir = state_dir("core-mcp");

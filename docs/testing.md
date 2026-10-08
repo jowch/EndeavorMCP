@@ -41,9 +41,16 @@ mkdir -p ~/endeavor-try && cd ~/endeavor-try
 claude --plugin-dir "$ENDEAVOR_PLUGIN"
 ```
 
-`ENDEAVOR_BIN` must be set in the shell that starts `claude`. Codex does not
-pass it to a plugin's server; put it in the entry's `env`. (The Codex trial gave
-the server with `-c 'mcp_servers.endeavor.command=...'`, not as a plugin.) Julia is found on
+`ENDEAVOR_BIN` must be set in the shell that starts `claude`. To try the Codex
+plugin, run Codex with `CODEX_HOME` set to a folder of your own (its `auth.json`
+a link to `~/.codex/auth.json`), add a copy of the repository as the marketplace
+and install the plugin from it. Edit the copy's `codex-plugin/mcp.json`: Codex
+passes no part of its own environment to a plugin's server, so give the entry an
+`env` with `ENDEAVOR_BIN` and the `XDG_*` folders, and add `--state-dir`,
+`--julia` and `--depot` to its `args`. Without that the launcher downloads into
+`~/.local/share/endeavor` and Julia into `~/.cache/endeavor`. In `codex exec`,
+set `default_tools_approval_mode` for the plugin's server in that
+`config.toml` (README). Julia is found on
 your `PATH`, or downloaded into `~/.cache/endeavor/` if there is none. The
 first notebook installs Julia packages into `~/.cache/endeavor/depot`, which
 takes a few minutes; the Endeavor app uses the same folder. Don't open a

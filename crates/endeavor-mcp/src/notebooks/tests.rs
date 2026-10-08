@@ -341,14 +341,14 @@ impl Setup {
 
     /// A tool call as the core makes it for `owner`: its result or error text.
     fn call(&self, owner: &str, tool: &str, arguments: Value) -> Result<Value, String> {
-        if let Some(refusal) = self.notebooks.refusal(owner, tool, &arguments, None) {
+        if let Some(refusal) = self.notebooks.refusal(owner, tool, &arguments, &Folder::Process) {
             return Err(refusal);
         }
         if tool == "keep_notebook_alive" {
             return self.notebooks.keep_alive(&arguments);
         }
         self.notebooks.note_activity(&arguments);
-        self.notebooks.tool(owner, tool, &arguments, None, Instant::now()).map(tool_json)
+        self.notebooks.tool(owner, tool, &arguments, &Folder::Process, Instant::now()).map(tool_json)
     }
 
     /// The kind of error a call failed with (`read_required`, ...).
@@ -546,14 +546,14 @@ fn an_edit_the_user_didnt_let_run_is_kept_staged() {
     s.read("7", NB, X);
     let before = runs();
     let edit = json!({ "notebook_id": NB, "cell_id": X, "code": "x = 2", "run_after": true });
-    let receipt = tool_json(s.notebooks.tool_unrun("7", "edit_cell", &edit, None, Instant::now()).unwrap());
+    let receipt = tool_json(s.notebooks.tool_unrun("7", "edit_cell", &edit, &Folder::Process, Instant::now()).unwrap());
     assert_eq!(s.engine.code(NB, X), "x = 2", "the edit is made");
     assert_eq!(runs(), before, "and not run");
     assert_eq!((&receipt["execution"]["status"], &receipt["pending_run"]), (&json!("staged"), &json!([X])));
     assert_eq!(receipt["warnings"], json!(["not_approved::The user chose not to run this yet. The edit is kept, staged and not run."]));
 
     let add = json!({ "notebook_id": NB, "after_cell_id": X, "code": "y = x", "run_after": true });
-    let receipt = tool_json(s.notebooks.tool_unrun("7", "add_cell", &add, None, Instant::now()).unwrap());
+    let receipt = tool_json(s.notebooks.tool_unrun("7", "add_cell", &add, &Folder::Process, Instant::now()).unwrap());
     assert_eq!((runs(), s.engine.order(NB).len()), (before, 2));
     assert_eq!(receipt["warnings"][0], "not_approved::The user chose not to run this yet. The edit is kept, staged and not run.");
 }
@@ -866,7 +866,7 @@ fn a_wait_has_a_floor_however_long_the_call_took_to_start() {
     // The user took 44 seconds, then a minute, to answer the approval card.
     for taken in [44, 60] {
         let began = Instant::now().checked_sub(Duration::from_secs(taken)).expect("a clock that has run that long");
-        s.notebooks.tool("", "execute_cell", &json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true }), None, began).unwrap();
+        s.notebooks.tool("", "execute_cell", &json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true }), &Folder::Process, began).unwrap();
         assert_eq!(s.engine.waits.lock().unwrap().last(), Some(&5.0), "after {taken} s");
     }
 }
@@ -1026,7 +1026,7 @@ fn search_code_cuts_snippets_as_julia_did() {
 fn view_cell_output_sends_the_png_the_engine_renders() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "plot(x)"), (Y, "y = 1")]);
-    let view = |cell: &str| s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": cell }), None, Instant::now());
+    let view = |cell: &str| s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": cell }), &Folder::Process, Instant::now());
     match view(X).unwrap() {
         Reply::Image { meta, png_base64 } => {
             assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/plain", "png_bytes": 4 }));
@@ -1086,9 +1086,9 @@ fn opening_and_making_notebooks() {
     assert_eq!(s.refused("", "new_notebook", json!({ "path": format!("{dir}{SEP}x.txt") })), "invalid_path");
     assert_eq!(s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}missing{SEP}y.jl") })), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}{SEP}missing'")));
     // A session's folder takes its unnamed notebooks, and relative paths.
-    let named = s.notebooks.tool("s", "new_notebook", &json!({ "path": "named.jl" }), Some(&dir), Instant::now()).map(tool_json).unwrap();
+    let named = s.notebooks.tool("s", "new_notebook", &json!({ "path": "named.jl" }), &Folder::In(dir.clone()), Instant::now()).map(tool_json).unwrap();
     assert_eq!(named["path"], format!("{dir}{SEP}named.jl"));
-    let unnamed = s.notebooks.tool("t", "new_notebook", &json!({}), Some(&dir), Instant::now()).map(tool_json).unwrap();
+    let unnamed = s.notebooks.tool("t", "new_notebook", &json!({}), &Folder::In(dir.clone()), Instant::now()).map(tool_json).unwrap();
     assert_eq!(unnamed["path"], format!("{dir}{SEP}made.jl"));
 }
 
@@ -1210,19 +1210,19 @@ fn one_notebook_per_session() {
     assert!(s.call("a", "open_notebook", json!({})).unwrap_err().contains("so it can't create another notebook."), "as Julia said it");
     // Its own notebook isn't refused, however it's written.
     let roundabout = format!("{first_nb}{SEP}..{SEP}{}", first_nb.rsplit(SEP).next().unwrap());
-    assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": roundabout }), None), None);
+    assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": roundabout }), &Folder::Process), None);
     if let Some(relative) = pathdiff(first_nb, &wire::files::real_path(&std::env::current_dir().unwrap()).unwrap().display().to_string()) {
-        assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": relative }), None), None);
+        assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": relative }), &Folder::Process), None);
     }
     // Julia's expanduser leaves paths alone on Windows.
     #[cfg(unix)]
-    assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": "~bob/x.jl" }), None), Some("ArgumentError: ~user tilde expansion not yet implemented".into()));
+    assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": "~bob/x.jl" }), &Folder::Process), Some("ArgumentError: ~user tilde expansion not yet implemented".into()));
 
     // A relative path starts in the session's folder, not the process's.
     let (folder, name) = first_nb.rsplit_once(SEP).unwrap();
-    assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": name }), Some(folder)), None);
+    assert_eq!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": name }), &Folder::In(folder.to_owned())), None);
     let other = second_nb.rsplit_once(SEP).unwrap().1;
-    assert!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": other }), Some(folder)).unwrap().contains("one_notebook"));
+    assert!(s.notebooks.refusal("a", "open_notebook", &json!({ "path": other }), &Folder::In(folder.to_owned())).unwrap().contains("one_notebook"));
 
     // Calls without an owner (the app, tests) are unrestricted.
     let second_id = s.call("", "open_notebook", json!({ "path": second_nb })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
@@ -1446,7 +1446,7 @@ fn the_apps_notebook_actions_restart_move_file_info_and_new_notebook() {
     assert_eq!(s.notebooks.move_notebook(&id(1), &renamed), Ok(json!({ "path": renamed })));
     assert_eq!(s.notebooks.bound("a"), Some(renamed.clone()));
     assert_eq!(s.notebooks.idle_stopped(), [json!({ "path": renamed, "hours": 1, "safe_preview": false })]);
-    assert_eq!(s.notebooks.refusal("a", "edit_cell", &json!({ "notebook_id": id(1) }), None), None, "still its own notebook");
+    assert_eq!(s.notebooks.refusal("a", "edit_cell", &json!({ "notebook_id": id(1) }), &Folder::Process), None, "still its own notebook");
     assert_eq!(s.notebooks.move_notebook(&id(1), &paths[1]), Err(format!("ArgumentError: file_exists::'{}' already exists", paths[1])));
     assert_eq!(s.notebooks.move_notebook(&id(1), &format!("{dir}{SEP}notes.txt")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{dir}{SEP}notes.txt'")));
     assert_eq!(s.notebooks.move_notebook(&id(1), &format!("{dir}{SEP}gone{SEP}x.jl")), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}{SEP}gone'")));
@@ -1464,7 +1464,7 @@ fn the_apps_notebook_actions_restart_move_file_info_and_new_notebook() {
 
     // The app's New notebook for a session: in its folder, and the session's notebook from now on.
     s.notebooks.bind("b", &renamed);
-    let made = s.notebooks.new_for("b", Some(&dir)).unwrap();
+    let made = s.notebooks.new_for("b", &Folder::In(dir.clone())).unwrap();
     assert_eq!(made["path"], format!("{dir}{SEP}made.jl"));
     assert_eq!(s.notebooks.bound("b"), Some(format!("{dir}{SEP}made.jl")));
 }
@@ -1709,8 +1709,29 @@ fn a_cell_is_never_named_after_its_anonymous_functions() {
 #[cfg(unix)]
 #[test]
 fn a_requested_path_expands_the_home_folder_before_the_session_folder() {
-    assert_eq!(requested_path("~/x.jl", Some("/work")), Ok(format!("{}/x.jl", home())));
-    assert_eq!(requested_path("~/x.jl", None), Ok(format!("{}/x.jl", home())));
-    assert_eq!(requested_path("x.jl", Some("/work")), Ok("/work/x.jl".to_owned()));
-    assert_eq!(requested_path("/a/x.jl", Some("/work")), Ok("/a/x.jl".to_owned()));
+    let work = Folder::In("/work".into());
+    assert_eq!(requested_path("~/x.jl", &work), Ok(format!("{}/x.jl", home())));
+    assert_eq!(requested_path("~/x.jl", &Folder::Process), Ok(format!("{}/x.jl", home())));
+    assert_eq!(requested_path("x.jl", &work), Ok("/work/x.jl".to_owned()));
+    assert_eq!(requested_path("/a/x.jl", &work), Ok("/a/x.jl".to_owned()));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_with_no_folder_may_give_absolute_paths_and_nothing_else() {
+    let none = Folder::Unknown;
+    assert_eq!(requested_path("~/x.jl", &none), Ok(format!("{}/x.jl", home())));
+    assert_eq!(requested_path("/a/x.jl", &none), Ok("/a/x.jl".to_owned()));
+    let refused = tools::argument_error("invalid_path::Give an absolute path: this server was not told the project folder.");
+    assert_eq!(requested_path("x.jl", &none), Err(refused.clone()));
+    assert_eq!(requested_path("./a/../x.jl", &none), Err(refused.clone()));
+    assert_eq!(requested_path("", &none), Err(refused.clone()));
+    for (tool, arguments) in [("open_notebook", json!({ "path": "x.jl" })), ("new_notebook", json!({ "path": "x.jl" })), ("new_notebook", json!({})), ("new_notebook", json!({ "path": null }))] {
+        assert_eq!(path_refusal(tool, &arguments, &none), Some(refused.clone()), "{tool} {arguments}");
+        assert_eq!(path_refusal(tool, &arguments, &Folder::In("/work".into())), None, "a session with a folder");
+        assert_eq!(path_refusal(tool, &arguments, &Folder::Process), None, "the app's session");
+    }
+    for (tool, arguments) in [("open_notebook", json!({ "path": "/a/x.jl" })), ("new_notebook", json!({ "path": "/a/x.jl" })), ("open_notebook", json!({})), ("open_notebook", json!({ "path": 5 })), ("read_cell", json!({ "path": "x.jl" })), ("list_notebooks", json!({}))] {
+        assert_eq!(path_refusal(tool, &arguments, &none), None, "{tool} {arguments}");
+    }
 }

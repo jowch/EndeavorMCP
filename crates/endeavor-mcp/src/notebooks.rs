@@ -815,7 +815,7 @@ impl Notebooks {
 
     /// Why a session may not make this call: it works on another notebook.
     /// Other notebooks stay readable. A notebook that is no longer open is not one it works on.
-    pub fn refusal(&self, owner: &str, tool: &str, arguments: &Value, folder: Option<&str>) -> Option<String> {
+    pub fn refusal(&self, owner: &str, tool: &str, arguments: &Value, folder: &Folder) -> Option<String> {
         if owner.is_empty() {
             return None;
         }
@@ -1006,7 +1006,7 @@ impl Notebooks {
 
     /// `endeavor/new_notebook`: the app's "New notebook" for session `owner`,
     /// a new notebook in its folder that becomes its notebook.
-    pub fn new_for(&self, owner: &str, folder: Option<&str>) -> Result<Value, String> {
+    pub fn new_for(&self, owner: &str, folder: &Folder) -> Result<Value, String> {
         self.bind(owner, "");
         let Reply::Json(result) = self.tool(owner, "new_notebook", &json!({}), folder, Instant::now())? else {
             unreachable!("new_notebook answers JSON")
@@ -1094,13 +1094,54 @@ pub fn canonical_path(path: &str) -> Result<String, String> {
     }
 }
 
+/// Where a session's relative paths start.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Folder {
+    /// The session's working folder.
+    In(String),
+    /// None was given (the app's session): the runtime process's own working folder.
+    Process,
+    /// The session was not told its project folder, so a relative path means nothing.
+    Unknown,
+}
+
+impl Folder {
+    /// The folder, when there is one.
+    pub fn dir(&self) -> Option<&str> {
+        match self {
+            Folder::In(dir) => Some(dir),
+            _ => None,
+        }
+    }
+}
+
+/// What a session without a folder is told when it gives a path that needs one.
+fn folder_unknown() -> String {
+    tools::argument_error("invalid_path::Give an absolute path: this server was not told the project folder.")
+}
+
 /// A path an agent gave, as the tools resolve it: `~` expanded, and a relative
-/// path taken from the session's `folder` when it has one.
-fn requested_path(path: &str, folder: Option<&str>) -> Result<String, String> {
+/// path taken from the session's `folder`. The one place a relative path is resolved.
+fn requested_path(path: &str, folder: &Folder) -> Result<String, String> {
     let expanded = expand_user(path)?;
     match folder {
-        Some(folder) if !is_absolute(&expanded) => absolute_path(&format!("{folder}/{expanded}")),
-        _ => Ok(expanded),
+        _ if is_absolute(&expanded) => Ok(expanded),
+        Folder::In(folder) => absolute_path(&format!("{folder}/{expanded}")),
+        Folder::Process => Ok(expanded),
+        Folder::Unknown => Err(folder_unknown()),
+    }
+}
+
+/// Why a session with no folder may not make this call: it gives a relative path, or none to
+/// `new_notebook`, which would put the notebook in a folder it does not know. Nothing else is refused.
+pub(crate) fn path_refusal(tool: &str, arguments: &Value, folder: &Folder) -> Option<String> {
+    if *folder != Folder::Unknown {
+        return None;
+    }
+    match (tool, arguments.get("path").filter(|path| !path.is_null())) {
+        ("open_notebook" | "new_notebook", Some(Value::String(path))) => requested_path(path, folder).err(),
+        ("new_notebook", None) => Some(folder_unknown()),
+        _ => None,
     }
 }
 

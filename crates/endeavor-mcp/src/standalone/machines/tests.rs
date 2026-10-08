@@ -264,7 +264,7 @@ fn a_call_that_waited_sees_that_the_session_moved_away_and_back() {
     assert!(relay.moved(&relay.current(), &before, &provider).is_none());
     let server = Server { id: "lab".into(), name: "Lab".into(), ssh_host: "lab".into(), ..Default::default() };
     relay.point_at(Target::new(&server, None));
-    relay.point_at(Target::local(&relay.options.folder.join("other")));
+    relay.point_at(Target::local(relay.options.folder.as_ref().map(|folder| folder.join("other")).as_deref()));
     let now = relay.current();
     assert_eq!((now.id.as_str(), now.moves), (before.id.as_str(), 2), "the same machine, another folder");
     let said = relay.moved(&now, &before, &provider).unwrap();
