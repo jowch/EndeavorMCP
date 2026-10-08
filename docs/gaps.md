@@ -242,15 +242,16 @@ _Started 2026-10-06, on the `client-library` branch._
 - **`install.ps1` has never run.** There is no PowerShell here. It is read
   against PowerShell 5.1's behaviour only. To close: run it on Windows
   against a fake release (`ENDEAVOR_RELEASE_URL`) and the real one.
-- **The Helpers workflow's macOS and Windows rows and the key check have never
-  run.** They run on the next push to `main`; the YAML parses and was read
-  through. CI (`ci.yml`) builds and runs `cargo test` on `macos-15` and
-  `windows-latest`, and the tests pass there, but no person has run the macOS
-  or Windows binaries, and CI does not cover real Julia, real ssh or the
+- **No person has run the released macOS or Windows binaries.** The Helpers
+  workflow built and published all five platforms for the first time on
+  2026-10-08 (key `ed283c702b22`), with the key check passing on each. CI
+  (`ci.yml`) builds and runs `cargo test` on `macos-15` and `windows-latest`,
+  and the tests pass there, but CI does not cover real Julia, real ssh or the
   install scripts there. The `darwin-x86_64` build is cross-built on an Apple
   Silicon runner and its key is checked by searching the file for it, not by
-  running it. Until a release holds them, the install scripts and `endeavor
-  update` on those platforms find no asset and say so.
+  running it. The Linux x86_64 file was downloaded, its checksum checked and
+  run; the launcher's `--fetch-only` and `install.sh` were run against the
+  release on Linux.
 - **`endeavor update` on macOS and Windows has never run.** The logic is the
   Linux code with other asset names, and the Windows rename-aside is tested
   on Linux with the same function; `cfg(windows)` paths are compile-checked.
@@ -322,9 +323,7 @@ _Started 2026-10-06, on the `client-library` branch._
     computer.
   - There is no early download. `codex-plugin/` has no hooks, so the first
     start downloads while the agent waits, and the plugin's entry names
-    `--no-folder`, which only builds from this branch know. Until a release
-    holds one, a plugin install gets an older build that refuses to start (see
-    the entry on the first release below).
+    `--no-folder`, which builds from key `ed283c702b22` on know.
   - `codex exec` needs `default_tools_approval_mode` (below).
   - Interactive `codex`, subagents and Windows are untried.
 - **The Antigravity plugin folder was built to its documentation and tried on no
@@ -347,14 +346,11 @@ _Started 2026-10-06, on the `client-library` branch._
   but `list_machines`). Whether Codex's approval could be avoided by what the
   tools declare is not looked into. Interactive `codex`, where the user is asked,
   was not tried.
-- **Before the first release from this branch, a plugin install gets an older
-  build.** The launcher takes the newest build on the Helpers release, which is
-  an older build from `main` (seen: key `14eb0a67bda7`, 3.3 MB). In the Codex
-  trial Codex did not pass `ENDEAVOR_BIN`, so the launcher's real download ran
-  once: it fetched that build into the real `~/.local/share/endeavor/bin/`,
-  checked it and ran it, and it attached to the newer runtime and answered
-  read-only calls. To close: release from this branch before the plugin is
-  offered, and pin the key.
+- **An older build attaches to a newer runtime without complaint.** Before
+  the release of 2026-10-08 the launcher once fetched the then-newest build
+  (key `14eb0a67bda7`) and ran it against a runtime of this branch: it
+  attached and answered read-only calls. Nothing compares the two builds
+  before a front uses a runtime, beyond the note `other_build` gives.
 - **The pinned key can only be set after a release from `main` holds that
   build.** Until then `release-key` is empty and the plugin takes the newest
   build. Unpinned, a start uses the build it already has, and looks for a
@@ -376,8 +372,8 @@ _Started 2026-10-06, on the `client-library` branch._
   the pinned and the newest at a start, when no `endeavor` from there is
   running.
 - **The first start can outlast the agent's 30 s limit.** The launcher's
-  download ran once, on Linux, by accident under Codex (see the entry on the
-  older build below); how long it took was not recorded. The download goes
+  download has run on Linux (about 4.5 MB for Linux x86_64 at key
+  `ed283c702b22`); it was not timed against the limit. The download goes
   on in the background only if the agent doesn't kill the launcher's children;
   either way the next start finishes or redoes it, and `endeavor-setup` tells
   the agent to ask the user to reconnect. Claude Code's hook usually avoids it,
