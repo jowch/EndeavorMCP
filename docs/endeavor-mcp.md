@@ -556,8 +556,10 @@ engine needs at one place (`prepare` in `src/lib.rs`).
 directly on the machine, since a host can have Slurm's tools without being a
 cluster. `add_machine`'s `slurm` argument sets it: true needs Slurm there,
 false runs directly, and left out a new machine takes what was detected and a
-machine connected before keeps how it was saved. `add_machine` connects with the
-machine's record and writes `machines.json` only after the connect has
+machine connected before keeps how it was saved. `add_machine` connects a new
+machine the way it will be saved (the helper's `--launcher auto` is Slurm where
+`sinfo` is, and `Hello` says which it chose), so the connection that added it is
+the one used next; a saved machine it connects with its record. It writes `machines.json` only after the connect has
 succeeded: a call that is still connecting, that needs the helper installed, or
 that fails leaves the file as it was, and the agent calls `add_machine` again
 with the same arguments. An updated machine keeps its old record until the new

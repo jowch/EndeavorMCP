@@ -19,7 +19,7 @@ use wire::slurm::{Partition, Resources, check_extra_flag};
 use super::projects::Remembered;
 use super::target::{OtherBuild, Provider, Target, local_server};
 use super::{Relay, Route, tool_failure};
-use crate::client::{Cluster, Config, InstallInfo, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
+use crate::client::{Cluster, Config, InstallInfo, Launcher, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
 use crate::mcp::{browser_link, to_json, tool_error};
 use crate::notebooks::Folder;
 
@@ -58,7 +58,7 @@ fn test_var(name: &str) -> Option<std::ffi::OsString> {
 /// are the machine's own default folders (`{id}` in them is the machine's id, so that two machines don't
 /// share a runtime); `ENDEAVOR_TEST_ASK` is a command that runs in the shell before each connect
 /// (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
-fn open_session(server: Server, allow_install: bool) -> Result<Session, String> {
+fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>) -> Result<Session, String> {
     let id = server.id.clone();
     let var = |name: &str| test_var(name).and_then(|v| v.into_string().ok()).unwrap_or_default().replace("{id}", &id);
     let helper = |os: &str, arch: &str| {
@@ -73,6 +73,7 @@ fn open_session(server: Server, allow_install: bool) -> Result<Session, String> 
         config.transport = Transport::Shell { env: Vec::new(), ask: test_var("ENDEAVOR_TEST_ASK").and_then(|v| v.into_string().ok()) };
     }
     (config.root, config.state, config.depot, config.allow_install) = (var("ENDEAVOR_TEST_ROOT"), var("ENDEAVOR_TEST_STATE"), var("ENDEAVOR_TEST_DEPOT"), allow_install);
+    config.launcher = launcher;
     config.messages = Messages {
         restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
         not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
@@ -90,8 +91,8 @@ struct Held {
 }
 
 impl Held {
-    fn new(server: &Server, allow_install: bool, saved: bool) -> Result<Held, String> {
-        Ok(Held { server: server.clone(), session: Arc::new(open_session(server.clone(), allow_install)?), saved })
+    fn new(server: &Server, allow_install: bool, saved: bool, launcher: Option<Launcher>) -> Result<Held, String> {
+        Ok(Held { server: server.clone(), session: Arc::new(open_session(server.clone(), allow_install, launcher)?), saved })
     }
 
     /// Whether nothing hangs on the connection, so that a new one can take its place without breaking
@@ -158,7 +159,7 @@ impl Connections {
                 return Err(settings_changed(&server.display_name()));
             }
         }
-        let fresh = Held::new(server, allow_install, true)?;
+        let fresh = Held::new(server, allow_install, true, None)?;
         let session = fresh.session.clone();
         let old = held.insert(server.id.clone(), fresh);
         drop(held);
@@ -167,10 +168,10 @@ impl Connections {
     }
 
     /// The connection `add_machine` tries `record` with: the one held if it was made with the same
-    /// settings (a saved machine's, or the one an earlier call left unsaved), else a new one that takes the
-    /// place of one nothing hangs on. An error when a runtime is in use through a saved one made with other
+    /// settings (a saved machine's, or the one an earlier call left unsaved), else a new one, made with
+    /// `launcher` (None: the record's), that takes the place of one nothing hangs on. An error when a runtime is in use through a saved one made with other
     /// settings. Any other unsaved connection is ended.
-    fn trying(&self, record: &Server, allow_install: bool) -> Result<(Arc<Session>, Unsaved<'_>), String> {
+    fn trying(&self, record: &Server, allow_install: bool, launcher: Option<Launcher>) -> Result<(Arc<Session>, Unsaved<'_>), String> {
         let mut held = self.held.lock().unwrap();
         let abandoned: Vec<Held> = held.extract_if(|id, h| !h.saved && *id != record.id).map(|(_, h)| h).collect();
         let unsaved = || Unsaved { connections: self, id: record.id.clone(), leave: false };
@@ -179,7 +180,7 @@ impl Connections {
             Some(old) if old.saved && !old.replaceable() => return Err(settings_changed(&record.display_name())),
             _ => {}
         }
-        let fresh = Held::new(record, allow_install, false)?;
+        let fresh = Held::new(record, allow_install, false, launcher)?;
         let session = fresh.session.clone();
         let old = held.insert(record.id.clone(), fresh);
         drop(held);
@@ -998,7 +999,16 @@ impl Relay {
         if julia.is_some() {
             record.julia = julia;
         }
-        let (session, mut unsaved) = self.connections.trying(&record, install)?;
+        // A machine not saved yet is connected to the way it will be saved, so that saving it doesn't
+        // mean connecting again: Slurm jobs when it has Slurm, unless `slurm` says. A saved one as it is
+        // saved, so that a runtime running the way it is saved is seen below.
+        let launcher = match (&existing, slurm) {
+            (Some(_), _) => None,
+            (None, Some(true)) => Some(Launcher::Slurm),
+            (None, Some(false)) => Some(Launcher::Process),
+            (None, None) => Some(Launcher::Auto),
+        };
+        let (session, mut unsaved) = self.connections.trying(&record, install, launcher)?;
         let outcome = session.ensure(Want::Attach { install }, deadline.left(), true);
         match &outcome {
             Outcome::NeedsInstall(info) => {
@@ -1027,7 +1037,7 @@ impl Relay {
             Outcome::Ready(_) | Outcome::Queued { .. } | Outcome::NothingRunning => {}
         }
         let mut status = session.status();
-        let connected_as_cluster = record.cluster.is_some();
+        let connected_as_cluster = session.cluster();
         let found = status.hello.as_ref().is_some_and(|h| h.slurm);
         let cluster = match choose_mode(slurm, existing.as_ref(), found) {
             Ok(cluster) => cluster,

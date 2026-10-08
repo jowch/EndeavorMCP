@@ -198,6 +198,10 @@ pub enum ToApp {
         /// doesn't say so and would ignore them.
         #[serde(default)]
         uploads: bool,
+        /// How this helper runs the runtime, for the whole connection: "process" or "slurm" (what
+        /// `--launcher auto` became). Empty from a helper that predates it.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        launcher: String,
     },
     /// A line of the runtime's log while it starts, or of an install. A
     /// start's progress (this, `Found`, `Submitted`, `Queued`) names no
@@ -431,7 +435,7 @@ mod tests {
         assert_eq!(ToApp::StartCancelled { id: 4 }.answers(), Some(4));
         assert_eq!(ToApp::Died { status: String::new(), log_tail: Vec::new() }.answers(), None);
         assert_eq!(ToApp::Progress { line: String::new() }.answers(), None);
-        let hello = ToApp::Hello { protocol: PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: true };
+        let hello = ToApp::Hello { protocol: PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: true, launcher: String::new() };
         let Frame::Control(json) = hello.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), hello);
         let old_hello = r#"{"type":"Hello","version":"0.1.0","node":"labbox3","home":"/home/ada"}"#;

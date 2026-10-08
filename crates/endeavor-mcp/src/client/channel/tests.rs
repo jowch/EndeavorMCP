@@ -77,7 +77,7 @@ impl Scripted {
         let child = std::process::Command::new("true").spawn().unwrap();
         let channel = Arc::new(Channel::open(child, Sent(sent.clone(), closed.clone()), Heard(heard, Vec::new())));
         let scripted = Scripted { channel, say, sent, closed };
-        scripted.tell(&ToApp::Hello { protocol: wire::PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: true });
+        scripted.tell(&ToApp::Hello { protocol: wire::PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: true, launcher: "process".into() });
         scripted.channel.wait_hello(|| "gone".into()).unwrap();
         scripted
     }

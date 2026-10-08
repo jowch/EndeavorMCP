@@ -30,7 +30,7 @@ the session that built it._
 - **With the skills rewrite:** N1.
 - **Before real users:** N2, N5.
 - **With the app:** P3. **At the first release from `main`:** P7.
-- **P6:** a short spike first.
+- **2026-10-08, P6 decided after the spike ([launcher-spike.md](launcher-spike.md)):** not built as proposed. The launcher stays fixed per connection; a launcher of `auto` (Slurm where `sinfo` is) lets `add_machine` connect a new machine the way it will be saved, so adding a cluster takes one connection. Built, with the Slurm launcher's `attach_only` fix the spike found.
 
 ## The proposals
 
@@ -231,4 +231,3 @@ An agent meets: machine, local, link, helper, runtime, Julia, job, session, note
 - Any behaviour on real Windows or macOS.
 - What the app's current client code needs from the API beyond what the docs say. The app is not in this repository.
 - Whether old per-build helper folders on servers are ever removed.
-- The Slurm side effects of P6.

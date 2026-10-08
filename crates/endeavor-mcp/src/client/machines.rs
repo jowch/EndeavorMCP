@@ -22,6 +22,28 @@ pub enum IdleStop {
     Never,
 }
 
+/// How the helper runs the runtime on a machine, fixed for a connection's life: as a process
+/// there, in Slurm jobs, or (`Auto`) in Slurm jobs when the machine has Slurm's `sinfo` and as a
+/// process when not. The helper settles `Auto` once, as it starts (the bootstrap script before
+/// it), and `Hello::launcher` says which it chose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Launcher {
+    Process,
+    Slurm,
+    Auto,
+}
+
+impl Launcher {
+    /// The word `endeavor connect --launcher` takes.
+    pub fn word(self) -> &'static str {
+        match self {
+            Launcher::Process => "process",
+            Launcher::Slurm => "slurm",
+            Launcher::Auto => "auto",
+        }
+    }
+}
+
 /// Whether `id` is fit to be a machine's id: the machines file can be edited by hand, and an id may become a folder's name.
 /// Capitals are out because Windows and macOS give two ids that differ only in
 /// case one folder, and names Windows keeps for devices (`nul`, `com1`, even as
@@ -96,6 +118,11 @@ impl Server {
             None => ["process".into(), "state".into()],
             Some(_) => ["slurm".into(), format!("cluster-{}", self.id)],
         }
+    }
+
+    /// How a connection made for this record runs the runtime: in Slurm jobs for a cluster, else as a process.
+    pub fn launcher_kind(&self) -> Launcher {
+        if self.cluster.is_some() { Launcher::Slurm } else { Launcher::Process }
     }
 
     /// Whether a connection made from `other` is the one this record asks for: the same address,

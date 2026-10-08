@@ -3,6 +3,13 @@
 A spike for architecture-review.md P6, written 2026-10-08 from the code on
 `main` at 65fbe36. Nothing was built or run for it.
 
+## Decided
+
+2026-10-08: the `auto` launcher, not P6. Built with the `attach_only` fix
+below. Asked about a workstation used both ways (jobs and direct): neither
+option gives one machine both; adding it twice, under two names, should
+work (read from the code, not tried).
+
 ## Recommendation
 
 Don't build P6 as proposed. The problem it was meant to fix is real but

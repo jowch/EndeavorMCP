@@ -440,8 +440,12 @@ sign-in.
 - [P3] **A `serve` you started inside your own job** is recorded under the
   compute node's name and isn't found from the login node. Add the node as the
   machine instead.
-- [P3] **Adding a cluster takes two connections.** The first connection is made
-  as a plain server; `add_machine` ends it once Slurm is found.
+- [P3] **Changing a saved machine between Slurm jobs and direct takes a second
+  connection.** A new machine is connected the way it will be saved (the
+  `auto` launcher), but a saved one is connected the way it is saved, so a
+  runtime running that way is seen and the change refused; once allowed, the
+  next call connects again the other way. One computer used both ways would be
+  two machines with two names (not tried; [launcher-spike.md](launcher-spike.md)).
 - [P3] **Time waited in the queue is not reported**: the session doesn't know
   when a job from an earlier connection was submitted.
 - [P3] **Saved extra `sbatch` flags written as a flag and a separate value**
@@ -593,9 +597,10 @@ pin of this repository was 84 commits behind `main` on 2026-10-08. That is the p
 defect: the MCP side's design is to settle before the app moves to
 `client::Session`.
 
-Before the app adopts the library, in this order (assessed 2026-10-08): the
-launcher choice per start (architecture-review.md P6, a wire change; spike
-first), a compatibility rule for builds that share a runtime, the three
+Before the app adopts the library, in this order (assessed 2026-10-08; the
+launcher per start, architecture-review.md P6, was decided against on
+2026-10-08 and an `auto` launcher built instead): a compatibility rule for
+builds that share a runtime, the three
 `Config` settings and events instead of stderr below, and one real run from a
 Mac to the Linux test VM through `client::Session` (the P1 in Releases and
 plugins). The rest of this file can wait or go alongside.

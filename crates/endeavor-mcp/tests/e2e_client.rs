@@ -92,7 +92,7 @@ fn a_runtime_over_real_ssh() {
 
     let server = Server { ssh_host: host.clone(), julia: Some(julia.display().to_string()), ..Default::default() };
     let helper = |_: &str, _: &str| Ok(PathBuf::from(env!("CARGO_BIN_EXE_endeavor")));
-    let options = Options { auth: Auth::Batch, root: root.display().to_string(), state: state.display().to_string(), depot: depot_path, exit_idle: false, allow_install: true, helper: &helper };
+    let options = Options { auth: Auth::Batch, root: root.display().to_string(), state: state.display().to_string(), depot: depot_path, exit_idle: false, allow_install: true, helper: &helper, launcher: None };
     let (events_tx, events) = mpsc::channel();
     let on = move |event: Event| drop(events_tx.send(event));
 

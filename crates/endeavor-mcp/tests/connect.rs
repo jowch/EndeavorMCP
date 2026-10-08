@@ -1685,6 +1685,43 @@ fn the_default_state_folder_is_the_hosts_for_a_process_and_one_for_the_cluster_f
     assert!(xdg.join("endeavor/serve").join(this_host()).join("start.lock").exists());
 }
 
+#[test]
+fn an_attach_only_start_on_a_cluster_submits_nothing_when_no_job_runs_or_waits() {
+    let dir = state_dir("slurm-attach-only");
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let helper = slurm.helper(&dir, &julia);
+    helper.hello();
+    let id = helper.request_attach();
+    assert_eq!(helper.next(), ToApp::NotRunning { id });
+    assert_eq!(slurm.read("sbatch.args"), "", "no job was submitted");
+    assert!(!dir.join("job.json").exists());
+}
+
+#[test]
+fn launcher_auto_is_slurm_where_sinfo_is_and_says_so() {
+    let dir = state_dir("launcher-auto");
+    let (home, xdg) = (dir.join("home"), dir.join("xdg"));
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let mut command = slurm.command(&julia, 100);
+    command.args(["--launcher", "auto"]).env("HOME", &home).env("XDG_STATE_HOME", &xdg);
+    let helper = Helper::spawn(command);
+    let ToApp::Hello { launcher, slurm: slurm_here, .. } = helper.hello() else { unreachable!() };
+    assert_eq!((launcher.as_str(), slurm_here), ("slurm", true));
+    helper.request_start(small_job(), true);
+    assert_eq!(queued(&helper), "42");
+    assert!(xdg.join("endeavor/cluster/job.json").exists(), "the cluster's state folder");
+
+    // With no sinfo to be found it runs the runtime as a process (unless this computer has Slurm in a folder `has` always looks in).
+    let fixed = ["/usr/bin", "/usr/local/bin", "/opt/slurm/bin"].iter().any(|d| Path::new(d).join("sinfo").is_file());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+    command.args(["connect", "--launcher", "auto", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent", "--depot", "/nonexistent"]).env("PATH", "/nonexistent").env("HOME", &home).env("XDG_STATE_HOME", &xdg);
+    let helper = Helper::spawn(command);
+    let ToApp::Hello { launcher, .. } = helper.hello() else { unreachable!() };
+    assert_eq!(launcher, if fixed { "slurm" } else { "process" });
+}
+
 /// Hold `dir/start.lock`, as a helper in the middle of a start does.
 fn hold_start_lock(dir: &Path) -> std::fs::File {
     let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("start.lock")).unwrap();

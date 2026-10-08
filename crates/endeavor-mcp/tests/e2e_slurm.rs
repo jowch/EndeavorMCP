@@ -280,7 +280,7 @@ fn a_runtime_in_a_slurm_job() {
     let server = Server { id: "e2e-slurm".into(), ssh_host: host.clone(), julia: Some(julia.display().to_string()), cluster: Some(cluster), ..Default::default() };
     assert_eq!(server.launcher()[0], "slurm");
     let helper = |_: &str, _: &str| Ok(PathBuf::from(env!("CARGO_BIN_EXE_endeavor")));
-    let options = Options { auth: Auth::Batch, root: root.display().to_string(), state: state.display().to_string(), depot: format!("{}:", depot.display()), exit_idle: false, allow_install: true, helper: &helper };
+    let options = Options { auth: Auth::Batch, root: root.display().to_string(), state: state.display().to_string(), depot: format!("{}:", depot.display()), exit_idle: false, allow_install: true, helper: &helper, launcher: None };
 
     let join = |log: &Log| -> Client {
         let (channel, hello) = connect(&server, &Transport::for_server(&server), &options, &Cancel::default(), &log.on()).map_err(|e| e.message).expect("connect over ssh");
