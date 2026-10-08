@@ -593,13 +593,37 @@ pin of this repository was 84 commits behind `main` on 2026-10-08. That is the p
 defect: the MCP side's design is to settle before the app moves to
 `client::Session`.
 
+Before the app adopts the library, in this order (assessed 2026-10-08): the
+launcher choice per start (architecture-review.md P6, a wire change; spike
+first), a compatibility rule for builds that share a runtime, the three
+`Config` settings and events instead of stderr below, and one real run from a
+Mac to the Linux test VM through `client::Session` (the P1 in Releases and
+plugins). The rest of this file can wait or go alongside.
+
+- [P2] **The app and the plugin on one computer will run different builds
+  against one runtime.** The plan is one state folder for both, so one runtime
+  ([plugins-and-remote.md](plugins-and-remote.md), item 6). `mcp`'s check
+  compares the exact build (`Local::other_build` in `standalone/target.rs`). The
+  plugin's build changes with every change to the helper's source, the app's
+  only with an app release, so once they share a folder a mismatch is the
+  usual case: the plugin replaces the app's idle runtime, or tells the agent at
+  every connect. To close before the app moves folders: record a compatibility
+  number for the core's interface in `runtime.json`, compare that instead of
+  the build, and replace a runtime only when it differs.
+- [P2] **The app becomes a second pinned consumer of the Helpers release.** The
+  app pins this repository by commit, so its helper key is that commit's, and
+  servers can only fetch it once Helpers has published it. Push this
+  repository and wait for Helpers before an app release that moves the pin. A
+  check in the app's CI that the pinned key is published would catch it.
 - [P2] **Adopting `Session` in the app needs three settings it fixes now:** the
   wording of the listener's messages (`Config::messages` names MCP tools in the
   front's case; the default speaks in the app's words), batch sign-in only
   (`Auth::Batch`) and `exit_idle: true` for a runtime this session starts. Each
   would become a `Config` field.
-- [P3] **A session writes its progress and failures to stderr** (`eprintln!`).
-  A caller that holds sessions in its own process gets them on its stderr.
+- [P2] **A session writes its progress and failures to stderr** (`eprintln!`).
+  A caller that holds sessions in its own process gets them on its stderr; a
+  desktop app can't show them to the user. To close before the app adopts:
+  send them as the session's events.
 - [P3] **The names of the entry points mislead.** `lib.rs`, the crate root,
   holds the helper's connect loop as `serve`, while `endeavor serve` is
   `standalone::serve`; `mcp.rs` is the runtime's MCP server, while `endeavor
