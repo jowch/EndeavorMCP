@@ -69,9 +69,17 @@ exec sleep 600
         pluto = bridge.pluto_port,
         mcp = bridge.port,
     );
-    std::fs::write(&julia, script).unwrap();
-    std::fs::set_permissions(&julia, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    write_executable(&julia, &script);
     julia
+}
+
+/// Write `contents` to `path` as an executable file. A child process writes it: while this process holds
+/// a file open for writing, a fork by any of its threads copies that descriptor until the child execs,
+/// and running the file in that time fails with ETXTBSY ("Text file busy"). The tests run on many threads.
+pub fn write_executable(path: &Path, contents: &str) {
+    let status = std::process::Command::new("/bin/sh").args(["-c", r#"printf '%s' "$1" > "$0""#]).arg(path).arg(contents).status().unwrap();
+    assert!(status.success(), "couldn't write {}", path.display());
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 }
 
 /// For a test that sets an `ENDEAVOR_TEST_*` variable for the binary: a release build ignores them.

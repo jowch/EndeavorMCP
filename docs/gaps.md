@@ -681,11 +681,19 @@ plugins). The rest of this file can wait or go alongside.
 - [P3] **`a_helper_that_ends_unexpectedly_is_a_drop_and_after_the_client_let_it_go_is_not`
   hung once** in a full workspace run on 2026-10-07 and passed alone and in
   the next full runs. Not reproduced.
-- [P3] **`honors_the_mcp_protocol_version_header` failed once.** In one full
-  workspace run (2026-10-06) the `core` test timed out after 20 s waiting for
-  its core's `runtime.json`; five runs after it passed, three of them of that
-  binary alone. Not understood. To close: if it recurs, keep the core's stderr
-  in the failure message.
+- [P3] **Tests that write a script and run it can fail with "Text file
+  busy".** A script written with `fs::write` can still be open in a child that
+  another test thread has just forked, so an exec of it fails with ETXTBSY.
+  That made a `core` test time out waiting for `runtime.json` about one run in
+  thirty (seen as `honors_the_mcp_protocol_version_header` on 2026-10-06 and
+  `a_held_call_answers_as_an_event_stream_at_once` in CI on 2026-10-08; the
+  core had exited at once). The fake Julia is now written by a child `sh`
+  (`common::write_executable`), the helper reports a core that exits before
+  its record instead of waiting 20 s, and the fixed-port test retries a port
+  another test took. The fake `ssh`, `squeue`, `uname`, `ps` and Slurm tools in
+  `connect.rs`, `client.rs`, `launcher.rs`, `machines.rs`, `install.rs` and
+  `src/client/ssh/tests.rs` are still written with `fs::write`; none has
+  failed. To close: write them with `write_executable` too.
 - [P3] **The launcher's tests don't pass under `busybox sh`.** Four launcher
   tests and one install test fail there because busybox runs its own built-in
   `uname`, `mkdir`, `timeout` and `wget` and ignores the fakes the tests put on

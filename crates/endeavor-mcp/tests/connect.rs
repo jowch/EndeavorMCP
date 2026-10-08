@@ -1087,8 +1087,7 @@ fn fake_julia(dir: &Path) -> PathBuf {
     let bin = dir.join("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
     let julia = bin.join("julia");
-    std::fs::write(&julia, "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'julia version 1.12.0'; exit 0; }\necho 'ERROR: boom'\nexit 3\n").unwrap();
-    std::fs::set_permissions(&julia, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    common::write_executable(&julia, "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'julia version 1.12.0'; exit 0; }\necho 'ERROR: boom'\nexit 3\n");
     julia
 }
 

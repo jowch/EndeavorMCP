@@ -12,7 +12,7 @@ use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use common::*;
@@ -34,8 +34,13 @@ impl Core {
     }
 
     fn start_with_env(dir: &Path, bridge: &FakeBridge, env: &[(&str, &str)]) -> Core {
+        Core::try_start_with_env(dir, bridge, env).unwrap_or_else(|status| panic!("the core exited before it wrote runtime.json: {status}"))
+    }
+
+    /// `start_with_env`, which gives the core's exit status if it ends before it writes `runtime.json`.
+    fn try_start_with_env(dir: &Path, bridge: &FakeBridge, env: &[(&str, &str)]) -> Result<Core, ExitStatus> {
         let julia = serving_julia(dir, bridge);
-        let process = Command::new(env!("CARGO_BIN_EXE_endeavor"))
+        let mut process = Command::new(env!("CARGO_BIN_EXE_endeavor"))
             .envs(env.iter().copied())
             .arg("core")
             .arg("--state-dir")
@@ -49,10 +54,20 @@ impl Core {
             .stdin(Stdio::null())
             .spawn()
             .unwrap();
-        wait_for("runtime.json", || dir.join("runtime.json").exists());
+        let mut exited = None;
+        wait_for("runtime.json", || {
+            if dir.join("runtime.json").exists() {
+                return true;
+            }
+            exited = process.try_wait().unwrap();
+            exited.is_some()
+        });
+        if let Some(status) = exited {
+            return Err(status);
+        }
         let state = read_json(&dir.join("runtime.json"));
         let julia_pid = read_json(&dir.join("julia.json"))["pid"].as_i64().unwrap() as i32;
-        Core { port: state["port"].as_u64().unwrap() as u16, process, julia_pid }
+        Ok(Core { port: state["port"].as_u64().unwrap() as u16, process, julia_pid })
     }
 
     fn connect(&self) -> TcpStream {
@@ -1153,9 +1168,18 @@ fn a_standalone_runtime_has_a_folder_a_fixed_port_and_host_tools_for_every_sessi
     let dir = state_dir("core-standalone");
     let bridge = FakeBridge::start(&dir);
     let folder = temp_folder("core-standalone-folder");
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let env = [("ENDEAVOR_FOLDER", folder.to_str().unwrap()), ("ENDEAVOR_PORT", &port.to_string()), ("ENDEAVOR_HOST_TOOLS", "lab3")];
-    let core = Core::start_with_env(&dir, &bridge, &env);
+    // A port found free can be taken before the core binds it, by a connection or a listener of another
+    // test: the core then exits at once, and another port is tried.
+    let mut attempts = 0;
+    let (core, port) = loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let env = [("ENDEAVOR_FOLDER", folder.to_str().unwrap()), ("ENDEAVOR_PORT", &port.to_string()), ("ENDEAVOR_HOST_TOOLS", "lab3")];
+        attempts += 1;
+        match Core::try_start_with_env(&dir, &bridge, &env) {
+            Ok(core) => break (core, port),
+            Err(status) => assert!(attempts < 5, "the core exited ({status}) {attempts} times before it wrote runtime.json"),
+        }
+    };
     assert_eq!(core.port, port);
     assert_eq!(read_json(&dir.join("runtime.json"))["folder"], folder.to_str().unwrap());
     let set_folder = bridge.seen().into_iter().find(|s| String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")).expect("Pluto hears the folder");
@@ -1173,6 +1197,19 @@ fn a_standalone_runtime_has_a_folder_a_fixed_port_and_host_tools_for_every_sessi
     };
     assert_eq!(ran("pwd"), format!("{}\n", folder.display()), "in the runtime's folder");
     assert_eq!(ran("echo \"$ENDEAVOR_FOLDER|$ENDEAVOR_PORT|$ENDEAVOR_HOST_TOOLS\""), "||\n", "none of the runtime's settings");
+}
+
+#[test]
+fn a_core_whose_fixed_port_is_taken_exits_at_once() {
+    let dir = state_dir("core-port-taken");
+    let bridge = FakeBridge::start(&dir);
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = taken.local_addr().unwrap().port().to_string();
+    let started = std::time::Instant::now();
+    let status = Core::try_start_with_env(&dir, &bridge, &[("ENDEAVOR_PORT", &port)]).err().expect("the core can't serve on a port that is taken");
+    assert_eq!(status.code(), Some(1));
+    assert!(started.elapsed() < Duration::from_secs(10), "the wait ended with the core, not at its limit");
+    assert!(!dir.join("runtime.json").exists());
 }
 
 #[test]
@@ -1528,4 +1565,37 @@ fn a_stop_signal_to_the_core_stops_julia() {
     assert_eq!(core.exits().signal(), Some(libc::SIGTERM));
     wait_for("Julia to exit", || !pid_alive(core.julia_pid));
     assert!(!dir.join("runtime.json").exists());
+}
+
+#[test]
+fn a_script_written_while_other_threads_start_processes_can_be_run_at_once() {
+    let dir = state_dir("core-write-executable");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    Command::new("true").status().unwrap();
+                }
+            });
+        }
+        let writers: Vec<_> = (0..4)
+            .map(|n| {
+                let dir = &dir;
+                scope.spawn(move || {
+                    for i in 0..60 {
+                        let script = dir.join(format!("script-{n}-{i}"));
+                        write_executable(&script, "#!/bin/sh\nexit 0\n");
+                        let status = Command::new(&script).status().unwrap_or_else(|e| panic!("running {}: {e}", script.display()));
+                        assert!(status.success());
+                    }
+                })
+            })
+            .collect();
+        let results: Vec<_> = writers.into_iter().map(|w| w.join()).collect();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        for result in results {
+            result.unwrap();
+        }
+    });
 }
