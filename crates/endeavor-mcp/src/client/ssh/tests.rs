@@ -526,6 +526,7 @@ fn only_sign_in_and_host_key_failures_end_a_reconnect() {
     assert!(!explain_retry(&lab(), &ask, &[], None, true, false).1, "a cancel");
 }
 
+#[cfg(unix)]
 #[test]
 fn the_bootstrap_script_settles_auto_as_the_helper_does() {
     assert!(bootstrap_script("v1", false).contains(PICK_LAUNCHER_SH), "the script holds the shell text that is tested");
