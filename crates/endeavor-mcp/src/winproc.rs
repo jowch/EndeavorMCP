@@ -1,4 +1,5 @@
-//! Windows process control for the runtime (docs/windows.md, process control).
+//! Windows process control for the runtime (Endeavor's docs/windows.md,
+//! process control).
 //! Unix keeps the runtime together as a process group; here the core puts
 //! itself in a Job Object that ends every process in it when the core ends,
 //! and a recorded pid is trusted only while the process's start time matches,

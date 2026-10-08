@@ -1,4 +1,4 @@
-//! The notebook tools without the app (docs/standalone.md). The user starts
+//! The notebook tools without the app (docs/serve.md). The user starts
 //! the runtime themselves, as they would Pluto or Jupyter, and points their
 //! agent and browser at its one port:
 //!

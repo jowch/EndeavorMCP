@@ -1,5 +1,6 @@
 //! Calls waiting for the user: in Ask to run, an agent's call that runs code
-//! waits here until the app answers (docs/other-agents.md, work item 3); in
+//! waits here until the app answers (Endeavor's docs/other-agents.md, work
+//! item 3); in
 //! Manual, so does a call that changes the notebook. The app sees each
 //! waiting call in its event stream (`asks`), shows it as a run or edit card,
 //! and answers with `endeavor/answer_run`. The call stops waiting if the

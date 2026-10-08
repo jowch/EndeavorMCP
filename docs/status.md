@@ -1,7 +1,8 @@
 # Status
 
-Where EndeavorMCP stands, and what is open. Updated 2026-10-03, when this
-repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
+Where EndeavorMCP stands, and what is open. Updated 2026-10-08. This
+repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
+2026-10-03.
 
 ## Where things stand
 
@@ -27,7 +28,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor).
   publishes the binaries for Linux, macOS and Windows to the `helpers` release
   under a key computed from the helper's source (`scripts/helpers.sh`), and
   `LATEST`, the newest key, for builds from `main`. Every build gets that key
-  (`ENDEAVOR_RELEASE_KEY`). The macOS and Windows rows have not run yet.
+  (`ENDEAVOR_RELEASE_KEY`). All five platforms were published for the first
+  time on 2026-10-08 (key `ed283c702b22`).
 - `scripts/install.sh` (tested against a fake release and the public one) and
   `scripts/install.ps1` (not run) install the newest build.
 - `endeavor update` replaces the binary from the Helpers release with the

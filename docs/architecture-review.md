@@ -4,14 +4,14 @@ A look back at the plugin and remote design ([plugins-and-remote.md](plugins-and
 after building it, before the app adopts it. It is for deciding, not a plan:
 nothing here is done until it is chosen.
 
-_Written 2026-10-09 against `client-library` at 7f1e6dc. The second part is an
+_Written 2026-10-06 against `client-library` at 7f1e6dc. The second part is an
 independent review by a separate agent that had not worked on the branch and
 was told that proposing removals was welcome. The first part is the view of
 the session that built it._
 
 ## Decided
 
-2026-10-09: go with the recommendations below.
+2026-10-06: go with the recommendations below.
 
 - **Now, before the skills trial and the app:** P1, P2, P4 (with the
   `machines.json` fixes), N3, N4, and P5a.

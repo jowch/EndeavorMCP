@@ -1,6 +1,6 @@
 //! Each agent session's last tool results, for the app to look up when the
 //! agent doesn't pass a call's result on (Cursor reports only
-//! `{"success": true}`; docs/other-agents.md, work item 2).
+//! `{"success": true}`; Endeavor's docs/other-agents.md, work item 2).
 //!
 //! A result is found by the id the agent's client gave the call, when the app
 //! knows it (Claude Code sends `_meta["claudecode/toolUseId"]`, the same id

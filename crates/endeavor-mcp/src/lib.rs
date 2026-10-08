@@ -3,7 +3,7 @@
 //! client of its Julia runtime (Pluto plus EndeavorRuntime): it attaches to the
 //! runtime recorded in the state folder or starts one, then relays the app's
 //! streams to the runtime's one loopback port over its own stdin/stdout
-//! (docs/remote-sessions.md). It runs over `ssh` on a server as the
+//! (Endeavor's docs/remote-sessions.md). It runs over `ssh` on a server as the
 //! `endeavor` binary; on This Mac the app runs itself as the helper
 //! (`endeavor --helper connect …`, calling `run`), so its helper can't go
 //! missing or be from another build. It is also ssh's askpass program (see `askpass`).
@@ -82,7 +82,7 @@ const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|au
        endeavor core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
        endeavor askpass PROMPT
        endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)
-       endeavor update                      replace this binary with the newest build (Linux)
+       endeavor update                      replace this binary with the newest build (Linux, macOS, Windows)
        endeavor --version";
 const LOG_TAIL: usize = 40;
 
