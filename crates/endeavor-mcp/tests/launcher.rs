@@ -45,16 +45,17 @@ struct Run {
 }
 
 impl Place {
-    /// A release with nothing on it, and a plugin folder holding the scripts.
+    /// A release with nothing on it, and a plugin folder holding the scripts, unpinned.
     fn new(name: &str) -> Place {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("launcher-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         for sub in ["release", "home", "plugin/launch", "fake"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
         }
-        for file in ["endeavor-mcp.sh", "install.sh", "release-key"] {
+        for file in ["endeavor-mcp.sh", "install.sh"] {
             std::fs::copy(scripts().join(file), dir.join("plugin/launch").join(file)).unwrap();
         }
+        std::fs::write(dir.join("plugin/launch/release-key"), "").unwrap();
         Place { dir }
     }
 
@@ -347,7 +348,7 @@ fn install_sh_takes_a_key_and_with_quiet_writes_nothing_to_stdout() {
     let bad = place.install(&["--key", "../x"]);
     assert!(!bad.ok && bad.stderr.contains("isn't a build's key"), "{}", bad.stderr);
     let unknown = place.install(&["--key", "ffffffffffff", "--dir", dir.to_str().unwrap()]);
-    assert!(!unknown.ok && unknown.stderr.contains("couldn't download"), "{}", unknown.stderr);
+    assert!(!unknown.ok && unknown.stderr.contains("doesn't hold build ffffffffffff yet"), "{}", unknown.stderr);
 }
 
 #[test]
