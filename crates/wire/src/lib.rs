@@ -245,6 +245,8 @@ pub enum ToApp {
     /// A `Stop` ended the `StartRuntime` with this id before it was ready: that
     /// start's answer, sent before the `Stopped` that answers the `Stop`.
     StartCancelled { id: u32 },
+    /// The `StartRuntime` with this id had `attach_only`, and no runtime runs or starts: nothing was started.
+    NotRunning { id: u32 },
     /// The runtime exited, with no request waiting for it; the helper stays connected.
     Died { status: String, log_tail: Vec<String> },
     /// The runtime stopped as the `Stop` with this id asked; the helper stays connected.
@@ -275,13 +277,19 @@ pub enum ToHelper {
     /// `engine` names the notebook system to start ([`ENGINE_PLUTO`]). `install`
     /// says the helper may install whatever this start needs (such as a
     /// language runtime); without it, a start that needs something is answered
-    /// `NeedsInstall` and installs nothing.
+    /// `NeedsInstall` and installs nothing. `attach_only` says never to start
+    /// one: the helper attaches to the runtime that runs, waits for a start
+    /// under way and attaches to what it records, and answers `NotRunning` when
+    /// there is none or the start ended without one. Absent, as from a client
+    /// that predates it, it is false.
     StartRuntime {
         id: u32,
         #[serde(default)]
         job: Option<slurm::JobRequest>,
         engine: String,
         install: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        attach_only: bool,
     },
     /// Stop the runtime and stay connected: the attached one, else the one
     /// recorded in the state folder, or on a cluster the job waiting for it.
@@ -296,7 +304,7 @@ impl ToApp {
     /// The id of the request this answers, if it answers one.
     pub fn answers(&self) -> Option<u32> {
         match self {
-            ToApp::Ready { id, .. } | ToApp::StartFailed { id, .. } | ToApp::NeedsInstall { id, .. } | ToApp::StartDied { id, .. } | ToApp::StartCancelled { id } | ToApp::Stopped { id } | ToApp::NotStopped { id, .. } => Some(*id),
+            ToApp::Ready { id, .. } | ToApp::StartFailed { id, .. } | ToApp::NeedsInstall { id, .. } | ToApp::StartDied { id, .. } | ToApp::StartCancelled { id } | ToApp::NotRunning { id } | ToApp::Stopped { id } | ToApp::NotStopped { id, .. } => Some(*id),
             _ => None,
         }
     }
@@ -399,9 +407,13 @@ mod tests {
         let Frame::Control(json) = not_stopped.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&json).unwrap()["type"], "NotStopped");
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), not_stopped);
-        let start = ToHelper::StartRuntime { id: 5, job: None, engine: ENGINE_PLUTO.into(), install: false };
+        let start = ToHelper::StartRuntime { id: 5, job: None, engine: ENGINE_PLUTO.into(), install: false, attach_only: false };
         assert_eq!(serde_json::to_string(&start).unwrap(), r#"{"type":"StartRuntime","id":5,"job":null,"engine":"pluto","install":false}"#);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"StartRuntime","id":5,"engine":"pluto","install":false}"#).unwrap(), start);
+        let attach = ToHelper::StartRuntime { id: 6, job: None, engine: ENGINE_PLUTO.into(), install: false, attach_only: true };
+        assert_eq!(serde_json::to_string(&attach).unwrap(), r#"{"type":"StartRuntime","id":6,"job":null,"engine":"pluto","install":false,"attach_only":true}"#);
+        assert_eq!(serde_json::from_str::<ToHelper>(&serde_json::to_string(&attach).unwrap()).unwrap(), attach);
+        assert_eq!(ToApp::NotRunning { id: 6 }.answers(), Some(6));
         let julia = Item { kind: KIND_RUNTIME.into(), name: "Julia 1.12.6".into(), size_mb: Some(289), place: Some("/home/ada/.cache/endeavor/julia-1.12.6".into()) };
         let needs = ToApp::NeedsInstall { id: 5, items: vec![julia.clone()] };
         let Frame::Control(json) = needs.frame() else { panic!() };

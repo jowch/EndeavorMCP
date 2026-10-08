@@ -85,14 +85,14 @@ impl Drop for Place {
     }
 }
 
-/// End the runtime a test of `dir` started (the core, Julia and its workers are one process group).
+/// End the runtime a test of `dir` started (the core, Julia and its workers are one process group). The
+/// cores are found by their command line, which holds this test's own state folder, not by a pid read
+/// from a file: a record or a lock left behind by an earlier run may name a pid that is another program's now.
 fn end_runtime(dir: &Path) {
-    let recorded = std::fs::read_to_string(dir.join("runtime-state/runtime.json")).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    // A core that is still starting has no record, but names itself in `starting.lock`.
-    let starting = std::fs::read_to_string(dir.join("runtime-state/starting.lock")).ok().and_then(|t| t.split_whitespace().next().and_then(|p| p.parse::<i64>().ok()));
-    if let Some(pid) = recorded.and_then(|v| v["pid"].as_i64()).or(starting).filter(|&p| p > 1) {
-        // SAFETY: plain syscall, on the runtime this test started.
-        unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+    let cores = Command::new("pgrep").arg("-f").arg("--").arg(format!("core --state-dir {} ", dir.join("runtime-state").display())).output().unwrap();
+    for pid in String::from_utf8_lossy(&cores.stdout).split_whitespace().filter_map(|p| p.parse::<i32>().ok()).filter(|&p| p > 1) {
+        // SAFETY: plain syscall, on a core of this test (its own process group) and what it started.
+        unsafe { libc::kill(-pid, libc::SIGTERM) };
     }
 }
 
@@ -481,6 +481,30 @@ fn a_connection_lost_and_back_while_the_core_still_starts_sees_the_start_and_wai
     assert_eq!((Some(runtime.pid as i32), runtime.reattached), (place.runtime(), true), "the start it did not begin");
     assert_eq!(julia_pids(&place.state).len(), 1, "one core ran: the second connection started none");
     assert_eq!(session.status().state, State::Ready);
+}
+
+#[test]
+fn an_attach_waits_for_a_start_under_way_and_when_it_dies_says_nothing_runs_and_starts_none() {
+    let place = Place::new("attach-start-dies");
+    let hold = place.state.join("hold");
+    std::fs::write(&hold, "").unwrap();
+    let first = place.session();
+    assert!(matches!(first.ensure(start(), Duration::from_millis(1500), false), Outcome::StillWorking(_)));
+    wait_for("Julia to be asked for", || place.julia_ran());
+    drop(first);
+    let core: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(place.state.join("starting.lock")).unwrap()).unwrap();
+    let core = core["pid"].as_i64().unwrap() as i32;
+
+    // Another session only attaches: it waits for the start, and it dies.
+    let second = place.session();
+    assert!(matches!(second.ensure(Want::Attach { install: false }, Duration::from_millis(1500), false), Outcome::StillWorking(_)), "a start under way is something to wait for");
+    // SAFETY: plain syscall, on the core this test's session started and what it started.
+    unsafe { libc::kill(-core, libc::SIGKILL) };
+    wait_for("the end to be told", || second.status().nothing_running);
+    assert_eq!(second.ensure(Want::Attach { install: false }, LONG, false), Outcome::NothingRunning);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(julia_pids(&place.state).len(), 1, "no Julia was started in its place");
+    assert!(place.runtime().is_none());
 }
 
 #[test]

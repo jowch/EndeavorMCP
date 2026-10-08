@@ -200,7 +200,7 @@ fn end_leftovers(dir: &Path) {
     }
     // The recorded runtimes, and any still starting (no record yet): the cores whose command line is `core --state-dir` and this test's own folders.
     let states: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|entry| entry.path()).filter(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("runtime-state") || n == "local-state")).collect();
-    let mut groups: Vec<i32> = states.iter().filter_map(|state| recorded_pid(state)).collect();
+    let mut groups: Vec<i32> = Vec::new();
     for state in &states {
         groups.extend(pids(&format!("core --state-dir {} ", state.display())));
     }
@@ -1464,6 +1464,8 @@ fn a_forced_stop_cancels_the_start_this_session_began_and_it_is_not_left_as_a_fa
     wait_for("the core to end", || !pid_alive(started[0]));
     let status = front.ok("pluto_session_status", json!({}));
     assert_eq!(status["state"], "stopped", "{status}");
+    // Read without a call that asks to try again: the start it cancelled is not a failure kept for every call.
+    assert!(status.get("error").is_none(), "no failure is kept and told to every call: {status}");
     let used = front.ok("use_machine", json!({ "machine": "local" }));
     assert_ne!(used["state"], "failed", "the start it cancelled is not held against the next one: {used}");
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
@@ -1473,6 +1475,41 @@ fn a_forced_stop_cancels_the_start_this_session_began_and_it_is_not_left_as_a_fa
         std::thread::sleep(Duration::from_millis(300));
     }
     assert_eq!(common::julia_pids(&place.local_state).len(), 2);
+    front.finish();
+}
+
+#[test]
+fn a_forced_stop_after_a_failed_start_here_reaches_a_start_another_process_has_under_way() {
+    let place = Place::new("lazy-failed-then-other");
+    let path = local_notebook(&place, "failed.jl");
+    std::fs::write(place.local_state.join("hold"), "").unwrap();
+    let short = [("ENDEAVOR_START_WAIT_SECS", "2")];
+    let mut front = start_front(&place, &short);
+    front.initialize();
+    let (failed, said) = front.call("open_notebook", json!({ "path": path }));
+    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    // Its start fails: the core is killed under it.
+    let first = core_of(&place);
+    assert_eq!(first.len(), 1, "{first:?}");
+    // SAFETY: plain syscall, on the core this test's front started and what it started.
+    unsafe { libc::kill(-first[0], libc::SIGKILL) };
+    wait_for("the failure", || {
+        let (failed, said) = front.call("open_notebook", json!({ "path": path }));
+        failed && text(&said).contains("stopped while starting")
+    });
+    // Another process begins a start of its own.
+    let mut other = start_front(&place, &short);
+    other.initialize();
+    let (failed, said) = other.call("open_notebook", json!({ "path": path }));
+    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    let second = core_of(&place);
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert_ne!(second, first);
+    other.finish();
+
+    let stopped = front.ok("stop_machine", json!({ "machine": "local", "force": true }));
+    assert_eq!(stopped["stopped"], true, "the first forced stop reaches the start: {stopped}");
+    wait_for("the other process's core to end", || core_of(&place).is_empty());
     front.finish();
 }
 

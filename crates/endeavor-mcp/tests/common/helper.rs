@@ -84,7 +84,14 @@ impl Helper {
     /// Ask for the runtime: the request's id.
     pub fn request_start(&self, job: Option<wire::slurm::JobRequest>, install: bool) -> u32 {
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
-        self.send(ToHelper::StartRuntime { id, job, engine: wire::ENGINE_PLUTO.into(), install });
+        self.send(ToHelper::StartRuntime { id, job, engine: wire::ENGINE_PLUTO.into(), install, attach_only: false });
+        id
+    }
+
+    /// Ask for the runtime that runs or is starting, and never to start one.
+    pub fn request_attach(&self) -> u32 {
+        let id = self.ids.fetch_add(1, Ordering::Relaxed);
+        self.send(ToHelper::StartRuntime { id, job: None, engine: wire::ENGINE_PLUTO.into(), install: false, attach_only: true });
         id
     }
 

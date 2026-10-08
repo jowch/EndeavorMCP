@@ -647,7 +647,7 @@ impl Shared {
                 wish
             };
             let tx = shared.inbox.clone();
-            let options = StartOptions { job: wish.job, install: wish.install, ..StartOptions::default() };
+            let options = StartOptions { job: wish.job, install: wish.install, attach_only: wish.attach, ..StartOptions::default() };
             let result = start(&channel, &shared.listener, &options, &|event| shared.on_event(event), move |notice| drop(tx.send(Msg::Notice(conn, notice))));
             let _ = shared.inbox.send(Msg::Started(conn, epoch, options.install, result));
         });
@@ -1144,6 +1144,23 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             i.needs = Some(InstallInfo { items, helper: None });
                         });
                         shared.listener.restart_failed();
+                    }
+                    Err(StartError::NotRunning) => {
+                        // The wish may have become a start while the attach waited.
+                        let restart = shared.with(|i| {
+                            i.run = Run::Idle;
+                            if i.wanted.as_ref().is_some_and(|wish| !wish.attach) {
+                                return true;
+                            }
+                            (i.wanted, i.job, i.queue) = (None, None, None);
+                            i.nothing_running = true;
+                            i.state = State::Connected;
+                            i.step = Some(format!("No runtime is running on {}", i.name));
+                            false
+                        });
+                        if restart {
+                            shared.begin_start();
+                        }
                     }
                     Err(StartError::Failed(message)) => {
                         shared.with(|i| {

@@ -125,6 +125,9 @@ struct State {
     /// later process given the same pid; none for a record from a build before it was written, and on
     /// a Unix system that gives no start time.
     started: Option<u64>,
+    /// Which boot of the computer `started` counts from (`unixproc::boot_id`, Linux); none when the
+    /// platform's start time is absolute, and for a record from before it was written.
+    boot: Option<String>,
     /// The runtime's one port (the core's). None for a runtime from a build
     /// before one port per runtime, which this helper can stop but not relay to.
     port: Option<u16>,
@@ -316,13 +319,13 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
     loop {
         let event = inbox.next();
         match event {
-            Event::App(ToHelper::StartRuntime { id, job, engine, install }) => {
+            Event::App(ToHelper::StartRuntime { id, job, engine, install, attach_only }) => {
                 if let Some(attached) = &attached {
                     let _ = mux.send(&attached.ready(id, true).frame());
                     continue;
                 }
                 let result = match args.launcher {
-                    Launcher::Process => attach(args, mux, &mut inbox, &events, &parts, &engine, install),
+                    Launcher::Process => attach(args, mux, &mut inbox, &events, &parts, &engine, install, attach_only),
                     Launcher::Slurm => slurm::attach(args, mux, &mut inbox, &events, &parts, job.unwrap_or_default(), &engine, install),
                 };
                 match result {
@@ -488,7 +491,7 @@ fn stop_marked(dir: &Path, state: Option<&State>, runtime: &Runtime, how: stoppe
     let of = stopped::Of::Runtime(runtime.pid);
     stopped::mark(dir, of, how);
     runtime.stop(state);
-    let gone = !pid_alive(runtime.pid, runtime.started);
+    let gone = !runtime.is_it();
     if !gone {
         stopped::unmark(dir, of);
     }
@@ -580,6 +583,8 @@ enum Unstarted {
     Died { status: String, log_tail: Vec<String> },
     /// The `Stop` with this id cut it short; that is answered too.
     Stopped(u32),
+    /// Only attaching was asked for, and nothing runs or is starting.
+    NotRunning,
 }
 
 impl Unstarted {
@@ -590,6 +595,7 @@ impl Unstarted {
             Unstarted::NeedsInstall(items) => (ToApp::NeedsInstall { id: start, items }, None),
             Unstarted::Died { status, log_tail } => (ToApp::StartDied { id: start, status, log_tail }, None),
             Unstarted::Stopped(stop) => (ToApp::StartCancelled { id: start }, Some(stop)),
+            Unstarted::NotRunning => (ToApp::NotRunning { id: start }, None),
         };
         let _ = mux.send(&reply.frame());
         if let Some(id) = stop {
@@ -663,6 +669,7 @@ impl<'a> Client<'a> {
             Outcome::Unusable(Looked::OtherNode(state)) => Unstarted::Failed(runtime::other_node_text(&state.node)),
             Outcome::Unusable(_) => Unstarted::Failed(OLDER_RUNTIME.into()),
             Outcome::Cancelled => self.cancelled(),
+            Outcome::NothingRunning => Unstarted::NotRunning,
             Outcome::Ready(_) => unreachable!("a runtime is not an unstarted one"),
         }
     }
@@ -715,10 +722,10 @@ fn lock_stop(dir: &Path, inbox: &mut Inbox, limit: Duration) -> Result<File, Str
 /// Attach to the runtime in the state folder, or start one (`runtime::find_or_start`). Helpers asked at
 /// once start one runtime and the rest attach to it. The error is the app's answer: why it couldn't
 /// start, or that it died while starting.
-fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, engine: &str, install: bool) -> Result<Attached, Unstarted> {
+fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, engine: &str, install: bool, attach_only: bool) -> Result<Attached, Unstarted> {
     let mut client = Client::new(args, mux, inbox, parts);
     client.hear_kept()?;
-    let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events };
+    let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events, attach_only };
     match runtime::find_or_start(&want, &mut client) {
         Outcome::Ready(Up { state, port, runtime, started }) => Ok(Attached { how: How::Process(runtime, port), state, reattached: !started }),
         other => Err(client.unstarted(other)),
@@ -758,9 +765,10 @@ fn check(dir: &Path, launcher: Launcher, any_node: bool) -> RuntimeState {
         return slurm::check(dir);
     }
     // Before the look: a core writes its record before it lets go of the lock.
-    let starting = runtime::starting(dir);
+    let starting = runtime::lock_state(dir).is_held();
     match runtime::look(dir, any_node, true) {
-        runtime::Looked::NotRunning | runtime::Looked::Dead(_) if starting => RuntimeState::Starting,
+        // No runtime answers: a start under way is what will.
+        runtime::Looked::NotRunning | runtime::Looked::Dead(_) | runtime::Looked::Silent(_) if starting => RuntimeState::Starting,
         runtime::Looked::NotRunning | runtime::Looked::Dead(_) | runtime::Looked::Silent(_) => RuntimeState::NotRunning,
         runtime::Looked::OtherNode(state) | runtime::Looked::Older(state) => RuntimeState::Running { node: state.node, notebooks: None, job: None },
         runtime::Looked::Running(state, port) => RuntimeState::Running { notebooks: open_notebooks(port, &state.token), node: state.node, job: None },
@@ -781,6 +789,7 @@ struct Runtime {
     pid: i32,
     /// As in `State`: what `kill` checks the pid against before ending it.
     started: Option<u64>,
+    boot: Option<String>,
     exit: Arc<Exit>,
     state_dir: PathBuf,
 }
@@ -792,10 +801,11 @@ impl Runtime {
         #[cfg(windows)]
         let started = winproc::start_time(std::os::windows::io::AsRawHandle::as_raw_handle(&child));
         #[cfg(unix)]
-        let started = unixproc::start_time(pid);
+        let started = unixproc::start_time(pid).at();
         Runtime {
             pid,
             started,
+            boot: own_boot(),
             exit: Exit::watch_child(child, pid, events.clone()),
             state_dir: state_dir.to_path_buf(),
         }
@@ -803,12 +813,13 @@ impl Runtime {
 
     /// The runtime `state` records, which some earlier helper started.
     fn recorded(state: &State, state_dir: &Path, events: &Sender<Event>) -> Runtime {
-        Runtime::of(state.pid, state.started, state_dir, events)
+        Runtime::of(state.pid, state.started, state.boot.clone(), state_dir, events)
     }
 
-    /// The runtime process `pid`, which started at `started`, though it has no record.
-    fn of(pid: i32, started: Option<u64>, state_dir: &Path, events: &Sender<Event>) -> Runtime {
-        Runtime { pid, started, exit: Exit::watch_pid(pid, started, events.clone()), state_dir: state_dir.to_path_buf() }
+    /// The runtime process `pid`, which started at `started` (on boot `boot`), though it has no record.
+    fn of(pid: i32, started: Option<u64>, boot: Option<String>, state_dir: &Path, events: &Sender<Event>) -> Runtime {
+        let exit = Exit::watch_pid(pid, started, boot.clone(), events.clone());
+        Runtime { pid, started, boot, exit, state_dir: state_dir.to_path_buf() }
     }
 
     /// It exited: clean up after it and say so, and if another connection
@@ -820,6 +831,11 @@ impl Runtime {
         stop_workers(self.pid);
         remove_state(&self.state_dir, self.pid, self.started);
         (status, log_tail)
+    }
+
+    /// Whether the process with its pid is it, and runs.
+    fn is_it(&self) -> bool {
+        pid_alive(self.pid, self.started, self.boot.as_deref())
     }
 
     /// Ask the runtime to shut down (when it's up and from this build), then insist.
@@ -837,7 +853,7 @@ impl Runtime {
     fn kill(&self) {
         for signal in [libc::SIGTERM, libc::SIGKILL] {
             // A pid that is now another process's is not signalled.
-            if self.exit.status().is_some() || !pid_alive(self.pid, self.started) {
+            if self.exit.status().is_some() || !self.is_it() {
                 break;
             }
             signal_group(self.pid, signal);
@@ -845,7 +861,7 @@ impl Runtime {
         }
         stop_workers(self.pid);
         // A runtime that survived stays on record for the clients that can still reach it.
-        if !pid_alive(self.pid, self.started) {
+        if !self.is_it() {
             remove_state(&self.state_dir, self.pid, self.started);
         }
     }
@@ -880,7 +896,7 @@ fn signal_group(pid: i32, signal: i32) {
 /// of its own: the runtime's record may be from before a reboot.
 #[cfg(unix)]
 fn stop_workers(pid: i32) {
-    if pid_alive(pid, None) {
+    if pid_alive(pid, None, None) {
         return;
     }
     // SAFETY: plain syscall.
@@ -911,11 +927,11 @@ impl Exit {
     }
 
     /// A runtime some earlier helper started isn't our child: poll it.
-    fn watch_pid(pid: i32, started: Option<u64>, events: Sender<Event>) -> Arc<Exit> {
+    fn watch_pid(pid: i32, started: Option<u64>, boot: Option<String>, events: Sender<Event>) -> Arc<Exit> {
         let exit = Arc::new(Exit::default());
         let e = exit.clone();
         std::thread::spawn(move || {
-            while pid_alive(pid, started) {
+            while pid_alive(pid, started, boot.as_deref()) {
                 std::thread::sleep(Duration::from_millis(500));
             }
             e.set(pid, "exited".into(), &events);
@@ -939,29 +955,45 @@ impl Exit {
     }
 }
 
-/// Whether the process `pid` runs, and when `started` is known, is the one that started then: a pid that
-/// is recorded outlives a reboot, and is then another program's. Everything that trusts or signals a
-/// recorded pid asks this.
+/// Whether the process `pid` runs, and when `started` is known, is the one that started then (on boot
+/// `boot`, when both that and this boot have an id): a pid that is recorded outlives a reboot, and is then
+/// another program's. Only a process that is not there, or has another start time, is not it: a start
+/// time that can't be read leaves it to `kill`. Everything that trusts or signals a recorded pid asks this.
 #[cfg(unix)]
-fn pid_alive(pid: i32, started: Option<u64>) -> bool {
+fn pid_alive(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     let exists = pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
-    exists && started.is_none_or(|started| unixproc::start_time(pid) == Some(started))
+    if !exists || !unixproc::same_boot(boot) {
+        return false;
+    }
+    match (started, unixproc::start_time(pid)) {
+        (Some(started), unixproc::Start::At(now)) => now == started,
+        (Some(_), unixproc::Start::Gone) => false,
+        _ => true,
+    }
 }
 
 /// Windows reuses pids quickly, so the process must also have started when
 /// the record says.
 #[cfg(windows)]
-fn pid_alive(pid: i32, started: Option<u64>) -> bool {
+fn pid_alive(pid: i32, started: Option<u64>, _boot: Option<&str>) -> bool {
     winproc::Process::open(pid, started).is_some_and(|process| process.alive())
 }
 
 /// When this process started, as `runtime.json` and `starting.lock` record it.
 fn own_start_time() -> Option<u64> {
     #[cfg(unix)]
-    return unixproc::start_time(std::process::id() as i32);
+    return unixproc::start_time(std::process::id() as i32).at();
     #[cfg(windows)]
     return winproc::own_start_time();
+}
+
+/// Which boot this is, for the start time to be compared on (`State::boot`).
+fn own_boot() -> Option<String> {
+    #[cfg(unix)]
+    return unixproc::boot_id();
+    #[cfg(windows)]
+    return None;
 }
 
 /// End the runtime recorded with `pid` and `started` (runtime.json), with
@@ -1106,6 +1138,7 @@ fn parse_state(v: &Value) -> Option<State> {
         node: text("node")?,
         pid: v["pid"].as_i64().and_then(|p| i32::try_from(p).ok())?,
         started: v["started"].as_u64(),
+        boot: text("boot"),
         port: v["port"].as_u64().and_then(|p| u16::try_from(p).ok()),
         token: text("token")?,
         job: text("job").filter(|j| !j.is_empty()),

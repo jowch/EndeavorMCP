@@ -78,11 +78,12 @@ _Started 2026-10-06, on the `client-library` branch._
   where it is running. To close: a third state for "running on another node".
 - **A forced stop cancels a start only when `starting.lock` names its core.**
   `endeavor stop --force` and `stop_machine` with `force` on this computer end
-  the core the file names, if the lock is held and that process started when the
-  file says. A core of an older build writes no pid, and a core that has just
-  taken the lock has not yet: the stop then says it can't tell which process is
-  starting Julia and stops nothing. Find the process with `ps` and end it, or
-  try again in a moment.
+  the core the file names, if the lock is held, the file names this computer and
+  a start time, and that process started then (on this boot). A core of an
+  older build writes no pid, a core that has just taken the lock has not yet,
+  and a platform that gives no start time records none: the stop then says it
+  can't tell which process is starting Julia and stops nothing. Find the process
+  with `ps` and end it, or try again in a moment.
 - **On a machine, a stop cannot cancel a start another connection began.** The
   helper's `Stop` has no `force`, so `stop_machine` with `force` ends a start
   that this session's own connection is waiting on, and for another process's
@@ -132,10 +133,12 @@ _Started 2026-10-06, on the `client-library` branch._
   another node is still refused by name (`runtime.json`); this is only for a
   start with no record yet.
 - **A recorded pid is compared with its start time only where the platform gives
-  one.** Linux (`/proc/PID/stat`) and macOS (`proc_pidinfo`) do. The macOS code
-  is built, and its unit test run, only by CI (`macos-15`); nobody has run it by hand. A
-  start time that can't be read (another user's process under `hidepid`) counts
-  as not the process. When a stale pid is another program's, a runtime's leftover
+  one.** Linux (`/proc/PID/stat`, with the boot id) and macOS (`proc_pidinfo`) do.
+  The macOS code is built, and its unit test run, only by CI (`macos-15`);
+  nobody has run it by hand. Only a process that is not there counts as not the
+  process when its start time can't be read (no descriptors, no memory, another
+  user's process under `hidepid`): `kill(pid, 0)` decides then, so a stale pid
+  that another program has may count in that moment. When a stale pid is another program's, a runtime's leftover
   notebook workers are not signalled, since their group id may be that program's.
 - **A helper started with `--quit-with-client` stops, when its input ends
   during a start, only a runtime it started itself.** One it was waiting for
@@ -192,17 +195,13 @@ _Started 2026-10-06, on the `client-library` branch._
 - **The byte lock on `starting.lock` is not run on Windows.** Windows locks bytes
   against other processes' reads, and std's `File::lock` and `try_lock_shared`
   lock every byte (`LockFileEx` from offset 0 over the largest length, read in
-  std's source), so the core locks one byte at offset 4096, past the 33 bytes
-  the file holds, with `LockFileEx` itself and the pid stays readable. It works
+  std's source), so the core locks one byte at offset 4096, past the
+  few hundred bytes (under 512) the file holds, with `LockFileEx` itself and the pid stays readable. It works
   for any lock from offset 0 longer than 4 KiB. CI compiles and tests this on
   `windows-latest` with a stand-in Julia, but the pid and the cancel are not
   tested there (the tests that use them are Unix only). A core that can't write
   its pid in the file does not start.
-- **A call that only attaches can wait for a start.** After a reconnect or in
-  `list_notebooks`, a runtime that is starting counts as there, so the call sends
-  `StartRuntime`, which waits for the start. If that start dies without a stop
-  noted, the helper starts a runtime, where before the call answered "not
-  running" at once.
+- **A client of an earlier build of this branch cannot read `RuntimeState::Starting`.**
 
 ## Slurm
 
@@ -394,11 +393,10 @@ _Started 2026-10-06, on the `client-library` branch._
   limited to 5 seconds in all, so it takes about 10 seconds at most. A ping sends
   the recorded token to the recorded port on 127.0.0.1 (every pinging `look`
   does, including `endeavor status`), and only if the recorded pid is the process
-  that started then (its start time is recorded). That still leaves a record
-  without a start time, which an older build wrote or a Unix system that gives
-  none, and Linux's start time is in clock ticks after boot, so after a reboot a
-  process with the same pid that started in the same tick is not told apart. In
-  those cases a stale record whose port another local program now uses would show
+  that started then (its start time is recorded, with the boot id on Linux, where
+  it counts ticks after boot). That still leaves a record without a start time,
+  which an older build wrote or a Unix system that gives none, and one without a
+  boot id, which an earlier build of this branch wrote. In those cases a stale record whose port another local program now uses would show
   it the token. It reads `runtime.json` through
   `State`, while `standalone::recorded_folder` and `other_build_than` still read
   the file on their own (their tests write partial records), so the record has

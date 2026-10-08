@@ -558,18 +558,85 @@ fn a_forced_stop_cancels_a_start_that_is_under_way_and_leaves_nothing_of_it() {
 }
 
 #[test]
+fn an_attach_that_waits_for_a_start_never_starts_a_runtime_when_that_start_dies() {
+    let (dir, cores, julia) = held_dir("attach-only");
+    let env_home = dir.join("home").display().to_string();
+    let attaching = || {
+        let env = [("HOME", env_home.as_str()), ("XDG_STATE_HOME", env_home.as_str()), ("XDG_CONFIG_HOME", env_home.as_str()), ("XDG_CACHE_HOME", env_home.as_str())];
+        let helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &env);
+        helper.hello();
+        let id = helper.request_attach();
+        (helper, id)
+    };
+    // Nothing runs and nothing starts: it says so, and starts nothing.
+    let (none, id) = attaching();
+    assert_eq!(none.after_progress(), ToApp::NotRunning { id });
+    assert!(cores.pids().is_empty() && common::julia_pids(&dir).is_empty(), "nothing was started");
+
+    // A start is under way: the attach waits for it, and when it dies says nothing runs.
+    let mut first = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    first.send(ToHelper::Detach);
+    first.exits();
+    let (waiter, id) = attaching();
+    std::thread::sleep(Duration::from_millis(500));
+    // SAFETY: plain syscall, on the core this test's helper started and what it started.
+    unsafe { libc::kill(-core, libc::SIGKILL) };
+    assert_eq!(waiter.after_progress(), ToApp::NotRunning { id });
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(cores.pids().is_empty(), "no core was started in its place: {:?}", cores.pids());
+    assert_eq!(common::julia_pids(&dir).len(), 1, "exactly one Julia ran, the one that was waited for");
+
+    // One that comes up is attached to.
+    let mut second = held_start(&dir, &julia, &[]);
+    let (attached, id) = attaching();
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    let ToApp::Ready { pid, reattached, .. } = after_start(&attached) else { panic!("expected Ready for {id}") };
+    assert!(reattached && pid as i32 == cores.pids()[0]);
+    second.stdin.0.lock().unwrap().take();
+    second.exits();
+}
+
+#[test]
+fn the_helpers_check_says_a_start_is_under_way_beside_a_hung_runtime_and_not_after_it() {
+    let dir = state_dir("check-silent");
+    let runtime = FakeRuntime::start(&dir, &this_host());
+    // Its port stops answering: a runtime that hangs.
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut state = common::read_json(&dir.join("runtime.json"));
+    state["port"] = closed.into();
+    std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
+    let helper = Helper::start(&dir, &[]);
+    helper.hello();
+    assert_eq!(check(&helper, 1), RuntimeState::NotRunning, "a hung runtime and no start under way");
+    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("starting.lock")).unwrap();
+    lock.lock().unwrap();
+    assert_eq!(check(&helper, 2), RuntimeState::Starting, "its replacement is on the way");
+    drop(lock);
+    assert_eq!(check(&helper, 3), RuntimeState::NotRunning);
+    assert!(runtime.alive());
+    helper.stdin.0.lock().unwrap().take();
+}
+
+#[test]
 fn a_forced_stop_does_not_end_a_core_the_file_does_not_name() {
     let (dir, cores, julia) = held_dir("start-force-unnamed");
     let mut first = held_start(&dir, &julia, &[]);
     let core = cores.pids()[0];
     first.send(ToHelper::Detach);
     first.exits();
-    // The core is told apart from whatever the file names: a start time that is not its own.
-    let file = std::fs::OpenOptions::new().write(true).open(dir.join("starting.lock")).unwrap();
-    std::os::unix::fs::FileExt::write_all_at(&file, format!("{core:>11} {:>20}\n", 1).as_bytes(), 0).unwrap();
-    let refused = endeavor(&dir, &["stop", "--force"]).output().unwrap();
-    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("can't tell which process"), "{refused:?}");
-    assert!(common::pid_alive(core) && !dir.join("stopped").exists(), "nothing was signalled");
+    // The file names the core by its pid, start time and computer; a signal goes on all three, never on a guess.
+    let named = common::read_json(&dir.join("starting.lock"));
+    assert_eq!((named["pid"].as_i64(), named["node"].as_str()), (Some(core as i64), Some(this_host().as_str())), "the core names itself: {named}");
+    for (what, change) in [("a start time that is not its own", ("started", serde_json::json!(1))), ("no start time", ("started", serde_json::Value::Null)), ("another computer", ("node", serde_json::json!("another-node")))] {
+        let mut file = named.clone();
+        file[change.0] = change.1;
+        std::fs::write(dir.join("starting.lock"), file.to_string()).unwrap();
+        let refused = endeavor(&dir, &["stop", "--force"]).output().unwrap();
+        assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("can't tell which process"), "{what}: {refused:?}");
+        assert!(common::pid_alive(core) && !dir.join("stopped").exists(), "{what}: nothing was signalled");
+    }
 }
 
 #[test]
@@ -1123,7 +1190,7 @@ fn a_start_for_an_engine_nobody_knows_fails_and_the_helper_stays_up() {
     let dir = state_dir("unknown-engine");
     let helper = Helper::start(&dir, &[]);
     helper.hello();
-    helper.send(ToHelper::StartRuntime { id: 7, job: None, engine: "marimo".into(), install: true });
+    helper.send(ToHelper::StartRuntime { id: 7, job: None, engine: "marimo".into(), install: true, attach_only: false });
     let ToApp::StartFailed { id, message } = helper.next() else { panic!("expected StartFailed") };
     assert_eq!(id, 7);
     assert!(message.contains("marimo"), "{message}");

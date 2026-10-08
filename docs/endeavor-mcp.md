@@ -174,9 +174,10 @@ The helper, `serve` and the front find or start the runtime with one function
 (`runtime::find_or_start`), look at what is running with one (`runtime::look`)
 and stop it with one (`runtime::end`). A start, once begun, finishes without the
 process that asked for it. The core is its own session. As the first thing it
-does it holds `starting.lock` in the state folder, writes its pid and start time
-into that file, and lets go only after it has written `runtime.json` and blanked
-them; the OS lets go if it dies. The process that spawned it
+does it holds `starting.lock` in the state folder, writes its pid, start time,
+boot id and host name into that file (one JSON object), and lets go only after
+it has written `runtime.json` and blanked the file; the OS lets go if it dies.
+`runtime::lock_state` is the one reading of it: free, or held with the core it names. The process that spawned it
 holds `start.lock` for the look and the spawn, until the core holds its own lock,
 and waits for the runtime without it. A client that takes `start.lock` and finds
 no usable record but `starting.lock` held waits for that runtime, and looks again
@@ -189,11 +190,15 @@ process: a `Stop` to the helper, Ctrl-C in `serve`, the end of input and
 runtime it is not attached to) that finds no record and `starting.lock` held
 stops nothing, and says Julia is still starting. `endeavor stop --force` and
 `stop_machine` with `force` on this computer cancel it: `runtime::end` reads the
-pid and start time from `starting.lock`, and ends that core and its process group
-(as it ends a runtime that is up, with the same note in `stopped`) only if the
-lock is held and the pid is the process that started then, checked again just
-before the signal. A core of an older build writes no pid, and then nothing is
-stopped. The helper's Stop has no `force`, so it still stops nothing.
+pid, start time, boot id and host name from `starting.lock`, and ends that core
+and its process group (as it ends a runtime that is up, with the same note in
+`stopped`) only if the lock is held, the host is this one and the pid is the
+process that started then, read again immediately before the signal. A file that
+gives no start time, or a core of an older build, and then nothing is stopped
+(after a last look for a record: a start that finished meanwhile is stopped as a
+runtime is). A call that only attaches (`StartRuntime` with `attach_only`) waits
+for a start under way in the same way, but starts none when it dies: the helper
+answers `NotRunning`. The helper's Stop has no `force`, so it still stops nothing.
 
 `endeavor status [--state-dir DIR] [--json]` reports what Endeavor has on this
 computer and changes nothing: it makes no folder or file, starts nothing and

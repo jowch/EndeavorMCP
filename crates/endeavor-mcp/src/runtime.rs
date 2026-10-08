@@ -53,7 +53,7 @@ pub(crate) fn look(dir: &Path, any_node: bool, ping: bool) -> Looked {
     if state.node != crate::hostname() && !any_node {
         return Looked::OtherNode(state);
     }
-    if !crate::pid_alive(state.pid, state.started) {
+    if !crate::pid_alive(state.pid, state.started, state.boot.as_deref()) {
         return Looked::Dead(state);
     }
     match state.port {
@@ -86,6 +86,9 @@ pub(crate) struct Want<'a> {
     pub runtime: &'a dyn Fn() -> Result<PathBuf, String>,
     /// Where a runtime reports its exit.
     pub events: &'a Sender<Event>,
+    /// Never start a runtime: find the one that runs, or wait for a start under way, and say nothing
+    /// runs (`Outcome::NothingRunning`) when there is none or the start ended without one.
+    pub attach_only: bool,
 }
 
 /// What a caller says and decides while a start goes on.
@@ -129,6 +132,8 @@ pub(crate) enum Outcome {
     Died { status: String, log_tail: Vec<String> },
     /// `Hooks::wait` said to stop.
     Cancelled,
+    /// `Want::attach_only`, and no runtime runs and none is starting.
+    NothingRunning,
 }
 
 const POLL: Duration = Duration::from_millis(200);
@@ -159,21 +164,25 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             Err(outcome) => return outcome,
         };
         // Before the look: a core that records itself and lets go in between is then found by the look.
-        let starting = starting(dir);
+        let starting = lock_state(dir).is_held();
         match look(dir, want.args.any_node, true) {
             Looked::Running(state, port) => return Outcome::Ready(up(want, state, port, None)),
             unusable @ (Looked::OtherNode(_) | Looked::Older(_)) => return Outcome::Unusable(unusable),
-            Looked::Silent(state) if !starting => eprintln!("endeavor: the recorded runtime (pid {}) isn't answering; starting a new one", state.pid),
+            Looked::Silent(state) if !starting && !want.attach_only => eprintln!("endeavor: the recorded runtime (pid {}) isn't answering; starting a new one", state.pid),
             _ => {}
         }
         if starting {
             drop(lock);
             match await_runtime(dir, want.args.any_node, None, hooks) {
                 Ok((state, port)) => return Outcome::Ready(up(want, state, port, None)),
-                // It died; the lock is taken again to look, and to start one if none is.
+                // It died; the lock is taken again to look, and to start one if none is, unless none is to be started.
+                Err(Waited::Gone) if want.attach_only => return Outcome::NothingRunning,
                 Err(Waited::Gone) => continue,
                 Err(Waited::Out(outcome)) => return outcome,
             }
+        }
+        if want.attach_only {
+            return Outcome::NothingRunning;
         }
         stopped::clear(dir);
         let runtime_dir = match (want.runtime)() {
@@ -233,11 +242,21 @@ fn open_starting(dir: &Path) -> std::io::Result<File> {
 }
 
 /// The process that holds `starting.lock`, as the file names it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Core {
     pub pid: i32,
     /// As in `State`.
     pub started: Option<u64>,
+    pub boot: Option<String>,
+    /// The computer it runs on: a pid means nothing on another.
+    pub node: String,
+}
+
+impl Core {
+    /// The core is this process.
+    fn this() -> Core {
+        Core { pid: std::process::id() as i32, started: crate::own_start_time(), boot: crate::own_boot(), node: crate::hostname() }
+    }
 }
 
 /// Where on Windows the core's lock is: a byte past what the file holds (`write_core`), so that
@@ -265,22 +284,30 @@ fn lock_starting(file: &File) -> std::io::Result<()> {
     if locked == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
 }
 
-/// Write who holds the lock (or, with none, that no one does) over the whole of what the file holds, at
-/// a fixed width. The lock is held when this is called, so no shared lock over the file (`starting`) is
-/// held meanwhile on Windows.
-fn write_core(mut file: &File, core: Option<Core>) -> std::io::Result<()> {
-    let (pid, started) = core.map_or((0, 0), |core| (core.pid, core.started.unwrap_or(0)));
+/// Write who holds the lock (or, with none, that no one does) as the whole of what the file holds. The
+/// lock is held when this is called, so no shared lock over the file (`lock_state`) is held meanwhile on
+/// Windows.
+fn write_core(mut file: &File, core: Option<&Core>) -> std::io::Result<()> {
+    file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
-    file.write_all(format!("{pid:>11} {started:>20}\n").as_bytes())
+    match core {
+        Some(core) => file.write_all(serde_json::json!({ "pid": core.pid, "started": core.started, "boot": core.boot, "node": core.node }).to_string().as_bytes()),
+        None => Ok(()),
+    }
 }
 
+/// What the file says, read as it is: whether the process is there is for `lock_state`.
 fn read_core(mut file: &File) -> Option<Core> {
     let mut text = String::new();
     file.seek(SeekFrom::Start(0)).ok()?;
-    file.take(64).read_to_string(&mut text).ok()?;
-    let mut words = text.split_whitespace();
-    let pid = words.next()?.parse::<i32>().ok().filter(|pid| *pid > 0)?;
-    Some(Core { pid, started: words.next()?.parse::<u64>().ok().filter(|started| *started != 0) })
+    file.take(512).read_to_string(&mut text).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(Core {
+        pid: v["pid"].as_i64().and_then(|pid| i32::try_from(pid).ok()).filter(|pid| *pid > 0)?,
+        started: v["started"].as_u64(),
+        boot: v["boot"].as_str().map(str::to_owned),
+        node: v["node"].as_str()?.to_owned(),
+    })
 }
 
 /// The core takes `starting.lock` before it does anything else, writes its own pid and start time in it,
@@ -289,8 +316,7 @@ fn read_core(mut file: &File) -> Option<Core> {
 pub(crate) fn hold_starting(dir: &Path) -> std::io::Result<File> {
     let file = open_starting(dir)?;
     lock_starting(&file)?;
-    let me = std::process::id() as i32;
-    write_core(&file, Some(Core { pid: me, started: crate::own_start_time() })).map_err(|e| std::io::Error::new(e.kind(), format!("couldn't write its pid in starting.lock: {e}")))?;
+    write_core(&file, Some(&Core::this())).map_err(|e| std::io::Error::new(e.kind(), format!("couldn't write its pid in starting.lock: {e}")))?;
     Ok(file)
 }
 
@@ -300,26 +326,46 @@ pub(crate) fn release_starting(file: File) {
     let _ = write_core(&file, None);
 }
 
-/// Whether a core holds `starting.lock`: a start is under way. Asked with a shared lock, so that two who
-/// ask never make each other see it held. On a home folder shared by several machines the lock may not
-/// reach them all.
-/// It makes no file: a core makes `starting.lock` before it holds it, so none means no start.
-pub(crate) fn starting(dir: &Path) -> bool {
-    File::open(dir.join("starting.lock")).is_ok_and(|file| file.try_lock_shared().is_err())
+/// What `starting.lock` says.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Lock {
+    /// No core holds it: no start is under way.
+    Free,
+    /// A core holds it: a start is under way. The core the file names, when it names a process on this
+    /// computer that is the one named (`pid_alive`) and has no record, so it has not finished; none for a
+    /// core of an older build, one that has just taken the lock, or one that is another computer's.
+    Held(Option<Core>),
 }
 
-/// The core that is starting, when a start is under way (`starting`), the file names a process, and that
-/// process is the one named (`pid_alive`) and has no record, so it has not finished. None when the file
-/// names no such process: a core of an older build writes none, and a core that has just taken the lock has
-/// not yet.
-pub(crate) fn starting_core(dir: &Path) -> Option<Core> {
-    let file = File::open(dir.join("starting.lock")).ok()?;
-    if file.try_lock_shared().is_ok() {
-        return None;
+impl Lock {
+    pub(crate) fn is_held(&self) -> bool {
+        matches!(self, Lock::Held(_))
     }
-    let core = read_core(&file)?;
-    let recorded = crate::read_state(dir).is_some_and(|state| state.pid == core.pid);
-    (crate::pid_alive(core.pid, core.started) && !recorded).then_some(core)
+
+    /// The core the file names.
+    pub(crate) fn core(&self) -> Option<&Core> {
+        match self {
+            Lock::Held(core) => core.as_ref(),
+            Lock::Free => None,
+        }
+    }
+}
+
+/// The one reading of `starting.lock`: whether a core holds it, and who. Asked with a shared lock, so that
+/// two who ask never make each other see it held. On a home folder shared by several machines the lock may
+/// not reach them all. It makes no file: a core makes `starting.lock` before it holds it, so none means no
+/// start. Read before the record is, since a core writes the record before it lets go.
+pub(crate) fn lock_state(dir: &Path) -> Lock {
+    let Ok(file) = File::open(dir.join("starting.lock")) else { return Lock::Free };
+    if file.try_lock_shared().is_ok() {
+        return Lock::Free;
+    }
+    let core = read_core(&file).filter(|core| {
+        core.node == crate::hostname()
+            && crate::pid_alive(core.pid, core.started, core.boot.as_deref())
+            && !crate::read_state(dir).is_some_and(|state| state.pid == core.pid)
+    });
+    Lock::Held(core)
 }
 
 /// The core `runtime` was just spawned: wait until it holds `starting.lock`, so that nothing that takes
@@ -332,7 +378,7 @@ fn await_core_lock(dir: &Path, runtime: &Runtime) -> Result<(), Outcome> {
             return Err(Outcome::Died { status, log_tail });
         }
         // Named in the file, so that whoever takes the start lock after this finds it ready to be stopped.
-        if starting_core(dir).is_some_and(|core| core.pid == runtime.pid) || crate::read_state(dir).is_some_and(|state| state.pid == runtime.pid) {
+        if lock_state(dir).core().is_some_and(|core| core.pid == runtime.pid) || crate::read_state(dir).is_some_and(|state| state.pid == runtime.pid) {
             return Ok(());
         }
         if Instant::now() > until {
@@ -368,9 +414,10 @@ fn await_runtime(dir: &Path, any_node: bool, own: Option<&Runtime>, hooks: &mut 
             break Err(Waited::Out(Outcome::Died { status, log_tail }));
         }
         // Before the record is read: a core writes the record before it lets go of the lock.
-        let held = own.is_some() || starting(dir);
-        if held && own.is_none() {
-            core = starting_core(dir).map(|core| core.pid).or(core);
+        let lock = lock_state(dir);
+        let held = own.is_some() || lock.is_held();
+        if own.is_none() {
+            core = lock.core().map(|core| core.pid).or(core);
         }
         if let Looked::Running(state, port) = look(dir, any_node || own.is_some(), true)
             && own.is_none_or(|runtime| state.pid == runtime.pid)
@@ -428,46 +475,64 @@ pub(crate) const START_UNIDENTIFIED: &str = "Julia is starting, but Endeavor can
 /// caller holds the start lock, so no start is begun meanwhile; one that is under way is not touched,
 /// unless `force` is given: then its core is ended, with Julia and its children, and nothing of it is left.
 pub(crate) fn end(dir: &Path, any_node: bool, how: stopped::How, force: bool, events: &Sender<Event>) -> Ended {
-    let starting = starting(dir);
+    // Before the look: a core that records itself and lets go in between is then found by the look.
+    let lock = lock_state(dir);
     match look(dir, any_node, false) {
         Looked::OtherNode(state) => Ended::Elsewhere(state.node),
-        Looked::Running(state, _) | Looked::Older(state) | Looked::Silent(state) => {
-            if crate::stop_marked(dir, Some(&state), &Runtime::recorded(&state, dir, events), how) { Ended::Stopped(state.pid) } else { Ended::Alive(state.pid) }
-        }
+        Looked::Running(state, _) | Looked::Older(state) | Looked::Silent(state) => stop_up(dir, state, how, events),
         Looked::Dead(state) => {
             crate::remove_state(dir, state.pid, state.started);
-            if starting { cancel_start(dir, how, force, events) } else { Ended::NotRunning }
+            without_runtime(dir, any_node, lock, how, force, events)
         }
-        Looked::NotRunning if starting => cancel_start(dir, how, force, events),
-        Looked::NotRunning => Ended::NotRunning,
+        Looked::NotRunning => without_runtime(dir, any_node, lock, how, force, events),
     }
+}
+
+/// Stop the runtime `state` records, which is alive.
+fn stop_up(dir: &Path, state: State, how: stopped::How, events: &Sender<Event>) -> Ended {
+    if crate::stop_marked(dir, Some(&state), &Runtime::recorded(&state, dir, events), how) { Ended::Stopped(state.pid) } else { Ended::Alive(state.pid) }
 }
 
 /// How long the lock of a core that was ended is waited for. The OS lets it go when the core's last
 /// handle closes, and a process the core was starting may hold the file a moment longer.
 const LOCK_FREED_WITHIN: Duration = Duration::from_secs(5);
 
-/// A start is under way: with `force`, end the core the lock file names. The same stop as a runtime that
-/// is up (`stop_marked`), with its note for the clients that wait. The file is read once, immediately
-/// before the stop, and the first signal goes only to a process with the start time the file gives
-/// (`Runtime::kill` checks it before each signal); the lock is not looked at again before the second.
-fn cancel_start(dir: &Path, how: stopped::How, force: bool, events: &Sender<Event>) -> Ended {
+/// No runtime is recorded as alive, and `lock` was read before the look. With a start under way and
+/// `force`, end the core the lock file names: the same stop as a runtime that is up (`stop_marked`), with
+/// its note for the clients that wait. The lock is read again immediately before the stop, and the first
+/// signal goes only to a process with the start time and boot the file gives (`Runtime::kill` checks
+/// them before each signal). A core is ended only if the file gives a start time, and the computer it
+/// runs on is this one; otherwise nothing is signalled, after a last look for the record of a start that
+/// has finished meanwhile, which is then stopped as any runtime is.
+fn without_runtime(dir: &Path, any_node: bool, lock: Lock, how: stopped::How, force: bool, events: &Sender<Event>) -> Ended {
+    if !lock.is_held() {
+        return Ended::NotRunning;
+    }
     if !force {
         return Ended::Starting;
     }
-    let Some(core) = starting_core(dir) else { return Ended::Unidentified };
-    if !crate::stop_marked(dir, None, &Runtime::of(core.pid, core.started, dir, events), how) {
-        return Ended::Alive(core.pid);
+    if let Lock::Held(Some(core)) = lock_state(dir)
+        && core.started.is_some()
+    {
+        let runtime = Runtime::of(core.pid, core.started, core.boot.clone(), dir, events);
+        if !crate::stop_marked(dir, None, &runtime, how) {
+            return Ended::Alive(core.pid);
+        }
+        // What the core would have removed.
+        for name in ["runtime.json.tmp", "julia.json"] {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+        let until = Instant::now() + LOCK_FREED_WITHIN;
+        while lock_state(dir).is_held() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        return Ended::Cancelled(core.pid);
     }
-    // What the core would have removed.
-    for name in ["runtime.json.tmp", "julia.json"] {
-        let _ = std::fs::remove_file(dir.join(name));
+    match look(dir, any_node, false) {
+        Looked::Running(state, _) | Looked::Older(state) | Looked::Silent(state) => stop_up(dir, state, how, events),
+        _ if lock_state(dir).is_held() => Ended::Unidentified,
+        _ => Ended::NotRunning,
     }
-    let until = Instant::now() + LOCK_FREED_WITHIN;
-    while starting(dir) && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Ended::Cancelled(core.pid)
 }
 
 /// A log read line by line as it grows.
@@ -510,6 +575,10 @@ mod tests {
 
     use super::*;
 
+    fn starting(dir: &Path) -> bool {
+        lock_state(dir).is_held()
+    }
+
     /// A process of ours that does nothing for a minute, in its own group.
     struct Sleeper(Child);
 
@@ -524,7 +593,12 @@ mod tests {
         }
 
         fn started(&self) -> u64 {
-            crate::unixproc::start_time(self.pid()).expect("a start time on this platform")
+            crate::unixproc::start_time(self.pid()).at().expect("a start time on this platform")
+        }
+
+        /// The core file would name this process, on this computer, as it is.
+        fn core(&self) -> Core {
+            Core { pid: self.pid(), started: Some(self.started()), boot: crate::own_boot(), node: crate::hostname() }
         }
 
         fn alive(&mut self) -> bool {
@@ -640,7 +714,11 @@ mod tests {
     }
 
     fn record_started(dir: &Path, pid: i32, started: Option<u64>, port: u16) {
-        let state = serde_json::json!({ "launcher": "process", "node": crate::hostname(), "pid": pid, "started": started, "token": "t", "port": port });
+        record_booted(dir, pid, started, crate::own_boot(), port);
+    }
+
+    fn record_booted(dir: &Path, pid: i32, started: Option<u64>, boot: Option<String>, port: u16) {
+        let state = serde_json::json!({ "launcher": "process", "node": crate::hostname(), "pid": pid, "started": started, "boot": boot, "token": "t", "port": port });
         std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
     }
 
@@ -665,6 +743,17 @@ mod tests {
         assert!(look(&dir, false, true).alive().is_none());
         assert_eq!(pings.load(Ordering::SeqCst), 2, "its port was not asked, so the token was not sent");
 
+        // The same start time on another boot (Linux counts it from boot) is not the same process.
+        if crate::unixproc::boot_id().is_some() {
+            record_booted(&dir, other.pid(), Some(right), Some("another-boot".into()), port);
+            assert!(matches!(look(&dir, false, true), Looked::Dead(_)));
+            assert_eq!(pings.load(Ordering::SeqCst), 2);
+            record_booted(&dir, other.pid(), Some(right), None, port);
+            assert!(matches!(look(&dir, false, true), Looked::Running(..)), "a record without a boot id is compared as before");
+            assert_eq!(pings.load(Ordering::SeqCst), 3);
+            record_started(&dir, other.pid(), Some(right + 1), port);
+        }
+
         let (events, _) = std::sync::mpsc::channel();
         assert!(matches!(end(&dir, false, stopped::How::Stop, true, &events), Ended::NotRunning));
         assert!(!dir.join("runtime.json").exists(), "the stale record is removed");
@@ -672,13 +761,13 @@ mod tests {
 
         // The same through the process that ends a runtime: a pid that is not the one recorded is left alone.
         record_started(&dir, other.pid(), Some(right + 1), port);
-        let runtime = Runtime::of(other.pid(), Some(right + 1), &dir, &events);
+        let runtime = Runtime::of(other.pid(), Some(right + 1), crate::own_boot(), &dir, &events);
         runtime.kill();
         assert!(other.alive(), "not signalled");
         assert!(!dir.join("runtime.json").exists(), "and the record of a process that isn't it is removed");
         record_started(&dir, other.pid(), Some(right), port);
         // Our child is not gone until it is reaped, which `alive` does.
-        let runtime = Runtime::of(other.pid(), Some(right), &dir, &events);
+        let runtime = Runtime::of(other.pid(), Some(right), crate::own_boot(), &dir, &events);
         let until = Instant::now() + Duration::from_secs(20);
         std::thread::scope(|scope| {
             scope.spawn(|| runtime.kill());
@@ -690,71 +779,123 @@ mod tests {
     }
 
     #[test]
+    fn a_pid_counts_unless_it_is_no_process_or_started_at_another_time() {
+        let me = std::process::id() as i32;
+        let started = crate::own_start_time();
+        let boot = crate::own_boot();
+        assert!(crate::pid_alive(me, started, boot.as_deref()));
+        assert!(crate::pid_alive(me, None, None), "no start time recorded: as before");
+        assert!(!crate::pid_alive(me, started.map(|started| started + 1), boot.as_deref()), "another start time");
+        assert!(!crate::pid_alive(i32::MAX, started, None), "no such process");
+        assert!(!crate::pid_alive(0, None, None) && !crate::pid_alive(-1, None, None));
+        if boot.is_some() {
+            assert!(!crate::pid_alive(me, started, Some("another-boot")), "another boot");
+        }
+    }
+
+    #[test]
     fn a_core_that_holds_starting_lock_is_named_in_it_until_it_lets_go() {
         let dir = crate::client::scratch("core-named");
-        assert_eq!(starting_core(&dir), None, "no file");
-        let me = Core { pid: std::process::id() as i32, started: crate::own_start_time() };
+        assert_eq!(lock_state(&dir), Lock::Free, "no file");
+        let me = Core::this();
         let core = hold_starting(&dir).unwrap();
-        assert_eq!(starting_core(&dir), Some(me));
-        assert!(starting(&dir));
+        assert_eq!(lock_state(&dir), Lock::Held(Some(me.clone())));
+        assert_eq!(lock_state(&dir), Lock::Held(Some(me.clone())), "asking does not take it");
 
         record_started(&dir, me.pid, me.started, 1);
-        assert_eq!(starting_core(&dir), None, "a core with a record has finished");
+        assert_eq!(lock_state(&dir), Lock::Held(None), "a core with a record has finished");
         let _ = std::fs::remove_file(dir.join("runtime.json"));
-        assert_eq!(starting_core(&dir), Some(me));
+        assert_eq!(lock_state(&dir), Lock::Held(Some(me.clone())));
 
         release_starting(core);
         wait_free(&dir);
-        assert!(!starting(&dir));
-        assert_eq!(starting_core(&dir), None);
+        assert_eq!(lock_state(&dir), Lock::Free);
         assert_eq!(read_core(&File::open(dir.join("starting.lock")).unwrap()), None, "the pid is blanked");
 
         // A core that dies without letting go leaves its pid in the file and no lock.
         let core = hold_starting(&dir).unwrap();
         drop(core);
         wait_free(&dir);
-        assert!(!starting(&dir) && starting_core(&dir).is_none());
+        assert_eq!(lock_state(&dir), Lock::Free);
     }
 
     #[test]
-    fn the_file_names_the_core_only_if_that_process_is_the_one_that_started_then() {
+    fn the_file_names_the_core_only_if_that_process_is_the_one_that_started_then_on_this_computer() {
         let dir = crate::client::scratch("core-identity");
         let mut other = Sleeper::new();
         let lock = open_starting(&dir).unwrap();
         lock.lock().unwrap();
-        let mut says = |pid: i32, started: Option<u64>| {
-            write_core(&lock, Some(Core { pid, started })).unwrap();
-            starting_core(&dir)
+        let says = |core: Core| {
+            write_core(&lock, Some(&core)).unwrap();
+            lock_state(&dir)
         };
-        assert_eq!(says(other.pid(), Some(other.started())), Some(Core { pid: other.pid(), started: Some(other.started()) }));
-        assert_eq!(says(other.pid(), None), Some(Core { pid: other.pid(), started: None }), "no start time recorded: as before");
-        assert_eq!(says(other.pid(), Some(other.started() + 1)), None, "another process with that pid");
-        assert_eq!(says(i32::MAX, Some(1)), None, "no such process");
-        assert_eq!(says(0, None), None);
+        let named = other.core();
+        assert_eq!(says(named.clone()), Lock::Held(Some(named.clone())));
+        let no_time = Core { started: None, ..named.clone() };
+        assert_eq!(says(no_time.clone()), Lock::Held(Some(no_time)), "no start time recorded: as before");
+        assert_eq!(says(Core { started: named.started.map(|started| started + 1), ..named.clone() }), Lock::Held(None), "another process with that pid");
+        assert_eq!(says(Core { node: "another-node".into(), ..named.clone() }), Lock::Held(None), "another computer's pid number means nothing here");
+        if named.boot.is_some() {
+            assert_eq!(says(Core { boot: Some("another-boot".into()), ..named.clone() }), Lock::Held(None));
+        }
+        assert_eq!(says(Core { pid: i32::MAX, started: Some(1), ..named.clone() }), Lock::Held(None), "no such process");
         other.0.kill().unwrap();
         other.0.wait().unwrap();
-        assert_eq!(says(other.pid(), None), None, "gone");
+        assert_eq!(says(named), Lock::Held(None), "gone");
+        write_core(&lock, None).unwrap();
+        assert_eq!(lock_state(&dir), Lock::Held(None), "a core that names no one");
     }
 
     #[test]
-    fn a_forced_stop_ends_nothing_unless_the_file_names_the_core() {
+    fn a_forced_stop_ends_nothing_unless_the_file_gives_the_core_and_its_start_time() {
         let dir = crate::client::scratch("force-unnamed");
         let (events, _) = std::sync::mpsc::channel();
         let mut other = Sleeper::new();
         let lock = open_starting(&dir).unwrap();
         lock.lock().unwrap();
+        let force = || end(&dir, false, stopped::How::Stop, true, &events);
         // A core of an older build writes no pid.
-        assert!(matches!(end(&dir, false, stopped::How::Stop, true, &events), Ended::Unidentified));
+        assert!(matches!(force(), Ended::Unidentified));
         assert!(matches!(end(&dir, false, stopped::How::Stop, false, &events), Ended::Starting));
         // A pid that is another process now.
-        write_core(&lock, Some(Core { pid: other.pid(), started: Some(other.started() + 1) })).unwrap();
-        assert!(matches!(end(&dir, false, stopped::How::Stop, true, &events), Ended::Unidentified));
+        write_core(&lock, Some(&Core { started: Some(other.started() + 1), ..other.core() })).unwrap();
+        assert!(matches!(force(), Ended::Unidentified));
+        // The process is there, but the file gives no start time: it is never signalled on the pid alone.
+        write_core(&lock, Some(&Core { started: None, ..other.core() })).unwrap();
+        assert!(matches!(force(), Ended::Unidentified));
+        // A pid of another computer.
+        write_core(&lock, Some(&Core { node: "another-node".into(), ..other.core() })).unwrap();
+        assert!(matches!(force(), Ended::Unidentified));
+        assert!(other.alive() && !dir.join("stopped").exists(), "nothing was signalled");
         // A named process, but no one holds the lock: no start is under way.
-        write_core(&lock, Some(Core { pid: other.pid(), started: Some(other.started()) })).unwrap();
+        write_core(&lock, Some(&other.core())).unwrap();
         drop(lock);
         wait_free(&dir);
-        assert!(matches!(end(&dir, false, stopped::How::Stop, true, &events), Ended::NotRunning));
+        assert!(matches!(force(), Ended::NotRunning));
         assert!(other.alive() && !dir.join("stopped").exists(), "nothing was signalled");
+    }
+
+    #[test]
+    fn a_forced_stop_that_finds_the_start_finished_stops_the_runtime_instead_of_saying_it_cannot_tell() {
+        let dir = crate::client::scratch("force-finished");
+        let (events, _) = std::sync::mpsc::channel();
+        let mut other = Sleeper::new();
+        let lock = open_starting(&dir).unwrap();
+        lock.lock().unwrap();
+        // The lock was read as held with no core named; the core has recorded itself since.
+        // Without a port, so that the stop does not wait for the runtime to answer a shutdown.
+        let state = serde_json::json!({ "launcher": "process", "node": crate::hostname(), "pid": other.pid(), "started": other.started(), "boot": crate::own_boot(), "token": "t" });
+        std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
+        let ended = std::thread::scope(|scope| {
+            let stopping = scope.spawn(|| without_runtime(&dir, false, Lock::Held(None), stopped::How::Stop, true, &events));
+            let until = Instant::now() + Duration::from_secs(20);
+            while other.alive() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            stopping.join().unwrap()
+        });
+        assert!(matches!(ended, Ended::Stopped(pid) if pid == other.pid()), "the runtime that is up is stopped as usual");
+        assert!(!other.alive());
     }
 
     #[test]

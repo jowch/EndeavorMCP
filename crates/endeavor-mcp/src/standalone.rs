@@ -344,7 +344,7 @@ impl Hooks for Saying<'_> {
 fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Up, String> {
     let args = runtime_args(options, exit_idle);
     let (events, _) = mpsc::channel();
-    let want = Want { args: &args, engine: wire::ENGINE_PLUTO, install: true, runtime: &|| unpack_runtime(&options.cache), events: &events };
+    let want = Want { args: &args, engine: wire::ENGINE_PLUTO, install: true, runtime: &|| unpack_runtime(&options.cache), events: &events, attach_only: false };
     match runtime::find_or_start(&want, &mut Saying { progress, cancelled }) {
         Outcome::Ready(up) => Ok(up),
         Outcome::Unusable(Looked::OtherNode(state)) => Err(runtime::other_node_text(&state.node)),
@@ -356,6 +356,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
             Err(format!("Julia stopped while starting ({status}). The end of {}:\n{tail}", options.state_dir.join("runtime.log").display()))
         }
         Outcome::Cancelled => Err("Stopped before Julia was ready.".into()),
+        Outcome::NothingRunning => Err("No Julia is running.".into()),
     }
 }
 
@@ -634,7 +635,7 @@ fn serve(options: Options) -> ! {
     }
     let _ = io::stdout().flush();
     while !stopping() {
-        if !crate::pid_alive(up.state.pid, up.state.started) {
+        if !crate::pid_alive(up.state.pid, up.state.started, up.state.boot.as_deref()) {
             match crate::stopped::why(dir, crate::stopped::Of::Runtime(up.state.pid)) {
                 Some(crate::stopped::How::Stop) => eprintln!("Julia was stopped with `endeavor stop`."),
                 Some(crate::stopped::How::Connection) => eprintln!("Julia was stopped from another connection."),

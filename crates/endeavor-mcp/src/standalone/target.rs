@@ -135,7 +135,11 @@ impl Local {
 
     /// The runtime recorded in the state folder, if there is one; none is started.
     fn look(&self) -> Outcome {
+        // Before the look: a core writes its record before it lets go of the lock.
+        let starting = runtime::lock_state(&self.options.state_dir).is_held();
         match runtime::look(&self.options.state_dir, false, true) {
+            // A start another process has under way is a start under way, not nothing.
+            Looked::NotRunning | Looked::Dead(_) | Looked::Silent(_) if starting => Outcome::StillWorking("Another process is starting Julia".into()),
             Looked::NotRunning | Looked::Dead(_) => Outcome::NothingRunning,
             Looked::Running(state, port) => Outcome::Ready(announce(&self.options, &state, port, false)),
             Looked::OtherNode(state) => Outcome::Failed(runtime::other_node_text(&state.node)),
@@ -227,7 +231,7 @@ impl Provider for Local {
     fn status(&self) -> Status {
         let (state, step, error, runtime) = match &*self.phase() {
             // A start another process has under way is a start under way.
-            Phase::Idle if runtime::starting(&self.options.state_dir) => (State::Starting, None, None, None),
+            Phase::Idle if runtime::lock_state(&self.options.state_dir).is_held() => (State::Starting, None, None, None),
             Phase::Idle => (State::Connected, None, None, None),
             Phase::Starting(step) => (State::Starting, Some(step.clone()).filter(|step| !step.is_empty()), None, None),
             Phase::Ready(runtime) => (State::Ready, None, None, Some(runtime.clone())),
@@ -241,9 +245,12 @@ impl Provider for Local {
         // First, so that a start another process has under way is waited for, not missed.
         let starting = super::stop_lock(dir)?;
         let (events, _) = mpsc::channel();
+        // Before the stop, which takes a while: a start of this process that ends by it is over by then.
+        let began_here = matches!(*self.state.0.lock().unwrap(), Phase::Starting(_));
         let ended = runtime::end(dir, false, stopped::How::Connection, force, &events);
         // Let go before waiting for this process's own start to settle: it may wait for the lock.
         drop(starting);
+        let cancelled = matches!(ended, Ended::Cancelled(_));
         match ended {
             Ended::Stopped(_) | Ended::NotRunning | Ended::Cancelled(_) => {}
             Ended::Alive(pid) => return Err(format!("Julia (pid {pid}) is still running after the stop.")),
@@ -251,14 +258,18 @@ impl Provider for Local {
             Ended::Starting => return Err(runtime::STILL_STARTING_FORCE.into()),
             Ended::Unidentified => return Err(runtime::START_UNIDENTIFIED.into()),
         }
-        // A start of this process that was cancelled ends in a failure, which is its own doing and is not kept.
         let mut phase = self.state.0.lock().unwrap();
-        let was_starting = matches!(*phase, Phase::Starting(_));
-        let until = Instant::now() + Duration::from_secs(10);
-        while matches!(*phase, Phase::Starting(_)) && Instant::now() < until {
-            phase = self.state.1.wait_timeout(phase, until.saturating_duration_since(Instant::now())).unwrap().0;
+        // A start of this process that was cancelled ends in a failure, which is its own doing and is not kept.
+        if cancelled && began_here {
+            let until = Instant::now() + Duration::from_secs(10);
+            while matches!(*phase, Phase::Starting(_)) && Instant::now() < until {
+                phase = self.state.1.wait_timeout(phase, until.saturating_duration_since(Instant::now())).unwrap().0;
+            }
+            if matches!(*phase, Phase::Failed(_)) {
+                *phase = Phase::Idle;
+            }
         }
-        if matches!(*phase, Phase::Ready(_)) || (was_starting && matches!(*phase, Phase::Failed(_))) {
+        if matches!(*phase, Phase::Ready(_)) {
             *phase = Phase::Idle;
         }
         Ok(())

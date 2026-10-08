@@ -117,8 +117,9 @@ What came out differently from the design above, or wasn't settled by it:
   checked, and an upgraded connection was checked at its upgrade.
 - **`runtime.json`** is `{launcher, node, pid, started, port, token, job, exits_when_idle}`.
   `started` is when the core's process started (a platform's own unit); a pid is
-  trusted only while the process has that start time. It is absent from a record
-  an older build wrote, and then the pid alone counts.
+  trusted only while the process has that start time (and `boot`, the boot id, on
+  Linux, where it counts ticks after boot). Both are absent from a record an older
+  build wrote, and then the pid alone counts.
   Pluto's port and secret and Julia's bridge port stay in `julia.json`,
   between the core and Julia. Julia's side needed no change: it already ran
   Pluto and its bridge on ports the core picked.

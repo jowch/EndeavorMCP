@@ -150,11 +150,12 @@ fn report(env: &Env, state_dir: &Path) -> Report {
 
 fn runtime_report(dir: &Path) -> RuntimeReport {
     let log = dir.join("runtime.log");
+    let lock = runtime::lock_state(dir);
     let mut report = RuntimeReport {
         state_dir: dir.to_owned(),
         state: "not_running",
-        starting: runtime::starting(dir),
-        starting_pid: runtime::starting_core(dir).map(|core| core.pid),
+        starting: lock.is_held(),
+        starting_pid: lock.core().map(|core| core.pid),
         pid: None,
         port: None,
         node: None,

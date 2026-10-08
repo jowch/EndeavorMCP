@@ -223,9 +223,10 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, bridge: &Bridge,
     }
     // With the pid, what tells the core from a later process given its pid.
     let started = crate::own_start_time();
+    let boot = crate::own_boot();
     let mut state = json!({
         "launcher": julia["launcher"], "node": julia["node"], "job": julia["job"],
-        "pid": std::process::id(), "started": started, "port": port, "token": token, "exits_when_idle": bridge.notebooks.exits_when_idle,
+        "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": token, "exits_when_idle": bridge.notebooks.exits_when_idle,
     });
     if let Some(standalone) = &bridge.standalone {
         state["folder"] = standalone.folder.clone().into();

@@ -67,11 +67,14 @@ pub struct StartOptions {
     /// (`ToHelper::StartRuntime`'s `install`). Without it a start that needs
     /// something ends with `StartError::NeedsInstall` and installs nothing.
     pub install: bool,
+    /// Never start a runtime (`ToHelper::StartRuntime`'s `attach_only`): attach to the one that runs or
+    /// is starting, else `StartError::NotRunning`.
+    pub attach_only: bool,
 }
 
 impl Default for StartOptions {
     fn default() -> StartOptions {
-        StartOptions { job: None, engine: wire::ENGINE_PLUTO.to_owned(), install: false }
+        StartOptions { job: None, engine: wire::ENGINE_PLUTO.to_owned(), install: false, attach_only: false }
     }
 }
 
@@ -81,6 +84,8 @@ pub enum StartError {
     /// The start needs these installed and `StartOptions::install` was false:
     /// nothing was started or installed.
     NeedsInstall(Vec<wire::Item>),
+    /// `StartOptions::attach_only`, and no runtime runs or is starting.
+    NotRunning,
     Failed(String),
 }
 
@@ -89,6 +94,7 @@ impl StartError {
     pub fn message(self) -> String {
         match self {
             StartError::NeedsInstall(items) => format!("{} Installing wasn't allowed, and an agreement to it (`StartOptions::install`) is for one start only.", wire::needs_text(&items, "that machine")),
+            StartError::NotRunning => "No Julia is running there.".to_owned(),
             StartError::Failed(message) => message,
         }
     }
@@ -358,7 +364,7 @@ impl Channel {
         let (events, _registered) = self.register(id, None, true);
         let leaving = Arc::new(AtomicU32::new(0));
         *self.leaving.lock().unwrap() = leaving.clone();
-        self.mux.send(&ToHelper::StartRuntime { id, job: options.job.clone(), engine: options.engine.clone(), install: options.install }.frame()).map_err(|_| failed(CLOSED.to_owned()))?;
+        self.mux.send(&ToHelper::StartRuntime { id, job: options.job.clone(), engine: options.engine.clone(), install: options.install, attach_only: options.attach_only }.frame()).map_err(|_| failed(CLOSED.to_owned()))?;
         let runtime = loop {
             match events.recv() {
                 Ok(message @ (ToApp::Progress { .. } | ToApp::Found { .. } | ToApp::Submitted { .. } | ToApp::Queued { .. })) => on_message(message),
@@ -375,6 +381,7 @@ impl Channel {
                     return Err(failed(format!("Julia stopped before Pluto was ready. {how}{}{}", if how.is_empty() { "" } else { " " }, diagnose(&log_tail))));
                 }
                 Ok(ToApp::StartCancelled { .. }) => return Err(failed("Julia was stopped while it started.".into())),
+                Ok(ToApp::NotRunning { .. }) => return Err(StartError::NotRunning),
                 Ok(ToApp::Replaced) => return Err(failed("Another connection took Julia over while it was starting.".into())),
                 Ok(_) => {}
                 Err(_) => return Err(failed(CLOSED.into())),
