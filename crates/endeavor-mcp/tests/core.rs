@@ -1324,6 +1324,10 @@ fn list_folder_and_read_file_read_the_server() {
     std::fs::write(&bad, [0x61, 0xe2, 0x82, 0x62, 0x0a, 0xff, 0xc0, 0x80, 0x7f]).unwrap();
     assert_eq!(server.call("", "read_file", serde_json::json!({ "path": bad })).unwrap()["text"], "     1\ta\u{fffd}b\n     2\t\u{fffd}\u{fffd}\u{7f}\n");
 
+    // SAFETY: plain syscall.
+    if unsafe { libc::geteuid() } == 0 {
+        return eprintln!("skipped the unreadable folder: root can read anywhere");
+    }
     let locked = files.join("locked");
     std::fs::create_dir(&locked).unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();

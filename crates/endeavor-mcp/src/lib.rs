@@ -858,7 +858,9 @@ impl Runtime {
             if self.exit.status().is_some() || !self.is_it() {
                 break;
             }
-            signal_group(self.pid, signal);
+            if !unkillable_for_tests() {
+                signal_group(self.pid, signal);
+            }
             self.exit.wait(Duration::from_secs(5));
         }
         stop_workers(self.pid);
@@ -880,6 +882,13 @@ impl Runtime {
         }
         remove_state(&self.state_dir, self.pid, self.started);
     }
+}
+
+/// `ENDEAVOR_TEST_UNKILLABLE` (any value, read only by a debug build) sends the runtime no signals, so a
+/// test can have a runtime that is still alive after the stop, as one stuck in the kernel would be.
+#[cfg(unix)]
+fn unkillable_for_tests() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_UNKILLABLE").is_some()
 }
 
 /// The runtime was started with setsid, so its pid is also its process group's.
@@ -970,7 +979,7 @@ fn pid_alive(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
     }
     match (started, unixproc::start_time(pid)) {
         (Some(started), unixproc::Start::At(now)) => now == started,
-        (Some(_), unixproc::Start::Gone) => false,
+        (_, unixproc::Start::Gone) => false,
         _ => true,
     }
 }

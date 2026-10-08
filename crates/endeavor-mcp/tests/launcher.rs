@@ -381,6 +381,14 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 fn alive(pid: &str) -> bool {
+    // An ended process whose parent is gone stays a zombie until PID 1 reaps
+    // it, and `kill -0` still finds a zombie. Containers whose PID 1 doesn't
+    // reap (the cloud VMs' doesn't) keep them, so on Linux a zombie is dead.
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        && stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z'))
+    {
+        return false;
+    }
     Command::new("kill").args(["-0", pid]).stderr(Stdio::null()).status().unwrap().success()
 }
 
