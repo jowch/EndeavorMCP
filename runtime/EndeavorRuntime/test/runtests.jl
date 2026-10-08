@@ -429,20 +429,35 @@ end
                   Dict("accepted" => true, "process_status" => "ready")
             @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [X])
 
-            # A waited run that outlasts `timeout` returns when it passes, with the cell
-            # that finished and the dependent still running; the run goes on.
+            # A waited run that outlasts `timeout` returns when it passes, with the cell that
+            # finished and the dependent still running. The run goes on, watched: a
+            # notification says when it ends. The dependent waits for a file the test makes.
+            gate = joinpath(mktempdir(), "release")
             insert(code, index) = only(result("apply", ops(Dict("op" => "insert", "code" => code, "folded" => false, "index" => index)))["inserted"])
-            w, slow = insert("w = 5", 3), insert("slow = (sleep(4); w)", 4)
-            began = time()
-            capped = result("run", Dict("notebook_id" => nid, "cells" => [w], "wait" => true, "timeout" => 1))
-            @test time() - began < 3.5
-            @test capped == Dict("accepted" => true, "process_status" => "ready", "completed" => [w], "timed_out" => [slow])
-            @test nb.cells_dict[UUID(w)].output.body == "5"
-            @test nb.cells_dict[UUID(slow)].running || nb.cells_dict[UUID(slow)].queued
-            @test timedwait(() -> !(nb.cells_dict[UUID(slow)].running || nb.cells_dict[UUID(slow)].queued), 60) == :ok
+            w, slow = insert("w = 5", 3), insert("slow = (while !isfile($(repr(gate))); sleep(0.05); end; w)", 4)
+            try
+                capped = result("run", Dict("notebook_id" => nid, "cells" => [w], "wait" => true, "timeout" => 8))
+                @test capped == Dict("accepted" => true, "process_status" => "ready", "completed" => [w], "timed_out" => [slow])
+                @test nb.cells_dict[UUID(w)].output.body == "5"
+                @test nb.cells_dict[UUID(slow)].running || nb.cells_dict[UUID(slow)].queued
+            finally
+                touch(gate)
+            end
+            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [w])
             @test nb.cells_dict[UUID(slow)].output.body == "5"
-            @test result("snapshot", Dict("notebook_id" => nid))["cells"][5]["running"] == false
+            @test !any(c -> c["running"] || c["queued"], result("snapshot", Dict("notebook_id" => nid))["cells"])
             result("apply", ops(Dict("op" => "delete", "cell_id" => slow), Dict("op" => "delete", "cell_id" => w)))
+
+            # A run whose task fails with nobody waiting: the cells marked queued by hand are released
+            # and the run is said to have finished.
+            failing = @task error("boom")
+            schedule(failing)
+            try wait(failing) catch end
+            marked = nb.cells_dict[UUID(X)]
+            marked.queued = true
+            EndeavorRuntime._watch_run!(EndeavorRuntime.standalone_session(), nb, [marked], failing)
+            @test !marked.queued
+            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [X])
 
             # Move and delete, then the cleanup run that follows a delete.
             result("apply", ops(Dict("op" => "move", "cell_id" => z, "index" => 0)))

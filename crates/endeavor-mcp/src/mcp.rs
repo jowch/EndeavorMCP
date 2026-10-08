@@ -325,11 +325,12 @@ impl Bridge {
     /// The reply to one JSON-RPC message, if it gets one. `gone`, called
     /// while a call waits on the user: whether the client hung up.
     fn dispatch(&self, message: &Value, caller: &Caller, gone: &dyn Fn() -> bool) -> Option<String> {
+        let began = Instant::now();
         if message["method"] == "notifications/cancelled" && self.notebooks.asks.cancel(&caller.owner, &message["params"]["requestId"]) {
             self.notebooks.publish();
         }
         answer(message, caller, self.standalone.is_some(), |params| {
-            let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone };
+            let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone, began };
             let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);
@@ -395,9 +396,9 @@ impl Bridge {
             Err(result) => return result,
         };
         let reply = if run {
-            self.notebooks.tool(&caller.owner, name, &arguments, folder.as_deref())
+            self.notebooks.tool(&caller.owner, name, &arguments, folder.as_deref(), call.began)
         } else {
-            self.notebooks.tool_unrun(&caller.owner, name, &arguments, folder.as_deref())
+            self.notebooks.tool_unrun(&caller.owner, name, &arguments, folder.as_deref(), call.began)
         };
         match reply {
             Ok(Reply::Json(mut result)) => {
@@ -583,6 +584,8 @@ struct Call<'a> {
     request: &'a Value,
     call_id: Option<&'a str>,
     gone: &'a dyn Fn() -> bool,
+    /// When the call arrived: before any wait for the user's answer.
+    began: Instant,
 }
 
 /// Whether the other end of `socket` has closed it, without reading from it.

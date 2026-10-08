@@ -16,7 +16,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
@@ -1008,7 +1008,7 @@ impl Notebooks {
     /// a new notebook in its folder that becomes its notebook.
     pub fn new_for(&self, owner: &str, folder: Option<&str>) -> Result<Value, String> {
         self.bind(owner, "");
-        let Reply::Json(result) = self.tool(owner, "new_notebook", &json!({}), folder)? else {
+        let Reply::Json(result) = self.tool(owner, "new_notebook", &json!({}), folder, Instant::now())? else {
             unreachable!("new_notebook answers JSON")
         };
         self.publish();

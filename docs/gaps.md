@@ -418,10 +418,14 @@ _Started 2026-10-06, on the `client-library` branch._
   and whether a current model needs any rule that was cut.
 
 - **A waited run stops waiting at 45 seconds, and nothing stops a second
-  run of the same cells.** The cap is `WAIT_SECONDS` in `notebooks/tools.rs`;
-  no argument changes it, and a real agent client has not been run against it
-  (it is chosen from the 45 to 60 second tool timeouts). The call returns with
-  `execution.status` `running`, and the run goes on. If the agent runs the
+  run of the same cells.** The cap is `WAIT_SECONDS` in `notebooks/tools.rs`,
+  counted from the start of the tool call (an approval card's time included),
+  with a floor of 5 seconds for the wait itself. No argument changes it, and a
+  real agent client has not been run against it (it is chosen from the 45 to 60
+  second tool timeouts). The call returns with `execution.still_running` and the
+  run goes on, watched until it ends. A run accepted is no longer in
+  `pending_run` while it runs, for an unwaited run too; so if its task fails
+  before the cell runs, the cell is not staged any more. If the agent runs the
   still-running cells again, Pluto queues the run as it does for an unwaited
   one; `run_conflict` only covers another session's edits.
 

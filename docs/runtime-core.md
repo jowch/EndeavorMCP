@@ -84,7 +84,7 @@ Core → engine:
 | `snapshot(nid)` | path, order, process status, whether execution is allowed, whether it's in safe preview, per cell: code, folded, running, queued, errored, last run time, runtime, output summary or structured error, whether the tools hide it (boilerplate such as Pluto's package cells) and whether it's markdown. Without `nid`, every open notebook, in the engine's order |
 | `graph(nid, fresh?, refresh?, edges?, packages?)` | per cell, in the engine's order: definitions, function names, references, as of the engine's last analysis (`fresh`: of the notebook as it is now, not kept); with `edges`, each cell's direct upstream and downstream cells; with `packages`, the packages each cell loads; the runnable cells in run order, and the rest |
 | `apply(nid, ops)` | ops: set code (refused, before any op applies, if a cell's code isn't the `expected` code), insert at an index, delete, move to an index, fold. The engine saves the file and updates its own UI. The inserted cells' ids |
-| `run(nid, cells, wait, timeout)` | accepted, or not because gated (with the process status); waited for, which cells finished and which timed out. The run always starts in the background. A wait ends when the run has, or after `timeout` seconds in all, and then `timed_out` lists the cells of the notebook still running or queued, the run's dependents included; the run goes on. The process status is read after the wait |
+| `run(nid, cells, wait, timeout)` | accepted, or not because gated (with the process status). The run always starts in the background and is watched until its task ends, with no time limit (only the notebook's process ending or leaving the session cuts it short): a failed task releases the cells marked queued by hand, and `run_finished` follows. With `wait`, the reply is read when the run is over or after `timeout` seconds, whichever is first: the process status, which cells finished, `timed_out` (the notebook's cells still running or queued, empty when the run is over) and, if the process ended by itself, `exited`. A run that outlasts `timeout` goes on and sends `run_finished` as an unwaited one does. `timeout` is ignored without `wait` |
 | `interrupt(nid)` | — |
 | `restart(nid, timeout)` | the engine's own restart: a new process, then every cell runs (refused in safe preview) |
 | `move(nid, path)` | the file moved to `path` (checked by the core), and its new path |
@@ -101,7 +101,7 @@ Engine → core, as notifications, each naming its notebook:
   the engine (a restart in place isn't one); `file_saved(nid)`;
   `execution_done(nid)`, when a run finishes; `topology_changed(nid)`, when
   the dependency graph changed; `run_finished(nid, cells)`, the cells a run
-  the core didn't wait for finished.
+  finished that the core didn't wait for or stopped waiting for.
 
 Notifications say when to look; the core reads a fresh `snapshot` and `graph`
 each time it tells the app anything, coalescing a burst of notifications

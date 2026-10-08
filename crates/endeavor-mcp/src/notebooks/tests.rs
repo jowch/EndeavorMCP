@@ -264,8 +264,12 @@ impl Engine {
                     }
                     return Ok(reply);
                 }
-                // `linger()` keeps running: a waited run returns with it unfinished.
-                let (lingering, finishing): (Vec<String>, Vec<String>) = cells.iter().cloned().partition(|id| nb.cells.iter().any(|c| c.id == *id && c.code.contains("linger()")));
+                // `linger()` keeps running: a waited run returns with it unfinished, and so
+                // with a cell using it that depends on a cell of the run.
+                let defined: Vec<String> = nb.cells.iter().filter(|c| cells.contains(&c.id)).flat_map(|c| c.analysis().0).collect();
+                let dependents: Vec<String> = nb.cells.iter().filter(|c| !cells.contains(&c.id) && c.code.contains("linger()") && c.analysis().1.iter().any(|name| defined.contains(name))).map(|c| c.id.clone()).collect();
+                let (mut lingering, finishing): (Vec<String>, Vec<String>) = cells.iter().cloned().partition(|id| nb.cells.iter().any(|c| c.id == *id && c.code.contains("linger()")));
+                lingering.extend(dependents);
                 for cell in nb.cells.iter_mut().filter(|c| lingering.contains(&c.id)) {
                     cell.running = true;
                 }
@@ -344,7 +348,7 @@ impl Setup {
             return self.notebooks.keep_alive(&arguments);
         }
         self.notebooks.note_activity(&arguments);
-        self.notebooks.tool(owner, tool, &arguments, None).map(tool_json)
+        self.notebooks.tool(owner, tool, &arguments, None, Instant::now()).map(tool_json)
     }
 
     /// The kind of error a call failed with (`read_required`, ...).
@@ -522,7 +526,7 @@ fn edits_are_staged_until_they_run_however_they_run() {
     s.edit("", NB, X, "x = 11");
     let receipt = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     assert_eq!(receipt["execution"]["status"], "running");
-    assert_eq!(receipt["warnings"], json!(["async_execution::cells running; pending_run clears when execution finishes"]));
+    assert_eq!(receipt["warnings"], json!(["async_execution::cells running; read them for the result"]));
     s.seconds(1.0);
     s.edit("", NB, X, "x = 12");
     s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
@@ -542,14 +546,14 @@ fn an_edit_the_user_didnt_let_run_is_kept_staged() {
     s.read("7", NB, X);
     let before = runs();
     let edit = json!({ "notebook_id": NB, "cell_id": X, "code": "x = 2", "run_after": true });
-    let receipt = tool_json(s.notebooks.tool_unrun("7", "edit_cell", &edit, None).unwrap());
+    let receipt = tool_json(s.notebooks.tool_unrun("7", "edit_cell", &edit, None, Instant::now()).unwrap());
     assert_eq!(s.engine.code(NB, X), "x = 2", "the edit is made");
     assert_eq!(runs(), before, "and not run");
     assert_eq!((&receipt["execution"]["status"], &receipt["pending_run"]), (&json!("staged"), &json!([X])));
     assert_eq!(receipt["warnings"], json!(["not_approved::The user chose not to run this yet. The edit is kept, staged and not run."]));
 
     let add = json!({ "notebook_id": NB, "after_cell_id": X, "code": "y = x", "run_after": true });
-    let receipt = tool_json(s.notebooks.tool_unrun("7", "add_cell", &add, None).unwrap());
+    let receipt = tool_json(s.notebooks.tool_unrun("7", "add_cell", &add, None, Instant::now()).unwrap());
     assert_eq!((runs(), s.engine.order(NB).len()), (before, 2));
     assert_eq!(receipt["warnings"][0], "not_approved::The user chose not to run this yet. The edit is kept, staged and not run.");
 }
@@ -801,26 +805,31 @@ fn safe_preview_keeps_edits_staged_until_execution_is_allowed() {
 #[test]
 fn a_waited_run_that_outlasts_the_cap_returns_with_its_cells_still_running() {
     let s = setup();
-    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);
+    let (b, z) = ("44444444-4444-4444-4444-444444444444", "33333333-3333-3333-3333-333333333333");
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()"), (z, "z = y + 1"), (b, "b = 5")]);
+    // Another run's cell, running too.
+    s.engine.with(NB, |nb| nb.cells[3].running = true);
     s.read("", NB, X);
-    s.read("", NB, Y);
     s.edit("", NB, X, "x = 10");
-    s.edit("", NB, Y, "y = linger()");
 
     let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
-    let cap = s.engine.waits.lock().unwrap()[0];
-    assert!(cap <= super::tools::WAIT_SECONDS && cap > super::tools::WAIT_SECONDS - 5.0, "the run is given what is left of the cap: {cap}");
-    assert_eq!(ran["execution"], json!({ "status": "running", "still_running": [Y] }));
-    assert_eq!(ran["affected_cells"], json!([X, Y]));
-    assert_eq!(ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| c["cell_id"].clone()).collect::<Vec<_>>(), vec![json!(X)], "a cell still running has no output of this run");
-    assert_eq!(ran["pending_run"], json!([Y]), "the cell that did not finish is still staged");
-    assert_eq!(ran["warnings"].as_array().unwrap().len(), 1);
+    assert!(s.engine.waits.lock().unwrap()[0] <= super::tools::WAIT_SECONDS);
+    assert_eq!(ran["execution"], json!({ "status": "running", "still_running": [Y] }), "the cells of this run, not the notebook's other running cell: {ran}");
+    assert_eq!(ran["affected_cells"], json!([X]));
+    assert_eq!(ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| c["cell_id"].clone()).collect::<Vec<_>>(), vec![json!(X)]);
+    assert_eq!(ran["pending_run"], json!([]), "cells being run are no longer staged");
     assert!(ran["warnings"][0].as_str().unwrap().starts_with("execution_timeout::"), "{ran}");
     assert!(ran["message"].as_str().unwrap().contains("list_notebooks"), "{ran}");
 
-    // A read shows the cell running, then finished; the staged cell clears.
-    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap()["running"], true);
-    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["running"], json!([Y]));
+    // A read shows the dependent running and not stale; a bare submit_changes runs nothing again.
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    assert_eq!((&read["running"], &read["stale"]), (&json!(true), &json!(false)));
+    let runs = || s.engine.calls.lock().unwrap().iter().filter(|call| *call == "run").count();
+    let before = runs();
+    let again = s.call("", "submit_changes", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!((&again["affected_cells"], &again["execution"]["status"], runs()), (&json!([]), &json!("completed"), before));
+
+    // The dependent finishes: the reads say so.
     s.seconds(5.0);
     let now = *s.clock.lock().unwrap();
     s.engine.with(NB, |nb| {
@@ -828,17 +837,38 @@ fn a_waited_run_that_outlasts_the_cap_returns_with_its_cells_still_running() {
         nb.cells[1].last_run = now;
         nb.cells[1].output = "done".into();
     });
-    let listed = s.call("", "list_notebooks", json!({})).unwrap();
-    assert_eq!((&listed[0]["running"], &listed[0]["pending_run"]), (&json!([]), &json!([])));
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["running"], json!([b]));
     assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap()["running"], false);
 
     // A run that finishes in time is as before.
     s.seconds(1.0);
-    s.read("", NB, Y);
-    s.edit("", NB, Y, "y = 3");
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 11");
+    s.engine.with(NB, |nb| nb.cells[1].code = "y = x + 1".into());
     let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
     assert_eq!(ran["execution"], json!({ "status": "completed" }));
     assert_eq!((ran.get("message"), &ran["warnings"]), (None, &json!([])));
+}
+
+#[test]
+fn a_cell_that_errored_is_reported_before_the_cells_still_running() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = error(1)"), (Y, "y = linger()")]);
+    let ran = s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["execution"], json!({ "status": "errored", "still_running": [Y] }));
+    assert_eq!(ran["pending_run"], json!([]));
+}
+
+#[test]
+fn a_wait_has_a_floor_however_long_the_call_took_to_start() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);
+    // The user took 44 seconds, then a minute, to answer the approval card.
+    for taken in [44, 60] {
+        let began = Instant::now().checked_sub(Duration::from_secs(taken)).expect("a clock that has run that long");
+        s.notebooks.tool("", "execute_cell", &json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true }), None, began).unwrap();
+        assert_eq!(s.engine.waits.lock().unwrap().last(), Some(&5.0), "after {taken} s");
+    }
 }
 
 #[test]
@@ -996,7 +1026,7 @@ fn search_code_cuts_snippets_as_julia_did() {
 fn view_cell_output_sends_the_png_the_engine_renders() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "plot(x)"), (Y, "y = 1")]);
-    let view = |cell: &str| s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": cell }), None);
+    let view = |cell: &str| s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": cell }), None, Instant::now());
     match view(X).unwrap() {
         Reply::Image { meta, png_base64 } => {
             assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/plain", "png_bytes": 4 }));
@@ -1056,9 +1086,9 @@ fn opening_and_making_notebooks() {
     assert_eq!(s.refused("", "new_notebook", json!({ "path": format!("{dir}{SEP}x.txt") })), "invalid_path");
     assert_eq!(s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}missing{SEP}y.jl") })), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}{SEP}missing'")));
     // A session's folder takes its unnamed notebooks, and relative paths.
-    let named = s.notebooks.tool("s", "new_notebook", &json!({ "path": "named.jl" }), Some(&dir)).map(tool_json).unwrap();
+    let named = s.notebooks.tool("s", "new_notebook", &json!({ "path": "named.jl" }), Some(&dir), Instant::now()).map(tool_json).unwrap();
     assert_eq!(named["path"], format!("{dir}{SEP}named.jl"));
-    let unnamed = s.notebooks.tool("t", "new_notebook", &json!({}), Some(&dir)).map(tool_json).unwrap();
+    let unnamed = s.notebooks.tool("t", "new_notebook", &json!({}), Some(&dir), Instant::now()).map(tool_json).unwrap();
     assert_eq!(unnamed["path"], format!("{dir}{SEP}made.jl"));
 }
 

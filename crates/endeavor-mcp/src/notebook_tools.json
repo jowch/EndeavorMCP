@@ -170,7 +170,7 @@
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Wait for the run to end, at most 45 seconds. If it is still going then, the result has `execution.status` `running` and the cells in `execution.still_running`; the run continues, so read the cells later and do not run them again. Default: false.",
+          "description": "Wait for the run to end, at most 45 seconds from the start of the call (at least 5 after an approval). If it is still going then, the result has the cells in `execution.still_running` (`status` is `running`, or `errored` if a cell already failed) and a `message`; the run continues, so read the cells later and do not run them again. Default: false.",
           "type": "boolean"
         }
       },
@@ -201,7 +201,7 @@
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Wait for the run to end, at most 45 seconds. If it is still going then, the result has `execution.status` `running` and the cells in `execution.still_running`; the run continues, so read the cells later and do not run them again. Default: false.",
+          "description": "Wait for the run to end, at most 45 seconds from the start of the call (at least 5 after an approval). If it is still going then, the result has the cells in `execution.still_running` (`status` is `running`, or `errored` if a cell already failed) and a `message`; the run continues, so read the cells later and do not run them again. Default: false.",
           "type": "boolean"
         }
       },
@@ -220,7 +220,7 @@
           "type": "string"
         },
         "wait_for_completion": {
-          "description": "Wait for the run to end, at most 45 seconds. If it is still going then, the result has `execution.status` `running` and the cells in `execution.still_running`; the run continues, so read the cells later and do not run them again. Default: false.",
+          "description": "Wait for the run to end, at most 45 seconds from the start of the call (at least 5 after an approval). If it is still going then, the result has the cells in `execution.still_running` (`status` is `running`, or `errored` if a cell already failed) and a `message`; the run continues, so read the cells later and do not run them again. Default: false.",
           "type": "boolean"
         }
       },

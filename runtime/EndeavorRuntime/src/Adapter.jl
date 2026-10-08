@@ -104,19 +104,36 @@ function _notify_browser(session, notebook)
     end
 end
 
-# Until `run`, the Pluto task of a run, has ended or `timeout` seconds have
-# passed in all. The ids of `cells` that finished and those that didn't; if the
-# run is still going, the latter are every cell of the notebook that is running
-# or queued, which includes the dependents Pluto added to the run.
-function _wait_cells!(nb, cells, run; timeout)
-    t = time()
-    while !istaskdone(run) && time() - t <= timeout
-        sleep(0.05)
-    end
-    unfinished(c) = c.running || c.queued
-    timed_out = [c.cell_id for c in (istaskdone(run) ? cells : nb.cells) if unfinished(c)]
-    completed = [c.cell_id for c in cells if !(c.cell_id in timed_out)]
-    return completed, timed_out
+# Whether a run is over: its Pluto task has ended, or its notebook's own
+# process is gone or the notebook has left the session, which no task ending
+# would say.
+function _run_over(session, nb, run)
+    istaskdone(run) || nb.process_status === Pluto.ProcessStatus.no_process ||
+        get(session.notebooks, nb.notebook_id, nothing) !== nb
+end
+
+# Whether `over()` became true within `timeout` seconds.
+_wait_over(over, timeout) = timedwait(over, timeout; pollint=0.05) === :ok
+
+_unfinished(cell) = cell.running || cell.queued
+
+# Pluto marks the cells it runs queued itself; a run task that failed leaves
+# the cells marked by hand in `run_cells!` queued.
+function _release_cells!(nb, cells)
+    foreach(c -> c.queued = false, cells)
+    notify_state!(nb)
+    return nothing
+end
+
+# What happens when a run ends that no caller is waiting for: a failed task
+# releases the cells, and `run_finished` says which of them finished. Waits as
+# long as the run takes, which only the notebook's process ending or leaving
+# the session cuts short.
+function _watch_run!(session, nb, cells, run)
+    _wait_over(() -> _run_over(session, nb, run), Inf)
+    istaskfailed(run) && _release_cells!(nb, cells)
+    notify!("run_finished", Dict{String,Any}("notebook_id" => string(nb.notebook_id), "cells" => [string(c.cell_id) for c in cells if !_unfinished(c)]))
+    return nothing
 end
 
 const _PLUTO_PROJECT_TOML_CELL_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -272,10 +289,11 @@ end
 
 # Run cells; none is Pluto's reactive cleanup after a delete. Not accepted when
 # the notebook won't run code (safe preview, a stopped process). With `wait`,
-# the reply says which cells finished within `timeout` seconds in all, which
-# were still running or queued then (the run goes on), and `exited` the cells
-# that were running if its process ended by itself meanwhile; without, a
-# `run_finished` notification says which finished later.
+# the reply says which cells finished within `timeout` seconds, which cells of
+# the notebook were still running or queued then, and `exited` the cells that
+# were running if its process ended by itself meanwhile. A run that goes on,
+# waited for or not, is watched (`_watch_run!`): a `run_finished` notification
+# says which cells finished when it ends.
 function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
     accepted = Pluto.will_run_code(nb)
     # Pluto marks cells queued only inside its run task, after package sync;
@@ -285,18 +303,20 @@ function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
     run = Pluto.update_save_run!(session, nb, cells; run_async=true, save=true)
     result = Dict{String,Any}("accepted" => accepted, "process_status" => string(nb.process_status))
     if accepted && wait
-        completed, timed_out = _wait_cells!(nb, cells, run; timeout)
-        istaskfailed(run) && fetch(run)
+        over = _wait_over(() -> _run_over(session, nb, run), timeout)
         result["process_status"] = string(nb.process_status)
-        result["completed"] = [string(id) for id in completed]
-        result["timed_out"] = [string(id) for id in timed_out]
         exited = exited_cells(nb)
-        exited === nothing || (result["exited"] = exited)
-    elseif accepted && !isempty(cells)
-        @async begin
-            completed, = _wait_cells!(nb, cells, run; timeout)
-            notify!("run_finished", Dict{String,Any}("notebook_id" => string(nb.notebook_id), "cells" => [string(id) for id in completed]))
+        if exited !== nothing
+            result["exited"] = exited
+        elseif over && istaskfailed(run)
+            _release_cells!(nb, cells)
+            fetch(run)
         end
+        result["completed"] = [string(c.cell_id) for c in cells if !_unfinished(c)]
+        result["timed_out"] = [string(c.cell_id) for c in (over ? cells : nb.cells) if _unfinished(c)]
+        over || @async _watch_run!(session, nb, cells, run)
+    elseif accepted && !isempty(cells)
+        @async _watch_run!(session, nb, cells, run)
     end
     _notify_browser(session, nb)
     return result
