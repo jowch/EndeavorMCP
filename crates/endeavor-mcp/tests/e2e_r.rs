@@ -6,7 +6,8 @@
 //! ENDEAVOR_TEST_R_NOTEBOOKS.
 //!
 //! Ignored by default, like e2e_julia (which says where Julia comes from); R is
-//! `Rscript` on the PATH with Ember installed in its library:
+//! `Rscript` on the PATH. The first run installs Ember at its pinned commit into
+//! ~/.cache/endeavor/r, which needs CRAN and GitHub for any package R lacks:
 //!
 //!     cargo test -p endeavor-mcp --test e2e_r -- --ignored --nocapture
 
@@ -173,9 +174,8 @@ fn an_r_notebook_through_the_runtime() {
         eprintln!("SKIPPED: no Julia. Set ENDEAVOR_E2E_JULIA, install Endeavor's own, or put julia on the PATH.");
         return;
     };
-    let has_ember = Command::new("Rscript").args(["-e", "library(ember)"]).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
-    if !has_ember {
-        eprintln!("SKIPPED: no Rscript on the PATH with Ember installed.");
+    if !Command::new("Rscript").arg("--version").stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
+        eprintln!("SKIPPED: no Rscript on the PATH.");
         return;
     }
     let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-r");
@@ -224,7 +224,16 @@ fn an_r_notebook_through_the_runtime() {
     agent.initialize();
 
     let notebook = step("opening an R notebook starts R and Ember, in safe preview", || {
-        let opened = agent.ok("open_notebook", json!({ "path": "growth.R" }));
+        // The first time, Ember installs in the background into a library of Endeavor's own.
+        let deadline = Instant::now() + Duration::from_secs(1200);
+        let opened = loop {
+            let (failed, opened) = agent.call("open_notebook", json!({ "path": "growth.R" }));
+            if !failed {
+                break opened;
+            }
+            assert!(opened["error"] == "r_installing" && Instant::now() < deadline, "{opened}");
+            std::thread::sleep(Duration::from_secs(5));
+        };
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("growth.R").display().to_string()), &json!(false)), "{opened}");
         assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}&token={token}")));

@@ -181,7 +181,7 @@ It takes about a minute and starts Julia twice:
 
 R's adapter (`runtime/r/adapter.R`) has a test of its own that starts it as the
 core does and calls every method over HTTP. It needs `Rscript` with Ember
-installed, and takes about ten seconds:
+installed in R's library (or `R_LIBS` naming one), and takes about ten seconds:
 
 ```sh
 Rscript runtime/r/test/test.R
@@ -192,8 +192,9 @@ and R. An agent opens an Ember notebook, which starts R's adapter; it reads,
 edits and runs a cell, and the browser link reaches Ember's page at
 `/ember/`. Ctrl-C ends R's adapter with the core. R notebooks aren't open to
 agents yet, so the test sets `ENDEAVOR_TEST_R_NOTEBOOKS` (read only by debug
-builds). It prints `SKIPPED` and passes without Julia, or without `Rscript`
-on the PATH with Ember installed.
+builds). It prints `SKIPPED` and passes without Julia or without `Rscript`
+on the PATH. The first run installs Ember at its pinned commit into
+`~/.cache/endeavor/r`, as a user's first R notebook does.
 
 ```sh
 cargo test -p endeavor-mcp --test e2e_r -- --ignored --nocapture

@@ -234,11 +234,25 @@ fn free_ports() -> Result<[u16; 2], String> {
 /// Where R's adapter writes its state for the core, in the state folder.
 const R_STATE: &str = "r.json";
 
+/// The Ember commit R notebooks use (https://github.com/jowch/Ember), installed
+/// from source the first time one is opened (`runtime/r/install.R`).
+pub const EMBER_COMMIT: &str = "0176bea6c969d3e6a9dd1d825f9672d62b1959d2";
+
+/// Where installing Ember is.
+enum Install {
+    Idle,
+    Running,
+    Failed(String),
+}
+
 /// Starts R's adapter (`runtime/r/adapter.R`), with Ember in it, the first time an R notebook is
 /// opened, and stops it when the core ends.
 struct RStarter {
     rscript: String,
+    /// The core's `--r-library`, which has Ember; else Endeavor's own, installed when first needed.
     library: Option<String>,
+    own_library: PathBuf,
+    install: Arc<std::sync::Mutex<Install>>,
     adapter: PathBuf,
     state: PathBuf,
     token: String,
@@ -259,6 +273,8 @@ impl RStarter {
         RStarter {
             rscript: args.r.clone(),
             library: args.r_library.clone(),
+            own_library: crate::paths::Env::here().r_library(EMBER_COMMIT),
+            install: Arc::new(std::sync::Mutex::new(Install::Idle)),
             adapter: args.runtime.join("r").join("adapter.R"),
             state: args.state_dir.join(R_STATE),
             token: token.to_owned(),
@@ -269,12 +285,18 @@ impl RStarter {
 
     /// Start the adapter and wait until it's up: what answers for R, and Ember's page on `/ember/`.
     fn start(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+        let library = match &self.library {
+            Some(library) => PathBuf::from(library),
+            None => {
+                if !self.own_library.is_dir() {
+                    return Err(self.install());
+                }
+                self.own_library.clone()
+            }
+        };
         let _ = std::fs::remove_file(&self.state);
         let mut command = Command::new(&self.rscript);
-        command.arg("--vanilla").arg(&self.adapter).env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_R_STATE", &self.state).stdin(Stdio::null());
-        if let Some(library) = &self.library {
-            command.env("R_LIBS", library);
-        }
+        command.arg("--vanilla").arg(&self.adapter).env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", &library).stdin(Stdio::null());
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
         unsafe {
@@ -310,6 +332,36 @@ impl RStarter {
             let _ = old.wait();
         }
         Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone())))
+    }
+
+    /// Install Ember into Endeavor's own library in the background, the first
+    /// time it's needed: why R notebooks can't open yet. Installing takes
+    /// minutes (packages build from source), longer than an agent's call may
+    /// wait, so the call that starts it returns at once.
+    fn install(&self) -> String {
+        let mut install = self.install.lock().unwrap();
+        match std::mem::replace(&mut *install, Install::Running) {
+            Install::Running => {}
+            // Said once; the next call tries again.
+            Install::Failed(why) => {
+                *install = Install::Idle;
+                return why;
+            }
+            Install::Idle => {
+                let mut command = Command::new(&self.rscript);
+                command.arg("--vanilla").arg(self.adapter.with_file_name("install.R")).arg(&self.own_library).arg(EMBER_COMMIT).stdin(Stdio::null());
+                let (state, rscript) = (self.install.clone(), self.rscript.clone());
+                std::thread::spawn(move || {
+                    let done = match command.status() {
+                        Ok(status) if status.success() => Install::Idle,
+                        Ok(_) => Install::Failed("r_failed::Couldn't install Ember for R notebooks; the runtime's log says why".into()),
+                        Err(e) => Install::Failed(format!("r_not_found::Couldn't start R ({rscript}): {e}")),
+                    };
+                    *state.lock().unwrap() = done;
+                });
+            }
+        }
+        "r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Try again in a minute.".into()
     }
 
     fn stop(&self) {

@@ -164,8 +164,11 @@ Next:
   starts it, with Ember in it, the first time an R notebook is opened, and
   follows its notifications by long-polling. Only tests open R notebooks so
   far (`ENDEAVOR_TEST_R_NOTEBOOKS`); the agent's tools and skills for R come
-  after the agent-loop eval. R is `Rscript` on the PATH (or the core's `--r`)
-  with Ember already installed; finding R and installing Ember at a pinned
-  commit are next. The engine name a client asks a runtime for
+  after the agent-loop eval. R is `Rscript` on the PATH (or the core's `--r`).
+  The first R notebook installs Ember at the commit the core pins
+  (`core::EMBER_COMMIT`) into `~/.cache/endeavor/r/<commit>` (`$SCRATCH/endeavor/r`
+  on clusters), with any package it needs that R lacks; the open returns
+  `r_installing` until that's done. Letting serve, mcp and the app say where R
+  is (`--r`, `--r-shell`) is next. The engine name a client asks a runtime for
   (`wire::ENGINE_PLUTO`, a string) becomes `Backend` with those.
 - marimo after Ember.

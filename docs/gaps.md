@@ -878,10 +878,13 @@ Ember support is being built (status.md); these are its known limits so far.
   Ember file unless a debug build has `ENDEAVOR_TEST_R_NOTEBOOKS`, and
   `new_notebook` makes only `.jl` files. The tool descriptions and skills
   don't cover R yet; they come after the agent-loop eval.
-- **P2: R must already be set up.** The core runs `Rscript` from the PATH (or
-  `--r`, which nothing passes yet) with Ember in R's own library. Finding R
-  (`--r`, `--r-shell`) and installing Ember at a pinned commit into a library
-  of its own are next.
+- **P2: R is only found on the PATH.** The core runs `Rscript` from the PATH
+  (or `--r`, which nothing passes yet). serve, mcp, the app and machines.json
+  can't name another R or a shell setup (`module load R`) yet.
+- **P2: Ember installs from source.** The first R notebook builds Ember, and
+  any of its packages R lacks, which needs a C compiler and CRAN and GitHub
+  (codeload.github.com). Tried only where R already had Ember's packages.
+  Binaries from Ember's CI would remove the compiler (Ember's gaps).
 - **P2: R's adapter isn't restarted.** If its R process ends, R notebooks'
   calls fail until the runtime restarts. Pluto's Julia ending ends the whole
   runtime instead.
