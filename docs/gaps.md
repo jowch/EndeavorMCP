@@ -476,8 +476,8 @@ sign-in.
 Windows is not offered until these close; the README says so.
 
 - [P2] **Endeavor has run on Windows once, by hand.** CI runs `cargo test` on
-  `windows-latest`, but every test in `tests/` is `cfg(unix)`, so only unit
-  tests run there. The first try on Windows 11 found two bugs no test saw:
+  `windows-latest`, but every test in `tests/` but `version.rs` is
+  `cfg(unix)`, so little more than the unit tests run there (issue #9). The first try on Windows 11 found two bugs no test saw:
   `--julia auto` asked `/bin/sh` for julia, and the runtime's log couldn't be
   emptied (opened to append, os error 5). With both fixed, `endeavor serve`
   started a real runtime with juliaup's Julia 1.13.1 and `endeavor stop`
