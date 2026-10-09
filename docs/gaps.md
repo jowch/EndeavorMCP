@@ -738,6 +738,14 @@ plugins). The rest of this file can wait or go alongside.
   servers can only fetch it once Helpers has published it. Push this
   repository and wait for Helpers before an app release that moves the pin. A
   check in the app's CI that the pinned key is published would catch it.
+- [P3] **A plugin pinned to a pruned build says it is still being published.**
+  `scripts/prune-helpers.sh` removes builds nothing recent pins (keeping main's
+  last 40 plugin pins, every branch head's and anything from the last 7 days).
+  A plugin installed from an older commit, on a computer that hasn't
+  downloaded its binary yet, then hears from the launcher (install.sh exits 3)
+  that the build "is still being published. Reconnect in a few minutes", which
+  never comes true. To close: have the launcher say the build is gone and to
+  update the plugin when the build is older than LATEST's.
 - [P3] **A restart that needs an install says to restart again.** When the start
   `Session::restart` begins ends `NeedsInstall`, calls to the listener are told
   `Messages::restart_failed`'s text ("Use Restart Julia to try again"), which
