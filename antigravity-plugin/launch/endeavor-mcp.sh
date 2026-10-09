@@ -117,6 +117,17 @@ fi
 
 mkdir -p "$base" || fail "couldn't create $base. $manual"
 lock=$base/.lock
+
+# Whether the lock, whose owner is $1 (empty when none is written yet), is stale. The lock folder is
+# made when the lock is taken, and its age is the lock's.
+stale() {
+  if [ -z "$1" ]; then
+    [ -n "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]
+  else
+    ! kill -0 "$1" 2>/dev/null || [ -n "$(find "$lock" -maxdepth 0 -mmin +20 2>/dev/null)" ]
+  fi
+}
+
 waited=0
 until err=$(mkdir "$lock" 2>&1); do
   if [ ! -d "$lock" ]; then
@@ -124,24 +135,19 @@ until err=$(mkdir "$lock" 2>&1); do
     err=$(mkdir "$lock" 2>&1) && break
     [ -d "$lock" ] || fail "can't make $lock, so $base can't be written ($err). $manual"
   fi
-  # The lock folder is made when the lock is taken, and its age is the lock's.
   owner=$(cat "$lock/pid" 2>/dev/null || true)
-  stale=
-  if [ -z "$owner" ]; then
-    [ -z "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ] || stale=1
-  elif ! kill -0 "$owner" 2>/dev/null || [ -n "$(find "$lock" -maxdepth 0 -mmin +20 2>/dev/null)" ]; then
-    stale=1
-  fi
-  if [ -n "$stale" ]; then
-    # Only one start's rename succeeds.
-    if mv "$lock" "$lock.stale.$$" 2>/dev/null; then
-      # If another start took the lock over first, this moved its new one: give it back.
-      if [ "$(cat "$lock.stale.$$/pid" 2>/dev/null || true)" != "$owner" ] && [ ! -e "$lock" ]; then
-        mv "$lock.stale.$$" "$lock" 2>/dev/null || true
+  if stale "$owner"; then
+    # One start at a time removes a stale lock, and looks at it again first: by then it may be
+    # another start's, just taken, with no pid in it yet. That one is never moved or removed.
+    if mkdir "$lock.take" 2>/dev/null; then
+      if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$owner" ] && stale "$owner"; then
+        rm -rf "$lock"
       fi
-      rm -rf "$lock.stale.$$"
+      rmdir "$lock.take" 2>/dev/null || true
       continue
     fi
+    # Left by a start that was stopped while removing a lock.
+    [ -z "$(find "$lock.take" -maxdepth 0 -mmin +1 2>/dev/null)" ] || rmdir "$lock.take" 2>/dev/null || true
   fi
   if [ "$waited" -ge 25 ]; then
     fail "another start has been downloading endeavor for $waited seconds. Reconnect in a minute. $manual"
