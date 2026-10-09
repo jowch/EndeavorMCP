@@ -20,7 +20,7 @@ fn options(root: &str, state: &str, depot: &str) -> Options<'static> {
 fn batch_mode_adds_batchmode_and_env_does_not() {
     let batch = lab().command("true", &Auth::Batch).unwrap();
     let args_batch = args(&batch);
-    assert_eq!(batch.get_program(), "ssh");
+    assert_eq!(batch.get_program(), ssh_program().as_os_str());
     assert!(args_batch.windows(2).any(|w| w == ["-o", "BatchMode=yes"]), "{args_batch:?}");
     assert!(batch.get_envs().next().is_none());
 
@@ -30,6 +30,16 @@ fn batch_mode_adds_batchmode_and_env_does_not() {
     assert!(!args_env.iter().any(|a| a.contains("BatchMode")), "{args_env:?}");
     let set: Vec<_> = asking.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
     assert_eq!(set, [("SSH_ASKPASS".to_owned(), Some("/x/askpass".to_owned())), ("SSH_ASKPASS_REQUIRE".to_owned(), Some("force".to_owned()))]);
+}
+
+/// Windows' own ssh when it is installed, whatever `ssh` comes first on the PATH (Git's, in Git Bash).
+#[test]
+fn the_ssh_is_windows_own_when_there_is_one() {
+    let windows = std::env::var_os("SystemRoot").map(|root| Path::new(&root).join("System32").join("OpenSSH").join("ssh.exe")).filter(|ssh| ssh.is_file());
+    match windows {
+        Some(ssh) if cfg!(windows) => assert_eq!(ssh_program(), ssh),
+        _ => assert_eq!(ssh_program(), Path::new("ssh")),
+    }
 }
 
 #[test]

@@ -78,7 +78,7 @@ impl Transport {
         let mut command = match self {
             Transport::Ssh { host, port } => {
                 valid_host(host)?;
-                let mut command = Command::new("ssh");
+                let mut command = Command::new(ssh_program());
                 // A keepalive every 10 s of silence, and ssh quits after two go
                 // unanswered: a dead link ends the helper's channel within
                 // about 30 s, even while nothing else is sent.
@@ -102,6 +102,7 @@ impl Transport {
         if let Auth::Env(env) = auth {
             command.envs(env.iter().map(|(k, v)| (k, v)));
         }
+        no_window(&mut command);
         Ok(command)
     }
 
@@ -121,6 +122,34 @@ impl Transport {
         }
     }
 }
+
+/// The ssh to run: on Windows, Windows' own OpenSSH when it is installed, and
+/// otherwise the first `ssh` on the PATH. In Git Bash that first one is Git's,
+/// which signs in with the Windows user name as it is spelled (`WongLab`) where
+/// Windows' lowercases it, and may read another `~/.ssh` than `%USERPROFILE%\.ssh`.
+fn ssh_program() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            let ssh = Path::new(&root).join("System32").join("OpenSSH").join("ssh.exe");
+            if ssh.is_file() {
+                return ssh;
+            }
+        }
+    }
+    PathBuf::from("ssh")
+}
+
+/// On Windows, start `command` without a console window: ssh is a console
+/// program, and from the app, which has no console, each one would open a window.
+#[cfg(windows)]
+fn no_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn no_window(_command: &mut Command) {}
 
 /// Whether `host` can be given to ssh as the destination: an alias, a name,
 /// an address (IPv6 has colons) or `user@host`, where the user, which may hold
@@ -349,7 +378,10 @@ fn kill_group(pid: u32) {
 /// The child is moved into the channel's thread, so only its pid is left.
 #[cfg(windows)]
 fn kill_group(pid: u32) {
-    let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let mut taskkill = Command::new("taskkill");
+    taskkill.args(["/PID", &pid.to_string(), "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    no_window(&mut taskkill);
+    let _ = taskkill.status();
 }
 
 /// `uname`'s words as the helper's folders name platforms: `linux` and `aarch64`.

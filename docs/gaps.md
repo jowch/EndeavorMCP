@@ -23,8 +23,8 @@ Every P1:
   ([Releases and plugins](#releases-and-plugins)).
 - No person has run the released macOS or Windows binaries
   ([Releases and plugins](#releases-and-plugins)).
-- A Mac or Windows computer reaching a Linux server is wired and not run
-  ([Releases and plugins](#releases-and-plugins)).
+- A Mac computer reaching a Linux server is wired and not run, and a Windows
+  one only from a debug build ([Releases and plugins](#releases-and-plugins)).
 
 ## Releases and plugins
 
@@ -72,10 +72,16 @@ Every P1:
   running it. The Linux x86_64 file was downloaded, its checksum checked and
   run; the launcher's `--fetch-only` and `install.sh` were run against the
   release on Linux.
-- [P1] **A Mac or Windows computer reaching a Linux server is wired and not
-  run.** The release logic is tested with a fake release, but
-  `open_session`'s call to it is not exercised across platforms, because the
-  tests' ssh stand-in always reports this computer's platform.
+- [P1] **A Mac computer reaching a Linux server is wired and not run, and a
+  Windows one only from a debug build.** The release logic is tested with a fake
+  release, but `open_session`'s call to it is not exercised across platforms,
+  because the tests' ssh stand-in always reports this computer's platform. On
+  2026-10-09 a debug `endeavor mcp` on Windows 10 ran `add_machine`,
+  `use_machine` and `stop_machine` against a Linux server with Slurm, through
+  Windows' OpenSSH 9.5: it fetched the Linux helper from a local `file://`
+  release (a debug build has no release key), sent it, and started and stopped
+  Julia there. A release build fetching from the real release, the Slurm
+  launcher, and a Mac were not run.
 - [P2] **The plugin manifests say `"version": "0.1.0"` and never change.** The
   Claude Code and Codex manifests and the app's `plugin/` carry it;
   Antigravity's has no version. This is deliberate until the first plugin
@@ -476,10 +482,26 @@ sign-in.
 Windows is not offered until these close; the README says so.
 
 - [P2] **No person has run Endeavor on Windows.** CI runs `cargo test` on
-  `windows-latest` and the tests pass, but they use a stand-in Julia and fake
-  ssh and Slurm. CI does not cover the runtime's detached start with real
-  Julia, its console handler, the `taskkill` cancel path, or a real ssh from
-  Windows.
+  `windows-latest` and the tests pass, but they use a stand-in Julia. CI does
+  not cover the runtime's detached start with real Julia, its console handler,
+  or the `taskkill` cancel path. A real ssh from Windows to a Linux server was
+  run once by hand ([Releases and plugins](#releases-and-plugins)).
+- [P2] **No integration test runs on Windows.** Every file in
+  `crates/endeavor-mcp/tests/` is `#![cfg(unix)]`, so on Windows `cargo test`
+  runs only the unit tests: none of connect, session, machines, serve or Slurm.
+  Their ssh and Slurm stand-ins are `/bin/sh` scripts (`tests/common`). The
+  channel unit tests also spawn `true`, which only Git's `usr\bin` provides (CI's
+  runner has it on the PATH; a plain Windows shell doesn't). To close: stand-ins
+  written in Rust (a small test binary), or the scripts run through Git's
+  `sh.exe`, and the tests' `cfg(unix)` narrowed to what is Unix only.
+- [P2] **On Windows ssh can't ask for a password or a key's passphrase.** The
+  askpass mode answers ssh's prompts through the app's Unix socket
+  (`askpass.rs`), which is not ported, so only a key without a passphrase or a
+  key in ssh-agent signs in. Windows ships its ssh-agent service disabled, so
+  the "run `ssh-add`" advice that a refused sign-in gives (`client/ssh.rs`,
+  `explain_retry`) fails there until an administrator enables the service. To
+  close: askpass over loopback TCP with a token, or a named pipe; and on Windows
+  say how to start the ssh-agent service.
 - [P2] **Under Codex on Windows a runtime would end with the session.** Codex
   puts an MCP server in a job object that its children cannot leave, and ends
   the job with the session (read from its source, not run). Endeavor asks to
