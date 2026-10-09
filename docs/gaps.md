@@ -38,6 +38,12 @@ Every P1:
   carries) it only tells the agent once, in `use_machine` or the next notebook
   call, and `client::Session` reports it as trouble: a machine's runtime is
   never stopped for the agent, since on a cluster that gives up the job.
+  A machine's runtime whose `Ready` gives neither its build nor its
+  interface is from before runs waited for the user's answer, so for a
+  client whose runs wait for it (the app, which sends a policy) the listener
+  refuses its code runs (`Messages::no_run_gate`); reading and editing still
+  work. The plugin leaves it off: it sends no policy, so no runtime holds its
+  runs, old or new.
   `serve` doesn't need it: the agent talks to the core itself.
 - [P2] **Old builds are never removed from servers or from the plugin's
   folder.** Every build a server was sent stays in `~/.cache/endeavor/<build>/`
@@ -589,6 +595,16 @@ not supported. These gaps stay open.
 - [P3] **No helper for a Windows server or a platform other than the five.**
   The server's `uname` is what is asked for, and the release has no Windows
   server helper.
+- [P3] **Windows' 260-character path limit can break a package install.**
+  Julia's artifacts sit deep under `%LOCALAPPDATA%\Endeavor\serve-depot\artifacts\`.
+  On a Windows test machine, with `LOCALAPPDATA` pointed at a folder about 120
+  characters long, the first start failed: "Failed to install some artifacts:
+  SystemError: opening file" on a file under `include\everest\kremlib\`. The
+  same install from a shorter folder worked, and a normal `%LOCALAPPDATA%` is
+  much shorter still, but the margin hasn't been measured. A very long user
+  name might hit it. Turning on Windows' long paths (`LongPathsEnabled`) may
+  help, but that hasn't been tried. PowerShell's `Remove-Item` can't delete
+  such a tree; `rd /s /q "\\?\<folder>"` can.
 
 ## Folders and paths
 
@@ -672,13 +688,16 @@ not supported. These gaps stay open.
   call then fails with `waiting_for_user`, and the card stays up. The same call
   made again by the same session, on the same notebook code, waits on the same
   card and gets at once an approval given meanwhile. Any other call by the
-  session takes the card down, so an approval can't reach code the agent
-  changed since; so does a refusal while no call waits, since the app refuses
-  what is still up when a turn ends. `waiting_for_user` is an error on purpose,
-  unlike `execution.still_running`: nothing happened, and the agent must not
-  assume it did. Not yet tried with a real agent and the app; the app may show
-  a second prompt of the agent's own for the repeated call, unless the user
-  chose "Always" for it.
+  session that changes or runs something takes the card down; reads leave it,
+  and the notebook-code check keeps an approval from reaching changed code. So
+  does a refusal while no call waits. `waiting_for_user` is an error on
+  purpose, unlike `execution.still_running`: nothing happened, and the agent
+  must not assume it did. Claude stops retrying after one to four tries, so
+  the result also says to tell the user and make the same call when they write
+  back. The app keeps a card no call waits on (`waiting: false`) past the
+  turn. Approving it does nothing until the user writes. An approval no call
+  has taken yet never expires; it stays until the session's next change or
+  run.
 - [P2] **An agent can add a machine under a name the user did not give.** Told
   "the machine localhost", a Codex agent called `add_machine` with host
   `self`, an alias `list_machines` showed in `ssh_hosts_not_added`, and told

@@ -78,6 +78,8 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>)
         restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
         restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {}", install_text(name, &InstallInfo { items: items.to_vec(), helper: None }, "use_machine")),
         not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
+        // The plugin's runs aren't held for the user's answer by any runtime (it sends no policy): an old one is no worse.
+        no_run_gate: None,
     };
     Session::new(config)
 }
@@ -1376,7 +1378,10 @@ impl Relay {
         let at = place(&name);
         let provider = self.provider_for(&server, install, true)?;
         if !matches!(provider.status().state, State::Ready(_) | State::Starting { .. } | State::Queued(_)) {
-            match provider.ensure(Want::Attach { install }, deadline.left(), true) {
+            // Not waited for: a start another process has under way here, which a look would wait for and the stop is for.
+            let starting_here = server.id == LOCAL && crate::runtime::lock_state(&self.options.state_dir).is_held();
+            let wait = if starting_here { Duration::ZERO } else { deadline.left() };
+            match provider.ensure(Want::Attach { install }, wait, true) {
                 Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, &info, "stop_machine")),
                 Outcome::NothingRunning => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Julia isn't running on {at}, so there is nothing to stop.") })),
                 _ => {}

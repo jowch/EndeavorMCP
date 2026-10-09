@@ -218,6 +218,10 @@ fn julia_command(args: &Args, token: &str, launcher: &str, julia_state: &Path) -
         .env("ENDEAVOR_STATE", julia_state)
         .env("ENDEAVOR_LAUNCHER", launcher)
         .stdin(Stdio::null());
+    // Julia is a console program. The core may have no console to give it (in
+    // the app, the core is the app's own GUI program), and then Julia would open
+    // a console window for as long as it runs. Pluto's workers share Julia's.
+    crate::client::no_window(&mut command);
     for name in ["ENDEAVOR_PORT", "ENDEAVOR_FOLDER", "ENDEAVOR_NO_FOLDER", "ENDEAVOR_HOST_TOOLS", "ENDEAVOR_IDLE_HOURS", "ENDEAVOR_EXIT_IDLE"] {
         command.env_remove(name);
     }

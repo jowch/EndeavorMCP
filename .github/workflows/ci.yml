@@ -1,6 +1,6 @@
 # Builds the workspace and runs its tests on Linux, macOS and Windows. The
 # tests against real Julia (e2e_julia, e2e_serve) are ignored by default and
-# don't run here (docs/testing.md). Each job has a time limit well above a
+# run in e2e.yml instead (docs/testing.md). Each job has a time limit well above a
 # normal run (a few minutes), so a test that hangs fails the job instead of
 # holding it, and the PR's checks, for GitHub's default of six hours.
 name: CI

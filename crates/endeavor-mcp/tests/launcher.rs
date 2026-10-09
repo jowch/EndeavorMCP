@@ -466,6 +466,90 @@ fn starts_that_find_one_stale_lock_download_once_and_all_run() {
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// The order that left a lock with no pid (#44): start B finds the stale lock and reads its dead pid; start A
+/// removes it and takes the lock; only then does B act on what it read, while A has yet to write its pid.
+/// Fakes of `cat`, `mkdir` and `mv` hold each start at its step, so the order is the same every run.
+#[test]
+fn a_start_that_read_a_stale_lock_late_leaves_a_lock_just_taken_alone() {
+    let place = Place::new("stalelate");
+    place.release(KEY);
+    let mut child = Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let lock = place.data().join(".lock");
+    std::fs::create_dir_all(&lock).unwrap();
+    std::fs::write(lock.join("pid"), format!("{dead}\n")).unwrap();
+    let sig = place.dir.join("fake/sig");
+    std::fs::create_dir_all(&sig).unwrap();
+    let wait = |file: &str| format!("i=0; while [ ! -e '{sig}/{file}' ] && [ $i -lt 30 ]; do '{sleep}' 0.1; i=$((i + 1)); done; [ -e '{sig}/{file}' ] || : >'{sig}/timed-out'", sig = sig.display(), sleep = real("sleep").display());
+    // B, once: having read the dead pid, waits until A has taken the lock.
+    place.fake("cat", &format!(
+        "#!/bin/sh\n'{cat}' \"$@\" || exit $?\nif [ \"${{ROLE:-}}\" = b ] && [ \"$1\" = '{lock}/pid' ] && [ ! -e '{sig}/b-read' ] && [ \"$('{cat}' \"$1\" 2>/dev/null)\" = {dead} ]; then : >'{sig}/b-read'; {wait}; fi\n",
+        cat = real("cat").display(), lock = lock.display(), sig = sig.display(), wait = wait("a-locked"),
+    ));
+    // A, once: having taken the lock, waits (up to 3 s) until B acts on what it read, by starting to remove
+    // the lock (`mkdir .lock.take`), or as the launcher once did, by moving it aside (`mv .lock`).
+    place.fake("mkdir", &format!(
+        "#!/bin/sh\n'{mkdir}' \"$@\" || exit $?\nif [ \"${{ROLE:-}}\" = b ] && [ \"$1\" = '{lock}.take' ]; then : >'{sig}/b-acted'; fi\nif [ \"${{ROLE:-}}\" = a ] && [ \"$1\" = '{lock}' ] && [ ! -e '{sig}/a-locked' ]; then : >'{sig}/a-locked'; {wait}; fi\n",
+        mkdir = real("mkdir").display(), lock = lock.display(), sig = sig.display(), wait = wait("b-acted"),
+    ));
+    place.fake("mv", &format!(
+        "#!/bin/sh\n'{mv}' \"$@\" || exit $?\nif [ \"${{ROLE:-}}\" = b ] && [ \"$1\" = '{lock}' ] && [ ! -e '{sig}/b-acted' ]; then : >'{sig}/b-acted'; '{sleep}' 0.5; fi\n",
+        mv = real("mv").display(), lock = lock.display(), sig = sig.display(), sleep = real("sleep").display(),
+    ));
+    let start = |role: &str| place.command("endeavor-mcp.sh", &[], &place.url()).env("ROLE", role).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let b = start("b");
+    wait_for("B to read the stale lock", || sig.join("b-read").exists());
+    let a = start("a");
+    let started = Instant::now();
+    for child in [a, b] {
+        let run = place.finish(child.wait_with_output().unwrap());
+        assert!(run.ok && run.stdout == expected(""), "{}", run.stderr);
+    }
+    assert!(["b-read", "a-locked", "b-acted"].iter().all(|step| sig.join(step).exists()), "every step was reached");
+    assert!(!sig.join("timed-out").exists(), "a start gave up waiting for the other, so the order wasn't the one the test sets");
+    assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    let left: Vec<_> = std::fs::read_dir(place.data()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(".lock")).collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_takeover_left_by_a_start_that_was_stopped_doesnt_hold_up_the_next() {
+    let place = Place::new("staletake");
+    place.release(KEY);
+    let mut child = Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let lock = place.data().join(".lock");
+    std::fs::create_dir_all(&lock).unwrap();
+    std::fs::write(lock.join("pid"), format!("{dead}\n")).unwrap();
+    let take = place.data().join(".lock.take");
+    std::fs::create_dir_all(&take).unwrap();
+    assert!(Command::new("touch").args(["-t", "202001010000"]).arg(&take).status().unwrap().success());
+    let started = Instant::now();
+    let run = place.launch(&[]);
+    assert!(run.ok && run.stdout == expected(""), "{}", run.stderr);
+    assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    assert!(!lock.exists() && !take.exists());
+}
+
+#[test]
+fn a_start_stopped_while_removing_a_stale_lock_lets_go_of_the_takeover() {
+    let place = Place::new("staletakestop");
+    place.release(KEY);
+    let mut child = Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let lock = place.data().join(".lock");
+    std::fs::create_dir_all(&lock).unwrap();
+    std::fs::write(lock.join("pid"), format!("{dead}\n")).unwrap();
+    // The start is stopped while it removes the stale lock.
+    place.fake("rm", &format!("#!/bin/sh\nif [ \"$2\" = '{lock}' ]; then kill -TERM $PPID; fi\nexec '{rm}' \"$@\"\n", lock = lock.display(), rm = real("rm").display()));
+    let run = place.launch(&[]);
+    assert!(!run.ok, "{}", run.stderr);
+    assert!(!place.data().join(".lock.take").exists());
+}
+
 #[test]
 fn a_folder_that_cant_be_written_fails_at_once_naming_it() {
     let place = Place::new("unwritable");
