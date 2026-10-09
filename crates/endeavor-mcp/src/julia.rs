@@ -192,14 +192,22 @@ fn download_here() -> Result<(&'static str, &'static str, u64), String> {
         .ok_or_else(|| format!("No julia on this machine's PATH, and Endeavor has no Julia download for {os} {arch}. Set How to get Julia for this server."))
 }
 
-/// `~/.cache/endeavor/julia-<version>/bin/julia` (`julia.exe` on Windows),
-/// downloading it the first time.
+/// `~/.cache/endeavor/julia-<version>/bin/julia`, downloading it the first time.
+/// On Windows `%LOCALAPPDATA%\Endeavor\julia-<version>\bin\julia.exe`, the
+/// app's own Julia, so the two share one install.
 fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String, Failure> {
     let env = crate::paths::Env::here();
-    if env.home.as_os_str().is_empty() {
-        return Err("HOME isn't set".to_owned().into());
-    }
-    let cache = env.server_root();
+    let cache = if cfg!(windows) {
+        if !env.local.is_absolute() {
+            return Err("LOCALAPPDATA isn't set, so Endeavor has no folder to download Julia into.".to_owned().into());
+        }
+        env.local.clone()
+    } else {
+        if env.home.as_os_str().is_empty() {
+            return Err("HOME isn't set".to_owned().into());
+        }
+        env.server_root()
+    };
     let dir = cache.join(format!("julia-{JULIA_VERSION}"));
     let bin = dir.join("bin").join(if cfg!(windows) { "julia.exe" } else { "julia" });
     if !bin.exists() {
@@ -268,7 +276,19 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
     if !untar.success() || !staging.join(&top).is_dir() {
         return Err(format!("Couldn't unpack Julia {JULIA_VERSION} ({untar})."));
     }
-    std::fs::rename(staging.join(&top), dir).map_err(|e| e.to_string())?;
+    // Another install (the app's, on Windows) may have finished first, and on
+    // Windows an antivirus scan can hold a just-unpacked file for a moment.
+    let mut tries = if cfg!(windows) { 10 } else { 1 };
+    while let Err(e) = std::fs::rename(staging.join(&top), dir) {
+        if dir.join("bin").is_dir() {
+            break;
+        }
+        tries -= 1;
+        if tries == 0 {
+            return Err(format!("Couldn't move the unpacked Julia {JULIA_VERSION} into place ({e})."));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
     let _ = std::fs::remove_dir_all(&staging);
     let _ = std::fs::remove_file(&part);
     Ok(())
@@ -308,7 +328,7 @@ fn unpack(zip: &Path, into: &Path) -> Result<std::process::ExitStatus, String> {
     let tar = system.filter(|tar| tar.exists()).unwrap_or_else(|| "tar.exe".into());
     let mut command = Command::new(tar);
     crate::client::no_window(&mut command);
-    command.arg("-xf").arg(zip).arg("-C").arg(into).status().map_err(|e| e.to_string())
+    command.arg("-xf").arg(zip).arg("-C").arg(into).status().map_err(|e| format!("Couldn't unpack Julia: Windows' tar.exe didn't start ({e})."))
 }
 
 #[cfg(test)]
@@ -336,8 +356,7 @@ mod tests {
     /// zip, from a `file://` address with curl.
     #[test]
     fn installs_a_checked_download_and_deletes_a_bad_one() {
-        // A canonical Windows path starts `\\?\`. Dropped: curl would read the `?` as a query,
-        // and a real cache path never has it.
+        // Without the `\\?\` a canonical Windows path has, as a real cache path is.
         let tmp = crate::client::scratch("julia-install");
         let tmp = tmp.to_str().and_then(|p| p.strip_prefix(r"\\?\")).map(std::path::PathBuf::from).unwrap_or(tmp);
         let top = format!("julia-{JULIA_VERSION}");
@@ -350,7 +369,7 @@ mod tests {
         // -a: the format from the file name.
         pack.args(if cfg!(windows) { ["-a", "-cf"].as_slice() } else { ["-czf"].as_slice() });
         assert!(pack.arg(&archive).arg("-C").arg(tmp.join("src")).arg(&top).status().unwrap().success());
-        let url = format!("file://{}{}", if cfg!(windows) { "/" } else { "" }, archive.display().to_string().replace('\\', "/"));
+        let url = crate::client::file_url(&archive.display().to_string());
         let size = std::fs::metadata(&archive).unwrap().len();
         let sha = sha256_of(&archive).unwrap();
 

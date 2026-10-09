@@ -60,8 +60,11 @@ The product uses the user's Julia and packages instead of managing its own.
 Most of this exists: the helper looks for a path the user gave, a setup line
 of theirs (`module load julia`), then `julia` on the login shell's PATH
 (juliaup installs), and only then downloads its pinned Julia
-(`crates/endeavor-mcp/src/julia.rs`). The product drops the download: with
-no Julia found, it says how to install one (juliaup).
+(`crates/endeavor-mcp/src/julia.rs`). The download stays, on every system
+including Windows: without it a new user has to install juliaup (on Windows
+from the Microsoft Store, which managed PCs sometimes block) before the first
+notebook, and it pins the Julia the runtime's packages were resolved for. A
+Julia the user has still wins.
 
 - **Packages.** The runtime already uses its own package store first, with the
   user's `~/.julia` behind it read-only (`src/runtime.rs`), so registries and

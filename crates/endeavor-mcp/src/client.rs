@@ -28,3 +28,20 @@ pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir.canonicalize().unwrap()
 }
+
+/// The `file://` address of `path` as curl wants it: on Windows `file:///D:/a/x`,
+/// from `D:\a\x` or the canonical `\\?\D:\a\x`, and `file://server/share/x` from a UNC path.
+#[cfg(test)]
+pub(crate) fn file_url(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let path = match path.strip_prefix("//?/UNC/") {
+        Some(unc) => format!("//{unc}"),
+        None => path.strip_prefix("//?/").map_or(path.clone(), str::to_owned),
+    };
+    let encoded: String = path.bytes().map(|b| if b.is_ascii_alphanumeric() || b"/:-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    match encoded.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => format!("file:///{encoded}"),
+        _ if encoded.starts_with("//") => format!("file:{encoded}"),
+        _ => format!("file://{encoded}"),
+    }
+}

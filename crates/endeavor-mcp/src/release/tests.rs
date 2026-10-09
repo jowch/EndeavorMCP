@@ -4,6 +4,7 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
 use super::*;
+use crate::client::file_url;
 
 const KEY: &str = "0123456789ab";
 const HELPER: &[u8] = b"the helper for another platform";
@@ -14,22 +15,6 @@ fn scratch(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.canonicalize().unwrap()
-}
-
-/// The `file://` address of `path` as curl wants it: on Windows `file:///D:/a/x`,
-/// from `D:\a\x` or the canonical `\\?\D:\a\x`, and `file://server/share/x` from a UNC path.
-fn file_url(path: &str) -> String {
-    let path = path.replace('\\', "/");
-    let path = match path.strip_prefix("//?/UNC/") {
-        Some(unc) => format!("//{unc}"),
-        None => path.strip_prefix("//?/").map_or(path.clone(), str::to_owned),
-    };
-    let encoded: String = path.bytes().map(|b| if b.is_ascii_alphanumeric() || b"/:-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
-    match encoded.as_bytes() {
-        [drive, b':', ..] if drive.is_ascii_alphabetic() => format!("file:///{encoded}"),
-        _ if encoded.starts_with("//") => format!("file:{encoded}"),
-        _ => format!("file://{encoded}"),
-    }
 }
 
 /// The address of a folder on this computer.

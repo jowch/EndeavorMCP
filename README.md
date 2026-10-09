@@ -75,7 +75,10 @@ these ways:
   Choosing "Git and optional Unix tools" when installing Git does the same.
 - With no Julia 1.11 or newer on the PATH (juliaup's counts), Endeavor
   downloads its own Julia 1.12 the first time, about 275 MB, into
-  `.cache\endeavor` in your user folder, as on Linux and macOS.
+  `%LOCALAPPDATA%\Endeavor`, as on Linux and macOS. The Endeavor desktop app
+  keeps its Julia in the same folder, so the two share one copy. The download
+  uses `curl.exe`, which follows `HTTPS_PROXY` but not a proxy set only in
+  Windows settings.
 - agy names the server `endeavor_endeavor`. `agy -p` (print mode) refuses
   every MCP call that isn't allowed in `~/.gemini/antigravity-cli/settings.json`,
   one tool at a time:
