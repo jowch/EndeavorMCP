@@ -76,10 +76,6 @@ these ways:
 - Endeavor downloads no Julia on Windows. Install juliaup
   (`winget install --id 9NJNWW8PVKMN -e -s msstore`) and Julia 1.12
   (`juliaup add 1.12`, `juliaup default 1.12`) first.
-- On Windows, a computer whose name has lower-case letters, or is longer than
-  15 characters, can't use its own runtime yet: `new_notebook` says Julia runs
-  remotely on that name ([gaps.md](docs/gaps.md)). Names like
-  `DESKTOP-AB12CD` should work (not tried).
 - agy names the server `endeavor_endeavor`. `agy -p` (print mode) refuses
   every MCP call that isn't allowed in `~/.gemini/antigravity-cli/settings.json`,
   one tool at a time:
