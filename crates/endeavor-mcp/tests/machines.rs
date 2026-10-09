@@ -854,6 +854,63 @@ fn use_machine_without_a_folder_keeps_the_folder_the_project_remembers_for_that_
 }
 
 #[test]
+fn use_machine_makes_a_folder_whose_parent_is_there_and_refuses_one_whose_parent_is_not_before_any_job() {
+    let slurm = FakeSlurm::new("folder");
+    let place = Place::with("folder", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_hpc();
+    let mut front = place.front();
+    front.initialize();
+    let job = json!({ "cpus": 1, "memory_gb": 1, "hours": 1 });
+    let ask = |folder: &Path| {
+        let mut args = job.clone();
+        args["machine"] = "hpc".into();
+        args["folder"] = folder.display().to_string().into();
+        args
+    };
+
+    // A folder whose parent is missing too, such as another computer's path: nothing is made and no job is asked for.
+    let elsewhere = place.dir.join("Users/me/projects/study");
+    let (failed, refused) = front.call("use_machine", ask(&elsewhere));
+    let message = refused["message"].as_str().unwrap();
+    assert!(failed && message.contains("can't be the session's folder: neither it nor the folder it would go in") && message.contains("exists on hpc") && message.contains("Nothing was started") && message.contains("another computer") && message.contains("Ask the user"), "{refused}");
+    assert!(!place.dir.join("Users").exists(), "nothing was made");
+    assert_eq!(slurm.read("sbatch.args"), "", "no job was submitted");
+    assert_eq!(place.projects(), Value::Null, "the project remembers nothing");
+
+    // A new folder whose parent is there is made, and the result says so.
+    let study = place.dir.join("home/new-study");
+    let queued = front.ok("use_machine", ask(&study));
+    assert_eq!(queued["state"].as_str(), Some("queued"), "{queued}");
+    assert!(study.is_dir(), "the folder was made");
+    assert!(queued["message"].as_str().unwrap().contains(&format!("Made a new folder for the session on hpc: {}", study.display())), "{queued}");
+    assert_ne!(slurm.read("sbatch.args"), "", "the job was submitted");
+    assert_eq!(place.projects()[place.project.display().to_string()]["folder"], study.display().to_string().as_str());
+}
+
+#[test]
+fn a_remembered_folder_that_is_gone_is_named_as_the_projects_and_a_given_folder_gets_past_it() {
+    let place = Place::new("remembered-gone");
+    place.add_lab();
+    let work = place.dir.join("home/scratch/work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab", "folder": work.display().to_string() }));
+    first.finish();
+    std::fs::remove_dir_all(place.dir.join("home/scratch")).unwrap();
+
+    // Leaving `folder` out brings the remembered folder back, so the error says it is the project's and asks for another.
+    let mut second = place.front();
+    second.initialize();
+    let (failed, refused) = second.call("use_machine", json!({ "machine": "lab" }));
+    let message = refused["message"].as_str().unwrap();
+    assert!(failed && message.contains(&format!("The folder this project used on lab, {},", work.display())) && message.contains("pass it as `folder`") && !message.contains("leave `folder` out"), "{refused}");
+    let home = second.ok("use_machine", json!({ "machine": "lab", "folder": "~" }));
+    assert_eq!(home["state"].as_str(), Some("ready"), "{home}");
+    assert_eq!(place.projects()[place.project.display().to_string()]["folder"], "~", "the folder given replaces the one that was gone");
+}
+
+#[test]
 fn a_remembered_plain_server_is_started_when_nothing_runs_there() {
     let place = Place::new("remember-start");
     place.add_lab();
@@ -1686,7 +1743,9 @@ fn a_forced_stop_after_a_failed_start_here_reaches_a_start_another_process_has_u
     let path = local_notebook(&place, "failed.jl");
     std::fs::write(place.local_state.join("hold"), "").unwrap();
     let short = [("ENDEAVOR_START_WAIT_SECS", "2")];
-    let mut front = start_front(&place, &short);
+    // The forced stop below waits as long as each tool waits for a start, and ending the other process's
+    // core takes about 2 s here (the core ends when its Julia does, and that is polled every 500 ms).
+    let mut front = start_front(&place, &[("ENDEAVOR_START_WAIT_SECS", "8")]);
     front.initialize();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
     assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");

@@ -24,11 +24,20 @@ pub(super) trait Provider: Send + Sync {
     fn stop(&self, force: bool) -> Result<(), String>;
     /// Whether the machine is a Slurm cluster, by the record the connection was made with.
     fn cluster(&self) -> bool;
+    /// Ask a machine's helper about its files, once it is connected (`Session::files`). None on this
+    /// computer, and on a machine that isn't connected by the end of `wait`.
+    fn files(&self, _request: wire::files::Request, _wait: Duration) -> Option<Result<wire::files::Reply, String>> {
+        None
+    }
 }
 
 impl Provider for Session {
     fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome {
         Session::ensure(self, want, wait, retry)
+    }
+
+    fn files(&self, request: wire::files::Request, wait: Duration) -> Option<Result<wire::files::Reply, String>> {
+        Session::files(self, request, wait)
     }
 
     fn status(&self) -> Status {
