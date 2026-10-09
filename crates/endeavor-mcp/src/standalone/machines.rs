@@ -76,6 +76,7 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>)
     config.launcher = launcher;
     config.messages = Messages {
         restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
+        restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {}", install_text(name, &InstallInfo { items: items.to_vec(), helper: None }, "use_machine")),
         not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
     };
     Session::new(config)
@@ -446,6 +447,10 @@ fn job_json(status: &Status) -> Option<Value> {
 
 fn queue_json(status: &Status) -> Option<Value> {
     let queue = status.state.queue()?;
+    // Once the job runs, the helper gives its node in place of a reason.
+    if queue.state == "RUNNING" {
+        return Some(json!({ "state": queue.state, "node": queue.reason, "reason_text": format!("running on node {}, and Julia is starting there", queue.reason) }));
+    }
     Some(json!({ "state": queue.state, "reason": queue.reason, "reason_text": queue_reason_text(&queue.reason) }))
 }
 

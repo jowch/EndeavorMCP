@@ -103,15 +103,40 @@ fn stopping_on_purpose_says_so_not_that_it_reconnects_by_itself() {
 
 #[test]
 fn a_caller_can_word_the_messages_that_name_the_apps_controls() {
-    let messages = Messages { restart_failed: |name| format!("Julia on {name} didn't start. Call use_machine again."), not_connected: |name| format!("Not connected to {name}. Call use_machine.") };
+    let messages = Messages {
+        restart_failed: |name| format!("Julia on {name} didn't start. Call use_machine again."),
+        restart_needs_install: |name, items| format!("{name} needs {}. Call use_machine with install.", wire::items_text(items)),
+        not_connected: |name| format!("Not connected to {name}. Call use_machine."),
+    };
     let listener = Listener::new("lab-server", None, messages).unwrap();
     let mux = Mux::new(std::io::sink());
     listener.attach(mux, "secret".into());
     listener.restarting();
     listener.restart_failed();
     assert!(post(&listener, "secret", LIST).contains(r#""text":"Julia on lab-server didn't start. Call use_machine again.""#));
+    listener.restarting();
+    listener.restart_needs_install(&[julia()]);
+    assert!(post(&listener, "secret", LIST).contains(r#""text":"lab-server needs Julia 1.12.6 (about 289 MB). Call use_machine with install.""#));
     listener.disconnected();
     assert!(post(&listener, "secret", LIST).contains(r#""text":"Not connected to lab-server. Call use_machine.""#));
+}
+
+fn julia() -> wire::Item {
+    wire::Item { kind: wire::KIND_RUNTIME.into(), name: "Julia 1.12.6".into(), size_mb: Some(289), place: None }
+}
+
+#[test]
+fn a_restart_that_needs_an_install_says_what_is_missing_not_to_restart_again() {
+    let listener = Listener::start("lab-server").unwrap();
+    listener.attach(Mux::new(std::io::sink()), "secret".into());
+    // Before restarting() ran, there's nothing to correct: still up, a no-op.
+    listener.restart_needs_install(&[julia()]);
+    assert!(matches!(&*listener.upstream.lock().unwrap(), Upstream::Up { .. }));
+    listener.restarting();
+    listener.restart_needs_install(&[julia()]);
+    let response = post(&listener, "secret", LIST);
+    assert!(response.contains(r#""text":"Julia on lab-server couldn't start. Julia 1.12.6 wasn't found on lab-server. Endeavor can download its own copy (about 289 MB). Endeavor is asking the user whether it may install that; Julia starts once they agree.""#), "{response}");
+    assert!(!response.contains("Restart Julia"), "{response}");
 }
 
 #[test]

@@ -36,8 +36,9 @@ pub enum Event {
     Progress(String),
     /// A cluster job for Julia was submitted.
     Submitted { job: String, summary: String },
-    /// It waits in the queue (Slurm's state and reason).
-    Queued { state: String, reason: String },
+    /// The job `job` waits in the queue (Slurm's state and reason); once it runs, state RUNNING and the
+    /// node as `reason`.
+    Queued { job: String, state: String, reason: String },
     /// The runtime is up (or was already running) and its bridge answered through the listener.
     Started { node: String, reattached: bool },
     /// `test` on a cluster: what Slurm says there.
@@ -594,7 +595,7 @@ pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions
             ToApp::Progress { line } => on(Event::Progress(line)),
             ToApp::Found { name, version, path } => on(Event::Found { name, version, path }),
             ToApp::Submitted { job, summary } => on(Event::Submitted { job, summary }),
-            ToApp::Queued { state, reason, .. } => on(Event::Queued { state, reason }),
+            ToApp::Queued { job, state, reason } => on(Event::Queued { job, state, reason }),
             _ => {}
         },
         notice,

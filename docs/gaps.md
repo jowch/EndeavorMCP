@@ -232,15 +232,10 @@ Starting, stopping, idle exit and updates.
   over it), so a kill during that write can leave the file cut short.
 - [P2] **A start that hangs, with no client left, is ended only by a forced
   stop.** Clients that wait for it never stop it, and a stop without `force`
-  says it is still starting. On this computer `endeavor stop --force` ends it;
-  on a machine see "On a machine, a stop cannot cancel a start another
-  connection began". There is no deadline for a start.
-- [P2] **On a machine, a stop cannot cancel a start another connection began.**
-  The helper's `Stop` has no `force`, so `stop_machine` with `force` ends a
-  start that this session's own connection is waiting on, and for another
-  process's start the helper still says it is still starting. Run `endeavor
-  stop --force` on the machine, with the helper's `--state-dir`. To close: a
-  `force` on the `Stop` message.
+  says it is still starting. `endeavor stop --force`, and `stop_machine` with
+  `force` on this computer or a machine, end it. There is no deadline for a
+  start. (A machine whose helper predates the `force` on its `Stop` still
+  says it is still starting; run `endeavor stop --force` there.)
 - [P2] **`starting.lock` is a file lock, which a home folder shared by several
   machines may not carry between them.** A client on another machine may then
   not see a start under way and start a second runtime. A recorded runtime of
@@ -252,9 +247,9 @@ Starting, stopping, idle exit and updates.
   sees it end. `runtime.json` and `pluto_session_status` now say which kind it
   is.
 - [P3] **A forced stop cancels a start only when `starting.lock` names its
-  core.** `endeavor stop --force` and `stop_machine` with `force` on this
-  computer end the core the file names, if the lock is held, the file names
-  this computer and a start time, and that process started then (on this
+  core.** `endeavor stop --force` and `stop_machine` with `force` end the
+  core the file names, if the lock is held, the file names
+  the computer the stop runs on and a start time, and that process started then (on this
   boot). A core of an older build writes no pid, a core that has just taken
   the lock has not yet, and a platform that gives no start time records none:
   the stop then says it can't tell which process is starting Julia and stops
@@ -447,19 +442,16 @@ sign-in.
 
 - [P2] **Queued and starting states have not been seen on real Slurm through
   the tools.** The queue here is empty and a job runs at once, so their wording
-  is checked against the fake Slurm only. No agent has followed the
-  `endeavor-machines` skill through a cluster.
+  is checked against the fake Slurm only. `e2e_machines_slurm` now holds a job
+  in the queue (`--begin=now+90`) to give a real one, also for a session that
+  attaches to the queued job; it has not yet been run. No agent has followed
+  the `endeavor-machines` skill through a cluster.
 - [P3] **`use_machine` checks and makes a session's folder on the login
   node.** A folder on a disk only the login node has (`/tmp/...`, a node-local
   scratch) passes the check, or is made there, and is still missing on the
   compute node, so `new_notebook` fails as it did before the check. To close:
   have the runtime check the folder once the job runs, or name node-local
   paths in the refusal.
-- [P3] **A queued job has no id in the session's status until it is submitted
-  by this session.** A session that re-attaches to a job already queued shows
-  `queue` but no `job` until it runs, because the library's queued event
-  carries no id. A job already running shows its id, node and end time to a
-  new session (`e2e_machines_slurm`).
 - [P3] **The reason a job ended could come back empty.** `e2e_slurm` failed
   about one run in six on 2026-10-07: a job cancelled from outside was
   reported with no reason, because the helper asked while Slurm still listed
@@ -752,12 +744,6 @@ plugins). The rest of this file can wait or go alongside.
   build is too old and how to update (`endeavor update`, or update the
   plugin), when the build is missing and LATEST names another; or publish
   each build to a release of its own, so nothing has to be pruned.
-- [P3] **A restart that needs an install says to restart again.** When the start
-  `Session::restart` begins ends `NeedsInstall`, calls to the listener are told
-  `Messages::restart_failed`'s text ("Use Restart Julia to try again"), which
-  won't help: the user has to agree to the install first. The message is given
-  only the machine's name, so it can't say why. To settle in the app's PR that
-  moves servers to `Session`.
 - [P3] **The layers under a session still write a few lines to stderr.** A
   session's own progress and trouble go to `Config::on_event` (since
   2026-10-08). Below it, ssh's stderr (`ssh: ...`), lines a login script prints

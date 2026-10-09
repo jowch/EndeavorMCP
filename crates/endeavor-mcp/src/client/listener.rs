@@ -25,6 +25,9 @@ pub type Refuse = Box<dyn Fn(&str, &str, &Value) -> Option<String> + Send + Sync
 pub struct Messages {
     /// A restart that was announced (`restarting`) did not bring Julia back.
     pub restart_failed: fn(&str) -> String,
+    /// A restart that was announced did not bring Julia back because the start needs these installed,
+    /// and installing wasn't allowed: what is missing (`wire::needs_text`) and how the user agrees.
+    pub restart_needs_install: fn(&str, &[wire::Item]) -> String,
     /// The server was stopped or disconnected on purpose.
     pub not_connected: fn(&str) -> String,
 }
@@ -33,6 +36,7 @@ impl Default for Messages {
     fn default() -> Messages {
         Messages {
             restart_failed: |name| format!("Julia on {name} couldn't start. Use Restart Julia to try again."),
+            restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {} Endeavor is asking the user whether it may install that; Julia starts once they agree.", wire::needs_text(items, name)),
             not_connected: |name| format!("Endeavor isn't connected to {name}. Reconnect it to use its notebook again."),
         }
     }
@@ -176,6 +180,11 @@ impl Listener {
     /// The restart `restarting` announced didn't work out: Julia didn't come back.
     pub fn restart_failed(&self) {
         self.deliberately((self.messages.restart_failed)(&self.name), false);
+    }
+
+    /// The restart `restarting` announced didn't work out because the start needs `items` installed.
+    pub fn restart_needs_install(&self, items: &[wire::Item]) {
+        self.deliberately((self.messages.restart_needs_install)(&self.name, items), false);
     }
 
     fn not_connected(&self) -> String {

@@ -85,7 +85,7 @@ impl Running {
     /// The caller holds the start lock.
     pub fn stop(self, inbox: &mut Inbox) {
         let generation = self.link.generation;
-        if self.link.send(&ToHelper::Stop { id: 0 }).is_ok() {
+        if self.link.send(&ToHelper::Stop { id: 0, force: false }).is_ok() {
             let deadline = Instant::now() + Duration::from_secs(20);
             while let Some(left) = deadline.checked_duration_since(Instant::now()) {
                 match inbox.rx.recv_timeout(left) {
@@ -329,11 +329,12 @@ fn wait(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, 
     let mut last: Option<(String, String)> = None;
     let result = loop {
         match inbox.hear_while_starting(mux, poll()) {
-            Heard::Stop(id) => {
+            // Forced or not, the job is cancelled, whoever submitted it.
+            Heard::Stop(id, force) => {
                 stopped::mark(dir, stopped::Of::Job(job), stopped::How::Connection);
                 scancel(job);
                 forget(dir, job);
-                break Err(Unstarted::Stopped(id));
+                break Err(Unstarted::Stopped { id, force, other: false });
             }
             Heard::Detach | Heard::Eof => std::process::exit(0),
             Heard::Event => continue,
@@ -700,7 +701,7 @@ pub fn relay_main(argv: &[String]) -> ! {
     let _ = mux.send(&ready.frame());
     loop {
         match rx.recv().expect("senders live as long as their threads") {
-            Event::App(ToHelper::Stop { id }) => {
+            Event::App(ToHelper::Stop { id, .. }) => {
                 runtime.stop(Some(&state));
                 let _ = mux.send(&ToApp::Stopped { id }.frame());
                 std::process::exit(0);

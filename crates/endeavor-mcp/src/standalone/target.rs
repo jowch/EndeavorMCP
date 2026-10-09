@@ -20,7 +20,7 @@ pub(super) trait Provider: Send + Sync {
     fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome;
     fn status(&self) -> Status;
     /// End the runtime for every client of it, and wait until it is gone. With `force` a start that is
-    /// under way is cancelled (a machine's is, whether or not it is given).
+    /// under way is cancelled, whoever began it; without, only one this session's connection is waiting on.
     fn stop(&self, force: bool) -> Result<(), String>;
     /// Whether the machine is a Slurm cluster, by the record the connection was made with.
     fn cluster(&self) -> bool;
@@ -44,8 +44,9 @@ impl Provider for Session {
         Session::status(self)
     }
 
-    fn stop(&self, _force: bool) -> Result<(), String> {
-        Session::stop(self).map_err(|why| {
+    fn stop(&self, force: bool) -> Result<(), String> {
+        let stopped = if force { Session::force_stop(self) } else { Session::stop(self) };
+        stopped.map_err(|why| {
             // Nothing to do about a stop the helper refused.
             if self.connected() {
                 return why;
