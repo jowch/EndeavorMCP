@@ -2,8 +2,10 @@
 # because they are ignored by default. They take a few minutes once the
 # packages are cached and much longer the first time, so they run in their own
 # workflow: CI's checks don't wait for them. Linux only for now. They run on a
-# PR or push that changes the crates, the runtime or the lockfile, and on
-# request (docs/testing.md).
+# PR or push that changes what goes into the binary (the crates, the runtime,
+# the skills it embeds, the Cargo files), and on request (docs/testing.md).
+# Because of those path filters, don't make this check required in branch
+# protection: a PR that changes none of them would wait for it forever.
 name: E2E
 
 on:
@@ -12,6 +14,8 @@ on:
     paths:
       - 'crates/**'
       - 'runtime/**'
+      - 'plugin/**'
+      - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - '.github/workflows/e2e.yml'
@@ -19,6 +23,8 @@ on:
     paths:
       - 'crates/**'
       - 'runtime/**'
+      - 'plugin/**'
+      - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - '.github/workflows/e2e.yml'
@@ -26,7 +32,8 @@ on:
 
 concurrency:
   group: e2e-${{ github.ref }}
-  cancel-in-progress: true
+  # A run on main finishes, so each merge gets a result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   julia:
@@ -53,6 +60,14 @@ jobs:
             target/tmp/e2e-serve/depot
           key: e2e-depots-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml') }}-${{ github.run_id }}
           restore-keys: e2e-depots-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml') }}-
+      # A run whose tests passed marks its depots complete. One restored without
+      # the mark came from a failed run and may lack packages.
+      - name: Check depots
+        id: depots
+        run: |
+          if [ -f target/tmp/e2e-julia/depot/.e2e-complete ] && [ -f target/tmp/e2e-serve/depot/.e2e-complete ]; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build
         run: cargo build --locked -p endeavor-mcp --tests
       # A test that finds no Julia prints SKIPPED and passes. Here that would
@@ -63,15 +78,16 @@ jobs:
           export ENDEAVOR_E2E_JULIA="$(command -v julia)"
           for test in e2e_julia e2e_serve; do
             cargo test --locked -p endeavor-mcp --test "$test" -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/$test.log"
-            if grep -q '^SKIPPED' "$RUNNER_TEMP/$test.log"; then
+            if grep -q 'SKIPPED:' "$RUNNER_TEMP/$test.log"; then
               echo "::error::$test was skipped"
               exit 1
             fi
           done
-      # A new entry each time would fill the cache, so save only on main (whose
-      # entries every PR can read) or when nothing was restored.
+          touch target/tmp/e2e-julia/depot/.e2e-complete target/tmp/e2e-serve/depot/.e2e-complete
+      # Save only when the restored depots weren't complete: a new entry each
+      # time would fill the cache, and complete depots have nothing to add.
       - name: Save depots
-        if: always() && (github.ref == 'refs/heads/main' || steps.restore.outputs.cache-matched-key == '')
+        if: always() && steps.depots.outputs.complete != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
