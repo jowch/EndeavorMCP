@@ -24,7 +24,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   Slurm (`tests/machines.rs`), and over real ssh and Julia in `e2e_machines`.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
-- CI (`ci.yml`) builds and tests on Linux, macOS and Windows. `helpers.yml`
+- CI (`ci.yml`) builds and tests on Linux, macOS and Windows. `e2e.yml` runs
+  `e2e_julia` and `e2e_serve` against real Julia on Linux. `helpers.yml`
   publishes the binaries for Linux, macOS and Windows to the `helpers` release
   under a key computed from the helper's source (`scripts/helpers.sh`), and
   `LATEST`, the newest key, for builds from `main`. Every build gets that key
