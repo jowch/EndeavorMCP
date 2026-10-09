@@ -517,8 +517,9 @@ not supported. These gaps stay open.
   `use_machine local` was not called with the fix. The console handler and
   the `taskkill` cancel path have not run. A real ssh from Windows to a Linux
   server was run once by hand ([Releases and plugins](#releases-and-plugins)).
-  Windows has no Julia download: with no `julia.exe` on the PATH, Endeavor
-  says to install juliaup, and with one too old, it says so.
+  With no usable `julia.exe` on the PATH, Endeavor downloads its own Julia
+  (the win64 zip, unpacked with Windows' own `tar.exe`) since 2026-10-09;
+  that download has not run on a real Windows machine yet.
 - [P2] **No integration test runs on Windows.** Every file in
   `crates/endeavor-mcp/tests/` but `version.rs` is `#![cfg(unix)]`, so on
   Windows `cargo test` runs only the unit tests: none of connect, session,

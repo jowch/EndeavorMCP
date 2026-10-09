@@ -73,9 +73,9 @@ these ways:
   ```
 
   Choosing "Git and optional Unix tools" when installing Git does the same.
-- Endeavor downloads no Julia on Windows. Install juliaup
-  (`winget install --id 9NJNWW8PVKMN -e -s msstore`) and Julia 1.12
-  (`juliaup add 1.12`, `juliaup default 1.12`) first.
+- With no Julia 1.11 or newer on the PATH (juliaup's counts), Endeavor
+  downloads its own Julia 1.12 the first time, about 275 MB, into
+  `.cache\endeavor` in your user folder, as on Linux and macOS.
 - agy names the server `endeavor_endeavor`. `agy -p` (print mode) refuses
   every MCP call that isn't allowed in `~/.gemini/antigravity-cli/settings.json`,
   one tool at a time:

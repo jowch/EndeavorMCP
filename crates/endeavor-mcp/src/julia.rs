@@ -1,6 +1,7 @@
 //! Finding the julia to start the runtime with: a path the user gave, the one a
 //! shell line of theirs sets up (`module load julia`), the one on their login
-//! shell's PATH, or else Endeavor's own, downloaded and checked here.
+//! shell's PATH (on Windows the PATH's), or else Endeavor's own, downloaded and
+//! checked here.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -10,7 +11,8 @@ use std::time::Duration;
 const MIN_JULIA: (u32, u32) = (1, 11);
 
 /// The Julia downloaded when a machine has none, pinned with the official
-/// tarballs' SHA-256 and size (bump all with the app's own in src/runtime.rs).
+/// tarballs' (Windows: zip's) SHA-256 and size (bump all with the app's own in
+/// src/runtime.rs).
 const JULIA_VERSION: &str = "1.12.6";
 const TARBALLS: [(&str, &str, &str, &str, u64); 4] = [
     (
@@ -43,11 +45,19 @@ const TARBALLS: [(&str, &str, &str, &str, u64); 4] = [
     ),
 ];
 
+/// Windows' Julia. There is no Windows ARM64 build of Julia 1.12, so Windows
+/// on ARM gets the x64 one, which it runs under emulation.
+const WINDOWS_ZIP: (&str, &str, u64) = (
+    "https://julialang-s3.julialang.org/bin/winnt/x64/1.12/julia-1.12.6-win64.zip",
+    "a63d991976e6893f508c512e3dc7bca1836c1a1f6ad1f3e4aedec159b6733e89",
+    275_091_967,
+);
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
     /// `--julia PATH`
     Path(String),
-    /// `--julia auto`: the login shell's (on Windows the PATH's), else Endeavor's own (not on Windows).
+    /// `--julia auto`: the login shell's (on Windows the PATH's), else Endeavor's own.
     Auto,
     /// `--julia-shell LINE`: what `LINE` puts on the login shell's PATH.
     Shell(String),
@@ -97,13 +107,9 @@ pub fn find(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -
             Ok((path, version))
         }
         Source::Auto => {
-            if let Some(path) = path_julia() {
-                match checked_version(&path, &format!("Found {path}, but it doesn't run.")) {
-                    Ok(version) => return Ok((path, version)),
-                    // Windows has no download to fall back on: say what's wrong with the one found.
-                    Err(why) if cfg!(windows) => return Err(format!("{why} With juliaup, `juliaup update` or `juliaup default release` gives a newer one.").into()),
-                    Err(_) => {}
-                }
+            if let Some(path) = path_julia()
+                && let Ok(version) = checked_version(&path, &format!("Found {path}, but it doesn't run.")) {
+                return Ok((path, version));
             }
             let path = own_julia(download, progress)?;
             let version = checked_version(&path, "Endeavor's Julia doesn't run on this machine.")?;
@@ -151,7 +157,9 @@ fn login_shell_julia(script: &str) -> (Option<String>, String) {
 
 /// `julia --version`, if it's new enough.
 fn checked_version(julia: &str, missing: &str) -> Result<String, String> {
-    let output = Command::new(julia).arg("--version").stdin(Stdio::null()).output().map_err(|_| missing.to_owned())?;
+    let mut command = Command::new(julia);
+    crate::client::no_window(&mut command);
+    let output = command.arg("--version").stdin(Stdio::null()).output().map_err(|_| missing.to_owned())?;
     let text = String::from_utf8_lossy(&output.stdout);
     let version = text.trim().rsplit(' ').next().unwrap_or_default().to_owned();
     match parse_version(&version) {
@@ -171,28 +179,31 @@ fn uname(flag: &str) -> String {
     Command::new("uname").arg(flag).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default()
 }
 
-/// `~/.cache/endeavor/julia-<version>/bin/julia`, downloading it the first time.
-fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String, Failure> {
+/// The download for this machine: its URL, SHA-256 and size.
+fn download_here() -> Result<(&'static str, &'static str, u64), String> {
     if cfg!(windows) {
-        return Err(format!(
-            "No Julia {}.{} or newer on this computer's PATH, and Endeavor doesn't download Julia on Windows. Install it with juliaup (`winget install --id 9NJNWW8PVKMN -e -s msstore`), or pass its julia.exe with --julia, then try again.",
-            MIN_JULIA.0, MIN_JULIA.1
-        )
-        .into());
+        return Ok(WINDOWS_ZIP);
     }
+    let (os, arch) = (uname("-s"), uname("-m").replace("arm64", "aarch64"));
+    TARBALLS
+        .iter()
+        .find(|t| t.0 == os && t.1 == arch)
+        .map(|&(_, _, url, sha256, size)| (url, sha256, size))
+        .ok_or_else(|| format!("No julia on this machine's PATH, and Endeavor has no Julia download for {os} {arch}. Set How to get Julia for this server."))
+}
+
+/// `~/.cache/endeavor/julia-<version>/bin/julia` (`julia.exe` on Windows),
+/// downloading it the first time.
+fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String, Failure> {
     let env = crate::paths::Env::here();
     if env.home.as_os_str().is_empty() {
         return Err("HOME isn't set".to_owned().into());
     }
     let cache = env.server_root();
     let dir = cache.join(format!("julia-{JULIA_VERSION}"));
-    let bin = dir.join("bin/julia");
+    let bin = dir.join("bin").join(if cfg!(windows) { "julia.exe" } else { "julia" });
     if !bin.exists() {
-        let (os, arch) = (uname("-s"), uname("-m").replace("arm64", "aarch64"));
-        let &(_, _, url, sha256, size) = TARBALLS
-            .iter()
-            .find(|t| t.0 == os && t.1 == arch)
-            .ok_or_else(|| format!("No julia on this machine's PATH, and Endeavor has no Julia download for {os} {arch}. Set How to get Julia for this server."))?;
+        let (url, sha256, size) = download_here()?;
         if !download {
             return Err(Failure::Missing(wire::Item {
                 kind: wire::KIND_RUNTIME.into(),
@@ -209,15 +220,21 @@ fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String,
 fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progress: &mut dyn FnMut(String)) -> Result<(), String> {
     std::fs::create_dir_all(cache).map_err(|e| format!("Couldn't create {}: {e}", cache.display()))?;
     let top = format!("julia-{JULIA_VERSION}");
-    let part = cache.join(format!("{top}.tar.gz.part"));
+    let kind = if url.ends_with(".zip") { "zip" } else { "tar.gz" };
+    let part = cache.join(format!("{top}.{kind}.part"));
     let mut download = if has("curl") {
-        Command::new("curl").args(["-fsSL", "--retry", "3", "-C", "-", "-o"]).arg(&part).arg(url).stderr(Stdio::piped()).spawn()
+        let mut curl = Command::new("curl");
+        curl.args(["-fsSL", "--retry", "3", "-C", "-", "-o"]).arg(&part).arg(url);
+        curl
     } else if has("wget") {
-        Command::new("wget").args(["-q", "-c", "-O"]).arg(&part).arg(url).stderr(Stdio::piped()).spawn()
+        let mut wget = Command::new("wget");
+        wget.args(["-q", "-c", "-O"]).arg(&part).arg(url);
+        wget
     } else {
         return Err("No julia on this machine's PATH, and neither curl nor wget to download one. Set How to get Julia for this server.".into());
-    }
-    .map_err(|e| format!("Couldn't start the Julia download: {e}"))?;
+    };
+    crate::client::no_window(&mut download);
+    let mut download = download.stderr(Stdio::piped()).spawn().map_err(|e| format!("Couldn't start the Julia download: {e}"))?;
     let mut shown = u64::MAX;
     let status = loop {
         if let Some(status) = download.try_wait().map_err(|e| e.to_string())? {
@@ -233,7 +250,7 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
     if !status.success() {
         let mut err = String::new();
         let _ = std::io::Read::read_to_string(&mut download.stderr.take().unwrap(), &mut err);
-        return Err(format!("Couldn't download Julia {JULIA_VERSION} on the server ({}). It resumes on the next try.", err.trim()));
+        return Err(format!("Couldn't download Julia {JULIA_VERSION} ({}). It resumes on the next try.", err.trim()));
     }
 
     progress(format!("Checking Julia {JULIA_VERSION}…"));
@@ -247,7 +264,7 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
     let staging = cache.join(format!("{top}.unpacking"));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-    let untar = Command::new("tar").arg("-xzf").arg(&part).arg("-C").arg(&staging).status().map_err(|e| e.to_string())?;
+    let untar = unpack(&part, &staging)?;
     if !untar.success() || !staging.join(&top).is_dir() {
         return Err(format!("Couldn't unpack Julia {JULIA_VERSION} ({untar})."));
     }
@@ -257,18 +274,41 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
     Ok(())
 }
 
+#[cfg(unix)]
 fn has(program: &str) -> bool {
     Command::new("sh").args(["-c", &format!("command -v {program}")]).stdout(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
+/// Windows 10 and later ship `curl.exe`; there is no `wget`.
+#[cfg(windows)]
+fn has(program: &str) -> bool {
+    let mut curl = Command::new("curl");
+    crate::client::no_window(&mut curl);
+    program == "curl" && curl.arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
 fn sha256_of(path: &Path) -> Result<String, String> {
-    let output = if has("sha256sum") {
-        Command::new("sha256sum").arg(path).output()
-    } else {
-        Command::new("shasum").args(["-a", "256"]).arg(path).output()
-    }
-    .map_err(|e| format!("Couldn't check the download: {e}"))?;
-    Ok(String::from_utf8_lossy(&output.stdout).split_whitespace().next().unwrap_or_default().to_owned())
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    let mut file = std::fs::File::open(path).map_err(|e| format!("Couldn't check the download: {e}"))?;
+    std::io::copy(&mut file, &mut hasher).map_err(|e| format!("Couldn't check the download: {e}"))?;
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(unix)]
+fn unpack(tarball: &Path, into: &Path) -> Result<std::process::ExitStatus, String> {
+    Command::new("tar").arg("-xzf").arg(tarball).arg("-C").arg(into).status().map_err(|e| e.to_string())
+}
+
+/// With Windows' own bsdtar, which reads zips. A `tar` earlier on the PATH may
+/// be GNU tar from Git for Windows, which doesn't, and takes `C:` for a host.
+#[cfg(windows)]
+fn unpack(zip: &Path, into: &Path) -> Result<std::process::ExitStatus, String> {
+    let system = std::env::var_os("SystemRoot").map(|root| std::path::PathBuf::from(root).join("System32").join("tar.exe"));
+    let tar = system.filter(|tar| tar.exists()).unwrap_or_else(|| "tar.exe".into());
+    let mut command = Command::new(tar);
+    crate::client::no_window(&mut command);
+    command.arg("-xf").arg(zip).arg("-C").arg(into).status().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -283,6 +323,43 @@ mod tests {
         let home = std::env::home_dir().unwrap();
         assert_eq!(expand_home("~/julia/bin/julia"), format!("{}/julia/bin/julia", home.display()));
         assert_eq!(expand_home("/opt/julia"), "/opt/julia");
+    }
+
+    #[test]
+    fn the_checksum_is_sha256() {
+        let file = crate::client::scratch("julia-sha").join("abc");
+        std::fs::write(&file, "abc").unwrap();
+        assert_eq!(sha256_of(&file).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    /// The download is checked and unpacked whole: a tar.gz, and on Windows a
+    /// zip, from a `file://` address with curl.
+    #[test]
+    fn installs_a_checked_download_and_deletes_a_bad_one() {
+        let tmp = crate::client::scratch("julia-install");
+        let top = format!("julia-{JULIA_VERSION}");
+        let bin = tmp.join("src").join(&top).join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("julia"), "").unwrap();
+        let kind = if cfg!(windows) { "zip" } else { "tar.gz" };
+        let archive = tmp.join(format!("julia.{kind}"));
+        let mut pack = if cfg!(windows) { Command::new(std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_default()).join("System32").join("tar.exe")) } else { Command::new("tar") };
+        // -a: the format from the file name.
+        pack.args(if cfg!(windows) { ["-a", "-cf"].as_slice() } else { ["-czf"].as_slice() });
+        assert!(pack.arg(&archive).arg("-C").arg(tmp.join("src")).arg(&top).status().unwrap().success());
+        let url = format!("file://{}{}", if cfg!(windows) { "/" } else { "" }, archive.display().to_string().replace('\\', "/"));
+        let size = std::fs::metadata(&archive).unwrap().len();
+        let sha = sha256_of(&archive).unwrap();
+
+        let cache = tmp.join("cache");
+        let dir = cache.join(&top);
+        let err = install(&cache, &dir, &url, &"0".repeat(64), size, &mut |_| {}).unwrap_err();
+        assert!(err.contains("corrupt"), "{err}");
+        assert!(!dir.exists() && !cache.join(format!("{top}.{kind}.part")).exists());
+
+        install(&cache, &dir, &url, &sha, size, &mut |_| {}).unwrap();
+        assert!(dir.join("bin").join("julia").exists());
+        assert!(!cache.join(format!("{top}.{kind}.part")).exists() && !cache.join(format!("{top}.unpacking")).exists());
     }
 
     /// Windows has no login shell, so `--julia auto` looks in the PATH's folders itself.
