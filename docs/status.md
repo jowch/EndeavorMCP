@@ -85,8 +85,9 @@ Checked live on 2026-10-03:
   from its GitHub folder URL with Git's `bin` on the PATH and Julia from
   juliaup. agy loaded the three skills, the launcher downloaded the pinned
   release, and `agy -p` made a notebook and read a cell's output (`5050`).
-  It needed `COMPUTERNAME` set to the DNS host name's case
-  ([gaps.md](gaps.md), Windows).
+  It needed `COMPUTERNAME` set to the DNS host name's case, since Endeavor
+  compared the NetBIOS name with Julia's; fixed in #31, which reads the DNS
+  host name.
 - The app sending its bundled macOS helper to a macOS server, with this Mac
   as the server over `ssh localhost`. The app picked
   `Resources/helpers/darwin-aarch64/endeavor`, the server's copy matched it

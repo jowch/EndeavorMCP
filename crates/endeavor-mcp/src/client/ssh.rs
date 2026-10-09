@@ -722,7 +722,7 @@ fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option
 /// How to put a key in the ssh agent. Windows ships the agent's service
 /// turned off, and `ssh-add` fails until an administrator turns it on.
 const ADD_KEY: &str = if cfg!(windows) {
-    "run `ssh-add` in a terminal to add it. If that says it can't connect to the agent, turn the agent on once, in PowerShell run as administrator: `Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent`"
+    "run `ssh-add` in a terminal to add it. If that says it can't connect to the agent, turn the agent on once, in PowerShell run as administrator: `Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent`, then run `ssh-add` again"
 } else {
     "run `ssh-add` in a terminal to add it"
 };

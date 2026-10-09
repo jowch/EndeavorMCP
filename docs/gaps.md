@@ -541,6 +541,13 @@ not supported. These gaps stay open.
   disabled, so `ssh-add` fails there until an administrator enables it. On
   Windows a refused sign-in now says how (`client/ssh.rs`, `ADD_KEY`), but the
   user still has to do it once, as administrator.
+- [P3] **On Windows a computer name longer than 15 characters moved its state
+  folder.** Since #31 the state folder (`serve/<name>`) uses the DNS host
+  name, not the 15-character NetBIOS one, so a runtime an older build started
+  there is not seen: a new one starts beside it, and the old one runs until
+  its idle limit. Such a runtime was already unusable (it counted as another
+  computer's). Names that differ only in case keep their folder, since NTFS
+  ignores case.
 - [P3] **On Windows the ssh can't be chosen.** Endeavor runs Windows' own
   `System32\OpenSSH\ssh.exe` when it is installed, and the PATH's `ssh` only
   when it isn't (`client/ssh.rs`, `ssh_program`), so a user who wants Git's
