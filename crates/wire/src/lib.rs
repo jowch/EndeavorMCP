@@ -304,9 +304,10 @@ pub enum ToHelper {
     },
     /// Stop the runtime and stay connected: the attached one, else the one
     /// recorded in the state folder, or on a cluster the job waiting for it.
-    /// A start under way ends with its own answer, then this is answered.
-    /// Without `force`, a start another connection began is left to finish and
-    /// the answer is `NotStopped`; with it, that start is cancelled as
+    /// A start under way ends with its own answer, then this is answered;
+    /// that includes this connection's wait for a start another connection
+    /// began. Without `force`, that other start is left to finish and the
+    /// answer is `NotStopped`; with it, it is cancelled as
     /// `endeavor stop --force` cancels it. Absent, as from a client that
     /// predates it, it is false; a helper that predates it ignores it.
     Stop {

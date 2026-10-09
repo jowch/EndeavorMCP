@@ -447,6 +447,10 @@ fn job_json(status: &Status) -> Option<Value> {
 
 fn queue_json(status: &Status) -> Option<Value> {
     let queue = status.state.queue()?;
+    // Once the job runs, the helper gives its node in place of a reason.
+    if queue.state == "RUNNING" {
+        return Some(json!({ "state": queue.state, "node": queue.reason, "reason_text": format!("running on node {}, and Julia is starting there", queue.reason) }));
+    }
     Some(json!({ "state": queue.state, "reason": queue.reason, "reason_text": queue_reason_text(&queue.reason) }))
 }
 

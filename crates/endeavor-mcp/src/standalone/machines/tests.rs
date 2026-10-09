@@ -47,6 +47,11 @@ fn a_machine_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
     let running = Outcome::Queued { job, queue: QueueInfo { state: "RUNNING".into(), reason: "n123".into() } };
     let said = not_ready_message("hpc", &reached(running, status(State::Starting { queue: Some(QueueInfo { state: "RUNNING".into(), reason: "n123".into() }) })));
     assert!(said.contains("running on node n123, and Julia is starting there") && said.contains("call the notebook tool you want again") && !said.contains("minutes or hours"), "{said}");
+    // The status's `queue` names the node of a job that runs, not as its reason.
+    let queue = queue_json(&status(State::Starting { queue: Some(QueueInfo { state: "RUNNING".into(), reason: "n123".into() }) })).unwrap();
+    assert_eq!(queue, json!({ "state": "RUNNING", "node": "n123", "reason_text": "running on node n123, and Julia is starting there" }));
+    let queue = queue_json(&status(State::Queued(QueueInfo { state: "PENDING".into(), reason: "BeginTime".into() }))).unwrap();
+    assert_eq!(queue, json!({ "state": "PENDING", "reason": "BeginTime", "reason_text": "its start time is in the future" }));
 
     let said = not_ready_message("lab", &reached(Outcome::Failed("lab refused the sign-in.".into()), status(State::Failed("lab refused the sign-in.".into()))));
     assert!(said.starts_with("Julia on lab isn't available: lab refused the sign-in.") && said.contains("`use_machine` with machine \"lab\""), "{said}");

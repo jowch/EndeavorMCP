@@ -330,11 +330,11 @@ fn wait(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, 
     let result = loop {
         match inbox.hear_while_starting(mux, poll()) {
             // Forced or not, the job is cancelled, whoever submitted it.
-            Heard::Stop(id, _) => {
+            Heard::Stop(id, force) => {
                 stopped::mark(dir, stopped::Of::Job(job), stopped::How::Connection);
                 scancel(job);
                 forget(dir, job);
-                break Err(Unstarted::Stopped { id, other: false });
+                break Err(Unstarted::Stopped { id, force, other: false });
             }
             Heard::Detach | Heard::Eof => std::process::exit(0),
             Heard::Event => continue,

@@ -396,9 +396,9 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                         attached = Some(now);
                     }
                     Err(unstarted) => {
-                        if let Some(stop) = unstarted.answer(mux, id) {
-                            let stopped = stop_recorded(args, &mut inbox, &events, true);
-                            answer_stops(mux, &mut inbox, stop, true, &stopped);
+                        if let Some((stop, force)) = unstarted.answer(mux, id) {
+                            let stopped = stop_recorded(args, &mut inbox, &events, force);
+                            answer_stops(mux, &mut inbox, stop, force, &stopped);
                         }
                     }
                 }
@@ -656,21 +656,23 @@ enum Unstarted {
     /// The start needs these installed and `install` was false.
     NeedsInstall(Vec<wire::Item>),
     Died { status: String, log_tail: Vec<String> },
-    /// The `Stop` with this id cut it short; that is answered too. `other`: it was forced, and cut short a
-    /// wait for what another connection began (or a runtime that didn't answer), which this stop hasn't ended.
-    Stopped { id: u32, other: bool },
+    /// The `Stop` with this id, forced or not, cut it short; that is answered too. `other`: it cut short a
+    /// wait for what this connection didn't begin (another connection's start, the start lock, or a
+    /// runtime that didn't answer), which this stop hasn't ended.
+    Stopped { id: u32, force: bool, other: bool },
     /// Only attaching was asked for, and nothing runs or is starting.
     NotRunning,
 }
 
 impl Unstarted {
-    /// Answer the `StartRuntime` with id `start`, and the `Stop` that ended it; but a forced `Stop` that
-    /// ended only this connection's wait for another's start is not answered: its id is returned, for the
-    /// caller to stop what runs or starts as a forced `Stop` with nothing attached does.
-    fn answer(self, mux: &Arc<Mux>, start: u32) -> Option<u32> {
-        if let Unstarted::Stopped { id, other: true } = self {
+    /// Answer the `StartRuntime` with id `start`, and the `Stop` that ended it; but a `Stop` that ended
+    /// only this connection's wait for what it didn't begin is not answered: its id and `force` are
+    /// returned, for the caller to handle as a `Stop` with nothing attached (`stop_recorded`), so that an
+    /// unforced one says Julia is still starting and a forced one cancels that start.
+    fn answer(self, mux: &Arc<Mux>, start: u32) -> Option<(u32, bool)> {
+        if let Unstarted::Stopped { id, force, other: true } = self {
             let _ = mux.send(&ToApp::StartCancelled { id: start }.frame());
-            return Some(id);
+            return Some((id, force));
         }
         let (reply, stop) = match self {
             Unstarted::Failed(message) => (ToApp::StartFailed { id: start, message }, None),
@@ -695,8 +697,9 @@ struct Client<'a> {
     parts: &'a Parts,
     /// Whether the client was told that another helper holds the start lock.
     told: bool,
-    /// The `Stop` that ended the start, and whether it was forced while this waited for what it didn't begin.
-    stop: Option<(u32, bool)>,
+    /// The `Stop` that ended the start: its id, whether it was forced, and whether it ended a wait for
+    /// what this didn't begin.
+    stop: Option<(u32, bool, bool)>,
 }
 
 impl<'a> Client<'a> {
@@ -721,7 +724,7 @@ impl<'a> Client<'a> {
     fn hear(&mut self, wait: Duration, waiting: Waiting) -> bool {
         match self.inbox.hear_while_starting(self.mux, wait) {
             Heard::Stop(id, force) => {
-                self.stop = Some((id, force && waiting != Waiting::Ready));
+                self.stop = Some((id, force, waiting != Waiting::Ready));
                 return false;
             }
             Heard::Detach => {
@@ -738,7 +741,7 @@ impl<'a> Client<'a> {
     /// How a start that `hear` ended is answered; none is when the client has gone, and the process exits.
     fn cancelled(&self) -> Unstarted {
         match self.stop {
-            Some((id, other)) => Unstarted::Stopped { id, other },
+            Some((id, force, other)) => Unstarted::Stopped { id, force, other },
             None => std::process::exit(0),
         }
     }
