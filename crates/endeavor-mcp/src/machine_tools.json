@@ -60,7 +60,7 @@
           "type": "array"
         },
         "folder": {
-          "description": "The session's folder on the machine: where new notebooks go, where a notebook tool's relative path starts, and where `run_shell` runs by default. Default: the project's remembered folder for it, else its home.",
+          "description": "The session's folder on the machine: where new notebooks go, where a notebook tool's relative path starts, and where `run_shell` runs by default. Default: the project's remembered folder for it, else its home. A folder that doesn't exist is made when the folder it goes in exists, and the result says so; when that one is missing too, the call fails before anything starts. Use a folder the user named, or ask them first.",
           "type": "string"
         },
         "gpus": {

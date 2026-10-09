@@ -427,6 +427,12 @@ sign-in.
   the tools.** The queue here is empty and a job runs at once, so their wording
   is checked against the fake Slurm only. No agent has followed the
   `endeavor-machines` skill through a cluster.
+- [P3] **`use_machine` checks and makes a session's folder on the login
+  node.** A folder on a disk only the login node has (`/tmp/...`, a node-local
+  scratch) passes the check, or is made there, and is still missing on the
+  compute node, so `new_notebook` fails as it did before the check. To close:
+  have the runtime check the folder once the job runs, or name node-local
+  paths in the refusal.
 - [P3] **A queued job has no id in the session's status until it is submitted
   by this session.** A session that re-attaches to a job already queued shows
   `queue` but no `job` until it runs, because the library's queued event
@@ -697,8 +703,15 @@ plugins). The rest of this file can wait or go alongside.
   finds no Julia, which a developer's machine often has. That test skips
   itself where a login shell finds Julia.
 - [P3] **`a_helper_that_ends_unexpectedly_is_a_drop_and_after_the_client_let_it_go_is_not`
-  hung once** in a full workspace run on 2026-10-07 and passed alone and in
-  the next full runs. Not reproduced.
+  hangs now and then.** It hung in a full workspace run on 2026-10-07, and on
+  CI's `macos-15` job on 2026-10-09 (PR #5, cancelled after 20 minutes). It
+  passed 100 of 100 runs alone on Linux. Two of its calls block with no
+  limit: `channel.closed()` and the `says()` read from the listener. To
+  close: give `says()` a read timeout so a hang fails at a named step, then
+  find which call waits.
+- [P3] **CI's jobs have no time limit.** A test that hangs keeps a job running
+  for GitHub's default of six hours. To close: a `timeout-minutes` on each
+  job in `.github/workflows/ci.yml`, well above a normal run's few minutes.
 - [P3] **Tests that write a script and run it can fail with "Text file
   busy".** A script written with `fs::write` can still be open in a child that
   another test thread has just forked, so an exec of it fails with ETXTBSY.
