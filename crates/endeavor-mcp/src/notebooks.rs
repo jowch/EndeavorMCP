@@ -534,8 +534,23 @@ impl Notebooks {
     fn follow(&self, backend: Backend, upstream: Arc<dyn Upstream>, tx: Sender<Value>) {
         let engines = self.engines.clone();
         std::thread::spawn(move || {
-            loop {
-                if let Ok(stream) = upstream.notifications() {
+            // Until another engine than Pluto's is dropped or replaced: a new one has its own follower.
+            while engines.is_current(backend, &upstream) {
+                let stream = match upstream.notifications() {
+                    Ok(stream) => stream,
+                    Err(_) if backend != Backend::Pluto && let Err(e) = upstream.adapter(br#"{"method":"status","params":{}}"#) => {
+                        // Not answering at all: its notebooks went with it.
+                        eprintln!("{} notebooks' engine stopped answering ({e})", engines::language(backend));
+                        engines.drop_engine(backend, &upstream);
+                        let _ = tx.send(json!({ "method": "resync" }));
+                        return;
+                    }
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                };
+                {
                     // What changed while no stream was open.
                     let _ = tx.send(json!({ "method": "resync" }));
                     for line in stream.lines().map_while(Result::ok) {
@@ -1047,8 +1062,13 @@ impl Notebooks {
     pub fn move_notebook(&self, notebook_id: &str, path: &str) -> Result<Value, String> {
         let nb = self.snapshot(notebook_id)?;
         let target = absolute_path(path)?;
-        if !target.ends_with(".jl") {
-            return Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{target}'"));
+        // A notebook keeps its engine: a Julia notebook's name ends in .jl, an R notebook's in .R.
+        let (fits, extension) = match self.backend_of(&nb.id) {
+            Backend::Pluto => (target.ends_with(".jl"), ".jl"),
+            Backend::Ember => (engines::of_path(&target) == Backend::Ember, ".R"),
+        };
+        if !fits {
+            return Err(format!("ArgumentError: invalid_path::Notebook path must end in {extension}: '{target}'"));
         }
         if std::path::Path::new(&target).exists() {
             return Err(format!("ArgumentError: file_exists::'{target}' already exists"));

@@ -1771,4 +1771,10 @@ fn a_second_engines_notebooks_are_listed_and_its_calls_go_to_it() {
     s.edit("", R, Y, "b = 3");
     assert_eq!(ember.code(R, Y), "b = 3");
     assert_eq!(s.engine.code(NB, X), "a = 1");
+    // A move keeps an R notebook an R notebook.
+    let dir = std::env::temp_dir().to_string_lossy().trim_end_matches(SEP).to_owned();
+    for name in ["c.jl", "c.txt"] {
+        assert_eq!(s.notebooks.move_notebook(R, &format!("{dir}{SEP}{name}")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .R: '{dir}{SEP}{name}'")));
+    }
+    assert_eq!(s.notebooks.move_notebook(NB, &format!("{dir}{SEP}c.R")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{dir}{SEP}c.R'")), "and a Julia one a Julia one");
 }

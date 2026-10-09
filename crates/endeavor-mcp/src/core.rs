@@ -285,6 +285,10 @@ impl RStarter {
 
     /// Start the adapter and wait until it's up: what answers for R, and Ember's page on `/ember/`.
     fn start(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+        // Ember, its install and R's adapter haven't been tried on Windows.
+        if cfg!(windows) {
+            return Err("unsupported::R notebooks don't work on Windows yet".into());
+        }
         let library = match &self.library {
             Some(library) => PathBuf::from(library),
             None => {
@@ -311,7 +315,7 @@ impl RStarter {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let state = loop {
             if let Ok(Some(status)) = child.try_wait() {
-                return Err(format!("r_failed::R's adapter ended as it started ({status}); the runtime's log says why"));
+                return Err(format!("r_failed::R stopped while starting ({status}); the runtime's log says why"));
             }
             if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
                 break state;

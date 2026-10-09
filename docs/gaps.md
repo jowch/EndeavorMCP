@@ -871,9 +871,14 @@ Ember support is being built (status.md); these are its known limits so far.
   any of its packages R lacks, which needs a C compiler and CRAN and GitHub
   (codeload.github.com). Tried only where R already had Ember's packages.
   Binaries from Ember's CI would remove the compiler (Ember's gaps).
-- **P2: R's adapter isn't restarted.** If its R process ends, R notebooks'
-  calls fail until the runtime restarts. Pluto's Julia ending ends the whole
-  runtime instead.
+- **P2: an R process that ends loses its notebooks without a word.** When
+  R stops answering, the core drops it and its notebooks: they leave
+  `list_notebooks` and the events, and the next R notebook opened starts R
+  again. Nothing tells the agent or the user that they went, and R's own
+  error is only in the runtime's log. Julia and its notebooks are never
+  affected; Pluto's Julia ending still ends the whole runtime.
+- **P2: R notebooks are refused on Windows.** Ember, its install and R's
+  adapter haven't been tried there.
 - **P3: Ember's code and Pluto's differ in small ways the tools can see.**
   Ember drops trailing blank lines and CRLF (the core compares code the same
   way, so authorship holds), runs a cell's stale ancestors first, leaves every

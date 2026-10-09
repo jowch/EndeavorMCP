@@ -270,6 +270,16 @@ fn an_r_notebook_through_the_runtime() {
         assert!(get(port, &format!("/ember/edit?id={notebook}"), "").0.starts_with("HTTP/1.1 401"));
     });
 
+    step("when R ends, its notebook goes, and opening it again starts R again", || {
+        let r_pid = std::fs::read_to_string(state.join("r.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["pid"].as_i64()).unwrap();
+        // SAFETY: plain syscall.
+        unsafe { libc::kill(r_pid as i32, libc::SIGKILL) };
+        common::wait_for("R's notebook to leave the list", || agent.ok("list_notebooks", json!({})) == json!([]));
+        let opened = agent.ok("open_notebook", json!({ "path": "growth.R" }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": opened["notebook_id"], "cell_id": A }));
+        assert_eq!(read["code"], "x <- 41", "Ember saved the edit: {read}");
+    });
+
     step("Ctrl-C stops Julia and R", || {
         let r_pid = std::fs::read_to_string(state.join("r.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["pid"].as_i64()).unwrap();
         let mut serve = cleanup.children.pop().unwrap();

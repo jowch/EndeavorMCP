@@ -62,6 +62,26 @@ impl Engines {
         self.ids.lock().unwrap().remove(id);
     }
 
+    /// Whether `upstream` is still `backend`'s engine: not dropped or replaced.
+    pub fn is_current(&self, backend: Backend, upstream: &Arc<dyn Upstream>) -> bool {
+        self.part(backend).is_some_and(|now| Arc::ptr_eq(&now, upstream))
+    }
+
+    /// `upstream`, another engine than Pluto's, stopped answering: its
+    /// notebooks are gone with it, and the next notebook opened in it starts
+    /// it again. Nothing if it was already replaced.
+    pub fn drop_engine(&self, backend: Backend, upstream: &Arc<dyn Upstream>) {
+        if backend == Backend::Pluto {
+            return;
+        }
+        let mut parts = self.parts.lock().unwrap();
+        let before = parts.len();
+        parts.retain(|(b, u)| !(*b == backend && Arc::ptr_eq(u, upstream)));
+        if parts.len() != before {
+            self.ids.lock().unwrap().retain(|_, b| *b != backend);
+        }
+    }
+
     /// The reply to one `POST /adapter` call, from the engine it belongs to.
     pub fn adapter(&self, raw: &[u8]) -> io::Result<String> {
         let message: Value = serde_json::from_slice(raw).map_err(|_| io::ErrorKind::InvalidData)?;
@@ -99,18 +119,35 @@ impl Engines {
 
     /// `snapshot` or `status` of every notebook: Pluto's reply, with the other
     /// engines' notebooks added to its own. Each notebook in a snapshot carries
-    /// its engine's `seq`, which only means something within that engine. An
-    /// engine that isn't answering yet has none; one that fails fails the call.
+    /// its engine's `seq`, which only means something within that engine.
+    /// Pluto failing fails the call. Another engine failing is left out, so a
+    /// broken R never hides the Julia notebooks; one that doesn't answer at all
+    /// is dropped with its notebooks.
     fn every(&self, method: &str, raw: &[u8]) -> io::Result<String> {
         let mut whole: Option<Value> = None;
         for (backend, upstream) in self.parts() {
             let reply = match upstream.adapter(raw) {
                 Ok(reply) => reply,
-                Err(e) if e.kind() == io::ErrorKind::NotConnected && backend != Backend::Pluto => continue,
+                Err(e) if backend != Backend::Pluto => {
+                    eprintln!("{} notebooks' engine didn't answer {method} ({e}); leaving it out", language(backend));
+                    self.drop_engine(backend, &upstream);
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
-            let mut reply: Value = serde_json::from_str(&reply).map_err(|_| io::ErrorKind::InvalidData)?;
+            let mut reply: Value = match serde_json::from_str(&reply) {
+                Ok(reply) => reply,
+                Err(_) if backend != Backend::Pluto => {
+                    eprintln!("{} notebooks' engine answered {method} with something that isn't JSON; leaving it out", language(backend));
+                    continue;
+                }
+                Err(_) => return Err(io::ErrorKind::InvalidData.into()),
+            };
             if reply.get("error").is_some() {
+                if backend != Backend::Pluto {
+                    eprintln!("{} notebooks' engine failed {method}: {}; leaving it out", language(backend), reply["error"]);
+                    continue;
+                }
                 return Ok(reply.to_string());
             }
             let seq = reply["result"]["seq"].clone();
@@ -149,7 +186,7 @@ pub fn of_path(path: &str) -> Backend {
     }
 }
 
-fn language(backend: Backend) -> &'static str {
+pub fn language(backend: Backend) -> &'static str {
     match backend {
         Backend::Pluto => "Julia",
         Backend::Ember => "R",
@@ -273,17 +310,45 @@ mod tests {
         assert_eq!(opened["error"], "unsupported::R notebooks aren't running in this runtime");
         assert!(asked(&pluto).is_empty());
         engines.add(Backend::Ember, Arc::new(Fake { down: true, ..Default::default() }));
-        assert_eq!(call(&engines, "snapshot", json!({}))["result"]["notebooks"].as_array().unwrap().len(), 1, "one starting is skipped");
+        assert_eq!(call(&engines, "snapshot", json!({}))["result"]["notebooks"].as_array().unwrap().len(), 1, "one not answering is skipped");
     }
 
     #[test]
-    fn a_failing_engine_fails_the_whole_snapshot() {
+    fn pluto_failing_fails_the_whole_snapshot() {
         let pluto = Arc::new(Fake { down: true, ..Default::default() });
         let engines = Engines::new(pluto);
         assert_eq!(engines.adapter(json!({ "method": "snapshot", "params": {} }).to_string().as_bytes()).unwrap_err().kind(), io::ErrorKind::NotConnected, "Pluto not answering yet is an error, as before");
+        let engines = Engines::new(Arc::new(Failing));
+        engines.add(Backend::Ember, Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "e1" })], ..Default::default() }));
+        assert_eq!(call(&engines, "snapshot", json!({}))["error"], "ArgumentError: broken", "and so is Pluto's error");
+    }
+
+    #[test]
+    fn another_engine_failing_leaves_out_only_its_own_notebooks() {
         let (engines, _, _) = two();
         engines.add(Backend::Ember, Arc::new(Failing));
-        assert_eq!(call(&engines, "snapshot", json!({}))["error"], "ArgumentError: broken");
+        assert_eq!(call(&engines, "snapshot", json!({}))["result"]["notebooks"], json!([{ "notebook_id": "p1", "seq": 7 }]));
+        assert!(engines.has(Backend::Ember), "it answered, so it stays");
+    }
+
+    #[test]
+    fn another_engine_that_stopped_answering_is_dropped_with_its_notebooks() {
+        let (engines, pluto, _) = two();
+        call(&engines, "snapshot", json!({}));
+        assert_eq!(engines.backend_of("e1"), Backend::Ember);
+        let dead: Arc<dyn Upstream> = Arc::new(Fake { down: true, ..Default::default() });
+        engines.add(Backend::Ember, dead.clone());
+        assert_eq!(call(&engines, "status", json!({}))["result"]["notebooks"], json!([{ "notebook_id": "p1" }]));
+        assert!(!engines.has(Backend::Ember) && !engines.is_current(Backend::Ember, &dead));
+        assert_eq!(engines.backend_of("e1"), Backend::Pluto, "its notebooks are forgotten");
+        let opened = call(&engines, "open", json!({ "path": "/a/b.R", "run": false }));
+        assert_eq!(opened["error"], "unsupported::R notebooks aren't running in this runtime", "until it starts again");
+        let again: Arc<dyn Upstream> = Arc::new(Fake::default());
+        engines.add(Backend::Ember, again.clone());
+        engines.drop_engine(Backend::Ember, &dead);
+        assert!(engines.is_current(Backend::Ember, &again), "dropping the old one again leaves the new one");
+        engines.drop_engine(Backend::Pluto, &(pluto as Arc<dyn Upstream>));
+        assert!(engines.has(Backend::Pluto), "Pluto's is never dropped");
     }
 
     struct Failing;
