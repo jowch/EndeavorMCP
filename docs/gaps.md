@@ -522,9 +522,10 @@ not supported. These gaps stay open.
   written in Rust (a small test binary), or the scripts run through Git's
   `sh.exe`, and the tests' `cfg(unix)` narrowed to what is Unix only.
 - [P2] **On Windows the app can't ask ssh's questions yet.** Since 2026-10-09
-  the askpass mode also reaches the app over loopback TCP with a one-time token
-  (`wire::askpass::ADDRESS_ENV`, `TOKEN_ENV`; `client::Asker` is the app's
-  side), and `Auth::Env` sets `SSH_ASKPASS_REQUIRE=force` on Windows. That was
+  the askpass mode also reaches the app over loopback TCP with a random token
+  per listener (`wire::askpass::ADDRESS_ENV`, `TOKEN_ENV`; `client::Asker` is
+  the app's side), and `Auth::Env` sets `SSH_ASKPASS_REQUIRE=force` on Windows.
+  The token keeps out other users' processes, not the user's own. That was
   tested on Windows 10 with Windows' OpenSSH 9.5, started as Endeavor starts it
   (no console window), against a test sshd: a key's passphrase and an unknown
   host's yes/no went through `client::Asker` and ssh signed in, and a wrong

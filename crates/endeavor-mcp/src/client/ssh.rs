@@ -54,7 +54,8 @@ pub enum Auth {
     Batch,
     /// No batch mode, and these variables set on ssh: for a caller that answers
     /// ssh's prompts itself (through `SSH_ASKPASS`; `Asker::env` gives them). On
-    /// Windows `SSH_ASKPASS_REQUIRE` is always `force`.
+    /// Windows `SSH_ASKPASS_REQUIRE` is always `force`, so variables without an
+    /// `SSH_ASKPASS` make a sign-in that needs an answer fail rather than wait.
     Env(Vec<(String, String)>),
 }
 
