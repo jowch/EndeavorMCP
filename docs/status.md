@@ -31,13 +31,14 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   (`ENDEAVOR_RELEASE_KEY`). All five platforms were published for the first
   time on 2026-10-08 (key `ed283c702b22`). GitHub allows 1000 files on one
   release and each build adds six, so `scripts/prune-helpers.sh` removes the
-  builds nothing pins any more: it keeps `LATEST`, every branch head's pin
-  here and in Endeavor, main's last 40 plugin pins and Endeavor's last 10, and
-  anything from the last 7 days. Helpers runs it once the release holds more
-  than 700 files; the Prune helpers workflow runs it by hand, listing only
-  unless asked to delete. Not yet run with deleting on (dry runs only, 2026-10-09).
-  A plugin pinned to a pruned build can't download it and says the build is
-  "still being published", which then isn't true.
+  builds nothing needs any more: it keeps `LATEST`, every branch head's pin
+  here and in Endeavor, main's last 40 plugin pins and Endeavor's last 10,
+  and anything from the last 7 days; of the rest, the newest 100 builds keep
+  their Linux files and checksums. The Prune helpers workflow runs it by hand,
+  listing only unless asked to delete; Helpers runs it once the release holds
+  more than 700 files, when the repository variable `PRUNE_HELPERS_AUTO` is
+  true. Not yet run with deleting on (dry runs only, 2026-10-09). An installed
+  binary whose build has lost its Linux files can't set up a new server (gaps.md).
 - `scripts/install.sh` (tested against a fake release and the public one) and
   `scripts/install.ps1` (not run) install the newest build.
 - `endeavor update` replaces the binary from the Helpers release with the

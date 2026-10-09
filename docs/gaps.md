@@ -738,14 +738,21 @@ plugins). The rest of this file can wait or go alongside.
   servers can only fetch it once Helpers has published it. Push this
   repository and wait for Helpers before an app release that moves the pin. A
   check in the app's CI that the pinned key is published would catch it.
-- [P3] **A plugin pinned to a pruned build says it is still being published.**
-  `scripts/prune-helpers.sh` removes builds nothing recent pins (keeping main's
-  last 40 plugin pins, every branch head's and anything from the last 7 days).
-  A plugin installed from an older commit, on a computer that hasn't
-  downloaded its binary yet, then hears from the launcher (install.sh exits 3)
-  that the build "is still being published. Reconnect in a few minutes", which
-  never comes true. To close: have the launcher say the build is gone and to
-  update the plugin when the build is older than LATEST's.
+- [P2] **A pruned build breaks the binaries that came from it.**
+  `scripts/prune-helpers.sh` removes builds nothing recent needs. Every
+  installed binary (plugin, install.sh or `endeavor update`, on any OS)
+  fetches the Linux helper of its own build to set up a server
+  (`release::helper_for`), so once its build's Linux files are gone it can't
+  set one up, and says only "Couldn't get the helper for linux x86_64 servers
+  from the release: Couldn't download ..." with a 404. The Linux files of the
+  newest 100 builds stay, which at 2026-10-09's pace is about a week and at a
+  quieter pace a month or more. A plugin installed from an older commit, on a
+  computer that hasn't downloaded its binary yet, also hears from the launcher
+  (install.sh exits 3) that the build "is still being published. Reconnect in
+  a few minutes", which never comes true. To close: both messages say the
+  build is too old and how to update (`endeavor update`, or update the
+  plugin), when the build is missing and LATEST names another; or publish
+  each build to a release of its own, so nothing has to be pruned.
 - [P3] **A restart that needs an install says to restart again.** When the start
   `Session::restart` begins ends `NeedsInstall`, calls to the listener are told
   `Messages::restart_failed`'s text ("Use Restart Julia to try again"), which

@@ -8,8 +8,8 @@
 # install.ps1 the newest build for a computer, from there. LATEST, uploaded
 # after them, holds the newest key, for those scripts and for `endeavor update`.
 # Before publishing, builds nothing pins any more are pruned once the release
-# holds more than 700 files (scripts/prune-helpers.sh; prune-helpers.yml runs
-# it by hand).
+# holds more than 700 files (scripts/prune-helpers.sh), if the repository
+# variable PRUNE_HELPERS_AUTO is true; prune-helpers.yml runs it by hand.
 name: Helpers
 
 on:
@@ -159,15 +159,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-      # GitHub allows 1000 files on a release, and a full one refuses the upload
-      # below (after --clobber has deleted LATEST). Builds nothing pins go once
-      # the release passes 700 files; see scripts/prune-helpers.sh. A failure
-      # here doesn't hold the build back.
+      # GitHub allows 1000 files on a release and refuses uploads to a full
+      # one. Once the release passes 700 files, builds nothing needs go; see
+      # scripts/prune-helpers.sh. Off until the repository variable
+      # PRUNE_HELPERS_AUTO is true (set it after a deleting run by hand has
+      # been checked). A failure here doesn't hold the build back; it leaves
+      # a warning on the run.
       - name: Prune
-        continue-on-error: true
+        if: ${{ vars.PRUNE_HELPERS_AUTO == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: sh scripts/prune-helpers.sh --delete --above 700
+        run: sh scripts/prune-helpers.sh --delete --above 700 || echo "::warning::Pruning the Helpers release failed; see this step's log."
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

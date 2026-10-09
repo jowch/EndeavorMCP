@@ -17,10 +17,17 @@
 #   - Endeavor's Cargo.lock pins the commit it was built from, at the head of
 #     any of Endeavor's branches or as one of the last APP_PINS (10) pins on
 #     its main (the app's scripts/helpers.sh downloads it to bundle);
-#   - it was published in the last NEW_DAYS days (7): a binary installed from
-#     LATEST then fetches the Linux helper of its own build.
-# Pins are counted rather than dated so that what is kept stays bounded however
-# often main moves: 40 pins are at most 240 files.
+#   - it was published in the last NEW_DAYS days (7).
+# Of the other builds, the newest LINUX_BUILDS (100) keep their Linux files and
+# checksum file, and lose only the macOS and Windows ones. Every installed
+# binary, from a plugin, install.sh or `endeavor update`, fetches the Linux
+# helper of its own build when it sets up a server, so this is what keeps a
+# binary nobody has updated working; the Linux files are half a build.
+# Pins and builds are counted rather than dated so that what is kept stays
+# bounded however often main moves: at most about 240 files for the pins and
+# 300 for the Linux files. At 2026-10-09's pace (about 15 pins a day) the 40
+# pins cover two or three days, and the 7 days and the Linux files are what
+# protect a binary that isn't updated.
 # LATEST itself and any file whose name holds no key are never deleted. If any
 # of this can't be worked out (a clone, a pinned commit, the release), the
 # script stops before deleting anything.
@@ -37,6 +44,7 @@ app_repo=${ENDEAVOR_APP_REPO:-jowch/Endeavor}
 plugin_pins=${PLUGIN_PINS:-40}
 app_pins=${APP_PINS:-10}
 new_days=${NEW_DAYS:-7}
+linux_builds=${LINUX_BUILDS:-100}
 tag=helpers
 # The kept builds' files above this many get a warning: pruning can't help then.
 warn_at=800
@@ -58,8 +66,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-case $above$plugin_pins$app_pins$new_days in
-  *[!0-9]*) echo "--above, PLUGIN_PINS, APP_PINS and NEW_DAYS take whole numbers." >&2; exit 2 ;;
+case $above$plugin_pins$app_pins$new_days$linux_builds in
+  *[!0-9]*) echo "--above, PLUGIN_PINS, APP_PINS, NEW_DAYS and LINUX_BUILDS take whole numbers." >&2; exit 2 ;;
 esac
 
 fail() {
@@ -209,9 +217,11 @@ while read -r asset name created; do
   [ -z "$k" ] || [ "$created" \< "$new_since" ] || keep "$k" "published in the last $new_days days"
 done <"$work/assets"
 
+# The builds whose Linux files and checksums stay.
+tail -n "$linux_builds" "$work/release-keys" >"$work/linux-keys"
+
 # Every file is kept or goes; print by build, oldest first.
 : >"$work/go"
-kept=0
 cp "$work/release-keys" "$work/keys"
 echo "The $tag release of $mcp_repo holds $total files."
 echo
@@ -222,6 +232,11 @@ while read -r k; do
   why=$(awk -v k="$k" '$1 == k { $1 = ""; sub(/^ /, ""); print }' "$work/keep" | awk '!seen[$0]++' | head -n 1)
   if [ -n "$why" ]; then
     echo "keep    $k  $count files  $when  $why"
+  elif grep -qx "$k" "$work/linux-keys"; then
+    others=$(printf '%s\n' "$files" | awk '$2 ~ /-(darwin|windows)-/')
+    n=$(printf '%s' "$others" | grep -c . || true)
+    echo "linux   $k  $count files  $when  one of the newest $linux_builds builds: $n macOS and Windows files go"
+    [ -z "$others" ] || printf '%s\n' "$others" >>"$work/go"
   else
     echo "delete  $k  $count files  $when"
     printf '%s\n' "$files" >>"$work/go"
@@ -236,7 +251,7 @@ left=$((total - gone))
 echo
 echo "$gone files would go and $left would stay."
 if [ "$left" -gt "$warn_at" ]; then
-  msg="The $tag release keeps $left files after pruning; GitHub allows 1000. Shorten PIN_DAYS or NEW_DAYS, or move old builds to another release."
+  msg="The $tag release keeps $left files after pruning; GitHub allows 1000. Lower PLUGIN_PINS, NEW_DAYS or LINUX_BUILDS (which shortens how long an installed binary that isn't updated can still set up servers), or publish to more than one release."
   echo "$msg" >&2
   [ -z "${GITHUB_ACTIONS:-}" ] || echo "::warning::$msg"
 fi
