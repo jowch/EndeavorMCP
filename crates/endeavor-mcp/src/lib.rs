@@ -967,14 +967,13 @@ fn signal_group(pid: i32, signal: i32) {
 /// the core, Julia itself, which would otherwise go on saving the notebooks a new runtime opens. Only the
 /// group: once the core is reaped its pid may be reused, but a group id isn't while any member is left. Not
 /// when `pid` now belongs to a process, which may lead a group of its own, nor when the record is from an
-/// earlier boot, whose group ids mean nothing now. Whether anything was left.
+/// earlier boot, whose group ids mean nothing now. Whether anything was left running (zombies are not).
 #[cfg(unix)]
 fn stop_workers(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
     if pid <= 0 || pid_alive(pid, None, None) || !unixproc::this_boot(started, boot) {
         return false;
     }
-    // SAFETY: signal 0 only checks; a group of another user's processes (EPERM) is not the runtime's.
-    let left = || unsafe { libc::kill(-pid, 0) } == 0;
+    let left = || unixproc::group_running(pid);
     if !left() {
         return false;
     }
@@ -983,7 +982,7 @@ fn stop_workers(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
         unsafe { libc::kill(-pid, signal) };
         let until = std::time::Instant::now() + Duration::from_secs(5);
         while left() && std::time::Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(100));
         }
         if !left() {
             break;

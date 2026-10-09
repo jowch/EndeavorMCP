@@ -48,6 +48,35 @@ fn zombie(stat: &str) -> bool {
     stat.rfind(')').and_then(|end| stat[end + 1..].split_whitespace().next()).is_some_and(|state| state == "Z" || state == "X")
 }
 
+/// Whether a process of the group `pgid` is still running. Zombies don't count, as in `start_time`:
+/// a container whose PID 1 reaps slowly or not at all may keep the ended processes of a group for a
+/// while, or for good.
+#[cfg(target_os = "linux")]
+pub fn group_running(pgid: i32) -> bool {
+    // SAFETY: signal 0 only checks; a group of another user's processes (EPERM) is not counted.
+    if pgid <= 0 || unsafe { libc::kill(-pgid, 0) } != 0 {
+        return false;
+    }
+    let Ok(procs) = std::fs::read_dir("/proc") else { return true };
+    procs.flatten().filter(|entry| entry.file_name().to_str().is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()))).any(|entry| {
+        std::fs::read_to_string(entry.path().join("stat")).is_ok_and(|stat| group_of(&stat) == Some(pgid) && !zombie(&stat))
+    })
+}
+
+/// Whether a process of the group `pgid` is still running. A zombie here doesn't last: the core's parent
+/// waits on it, and launchd reaps orphans.
+#[cfg(not(target_os = "linux"))]
+pub fn group_running(pgid: i32) -> bool {
+    // SAFETY: signal 0 only checks; a group of another user's processes (EPERM) is not counted.
+    pgid > 0 && unsafe { libc::kill(-pgid, 0) } == 0
+}
+
+/// Field 5 of `/proc/PID/stat`, the process group.
+#[cfg(any(target_os = "linux", test))]
+fn group_of(stat: &str) -> Option<i32> {
+    stat[stat.rfind(')')? + 1..].split_whitespace().nth(2)?.parse().ok()
+}
+
 /// Field 22 of `/proc/PID/stat`, the start in clock ticks after boot. The name in field 2 is in
 /// parentheses and may hold spaces and parentheses, so the fields are counted from the last `)`.
 #[cfg(any(target_os = "linux", test))]
@@ -140,6 +169,8 @@ mod tests {
         assert_eq!(parse_stat("no name"), None);
         assert!(zombie("123 (a) (b) c) Z 1 123") && zombie("9 (x) X 1"));
         assert!(!zombie(stat) && !zombie("no name"));
+        assert_eq!(group_of("123 (a) (b) c) S 1 456 456"), Some(456));
+        assert_eq!(group_of("no name"), None);
     }
 
     #[cfg(target_os = "linux")]
@@ -153,6 +184,26 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(start_time(pid), Start::Gone, "a zombie");
+        child.wait().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_group_left_with_only_a_zombie_has_nothing_running() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let pid = child.id() as i32;
+        assert!(group_running(pid), "it runs");
+        // SAFETY: plain syscall, on the child this test started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| zombie(&stat)) {
+            assert!(std::time::Instant::now() < deadline, "the child never ended");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // SAFETY: signal 0 only checks.
+        assert_eq!(unsafe { libc::kill(-pid, 0) }, 0, "the zombie still answers a signal");
+        assert!(!group_running(pid), "but nothing in the group runs");
         child.wait().unwrap();
     }
 
