@@ -7,7 +7,7 @@ use super::*;
 fn away() -> Arc<Listener> {
     let listener = Listener::start("lab-server").unwrap();
     let mux = Mux::new(std::io::sink());
-    listener.attach(mux.clone(), "secret".into());
+    listener.attach(mux.clone(), "secret".into(), true);
     listener.forget(&mux);
     listener
 }
@@ -69,7 +69,7 @@ fn plutos_page_while_the_server_is_away_is_closed_unanswered() {
 #[test]
 fn restarting_julia_says_so() {
     let listener = Listener::start("This Mac").unwrap();
-    listener.attach(Mux::new(std::io::sink()), "secret".into());
+    listener.attach(Mux::new(std::io::sink()), "secret".into(), true);
     listener.restarting();
     let response = post(&listener, "secret", LIST);
     assert!(response.contains(r#""text":"Endeavor is restarting Julia on This Mac. Try again in a moment.""#), "{response}");
@@ -78,7 +78,7 @@ fn restarting_julia_says_so() {
 #[test]
 fn a_restart_that_fails_says_so_instead_of_restarting_forever() {
     let listener = Listener::start("This Mac").unwrap();
-    listener.attach(Mux::new(std::io::sink()), "secret".into());
+    listener.attach(Mux::new(std::io::sink()), "secret".into(), true);
     // Before restarting() ran, there's nothing to correct: still up, a no-op.
     listener.restart_failed();
     assert!(matches!(&*listener.upstream.lock().unwrap(), Upstream::Up { .. }));
@@ -92,7 +92,7 @@ fn a_restart_that_fails_says_so_instead_of_restarting_forever() {
 fn stopping_on_purpose_says_so_not_that_it_reconnects_by_itself() {
     let listener = Listener::start("lab-server").unwrap();
     let mux = Mux::new(std::io::sink());
-    listener.attach(mux.clone(), "secret".into());
+    listener.attach(mux.clone(), "secret".into(), true);
     listener.disconnected();
     let response = post(&listener, "secret", LIST);
     assert!(response.contains(r#""text":"Endeavor isn't connected to lab-server. Reconnect it to use its notebook again.""#), "{response}");
@@ -107,10 +107,11 @@ fn a_caller_can_word_the_messages_that_name_the_apps_controls() {
         restart_failed: |name| format!("Julia on {name} didn't start. Call use_machine again."),
         restart_needs_install: |name, items| format!("{name} needs {}. Call use_machine with install.", wire::items_text(items)),
         not_connected: |name| format!("Not connected to {name}. Call use_machine."),
+        no_run_gate: None,
     };
     let listener = Listener::new("lab-server", None, messages).unwrap();
     let mux = Mux::new(std::io::sink());
-    listener.attach(mux, "secret".into());
+    listener.attach(mux, "secret".into(), true);
     listener.restarting();
     listener.restart_failed();
     assert!(post(&listener, "secret", LIST).contains(r#""text":"Julia on lab-server didn't start. Call use_machine again.""#));
@@ -128,7 +129,7 @@ fn julia() -> wire::Item {
 #[test]
 fn a_restart_that_needs_an_install_says_what_is_missing_not_to_restart_again() {
     let listener = Listener::start("lab-server").unwrap();
-    listener.attach(Mux::new(std::io::sink()), "secret".into());
+    listener.attach(Mux::new(std::io::sink()), "secret".into(), true);
     // Before restarting() ran, there's nothing to correct: still up, a no-op.
     listener.restart_needs_install(&[julia()]);
     assert!(matches!(&*listener.upstream.lock().unwrap(), Upstream::Up { .. }));
@@ -157,7 +158,7 @@ fn the_refuse_hook_sees_the_session_tool_and_arguments() {
         (tool == "execute_cell").then(|| "This runtime is from an older build.".to_owned())
     });
     let listener = Listener::with_refuse("lab-server", refuse).unwrap();
-    listener.attach(Mux::new(std::io::sink()), "secret".into());
+    listener.attach(Mux::new(std::io::sink()), "secret".into(), true);
     let mut socket = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
     let body = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"execute_cell","arguments":{"cell_id":"a"}}}"#;
     let request = format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Endeavor-Session: 7\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len());
@@ -184,13 +185,13 @@ fn a_drop_then_a_deliberate_stop_says_the_stop() {
 fn a_helper_the_client_let_go_is_not_reconnecting() {
     let listener = Listener::start("lab-server").unwrap();
     let mux = Mux::new(std::io::sink());
-    listener.attach(mux.clone(), "secret".into());
+    listener.attach(mux.clone(), "secret".into(), true);
     listener.left(&mux);
     let response = post(&listener, "secret", LIST);
     assert!(response.contains("Endeavor isn't connected to lab-server.") && !response.contains("reconnecting"), "{response}");
     // Another channel's listener use isn't undone by an older channel's end.
     let (newer, older) = (Mux::new(std::io::sink()), Mux::new(std::io::sink()));
-    listener.attach(newer, "secret".into());
+    listener.attach(newer, "secret".into(), true);
     listener.left(&older);
     assert!(matches!(&*listener.upstream.lock().unwrap(), Upstream::Up { .. }));
 }
@@ -203,4 +204,60 @@ fn a_failing_accept_backs_off_up_to_a_second_and_starts_over_after_one_works() {
     assert_eq!(failures, [(50, true), (100, false), (200, false), (400, false), (800, false), (1000, false), (1000, false)]);
     backoff.accepted();
     assert_eq!(ms(backoff.failed()), (50, true), "reported again after a success");
+}
+
+/// The response to an MCP call to `tool` with `arguments` on the listener's port; empty when it was relayed
+/// (the stand-in runtime never answers), and "(closed unanswered)" when the listener closed it.
+fn call(listener: &Listener, tool: &str, arguments: &str) -> String {
+    let body = format!(r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"{tool}","arguments":{arguments}}}}}"#);
+    let mut socket = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+    // A call that is relayed goes to a runtime that never answers: no answer in time is a call that wasn't refused.
+    socket.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+    let mut response = String::new();
+    let request = format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    socket.write_all(request.as_bytes()).unwrap();
+    match socket.read_to_string(&mut response) {
+        Err(e) if response.is_empty() && matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => String::new(),
+        _ if response.is_empty() => "(closed unanswered)".into(),
+        _ => response,
+    }
+}
+
+/// A client whose runs are held for the user's answer: it refuses code runs on a runtime too old to hold them.
+fn holding(refuse: Option<Refuse>) -> Arc<Listener> {
+    let messages = Messages { no_run_gate: Some(|name| format!("Julia on {name} is too old to ask before a run. Restart Julia.")), ..Messages::default() };
+    Listener::new("lab-server", refuse, messages).unwrap()
+}
+
+#[test]
+fn a_runtime_too_old_to_ask_before_a_run_runs_no_code_for_a_client_that_holds_runs() {
+    let listener = holding(None);
+    listener.attach(Mux::new(std::io::sink()), "secret".into(), false);
+    for (tool, arguments) in [("execute_cell", r#"{"cell_id":"a"}"#), ("edit_cell", r#"{"cell_id":"a","code":"1","run_after":true}"#), ("run_shell", r#"{"command":"ls"}"#)] {
+        let response = call(&listener, tool, arguments);
+        assert!(response.contains(r#""isError":true"#) && response.contains(r#"\"message\":\"Julia on lab-server is too old to ask before a run. Restart Julia.\""#), "{tool}: {response}");
+    }
+    assert_eq!(call(&listener, "read_cell", r#"{"cell_id":"a"}"#), "", "relayed");
+    assert_eq!(call(&listener, "edit_cell", r#"{"cell_id":"a","code":"1"}"#), "", "edits still go through");
+}
+
+#[test]
+fn a_runtime_too_old_to_ask_runs_code_for_a_client_that_doesnt_hold_runs() {
+    let listener = Listener::start("lab-server").unwrap();
+    listener.attach(Mux::new(std::io::sink()), "secret".into(), false);
+    assert_eq!(call(&listener, "execute_cell", r#"{"cell_id":"a"}"#), "", "relayed");
+}
+
+#[test]
+fn a_runtime_that_says_its_build_or_interface_runs_code_and_the_callers_rule_still_applies() {
+    let refuse: Refuse = Box::new(|_, tool, _| (tool == "run_shell").then(|| "No shell here.".to_owned()));
+    let listener = holding(Some(refuse));
+    listener.attach(Mux::new(std::io::sink()), "secret".into(), true);
+    assert_eq!(call(&listener, "execute_cell", r#"{"cell_id":"a"}"#), "", "relayed");
+    assert!(call(&listener, "run_shell", r#"{"command":"ls"}"#).contains("No shell here."));
+    // With no gate, the built-in rule comes first and the caller's still covers the rest.
+    listener.attach(Mux::new(std::io::sink()), "secret".into(), false);
+    assert!(call(&listener, "execute_cell", r#"{"cell_id":"a"}"#).contains("too old"));
+    assert!(call(&listener, "run_shell", r#"{"command":"ls"}"#).contains("too old"));
+    assert!(call(&listener, "list_notebooks", "{}").is_empty());
 }
