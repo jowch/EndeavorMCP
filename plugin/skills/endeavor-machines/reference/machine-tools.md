@@ -34,7 +34,7 @@ Waits up to 45 seconds. Result: `machine`, `host`, `state` `connected`, `saved`,
 
 | Argument | Meaning |
 |----------|---------|
-| `folder` | The session's folder on the machine: where new notebooks go, where a notebook tool's relative path starts, and where `run_shell` runs by default. Default: the folder the project remembers for it, else its home folder. Not used for `"local"` |
+| `folder` | The session's folder on the machine: where new notebooks go, where a notebook tool's relative path starts, and where `run_shell` runs by default. Default: the folder the project remembers for it, else its home folder. A folder that doesn't exist is made when the folder it goes in exists, and `message` says it was made; when that one is missing too, the call fails before any job is asked for. Not used for `"local"` |
 | `partition`, `cpus`, `memory_gb`, `hours`, `gpus`, `account`, `extra_sbatch_flags` | Cluster only (an error on a plain server or `"local"`). What isn't given comes from the machine's saved defaults; what is submitted is saved as the new defaults. `gpus: 0` means no GPU and clears a saved default. Each `extra_sbatch_flags` entry starts with `-` and holds a flag and its value together (`"--constraint=a100"`); `--wrap` and line breaks are refused. If a job is already queued or running, the resources are not used |
 
 Result `state`:

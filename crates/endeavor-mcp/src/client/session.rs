@@ -512,6 +512,15 @@ impl Session {
         settled.or(self.shared.config.launcher).unwrap_or_else(|| self.shared.config.server.launcher()) != Launcher::Process
     }
 
+    /// Ask the machine's helper about its files (`Request`), once the session has connected or
+    /// `wait` has passed. None when it isn't connected by then: it is still connecting, the helper
+    /// isn't installed, or the connection failed (`status` says which).
+    pub fn files(&self, request: Request, wait: Duration) -> Option<Result<Reply, String>> {
+        self.wait_for(wait, |status| status.state != State::Connecting);
+        let channel = self.shared.inner().channel.clone()?;
+        Some(channel.files(request))
+    }
+
     /// Whether the helper is connected, which `stop` needs.
     pub fn connected(&self) -> bool {
         self.shared.inner().channel.is_some()
