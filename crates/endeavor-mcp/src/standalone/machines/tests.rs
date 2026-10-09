@@ -504,6 +504,38 @@ fn a_failed_start_on_this_computer_goes_to_every_caller_and_only_a_call_that_ask
     assert!(local.status().state.error().is_none());
 }
 
+#[test]
+fn a_look_on_this_computer_waits_for_a_start_another_process_has_under_way() {
+    let dir = crate::client::scratch("local-another-start");
+    let mut options = options();
+    options.state_dir = dir.join("state");
+    std::fs::create_dir_all(&options.state_dir).unwrap();
+    let local = Arc::new(super::super::target::Local::new(options.clone()));
+    let attach = Want::Attach { install: false };
+    // Another process's start, as this computer sees it: a lock on `starting.lock` that isn't ours.
+    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(options.state_dir.join("starting.lock")).unwrap();
+    lock.lock().unwrap();
+    let began = Instant::now();
+    assert!(matches!(local.ensure(attach.clone(), Duration::ZERO, false), Outcome::StillWorking(_)));
+    assert!(began.elapsed() < Duration::from_secs(1), "a zero wait answers at once");
+    let began = Instant::now();
+    assert!(matches!(local.ensure(attach.clone(), Duration::from_secs(2), false), Outcome::StillWorking(_)));
+    assert!(began.elapsed() >= Duration::from_secs(2) && began.elapsed() < Duration::from_secs(4), "it waits for the whole wait: {:?}", began.elapsed());
+    // The start ends with nothing running: the look says so then, not at the end of its wait.
+    let waiter = {
+        let (local, attach) = (local.clone(), attach.clone());
+        std::thread::spawn(move || {
+            let began = Instant::now();
+            (local.ensure(attach, Duration::from_secs(30), false), began.elapsed())
+        })
+    };
+    std::thread::sleep(Duration::from_secs(1));
+    lock.unlock().unwrap();
+    let (outcome, took) = waiter.join().unwrap();
+    assert_eq!(outcome, Outcome::NothingRunning);
+    assert!(took < Duration::from_secs(5), "{took:?}");
+}
+
 /// A Julia that fails, and notes in `log` each time it is run.
 #[cfg(unix)]
 fn failing_julia(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
