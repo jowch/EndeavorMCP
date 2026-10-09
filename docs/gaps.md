@@ -681,22 +681,16 @@ not supported. These gaps stay open.
   call then fails with `waiting_for_user`, and the card stays up. The same call
   made again by the same session, on the same notebook code, waits on the same
   card and gets at once an approval given meanwhile. Any other call by the
-  session takes the card down, so an approval can't reach code the agent
-  changed since; so does a refusal while no call waits. `waiting_for_user` is
-  an error on purpose, unlike `execution.still_running`: nothing happened, and
-  the agent must not assume it did. Tried in the app with real Claude turns
-  (2026-10-09): the retry waited on the same card, but the result said "after
-  a few tries, tell them", and Claude stopped after two, under a minute; the
-  app then refused the card at the turn's end. The result now says to call
-  again for the first two minutes of the ask and then to stop, tell the user
-  and call again when they write back. The event's `asks` say whether a call
-  waits on each (`waiting`), so the app can keep a card no call waits on past
-  the turn; until it does, the user's reply gets a fresh card. Tried again
-  with real Claude turns and that app change: Claude still stopped early (after
-  four tries of an open, about 90 s, and after one try of an edit), not at
-  the two minutes. The card stayed up past the turn, and after the user
-  approved it and wrote back, the same call went ahead at once. Approving
-  alone does nothing until the user writes: the agent's turn has ended.
+  session that changes or runs something takes the card down; reads leave it,
+  and the notebook-code check keeps an approval from reaching changed code. So
+  does a refusal while no call waits. `waiting_for_user` is an error on
+  purpose, unlike `execution.still_running`: nothing happened, and the agent
+  must not assume it did. Claude stops retrying after one to four tries, so
+  the result also says to tell the user and make the same call when they write
+  back. The app keeps a card no call waits on (`waiting: false`) past the
+  turn. Approving it does nothing until the user writes. An approval no call
+  has taken yet never expires; it stays until the session's next change or
+  run.
 - [P2] **An agent can add a machine under a name the user did not give.** Told
   "the machine localhost", a Codex agent called `add_machine` with host
   `self`, an alias `list_machines` showed in `ssh_hosts_not_added`, and told
