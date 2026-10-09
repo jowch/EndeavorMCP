@@ -20,7 +20,7 @@ fn options(root: &str, state: &str, depot: &str) -> Options<'static> {
 fn batch_mode_adds_batchmode_and_env_does_not() {
     let batch = lab().command("true", &Auth::Batch).unwrap();
     let args_batch = args(&batch);
-    assert_eq!(batch.get_program(), "ssh");
+    assert_eq!(batch.get_program(), ssh_program().as_os_str());
     assert!(args_batch.windows(2).any(|w| w == ["-o", "BatchMode=yes"]), "{args_batch:?}");
     assert!(batch.get_envs().next().is_none());
 
@@ -30,6 +30,19 @@ fn batch_mode_adds_batchmode_and_env_does_not() {
     assert!(!args_env.iter().any(|a| a.contains("BatchMode")), "{args_env:?}");
     let set: Vec<_> = asking.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
     assert_eq!(set, [("SSH_ASKPASS".to_owned(), Some("/x/askpass".to_owned())), ("SSH_ASKPASS_REQUIRE".to_owned(), Some("force".to_owned()))]);
+}
+
+/// On Windows, Windows' own ssh build when it is installed, whatever `ssh` comes first on the PATH
+/// (Git's, in Git Bash); elsewhere the PATH's.
+#[test]
+fn the_ssh_is_windows_own_when_there_is_one() {
+    if !cfg!(windows) {
+        return assert_eq!(ssh_program(), Path::new("ssh"));
+    }
+    let Ok(version) = Command::new(ssh_program()).arg("-V").output() else { return };
+    let said = String::from_utf8_lossy(&version.stderr);
+    let installed = std::env::var_os("SystemRoot").is_some_and(|root| Path::new(&root).join("System32").join("OpenSSH").join("ssh.exe").is_file());
+    assert_eq!(said.contains("OpenSSH_for_Windows"), installed, "{said}");
 }
 
 #[test]
@@ -385,13 +398,14 @@ fn explains_ssh_failures_plainly() {
 fn in_batch_mode_a_sign_in_failure_says_what_to_do() {
     let say = |line: &str| say_in(&Auth::Batch, line);
     let host_key = say("Host key verification failed.");
-    assert!(host_key.contains("Run `ssh lab` once in a terminal and accept its host key"), "{host_key}");
+    let ssh = ssh_program().display().to_string().replace('\\', "/");
+    assert!(host_key.contains(&format!("Run `{ssh} lab` once in a terminal and accept its host key")), "{host_key}");
     let denied = say("jc@lab: Permission denied (publickey).");
     assert!(denied.contains("ssh-add") && denied.contains("password or a code, which Endeavor can't ask for yet"), "{denied}");
     // The same words for a password server: ssh lists its methods.
     assert_eq!(say("jc@lab: Permission denied (publickey,password,keyboard-interactive)."), denied);
     let with_port = explain(&Transport::Ssh { host: "lab".into(), port: Some(2222) }, &Auth::Batch, &["Host key verification failed.".to_owned()], None, false, false);
-    assert!(with_port.contains("`ssh -p 2222 lab`"), "{with_port}");
+    assert!(with_port.contains(&format!("`{ssh} -p 2222 lab`")), "{with_port}");
     // The rest reads the same as without batch mode.
     assert!(say("ssh: connect to host lab port 22: Operation timed out").contains("timed out"));
 }
