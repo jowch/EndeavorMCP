@@ -42,7 +42,7 @@ Result `state`:
 | `state` | Meaning |
 |---------|---------|
 | `ready` | Julia answers. `browser_url` (works while this session is connected) and `folder`. On a machine also `node`, `remote_port` (Julia's own port on the machine: on a plain server `message` gives an ssh command the user can run to reach it after the session ends; on a cluster it is on the job's node, behind the login node, and there is no such command), `already_running` (it was running before this call), and for a cluster `job` (`id`, `node`, `ends_at`, `ends_in_minutes`) |
-| `starting`, `queued` | Not up yet. `step`, and for a job `job` and `queue` (`state`, `reason`, `reason_text`). Wait by calling a notebook tool again (each call waits up to 45 seconds); a queued job can wait minutes or hours, so after a few tries let the user say when to check again. `pluto_session_status` shows the step at once |
+| `starting`, `queued` | Not up yet. `step`, and for a job `job` and `queue` (`state`, `reason`, `reason_text`; once the job runs, `node` in place of `reason`). Wait by calling a notebook tool again (each call waits up to 45 seconds); a queued job can wait minutes or hours, so after a few tries let the user say when to check again. `pluto_session_status` shows the step at once |
 | `needs_install` | The machine lacks Endeavor's program (or an update of it), or Julia. `install` says what. Ask the user, then call again with `install: true`; the session did not move |
 | `needs_job` | Cluster, nothing running, no resources given. `defaults` has what would be submitted and `partitions` what the cluster offers. Nothing was submitted and the session did not move (the project is unchanged). Ask the user, then call again with the values |
 

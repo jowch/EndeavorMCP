@@ -304,8 +304,17 @@ pub enum ToHelper {
     },
     /// Stop the runtime and stay connected: the attached one, else the one
     /// recorded in the state folder, or on a cluster the job waiting for it.
-    /// A start under way ends with its own answer, then this is answered.
-    Stop { id: u32 },
+    /// A start under way ends with its own answer, then this is answered;
+    /// that includes this connection's wait for a start another connection
+    /// began. Without `force`, that other start is left to finish and the
+    /// answer is `NotStopped`; with it, it is cancelled as
+    /// `endeavor stop --force` cancels it. Absent, as from a client that
+    /// predates it, it is false; a helper that predates it ignores it.
+    Stop {
+        id: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+    },
     /// Exit and leave the runtime running.
     Detach,
     Files { id: u32, request: files::Request },
@@ -358,7 +367,8 @@ mod tests {
             Frame::Data { id: 7, bytes: Vec::new() },
             Frame::Data { id: 8, bytes: (0..=255).cycle().take(70_000).collect() },
             Frame::Close { id: 7 },
-            ToHelper::Stop { id: 1 }.frame(),
+            ToHelper::Stop { id: 1, force: false }.frame(),
+            ToHelper::Stop { id: 2, force: true }.frame(),
             ToApp::Died { status: "signal: 9".into(), log_tail: vec!["a".into(), "b".into()] }.frame(),
         ]
     }
@@ -415,6 +425,9 @@ mod tests {
         let Frame::Control(json) = files.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Detach"}"#).unwrap(), ToHelper::Detach);
+        assert_eq!(serde_json::to_string(&ToHelper::Stop { id: 2, force: false }).unwrap(), r#"{"type":"Stop","id":2}"#, "an unforced stop reads as it did before `force`");
+        assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Stop","id":2}"#).unwrap(), ToHelper::Stop { id: 2, force: false });
+        assert_eq!(serde_json::to_string(&ToHelper::Stop { id: 2, force: true }).unwrap(), r#"{"type":"Stop","id":2,"force":true}"#);
         assert_eq!(serde_json::from_str::<ToApp>(r#"{"type":"Replaced"}"#).unwrap(), ToApp::Replaced);
         let not_stopped = ToApp::NotStopped { id: 2, message: "Julia was not stopped.".into() };
         let Frame::Control(json) = not_stopped.frame() else { panic!() };

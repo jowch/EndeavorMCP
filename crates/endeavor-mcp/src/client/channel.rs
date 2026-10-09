@@ -435,13 +435,25 @@ impl Channel {
     /// Stop the runtime and wait until it's gone (blocks up to ~60 s). The
     /// helper stays connected. If the helper says it didn't stop, the runtime is
     /// still attached and is watched as before. A start under way on another
-    /// thread ends, with its own answer from the helper.
+    /// thread ends, with its own answer from the helper. A start another
+    /// connection began is left to finish, and the stop is refused.
     pub fn stop(&self) -> Result<(), String> {
+        self.stop_as(false)
+    }
+
+    /// `stop`, but a start another connection began is cancelled too, as
+    /// `endeavor stop --force` cancels it. A helper that predates this does
+    /// as `stop` does.
+    pub fn force_stop(&self) -> Result<(), String> {
+        self.stop_as(true)
+    }
+
+    fn stop_as(&self, force: bool) -> Result<(), String> {
         let leaving = self.leaving.lock().unwrap().clone();
         leaving.fetch_add(1, Ordering::SeqCst);
         let id = self.request_id();
         let (answer, _registered) = self.register(id, Some(leaving.clone()), false);
-        if self.mux.send(&ToHelper::Stop { id }.frame()).is_err() {
+        if self.mux.send(&ToHelper::Stop { id, force }.frame()).is_err() {
             return Err(CLOSED.into());
         }
         let answered = match answer.recv_timeout(STOP_WAIT) {
@@ -506,7 +518,7 @@ impl Channel {
             return;
         }
         // A start that may be under way ends with its own answer; the stop's is dropped.
-        let _ = self.mux.send(&ToHelper::Stop { id: self.request_id() }.frame());
+        let _ = self.mux.send(&ToHelper::Stop { id: self.request_id(), force: false }.frame());
     }
 }
 

@@ -330,3 +330,130 @@ fn the_machine_tools_over_real_slurm() {
     assert_eq!(squeue(&[]), before, "no job of this test is left");
     eprintln!("[{:?}] stopped; nothing left", started.elapsed());
 }
+
+/// A job held in the queue (`--begin=now+90`, reason BeginTime) gives a real queue on a cluster whose queue is
+/// empty: what `use_machine` and `pluto_session_status` say while it waits, also from a session that attaches
+/// to the queued job afterwards, then while it starts. A forced stop ends it. Same setup as above, in
+/// `target/tmp/e2e-machines-slurm-held`.
+#[test]
+#[ignore = "needs ENDEAVOR_TEST_SSH_HOST and Slurm, submits one small real job held for 90 s: ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines_slurm -- --ignored"]
+fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_id() {
+    common::require_debug_build();
+    let Ok(host) = std::env::var("ENDEAVOR_TEST_SSH_HOST") else {
+        eprintln!("SKIPPED: ENDEAVOR_TEST_SSH_HOST isn't set. Name a host this user can ssh to with a key and that has Slurm, such as localhost.");
+        return;
+    };
+    if !Command::new("sinfo").arg("-h").output().is_ok_and(|o| o.status.success()) {
+        eprintln!("SKIPPED: `sinfo` doesn't run here, so there's no Slurm to submit to.");
+        return;
+    }
+    let Some((julia, app)) = find_julia() else {
+        eprintln!("SKIPPED: no Julia. Set ENDEAVOR_E2E_JULIA, install Endeavor's own, or put julia on the PATH.");
+        return;
+    };
+    let started = Instant::now();
+    let partition = std::env::var("ENDEAVOR_TEST_SLURM_PARTITION").unwrap_or_else(|_| "LocalQ".into());
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-machines-slurm-held");
+    let depot = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-client/depot");
+    let jobs = Arc::new(Mutex::new(Vec::new()));
+    drop(Ends { state: work.join("state"), jobs: jobs.clone() });
+    let _ = std::fs::remove_dir_all(&work);
+    for folder in ["root", "state", "notebooks", "project", "config", "state-home", "cache"] {
+        std::fs::create_dir_all(work.join(folder)).unwrap();
+    }
+    std::fs::create_dir_all(&depot).unwrap();
+    let canon = |p: &Path| p.canonicalize().unwrap();
+    let (work, depot) = (canon(&work), canon(&depot));
+    let (root, state, notebooks, project) = (work.join("root"), work.join("state"), work.join("notebooks"), work.join("project"));
+    let depot_path = match &app {
+        Some(app) => format!("{}:{}:", depot.display(), app.join("depot").display()),
+        None => format!("{}:", depot.display()),
+    };
+    let _ends = Ends { state: state.clone(), jobs: jobs.clone() };
+    let front = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+        command
+            .args(["mcp", "--skills", "plugin", "--folder"])
+            .arg(&project)
+            .args(["--julia", "/nonexistent/julia", "--depot"])
+            .arg(work.join("local-depot"))
+            .arg("--state-dir")
+            .arg(work.join("local-state"))
+            .env("XDG_STATE_HOME", work.join("state-home"))
+            .env("XDG_CONFIG_HOME", work.join("config"))
+            .env("XDG_CACHE_HOME", work.join("cache"))
+            .env("ENDEAVOR_TEST_ROOT", &root)
+            .env("ENDEAVOR_TEST_STATE", &state)
+            .env("ENDEAVOR_TEST_DEPOT", &depot_path)
+            .env("ENDEAVOR_START_WAIT_SECS", "45")
+            .current_dir(&project);
+        let mut front = Front::spawn(command);
+        front.initialize();
+        front
+    };
+    let mut one = front();
+    let added = one.ok("add_machine", json!({ "host": host, "name": "e2e-held", "julia": julia.display().to_string(), "slurm": true, "install": true }));
+    assert_eq!(added["state"].as_str(), Some("connected"), "{added}");
+
+    // Held: queued, with the job's id and BeginTime, in use_machine's answer and the status.
+    let resources = json!({ "machine": "e2e-held", "folder": notebooks.display().to_string(), "partition": partition, "cpus": 1, "memory_gb": 2, "hours": 0.25, "extra_sbatch_flags": ["--begin=now+90"] });
+    let used = one.ok("use_machine", resources);
+    eprintln!("[{:?}] use_machine: {used}", started.elapsed());
+    let job = used["job"]["id"].as_str().unwrap_or_else(|| panic!("the result names the job: {used}")).to_owned();
+    jobs.lock().unwrap().push(job.clone());
+    assert_eq!((used["state"].as_str(), used["ready"].clone(), used["queue"]["state"].as_str(), used["queue"]["reason"].as_str()), (Some("queued"), json!(false), Some("PENDING"), Some("BeginTime")), "{used}");
+    assert!(used["queue"]["reason_text"].as_str().is_some_and(|t| !t.is_empty()) && !used["message"].as_str().unwrap_or_default().is_empty(), "{used}");
+    let status = one.ok("pluto_session_status", json!({}));
+    eprintln!("[{:?}] pluto_session_status while held: {status}", started.elapsed());
+    assert_eq!((status["state"].as_str(), status["job"]["id"].as_str(), status["queue"]["reason"].as_str()), (Some("queued"), Some(job.as_str()), Some("BeginTime")), "{status}");
+    one.finish();
+    assert_eq!(listed(&job).len(), 1, "the job waits on after the session is gone");
+
+    // A session that comes to the queued job afterwards: queued, with the id.
+    let mut two = front();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let attached = loop {
+        let status = two.ok("pluto_session_status", json!({}));
+        if status["state"] == "queued" {
+            break status;
+        }
+        assert!(matches!(status["state"].as_str(), Some("connecting" | "connected" | "starting")) && Instant::now() < deadline, "{status}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    eprintln!("[{:?}] pluto_session_status after attaching: {attached}", started.elapsed());
+    assert_eq!((attached["machine"].as_str(), attached["job"]["id"].as_str(), attached["queue"]["reason"].as_str()), (Some("e2e-held"), Some(job.as_str()), Some("BeginTime")), "{attached}");
+    let again = two.ok("use_machine", json!({ "machine": "e2e-held" }));
+    eprintln!("[{:?}] use_machine after attaching: {again}", started.elapsed());
+    assert_eq!((again["state"].as_str(), again["job"]["id"].as_str()), (Some("queued"), Some(job.as_str())), "{again}");
+
+    // Its time comes: starting, then ready, with the id throughout.
+    let mut seen = Vec::new();
+    let ready = loop {
+        let status = two.ok("pluto_session_status", json!({}));
+        let note = format!("{} / {}", status["state"], status["queue"]);
+        if seen.last() != Some(&note) {
+            eprintln!("[{:?}] pluto_session_status: {status}", started.elapsed());
+            seen.push(note);
+        }
+        assert_eq!(status["job"]["id"].as_str(), Some(job.as_str()), "{status}");
+        if status.get("browser_url").is_some() {
+            break status;
+        }
+        assert!(matches!(status["state"].as_str(), Some("queued" | "starting")), "{status}");
+        assert!(started.elapsed() < Duration::from_secs(1200), "{status}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    eprintln!("states seen: {seen:?}");
+    assert!(ready["job"]["node"].as_str().is_some_and(|n| !n.is_empty()), "{ready}");
+
+    let stopped = two.ok("stop_machine", json!({ "machine": "e2e-held", "force": true }));
+    eprintln!("[{:?}] stop_machine with force: {stopped}", started.elapsed());
+    assert_eq!(stopped["stopped"], json!(true), "{stopped}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !listed(&job).is_empty() {
+        assert!(Instant::now() < deadline, "job {job} is still {:?} after the stop", listed(&job));
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    two.finish();
+    eprintln!("[{:?}] stopped; nothing left", started.elapsed());
+}
