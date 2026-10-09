@@ -502,6 +502,11 @@ Windows is not offered until these close; the README says so.
   `explain_retry`) fails there until an administrator enables the service. To
   close: askpass over loopback TCP with a token, or a named pipe; and on Windows
   say how to start the ssh-agent service.
+- [P3] **On Windows the ssh can't be chosen.** Endeavor runs Windows' own
+  `System32\OpenSSH\ssh.exe` when it is installed, and the PATH's `ssh` only
+  when it isn't (`client/ssh.rs`, `ssh_program`), so a user who wants Git's
+  ssh, or another build, for its config or agent has no setting for it. To
+  close: a setting or an `ENDEAVOR_SSH` variable read before the default.
 - [P2] **Under Codex on Windows a runtime would end with the session.** Codex
   puts an MCP server in a job object that its children cannot leave, and ends
   the job with the session (read from its source, not run). Endeavor asks to

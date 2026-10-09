@@ -113,11 +113,14 @@ impl Transport {
         }
     }
 
-    /// What to type in a terminal to sign in to the server by hand.
+    /// What to type in a terminal to sign in to the server by hand, with the ssh
+    /// Endeavor runs (`ssh_program`): on Windows its path, with forward slashes
+    /// so that PowerShell, cmd and Git Bash all take it.
     fn login_command(&self) -> String {
+        let ssh = ssh_program().display().to_string().replace('\\', "/");
         match self {
-            Transport::Ssh { host, port: Some(port) } => format!("ssh -p {port} {host}"),
-            Transport::Ssh { host, port: None } => format!("ssh {host}"),
+            Transport::Ssh { host, port: Some(port) } => format!("{ssh} -p {port} {host}"),
+            Transport::Ssh { host, port: None } => format!("{ssh} {host}"),
             Transport::Shell { .. } => "ssh".into(),
         }
     }
@@ -142,14 +145,15 @@ fn ssh_program() -> PathBuf {
 
 /// On Windows, start `command` without a console window: ssh is a console
 /// program, and from the app, which has no console, each one would open a window.
+/// The same goes for the curl or wget that fetches a server's helper (`release`).
 #[cfg(windows)]
-fn no_window(command: &mut Command) {
+pub(crate) fn no_window(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-fn no_window(_command: &mut Command) {}
+pub(crate) fn no_window(_command: &mut Command) {}
 
 /// Whether `host` can be given to ssh as the destination: an alias, a name,
 /// an address (IPv6 has colons) or `user@host`, where the user, which may hold

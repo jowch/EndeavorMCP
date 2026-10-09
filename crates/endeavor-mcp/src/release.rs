@@ -80,6 +80,8 @@ pub(crate) fn download(url: &str, to: Option<&Path>) -> Result<Vec<u8>, String> 
     let mut wget = Command::new("wget");
     wget.args(["-q", "--tries=3"]);
     wget.arg(format!("--connect-timeout={CONNECT_SECS}")).arg(format!("--timeout={TEXT_SECS}"));
+    client::no_window(&mut curl);
+    client::no_window(&mut wget);
     match to {
         Some(path) => {
             curl.arg("-o").arg(path);
