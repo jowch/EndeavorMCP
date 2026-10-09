@@ -45,7 +45,7 @@
     }
     $Dir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Dir)
 
-    # Fetch NAME from the release to FILE, giving up after SECS seconds (a build is about 30 MB).
+    # Fetch NAME from the release to FILE, giving up after SECS seconds (a build is about 5 MB).
     function Get-Release([string]$Name, [string]$File, [int]$Secs = 60) {
         $url = "$release/$Name"
         try {

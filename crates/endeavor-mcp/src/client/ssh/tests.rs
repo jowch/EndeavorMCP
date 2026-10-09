@@ -48,10 +48,12 @@ fn the_ssh_is_windows_own_when_there_is_one() {
 #[test]
 fn ssh_gets_its_usual_arguments_and_the_script_last() {
     let command = Transport::Ssh { host: "jc@lab".into(), port: Some(2222) }.command("echo hi", &Auth::Batch).unwrap();
-    assert_eq!(
-        args(&command),
-        ["-T", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2", "-o", "ConnectTimeout=20", "-o", "ForwardX11=no", "-o", "BatchMode=yes", "-p", "2222", "--", "jc@lab", "sh -c 'echo hi'"]
-    );
+    let mut expected = vec!["-T", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2", "-o", "ConnectTimeout=20", "-o", "ForwardX11=no"];
+    if cfg!(windows) {
+        expected.extend(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
+    }
+    expected.extend(["-o", "BatchMode=yes", "-p", "2222", "--", "jc@lab", "sh -c 'echo hi'"]);
+    assert_eq!(args(&command), expected);
 }
 
 #[test]
@@ -402,6 +404,8 @@ fn in_batch_mode_a_sign_in_failure_says_what_to_do() {
     assert!(host_key.contains(&format!("Run `{ssh} lab` once in a terminal and accept its host key")), "{host_key}");
     let denied = say("jc@lab: Permission denied (publickey).");
     assert!(denied.contains("ssh-add") && denied.contains("password or a code, which Endeavor can't ask for yet"), "{denied}");
+    // Windows ships its agent turned off, so there it also says how to turn it on.
+    assert_eq!(denied.contains("Start-Service ssh-agent"), cfg!(windows), "{denied}");
     // The same words for a password server: ssh lists its methods.
     assert_eq!(say("jc@lab: Permission denied (publickey,password,keyboard-interactive)."), denied);
     let with_port = explain(&Transport::Ssh { host: "lab".into(), port: Some(2222) }, &Auth::Batch, &["Host key verification failed.".to_owned()], None, false, false);

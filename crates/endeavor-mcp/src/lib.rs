@@ -1486,9 +1486,20 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+/// The DNS host name, as Julia's `gethostname()` gives it for the runtime's
+/// record. `COMPUTERNAME` is the NetBIOS name (upper case, at most 15
+/// characters), so a computer named otherwise saw its own runtime as remote.
 #[cfg(windows)]
 fn hostname() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_default()
+    use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    // SAFETY: the call writes at most `len` UTF-16 units into `buf` and sets
+    // `len` to the number written, without the terminating zero.
+    if unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) } == 0 {
+        return std::env::var("COMPUTERNAME").unwrap_or_default();
+    }
+    String::from_utf16_lossy(&buf[..len as usize])
 }
 
 /// The app's calls on the runtime's port.
@@ -1531,6 +1542,15 @@ fn bridge_call_within(port: u16, path: &str, token: &str, method: &str, wait: Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The runtime records Julia's `gethostname()`, the DNS name in its own
+    /// case, which Windows' `hostname` command also prints.
+    #[cfg(windows)]
+    #[test]
+    fn windows_names_this_computer_as_julia_does() {
+        let said = std::process::Command::new("hostname").output().unwrap();
+        assert_eq!(hostname(), String::from_utf8_lossy(&said.stdout).trim());
+    }
 
     /// On Windows the log once couldn't be emptied, so no runtime started there.
     #[test]

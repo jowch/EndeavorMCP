@@ -1,6 +1,6 @@
-//! Pluto notebook files on disk, read without Pluto: finding them in a folder,
-//! and the first cells of one for the new-session screen's static preview. The
-//! app reads This Mac's files with these; the helper a server's.
+//! Notebook files on disk, read without their engine: finding them in a
+//! folder, and the first cells of one for the new-session screen's static
+//! preview. The app reads This Mac's files with these; the helper a server's.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -14,11 +14,19 @@ const ORDER: &str = "# ╔═╡ Cell order:";
 /// Pluto's package cells, which hold the notebook's Project/Manifest.toml.
 const PACKAGE_CELLS: [&str; 2] = ["PLUTO_PROJECT_TOML_CONTENTS", "PLUTO_MANIFEST_TOML_CONTENTS"];
 
-/// A notebook found in a folder: its path, and when it last changed.
+/// A notebook found in a folder: its path, when it last changed, and whose
+/// notebook it is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Found {
     pub path: PathBuf,
     pub modified: SystemTime,
+    /// Missing from an older helper, which finds only Pluto's.
+    #[serde(default = "pluto")]
+    pub backend: Backend,
+}
+
+pub(crate) fn pluto() -> Backend {
+    Backend::Pluto
 }
 
 const MAX_DEPTH: usize = 3;
@@ -26,9 +34,9 @@ const MAX_VISITED: usize = 2000;
 const MAX_FOUND: usize = 200;
 const SKIPPED: [&str; 5] = ["node_modules", ".git", "target", "venv", ".julia"];
 
-/// Notebooks in `folder` and its subfolders (3 levels, skipping hidden and
-/// heavy folders, capped), newest first. See [`Backend::of_file`].
-pub fn scan(folder: &Path) -> Vec<Found> {
+/// Notebooks of `backends` in `folder` and its subfolders (3 levels, skipping
+/// hidden and heavy folders, capped), newest first. See [`Backend::of_file`].
+pub fn scan(folder: &Path, backends: &[Backend]) -> Vec<Found> {
     let mut found = Vec::new();
     let mut visited = 0;
     let mut stack = vec![(folder.to_path_buf(), 0)];
@@ -50,9 +58,11 @@ pub fn scan(folder: &Path) -> Vec<Found> {
                 if depth + 1 < MAX_DEPTH && !SKIPPED.contains(&name.as_ref()) {
                     stack.push((path, depth + 1));
                 }
-            } else if kind.is_file() && Backend::of_file(&path).is_some() {
+            } else if kind.is_file()
+                && let Some(backend) = Backend::of_file(&path).filter(|b| backends.contains(b))
+            {
                 let modified = entry.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-                found.push(Found { path, modified });
+                found.push(Found { path, modified, backend });
             }
         }
     }
@@ -82,7 +92,7 @@ pub struct Cell {
 
 const CELLS: usize = 8;
 const LINES: usize = 12;
-/// Larger files are only their start: Pluto keeps the cell order at the end.
+/// Larger files are only their start: Pluto and Ember keep the cell order at the end.
 const MAX_READ: u64 = 16 << 20;
 
 /// The preview of the notebook file at `path`.
@@ -92,7 +102,11 @@ pub fn read_preview(path: &Path) -> Result<Preview, String> {
     std::fs::File::open(path)
         .and_then(|f| f.take(MAX_READ).read_to_end(&mut bytes))
         .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
-    Ok(preview(&String::from_utf8_lossy(&bytes)))
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(match Backend::of_file(path) {
+        Some(Backend::Ember) => ember_preview(&text),
+        _ => preview(&text),
+    })
 }
 
 /// The first cells of a Pluto notebook file's text, in the notebook's order.
@@ -125,6 +139,72 @@ pub fn preview(text: &str) -> Preview {
         .filter_map(|id| bodies.iter().find(|(b, _)| b == id))
         .map(|(_, body)| trim_blank(body))
         .filter(|body| !body.first().is_some_and(|l| PACKAGE_CELLS.iter().any(|p| l.starts_with(p))))
+        .collect();
+    Preview {
+        total: codes.len(),
+        cells: codes
+            .iter()
+            .take(CELLS)
+            .map(|body| Cell { code: body[..body.len().min(LINES)].join("\n"), clipped: body.len() > LINES })
+            .collect(),
+    }
+}
+
+const EMBER_CELL: &str = "# %%";
+const EMBER_BLOCK_END: &str = "# ///";
+const EMBER_ORDER: &str = "cell order";
+
+/// The first cells of an Ember notebook file's text, in the notebook's order,
+/// read as Ember's `parse_notebook` reads it: a cell runs from its `# %% id=…`
+/// line to the next cell or `# /// <name>` block; the `cell order` block gives
+/// the display order and which cells are `disabled` or `commented`, whose lines
+/// the file prefixes with `## `.
+pub fn ember_preview(text: &str) -> Preview {
+    let mut bodies: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut order: Vec<(&str, bool)> = Vec::new();
+    let mut block: Option<&str> = None;
+    let mut in_cell = false;
+    for line in text.lines() {
+        if let Some(marker) = line.strip_prefix(EMBER_CELL) {
+            let id = marker.split_whitespace().find_map(|word| word.strip_prefix("id=")).unwrap_or("");
+            bodies.push((id, Vec::new()));
+            (block, in_cell) = (None, true);
+        } else if let Some(name) = line.strip_prefix("# /// ").filter(|name| !name.trim().is_empty()) {
+            (block, in_cell) = (Some(name.trim()), false);
+        } else if line == EMBER_BLOCK_END {
+            block = None;
+        } else if block == Some(EMBER_ORDER) {
+            let mut words = line.trim_start_matches('#').split_whitespace();
+            if let Some(id) = words.next() {
+                order.push((id, words.any(|w| w == "disabled" || w == "commented")));
+            }
+        } else if in_cell && let Some((_, body)) = bodies.last_mut() {
+            body.push(line);
+        }
+    }
+    // As Ember does: ids the file has no cell for, and repeats, are skipped; a
+    // cell the block doesn't list goes after the nearest cell before it in the
+    // file that is placed, else first.
+    let mut placed: Vec<(&str, bool)> = Vec::new();
+    for (id, commented) in order {
+        if bodies.iter().any(|(b, _)| *b == id) && !placed.iter().any(|(p, _)| *p == id) {
+            placed.push((id, commented));
+        }
+    }
+    for (at, (id, _)) in bodies.iter().enumerate() {
+        if placed.iter().any(|(p, _)| p == id) {
+            continue;
+        }
+        let after = bodies[..at].iter().rev().find_map(|(before, _)| placed.iter().position(|(p, _)| p == before));
+        placed.insert(after.map_or(0, |i| i + 1), (id, false));
+    }
+    let codes: Vec<Vec<&str>> = placed
+        .iter()
+        .filter_map(|(id, commented)| {
+            let (_, body) = bodies.iter().find(|(b, _)| b == id)?;
+            let body: Vec<&str> = if *commented { body.iter().map(|l| l.strip_prefix("## ").or_else(|| l.strip_prefix("##")).unwrap_or(l)).collect() } else { body.clone() };
+            Some(trim_blank(&body).to_vec())
+        })
         .collect();
     Preview {
         total: codes.len(),
@@ -242,9 +322,100 @@ julia_version = "1.12.6"
         std::fs::write(dir.join("sub/deeper/c.jl"), notebook).unwrap();
         std::fs::write(dir.join(".hidden/d.jl"), notebook).unwrap();
         std::fs::write(dir.join("node_modules/e.jl"), notebook).unwrap();
-        let mut found: Vec<_> = scan(&dir).into_iter().map(|f| f.path.strip_prefix(&dir).unwrap().to_path_buf()).collect();
-        found.sort();
-        assert_eq!(found, [PathBuf::from("a.jl"), PathBuf::from("sub/b.jl"), PathBuf::from("sub/deeper/c.jl")]);
+        std::fs::write(dir.join("sub/f.R"), "### An Ember notebook ###\n").unwrap();
+        std::fs::write(dir.join("script.R"), "x <- 1\n").unwrap();
+        let found = |backends: &[Backend]| {
+            let mut found: Vec<_> = scan(&dir, backends).into_iter().map(|f| (f.path.strip_prefix(&dir).unwrap().to_path_buf(), f.backend)).collect();
+            found.sort_by(|a, b| a.0.cmp(&b.0));
+            found
+        };
+        let pluto = [(PathBuf::from("a.jl"), Backend::Pluto), (PathBuf::from("sub/b.jl"), Backend::Pluto), (PathBuf::from("sub/deeper/c.jl"), Backend::Pluto)];
+        assert_eq!(found(&[Backend::Pluto]), pluto);
+        assert_eq!(found(&[Backend::Ember]), [(PathBuf::from("sub/f.R"), Backend::Ember)]);
+        assert_eq!(found(&Backend::ALL).len(), 4);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn found_from_an_older_helper_is_pluto() {
+        let found: Found = serde_json::from_str(r#"{"path":"/n/a.jl","modified":{"secs_since_epoch":0,"nanos_since_epoch":0}}"#).unwrap();
+        assert_eq!(found.backend, Backend::Pluto);
+    }
+
+    /// As Ember writes a file: header block, cells in run order, then the
+    /// footer. The display order differs, one cell is folded and one disabled.
+    const EMBER_SAMPLE: &str = "### An Ember notebook ###
+# /// environment
+# ember_version = \"0.0.0.9000\"
+# r_version = \"4.5.1\"
+# snapshot = \"2026-09-01\"
+# ///
+
+# %% id=6f1c9a2e-0000-4000-8000-000000000001
+library(dplyr)
+
+# %% id=0b7d0000-0000-4000-8000-000000000002
+#' ## Growth curves
+#' Measured every 30 minutes.
+
+# %% id=a41e0000-0000-4000-8000-000000000003
+curves <- read.csv(\"growth.csv\")
+
+# %% id=d7e00000-0000-4000-8000-000000000004
+## curves + 1
+## nrow(curves)
+
+# /// cell order
+# 0b7d0000-0000-4000-8000-000000000002
+# 6f1c9a2e-0000-4000-8000-000000000001 folded
+# a41e0000-0000-4000-8000-000000000003
+# d7e00000-0000-4000-8000-000000000004 disabled
+# ///
+# /// lock
+# dplyr 1.1.4 CRAN
+# ///
+";
+
+    #[test]
+    fn ember_cells_follow_the_cell_order() {
+        let p = ember_preview(EMBER_SAMPLE);
+        assert_eq!(p.total, 4);
+        let codes: Vec<&str> = p.cells.iter().map(|c| c.code.as_str()).collect();
+        assert_eq!(
+            codes,
+            ["#' ## Growth curves\n#' Measured every 30 minutes.", "library(dplyr)", "curves <- read.csv(\"growth.csv\")", "curves + 1\nnrow(curves)"]
+        );
+    }
+
+    #[test]
+    fn ember_without_a_cell_order_keeps_the_file_order() {
+        let text = "### An Ember notebook ###\n# /// environment\n# ///\n\n# %% id=a\nx <- 1\n\n# %% id=b\ny <- x\n";
+        let codes: Vec<String> = ember_preview(text).cells.into_iter().map(|c| c.code).collect();
+        assert_eq!(codes, ["x <- 1", "y <- x"]);
+    }
+
+    #[test]
+    fn ember_places_cells_the_order_leaves_out_as_ember_does() {
+        // c and a aren't listed: a has no listed cell before it, so it goes first; c goes after b.
+        let text = "### An Ember notebook ###\n# %% id=a\nA\n# %% id=b\nB\n# %% id=c\nC\n# %% id=d\nD\n# /// cell order\n# d\n# b\n# x\n# b\n# ///\n";
+        let codes: Vec<String> = ember_preview(text).cells.into_iter().map(|c| c.code).collect();
+        assert_eq!(codes, ["A", "D", "B", "C"]);
+    }
+
+    #[test]
+    fn ember_drops_a_disabled_cells_trailing_blank_lines() {
+        let text = "### An Ember notebook ###\n# %% id=a\n## x <- 1\n##\n\n# /// cell order\n# a disabled\n# ///\n";
+        assert_eq!(ember_preview(text).cells[0].code, "x <- 1");
+    }
+
+    #[test]
+    fn read_preview_picks_the_format_from_the_file() {
+        let dir = std::env::temp_dir().join(format!("endeavor-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.R"), EMBER_SAMPLE).unwrap();
+        std::fs::write(dir.join("b.jl"), SAMPLE).unwrap();
+        assert_eq!(read_preview(&dir.join("a.R")).unwrap().cells[1].code, "library(dplyr)");
+        assert_eq!(read_preview(&dir.join("b.jl")).unwrap().cells[1].code, "using CSV, DataFrames");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

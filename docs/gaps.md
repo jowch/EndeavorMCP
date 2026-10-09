@@ -42,8 +42,8 @@ Every P1:
 - [P2] **Old builds are never removed from servers or from the plugin's
   folder.** Every build a server was sent stays in `~/.cache/endeavor/<build>/`
   there (the bootstrap only notes that one is there), and every build the
-  plugin fetched stays in `bin/<key>/`. Each is about 30 MB, and a merge that
-  changes the build key adds one, so a cluster's home quota fills over time.
+  plugin fetched stays in `bin/<key>/`. Each is about 5 MB, and a merge that
+  changes the build key adds one, so a cluster's home quota fills slowly.
   To close: remove a server's folders of other builds that no recorded runtime
   or job runs from, and the plugin's folders other than the pinned or newest
   build. Careful: removing the folder a running Slurm job's helper runs from
@@ -158,9 +158,10 @@ Every P1:
   two minutes; calls answered "starting" after 45 s and the agent called
   again. The repository's own URL installs every plugin it finds and the
   Claude Code one overwrites this one (same name), leaving skills without
-  `launch/` or `mcp_config.json`; the README gives the folder's URL. Not
-  tried: macOS, Linux, interactive agy, the desktop app, a marketplace, and
-  whether the entry should pass `--skills plugin` as the others do.
+  `launch/` or `mcp_config.json`; the README gives the folder's URL. The
+  entry passes `--skills plugin` as the others do (since 2026-10-09; not yet
+  tried under agy). Not tried: macOS, Linux, interactive agy, the desktop app
+  and a marketplace.
 - [P3] **Under Codex a session without a project folder remembers no machine.**
   A project is remembered by its folder, so `use_machine` works, and the next
   session starts on this computer.
@@ -188,7 +189,7 @@ Every P1:
   release. To close: follow redirects by hand and refuse a non-https one.
 - [P3] **Uninstalling a plugin leaves the binary** in
   `~/.local/share/endeavor/bin/`. Old builds there are never removed, since a
-  running session may use one and the launcher can't tell which. About 30 MB
+  running session may use one and the launcher can't tell which. About 5 MB
   each. To close: delete all but the pinned and the newest at a start, when no
   `endeavor` from there is running.
 - [P3] **A launcher killed while it holds the lock** leaves a lock the next
@@ -430,6 +431,12 @@ sign-in.
   in `reattach`). `reattach` looks at the closing flag between its tries only.
 - [P3] **The front's exit can wait up to 5 s** for a connection that hangs (the
   connections close together).
+- [P3] **A call that reaches the listener just as the helper goes is closed
+  with no answer.** The agent sees a bare connection error ("fetch failed")
+  instead of "reconnecting by itself"; its next call gets the wording. This
+  happens when the helper's channel has ended but the listener hasn't heard
+  yet, or when the helper died and the relay can't write to it. A fix would
+  wait briefly for the listener to hear of the end and answer from that.
 
 ## Slurm
 
@@ -529,11 +536,16 @@ not supported. These gaps stay open.
 - [P2] **On Windows a key with a passphrase needs ssh-agent, which is off.**
   `endeavor mcp` signs in in batch mode, with no one to ask, so a key with a
   passphrase works only from ssh-agent. Windows ships the ssh-agent service
-  disabled, and the "run `ssh-add`" advice that a refused sign-in gives
-  (`client/ssh.rs`, `explain_retry`) fails there until an administrator enables
-  it. To close: on Windows, say how to start the service
-  (`Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent`, as
-  administrator).
+  disabled, so `ssh-add` fails there until an administrator enables it. On
+  Windows a refused sign-in now says how (`client/ssh.rs`, `ADD_KEY`), but the
+  user still has to do it once, as administrator.
+- [P3] **On Windows a computer name longer than 15 characters moved its state
+  folder.** Since #31 the state folder (`serve/<name>`) uses the DNS host
+  name, not the 15-character NetBIOS one, so a runtime an older build started
+  there is not seen: a new one starts beside it, and the old one runs until
+  its idle limit. Such a runtime was already unusable (it counted as another
+  computer's). Names that differ only in case keep their folder, since NTFS
+  ignores case.
 - [P3] **On Windows the ssh can't be chosen.** Endeavor runs Windows' own
   `System32\OpenSSH\ssh.exe` when it is installed, and the PATH's `ssh` only
   when it isn't (`client/ssh.rs`, `ssh_program`), so a user who wants Git's
@@ -549,24 +561,11 @@ not supported. These gaps stay open.
   "optional Unix tools" are chosen. Under agy 1.3.2 started from PowerShell
   without it, the server didn't start and no error showed; with
   `C:\Program Files\Git\bin` added, the launcher downloaded the release and
-  ran (the README says to add it). Antigravity's `mcp_config.json` has no
+  ran (the README says to add it, and the `endeavor-setup` skill tells the
+  agent to ask for it). Antigravity's `mcp_config.json` has no
   per-system command and no plugin-root variable, so its plugin can't avoid
   `sh`. Claude Code's plugin on Windows was not tried. To close: a `.cmd` or
   PowerShell launcher where the agent allows one.
-- [P2] **On Windows a computer whose name isn't all upper case, or is longer
-  than 15 characters, sees its own runtime as remote.** The runtime records
-  Julia's `gethostname()` (the DNS name, in its own case) and the Rust side
-  compares it with `COMPUTERNAME` (`hostname()` in `lib.rs`), the NetBIOS
-  name: upper case and at most 15 characters. So `new_notebook` says Julia
-  runs remotely on that name, `endeavor stop` can't stop it, and `endeavor
-  status` says it was recorded by another computer. Seen on Windows 10 under
-  agy; setting `COMPUTERNAME` to the DNS name for the agent's process made
-  everything work. Names that are all upper case and at most 15 characters,
-  such as the default `DESKTOP-AB12CD`, should not be affected (not tried).
-  The first try on Windows 11 (above) didn't hit it, presumably because that
-  computer's name was of that kind; this was not checked.
-  To close: read the DNS host name (`GetComputerNameExW` with
-  `ComputerNameDnsHostname`) in `hostname()`.
 - [P2] **`install.ps1` has never run.** There is no PowerShell here. It is read
   against PowerShell 5.1's behaviour only. To close: run it on Windows against
   a fake release (`ENDEAVOR_RELEASE_URL`) and the real one.
@@ -808,16 +807,6 @@ plugins). The rest of this file can wait or go alongside.
   not against a real download; its unit test would need a login shell that
   finds no Julia, which a developer's machine often has. That test skips
   itself where a login shell finds Julia.
-- [P3] **`a_helper_that_ends_unexpectedly_is_a_drop_and_after_the_client_let_it_go_is_not`
-  hangs now and then.** It hung in a full workspace run on 2026-10-07, and on
-  CI's `macos-15` job on 2026-10-09 (PR #5, cancelled after 20 minutes). It
-  passed 100 of 100 runs alone on Linux. Two of its calls block with no
-  limit: `channel.closed()` and the `says()` read from the listener. To
-  close: give `says()` a read timeout so a hang fails at a named step, then
-  find which call waits.
-- [P3] **CI's jobs have no time limit.** A test that hangs keeps a job running
-  for GitHub's default of six hours. To close: a `timeout-minutes` on each
-  job in `.github/workflows/ci.yml`, well above a normal run's few minutes.
 - [P3] **Tests that write a script and run it can fail with "Text file
   busy".** A script written with `fs::write` can still be open in a child that
   another test thread has just forked, so an exec of it fails with ETXTBSY.

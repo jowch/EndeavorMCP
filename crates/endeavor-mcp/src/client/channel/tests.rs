@@ -280,7 +280,7 @@ fn a_stop_on_a_channel_whose_helper_has_gone_fails_at_once() {
     let helper = Scripted::new();
     let Scripted { channel, say, .. } = helper;
     drop(say);
-    channel.closed();
+    closed_within(&channel);
     let began = Instant::now();
     assert_eq!(channel.stop().unwrap_err(), CLOSED);
     assert!(began.elapsed() < Duration::from_millis(500), "{:?}", began.elapsed());
@@ -469,14 +469,29 @@ fn a_stop_that_gave_up_and_was_refused_later_leaves_the_runtime_watched() {
     assert!(matches!(notice, Notice::Died(_)), "{notice:?}");
 }
 
-/// What the listener says to an MCP call, which tells how it is away.
+/// What the listener says to an MCP call, which tells how it is away. A
+/// connection the listener never answers or closes fails the test here.
 fn says(listener: &Listener) -> String {
     let mut socket = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_notebooks"}}"#;
-    write!(socket, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer t\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    // A listener that can't relay the call closes it, maybe before all of it is written.
+    let _ = write!(socket, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer t\r\nContent-Length: {}\r\n\r\n{body}", body.len());
     let mut response = String::new();
-    let _ = socket.read_to_string(&mut response);
+    if let Err(e) = socket.read_to_string(&mut response)
+        && matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+    {
+        panic!("the listener neither answered nor closed the call in 10 s; it said {response:?}");
+    }
     response
+}
+
+/// `channel.closed()`, failing the test if the helper's end isn't heard in 10 s.
+fn closed_within(channel: &Arc<Channel>) -> Option<Notice> {
+    let (tx, rx) = mpsc::channel();
+    let channel = channel.clone();
+    std::thread::spawn(move || drop(tx.send(channel.closed())));
+    rx.recv_timeout(Duration::from_secs(10)).expect("the helper's end is heard")
 }
 
 fn says_within(listener: &Listener, text: &str) -> String {
@@ -497,7 +512,7 @@ fn a_helper_that_ends_unexpectedly_is_a_drop_and_after_the_client_let_it_go_is_n
     helper.started(&listener, |_| {});
     let Scripted { channel, say, .. } = helper;
     drop(say);
-    assert!(matches!(channel.closed(), Some(Notice::Lost(_))));
+    assert!(matches!(closed_within(&channel), Some(Notice::Lost(_))));
     let response = says(&listener);
     assert!(response.contains("reconnecting by itself"), "{response}");
 
@@ -519,4 +534,33 @@ fn a_helper_that_ends_unexpectedly_is_a_drop_and_after_the_client_let_it_go_is_n
         let response = says_within(&listener, "isn't connected");
         assert!(response.contains("Endeavor isn't connected to lab.") && !response.contains("reconnecting"), "{how}: {response}");
     }
+}
+
+#[test]
+fn a_helper_that_ends_as_its_runtime_is_ready_is_a_drop() {
+    let listener = Listener::start("lab").unwrap();
+    let helper = Scripted::new();
+    // The start hears `Ready` only after the helper's channel has ended.
+    let (heard, wait) = mpsc::channel::<()>();
+    let (release, released) = mpsc::channel::<()>();
+    let starting = std::thread::spawn({
+        let (channel, listener) = (helper.channel.clone(), listener.clone());
+        move || {
+            channel.start_runtime(&listener, &StartOptions::default(), &mut |_| {
+                let _ = heard.send(());
+                let _ = released.recv();
+            }, |_| {})
+        }
+    });
+    let id = *helper.starts_sent(1).last().unwrap();
+    helper.tell(&ToApp::Progress { line: "starting".into() });
+    wait.recv_timeout(Duration::from_secs(10)).expect("the start hears progress");
+    helper.tell(&ready(id));
+    let Scripted { channel, say, .. } = helper;
+    drop(say);
+    assert!(matches!(closed_within(&channel), Some(Notice::Lost(_))));
+    drop(release);
+    assert!(starting.join().unwrap().is_ok());
+    let response = says_within(&listener, "reconnecting");
+    assert!(response.contains("reconnecting by itself"), "{response:?}");
 }
