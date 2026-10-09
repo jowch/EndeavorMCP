@@ -691,8 +691,12 @@ not supported. These gaps stay open.
   again for the first two minutes of the ask and then to stop, tell the user
   and call again when they write back. The event's `asks` say whether a call
   waits on each (`waiting`), so the app can keep a card no call waits on past
-  the turn; until it does, the user's reply gets a fresh card. Not yet tried
-  again with real turns.
+  the turn; until it does, the user's reply gets a fresh card. Tried again
+  with real Claude turns and that app change: Claude still stopped early (after
+  four tries of an open, about 90 s, and after one try of an edit), not at
+  the two minutes. The card stayed up past the turn, and after the user
+  approved it and wrote back, the same call went ahead at once. Approving
+  alone does nothing until the user writes: the agent's turn has ended.
 - [P2] **An agent can add a machine under a name the user did not give.** Told
   "the machine localhost", a Codex agent called `add_machine` with host
   `self`, an alias `list_machines` showed in `ssh_hosts_not_added`, and told
