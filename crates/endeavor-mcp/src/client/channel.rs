@@ -385,6 +385,15 @@ impl Channel {
                 Ok(ToApp::Ready { node, pid, token, reattached, job, port, build, interface, .. }) => {
                     *self.listener.lock().unwrap() = Some(listener.clone());
                     listener.attach(self.mux.clone(), token.clone());
+                    // A helper that ended as this start heard `Ready` may have found no listener to
+                    // tell, or told it before this attach: the listener says it is away all the same.
+                    if self.mux.has_ended() {
+                        if self.left.load(Ordering::SeqCst) {
+                            listener.left(&self.mux);
+                        } else {
+                            listener.forget(&self.mux);
+                        }
+                    }
                     break Runtime { port: listener.port(), mcp_url: listener.mcp_url(), page_url: listener.page_url(&token), token, pid, reattached, node, job, remote_port: port, build, interface };
                 }
                 Ok(ToApp::StartFailed { message, .. } | ToApp::Error { message }) => return Err(failed(message)),

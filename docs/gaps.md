@@ -435,6 +435,12 @@ sign-in.
   in `reattach`). `reattach` looks at the closing flag between its tries only.
 - [P3] **The front's exit can wait up to 5 s** for a connection that hangs (the
   connections close together).
+- [P3] **A call that reaches the listener just as the helper goes is closed
+  with no answer.** The agent sees a bare connection error ("fetch failed")
+  instead of "reconnecting by itself"; its next call gets the wording. This
+  happens when the helper's channel has ended but the listener hasn't heard
+  yet, or when the helper died and the relay can't write to it. A fix would
+  wait briefly for the listener to hear of the end and answer from that.
 
 ## Slurm
 

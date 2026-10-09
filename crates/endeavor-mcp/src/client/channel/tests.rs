@@ -517,3 +517,32 @@ fn a_helper_that_ends_unexpectedly_is_a_drop_and_after_the_client_let_it_go_is_n
         assert!(response.contains("Endeavor isn't connected to lab.") && !response.contains("reconnecting"), "{how}: {response}");
     }
 }
+
+#[test]
+fn a_helper_that_ends_as_its_runtime_is_ready_is_a_drop() {
+    let listener = Listener::start("lab").unwrap();
+    let helper = Scripted::new();
+    // The start hears `Ready` only after the helper's channel has ended.
+    let (heard, wait) = mpsc::channel::<()>();
+    let (release, released) = mpsc::channel::<()>();
+    let starting = std::thread::spawn({
+        let (channel, listener) = (helper.channel.clone(), listener.clone());
+        move || {
+            channel.start_runtime(&listener, &StartOptions::default(), &mut |_| {
+                let _ = heard.send(());
+                let _ = released.recv();
+            }, |_| {})
+        }
+    });
+    let id = *helper.starts_sent(1).last().unwrap();
+    helper.tell(&ToApp::Progress { line: "starting".into() });
+    wait.recv_timeout(Duration::from_secs(10)).expect("the start hears progress");
+    helper.tell(&ready(id));
+    let Scripted { channel, say, .. } = helper;
+    drop(say);
+    assert!(matches!(closed_within(&channel), Some(Notice::Lost(_))));
+    drop(release);
+    assert!(starting.join().unwrap().is_ok());
+    let response = says_within(&listener, "reconnecting");
+    assert!(response.contains("reconnecting by itself"), "{response:?}");
+}

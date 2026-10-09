@@ -113,6 +113,12 @@ impl Mux {
         }
     }
 
+    /// The channel has ended (`run` returned): no stream will be taken.
+    pub fn has_ended(&self) -> bool {
+        let _streams = self.streams.lock().unwrap();
+        self.ended.load(Ordering::SeqCst)
+    }
+
     pub fn open_streams(&self) -> usize {
         self.streams.lock().unwrap().len()
     }
