@@ -601,6 +601,16 @@ not supported. These gaps stay open.
 - [P3] **No helper for a Windows server or a platform other than the five.**
   The server's `uname` is what is asked for, and the release has no Windows
   server helper.
+- [P3] **Windows' 260-character path limit can break a package install.**
+  Julia's artifacts sit deep under `%LOCALAPPDATA%\Endeavor\serve-depot\artifacts\`.
+  On a Windows test machine, with `LOCALAPPDATA` pointed at a folder about 120
+  characters long, the first start failed: "Failed to install some artifacts:
+  SystemError: opening file" on a file under `include\everest\kremlib\`. The
+  same install from a shorter folder worked, and a normal `%LOCALAPPDATA%` is
+  much shorter still, but the margin hasn't been measured. A very long user
+  name might hit it. Turning on Windows' long paths (`LongPathsEnabled`) may help, but that
+  hasn't been tried. PowerShell's `Remove-Item` can't delete such a tree;
+  `rd /s /q "\\?\<folder>"` can.
 
 ## Folders and paths
 
