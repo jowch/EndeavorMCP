@@ -576,6 +576,54 @@ fn a_forced_stop_cancels_a_start_that_is_under_way_and_leaves_nothing_of_it() {
 }
 
 #[test]
+fn a_forced_stop_from_a_helper_cancels_a_start_another_connection_began() {
+    let (dir, cores, julia) = held_dir("start-force-helper");
+    let mut first = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    first.send(ToHelper::Detach);
+    first.exits();
+
+    // A connection that waits for that start: an unforced stop ends its wait and leaves the start alone.
+    let waiter = held_start(&dir, &julia, &[]);
+    let stop = waiter.request_stop();
+    assert_eq!(waiter.after_progress(), ToApp::StartCancelled { id: 1 });
+    assert_eq!(waiter.next(), ToApp::Stopped { id: stop });
+    assert!(common::pid_alive(core), "the start goes on");
+
+    // A forced one cancels it, and is answered once it is gone.
+    waiter.request_start(None, true);
+    let stop = waiter.request_stop_as(true);
+    let ToApp::StartCancelled { .. } = waiter.after_progress() else { panic!("expected StartCancelled") };
+    assert_eq!(waiter.after_progress(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    common::wait_for("the lock to be let go", || start_lock_free(&dir));
+    assert!(cores.pids().is_empty() && !dir.join("runtime.json").exists(), "{:?}", cores.pids());
+    assert_eq!(std::fs::read_to_string(dir.join("stopped")).unwrap(), format!("{core} connection"), "the clients are told why");
+    drop(waiter);
+
+    // A connection that isn't waiting: unforced, nothing is stopped; forced, the start is cancelled.
+    let mut first = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    first.send(ToHelper::Detach);
+    first.exits();
+    let mut other = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    other.hello();
+    let stop = other.request_stop();
+    let ToApp::NotStopped { id, message } = other.next() else { panic!("expected NotStopped") };
+    assert!(id == stop && message.contains("still starting") && message.contains("force"), "{message}");
+    assert!(common::pid_alive(core));
+    let stop = other.request_stop_as(true);
+    assert_eq!(other.next(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    common::wait_for("the lock to be let go", || start_lock_free(&dir));
+    assert!(cores.pids().is_empty() && !dir.join("runtime.json").exists(), "{:?}", cores.pids());
+    let stop = other.request_stop_as(true);
+    assert_eq!(other.next(), ToApp::Stopped { id: stop }, "nothing runs or starts, and a forced stop says so");
+    other.stdin.0.lock().unwrap().take();
+    other.exits();
+}
+
+#[test]
 fn an_attach_that_waits_for_a_start_never_starts_a_runtime_when_that_start_dies() {
     let (dir, cores, julia) = held_dir("attach-only");
     let env_home = dir.join("home").display().to_string();

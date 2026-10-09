@@ -112,7 +112,7 @@ impl Scripted {
 
     /// Wait until the client has sent `n` `Stop`s: their ids.
     fn stops_sent(&self, n: usize) -> Vec<u32> {
-        self.ids(n, |request| if let ToHelper::Stop { id } = request { Some(*id) } else { None })
+        self.ids(n, |request| if let ToHelper::Stop { id, .. } = request { Some(*id) } else { None })
     }
 
     /// Wait until the client has sent `n` `StartRuntime`s: their ids.
@@ -175,6 +175,24 @@ fn a_stop_waits_for_one_deadline_however_much_the_helper_says() {
     assert_eq!(helper.channel.stop().unwrap_err(), "Endeavor's helper didn't answer in 1 s, so Julia may not have stopped.");
     assert!(began.elapsed() < Duration::from_millis(2500), "{:?}", began.elapsed());
     chatter.join().unwrap();
+}
+
+#[test]
+fn a_forced_stop_says_so_and_an_unforced_one_reads_as_before() {
+    let helper = Scripted::new();
+    let forced = std::thread::spawn({
+        let channel = helper.channel.clone();
+        move || channel.force_stop()
+    });
+    let [id] = helper.stops_sent(1)[..] else { panic!() };
+    helper.tell(&ToApp::Stopped { id });
+    forced.join().unwrap().expect("stopped");
+    let stopping = helper.stopping();
+    let [_, id] = helper.stops_sent(2)[..] else { panic!() };
+    helper.tell(&ToApp::Stopped { id });
+    stopping.join().unwrap().expect("stopped");
+    let stops: Vec<bool> = helper.requests().iter().filter_map(|request| if let ToHelper::Stop { force, .. } = request { Some(*force) } else { None }).collect();
+    assert_eq!(stops, [true, false]);
 }
 
 #[test]

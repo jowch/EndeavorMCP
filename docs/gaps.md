@@ -231,15 +231,10 @@ Starting, stopping, idle exit and updates.
   over it), so a kill during that write can leave the file cut short.
 - [P2] **A start that hangs, with no client left, is ended only by a forced
   stop.** Clients that wait for it never stop it, and a stop without `force`
-  says it is still starting. On this computer `endeavor stop --force` ends it;
-  on a machine see "On a machine, a stop cannot cancel a start another
-  connection began". There is no deadline for a start.
-- [P2] **On a machine, a stop cannot cancel a start another connection began.**
-  The helper's `Stop` has no `force`, so `stop_machine` with `force` ends a
-  start that this session's own connection is waiting on, and for another
-  process's start the helper still says it is still starting. Run `endeavor
-  stop --force` on the machine, with the helper's `--state-dir`. To close: a
-  `force` on the `Stop` message.
+  says it is still starting. `endeavor stop --force`, and `stop_machine` with
+  `force` on this computer or a machine, end it. There is no deadline for a
+  start. (A machine whose helper predates the `force` on its `Stop` still
+  says it is still starting; run `endeavor stop --force` there.)
 - [P2] **`starting.lock` is a file lock, which a home folder shared by several
   machines may not carry between them.** A client on another machine may then
   not see a start under way and start a second runtime. A recorded runtime of
@@ -251,9 +246,9 @@ Starting, stopping, idle exit and updates.
   sees it end. `runtime.json` and `pluto_session_status` now say which kind it
   is.
 - [P3] **A forced stop cancels a start only when `starting.lock` names its
-  core.** `endeavor stop --force` and `stop_machine` with `force` on this
-  computer end the core the file names, if the lock is held, the file names
-  this computer and a start time, and that process started then (on this
+  core.** `endeavor stop --force` and `stop_machine` with `force` end the
+  core the file names, if the lock is held, the file names
+  the computer the stop runs on and a start time, and that process started then (on this
   boot). A core of an older build writes no pid, a core that has just taken
   the lock has not yet, and a platform that gives no start time records none:
   the stop then says it can't tell which process is starting Julia and stops

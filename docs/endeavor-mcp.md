@@ -192,8 +192,8 @@ process: a `Stop` to the helper, Ctrl-C in `serve`, the end of input and
 `--quit-with-client` end only a start this process spawned. A stop
 (`endeavor stop`, `stop_machine` for this computer, the helper's Stop for a
 runtime it is not attached to) that finds no record and `starting.lock` held
-stops nothing, and says Julia is still starting. `endeavor stop --force` and
-`stop_machine` with `force` on this computer cancel it: `runtime::end` reads the
+stops nothing, and says Julia is still starting. `endeavor stop --force`, and
+`stop_machine` with `force` here or on a machine (the helper's Stop with `force`), cancel it: `runtime::end` reads the
 pid, start time, boot id and host name from `starting.lock`, and ends that core
 and its process group (as it ends a runtime that is up, with the same note in
 `stopped`) only if the lock is held, the host is this one and the pid is the
@@ -202,7 +202,9 @@ gives no start time, or a core of an older build, and then nothing is stopped
 (after a last look for a record: a start that finished meanwhile is stopped as a
 runtime is). A call that only attaches (`StartRuntime` with `attach_only`) waits
 for a start under way in the same way, but starts none when it dies: the helper
-answers `NotRunning`. The helper's Stop has no `force`, so it still stops nothing.
+answers `NotRunning`. A forced Stop to a helper that waits for another process's
+start ends that wait (`StartCancelled`), then cancels the start as above before it
+is answered.
 
 `endeavor status [--state-dir DIR] [--json]` reports what Endeavor has on this
 computer and changes nothing: it makes no folder or file, starts nothing and
