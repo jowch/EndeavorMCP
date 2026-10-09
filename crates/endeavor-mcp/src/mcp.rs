@@ -381,6 +381,9 @@ impl Bridge {
             }
         }
         self.notebooks.note_call(&caller.owner);
+        if !caller.owner.is_empty() && self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
+            self.notebooks.publish();
+        }
         self.notebooks.note_activity(&arguments);
         if let Some(refusal) = refusal {
             return tool_error(&refusal, false);
@@ -463,16 +466,21 @@ impl Bridge {
             _ => (false, false),
         };
         if owner.is_empty() || !held {
+            // Allowed without asking now (Auto, say): a card left up for this call goes.
+            if !owner.is_empty() && self.notebooks.asks.moved_on(owner, "", &Value::Null) {
+                self.notebooks.publish();
+            }
             return Ok(true);
         }
         if !self.notebooks.followed() {
             return Err(tool_error("ArgumentError: no_app::Endeavor isn't connected to ask the user about this. Try again once Endeavor is open.", false));
         }
-        let ask = Ask { owner, call_id: call.call_id, request: call.request, tool, arguments, since: self.notebooks.now() };
+        let code = arguments.get("notebook_id").and_then(Value::as_str).and_then(|id| self.notebooks.code_print(id));
+        let ask = Ask { owner, call_id: call.call_id, request: call.request, tool, arguments, code, since: self.notebooks.now() };
         let id = self.notebooks.asks.add(ask);
         eprintln!("[ Info: Session {owner} asks before {tool} (ask {id}, call {})", call.call_id.unwrap_or("?"));
         self.notebooks.publish();
-        let deadline = call.began + Duration::from_secs_f64(notebooks::WAIT_SECONDS);
+        let deadline = call.began + ask_wait(tool);
         let outcome = self.notebooks.asks.wait(id, call.gone, deadline);
         self.notebooks.publish();
         match outcome {
@@ -508,11 +516,22 @@ impl Bridge {
     }
 }
 
+/// How long into a call it waits for the user's answer: what is left of the 60 seconds agents give a
+/// call must hold the work after it. Runs wait at least 5 seconds more (`WAIT_SECONDS` counts from
+/// the call's start); an open has no limit of its own and the first in a new Julia takes 20 to 25 s.
+fn ask_wait(tool: &str) -> Duration {
+    match tool {
+        "open_notebook" | "new_notebook" => Duration::from_secs(20),
+        _ => Duration::from_secs_f64(notebooks::WAIT_SECONDS),
+    }
+}
+
 /// The error of a call whose wait for the user's answer ended first: the ask stays up for the same call made again.
 fn unanswered(tool: &str) -> String {
     format!(
         "ArgumentError: waiting_for_user::The user hasn't answered yet, so nothing was changed or run. \
-The request is still on their screen. To keep waiting for their answer, call `{tool}` again with the same arguments."
+The request is still on their screen. To keep waiting, call `{tool}` again with the same arguments. \
+Don't try another way to do this meanwhile. If they still haven't answered after a few tries, tell them the request is waiting for them."
     )
 }
 
@@ -960,6 +979,15 @@ fn write_string(out: &mut String, text: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_open_waits_less_for_the_users_answer_than_a_run_so_the_open_after_it_fits_in_a_minute() {
+        use std::time::Duration;
+        let (open, run) = (super::ask_wait("new_notebook"), super::ask_wait("execute_cell"));
+        assert_eq!(super::ask_wait("open_notebook"), open);
+        assert!(open + Duration::from_secs(25) < Duration::from_secs(50), "{open:?}");
+        assert!(run > open && run + Duration::from_secs(5) < Duration::from_secs(55), "{run:?}");
+    }
+
     use super::*;
 
     /// The notebook tools' names and arguments, without their descriptions: what a front of another

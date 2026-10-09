@@ -98,8 +98,9 @@ call is still waiting: a `notifications/progress` when the request carried
 event. The stream keeps Claude Code's checks for a response that hasn't begun
 and for five silent minutes happy, but not its tool timeout: Claude Code ends
 every MCP call after 60 seconds by default, progress or not. So the wait for
-the answer ends 45 seconds into the call with `waiting_for_user`, the card
-stays up, and the same call made again waits on it (`asks.rs`). `GET /mcp` is `405` (no
+the answer ends 45 seconds into the call (20 for an open, which has work after
+it) with `waiting_for_user`, the card stays up, and the same call made again
+on the same code waits on it (`asks.rs`). `GET /mcp` is `405` (no
 server-initiated stream); so is `DELETE`, since a session lasts as long as the
 runtime. The reply to `initialize` carries an `Mcp-Session-Id` only for a
 client without `X-Endeavor-Session` (see

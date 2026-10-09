@@ -673,14 +673,21 @@ not supported. These gaps stay open.
   still-running cells again, Pluto queues the run as it does for an unwaited
   one; `run_conflict` only covers another session's edits.
 - [P2] **A call that waits for the user's answer stops waiting at 45
-  seconds.** Before, it waited as long as the card was up, and Claude Code
-  ended it at 60 seconds: in Manual, an unanswered "Let Claude create a
-  notebook?" card outlived its call (seen 2026-10-09). Now the call fails with
-  `waiting_for_user` and the card stays up; the same call made again by the same
-  session waits on the same card, and gets at once an answer given meanwhile.
-  The session's next held call to anything else takes the card down. Not yet
-  tried with a real agent and the app; the app may show a second prompt of the
-  agent's own for the repeated call, unless the user chose "Always" for it.
+  seconds, or 20 for `open_notebook` and `new_notebook`.** Before, it waited
+  as long as the card was up, and Claude Code ended it at 60 seconds: in
+  Manual, an unanswered "Let Claude create a notebook?" card outlived its call
+  (seen 2026-10-09). The wait leaves room for the work after it: a run waits at
+  least 5 seconds more, and the first open in a new Julia takes 20 to 25. The
+  call then fails with `waiting_for_user`, and the card stays up. The same call
+  made again by the same session, on the same notebook code, waits on the same
+  card and gets at once an approval given meanwhile. Any other call by the
+  session takes the card down, so an approval can't reach code the agent
+  changed since; so does a refusal while no call waits, since the app refuses
+  what is still up when a turn ends. `waiting_for_user` is an error on purpose,
+  unlike `execution.still_running`: nothing happened, and the agent must not
+  assume it did. Not yet tried with a real agent and the app; the app may show
+  a second prompt of the agent's own for the repeated call, unless the user
+  chose "Always" for it.
 - [P2] **An agent can add a machine under a name the user did not give.** Told
   "the machine localhost", a Codex agent called `add_machine` with host
   `self`, an alias `list_machines` showed in `ssh_hosts_not_added`, and told

@@ -765,6 +765,19 @@ impl Notebooks {
     }
 
     /// A session makes a tool call.
+    /// Notebook `id`'s code as it is now, cells in order, as a number that
+    /// changes when any cell's code or the order does. None for an id that
+    /// names no open notebook.
+    pub fn code_print(&self, id: &str) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let nb = self.snapshot(id).ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for cell in &nb.order {
+            (cell, nb.cells.get(cell).map(|c| &c.code)).hash(&mut hasher);
+        }
+        Some(hasher.finish())
+    }
+
     pub fn note_call(&self, owner: &str) {
         if owner.is_empty() {
             return;
