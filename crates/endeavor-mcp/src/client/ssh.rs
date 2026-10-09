@@ -128,7 +128,7 @@ impl Transport {
 
 /// The ssh to run: on Windows, Windows' own OpenSSH when it is installed, and
 /// otherwise the first `ssh` on the PATH. In Git Bash that first one is Git's,
-/// which signs in with the Windows user name as it is spelled (`WongLab`) where
+/// which signs in with the Windows user name as it is spelled (`JDoe`) where
 /// Windows' lowercases it, and may read another `~/.ssh` than `%USERPROFILE%\.ssh`.
 fn ssh_program() -> PathBuf {
     #[cfg(windows)]
