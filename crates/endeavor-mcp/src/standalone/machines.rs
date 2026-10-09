@@ -887,12 +887,13 @@ impl Relay {
     }
 
     /// The status's fields that only the front knows: the machine, its job and the runtime's own port, and
-    /// `other_version` when the runtime is another build's that doesn't offer this build's interface, which
-    /// says so again after the notice that was told once, with `runtime_build` the build that started it.
+    /// `other_version` when the runtime is another build's that doesn't offer this build's interface and is
+    /// kept, which says so again after the notice that was told once, with `runtime_build` the build that started it.
     fn add_machine_fields(&self, reply: &mut Value) -> bool {
         let machine = self.current();
         let status = if machine.is_local() { Some(self.local.status()) } else { self.connections.status(&machine.id) };
-        let other = status.as_ref().and_then(|status| status.state.runtime()).filter(|runtime| !runtime.usable_as_is());
+        // On this computer, only one that was kept: an idle one is stopped by the next call that may start one.
+        let other = status.as_ref().and_then(|status| status.state.runtime()).filter(|runtime| !runtime.usable_as_is() && (!machine.is_local() || self.local.kept(runtime.pid)));
         if machine.is_local() && other.is_none() {
             return false;
         }
@@ -900,7 +901,7 @@ impl Relay {
         if let Some(runtime) = other {
             let place = if machine.is_local() { "this computer" } else { machine.name.as_str() };
             let cluster = !machine.is_local() && self.connections.get(&machine.id).is_some_and(|session| session.cluster());
-            fields.insert("other_version".into(), format!("{}{}", crate::other_version_text(place, &machine.id, runtime.interface), cluster_clause(cluster)).into());
+            fields.insert("other_version".into(), format!("{}{}", crate::other_version_text(place, &machine.id, runtime.interface, ""), cluster_clause(cluster)).into());
             fields.insert("runtime_build".into(), runtime.build.clone().map_or(Value::Null, Value::from));
         }
         if machine.is_local() {

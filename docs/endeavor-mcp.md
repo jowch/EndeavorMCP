@@ -380,8 +380,9 @@ no notebook is open, else keeps it and tells the agent once; `serve` and
 `build` and `interface` the helper's `Ready` carries (`RuntimeInfo` has both,
 and `RuntimeInfo::usable_as_is` applies the rule); it is never stopped for the
 agent, only told of once, and `client::Session` reports it as trouble.
-While the session uses such a runtime, here or on a machine,
-`pluto_session_status` says so every time, for an agent that no longer has
+While the session uses such a runtime that was kept, here or on a machine,
+`pluto_session_status` says so every time (not for an idle one here that the
+next call that may start a runtime stops), for an agent that no longer has
 the notice: `other_version` is the same sentence and `runtime_build` the build
 that started it. What the agent is told says "an older" version when the
 runtime's number is lower or missing, "a newer" one when it is higher, and

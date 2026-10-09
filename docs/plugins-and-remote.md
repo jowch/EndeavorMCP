@@ -522,7 +522,7 @@ gives (none from an older helper). When the runtime offers this build's
 interface, nothing is said. Otherwise `use_machine`, or the first notebook
 call, tells the agent once that the runtime there is from an older (or
 newer) version of Endeavor and that stopping it (with the user's agreement)
-lets the next call start this version; `pluto_session_status` says it again
+and then `use_machine` starts this version; `pluto_session_status` says it again
 every time (`other_version`, with the build in `runtime_build`), and
 `client::Session` reports the same as trouble (`Config::on_event`). The front answers the tool list from its own build, so
 a tool or argument newer than the runtime fails with the runtime's own error.

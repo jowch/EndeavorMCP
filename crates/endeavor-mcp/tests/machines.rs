@@ -1416,6 +1416,8 @@ fn a_runtime_of_another_build_with_no_notebook_open_is_replaced_by_the_first_cal
     let (failed, listed) = second.contents("list_notebooks", json!({}));
     assert!(!failed && listed == [json!([])], "a query is answered by the runtime there, with nothing to add: {listed:?}");
     assert_eq!(place.local_runtime(), Some(old), "a query starts nothing, so it stops nothing");
+    let status = second.ok("pluto_session_status", json!({}));
+    assert!(status.get("other_version").is_none() && status.get("runtime_build").is_none(), "the next start stops it, so the status doesn't say it is kept: {status}");
     second.call("open_notebook", json!({ "path": path }));
     let new = place.local_runtime().expect("a runtime");
     assert!(new != old && !pid_alive(old), "{old} was stopped and {new} started");
@@ -1440,7 +1442,8 @@ fn a_runtime_of_another_build_with_a_notebook_open_is_kept_and_the_agent_is_told
     let (failed, said) = second.contents("list_notebooks", json!({}));
     assert!(!failed && said[0][0]["path"] == path.as_str(), "{said:?}");
     let notice = said[1].as_str().unwrap_or_default();
-    assert!(notice.starts_with("Note: Julia on this computer was started by an older version of Endeavor") && notice.contains("It has 1 notebook open.") && notice.contains("`stop_machine` with machine \"local\""), "{notice}");
+    assert!(notice.starts_with("Note: Julia on this computer was started by an older version of Endeavor, and it keeps running as it is. It has 1 notebook open. Some notebook tools"), "{notice}");
+    assert!(notice.contains("`stop_machine` with machine \"local\"; then `use_machine` with machine \"local\" starts this version."), "{notice}");
     assert!(!notice.contains(ANOTHER_BUILD), "{notice}");
     second.ok("open_notebook", json!({ "path": path }));
     let (_, again) = second.contents("list_notebooks", json!({}));

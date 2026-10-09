@@ -113,6 +113,8 @@ struct Builds {
     checked: Option<u32>,
     /// A runtime of another build was stopped. It is done once, so that two fronts of different builds don't take turns.
     stopped_one: bool,
+    /// The runtime of another build that was kept, and the agent told of.
+    kept: Option<u32>,
 }
 
 /// What `Local::other_build` came to.
@@ -173,7 +175,14 @@ impl Local {
                 Err(e) => eprintln!("endeavor: {e}"),
             }
         }
+        builds.kept = Some(runtime.pid);
         OtherBuild::Kept(other_build_notice(LOCAL, LOCAL, state.interface, open))
+    }
+
+    /// Whether `pid` is a runtime of another build that `other_build` kept. One it left for a call that may
+    /// start a runtime isn't, since that call stops it.
+    pub(super) fn kept(&self, pid: u32) -> bool {
+        self.builds.lock().unwrap().kept == Some(pid)
     }
 
     /// The phase, with a runtime that is no longer the one recorded forgotten. The state folder is read with the lock let go.
@@ -245,7 +254,7 @@ impl Local {
 pub(super) fn other_build_notice(name: &str, id: &str, interface: Option<u32>, open: Option<u32>) -> String {
     let place = if name == LOCAL { "this computer" } else { name };
     let open = open.filter(|n| *n > 0).map_or(String::new(), |n| format!(" It has {n} notebook{} open.", if n == 1 { "" } else { "s" }));
-    format!("Note: {}{open}", crate::other_version_text(place, id, interface))
+    format!("Note: {}", crate::other_version_text(place, id, interface, &open))
 }
 
 /// A runtime that was found or started, as the session uses it. The user is told on stderr where the

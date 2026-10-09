@@ -105,9 +105,10 @@ Not yet checked:
 - The check of a runtime from another build against a real Slurm job. On
   2026-10-09 a real Julia started by a build from before the interface number
   was checked by `mcp` on the same computer and on a machine over real ssh
-  (localhost): the agent was told once, and the runtime kept running. Not yet
-  against a job, and `endeavor update` reading the new binary's interface only
-  against a local stand-in.
+  (localhost), with the current wording and `other_version`: the agent was
+  told once, the status said it on every call, and the runtime kept running.
+  Not yet against a job, and `endeavor update` reading the new binary's
+  interface only against a local stand-in.
 - Gemini against `endeavor serve` and `endeavor mcp`, and Codex against
   `serve`. Their config lines in serve.md come from each tool's documentation.
   (Codex against `endeavor mcp` over stdio was tried through `codex exec` on
