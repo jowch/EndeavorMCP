@@ -1180,6 +1180,34 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
 }
 
 #[test]
+fn a_machines_runtime_too_old_to_ask_before_a_run_still_runs_the_plugins_code() {
+    let place = Place::new("machine-no-run-gate");
+    place.add_lab();
+    let path = place.notebook("old.jl");
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab" }));
+    first.ok("open_notebook", json!({ "path": path }));
+    first.finish();
+    wait_for("the connection to end", || place.helpers().is_empty());
+
+    // A record from before the core recorded its build or interface.
+    let mut record = read_record(&place.state);
+    record.as_object_mut().unwrap().remove("interface");
+    record.as_object_mut().unwrap().remove("build");
+    std::fs::write(place.state.join("runtime.json"), record.to_string()).unwrap();
+    let mut second = place.front();
+    second.initialize();
+    second.ok("use_machine", json!({ "machine": "lab" }));
+    // No runtime holds the plugin's runs for the user's answer (it sends no policy), so an old one is no
+    // worse, and refusing would only push the user to stop Julia, which on a cluster gives up the job.
+    let (_, said) = second.call("execute_cell", json!({ "notebook_id": NOTEBOOK, "cell_id": "00000000-0000-0000-0000-000000000000" }));
+    assert!(!said.to_string().contains("too old"), "{said}");
+    assert_eq!(second.ok("list_notebooks", json!({}))[0]["path"], path);
+    second.finish();
+}
+
+#[test]
 fn a_dropped_connection_is_made_again_in_the_same_front_on_the_same_browser_address() {
     let place = Place::new("dropped");
     place.add_lab();

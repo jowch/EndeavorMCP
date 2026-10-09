@@ -162,6 +162,23 @@ fn ready_with(id: u32, token: &str) -> ToApp {
 }
 
 #[test]
+fn a_ready_that_says_neither_build_nor_interface_attaches_a_runtime_that_runs_no_code() {
+    let helper = Scripted::new();
+    let listener = Listener::start("lab").unwrap();
+    helper.started(&listener, |_| {});
+    assert_eq!(listener.asks(), Some(false));
+    for (build, interface) in [(Some("b".to_owned()), None), (None, Some(crate::core::INTERFACE))] {
+        let helper = Scripted::new();
+        let starting = helper.starting(&listener, |_| {});
+        let id = *helper.starts_sent(1).last().unwrap();
+        let ToApp::Ready { id, launcher, node, pid, token, reattached, job, port, .. } = ready(id) else { unreachable!() };
+        helper.tell(&ToApp::Ready { id, launcher, node, pid, token, reattached, job, port, build: build.clone(), interface });
+        starting.join().unwrap().expect("ready");
+        assert_eq!(listener.asks(), Some(true), "{build:?} {interface:?}");
+    }
+}
+
+#[test]
 fn a_stop_waits_for_one_deadline_however_much_the_helper_says() {
     let helper = Scripted::new();
     let say = helper.say.clone();

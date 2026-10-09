@@ -78,6 +78,8 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>)
         restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
         restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {}", install_text(name, &InstallInfo { items: items.to_vec(), helper: None }, "use_machine")),
         not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
+        // The plugin's runs aren't held for the user's answer by any runtime (it sends no policy): an old one is no worse.
+        no_run_gate: None,
     };
     Session::new(config)
 }

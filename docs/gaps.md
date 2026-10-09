@@ -38,6 +38,12 @@ Every P1:
   carries) it only tells the agent once, in `use_machine` or the next notebook
   call, and `client::Session` reports it as trouble: a machine's runtime is
   never stopped for the agent, since on a cluster that gives up the job.
+  A machine's runtime whose `Ready` gives neither its build nor its
+  interface is from before runs waited for the user's answer, so for a
+  client whose runs wait for it (the app, which sends a policy) the listener
+  refuses its code runs (`Messages::no_run_gate`); reading and editing still
+  work. The plugin leaves it off: it sends no policy, so no runtime holds its
+  runs, old or new.
   `serve` doesn't need it: the agent talks to the core itself.
 - [P2] **Old builds are never removed from servers or from the plugin's
   folder.** Every build a server was sent stays in `~/.cache/endeavor/<build>/`

@@ -30,6 +30,11 @@ pub struct Messages {
     pub restart_needs_install: fn(&str, &[wire::Item]) -> String,
     /// The server was stopped or disconnected on purpose.
     pub not_connected: fn(&str) -> String,
+    /// Why a call that runs code is refused on a runtime too old to hold a run for the user's answer
+    /// (`Listener::attach`). None, the default: such a runtime runs code as any other. Only a client
+    /// whose runs are held for the user's answer (one that sends `endeavor/set_policy`, as the app
+    /// does) gains anything from the refusal; for any other, no runtime holds a run, old or new.
+    pub no_run_gate: Option<fn(&str) -> String>,
 }
 
 impl Default for Messages {
@@ -38,6 +43,7 @@ impl Default for Messages {
             restart_failed: |name| format!("Julia on {name} couldn't start. Use Restart Julia to try again."),
             restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {} Endeavor is asking the user whether it may install that; Julia starts once they agree.", wire::needs_text(items, name)),
             not_connected: |name| format!("Endeavor isn't connected to {name}. Reconnect it to use its notebook again."),
+            no_run_gate: None,
         }
     }
 }
@@ -58,7 +64,9 @@ pub struct Listener {
 enum Upstream {
     /// No runtime yet: a connection is closed.
     None,
-    Up { mux: Arc<Mux>, token: String },
+    /// `asks`: the runtime says its build or its interface, so it is new enough to hold a run for
+    /// the user's answer. One that says neither runs no code (`Messages::no_run_gate`).
+    Up { mux: Arc<Mux>, token: String, asks: bool },
     /// The runtime was up and is being got back. A connection waits for it up
     /// to `HOLD`; then an MCP request is answered with `why`
     /// (`serve_unreachable`), and anything else closed.
@@ -120,17 +128,25 @@ impl Listener {
         let upstream = self.upstream.lock().unwrap();
         let (upstream, _) = self.changed.wait_timeout_while(upstream, HOLD, |u| matches!(u, Upstream::Away { .. })).unwrap();
         match &*upstream {
-            Upstream::Up { mux, .. } => {
-                let mux = mux.clone();
+            Upstream::Up { mux, asks, .. } => {
+                let (mux, asks) = (mux.clone(), *asks);
                 drop(upstream);
-                match &self.refuse {
-                    Some(refuse) => {
-                        let Ok((ours, theirs)) = loopback_pair() else { return };
-                        if mux.open(theirs).is_ok() {
-                            let _ = crate::serve_guarded(connection, ours, &|session, tool, arguments| refuse(session, tool, arguments));
+                // The runtime runs code unless it doesn't ask and this client holds runs for the user's answer.
+                let no_run_gate = if asks { None } else { self.messages.no_run_gate };
+                if self.refuse.is_none() && no_run_gate.is_none() {
+                    drop(mux.open(connection));
+                    return;
+                }
+                let Ok((ours, theirs)) = loopback_pair() else { return };
+                if mux.open(theirs).is_ok() {
+                    let _ = crate::serve_guarded(connection, ours, &|session, tool, arguments| {
+                        if let Some(why) = no_run_gate
+                            && crate::runs_code(tool, arguments)
+                        {
+                            return Some(why(&self.name));
                         }
-                    }
-                    None => drop(mux.open(connection)),
+                        self.refuse.as_ref().and_then(|refuse| refuse(session, tool, arguments))
+                    });
                 }
             }
             Upstream::Away { token, why } => {
@@ -143,8 +159,13 @@ impl Listener {
         }
     }
 
-    pub(super) fn attach(&self, mux: Arc<Mux>, token: String) {
-        *self.upstream.lock().unwrap() = Upstream::Up { mux, token };
+    /// Relay connections to `mux`'s runtime from now on. `asks`: its `Ready` gave its build or its
+    /// interface. A runtime that gives neither is from before runs were held for the user's answer
+    /// (EndeavorMCP b0cab29) or close to it, and the listener refuses its code runs when the client
+    /// asked for that (`Messages::no_run_gate`). The rule is set with the runtime, so no call reaches
+    /// it before the rule does.
+    pub(super) fn attach(&self, mux: Arc<Mux>, token: String, asks: bool) {
+        *self.upstream.lock().unwrap() = Upstream::Up { mux, token, asks };
         self.changed.notify_all();
     }
 
@@ -153,7 +174,7 @@ impl Listener {
     /// replaces a deliberate one.
     fn dropped(&self, why: String, mux: &Arc<Mux>) {
         let mut upstream = self.upstream.lock().unwrap();
-        if let Upstream::Up { mux: up, token } = &*upstream
+        if let Upstream::Up { mux: up, token, .. } = &*upstream
             && Arc::ptr_eq(mux, up)
         {
             *upstream = Upstream::Away { token: token.clone(), why };
@@ -205,6 +226,12 @@ impl Listener {
     /// `mux`'s helper has gone because the client let it go, so nothing will reconnect it.
     pub(super) fn left(&self, mux: &Arc<Mux>) {
         self.dropped(self.not_connected(), mux);
+    }
+
+    /// Whether the runtime it relays to may run code (`attach`); none while there is no runtime.
+    #[cfg(test)]
+    pub(super) fn asks(&self) -> Option<bool> {
+        if let Upstream::Up { asks, .. } = &*self.upstream.lock().unwrap() { Some(*asks) } else { None }
     }
 
     pub fn port(&self) -> u16 {
