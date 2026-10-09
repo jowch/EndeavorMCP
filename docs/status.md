@@ -81,6 +81,12 @@ Checked live on 2026-10-03:
   tools and no `notebook_guide`. The same `endeavor mcp --skills plugin`
   command, driven over stdio, made a notebook and ran a cell (`42`). No
   model turn was run, because the empty config isn't logged in.
+- The Antigravity plugin on Windows 10 (agy 1.3.2, 2026-10-09), installed
+  from its GitHub folder URL with Git's `bin` on the PATH and Julia from
+  juliaup. agy loaded the three skills, the launcher downloaded the pinned
+  release, and `agy -p` made a notebook and read a cell's output (`5050`).
+  It needed `COMPUTERNAME` set to the DNS host name's case
+  ([gaps.md](gaps.md), Windows).
 - The app sending its bundled macOS helper to a macOS server, with this Mac
   as the server over `ssh localhost`. The app picked
   `Resources/helpers/darwin-aarch64/endeavor`, the server's copy matched it

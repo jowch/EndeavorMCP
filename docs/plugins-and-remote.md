@@ -6,8 +6,8 @@ cluster. A design; what is built is marked.
 
 _Drafted 2026-10-05, rewritten the same day after reading the Endeavor app's
 remote code ([remote-sessions.md](https://github.com/jowch/Endeavor/blob/main/docs/remote-sessions.md)).
-Facts about Antigravity come from its documentation and are untested; Codex
-was tried on 2026-10-08 (see "What was seen with Codex")._
+Codex was tried on 2026-10-08 (see "What was seen with Codex") and
+Antigravity on Windows on 2026-10-09 (see "What was seen with Antigravity")._
 
 _Revised 2026-10-07: see [The revision](#the-revision-decided-2026-10-07).
 It removed the link process, a background process for each server, and the
@@ -885,8 +885,8 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
 
 One plugin per harness with the same content: the skills, the launcher and one
 stdio entry that runs it. `claude-plugin/` is checked live with the launcher
-replaced by `ENDEAVOR_BIN`. `antigravity-plugin/` is built to what its
-documentation says and tried on no real install. `codex-plugin/` was installed
+replaced by `ENDEAVOR_BIN`. `antigravity-plugin/` was installed with agy on Windows and
+used through `agy -p` (below). `codex-plugin/` was installed
 from a local copy of the repository and used through `codex exec` (below).
 
 | | Claude Code | Codex | Antigravity |
@@ -896,8 +896,8 @@ from a local copy of the repository and used through `codex exec` (below).
 | Command | `sh ${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh ${PLUGIN_ROOT}/launch/endeavor-mcp.sh …` (expanded in `args`) | `sh -c` that finds the plugin in `~/.gemini/antigravity-cli/plugins/endeavor` and runs the launcher |
 | Skills | `skills/` (a copy) | `skills/` (a copy) | `skills/` (a copy) |
 | Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
-| Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add`, `codex plugin add endeavor@endeavor`, from `.agents/plugins/marketplace.json` | `agy plugin install <folder>` |
-| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable, so notebook paths must be absolute | the folder `mcp` starts in (from documentation) |
+| Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add`, `codex plugin add endeavor@endeavor`, from `.agents/plugins/marketplace.json` | `agy plugin install <folder or its GitHub tree URL>` |
+| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable, so notebook paths must be absolute | none: `--no-folder`, as Codex |
 
 Each plugin folder holds `launch/endeavor-mcp.sh`, `launch/install.sh` and
 `launch/release-key`. The command is `sh` with the script as its argument, so
@@ -917,12 +917,34 @@ sh scripts/plugins.sh sync` and amend the commit; the amend keeps the key.
 Because the key covers `plugin/`, a matching pin also
 means the binary embeds the skills the plugins ship.
 
-**What the documentation says, and what was seen.** Antigravity
-([antigravity.google/docs/plugins](https://antigravity.google/docs/plugins)):
-`plugin.json`, `mcp_config.json`, `hooks.json`, `skills/`, installed to
-`~/.gemini/antigravity-cli/plugins/<name>/`. It gives no shape for
-`mcp_config.json` or `hooks.json`, so the file uses the `mcpServers` shape the
-others use, and no variable is assumed. Not tried.
+**What was seen with Antigravity** (agy 1.3.2, Windows 10, through `agy -p`;
+[antigravity.google/docs/plugins](https://antigravity.google/docs/plugins) was
+the documentation used to build the folder):
+
+- The documentation names `plugin.json`, `mcp_config.json`, `hooks.json` and
+  `skills/`, and gives no shape for `mcp_config.json`; the `mcpServers` shape
+  the others use is accepted, and `agy plugin validate` passes. It has no
+  per-system command and no plugin-root variable, which is why the entry is a
+  `sh -c` that looks for the plugin folder.
+- `agy plugin install` takes a local folder or a GitHub `tree/<branch>/<path>`
+  URL (it clones and installs that folder). Given the repository's URL it
+  installs every plugin it finds; `plugin/.claude-plugin` is also named
+  `endeavor` and overwrites this one, leaving skills only.
+- The plugin is installed to `~/.gemini/config/plugins/endeavor`, the second
+  folder the entry tries; the documented `~/.gemini/antigravity-cli/plugins`
+  was not used. `agy plugin uninstall endeavor` removes it.
+- agy loads the three skills and prefixes the server with the plugin's name:
+  `endeavor_endeavor`. It gives the server no project folder.
+- `sh` must be on the Windows PATH (`C:\Program Files\Git\bin`); without it
+  the server doesn't start and agy shows no error.
+- Print mode refuses MCP calls unless `~/.gemini/antigravity-cli/settings.json`
+  allows each tool, as `mcp(endeavor_endeavor/new_notebook)`; `mcp(endeavor)`
+  matches nothing, and `mcp(endeavor_endeavor/*)` would allow `run_shell` too.
+- The first start installed Pluto in about two minutes; tool calls answered
+  "starting" after 45 s and the agent called again. With packages installed, a
+  run from a cold Julia took 85–100 s including the model's turns.
+- `agy mcp add endeavor <endeavor.exe> -- mcp --no-folder` (written to
+  `~/.gemini/config/mcp_config.json`) works without `sh` or skills.
 
 **What was seen with Codex** (0.161.0, Linux, through `codex exec`;
 [developers.openai.com/plugins/build/plugins](https://developers.openai.com/plugins/build/plugins)
@@ -973,10 +995,10 @@ was the documentation used to build the folder):
 
 Still from documentation or not tried: Codex's job object on Windows,
 subagents, the tool timeout (default 60 s), interactive `codex` (where the
-user is asked to approve), and Antigravity.
+user is asked to approve), and Antigravity on macOS and Linux, interactively,
+or as the desktop app.
 
-To check: that Antigravity accepts its entry, starts the server in the project
-folder and loads the skills, and that Claude Code's `SessionStart` hook runs
+To check: that Claude Code's `SessionStart` hook runs
 before the server starts (if not, the first start downloads, as in the other
 agents).
 
@@ -1045,8 +1067,8 @@ agents).
    [gaps.md](gaps.md)).
 6. The plugin gets the binary itself: the launcher, the Claude Code plugin
    using it, the Codex plugin folder (used in a trial through
-   `codex exec`, with absolute paths only) and the Antigravity one (built to its documentation and
-   unverified), the `endeavor-setup` skill, and `endeavor update` leaving a
+   `codex exec`, with absolute paths only) and the Antigravity one (used through
+   `agy -p` on Windows), the `endeavor-setup` skill, and `endeavor update` leaving a
    plugin's binary alone. The pinned key is set after the first release from
    `main`.
 7. The revision of 2026-10-07, in the order given in
