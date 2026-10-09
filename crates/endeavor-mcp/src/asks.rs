@@ -11,8 +11,10 @@
 //! a user can be away longer. The ask then stays up, without a call, and the
 //! same call made again by the same session, on the same code, waits on it
 //! once more; an approval the user gave meanwhile is that call's at once. Any
-//! other call by the session takes it down, and so does a refusal (the app
-//! refuses what is still up when a turn ends): the next call asks afresh.
+//! other call by the session takes it down, and so does a refusal: the next
+//! call asks afresh. The app sees which asks a call waits on (`waiting`), so
+//! it can keep one left up past the end of the agent's turn: the agent is told
+//! to stop calling after a while and let the user answer when they are back.
 
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -45,7 +47,9 @@ struct Waiting {
     tool: String,
     arguments: Value,
     code: Option<u64>,
-    /// What the app sees: `{id, owner, call_id, tool, arguments, since}`.
+    /// When it was first asked: the same call made again goes on counting from here.
+    asked: Instant,
+    /// What the app sees: `{id, owner, call_id, tool, arguments, since}`, and `waiting` from `list`.
     shown: Value,
     answer: Option<Answer>,
     cancelled: bool,
@@ -66,8 +70,9 @@ pub enum Outcome {
     Cancelled,
     /// The agent's connection closed.
     Gone,
-    /// The deadline came first. The ask is still up, for the same call made again.
-    Unanswered,
+    /// The deadline came first, this long after the ask was first made. The
+    /// ask is still up, for the same call made again.
+    Unanswered(Duration),
 }
 
 /// One call to wait for an answer about.
@@ -87,9 +92,16 @@ impl Asks {
         Asks { state: Mutex::new(State { next: (now * 1000.0) as u64, waiting: Vec::new() }), changed: Condvar::new() }
     }
 
-    /// The calls waiting, in the order they came.
+    /// The asks up, in the order they came, each with `waiting`: whether a call waits on it now.
     pub fn list(&self) -> Vec<Value> {
-        self.state.lock().unwrap().waiting.iter().filter(|w| w.answer.is_none() && !w.cancelled).map(|w| w.shown.clone()).collect()
+        let state = self.state.lock().unwrap();
+        let up = state.waiting.iter().filter(|w| w.answer.is_none() && !w.cancelled);
+        up.map(|w| {
+            let mut shown = w.shown.clone();
+            shown["waiting"] = (!w.request.is_null()).into();
+            shown
+        })
+        .collect()
     }
 
     /// Session `owner` makes a call to `tool` with `arguments`: its asks left
@@ -118,7 +130,7 @@ impl Asks {
         let id = state.next;
         let shown = json!({ "id": id, "owner": ask.owner, "call_id": ask.call_id, "tool": ask.tool, "arguments": ask.arguments, "since": ask.since });
         let (tool, arguments, code) = (ask.tool.to_owned(), ask.arguments.clone(), ask.code);
-        state.waiting.push(Waiting { id, owner: ask.owner.to_owned(), request: ask.request.clone(), tool, arguments, code, shown, answer: None, cancelled: false });
+        state.waiting.push(Waiting { id, owner: ask.owner.to_owned(), request: ask.request.clone(), tool, arguments, code, asked: Instant::now(), shown, answer: None, cancelled: false });
         id
     }
 
@@ -161,7 +173,7 @@ impl Asks {
             }
             if Instant::now() >= deadline {
                 state.waiting[at].request = Value::Null;
-                return Outcome::Unanswered;
+                return Outcome::Unanswered(state.waiting[at].asked.elapsed());
             }
             let (after, timed_out) = self.changed.wait_timeout(state, CHECK.min(deadline.saturating_duration_since(Instant::now()))).unwrap();
             state = after;
@@ -197,7 +209,7 @@ mod tests {
         let asks = Asks::new(0.0);
         let cell = json!({ "notebook_id": "n", "cell_id": "a" });
         let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
-        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered));
+        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered(_)));
         assert_eq!(asks.list().len(), 1, "the user still sees it");
         // A cancellation of the call that stopped waiting names no ask now.
         assert!(!asks.cancel("1", &json!(7)));
@@ -209,11 +221,25 @@ mod tests {
     }
 
     #[test]
+    fn the_app_sees_whether_a_call_waits_and_the_same_call_again_counts_from_the_first_ask() {
+        let asks = Asks::new(0.0);
+        let cell = json!({ "notebook_id": "n", "cell_id": "a" });
+        let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
+        assert_eq!(asks.list()[0]["waiting"], true);
+        let Outcome::Unanswered(first) = asks.wait(id, &|| false, soon()) else { panic!("answered") };
+        assert_eq!(asks.list()[0]["waiting"], false, "left up: the app may keep its card past the turn");
+        assert_eq!(asks.add(ask("1", &json!(8), "execute_cell", &cell)), id);
+        assert_eq!(asks.list()[0]["waiting"], true);
+        let Outcome::Unanswered(second) = asks.wait(id, &|| false, soon()) else { panic!("answered") };
+        assert!(second >= first + Duration::from_millis(50), "{first:?} then {second:?}");
+    }
+
+    #[test]
     fn the_same_call_again_waits_again_and_can_be_cancelled() {
         let asks = Asks::new(0.0);
         let cell = json!({ "notebook_id": "n", "cell_id": "a" });
         let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
-        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered));
+        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered(_)));
         assert_eq!(asks.add(ask("1", &json!(8), "execute_cell", &cell)), id);
         assert!(asks.cancel("1", &json!(8)));
         assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Cancelled));
@@ -226,7 +252,7 @@ mod tests {
         let cell = json!({ "notebook_id": "n", "cell_id": "a" });
         let other_cell = json!({ "notebook_id": "n", "cell_id": "b" });
         let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
-        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered));
+        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered(_)));
         // Another session's same call is its own ask, and leaves this one up.
         let theirs = asks.add(ask("2", &json!(7), "execute_cell", &cell));
         assert_ne!(theirs, id);
@@ -244,7 +270,7 @@ mod tests {
         let asks = Asks::new(0.0);
         let cell = json!({ "notebook_id": "n", "cell_id": "a" });
         let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
-        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered));
+        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered(_)));
         assert!(!asks.moved_on("1", "execute_cell", &cell), "the same call keeps it");
         assert!(!asks.moved_on("2", "read_cell", &cell), "another session's call doesn't touch it");
         assert_eq!(asks.list().len(), 1);
@@ -260,7 +286,7 @@ mod tests {
         let asks = Asks::new(0.0);
         let cell = json!({ "notebook_id": "n", "cell_id": "a" });
         let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
-        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered));
+        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered(_)));
         // The user allows the card raised for the code as it was; the code changes (another session, say).
         asks.answer(id, Answer { allow: true, user_ran: json!([]) }).unwrap();
         let request = json!(8);
@@ -275,13 +301,13 @@ mod tests {
         let asks = Asks::new(0.0);
         let cell = json!({ "notebook_id": "n", "cell_id": "a" });
         let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
-        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered));
+        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered(_)));
         // As the app refuses what is still up when the turn ends.
         asks.answer(id, Answer { allow: false, user_ran: json!([]) }).unwrap();
         assert!(asks.list().is_empty());
         let again = asks.add(ask("1", &json!(8), "execute_cell", &cell));
         assert_ne!(again, id);
-        assert!(matches!(asks.wait(again, &|| false, soon()), Outcome::Unanswered), "no refusal carried over");
+        assert!(matches!(asks.wait(again, &|| false, soon()), Outcome::Unanswered(_)), "no refusal carried over");
         // A refusal while a call waits is still that call's answer.
         assert_eq!(asks.add(ask("1", &json!(9), "execute_cell", &cell)), again);
         asks.answer(again, Answer { allow: false, user_ran: json!([]) }).unwrap();

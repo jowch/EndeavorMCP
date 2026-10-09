@@ -496,7 +496,7 @@ impl Bridge {
             Outcome::Answered(_) if matches!(tool, "edit_cell" | "add_cell") => Ok(false),
             Outcome::Answered(_) => Err(tool_error("ArgumentError: not_approved::The user chose not to run this.", false)),
             Outcome::Cancelled | Outcome::Gone => Err(tool_error("ArgumentError: cancelled::The call was cancelled before the user answered.", false)),
-            Outcome::Unanswered => Err(tool_error(&unanswered(tool), false)),
+            Outcome::Unanswered(asked) => Err(tool_error(&unanswered(tool, asked), false)),
         }
     }
 
@@ -526,12 +526,27 @@ fn ask_wait(tool: &str) -> Duration {
     }
 }
 
-/// The error of a call whose wait for the user's answer ended first: the ask stays up for the same call made again.
-fn unanswered(tool: &str) -> String {
+/// How long the agent is told to keep making a call again while the user doesn't answer it. After
+/// that it hands back to the user: one who stepped away comes back to the request and the agent's word
+/// on it, not to a turn that ended because the agent gave up on its own count of tries.
+const KEEP_ASKING: Duration = Duration::from_secs(120);
+
+/// The error of a call whose wait for the user's answer ended first, `asked` after the ask was first
+/// made: the ask stays up for the same call made again. The agent is told plainly which to do, since
+/// "after a few tries" read as two tries, under a minute.
+fn unanswered(tool: &str, asked: Duration) -> String {
+    if asked < KEEP_ASKING {
+        return format!(
+            "ArgumentError: waiting_for_user::The user hasn't answered yet, so nothing was changed or run. \
+The request is still on their screen. Call `{tool}` again now with the same arguments to keep waiting. \
+Don't try another way to do this meanwhile."
+        );
+    }
     format!(
-        "ArgumentError: waiting_for_user::The user hasn't answered yet, so nothing was changed or run. \
-The request is still on their screen. To keep waiting, call `{tool}` again with the same arguments. \
-Don't try another way to do this meanwhile. If they still haven't answered after a few tries, tell them the request is waiting for them."
+        "ArgumentError: waiting_for_user::The user hasn't answered for {} minutes, so nothing was changed or run. \
+Stop calling `{tool}` for now. Tell the user that your request is waiting for their answer, and end your reply there. \
+When they write back, call `{tool}` again with the same arguments: it goes ahead if they allowed it, and asks them again if not.",
+        KEEP_ASKING.as_secs() / 60
     )
 }
 
@@ -986,6 +1001,17 @@ mod tests {
         assert_eq!(super::ask_wait("open_notebook"), open);
         assert!(open + Duration::from_secs(25) < Duration::from_secs(50), "{open:?}");
         assert!(run > open && run + Duration::from_secs(5) < Duration::from_secs(55), "{run:?}");
+    }
+
+    #[test]
+    fn an_unanswered_call_is_told_to_call_again_for_two_minutes_and_then_to_hand_back() {
+        use std::time::Duration;
+        let early = super::unanswered("new_notebook", Duration::from_secs(41));
+        assert!(early.contains("Call `new_notebook` again now") && !early.contains("Stop"), "{early}");
+        let late = super::unanswered("new_notebook", Duration::from_secs(121));
+        assert!(late.starts_with("ArgumentError: waiting_for_user::") && late.contains("Stop calling `new_notebook`"), "{late}");
+        // Opens and runs alike get more than one try before handing back.
+        assert!(super::KEEP_ASKING > super::ask_wait("execute_cell") * 2, "{:?}", super::KEEP_ASKING);
     }
 
     use super::*;
