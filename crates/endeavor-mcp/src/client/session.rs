@@ -529,7 +529,12 @@ impl Session {
     /// Stop the runtime, for every client of it, and wait until it is gone (up to a minute and a
     /// bit). The connection stays, and the error says why when the runtime didn't stop.
     pub fn stop(&self) -> Result<(), String> {
-        self.shared.request_stop()
+        self.shared.request_stop(false)
+    }
+
+    /// `stop`, but a start under way that another connection began is cancelled too (`Channel::force_stop`).
+    pub fn force_stop(&self) -> Result<(), String> {
+        self.shared.request_stop(true)
     }
 
     /// Stop the runtime and start it again (`job` and `install` as in `Want::Start`), then answer as
@@ -539,7 +544,7 @@ impl Session {
     /// is restarting, and, if the start fails, that it couldn't start (`Messages::restart_failed`),
     /// rather than that the machine isn't connected. A stop that fails starts nothing and is the outcome.
     pub fn restart(&self, job: Option<JobRequest>, install: bool, wait: Duration) -> Outcome {
-        if let Err(message) = self.shared.request_stop() {
+        if let Err(message) = self.shared.request_stop(false) {
             return Outcome::Failed(message);
         }
         // After the stop, which says the machine isn't connected, and before the start can attach.
@@ -690,8 +695,12 @@ impl Shared {
                 i.step = Some(format!("Submitted job {job} ({summary})"));
                 i.job = Some(JobInfo { id: job, summary: Some(summary), ..Default::default() });
             }
-            Event::Queued { state, reason } => {
+            Event::Queued { job, state, reason } => {
                 i.step = Some(format!("The job is {} ({reason})", state.to_lowercase()));
+                // A job this session hasn't heard submitted, such as one it re-attached to, is known from here.
+                if i.job.as_ref().is_none_or(|known| known.id != job) {
+                    i.job = Some(JobInfo { id: job, ..Default::default() });
+                }
                 // The helper reports the node, as `reason`, once the job runs.
                 if state == "RUNNING"
                     && let Some(job) = &mut i.job
@@ -851,7 +860,7 @@ impl Shared {
         false
     }
 
-    fn request_stop(&self) -> Result<(), String> {
+    fn request_stop(&self, force: bool) -> Result<(), String> {
         // Counted before the helper is asked: it takes a while, and the end of a start it cuts short is no failure.
         let Some((channel, mine)) = self.with(|i| {
             let channel = i.channel.clone()?;
@@ -860,7 +869,7 @@ impl Shared {
         }) else {
             return Err(not_connected_to_stop(&self.inner()));
         };
-        let stopped = channel.stop();
+        let stopped = if force { channel.force_stop() } else { channel.stop() };
         self.with(|i| {
             let same = i.channel.as_ref().is_some_and(|now| Arc::ptr_eq(now, &channel));
             match &stopped {
@@ -1219,6 +1228,8 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             shared.begin_start();
                             continue;
                         }
+                        // What the listener tells callers names what is missing, not a restart that would only ask again.
+                        shared.listener.restart_needs_install(&items);
                         let text = shared.with(|i| {
                             (i.run, i.job) = (Run::Idle, None);
                             i.wanted = None;
@@ -1228,7 +1239,6 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             text
                         });
                         shared.trouble(text);
-                        shared.listener.restart_failed();
                     }
                     Err(StartError::NotRunning) => {
                         // The wish may have become a start while the attach waited.

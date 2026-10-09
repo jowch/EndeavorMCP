@@ -20,4 +20,4 @@ sha2 = "0.10"
 # Random bytes for the bridge token and MCP session ids (Unix reads /dev/urandom).
 getrandom = "0.3"
 # The runtime's processes: a Job Object, pids checked against start times, and the byte lock on starting.lock.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }

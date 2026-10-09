@@ -395,26 +395,24 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                         let _ = mux.send(&now.ready(id, now.reattached).frame());
                         attached = Some(now);
                     }
-                    Err(unstarted) => unstarted.answer(mux, id),
+                    Err(unstarted) => {
+                        if let Some((stop, force)) = unstarted.answer(mux, id) {
+                            let stopped = stop_recorded(args, &mut inbox, &events, force);
+                            answer_stops(mux, &mut inbox, stop, force, &stopped);
+                        }
+                    }
                 }
             }
-            Event::App(ToHelper::Stop { id }) => {
+            Event::App(ToHelper::Stop { id, force }) => {
                 let stopped = match attached.take() {
                     Some(runtime) => runtime.stop(args, &routes, &mut inbox, standalone::stop_lock_limit()).map_err(|failed| {
                         let (runtime, why) = *failed;
                         attached = Some(runtime);
                         why
                     }),
-                    None => stop_recorded(args, &mut inbox, &events),
+                    None => stop_recorded(args, &mut inbox, &events, force),
                 };
-                // A Stop said during this one has the same outcome: it is not stopped again.
-                for id in std::iter::once(id).chain(inbox.take_stops()) {
-                    let reply = match &stopped {
-                        Ok(()) => ToApp::Stopped { id },
-                        Err(message) => ToApp::NotStopped { id, message: message.clone() },
-                    };
-                    let _ = mux.send(&reply.frame());
-                }
+                answer_stops(mux, &mut inbox, id, force, &stopped);
             }
             Event::Eof if args.quit_with_client => {
                 if let Some(runtime) = attached.take()
@@ -453,6 +451,18 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                 }
             }
         }
+    }
+}
+
+/// Answer the `Stop` with this id, and the ones said during it, which have the same outcome: they are
+/// not stopped again. A forced one said during an unforced stop is not among them, and is heard next.
+fn answer_stops(mux: &Arc<Mux>, inbox: &mut Inbox, id: u32, force: bool, stopped: &Result<(), String>) {
+    for id in std::iter::once(id).chain(inbox.take_stops(force)) {
+        let reply = match stopped {
+            Ok(()) => ToApp::Stopped { id },
+            Err(message) => ToApp::NotStopped { id, message: message.clone() },
+        };
+        let _ = mux.send(&reply.frame());
     }
 }
 
@@ -572,8 +582,8 @@ struct Inbox {
 enum Heard {
     /// Nothing, or a `StartRuntime`, which was answered as busy.
     Quiet,
-    /// The `Stop` with this id: it cuts the start short.
-    Stop(u32),
+    /// The `Stop` with this id, and whether it is forced: it cuts the start short.
+    Stop(u32, bool),
     Detach,
     Eof,
     /// What happened to a runtime or a relay: nothing a start under way acts on.
@@ -603,7 +613,7 @@ impl Inbox {
                 let _ = mux.send(&ToApp::StartFailed { id, message: "Julia is already starting.".into() }.frame());
                 Heard::Quiet
             }
-            Event::App(ToHelper::Stop { id }) => Heard::Stop(id),
+            Event::App(ToHelper::Stop { id, force }) => Heard::Stop(id, force),
             Event::App(ToHelper::Detach) => Heard::Detach,
             Event::Eof => Heard::Eof,
             _ => Heard::Event,
@@ -619,14 +629,16 @@ impl Inbox {
         self.later.insert(at, event);
     }
 
-    /// The ids of the `Stop`s kept that came before any start, a detach or the
-    /// end of input, which are no longer kept: a stop that is over answers them.
-    fn take_stops(&mut self) -> Vec<u32> {
+    /// The ids of the `Stop`s kept that came before any start, a detach, the
+    /// end of input or (after an unforced stop, `force` false) a forced stop,
+    /// which are no longer kept: a stop that is over answers them.
+    fn take_stops(&mut self, force: bool) -> Vec<u32> {
         let mut ids = Vec::new();
         let mut at = 0;
         while let Some(event) = self.later.get(at) {
             match event {
-                Event::App(ToHelper::Stop { id }) => {
+                Event::App(ToHelper::Stop { force: true, .. }) if !force => break,
+                Event::App(ToHelper::Stop { id, .. }) => {
                     ids.push(*id);
                     self.later.remove(at);
                 }
@@ -644,26 +656,36 @@ enum Unstarted {
     /// The start needs these installed and `install` was false.
     NeedsInstall(Vec<wire::Item>),
     Died { status: String, log_tail: Vec<String> },
-    /// The `Stop` with this id cut it short; that is answered too.
-    Stopped(u32),
+    /// The `Stop` with this id, forced or not, cut it short; that is answered too. `other`: it cut short a
+    /// wait for what this connection didn't begin (another connection's start, the start lock, or a
+    /// runtime that didn't answer), which this stop hasn't ended.
+    Stopped { id: u32, force: bool, other: bool },
     /// Only attaching was asked for, and nothing runs or is starting.
     NotRunning,
 }
 
 impl Unstarted {
-    /// Answer the `StartRuntime` with id `start`, and the `Stop` that ended it.
-    fn answer(self, mux: &Arc<Mux>, start: u32) {
+    /// Answer the `StartRuntime` with id `start`, and the `Stop` that ended it; but a `Stop` that ended
+    /// only this connection's wait for what it didn't begin is not answered: its id and `force` are
+    /// returned, for the caller to handle as a `Stop` with nothing attached (`stop_recorded`), so that an
+    /// unforced one says Julia is still starting and a forced one cancels that start.
+    fn answer(self, mux: &Arc<Mux>, start: u32) -> Option<(u32, bool)> {
+        if let Unstarted::Stopped { id, force, other: true } = self {
+            let _ = mux.send(&ToApp::StartCancelled { id: start }.frame());
+            return Some((id, force));
+        }
         let (reply, stop) = match self {
             Unstarted::Failed(message) => (ToApp::StartFailed { id: start, message }, None),
             Unstarted::NeedsInstall(items) => (ToApp::NeedsInstall { id: start, items }, None),
             Unstarted::Died { status, log_tail } => (ToApp::StartDied { id: start, status, log_tail }, None),
-            Unstarted::Stopped(stop) => (ToApp::StartCancelled { id: start }, Some(stop)),
+            Unstarted::Stopped { id, .. } => (ToApp::StartCancelled { id: start }, Some(id)),
             Unstarted::NotRunning => (ToApp::NotRunning { id: start }, None),
         };
         let _ = mux.send(&reply.frame());
         if let Some(id) = stop {
             let _ = mux.send(&ToApp::Stopped { id }.frame());
         }
+        None
     }
 }
 
@@ -675,8 +697,9 @@ struct Client<'a> {
     parts: &'a Parts,
     /// Whether the client was told that another helper holds the start lock.
     told: bool,
-    /// The `Stop` that ended the start.
-    stop: Option<u32>,
+    /// The `Stop` that ended the start: its id, whether it was forced, and whether it ended a wait for
+    /// what this didn't begin.
+    stop: Option<(u32, bool, bool)>,
 }
 
 impl<'a> Client<'a> {
@@ -700,8 +723,8 @@ impl<'a> Client<'a> {
     /// runtime goes with the client. A `Stop` ends the start. A `StartRuntime` is refused. False: the start is over.
     fn hear(&mut self, wait: Duration, waiting: Waiting) -> bool {
         match self.inbox.hear_while_starting(self.mux, wait) {
-            Heard::Stop(id) => {
-                self.stop = Some(id);
+            Heard::Stop(id, force) => {
+                self.stop = Some((id, force, waiting != Waiting::Ready));
                 return false;
             }
             Heard::Detach => {
@@ -718,7 +741,7 @@ impl<'a> Client<'a> {
     /// How a start that `hear` ended is answered; none is when the client has gone, and the process exits.
     fn cancelled(&self) -> Unstarted {
         match self.stop {
-            Some(id) => Unstarted::Stopped(id),
+            Some((id, force, other)) => Unstarted::Stopped { id, force, other },
             None => std::process::exit(0),
         }
     }
@@ -799,15 +822,16 @@ fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>
 /// a cluster, cancel its job, or the job waiting for a node): the app's Stop
 /// for a host it only browsed. Without the start lock, for a runtime this helper
 /// may not stop, or for one that is still starting, nothing is stopped: why.
-fn stop_recorded(args: &Args, inbox: &mut Inbox, events: &Sender<Event>) -> Result<(), String> {
+fn stop_recorded(args: &Args, inbox: &mut Inbox, events: &Sender<Event>, force: bool) -> Result<(), String> {
     let dir = &args.state_dir;
     let _starting = lock_stop(dir, inbox, standalone::stop_lock_limit())?;
     match args.launcher {
-        Launcher::Process => match runtime::end(dir, args.any_node, stopped::How::Connection, false, events) {
+        Launcher::Process => match runtime::end(dir, args.any_node, stopped::How::Connection, force, events) {
             Ended::NotRunning | Ended::Stopped(_) | Ended::Cancelled(_) => {}
             Ended::Elsewhere(node) => return Err(format!("Julia was not stopped. {}", runtime::other_node_text(&node))),
             Ended::Alive(_) => return Err(STILL_RUNNING.into()),
-            Ended::Starting | Ended::Unidentified => return Err(runtime::STILL_STARTING.into()),
+            Ended::Starting => return Err(runtime::STILL_STARTING.into()),
+            Ended::Unidentified => return Err(runtime::START_UNIDENTIFIED.into()),
         },
         Launcher::Slurm => slurm::cancel_recorded(dir),
     }
@@ -1462,9 +1486,20 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+/// The DNS host name, as Julia's `gethostname()` gives it for the runtime's
+/// record. `COMPUTERNAME` is the NetBIOS name (upper case, at most 15
+/// characters), so a computer named otherwise saw its own runtime as remote.
 #[cfg(windows)]
 fn hostname() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_default()
+    use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    // SAFETY: the call writes at most `len` UTF-16 units into `buf` and sets
+    // `len` to the number written, without the terminating zero.
+    if unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) } == 0 {
+        return std::env::var("COMPUTERNAME").unwrap_or_default();
+    }
+    String::from_utf16_lossy(&buf[..len as usize])
 }
 
 /// The app's calls on the runtime's port.
@@ -1507,6 +1542,15 @@ fn bridge_call_within(port: u16, path: &str, token: &str, method: &str, wait: Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The runtime records Julia's `gethostname()`, the DNS name in its own
+    /// case, which Windows' `hostname` command also prints.
+    #[cfg(windows)]
+    #[test]
+    fn windows_names_this_computer_as_julia_does() {
+        let said = std::process::Command::new("hostname").output().unwrap();
+        assert_eq!(hostname(), String::from_utf8_lossy(&said.stdout).trim());
+    }
 
     /// On Windows the log once couldn't be emptied, so no runtime started there.
     #[test]

@@ -511,8 +511,8 @@ pub(crate) enum Ended {
     Cancelled(i32),
 }
 
-/// What a helper's stop says when a runtime is starting: a helper's `Stop` has no `force`.
-pub(crate) const STILL_STARTING: &str = "Julia was not stopped: it is still starting. Try again once it is up.";
+/// What a helper's stop says when a runtime is starting and its `Stop` was not forced.
+pub(crate) const STILL_STARTING: &str = "Julia was not stopped: it is still starting. Try again once it is up, or force the stop to cancel the start.";
 
 /// What a stop here says when a runtime is starting and `force` was not given.
 pub(crate) const STILL_STARTING_FORCE: &str = "Julia was not stopped: it is still starting. A stop with `force` cancels the start.";

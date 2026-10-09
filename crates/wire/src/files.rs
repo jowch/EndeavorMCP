@@ -1,5 +1,5 @@
 //! Questions about a host that the app asks before (or without) attaching to
-//! its runtime: a folder's contents, the Pluto notebooks under a folder, a
+//! its runtime: a folder's contents, the notebooks under a folder, a
 //! notebook's first cells, Slurm's partitions, and whether a runtime or its job
 //! is there. The helper answers them, all but `Runtime` with [`answer`].
 //! Also the writes: the session's folder, made when only it is missing
@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::backend::Backend;
 use crate::notebooks::{self, Found, Preview};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -20,7 +21,8 @@ pub enum Request {
     List { path: String },
     /// Every file and folder under `path`, a few levels deep ([`walk`]).
     Files { path: String },
-    /// Pluto notebooks under `path` ([`notebooks::scan`]).
+    /// Pluto notebooks under `path` ([`notebooks::scan`]). Ember's are left
+    /// out until the app can open them.
     Notebooks { path: String },
     /// The first cells of the notebook at `path`.
     Preview { path: String },
@@ -96,7 +98,7 @@ pub fn answer(request: &Request) -> Reply {
     let result = match request {
         Request::List { path } => list(&expand(path)),
         Request::Files { path } => Ok(Reply::Files { paths: walk(&expand(path), WALK_DEPTH, WALK_LIMIT) }),
-        Request::Notebooks { path } => Ok(Reply::Notebooks { found: notebooks::scan(&expand(path)) }),
+        Request::Notebooks { path } => Ok(Reply::Notebooks { found: notebooks::scan(&expand(path), &[Backend::Pluto]) }),
         Request::Preview { path } => notebooks::read_preview(&expand(path)).map(|preview| Reply::Preview { preview }),
         Request::Slurm => crate::slurm::probe().map(|scheduler| Reply::Slurm { scheduler }),
         Request::Runtime => Err("Only the helper knows about its runtime.".into()),

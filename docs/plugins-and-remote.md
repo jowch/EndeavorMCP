@@ -515,7 +515,8 @@ another version of Endeavor). A stop waits 20 s for
 `start.lock`, so it does not stop a runtime that another helper is still
 starting; it says so instead. `stop_machine` on this computer and `endeavor stop`
 do the same, and the first marks the stop as made from a connection. Those two, with `force`,
-cancel a start under way; the helper's Stop has no `force`.
+cancel a start under way, and so does the helper's Stop with `force`
+(`Channel::force_stop`, `Session::force_stop`), which `stop_machine` sends.
 
 **A runtime from another build** is used. The front sends its own build's
 helper, so those two always match, and the helper reaches the runtime over

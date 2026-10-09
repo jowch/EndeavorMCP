@@ -905,6 +905,9 @@ impl Call<'_> {
         if !std::path::Path::new(path).exists() {
             return Err(argument_error(&format!("file_not_found::No file at '{path}'")));
         }
+        if wire::backend::Backend::of_file(std::path::Path::new(path)) == Some(wire::backend::Backend::Ember) {
+            return Err(argument_error(&format!("unsupported::'{path}' is an Ember notebook (R). R notebooks can't be opened here yet")));
+        }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
         let opened = match self.nbs.call("open", json!({ "path": path, "run": run })) {

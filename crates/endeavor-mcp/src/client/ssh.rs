@@ -36,8 +36,9 @@ pub enum Event {
     Progress(String),
     /// A cluster job for Julia was submitted.
     Submitted { job: String, summary: String },
-    /// It waits in the queue (Slurm's state and reason).
-    Queued { state: String, reason: String },
+    /// The job `job` waits in the queue (Slurm's state and reason); once it runs, state RUNNING and the
+    /// node as `reason`.
+    Queued { job: String, state: String, reason: String },
     /// The runtime is up (or was already running) and its bridge answered through the listener.
     Started { node: String, reattached: bool },
     /// `test` on a cluster: what Slurm says there.
@@ -85,6 +86,11 @@ impl Transport {
                 // unanswered: a dead link ends the helper's channel within
                 // about 30 s, even while nothing else is sent.
                 command.args(["-T", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2", "-o", "ConnectTimeout=20", "-o", "ForwardX11=no"]);
+                // Windows' ssh has no connection sharing: a ControlMaster line in a
+                // config copied from a Mac would make the connect fail there.
+                if cfg!(windows) {
+                    command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
+                }
                 if *auth == Auth::Batch {
                     command.args(["-o", "BatchMode=yes"]);
                 }
@@ -589,7 +595,7 @@ pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions
             ToApp::Progress { line } => on(Event::Progress(line)),
             ToApp::Found { name, version, path } => on(Event::Found { name, version, path }),
             ToApp::Submitted { job, summary } => on(Event::Submitted { job, summary }),
-            ToApp::Queued { state, reason, .. } => on(Event::Queued { state, reason }),
+            ToApp::Queued { job, state, reason } => on(Event::Queued { job, state, reason }),
             _ => {}
         },
         notice,
@@ -714,6 +720,14 @@ fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option
     explain_retry(transport, auth, stderr, status, cancelled, signed_in).0
 }
 
+/// How to put a key in the ssh agent. Windows ships the agent's service
+/// turned off, and `ssh-add` fails until an administrator turns it on.
+const ADD_KEY: &str = if cfg!(windows) {
+    "run `ssh-add` in a terminal to add it. If that says it can't connect to the agent, turn the agent on once, in PowerShell run as administrator: `Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent`, then run `ssh-add` again"
+} else {
+    "run `ssh-add` in a terminal to add it"
+};
+
 /// `explain`, and whether trying again by itself could help (`ConnectError`).
 fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> (String, bool) {
     if cancelled {
@@ -735,7 +749,7 @@ fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: 
     } else if said("Host key verification failed") {
         Some((format!("{host}'s identity (host key) wasn't confirmed, so Endeavor didn't connect."), false))
     } else if said("Permission denied") && batch {
-        Some((format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent (run `ssh-add` in a terminal to add it). Or the server asks for a password or a code, which Endeavor can't ask for yet."), false))
+        Some((format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent ({}). Or the server asks for a password or a code, which Endeavor can't ask for yet.", ADD_KEY), false))
     } else if said("Permission denied") {
         Some((format!("{host} refused the sign-in. Check the user name, and your key or password."), false))
     } else if said("Connection refused") {

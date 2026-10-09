@@ -1,0 +1,40 @@
+# Runs scripts/prune-helpers.sh by hand: it lists the Helpers release's files
+# for builds nothing pins any more and, with "delete" ticked, removes them.
+# Read the list from a run without "delete" first; a deleted file can't be
+# brought back. The Helpers workflow also prunes, once the release passes 700
+# files, when the repository variable PRUNE_HELPERS_AUTO is true.
+name: Prune helpers
+
+on:
+  workflow_dispatch:
+    inputs:
+      delete:
+        description: Delete the listed files (otherwise only list them)
+        type: boolean
+        default: false
+
+# Its own group: in Helpers' group, a run queued here would cancel a Helpers run
+# that is waiting (GitHub keeps one waiting run per group), and that build would
+# never be published. Pruning needs no lock: it deletes only files from its own
+# listing, which a build published meanwhile isn't in.
+concurrency:
+  group: prune-helpers
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ inputs.delete }}" = true ]; then
+            sh scripts/prune-helpers.sh --delete
+          else
+            sh scripts/prune-helpers.sh
+          fi

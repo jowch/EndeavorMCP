@@ -576,6 +576,55 @@ fn a_forced_stop_cancels_a_start_that_is_under_way_and_leaves_nothing_of_it() {
 }
 
 #[test]
+fn a_forced_stop_from_a_helper_cancels_a_start_another_connection_began() {
+    let (dir, cores, julia) = held_dir("start-force-helper");
+    let mut first = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    first.send(ToHelper::Detach);
+    first.exits();
+
+    // A connection that waits for that start: an unforced stop ends its wait, leaves the start alone and says so.
+    let waiter = held_start(&dir, &julia, &[]);
+    let stop = waiter.request_stop();
+    assert_eq!(waiter.after_progress(), ToApp::StartCancelled { id: 1 });
+    let ToApp::NotStopped { id, message } = waiter.after_progress() else { panic!("expected NotStopped") };
+    assert!(id == stop && message.contains("still starting"), "{message}");
+    assert!(common::pid_alive(core), "the start goes on");
+
+    // A forced one cancels it, and is answered once it is gone.
+    waiter.request_start(None, true);
+    let stop = waiter.request_stop_as(true);
+    let ToApp::StartCancelled { .. } = waiter.after_progress() else { panic!("expected StartCancelled") };
+    assert_eq!(waiter.after_progress(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    common::wait_for("the lock to be let go", || start_lock_free(&dir));
+    assert!(cores.pids().is_empty() && !dir.join("runtime.json").exists(), "{:?}", cores.pids());
+    assert_eq!(std::fs::read_to_string(dir.join("stopped")).unwrap(), format!("{core} connection"), "the clients are told why");
+    drop(waiter);
+
+    // A connection that isn't waiting: unforced, nothing is stopped; forced, the start is cancelled.
+    let mut first = held_start(&dir, &julia, &[]);
+    let core = cores.pids()[0];
+    first.send(ToHelper::Detach);
+    first.exits();
+    let mut other = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    other.hello();
+    let stop = other.request_stop();
+    let ToApp::NotStopped { id, message } = other.next() else { panic!("expected NotStopped") };
+    assert!(id == stop && message.contains("still starting") && message.contains("force"), "{message}");
+    assert!(common::pid_alive(core));
+    let stop = other.request_stop_as(true);
+    assert_eq!(other.next(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    common::wait_for("the lock to be let go", || start_lock_free(&dir));
+    assert!(cores.pids().is_empty() && !dir.join("runtime.json").exists(), "{:?}", cores.pids());
+    let stop = other.request_stop_as(true);
+    assert_eq!(other.next(), ToApp::Stopped { id: stop }, "nothing runs or starts, and a forced stop says so");
+    other.stdin.0.lock().unwrap().take();
+    other.exits();
+}
+
+#[test]
 fn an_attach_that_waits_for_a_start_never_starts_a_runtime_when_that_start_dies() {
     let (dir, cores, julia) = held_dir("attach-only");
     let env_home = dir.join("home").display().to_string();
@@ -679,6 +728,25 @@ fn a_runtime_that_is_silent_for_a_while_is_waited_for_and_used_and_none_is_start
     let ToApp::Ready { pid, reattached, .. } = after_start(&helper) else { panic!("expected Ready") };
     assert_eq!((pid, reattached), (runtime.pid, true));
     assert!(cores.pids().is_empty() && runtime.alive());
+    helper.stdin.0.lock().unwrap().take();
+}
+
+#[test]
+fn a_stop_while_a_silent_runtime_is_asked_again_stops_it_as_a_stop_with_nothing_attached_does() {
+    let dir = state_dir("silent-stop");
+    let runtime = FakeRuntime::start(&dir, &this_host());
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    record_port(&dir, closed);
+    let julia = fake_julia(&dir);
+    let helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[("ENDEAVOR_TEST_SILENT_WAIT_SECS", "20")]);
+    helper.hello();
+    let start = helper.request_start(None, true);
+    assert!(matches!(helper.next(), ToApp::Progress { line } if line.contains("isn't answering")));
+    // The start doesn't stop what it didn't begin; the stop that ends its wait does, as the user asked.
+    let stop = helper.request_stop();
+    assert_eq!(helper.after_progress(), ToApp::StartCancelled { id: start });
+    assert_eq!(helper.after_progress(), ToApp::Stopped { id: stop });
+    assert!(!runtime.alive() && !dir.join("runtime.json").exists());
     helper.stdin.0.lock().unwrap().take();
 }
 
@@ -854,7 +922,9 @@ fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_
     let stopped = held_start(&dir, &julia, &[]);
     let stop = stopped.request_stop();
     assert_eq!(stopped.after_progress(), ToApp::StartCancelled { id: 1 });
-    assert_eq!(stopped.next(), ToApp::Stopped { id: stop });
+    // Its wait is over, and it says the start goes on rather than that it stopped.
+    let ToApp::NotStopped { id, message } = stopped.after_progress() else { panic!("expected NotStopped") };
+    assert!(id == stop && message.contains("still starting"), "{message}");
     let mut quitting = held_start(&dir, &julia, &["--quit-with-client"]);
     quitting.stdin.0.lock().unwrap().take();
     quitting.exits();
@@ -1770,14 +1840,16 @@ fn a_helper_waiting_for_another_start_says_so_once_and_still_hears_the_client() 
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
 
-    // And Stop, which starts nothing: the start ends with an answer of its own, and the Stop with its.
-    let helper = Helper::start(&dir, &[]);
+    // And Stop, which starts nothing: the start ends with an answer of its own, and the Stop with its, which
+    // is a stop's as from a helper with nothing attached: it waits for the lock, and says when it gives up.
+    let helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[("ENDEAVOR_STOP_LOCK_SECS", "1")]);
     helper.hello();
     let start = helper.request_start(None, true);
     assert_eq!(helper.next(), ToApp::Progress { line: line.into() });
     let stop = helper.request_stop();
     assert_eq!(helper.next(), ToApp::StartCancelled { id: start });
-    assert_eq!(helper.next(), ToApp::Stopped { id: stop });
+    let ToApp::NotStopped { id, message } = helper.next() else { panic!("expected NotStopped") };
+    assert!(id == stop && message.contains("start lock"), "{message}");
     assert!(!dir.join("runtime.json").exists());
 
     // A holder that never lets go is given up on.
