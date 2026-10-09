@@ -487,14 +487,24 @@ sign-in.
 
 Windows is not offered until these close; the README says so.
 
-- [P2] **No person has run Endeavor on Windows.** CI runs `cargo test` on
-  `windows-latest` and the tests pass, but they use a stand-in Julia. CI does
-  not cover the runtime's detached start with real Julia, its console handler,
-  or the `taskkill` cancel path. A real ssh from Windows to a Linux server was
-  run once by hand ([Releases and plugins](#releases-and-plugins)).
+- [P2] **Endeavor has run on Windows only by hand.** CI runs `cargo test` on
+  `windows-latest`, but every test in `tests/` but `version.rs` is
+  `cfg(unix)`, so little more than the unit tests run there (issue #9). The
+  first try on Windows 11 found two bugs no test saw: `--julia auto` asked
+  `/bin/sh` for julia, and the runtime's log couldn't be emptied (opened to
+  append, os error 5). With both fixed, by hand with juliaup's Julia 1.13.1:
+  `endeavor serve` started a runtime and `endeavor stop` stopped it, and under
+  the Antigravity CLI `endeavor mcp` made a notebook, edited cells and read
+  their output. There `new_notebook` started the local runtime itself;
+  `use_machine local` was not called with the fix. The console handler and
+  the `taskkill` cancel path have not run. A real ssh from Windows to a Linux
+  server was run once by hand ([Releases and plugins](#releases-and-plugins)).
+  Windows has no Julia download: with no `julia.exe` on the PATH, Endeavor
+  says to install juliaup, and with one too old, it says so.
 - [P2] **No integration test runs on Windows.** Every file in
-  `crates/endeavor-mcp/tests/` is `#![cfg(unix)]`, so on Windows `cargo test`
-  runs only the unit tests: none of connect, session, machines, serve or Slurm.
+  `crates/endeavor-mcp/tests/` but `version.rs` is `#![cfg(unix)]`, so on
+  Windows `cargo test` runs only the unit tests: none of connect, session,
+  machines, serve or Slurm (issue #9).
   Their ssh and Slurm stand-ins are `/bin/sh` scripts (`tests/common`). The
   channel unit tests also spawn `true`, which only Git's `usr\bin` provides (CI's
   runner has it on the PATH; a plain Windows shell doesn't). To close: stand-ins
@@ -660,12 +670,19 @@ plugins). The rest of this file can wait or go alongside.
   compares the exact build, and once the app and the plugin share a state
   folder a mismatch is the usual case. To close when the app adopts: compare
   `interface` as the library does (`RuntimeInfo::usable_as_is`, which a
-  machine's runtime has too).
+  machine's runtime has too, or `endeavor_mcp::usable_as_is` for a record
+  the app reads itself).
 - [P2] **The app becomes a second pinned consumer of the Helpers release.** The
   app pins this repository by commit, so its helper key is that commit's, and
   servers can only fetch it once Helpers has published it. Push this
   repository and wait for Helpers before an app release that moves the pin. A
   check in the app's CI that the pinned key is published would catch it.
+- [P3] **A restart that needs an install says to restart again.** When the start
+  `Session::restart` begins ends `NeedsInstall`, calls to the listener are told
+  `Messages::restart_failed`'s text ("Use Restart Julia to try again"), which
+  won't help: the user has to agree to the install first. The message is given
+  only the machine's name, so it can't say why. To settle in the app's PR that
+  moves servers to `Session`.
 - [P3] **The layers under a session still write a few lines to stderr.** A
   session's own progress and trouble go to `Config::on_event` (since
   2026-10-08). Below it, ssh's stderr (`ssh: ...`), lines a login script prints

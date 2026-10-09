@@ -171,7 +171,7 @@ impl State {
 
 /// Whether this build's callers can use a runtime that `build` started and whose core offers `interface`
 /// as it is: it offers this build's interface (`core::INTERFACE`), or it is this build. False when neither is known.
-pub(crate) fn usable_as_is(build: Option<&str>, interface: Option<u32>) -> bool {
+pub fn usable_as_is(build: Option<&str>, interface: Option<u32>) -> bool {
     interface == Some(core::INTERFACE) || build == Some(embedded::BUILD_VERSION)
 }
 
@@ -1343,18 +1343,30 @@ pub(crate) fn this_program() -> Result<PathBuf, String> {
     }
 }
 
+/// `runtime.log`, emptied, as the runtime's stdout and its stderr. The log
+/// shows Pluto's secret URL. On Unix it's opened to append, so nothing that
+/// writes it overwrites another. Not on Windows: there appending opens the file
+/// without the right to its data, which emptying it needs (os error 5). The two
+/// handles share one position, so stdout and stderr still take turns.
+fn open_log(path: &Path) -> Result<(File, File), String> {
+    let mut options = OpenOptions::new();
+    if cfg!(windows) {
+        options.write(true);
+    } else {
+        options.append(true);
+    }
+    let log = owner_only(options.create(true)).open(path).map_err(|e| format!("Couldn't open {}: {e}", path.display()))?;
+    log.set_len(0).map_err(|e| format!("Couldn't empty {}: {e}", path.display()))?;
+    let stderr = log.try_clone().map_err(|e| e.to_string())?;
+    Ok((log, stderr))
+}
+
 /// Start the runtime detached from us (its own session, no terminal, stdin from
 /// /dev/null), logging to `runtime.log`.
 #[cfg(unix)]
 fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child, String> {
     let dir = &args.state_dir;
-    let log_path = dir.join("runtime.log");
-    // The log shows Pluto's secret URL.
-    let log = owner_only(OpenOptions::new().append(true).create(true))
-        .open(&log_path)
-        .and_then(|f| f.set_len(0).map(|_| f))
-        .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
-    let stderr = log.try_clone().map_err(|e| e.to_string())?;
+    let (log, stderr) = open_log(&dir.join("runtime.log"))?;
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
     command.stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
@@ -1382,12 +1394,7 @@ fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child,
     use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
     let dir = &args.state_dir;
-    let log_path = dir.join("runtime.log");
-    let log = owner_only(OpenOptions::new().append(true).create(true))
-        .open(&log_path)
-        .and_then(|f| f.set_len(0).map(|_| f))
-        .map_err(|e| format!("Couldn't open {}: {e}", log_path.display()))?;
-    let stderr = log.try_clone().map_err(|e| e.to_string())?;
+    let (log, stderr) = open_log(&dir.join("runtime.log"))?;
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
     command.stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
@@ -1501,6 +1508,18 @@ fn bridge_call_within(port: u16, path: &str, token: &str, method: &str, wait: Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On Windows the log once couldn't be emptied, so no runtime started there.
+    #[test]
+    fn the_runtime_log_is_emptied_and_both_handles_write_it() {
+        let path = client::scratch("runtime-log").join("runtime.log");
+        std::fs::write(&path, "the last runtime's log\n").unwrap();
+        let (mut out, mut err) = open_log(&path).unwrap();
+        out.write_all(b"out\n").unwrap();
+        err.write_all(b"err\n").unwrap();
+        drop((out, err));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "out\nerr\n");
+    }
 
     #[test]
     fn a_call_gives_up_on_a_server_that_answers_a_little_at_a_time() {
