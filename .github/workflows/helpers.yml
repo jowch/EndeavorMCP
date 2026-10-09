@@ -32,6 +32,7 @@ concurrency:
 jobs:
   key:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       key: ${{ steps.key.outputs.key }}
     steps:
@@ -57,6 +58,8 @@ jobs:
     name: ${{ matrix.platform }}
     needs: key
     runs-on: ${{ matrix.runner }}
+    # A run takes a few minutes; a hung leg would otherwise hold every later release (the group doesn't cancel) for six hours.
+    timeout-minutes: 45
     env:
       ENDEAVOR_RELEASE_KEY: ${{ needs.key.outputs.key }}
     strategy:
@@ -143,6 +146,7 @@ jobs:
     needs: [key, build]
     if: ${{ !cancelled() && needs.key.result == 'success' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
