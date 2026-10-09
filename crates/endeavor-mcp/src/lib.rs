@@ -1423,6 +1423,7 @@ fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child,
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
     command.stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
+    not_inherited_std_handles();
     // CREATE_NO_WINDOW gives a console-program core a console without a
     // window. A GUI-program core (the app's own exe) gets no console at all,
     // so the core also starts Julia with CREATE_NO_WINDOW (core.rs), and
@@ -1438,6 +1439,26 @@ fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child,
         result => result,
     }
     .map_err(|e| format!("Couldn't start the runtime: {e}"))
+}
+
+/// Our standard handles came from whoever started us as inheritable handles,
+/// and Windows gives every inheritable handle to each child, whatever its own
+/// stdio. The core and Julia would then keep the app's log and our pipes open
+/// for as long as a kept runtime runs. Each spawn that inherits our output
+/// still gets its own copy (std duplicates it for the child).
+#[cfg(windows)]
+fn not_inherited_std_handles() {
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle returns a handle we hold, null or INVALID_HANDLE_VALUE; only the flag changes.
+        unsafe {
+            let handle = GetStdHandle(id);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 /// Send the runtime's log lines as `Progress` until it's ready (then what's
