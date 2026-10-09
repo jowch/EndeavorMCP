@@ -869,3 +869,26 @@ plugins). The rest of this file can wait or go alongside.
   on two servers. Each runtime saves over the other. Not covered by design.
 - [P3] **`run_conflict` was not provoked in the trial** with the real Claude
   Code CLI. It is covered by the unit tests only.
+
+## R notebooks (Ember)
+
+Ember support is being built (status.md); these are its known limits so far.
+
+- **P2: R notebooks are open only to tests.** `open_notebook` refuses an
+  Ember file unless a debug build has `ENDEAVOR_TEST_R_NOTEBOOKS`, and
+  `new_notebook` makes only `.jl` files. The tool descriptions and skills
+  don't cover R yet; they come after the agent-loop eval.
+- **P2: R must already be set up.** The core runs `Rscript` from the PATH (or
+  `--r`, which nothing passes yet) with Ember in R's own library. Finding R
+  (`--r`, `--r-shell`) and installing Ember at a pinned commit into a library
+  of its own are next.
+- **P2: R's adapter isn't restarted.** If its R process ends, R notebooks'
+  calls fail until the runtime restarts. Pluto's Julia ending ends the whole
+  runtime instead.
+- **P3: Ember's code and Pluto's differ in small ways the tools can see.**
+  Ember drops trailing blank lines and CRLF (the core compares code the same
+  way, so authorship holds), runs a cell's stale ancestors first, leaves every
+  cell unrun after a restart, and puts printed text and the value in one
+  output. The adapter's header lists the rest.
+- **P3: notebooks opened from Ember's own start page aren't seen.** Only
+  notebooks the adapter opened are in `list_notebooks` and the events.

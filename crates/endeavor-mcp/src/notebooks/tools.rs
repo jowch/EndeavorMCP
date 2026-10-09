@@ -905,7 +905,9 @@ impl Call<'_> {
         if !std::path::Path::new(path).exists() {
             return Err(argument_error(&format!("file_not_found::No file at '{path}'")));
         }
-        if wire::backend::Backend::of_file(std::path::Path::new(path)) == Some(wire::backend::Backend::Ember) {
+        // ENDEAVOR_TEST_R_NOTEBOOKS (a debug build only): the R tests open them before the tools and skills are ready for R.
+        let r_notebooks = cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_R_NOTEBOOKS").is_some();
+        if !r_notebooks && wire::backend::Backend::of_file(std::path::Path::new(path)) == Some(wire::backend::Backend::Ember) {
             return Err(argument_error(&format!("unsupported::'{path}' is an Ember notebook (R). R notebooks can't be opened here yet")));
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));

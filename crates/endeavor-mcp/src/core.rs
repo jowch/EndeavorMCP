@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::http::{self, Head};
+use wire::backend::Backend;
 use crate::mcp::Bridge;
 use crate::{USAGE, bridge_call, owner_only, remove_state};
 
@@ -55,11 +56,14 @@ struct Args {
     julia: String,
     runtime: PathBuf,
     depot: String,
+    /// R's `Rscript`, for R notebooks, and the R library Ember is installed in (none: R's own).
+    r: String,
+    r_library: Option<String>,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut args = argv.iter();
-    let (mut state_dir, mut julia, mut runtime, mut depot) = (None, None, None, None);
+    let (mut state_dir, mut julia, mut runtime, mut depot, mut r, mut r_library) = (None, None, None, None, None, None);
     while let Some(arg) = args.next() {
         let value = args.next().cloned().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -67,6 +71,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--julia" => julia = Some(value?),
             "--runtime" => runtime = Some(PathBuf::from(value?)),
             "--depot" => depot = Some(value?),
+            "--r" => r = Some(value?),
+            "--r-library" => r_library = Some(value?),
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
@@ -75,6 +81,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         julia: julia.ok_or("--julia is required")?,
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
+        r: r.unwrap_or_else(|| "Rscript".into()),
+        r_library,
     })
 }
 
@@ -153,6 +161,7 @@ pub fn main(argv: &[String]) -> ! {
 
     let cookie = cookie_name(&token);
     let port = listener.local_addr().unwrap().port();
+    let token_for_r = token.clone();
     let mut bridge = Bridge::new(token, &args.depot);
     bridge.standalone = folder.map(|folder| crate::mcp::Standalone { port, folder, no_folder, host: env("ENDEAVOR_HOST_TOOLS") });
     if let Ok(build) = std::env::var("ENDEAVOR_BUILD") {
@@ -164,6 +173,12 @@ pub fn main(argv: &[String]) -> ! {
     }
     Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
     let served = Arc::new(Served { bridge, pluto: OnceLock::new(), ember: Default::default(), cookie });
+    let r = Arc::new(RStarter::new(&args, &token_for_r));
+    let starting_r = (r.clone(), served.clone());
+    let _ = served.bridge.notebooks.starter.set(Box::new(move |backend| match backend {
+        Backend::Ember => starting_r.0.start(&starting_r.1),
+        Backend::Pluto => Err("Pluto starts with the runtime".into()),
+    }));
     accept(listener, served.clone());
 
     let status = loop {
@@ -180,6 +195,7 @@ pub fn main(argv: &[String]) -> ! {
         std::thread::sleep(Duration::from_millis(100));
     };
     let _ = std::fs::remove_file(&julia_state);
+    r.stop();
     remove_state(&args.state_dir, std::process::id() as i32, None);
     exit_like(status)
 }
@@ -213,6 +229,96 @@ fn free_ports() -> Result<[u16; 2], String> {
     let pluto = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let mcp = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     Ok([&pluto, &mcp].map(|l| l.local_addr().unwrap().port()))
+}
+
+/// Where R's adapter writes its state for the core, in the state folder.
+const R_STATE: &str = "r.json";
+
+/// Starts R's adapter (`runtime/r/adapter.R`), with Ember in it, the first time an R notebook is
+/// opened, and stops it when the core ends.
+struct RStarter {
+    rscript: String,
+    library: Option<String>,
+    adapter: PathBuf,
+    state: PathBuf,
+    token: String,
+    /// Runs each start: a process started on Linux ends with the thread that started it
+    /// (`PR_SET_PDEATHSIG`), and a request's thread ends with its connection.
+    spawn: std::sync::Mutex<std::sync::mpsc::Sender<(Command, std::sync::mpsc::Sender<io::Result<std::process::Child>>)>>,
+    child: std::sync::Mutex<Option<std::process::Child>>,
+}
+
+impl RStarter {
+    fn new(args: &Args, token: &str) -> RStarter {
+        let (tx, rx) = std::sync::mpsc::channel::<(Command, std::sync::mpsc::Sender<io::Result<std::process::Child>>)>();
+        std::thread::spawn(move || {
+            for (mut command, reply) in rx {
+                let _ = reply.send(command.spawn());
+            }
+        });
+        RStarter {
+            rscript: args.r.clone(),
+            library: args.r_library.clone(),
+            adapter: args.runtime.join("r").join("adapter.R"),
+            state: args.state_dir.join(R_STATE),
+            token: token.to_owned(),
+            spawn: std::sync::Mutex::new(tx),
+            child: std::sync::Mutex::default(),
+        }
+    }
+
+    /// Start the adapter and wait until it's up: what answers for R, and Ember's page on `/ember/`.
+    fn start(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+        let _ = std::fs::remove_file(&self.state);
+        let mut command = Command::new(&self.rscript);
+        command.arg("--vanilla").arg(&self.adapter).env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_R_STATE", &self.state).stdin(Stdio::null());
+        if let Some(library) = &self.library {
+            command.env("R_LIBS", library);
+        }
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            command.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.spawn.lock().unwrap().send((command, tx)).map_err(|e| e.to_string())?;
+        let mut child = rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("r_not_found::Couldn't start R ({}): {e}", self.rscript))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let state = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Err(format!("r_failed::R's adapter ended as it started ({status}); the runtime's log says why"));
+            }
+            if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
+                break state;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("r_failed::R's adapter didn't start within 60 seconds".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("r_failed::R's state has no {key}: {state}"));
+        let (bridge, ember) = (port("bridge_port")?, port("ember_port")?);
+        let secret = state["ember_secret"].as_str().ok_or("r_failed::R's state has no ember_secret")?.to_owned();
+        *served.ember.lock().unwrap() = Some(Page { port: ember, secret });
+        if let Some(mut old) = self.child.lock().unwrap().replace(child) {
+            let _ = old.kill();
+            let _ = old.wait();
+        }
+        Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone())))
+    }
+
+    fn stop(&self) {
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::fs::remove_file(&self.state);
+    }
 }
 
 /// An engine's page server (Pluto, Ember): its private port and the secret it requires.

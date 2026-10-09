@@ -38,6 +38,15 @@ impl Engines {
         self.parts.lock().unwrap().clone()
     }
 
+    /// The engine notebook `id` is open in, as far as we know: Pluto's for one we haven't seen.
+    pub fn backend_of(&self, id: &str) -> Backend {
+        self.ids.lock().unwrap().get(id).copied().unwrap_or(Backend::Pluto)
+    }
+
+    pub fn has(&self, backend: Backend) -> bool {
+        self.part(backend).is_some()
+    }
+
     fn part(&self, backend: Backend) -> Option<Arc<dyn Upstream>> {
         self.parts.lock().unwrap().iter().find(|(b, _)| *b == backend).map(|(_, u)| u.clone())
     }
@@ -70,7 +79,7 @@ impl Engines {
                 Ok(reply)
             }
             (_, Some(id)) => {
-                let backend = self.ids.lock().unwrap().get(id).copied().unwrap_or(Backend::Pluto);
+                let backend = self.backend_of(id);
                 let reply = self.on(backend, raw)?;
                 if method == "shutdown" && result(&reply).is_some() {
                     self.forget(id);
@@ -133,7 +142,7 @@ impl Engines {
 
 /// The engine a notebook at `path` belongs to, by its name alone: the file
 /// may not exist yet. Pluto's for any name no other engine claims.
-fn of_path(path: &str) -> Backend {
+pub fn of_path(path: &str) -> Backend {
     match Path::new(path).extension().and_then(|e| e.to_str()) {
         Some("R" | "r") => Backend::Ember,
         _ => Backend::Pluto,
