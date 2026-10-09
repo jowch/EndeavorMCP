@@ -449,6 +449,11 @@ fn queue_json(status: &Status) -> Option<Value> {
     Some(json!({ "state": queue.state, "reason": queue.reason, "reason_text": queue_reason_text(&queue.reason) }))
 }
 
+/// What the other-version notice adds for a runtime in a Slurm job.
+fn cluster_clause(cluster: bool) -> &'static str {
+    if cluster { " It runs in a Slurm job, so stopping it also gives up the job: the next start waits in the queue again. Tell the user that too." } else { "" }
+}
+
 /// What `pluto_session_status` says when the machine's runtime isn't up.
 fn status_result(name: &str, reached: &Reached, message: &str) -> Value {
     let Reached { outcome, status } = reached;
@@ -771,11 +776,7 @@ impl Relay {
         if !runtime.reattached || runtime.usable_as_is() || !self.told_other_build.lock().unwrap().insert((target.id.clone(), runtime.pid)) {
             return None;
         }
-        let mut notice = super::target::other_build_notice(&target.name, &target.id, &crate::which_build(runtime.build.as_deref()), "");
-        if cluster {
-            notice.push_str(" It runs in a Slurm job, so stopping it also gives up the job: the next start waits in the queue again. Tell the user that too.");
-        }
-        Some(notice)
+        Some(format!("{}{}", super::target::other_build_notice(&target.name, &target.id, runtime.interface, None), cluster_clause(cluster)))
     }
 
     /// Say `notice` with the next result, after any notice not said yet.
@@ -885,14 +886,30 @@ impl Relay {
         if changed { to_json(&parsed) } else { reply }
     }
 
+    /// The status's fields that only the front knows: the machine, its job and the runtime's own port, and
+    /// `other_version` when the runtime is another build's that doesn't offer this build's interface and is
+    /// kept, which says so again after the notice that was told once, with `runtime_build` the build that started it.
     fn add_machine_fields(&self, reply: &mut Value) -> bool {
         let machine = self.current();
-        if machine.is_local() {
+        let status = if machine.is_local() { Some(self.local.status()) } else { self.connections.status(&machine.id) };
+        // On this computer, only one that was kept: an idle one is stopped by the next call that may start one.
+        let other = status.as_ref().and_then(|status| status.state.runtime()).filter(|runtime| !runtime.usable_as_is() && (!machine.is_local() || self.local.kept(runtime.pid)));
+        if machine.is_local() && other.is_none() {
             return false;
         }
         let Some(Value::Object(mut fields)) = reply["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()) else { return false };
+        if let Some(runtime) = other {
+            let place = if machine.is_local() { "this computer" } else { machine.name.as_str() };
+            let cluster = !machine.is_local() && self.connections.get(&machine.id).is_some_and(|session| session.cluster());
+            fields.insert("other_version".into(), format!("{}{}", crate::other_version_text(place, &machine.id, runtime.interface, ""), cluster_clause(cluster)).into());
+            fields.insert("runtime_build".into(), runtime.build.clone().map_or(Value::Null, Value::from));
+        }
+        if machine.is_local() {
+            reply["result"]["content"][0]["text"] = to_json(&Value::Object(fields)).into();
+            return true;
+        }
         fields.insert("machine".into(), machine.name.clone().into());
-        if let Some(status) = self.connections.status(&machine.id) {
+        if let Some(status) = status {
             if let Some(job) = job_json(&status) {
                 fields.insert("job".into(), job);
             }

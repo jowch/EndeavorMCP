@@ -1167,8 +1167,8 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                     Ok(runtime) => {
                         let untold = shared.with(|i| i.told_other_build.replace(runtime.pid) != Some(runtime.pid));
                         let other = (untold && runtime.reattached && !crate::usable_as_is(runtime.build.as_deref(), runtime.interface)).then(|| {
-                            let which = crate::which_build(runtime.build.as_deref());
-                            format!("{}: Julia there was started by another version of Endeavor ({which}), and this is build {}, so a call may behave differently or be refused. It keeps running as it is; stopping it lets the next start use this version.", runtime.node, crate::embedded::BUILD_VERSION)
+                            let version = crate::which_version(runtime.interface, Some(crate::core::INTERFACE));
+                            format!("{}: Julia there was started by {version} version of Endeavor, and it keeps running as it is. Some calls may not work as expected, or may be refused. Stopping it lets the next start use this version.", runtime.node)
                         });
                         shared.with(|i| {
                         i.step = Some(format!("Ready on {}", runtime.node));

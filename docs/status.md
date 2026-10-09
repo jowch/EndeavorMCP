@@ -43,7 +43,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   binary's number; it compares builds with a binary from before the line was
   printed). A machine's runtime is checked too, since 2026-10-09: the helper's
   `Ready` carries its build and interface, the front tells the agent once and
-  never stops it, and `client::Session` reports it as trouble (serve.md,
+  never stops it, `pluto_session_status` says it every time (`other_version`,
+  since 2026-10-09), and `client::Session` reports it as trouble (serve.md,
   "Update it"; endeavor-mcp.md, "A runtime from another build").
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
@@ -101,11 +102,13 @@ Not yet checked:
   fetched build `14eb0a67bda7` through `LATEST` in the Linux VM, the
   checksum passed, and `endeavor update` said it is up to date. The replace
   step is tested against a local server.
-- The message when `serve` or `mcp` reuse a Julia from another build, with a
-  real Julia (unit-tested only). The check of a machine's runtime is tested
-  with a fake runtime and helper only, not against a real older Slurm job, and
-  `endeavor update` reading the new binary's interface only against a local
-  stand-in.
+- The check of a runtime from another build against a real Slurm job. On
+  2026-10-09 a real Julia started by a build from before the interface number
+  was checked by `mcp` on the same computer and on a machine over real ssh
+  (localhost), with the current wording and `other_version`: the agent was
+  told once, the status said it on every call, and the runtime kept running.
+  Not yet against a job, and `endeavor update` reading the new binary's
+  interface only against a local stand-in.
 - Gemini against `endeavor serve` and `endeavor mcp`, and Codex against
   `serve`. Their config lines in serve.md come from each tool's documentation.
   (Codex against `endeavor mcp` over stdio was tried through `codex exec` on

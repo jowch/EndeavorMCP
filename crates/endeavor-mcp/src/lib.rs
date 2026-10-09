@@ -180,6 +180,28 @@ pub(crate) fn which_build(build: Option<&str>) -> String {
     build.map_or("an earlier build".to_owned(), |build| format!("build {build}"))
 }
 
+/// How a runtime whose core offers `theirs` compares with a build that offers `ours`, in words: "an older",
+/// "a newer" or "another" (version). A core that says no interface is from before the number existed.
+pub(crate) fn which_version(theirs: Option<u32>, ours: Option<u32>) -> &'static str {
+    match (theirs, ours) {
+        (None, Some(_)) => "an older",
+        (Some(theirs), Some(ours)) if theirs < ours => "an older",
+        (Some(theirs), Some(ours)) if theirs > ours => "a newer",
+        _ => "another",
+    }
+}
+
+/// What the agent is told about a runtime on `place` that another build started and that doesn't offer this
+/// build's interface, whose core offers `interface`; `machine` is the id `stop_machine` and `use_machine`
+/// take, and `open` a sentence on its open notebooks, if any. No build keys: an agent passes this on to the
+/// user, to whom they mean nothing.
+pub(crate) fn other_version_text(place: &str, machine: &str, interface: Option<u32>, open: &str) -> String {
+    format!(
+        "Julia on {place} was started by {} version of Endeavor, and it keeps running as it is.{open} Some notebook tools may not work as described, or may be refused. If that happens, ask the user whether to stop it, since stopping it closes its notebooks. To stop it, call `stop_machine` with machine \"{machine}\"; then `use_machine` with machine \"{machine}\" starts this version.",
+        which_version(interface, Some(core::INTERFACE))
+    )
+}
+
 /// Why a runtime from a build before one port per runtime can't be used.
 pub const OLDER_RUNTIME: &str = "Julia here was started by an older version of Endeavor, which this version can't connect to. Restart Julia to use it.";
 
