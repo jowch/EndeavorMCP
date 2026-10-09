@@ -393,6 +393,47 @@ fn a_stop_ends_the_runtime_and_a_start_after_it_works_on_the_same_port() {
     assert!(session.stop().is_ok(), "nothing runs, and the helper says so");
 }
 
+/// What a tool call to the listener on `port` is answered.
+fn call(port: u16, token: &str) -> String {
+    use std::io::{Read, Write};
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_notebooks","arguments":{}}}"#;
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let request = format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    socket.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    socket.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    let _ = socket.read_to_string(&mut response);
+    response
+}
+
+#[test]
+fn a_restart_starts_another_runtime_on_the_same_port_and_calls_meanwhile_are_told_it_restarts() {
+    let place = Place::new("restart");
+    let session = place.session();
+    let first = ready(session.ensure(start(), LONG, false));
+    let hold = place.state.join("hold");
+    std::fs::write(&hold, "").unwrap();
+    assert!(matches!(session.restart(start(), Duration::from_millis(1500)), Outcome::StillWorking(_)));
+    assert!(!pid_alive(first.pid as i32), "the first runtime is gone");
+    let meanwhile = call(first.port, &first.token);
+    assert!(meanwhile.contains("Endeavor is restarting Julia on lab. Try again in a moment."), "{meanwhile}");
+    std::fs::remove_file(&hold).unwrap();
+    let second = ready(session.ensure(start(), LONG, false));
+    assert_eq!(second.port, first.port, "the same listener");
+    assert!(!second.reattached && second.pid != first.pid);
+    let after = call(second.port, &second.token);
+    assert!(after.starts_with("HTTP/1.1 200") && !after.contains("restarting"), "the new runtime answers: {after}");
+}
+
+#[test]
+fn a_restart_with_no_connection_fails_and_starts_nothing() {
+    let place = Place::new("restart-unconnected");
+    let session = place.session_with(false, None);
+    let outcome = session.restart(start(), LONG);
+    assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
+    assert!(!place.julia_ran());
+}
+
 #[test]
 fn a_stop_during_a_start_is_no_failure() {
     let place = Place::new("stop-starting");

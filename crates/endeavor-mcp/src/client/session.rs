@@ -532,6 +532,19 @@ impl Session {
         self.shared.request_stop()
     }
 
+    /// Stop the runtime and start it again as `want` says, then answer as `ensure` does (a kept
+    /// failure is tried again). Calls to the listener's port meanwhile are told that Julia is
+    /// restarting, and, if the start fails, that it couldn't start (`Messages::restart_failed`),
+    /// rather than that the machine isn't connected. A stop that fails starts nothing and is the outcome.
+    pub fn restart(&self, want: Want, wait: Duration) -> Outcome {
+        if let Err(message) = self.shared.request_stop() {
+            return Outcome::Failed(message);
+        }
+        // After the stop, which says the machine isn't connected, and before the start can attach.
+        self.shared.listener.restarting();
+        self.ensure(want, wait, true)
+    }
+
     /// The user agreed to install the helper on the machine, and nothing a start needs after it:
     /// a session waiting for that connects again with it allowed. Returns at once.
     pub fn allow_install(&self) {

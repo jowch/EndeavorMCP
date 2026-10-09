@@ -171,7 +171,7 @@ impl State {
 
 /// Whether this build's callers can use a runtime that `build` started and whose core offers `interface`
 /// as it is: it offers this build's interface (`core::INTERFACE`), or it is this build. False when neither is known.
-pub(crate) fn usable_as_is(build: Option<&str>, interface: Option<u32>) -> bool {
+pub fn usable_as_is(build: Option<&str>, interface: Option<u32>) -> bool {
     interface == Some(core::INTERFACE) || build == Some(embedded::BUILD_VERSION)
 }
 

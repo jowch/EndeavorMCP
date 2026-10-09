@@ -633,7 +633,8 @@ plugins). The rest of this file can wait or go alongside.
   compares the exact build, and once the app and the plugin share a state
   folder a mismatch is the usual case. To close when the app adopts: compare
   `interface` as the library does (`RuntimeInfo::usable_as_is`, which a
-  machine's runtime has too).
+  machine's runtime has too, or `endeavor_mcp::usable_as_is` for a record
+  the app reads itself).
 - [P2] **The app becomes a second pinned consumer of the Helpers release.** The
   app pins this repository by commit, so its helper key is that commit's, and
   servers can only fetch it once Helpers has published it. Push this
