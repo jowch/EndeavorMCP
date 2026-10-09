@@ -336,7 +336,10 @@ mod tests {
     /// zip, from a `file://` address with curl.
     #[test]
     fn installs_a_checked_download_and_deletes_a_bad_one() {
+        // A canonical Windows path starts `\\?\`. Dropped: curl would read the `?` as a query,
+        // and a real cache path never has it.
         let tmp = crate::client::scratch("julia-install");
+        let tmp = tmp.to_str().and_then(|p| p.strip_prefix(r"\\?\")).map(std::path::PathBuf::from).unwrap_or(tmp);
         let top = format!("julia-{JULIA_VERSION}");
         let bin = tmp.join("src").join(&top).join("bin");
         std::fs::create_dir_all(&bin).unwrap();
