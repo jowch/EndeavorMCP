@@ -682,13 +682,16 @@ not supported. These gaps stay open.
   call then fails with `waiting_for_user`, and the card stays up. The same call
   made again by the same session, on the same notebook code, waits on the same
   card and gets at once an approval given meanwhile. Any other call by the
-  session takes the card down, so an approval can't reach code the agent
-  changed since; so does a refusal while no call waits, since the app refuses
-  what is still up when a turn ends. `waiting_for_user` is an error on purpose,
-  unlike `execution.still_running`: nothing happened, and the agent must not
-  assume it did. Not yet tried with a real agent and the app; the app may show
-  a second prompt of the agent's own for the repeated call, unless the user
-  chose "Always" for it.
+  session that changes or runs something takes the card down; reads leave it,
+  and the notebook-code check keeps an approval from reaching changed code. So
+  does a refusal while no call waits. `waiting_for_user` is an error on
+  purpose, unlike `execution.still_running`: nothing happened, and the agent
+  must not assume it did. Claude stops retrying after one to four tries, so
+  the result also says to tell the user and make the same call when they write
+  back. The app keeps a card no call waits on (`waiting: false`) past the
+  turn. Approving it does nothing until the user writes. An approval no call
+  has taken yet never expires; it stays until the session's next change or
+  run.
 - [P2] **An agent can add a machine under a name the user did not give.** Told
   "the machine localhost", a Codex agent called `add_machine` with host
   `self`, an alias `list_machines` showed in `ssh_hosts_not_added`, and told

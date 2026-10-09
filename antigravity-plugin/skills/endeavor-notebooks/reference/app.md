@@ -27,7 +27,7 @@ Other refusals:
 
 | `error` | Meaning | Do |
 |---|---|---|
-| `waiting_for_user` | The user hasn't answered yet; nothing was changed or run, and the request is still on their screen | To keep waiting, make the same call again with the same arguments, and don't try another way meanwhile. Any other call takes the request down. If they still haven't answered after a few tries, tell them it is waiting for them |
+| `waiting_for_user` | The user hasn't answered yet; nothing was changed or run, and the request is still on their screen | To keep waiting, make the same call again with the same arguments, and don't try another way meanwhile: a call that changes or runs something takes the request down. If you stop waiting, tell the user the request is waiting for their answer, and make the same call again when they write back |
 | `cancelled` | The call was cancelled before the user answered | Ask before trying again |
 | `no_app` | The app isn't open to ask the user | Tell the user; try again when it is |
 | `older_runtime` | This runtime predates approval and can't ask | Don't run code. Tell the user to restart the runtime, or to switch to Auto |

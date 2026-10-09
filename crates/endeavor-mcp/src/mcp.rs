@@ -381,7 +381,7 @@ impl Bridge {
             }
         }
         self.notebooks.note_call(&caller.owner);
-        if !caller.owner.is_empty() && self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
+        if !caller.owner.is_empty() && acts(name, &arguments) && self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
             self.notebooks.publish();
         }
         self.notebooks.note_activity(&arguments);
@@ -526,12 +526,22 @@ fn ask_wait(tool: &str) -> Duration {
     }
 }
 
-/// The error of a call whose wait for the user's answer ended first: the ask stays up for the same call made again.
+/// Whether a call changes or runs anything, and so takes down the session's asks left up for other
+/// calls. A read leaves them: the agent may read a cell before making the same call again, and an
+/// answer is tied to the notebook's code anyway.
+fn acts(tool: &str, arguments: &Value) -> bool {
+    WRITE_TOOLS.contains(&tool) || runs_code(tool, arguments)
+}
+
+/// The error of a call whose wait for the user's answer ended first: the ask stays up for the same call
+/// made again. Agents stop retrying after one to four tries whatever the text says, so it also says
+/// what to do after stopping: the app keeps the card, and the same call when the user writes back
+/// takes their answer.
 fn unanswered(tool: &str) -> String {
     format!(
         "ArgumentError: waiting_for_user::The user hasn't answered yet, so nothing was changed or run. \
-The request is still on their screen. To keep waiting, call `{tool}` again with the same arguments. \
-Don't try another way to do this meanwhile. If they still haven't answered after a few tries, tell them the request is waiting for them."
+The request is still on their screen. To keep waiting, call `{tool}` again with the same arguments, and don't try another way meanwhile. \
+If you stop waiting, tell the user the request is waiting for their answer. When they write back, call `{tool}` again with the same arguments: it goes ahead if they allowed it."
     )
 }
 
@@ -986,6 +996,21 @@ mod tests {
         assert_eq!(super::ask_wait("open_notebook"), open);
         assert!(open + Duration::from_secs(25) < Duration::from_secs(50), "{open:?}");
         assert!(run > open && run + Duration::from_secs(5) < Duration::from_secs(55), "{run:?}");
+    }
+
+    #[test]
+    fn reads_leave_an_ask_left_up_and_changes_or_runs_take_it_down() {
+        let cell = json!({ "notebook_id": "n", "cell_id": "a" });
+        assert!(!super::acts("read_cell", &cell) && !super::acts("open_notebook", &json!({ "path": "a.jl" })));
+        assert!(super::acts("edit_cell", &cell) && super::acts("execute_cell", &cell));
+        assert!(super::acts("open_notebook", &json!({ "path": "a.jl", "run_notebook": true })));
+    }
+
+    #[test]
+    fn an_unanswered_call_says_how_to_keep_waiting_and_what_to_do_after_stopping() {
+        let text = super::unanswered("new_notebook");
+        assert!(text.starts_with("ArgumentError: waiting_for_user::"), "{text}");
+        assert!(text.contains("call `new_notebook` again with the same arguments, and") && text.contains("When they write back, call `new_notebook` again"), "{text}");
     }
 
     use super::*;

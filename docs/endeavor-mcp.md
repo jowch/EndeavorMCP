@@ -100,7 +100,10 @@ and for five silent minutes happy, but not its tool timeout: Claude Code ends
 every MCP call after 60 seconds by default, progress or not. So the wait for
 the answer ends 45 seconds into the call (20 for an open, which has work after
 it) with `waiting_for_user`, the card stays up, and the same call made again
-on the same code waits on it (`asks.rs`). `GET /mcp` is `405` (no
+on the same code waits on it (`asks.rs`). The result also tells the agent, if
+it stops waiting, to tell the user and make the same call when they write back.
+Each ask in the event says whether a call waits on it (`waiting`), so the app
+can keep that card past the turn. `GET /mcp` is `405` (no
 server-initiated stream); so is `DELETE`, since a session lasts as long as the
 runtime. The reply to `initialize` carries an `Mcp-Session-Id` only for a
 client without `X-Endeavor-Session` (see

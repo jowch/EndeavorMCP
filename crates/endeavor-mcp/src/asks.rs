@@ -11,8 +11,10 @@
 //! a user can be away longer. The ask then stays up, without a call, and the
 //! same call made again by the same session, on the same code, waits on it
 //! once more; an approval the user gave meanwhile is that call's at once. Any
-//! other call by the session takes it down, and so does a refusal (the app
-//! refuses what is still up when a turn ends): the next call asks afresh.
+//! other call by the session that changes or runs something takes it down, and
+//! so does a refusal: the next call asks afresh. The app sees which asks a call
+//! waits on (`waiting`), so it can keep one left up past the end of the agent's
+//! turn, for the same call when the user writes back.
 
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -45,7 +47,7 @@ struct Waiting {
     tool: String,
     arguments: Value,
     code: Option<u64>,
-    /// What the app sees: `{id, owner, call_id, tool, arguments, since}`.
+    /// What the app sees: `{id, owner, call_id, tool, arguments, since}`, and `waiting` from `list`.
     shown: Value,
     answer: Option<Answer>,
     cancelled: bool,
@@ -87,9 +89,16 @@ impl Asks {
         Asks { state: Mutex::new(State { next: (now * 1000.0) as u64, waiting: Vec::new() }), changed: Condvar::new() }
     }
 
-    /// The calls waiting, in the order they came.
+    /// The asks up, in the order they came, each with `waiting`: whether a call waits on it now.
     pub fn list(&self) -> Vec<Value> {
-        self.state.lock().unwrap().waiting.iter().filter(|w| w.answer.is_none() && !w.cancelled).map(|w| w.shown.clone()).collect()
+        let state = self.state.lock().unwrap();
+        let up = state.waiting.iter().filter(|w| w.answer.is_none() && !w.cancelled);
+        up.map(|w| {
+            let mut shown = w.shown.clone();
+            shown["waiting"] = (!w.request.is_null()).into();
+            shown
+        })
+        .collect()
     }
 
     /// Session `owner` makes a call to `tool` with `arguments`: its asks left
@@ -206,6 +215,18 @@ mod tests {
         assert_eq!(asks.add(ask("1", &json!(8), "execute_cell", &cell)), id);
         assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Answered(Answer { allow: true, .. })));
         assert!(asks.list().is_empty());
+    }
+
+    #[test]
+    fn the_app_sees_whether_a_call_waits_on_an_ask() {
+        let asks = Asks::new(0.0);
+        let cell = json!({ "notebook_id": "n", "cell_id": "a" });
+        let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
+        assert_eq!(asks.list()[0]["waiting"], true);
+        assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered));
+        assert_eq!(asks.list()[0]["waiting"], false, "left up: the app may keep its card past the turn");
+        assert_eq!(asks.add(ask("1", &json!(8), "execute_cell", &cell)), id);
+        assert_eq!(asks.list()[0]["waiting"], true);
     }
 
     #[test]
