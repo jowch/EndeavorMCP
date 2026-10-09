@@ -16,7 +16,7 @@ use crate::stopped;
 pub(super) trait Provider: Send + Sync {
     /// Ask for `want` and say how it stands, as soon as that is known or `wait` has passed
     /// (`Outcome::StillWorking`); a start goes on meanwhile. An `Attach` starts nothing and looks afresh
-    /// when nothing is known to run. A failure is kept and given to every call until one asks to `retry`.
+    /// when nothing is known to run, waiting for a start that another process has under way. A failure is kept and given to every call until one asks to `retry`.
     fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome;
     fn status(&self) -> Status;
     /// End the runtime for every client of it, and wait until it is gone. With `force` a start that is
@@ -136,6 +136,9 @@ pub(super) enum OtherBuild {
     /// It is another build's and was kept: what to tell the agent, once.
     Kept(String),
 }
+
+/// How often a look waiting for another process's start looks again.
+const ANOTHER_START_POLL: Duration = Duration::from_millis(500);
 
 enum Phase {
     /// The state folder says what runs.
@@ -310,7 +313,14 @@ impl Provider for Local {
                 // Looked at with the phase let go: a runtime that is slow to answer holds up no other call.
                 Phase::Idle if matches!(want, Want::Attach { .. }) => {
                     drop(phase);
-                    let outcome = self.look(wait);
+                    let outcome = self.look(until.saturating_duration_since(Instant::now()));
+                    // A start another process has under way is waited for, like one of this process's.
+                    let left = until.saturating_duration_since(Instant::now());
+                    if matches!(outcome, Outcome::StillWorking(_)) && !left.is_zero() {
+                        std::thread::sleep(left.min(ANOTHER_START_POLL));
+                        phase = self.phase();
+                        continue;
+                    }
                     if let Outcome::Ready(runtime) = &outcome {
                         let mut phase = self.state.0.lock().unwrap();
                         if matches!(*phase, Phase::Idle) {
