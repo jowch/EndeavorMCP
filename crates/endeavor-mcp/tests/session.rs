@@ -767,5 +767,6 @@ fn a_session_reports_the_runtimes_build_and_interface_and_tells_trouble_once_for
     wait_for("the connection to come back", || !place.helpers().is_empty() && matches!(second.status().state, State::Ready(_)));
     assert_eq!(ready(second.ensure(Want::Attach { install: false }, LONG, false)).pid, started.pid);
     let trouble = trouble.lock().unwrap().clone();
-    assert!(trouble.iter().filter(|t| t.contains("another version")).count() == 1 && trouble[0].contains("another version of Endeavor (build 0.0.1-0123456789abcdef)"), "{trouble:?}");
+    assert!(trouble.iter().filter(|t| t.contains("version of Endeavor")).count() == 1 && trouble[0].contains("Julia there was started by an older version of Endeavor"), "{trouble:?}");
+    assert!(!trouble[0].contains("0123456789abcdef"), "the build is in the runtime's info, not the sentence: {trouble:?}");
 }

@@ -113,6 +113,8 @@ struct Builds {
     checked: Option<u32>,
     /// A runtime of another build was stopped. It is done once, so that two fronts of different builds don't take turns.
     stopped_one: bool,
+    /// The runtime of another build that was kept, and the agent told of.
+    kept: Option<u32>,
 }
 
 /// What `Local::other_build` came to.
@@ -164,8 +166,8 @@ impl Local {
             return OtherBuild::Fine;
         }
         builds.checked = Some(runtime.pid);
-        let which = crate::which_build(state.build.as_deref());
         if idle {
+            let which = crate::which_build(state.build.as_deref());
             builds.stopped_one = true;
             eprintln!("endeavor: Julia here (pid {}) was started by {which}, and no notebook is open in it; stopping it so that this build ({this}) starts its own", runtime.pid);
             match self.stop(false) {
@@ -173,8 +175,14 @@ impl Local {
                 Err(e) => eprintln!("endeavor: {e}"),
             }
         }
-        let open = open.filter(|n| *n > 0).map_or(String::new(), |n| format!(", with {n} notebook{} open", if n == 1 { "" } else { "s" }));
-        OtherBuild::Kept(other_build_notice(LOCAL, LOCAL, &which, &open))
+        builds.kept = Some(runtime.pid);
+        OtherBuild::Kept(other_build_notice(LOCAL, LOCAL, state.interface, open))
+    }
+
+    /// Whether `pid` is a runtime of another build that `other_build` kept. One it left for a call that may
+    /// start a runtime isn't, since that call stops it.
+    pub(super) fn kept(&self, pid: u32) -> bool {
+        self.builds.lock().unwrap().kept == Some(pid)
     }
 
     /// The phase, with a runtime that is no longer the one recorded forgotten. The state folder is read with the lock let go.
@@ -240,14 +248,13 @@ impl Local {
     }
 }
 
-/// What the agent is told once about a runtime on the machine `name` (id `id`) that `which` build started
-/// and that doesn't offer this build's interface; `open` adds what is known of its open notebooks.
-pub(super) fn other_build_notice(name: &str, id: &str, which: &str, open: &str) -> String {
-    let this = crate::embedded::BUILD_VERSION;
+/// What the agent is told once about a runtime on the machine `name` (id `id`) that another build started
+/// and that doesn't offer this build's interface, whose core offers `interface`; `open` is how many notebooks
+/// are open in it, when that is known.
+pub(super) fn other_build_notice(name: &str, id: &str, interface: Option<u32>, open: Option<u32>) -> String {
     let place = if name == LOCAL { "this computer" } else { name };
-    format!(
-        "Note: Julia on {place} was started by another version of Endeavor ({which}{open}), and this session's tools are build {this}'s, so a tool may behave differently from its description or be refused. It keeps running as it is. Stopping it (`stop_machine` with machine \"{id}\", only with the user's agreement, since it ends its notebooks) lets the next call start this version."
-    )
+    let open = open.filter(|n| *n > 0).map_or(String::new(), |n| format!(" It has {n} notebook{} open.", if n == 1 { "" } else { "s" }));
+    format!("Note: {}", crate::other_version_text(place, id, interface, &open))
 }
 
 /// A runtime that was found or started, as the session uses it. The user is told on stderr where the
