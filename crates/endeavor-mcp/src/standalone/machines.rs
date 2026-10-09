@@ -1202,6 +1202,19 @@ impl Relay {
         let provider = self.provider_for(&server, install, false)?;
         let was_ready = matches!(provider.status().state, State::Ready(_));
         let mut notes: Vec<String> = Vec::new();
+        // The folder is looked at, and made when only it is missing, before any job is asked for. A
+        // machine that isn't connected yet is looked at by a later call; this one says why.
+        if let Some(path) = folder.as_ref().filter(|_| !local) {
+            match provider.files(wire::files::Request::Folder { path: path.clone() }, deadline.left()) {
+                Some(Ok(wire::files::Reply::Folder { path, created: true })) => notes.push(format!("Made a new folder for the session on {name}: {}. Tell the user it was made.", path.display())),
+                Some(Ok(wire::files::Reply::Folder { .. })) | None => {}
+                Some(Ok(other)) => return Err(format!("{name}'s helper answered the folder check with {other:?}.")),
+                // The helper's own refusal (`Reply::Error`) comes as an error too.
+                Some(Err(message)) => {
+                    return Err(invalid(format!("The folder \"{path}\" can't be the session's folder on {name}: {message} Nothing was started. A path whose folders are missing may be mistyped, or be a path on another computer: paths here are {name}'s. Ask the user which folder to use, or leave `folder` out to use the home folder.")));
+                }
+            }
+        }
         let mut saved_resources = None;
         let outcome = match &server.cluster {
             None => provider.ensure(Want::Start { job: None, install }, deadline.left(), true),

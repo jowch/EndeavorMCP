@@ -854,6 +854,40 @@ fn use_machine_without_a_folder_keeps_the_folder_the_project_remembers_for_that_
 }
 
 #[test]
+fn use_machine_makes_a_folder_whose_parent_is_there_and_refuses_one_whose_parent_is_not_before_any_job() {
+    let slurm = FakeSlurm::new("folder");
+    let place = Place::with("folder", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_hpc();
+    let mut front = place.front();
+    front.initialize();
+    let job = json!({ "cpus": 1, "memory_gb": 1, "hours": 1 });
+    let ask = |folder: &Path| {
+        let mut args = job.clone();
+        args["machine"] = "hpc".into();
+        args["folder"] = folder.display().to_string().into();
+        args
+    };
+
+    // A folder whose parent is missing too, such as another computer's path: nothing is made and no job is asked for.
+    let elsewhere = place.dir.join("Users/me/projects/study");
+    let (failed, refused) = front.call("use_machine", ask(&elsewhere));
+    let message = refused["message"].as_str().unwrap();
+    assert!(failed && message.contains("can't be the session's folder on hpc") && message.contains("Nothing was started") && message.contains("Ask the user"), "{refused}");
+    assert!(!place.dir.join("Users").exists(), "nothing was made");
+    assert_eq!(slurm.read("sbatch.args"), "", "no job was submitted");
+    assert_eq!(place.projects(), Value::Null, "the project remembers nothing");
+
+    // A new folder whose parent is there is made, and the result says so.
+    let study = place.dir.join("home/new-study");
+    let queued = front.ok("use_machine", ask(&study));
+    assert_eq!(queued["state"].as_str(), Some("queued"), "{queued}");
+    assert!(study.is_dir(), "the folder was made");
+    assert!(queued["message"].as_str().unwrap().contains(&format!("Made a new folder for the session on hpc: {}", study.display())), "{queued}");
+    assert_ne!(slurm.read("sbatch.args"), "", "the job was submitted");
+    assert_eq!(place.projects()[place.project.display().to_string()]["folder"], study.display().to_string().as_str());
+}
+
+#[test]
 fn a_remembered_plain_server_is_started_when_nothing_runs_there() {
     let place = Place::new("remember-start");
     place.add_lab();

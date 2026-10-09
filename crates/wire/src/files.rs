@@ -2,8 +2,9 @@
 //! its runtime: a folder's contents, the Pluto notebooks under a folder, a
 //! notebook's first cells, Slurm's partitions, and whether a runtime or its job
 //! is there. The helper answers them, all but `Runtime` with [`answer`].
-//! Also the one write: a file the user attached, sent in pieces into the
-//! session's folder (`Place`, then `Write`).
+//! Also the writes: the session's folder, made when only it is missing
+//! (`Folder`), and a file the user attached, sent in pieces into that folder
+//! (`Place`, then `Write`).
 
 use std::io::{Read, Write as _};
 use std::path::{Component, Path, PathBuf};
@@ -28,6 +29,9 @@ pub enum Request {
     /// Whether a runtime (or its job) is there, found without taking it over.
     /// Only the helper knows its state folder, so it answers this one itself.
     Runtime,
+    /// The folder `path` as a session's folder: there, or made when the folder
+    /// it goes in is there ([`folder`]).
+    Folder { path: String },
     /// Where a file named `name` goes in `folder`'s `data/` ([`place`]).
     Place { folder: String, name: String, size: u64, sha256: String },
     /// A piece of a file being sent to `path` in `folder`, as `Place` answered
@@ -53,6 +57,9 @@ pub enum Reply {
     Preview { preview: Preview },
     Slurm { scheduler: crate::slurm::Scheduler },
     Runtime { runtime: RuntimeState },
+    /// `path` is the folder, absolute and with `~` expanded; `created`: it was
+    /// made just now.
+    Folder { path: PathBuf, created: bool },
     /// `path` is relative to the folder; `have`: a file with the same contents
     /// is already there, so there's nothing to send.
     Place { path: String, have: bool },
@@ -90,6 +97,7 @@ pub fn answer(request: &Request) -> Reply {
         Request::Preview { path } => notebooks::read_preview(&expand(path)).map(|preview| Reply::Preview { preview }),
         Request::Slurm => crate::slurm::probe().map(|scheduler| Reply::Slurm { scheduler }),
         Request::Runtime => Err("Only the helper knows about its runtime.".into()),
+        Request::Folder { path } => folder(&expand(path)),
         Request::Place { folder, name, size, sha256 } => place(&expand(folder), name, *size, sha256),
         Request::Write { folder, path, offset, bytes, last } => write(&expand(folder), path, *offset, bytes, *last).map(|()| Reply::Written),
     };
@@ -121,6 +129,24 @@ pub fn expand(path: &str) -> PathBuf {
         Some(rest) if rest.starts_with('/') || cfg!(windows) && rest.starts_with('\\') => home().join(&rest[1..]),
         _ => home().join(path),
     }
+}
+
+/// `dir` as a session's folder: there already, or made when the folder it goes
+/// in is there. When that one is missing too, nothing is made: the path is more
+/// likely mistyped, or another computer's, than new.
+fn folder(dir: &Path) -> Result<Reply, String> {
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => return Ok(Reply::Folder { path: dir.to_owned(), created: false }),
+        Ok(_) => return Err(format!("{} is a file, not a folder.", dir.display())),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("Couldn't open {}: {}", dir.display(), plain(&e))),
+        Err(_) => {}
+    }
+    let parent = dir.parent().unwrap_or(dir);
+    if !parent.is_dir() {
+        return Err(format!("Neither {} nor the folder it would go in, {}, exists.", dir.display(), parent.display()));
+    }
+    std::fs::create_dir(dir).map_err(|e| format!("Couldn't make the folder {}: {}", dir.display(), plain(&e)))?;
+    Ok(Reply::Folder { path: dir.to_owned(), created: true })
 }
 
 fn list(dir: &Path) -> Result<Reply, String> {
@@ -330,6 +356,27 @@ fn plain(e: &std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_is_used_made_when_only_it_is_missing_and_else_refused() {
+        let dir = std::env::temp_dir().join(format!("endeavor-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(folder(&dir), Ok(Reply::Folder { path: dir.clone(), created: false }));
+        let new = dir.join("new-study");
+        assert_eq!(folder(&new), Ok(Reply::Folder { path: new.clone(), created: true }));
+        assert!(new.is_dir());
+        assert_eq!(folder(&new), Ok(Reply::Folder { path: new.clone(), created: false }), "made once");
+        let deeper = dir.join("missing").join("study");
+        let refused = folder(&deeper).unwrap_err();
+        assert!(refused.contains("Neither") && refused.contains(&dir.join("missing").display().to_string()), "{refused}");
+        assert!(!dir.join("missing").exists(), "nothing is made when the parent is missing");
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+        assert!(folder(&dir.join("notes.txt")).unwrap_err().contains("is a file"));
+        // `~` is the home folder, as for the other requests.
+        assert!(matches!(answer(&Request::Folder { path: "~".into() }), Reply::Folder { created: false, .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn lists_folders_first_then_julia_files() {
