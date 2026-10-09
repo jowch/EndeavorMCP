@@ -155,5 +155,12 @@ Next:
 
 - Ember (R notebooks) is in development in its own repository. It joins as
   another adapter behind the core, with its own path prefix on the one port
-  ([runtime-core.md](runtime-core.md), [one-port.md](one-port.md)).
+  ([runtime-core.md](runtime-core.md), [one-port.md](one-port.md)). So far
+  `wire` knows its files (`Backend::Ember`: `.R` with Ember's first line, a
+  page at `/ember/edit`, a preview of the first cells), the folder scan the
+  app asks for still lists only Pluto's, and `open_notebook` refuses an Ember
+  file as `unsupported`. Next: the core running one adapter per engine, then
+  the R adapter. The engine name a client asks a runtime for
+  (`wire::ENGINE_PLUTO`, a string) becomes `Backend` with the first of those,
+  where the core starts engines.
 - marimo after Ember.
