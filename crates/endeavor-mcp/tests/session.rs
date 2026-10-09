@@ -762,6 +762,10 @@ fn a_session_reports_the_runtimes_build_and_interface_and_tells_trouble_once_for
     assert!(!attached.usable_as_is());
     assert!(matches!(second.status().state, State::Ready(r) if r == attached), "the status carries them");
     ready(second.ensure(Want::Attach { install: false }, LONG, false));
+    // A connection made again to the same runtime says nothing again.
+    place.drop_connection();
+    wait_for("the connection to come back", || !place.helpers().is_empty() && matches!(second.status().state, State::Ready(_)));
+    assert_eq!(ready(second.ensure(Want::Attach { install: false }, LONG, false)).pid, started.pid);
     let trouble = trouble.lock().unwrap().clone();
-    assert!(trouble.len() == 1 && trouble[0].contains("another version of Endeavor (build 0.0.1-0123456789abcdef)"), "{trouble:?}");
+    assert!(trouble.iter().filter(|t| t.contains("another version")).count() == 1 && trouble[0].contains("another version of Endeavor (build 0.0.1-0123456789abcdef)"), "{trouble:?}");
 }

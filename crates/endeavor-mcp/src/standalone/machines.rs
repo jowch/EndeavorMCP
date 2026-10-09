@@ -745,7 +745,7 @@ impl Relay {
                     OtherBuild::Kept(notice) => self.add_notice(notice),
                     OtherBuild::Fine => {}
                 }
-            } else if let Some(notice) = self.machine_other_build(&target, runtime) {
+            } else if let Some(notice) = self.machine_other_build(&target, runtime, provider.cluster()) {
                 self.add_notice(notice);
             }
         }
@@ -767,17 +767,15 @@ impl Relay {
     /// What to tell the agent, once per runtime, when a machine's runtime came from another build and
     /// doesn't offer this build's interface. Unlike this computer's, it is never stopped for the agent:
     /// on a cluster that would give up the job's allocation, and the next start waits in the queue again.
-    fn machine_other_build(&self, target: &Target, runtime: &RuntimeInfo) -> Option<String> {
-        if !runtime.reattached || runtime.usable_as_is() {
+    fn machine_other_build(&self, target: &Target, runtime: &RuntimeInfo, cluster: bool) -> Option<String> {
+        if !runtime.reattached || runtime.usable_as_is() || !self.told_other_build.lock().unwrap().insert((target.id.clone(), runtime.pid)) {
             return None;
         }
-        let key = (target.id.clone(), runtime.pid);
-        let mut told = self.told_other_build.lock().unwrap();
-        if told.as_ref() == Some(&key) {
-            return None;
+        let mut notice = super::target::other_build_notice(&target.name, &target.id, &crate::which_build(runtime.build.as_deref()), "");
+        if cluster {
+            notice.push_str(" It runs in a Slurm job, so stopping it also gives up the job: the next start waits in the queue again. Tell the user that too.");
         }
-        *told = Some(key);
-        Some(super::target::other_build_notice(&target.name, &target.id, &crate::which_build(runtime.build.as_deref()), ""))
+        Some(notice)
     }
 
     /// Say `notice` with the next result, after any notice not said yet.
@@ -1302,7 +1300,7 @@ impl Relay {
             result["job"] = job;
         }
         let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Julia started there" };
-        let notes = match self.machine_other_build(&target, runtime) {
+        let notes = match self.machine_other_build(&target, runtime, server.cluster.is_some()) {
             Some(other) => format!("{notes} {other}"),
             None => notes,
         };

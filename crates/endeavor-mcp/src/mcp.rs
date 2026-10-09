@@ -981,7 +981,7 @@ mod tests {
         source.split("#[cfg(test)]").next().unwrap()
     }
 
-    /// The quoted names in `code` that start with `prefix` and go on in lower case and underscores, sorted, each once.
+    /// The quoted names in `code` that start with `prefix` and go on in letters, digits and underscores, sorted, each once.
     fn quoted_names(code: &str, prefix: &str) -> Vec<String> {
         let opening = format!("\"{prefix}");
         let mut names: Vec<String> = code
@@ -990,7 +990,7 @@ mod tests {
                 let rest = &code[at + 1..];
                 let end = rest.find('"')?;
                 let name = &rest[..end];
-                name[prefix.len()..].chars().all(|c| c.is_ascii_lowercase() || c == '_').then(|| name.to_owned())
+                name[prefix.len()..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_').then(|| name.to_owned())
             })
             .collect();
         names.sort();

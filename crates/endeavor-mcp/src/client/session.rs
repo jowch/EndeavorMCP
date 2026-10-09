@@ -385,6 +385,8 @@ struct Inner {
     /// What the first helper settled `Launcher::Auto` as: a reconnect asks for the same, so the
     /// session never changes how it runs the runtime (if Slurm was installed meanwhile, say).
     settled: Option<Launcher>,
+    /// The runtime (its pid) the caller was told came from another build: a reconnect to it says nothing again.
+    told_other_build: Option<u32>,
 }
 
 struct Shared {
@@ -435,6 +437,7 @@ impl Session {
             epoch: 0,
             may_kick: true,
             settled: None,
+            told_other_build: None,
         };
         let shared = Arc::new(Shared {
             allow_install: AtomicBool::new(config.allow_install),
@@ -1153,7 +1156,8 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                     // It went before its runtime was heard of, and was handled as gone: it is not ready.
                     Ok(_) if shared.with(|i| i.run == Run::Gone) => shared.with(|i| i.run = Run::Idle),
                     Ok(runtime) => {
-                        let other = (runtime.reattached && !crate::usable_as_is(runtime.build.as_deref(), runtime.interface)).then(|| {
+                        let untold = shared.with(|i| i.told_other_build.replace(runtime.pid) != Some(runtime.pid));
+                        let other = (untold && runtime.reattached && !crate::usable_as_is(runtime.build.as_deref(), runtime.interface)).then(|| {
                             let which = crate::which_build(runtime.build.as_deref());
                             format!("{}: Julia there was started by another version of Endeavor ({which}), and this is build {}, so a call may behave differently or be refused. It keeps running as it is; stopping it lets the next start use this version.", runtime.node, crate::embedded::BUILD_VERSION)
                         });

@@ -35,9 +35,16 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
 - `endeavor update` replaces the binary from the Helpers release with the
   newest build on Linux, macOS and Windows (tested for Linux's logic and the
   Windows rename on Linux; not run on a Mac or Windows). `endeavor --version`
-  prints the version and a build hash of the source, and on a release build
-  a second line, `release <key>`. `serve` and `mcp` say when the running Julia
-  came from another build (serve.md, "Update it").
+  prints the version and a build hash of the source, on a release build a
+  line `release <key>`, and last a line `interface <n>`, the number for what
+  its core offers callers (`core::INTERFACE`). A runtime of another build is
+  used as it is when it offers this build's interface. `serve`, `mcp` and
+  `endeavor update` say when the running Julia doesn't (`update` reads the new
+  binary's number; it compares builds with a binary from before the line was
+  printed). A machine's runtime is checked too, since 2026-10-09: the helper's
+  `Ready` carries its build and interface, the front tells the agent once and
+  never stops it, and `client::Session` reports it as trouble (serve.md,
+  "Update it"; endeavor-mcp.md, "A runtime from another build").
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
   SHA-256 and keeps it (tested against a fake release; the wiring is
@@ -95,7 +102,10 @@ Not yet checked:
   checksum passed, and `endeavor update` said it is up to date. The replace
   step is tested against a local server.
 - The message when `serve` or `mcp` reuse a Julia from another build, with a
-  real Julia (unit-tested only).
+  real Julia (unit-tested only). The check of a machine's runtime is tested
+  with a fake runtime and helper only, not against a real older Slurm job, and
+  `endeavor update` reading the new binary's interface only against a local
+  stand-in.
 - Gemini against `endeavor serve` and `endeavor mcp`, and Codex against
   `serve`. Their config lines in serve.md come from each tool's documentation.
   (Codex against `endeavor mcp` over stdio was tried through `codex exec` on

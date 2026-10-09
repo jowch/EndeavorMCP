@@ -722,8 +722,8 @@ struct Relay {
     ops: Mutex<()>,
     /// Said once, in the first result.
     notice: Mutex<Option<String>>,
-    /// The machine's runtime (machine id and pid) the agent was last told came from another build.
-    told_other_build: Mutex<Option<(String, u32)>>,
+    /// The machines' runtimes (machine id and pid) the agent was told came from another build.
+    told_other_build: Mutex<std::collections::HashSet<(String, u32)>>,
     machines: crate::client::MachinesFile,
     projects: projects::Projects,
     /// What `initialize` negotiated, for `MCP-Protocol-Version`.
@@ -762,7 +762,7 @@ impl Relay {
             connections: machines::Connections::default(),
             ops: Mutex::new(()),
             notice: Mutex::new(None),
-            told_other_build: Mutex::new(None),
+            told_other_build: Mutex::default(),
             machines: crate::client::MachinesFile::here(),
             projects: projects::Projects::at(Env::here().projects_path()),
             protocol: Mutex::default(),
