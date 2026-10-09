@@ -182,15 +182,28 @@ pub fn ember_preview(text: &str) -> Preview {
             body.push(line);
         }
     }
-    if order.is_empty() {
-        order = bodies.iter().map(|(id, _)| (*id, false)).collect();
+    // As Ember does: ids the file has no cell for, and repeats, are skipped; a
+    // cell the block doesn't list goes after the nearest cell before it in the
+    // file that is placed, else first.
+    let mut placed: Vec<(&str, bool)> = Vec::new();
+    for (id, commented) in order {
+        if bodies.iter().any(|(b, _)| *b == id) && !placed.iter().any(|(p, _)| *p == id) {
+            placed.push((id, commented));
+        }
     }
-    let codes: Vec<Vec<&str>> = order
+    for (at, (id, _)) in bodies.iter().enumerate() {
+        if placed.iter().any(|(p, _)| p == id) {
+            continue;
+        }
+        let after = bodies[..at].iter().rev().find_map(|(before, _)| placed.iter().position(|(p, _)| p == before));
+        placed.insert(after.map_or(0, |i| i + 1), (id, false));
+    }
+    let codes: Vec<Vec<&str>> = placed
         .iter()
         .filter_map(|(id, commented)| {
             let (_, body) = bodies.iter().find(|(b, _)| b == id)?;
-            let body = trim_blank(body);
-            Some(if *commented { body.iter().map(|l| l.strip_prefix("## ").or_else(|| l.strip_prefix("##")).unwrap_or(l)).collect() } else { body.to_vec() })
+            let body: Vec<&str> = if *commented { body.iter().map(|l| l.strip_prefix("## ").or_else(|| l.strip_prefix("##")).unwrap_or(l)).collect() } else { body.clone() };
+            Some(trim_blank(&body).to_vec())
         })
         .collect();
     Preview {
@@ -379,6 +392,20 @@ curves <- read.csv(\"growth.csv\")
         let text = "### An Ember notebook ###\n# /// environment\n# ///\n\n# %% id=a\nx <- 1\n\n# %% id=b\ny <- x\n";
         let codes: Vec<String> = ember_preview(text).cells.into_iter().map(|c| c.code).collect();
         assert_eq!(codes, ["x <- 1", "y <- x"]);
+    }
+
+    #[test]
+    fn ember_places_cells_the_order_leaves_out_as_ember_does() {
+        // c and a aren't listed: a has no listed cell before it, so it goes first; c goes after b.
+        let text = "### An Ember notebook ###\n# %% id=a\nA\n# %% id=b\nB\n# %% id=c\nC\n# %% id=d\nD\n# /// cell order\n# d\n# b\n# x\n# b\n# ///\n";
+        let codes: Vec<String> = ember_preview(text).cells.into_iter().map(|c| c.code).collect();
+        assert_eq!(codes, ["A", "D", "B", "C"]);
+    }
+
+    #[test]
+    fn ember_drops_a_disabled_cells_trailing_blank_lines() {
+        let text = "### An Ember notebook ###\n# %% id=a\n## x <- 1\n##\n\n# /// cell order\n# a disabled\n# ///\n";
+        assert_eq!(ember_preview(text).cells[0].code, "x <- 1");
     }
 
     #[test]
