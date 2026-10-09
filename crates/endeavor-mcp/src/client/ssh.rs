@@ -157,15 +157,17 @@ fn ssh_program() -> PathBuf {
 
 /// On Windows, start `command` without a console window: ssh is a console
 /// program, and from the app, which has no console, each one would open a window.
-/// The same goes for the curl or wget that fetches a server's helper (`release`).
+/// The same goes for the curl or wget that fetches a server's helper (`release`),
+/// and for Julia, which the core starts (in the app, the core has no console either).
+/// The app uses it for the console programs it starts itself. Elsewhere it does nothing.
 #[cfg(windows)]
-pub(crate) fn no_window(command: &mut Command) {
+pub fn no_window(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-pub(crate) fn no_window(_command: &mut Command) {}
+pub fn no_window(_command: &mut Command) {}
 
 /// Whether `host` can be given to ssh as the destination: an alias, a name,
 /// an address (IPv6 has colons) or `user@host`, where the user, which may hold
