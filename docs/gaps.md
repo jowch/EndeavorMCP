@@ -661,14 +661,33 @@ not supported. These gaps stay open.
 - [P2] **A waited run stops waiting at 45 seconds, and nothing stops a second
   run of the same cells.** The cap is `WAIT_SECONDS` in `notebooks/tools.rs`,
   counted from the start of the tool call (an approval card's time included),
-  with a floor of 5 seconds for the wait itself. No argument changes it, and a
-  real agent client has not been run against it (it is chosen from the 45 to
-  60 second tool timeouts). The call returns with `execution.still_running`
+  with a floor of 5 seconds for the wait itself. No argument changes it. It is
+  chosen to stay under 60 seconds: Claude Code (2.1.280, the app's pin, and
+  2.1.295, checked 2026-10-09) ends every MCP call after 60 seconds by default,
+  over HTTP and stdio, whatever progress the server sends; `MCP_TOOL_TIMEOUT`
+  or the server's `timeout` raises that. Codex's default is 60 seconds too.
+  The call returns with `execution.still_running`
   and the run goes on, watched until it ends. A run accepted is no longer in
   `pending_run` while it runs, for an unwaited run too; so if its task fails
   before the cell runs, the cell is not staged any more. If the agent runs the
   still-running cells again, Pluto queues the run as it does for an unwaited
   one; `run_conflict` only covers another session's edits.
+- [P2] **A call that waits for the user's answer stops waiting at 45
+  seconds, or 20 for `open_notebook` and `new_notebook`.** Before, it waited
+  as long as the card was up, and Claude Code ended it at 60 seconds: in
+  Manual, an unanswered "Let Claude create a notebook?" card outlived its call
+  (seen 2026-10-09). The wait leaves room for the work after it: a run waits at
+  least 5 seconds more, and the first open in a new Julia takes 20 to 25. The
+  call then fails with `waiting_for_user`, and the card stays up. The same call
+  made again by the same session, on the same notebook code, waits on the same
+  card and gets at once an approval given meanwhile. Any other call by the
+  session takes the card down, so an approval can't reach code the agent
+  changed since; so does a refusal while no call waits, since the app refuses
+  what is still up when a turn ends. `waiting_for_user` is an error on purpose,
+  unlike `execution.still_running`: nothing happened, and the agent must not
+  assume it did. Not yet tried with a real agent and the app; the app may show
+  a second prompt of the agent's own for the repeated call, unless the user
+  chose "Always" for it.
 - [P2] **An agent can add a machine under a name the user did not give.** Told
   "the machine localhost", a Codex agent called `add_machine` with host
   `self`, an alias `list_machines` showed in `ssh_hosts_not_added`, and told

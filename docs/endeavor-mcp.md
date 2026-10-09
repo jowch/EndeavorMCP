@@ -90,13 +90,17 @@ The core serves one endpoint, `POST /mcp` on the runtime's one port
 ([one-port.md](one-port.md)): a request's reply comes back in
 the same response (`200`, `application/json`); a notification or a response
 from the client gets `202` with no body. A call the runtime holds for the
-user's answer is the exception: Claude Code gives up on a POST whose
-response hasn't begun within 60 seconds, so once a call waits, its response
+user's answer is the exception: once it waits, its response
 begins at once as an event stream (`text/event-stream`, which the spec
 allows for a client that accepts it). Every 15 seconds the stream says the
 call is still waiting: a `notifications/progress` when the request carried
 `_meta.progressToken`, else an SSE comment. The reply is the stream's last
-event. `GET /mcp` is `405` (no
+event. The stream keeps Claude Code's checks for a response that hasn't begun
+and for five silent minutes happy, but not its tool timeout: Claude Code ends
+every MCP call after 60 seconds by default, progress or not. So the wait for
+the answer ends 45 seconds into the call (20 for an open, which has work after
+it) with `waiting_for_user`, the card stays up, and the same call made again
+on the same code waits on it (`asks.rs`). `GET /mcp` is `405` (no
 server-initiated stream); so is `DELETE`, since a session lasts as long as the
 runtime. The reply to `initialize` carries an `Mcp-Session-Id` only for a
 client without `X-Endeavor-Session` (see
