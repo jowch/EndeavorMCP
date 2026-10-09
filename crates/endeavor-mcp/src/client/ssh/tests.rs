@@ -207,7 +207,15 @@ fn a_server_without_the_helper_is_described_and_nothing_is_written() {
         std::fs::create_dir_all(&state).unwrap();
         let bin = |listed: Option<&str>, ps: Option<&str>| server_path(&home.join("bin"), &shell, listed, ps);
         // A process whose command is a core's, a quoted node name that holds "pid", and a recorded job.
-        let core = KillOnDrop(std::os::unix::process::CommandExt::arg0(Command::new("sleep").arg("60"), "endeavor core --state-dir fake").spawn().unwrap());
+        let child = std::os::unix::process::CommandExt::arg0(Command::new("sleep").arg("60"), "endeavor core --state-dir fake").spawn().unwrap();
+        // Just after the spawn the kernel may not have set the new command line yet, and `ps` then shows
+        // `[sleep]`: wait until it shows the core's.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !String::from_utf8_lossy(&Command::new("ps").args(["-p", &child.id().to_string(), "-o", "args="]).output().unwrap().stdout).contains("--state-dir") {
+            assert!(std::time::Instant::now() < deadline, "the fake core never showed its command line");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let core = KillOnDrop(child);
         let pid = core.0.id();
         let write = |text: String| std::fs::write(state.join("runtime.json"), text).unwrap();
         write(format!(r#"{{"launcher":"process","node":"rapid-pid1","pid":{pid},"port":5,"token":"t"}}"#));
