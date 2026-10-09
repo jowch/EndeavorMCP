@@ -126,8 +126,10 @@ Not yet checked:
 
 Known gaps:
 
-- `serve` on Windows stops Julia on Ctrl-C and when its console closes, but
-  only `cargo check` and clippy for the Windows target have seen that code.
+- `serve` on Windows has started Julia and been stopped by `endeavor stop`,
+  by hand (`gaps.md`, Windows). It also stops Julia on Ctrl-C and when its
+  console closes, but only `cargo check` and clippy for the Windows target
+  have seen that code.
 - Unpacking a new version removes older folders that no runtime holds and
   nobody has used for a day (`unpack`, `lease`). Folders unpacked before this
   have no `in-use` file and stay. The app still has to hold a `lease` on its

@@ -475,16 +475,19 @@ sign-in.
 
 Windows is not offered until these close; the README says so.
 
-- [P2] **Endeavor has run on Windows once, by hand.** CI runs `cargo test` on
+- [P2] **Endeavor has run on Windows only by hand.** CI runs `cargo test` on
   `windows-latest`, but every test in `tests/` but `version.rs` is
-  `cfg(unix)`, so little more than the unit tests run there (issue #9). The first try on Windows 11 found two bugs no test saw:
-  `--julia auto` asked `/bin/sh` for julia, and the runtime's log couldn't be
-  emptied (opened to append, os error 5). With both fixed, `endeavor serve`
-  started a real runtime with juliaup's Julia 1.13.1 and `endeavor stop`
-  stopped it. The MCP path (`use_machine local` under an agent), the console
+  `cfg(unix)`, so little more than the unit tests run there (issue #9). The
+  first try on Windows 11 found two bugs no test saw: `--julia auto` asked
+  `/bin/sh` for julia, and the runtime's log couldn't be emptied (opened to
+  append, os error 5). With both fixed, by hand with juliaup's Julia 1.13.1:
+  `endeavor serve` started a runtime and `endeavor stop` stopped it, and under
+  the Antigravity CLI `endeavor mcp` made a notebook, edited cells and read
+  their output. There `new_notebook` started the local runtime itself;
+  `use_machine local` was not called with the fix. `use_machine`, the console
   handler, the `taskkill` cancel path and a real ssh from Windows have not
-  run. Windows has no Julia download: with no `julia.exe` on the PATH, Endeavor
-  says to install juliaup.
+  run. Windows has no Julia download: with no `julia.exe` on the PATH,
+  Endeavor says to install juliaup, and with one too old, it says so.
 - [P2] **Under Codex on Windows a runtime would end with the session.** Codex
   puts an MCP server in a job object that its children cannot leave, and ends
   the job with the session (read from its source, not run). Endeavor asks to

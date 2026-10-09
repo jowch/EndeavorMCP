@@ -97,10 +97,13 @@ pub fn find(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -
             Ok((path, version))
         }
         Source::Auto => {
-            if let Some(path) = path_julia()
-                && let Ok(version) = checked_version(&path, "")
-            {
-                return Ok((path, version));
+            if let Some(path) = path_julia() {
+                match checked_version(&path, &format!("Found {path}, but it doesn't run.")) {
+                    Ok(version) => return Ok((path, version)),
+                    // Windows has no download to fall back on: say what's wrong with the one found.
+                    Err(why) if cfg!(windows) => return Err(format!("{why} With juliaup, `juliaup update` or `juliaup default release` gives a newer one.").into()),
+                    Err(_) => {}
+                }
             }
             let path = own_julia(download, progress)?;
             let version = checked_version(&path, "Endeavor's Julia doesn't run on this machine.")?;
