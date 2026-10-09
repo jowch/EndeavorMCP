@@ -199,7 +199,8 @@ edits and runs a cell, and the browser link reaches Ember's page at
 agents yet, so the test sets `ENDEAVOR_TEST_R_NOTEBOOKS` (read only by debug
 builds). It prints `SKIPPED` and passes without Julia or without `Rscript`
 on the PATH. The first run installs Ember at its pinned commit into
-`~/.cache/endeavor/r`, as a user's first R notebook does.
+`~/.cache/endeavor/r`, as a user's first R notebook does. The `E2E` workflow
+runs it too, in a job of its own with R from Ubuntu's packages.
 
 ```sh
 cargo test -p endeavor-mcp --test e2e_r -- --ignored --nocapture
