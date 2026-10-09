@@ -107,6 +107,22 @@ pub fn install_helper(root: &Path) {
     }
 }
 
+/// A process whose command looks like a runtime's core, for the look at what a recorded pid is.
+#[cfg(unix)]
+pub fn core_like_child() -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+    let child = Command::new("sleep").arg("600").arg0("endeavor core --state-dir fake").spawn().unwrap();
+    // Just after the spawn the kernel may not have set the new command line yet, and `ps` then shows
+    // `[sleep]`: wait until it shows the core's.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !String::from_utf8_lossy(&Command::new("ps").args(["-p", &child.id().to_string(), "-o", "args="]).output().unwrap().stdout).contains("--state-dir") {
+        assert!(std::time::Instant::now() < deadline, "the fake core never showed its command line");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child
+}
+
 pub fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while !done() {

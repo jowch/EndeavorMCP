@@ -1898,7 +1898,7 @@ impl Drop for KillOnDrop {
 fn add_machine_only_looks_until_told_to_install() {
     let place = Place::bare("needs-install", &[]);
     // A runtime that a helper of an earlier install left: the look reports it.
-    let core = KillOnDrop(std::os::unix::process::CommandExt::arg0(Command::new("sleep").arg("600"), "endeavor core --state-dir fake").spawn().unwrap());
+    let core = KillOnDrop(common::core_like_child());
     let core_pid = core.0.id();
     std::fs::write(place.state.join("runtime.json"), json!({ "launcher": "process", "node": "n", "pid": core_pid, "token": "t" }).to_string()).unwrap();
     let mut front = place.front();

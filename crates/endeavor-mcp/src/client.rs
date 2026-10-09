@@ -13,7 +13,7 @@ mod ssh;
 
 pub use channel::{CLOSED, Channel, Hello, Notice, Runtime, StartError, StartOptions, died_reason};
 pub use listener::{Listener, Messages, Refuse};
-pub use session::{Config, FoundInfo, HelloInfo, HelperFor, InstallInfo, JobInfo, Outcome, QueueInfo, RuntimeInfo, Session, State, Status, Want};
+pub use session::{Config, FoundInfo, HelloInfo, HelperFor, InstallInfo, JobInfo, OnEvent, Outcome, QueueInfo, RuntimeInfo, Session, SessionEvent, State, Status, Want};
 pub use machines::{Cluster, IdleStop, Launcher, MachinesFile, Server, ssh_config_hosts, valid_id};
 pub use ssh::{Auth, Cancel, ConnectError, Event, NeedsInstall, Options, Running, Transport, bootstrap_script, connect, no_helper, start, test, this_platform, valid_host};
 

@@ -84,7 +84,15 @@ fn hostname() -> String {
 
 /// A process whose command looks like a runtime's core, for the probe that looks at what a recorded pid is.
 fn core_child() -> std::process::Child {
-    Command::new("sleep").arg("600").arg0("endeavor core --state-dir fake").process_group(0).spawn().unwrap()
+    let child = Command::new("sleep").arg("600").arg0("endeavor core --state-dir fake").process_group(0).spawn().unwrap();
+    // Just after the spawn the kernel may not have set the new command line yet, and `ps` then shows
+    // `[sleep]`: wait until it shows the core's.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !String::from_utf8_lossy(&Command::new("ps").args(["-p", &child.id().to_string(), "-o", "args="]).output().unwrap().stdout).contains("--state-dir") {
+        assert!(std::time::Instant::now() < deadline, "the fake core never showed its command line");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child
 }
 
 /// `core_child`, ended when it is dropped, whatever a test did before.

@@ -231,6 +231,26 @@ pub enum Outcome {
 /// The helper binary to send to a machine whose `uname -s` is `os` and `uname -m` is `arch` (`Options::helper`).
 pub type HelperFor = Box<dyn Fn(&str, &str) -> Result<PathBuf, String> + Send + Sync>;
 
+/// What a session tells its caller as it goes (`Config::on_event`). It comes on a thread of the
+/// session's, after the session has recorded it and with no lock of the session held, so the
+/// caller may ask the session for its status and sees the state the event brought. The callback
+/// should return quickly, and must not close or drop the session: it runs on the session's own
+/// threads. Not every change of state comes with an event (a runtime that is ready, or found not
+/// running, doesn't), so a caller that shows the state still reads `Session::status`.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum SessionEvent {
+    /// A step of connecting or starting, as the helper reported it.
+    Step(Event),
+    /// Something that went wrong or waits on the user, in plain words: a lost connection, a start
+    /// that failed or needs an install, a wait for the agreement to install the helper, a runtime
+    /// that stopped or that another connection took over.
+    Trouble(String),
+}
+
+/// Where a session's events go (`Config::on_event`).
+pub type OnEvent = Box<dyn Fn(SessionEvent) + Send + Sync>;
+
 /// How a session reaches its machine.
 pub struct Config {
     pub server: Server,
@@ -249,13 +269,26 @@ pub struct Config {
     pub helper: HelperFor,
     /// How the helper runs the runtime (`Options::launcher`); None is the record's way.
     pub launcher: Option<Launcher>,
+    /// How ssh signs in (`Options::auth`): `Auth::Batch` by default. A caller that answers ssh's
+    /// prompts itself passes `Auth::Env` with its askpass.
+    pub auth: Auth,
+    /// A runtime this session starts ends itself once no notebook has been open for the idle limit
+    /// (`Options::exit_idle`); true by default.
+    pub exit_idle: bool,
+    /// Hears the session's events. The default writes each `Trouble` to stderr and drops the steps.
+    pub on_event: OnEvent,
 }
 
 impl Config {
     /// Over `ssh` to `server`, with the machine's default folders. `helper` finds the helper to send to a machine that lacks it.
     pub fn new(server: Server, helper: impl Fn(&str, &str) -> Result<PathBuf, String> + Send + Sync + 'static) -> Config {
         let transport = Transport::for_server(&server);
-        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper), launcher: None }
+        let on_event: OnEvent = Box::new(|event| {
+            if let SessionEvent::Trouble(text) = event {
+                eprintln!("{text}");
+            }
+        });
+        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper), launcher: None, auth: Auth::Batch, exit_idle: true, on_event }
     }
 }
 
@@ -585,8 +618,14 @@ impl Shared {
         self.inner.lock().unwrap()
     }
 
-    /// Hear what connecting and starting say.
+    /// Tell the caller something went wrong or waits on the user.
+    fn trouble(&self, text: String) {
+        (self.config.on_event)(SessionEvent::Trouble(text));
+    }
+
+    /// Hear what connecting and starting say, and pass it on.
     fn on_event(&self, event: Event) {
+        let step = SessionEvent::Step(event.clone());
         self.with(|i| match event {
             Event::Connected { os, arch } => {
                 let hello = i.hello.get_or_insert_with(HelloInfo::default);
@@ -625,6 +664,7 @@ impl Shared {
             Event::Started { node, .. } => i.step = Some(format!("Ready on {node}")),
             Event::Slurm(_) | Event::Finished { .. } => {}
         });
+        (self.config.on_event)(step);
     }
 
     /// Start the runtime on the connection if one is asked for and none is under
@@ -853,7 +893,6 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                     if shared.allow_install.load(Ordering::SeqCst) {
                         continue;
                     }
-                    eprintln!("The helper isn't installed on {name}; waiting for the user's agreement to install it");
                     let parked = shared.with(|i| {
                         // Checked with the lock held, so that a permission is never lost between the two.
                         if shared.allow_install.load(Ordering::SeqCst) {
@@ -869,6 +908,7 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                     if !parked {
                         continue;
                     }
+                    shared.trouble(format!("The helper isn't installed on {name}; waiting for the user's agreement to install it"));
                     (reconnecting, lost_since, delay) = (false, None, RETRY_FIRST);
                     shared.listener.disconnected();
                     if !wait_for(inbox, Duration::MAX) {
@@ -878,12 +918,12 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                 }
                 let lost = *lost_since.get_or_insert_with(Instant::now);
                 let retry = reconnecting && error.retry && lost.elapsed() < RETRY_GIVE_UP;
-                eprintln!("The connection to {name} failed{}: {}", if retry { ", trying again" } else { "" }, error.message);
                 shared.with(|i| {
                     i.may_kick = true;
                     i.state = if retry { State::Connecting } else { State::Failed(error.message.clone()) };
                     i.step = Some(if retry { format!("Lost the connection to {name}: {}", error.message) } else { error.message.clone() });
                 });
+                shared.trouble(format!("The connection to {name} failed{}: {}", if retry { ", trying again" } else { "" }, error.message));
                 if retry {
                     if !wait_for(inbox, delay) {
                         return;
@@ -1007,14 +1047,15 @@ fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
             std::thread::sleep(REATTACH_PAUSE);
         }
     }
-    shared.with(|i| {
-        eprintln!("{}: couldn't ask whether the runtime is still there: {trouble}", i.name);
+    let name = shared.with(|i| {
         if current(i) {
             let why = format!("Endeavor couldn't find out whether Julia on {} is still running ({trouble}). Starting it again tries once more.", i.name);
             i.step = Some(why.clone());
             i.state = State::Failed(why);
         }
+        i.name.clone()
     });
+    shared.trouble(format!("{name}: couldn't ask whether the runtime is still there: {trouble}"));
     shared.listener.disconnected();
 }
 
@@ -1023,7 +1064,7 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
     let config = &shared.config;
     let allowed = shared.allow_install.load(Ordering::SeqCst);
     let launcher = shared.inner().settled.or(config.launcher);
-    let options = Options { auth: Auth::Batch, root: config.root.clone(), state: config.state.clone(), depot: config.depot.clone(), exit_idle: true, allow_install: allowed, helper: &*config.helper, launcher };
+    let options = Options { auth: config.auth.clone(), root: config.root.clone(), state: config.state.clone(), depot: config.depot.clone(), exit_idle: config.exit_idle, allow_install: allowed, helper: &*config.helper, launcher };
     let cancel = Arc::new(Cancel::default());
     *shared.cancel.lock().unwrap() = cancel.clone();
     if shared.leaving.load(Ordering::SeqCst) {
@@ -1124,13 +1165,15 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             shared.begin_start();
                             continue;
                         }
-                        shared.with(|i| {
-                            eprintln!("{}: starting the runtime needs {}, and installing wasn't allowed.", i.name, wire::items_text(&items));
+                        let text = shared.with(|i| {
                             (i.run, i.job) = (Run::Idle, None);
                             i.wanted = None;
                             i.step = Some(format!("{} Waiting for the user's yes, which is for this start only.", wire::needs_text(&items, &i.name)));
+                            let text = format!("{}: starting the runtime needs {}, and installing wasn't allowed.", i.name, wire::items_text(&items));
                             i.state = State::NeedsInstall(InstallInfo { items, helper: None });
+                            text
                         });
+                        shared.trouble(text);
                         shared.listener.restart_failed();
                     }
                     Err(StartError::NotRunning) => {
@@ -1150,28 +1193,42 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                         }
                     }
                     Err(StartError::Failed(message)) => {
-                        shared.with(|i| {
-                            eprintln!("{}: starting the runtime failed: {message}", i.name);
+                        let name = shared.with(|i| {
                             i.run = Run::Idle;
                             i.wanted = None;
                             i.job = None;
-                            i.state = State::Failed(message);
+                            i.state = State::Failed(message.clone());
+                            i.name.clone()
                         });
+                        shared.trouble(format!("{name}: starting the runtime failed: {message}"));
                         shared.listener.restart_failed();
                     }
                 }
             }
             Msg::Notice(g, notice) if g == conn => match notice {
                 Notice::Died(reason) => {
-                    shared.with(|i| gone(i, format!("Julia on {} stopped. {reason}", i.name).trim_end().to_owned(), false));
+                    let text = shared.with(|i| {
+                        let text = format!("Julia on {} stopped. {reason}", i.name).trim_end().to_owned();
+                        gone(i, text.clone(), false);
+                        text
+                    });
+                    shared.trouble(text);
                     shared.listener.disconnected();
                 }
                 Notice::Replaced => {
-                    shared.with(|i| gone(i, format!("Another connection took Julia on {} over.", i.name), true));
+                    let text = shared.with(|i| {
+                        let text = format!("Another connection took Julia on {} over.", i.name);
+                        gone(i, text.clone(), true);
+                        text
+                    });
+                    shared.trouble(text);
                     shared.listener.disconnected();
                 }
                 // The helper is gone; `Closed` follows.
-                Notice::Lost(message) => eprintln!("{}: the helper said: {message}", shared.inner().name),
+                Notice::Lost(message) => {
+                    let name = shared.inner().name.clone();
+                    shared.trouble(format!("{name}: the helper said: {message}"));
+                }
             },
             _ => {}
         }

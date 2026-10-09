@@ -601,8 +601,8 @@ Before the app adopts the library, in this order (assessed 2026-10-08; the
 launcher per start, architecture-review.md P6, was decided against on
 2026-10-08 and an `auto` launcher built instead; the compatibility rule for
 builds that share a runtime was built on 2026-10-08, `interface` in
-`runtime.json`): the three
-`Config` settings and events instead of stderr below, and one real run from a
+`runtime.json`, and the `Config` settings and events on 2026-10-08,
+`Config::auth`, `exit_idle` and `on_event`): one real run from a
 Mac to the Linux test VM through `client::Session` (the P1 in Releases and
 plugins). The rest of this file can wait or go alongside.
 
@@ -618,15 +618,15 @@ plugins). The rest of this file can wait or go alongside.
   servers can only fetch it once Helpers has published it. Push this
   repository and wait for Helpers before an app release that moves the pin. A
   check in the app's CI that the pinned key is published would catch it.
-- [P2] **Adopting `Session` in the app needs three settings it fixes now:** the
-  wording of the listener's messages (`Config::messages` names MCP tools in the
-  front's case; the default speaks in the app's words), batch sign-in only
-  (`Auth::Batch`) and `exit_idle: true` for a runtime this session starts. Each
-  would become a `Config` field.
-- [P2] **A session writes its progress and failures to stderr** (`eprintln!`).
-  A caller that holds sessions in its own process gets them on its stderr; a
-  desktop app can't show them to the user. To close before the app adopts:
-  send them as the session's events.
+- [P3] **The layers under a session still write a few lines to stderr.** A
+  session's own progress and trouble go to `Config::on_event` (since
+  2026-10-08). Below it, ssh's stderr (`ssh: ...`), lines a login script prints
+  before the bootstrap's, the channel's "helper exited" and "sent an unreadable
+  message" lines and the listener's first failed accept still go to the
+  process's stderr. A desktop app sees none
+  of them, but they are diagnostics: a sign-in failure's reason also reaches
+  the session's error. To close: an optional log sink in `Options`, the channel
+  and the listener, which the session points at `on_event`.
 - [P3] **The names of the entry points mislead.** `lib.rs`, the crate root,
   holds the helper's connect loop as `serve`, while `endeavor serve` is
   `standalone::serve`; `mcp.rs` is the runtime's MCP server, while `endeavor
