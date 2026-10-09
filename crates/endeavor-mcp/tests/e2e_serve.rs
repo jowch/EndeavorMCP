@@ -18,7 +18,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::{find_julia, pid_alive, wait_for};
+use common::{find_julia, group_alive, pid_alive, wait_for};
 use serde_json::{Value, json};
 
 fn fresh(path: PathBuf) -> PathBuf {
@@ -320,8 +320,8 @@ fn serve_and_mcp_without_the_app() {
         let said: Vec<String> = err.try_iter().collect();
         assert!(said.ends_with(&["Stopping Julia…".to_owned(), "Stopped.".to_owned()]), "{said:?}");
         assert!(!pid_alive(core), "the core is gone");
-        // SAFETY: signal 0 only checks; ESRCH means the group, Julia and its workers, is gone.
-        assert_eq!(unsafe { libc::kill(-core, 0) }, -1, "Julia's process group is gone");
+        // Julia and its workers: nothing of the group runs (what is left may be zombies).
+        assert!(!group_alive(core), "Julia's process group is gone");
         assert!(!state.join("runtime.json").exists());
     });
 
@@ -402,8 +402,7 @@ fn serve_and_mcp_without_the_app() {
         let stopped = command(&["stop"], &work, &julia, &depot).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&stopped.stdout), format!("Stopped Julia (pid {core}).\n"));
         wait_for("the core to exit", || !pid_alive(core));
-        // SAFETY: as above.
-        assert_eq!(unsafe { libc::kill(-core, 0) }, -1, "Julia's process group is gone");
+        assert!(!group_alive(core), "Julia's process group is gone");
     });
 }
 
