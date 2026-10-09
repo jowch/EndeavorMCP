@@ -49,7 +49,8 @@ fn zombie(stat: &str) -> bool {
 }
 
 /// Whether a process of the group `pgid` is still running. Zombies don't count, as in `start_time`:
-/// a container whose PID 1 doesn't reap keeps the ended processes of a group for good.
+/// a container whose PID 1 reaps slowly or not at all may keep the ended processes of a group for a
+/// while, or for good.
 #[cfg(target_os = "linux")]
 pub fn group_running(pgid: i32) -> bool {
     // SAFETY: signal 0 only checks; a group of another user's processes (EPERM) is not counted.
@@ -62,7 +63,8 @@ pub fn group_running(pgid: i32) -> bool {
     })
 }
 
-/// Whether a process of the group `pgid` is still running.
+/// Whether a process of the group `pgid` is still running. A zombie here doesn't last: the core's parent
+/// waits on it, and launchd reaps orphans.
 #[cfg(not(target_os = "linux"))]
 pub fn group_running(pgid: i32) -> bool {
     // SAFETY: signal 0 only checks; a group of another user's processes (EPERM) is not counted.

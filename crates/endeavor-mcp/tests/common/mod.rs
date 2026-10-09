@@ -140,8 +140,9 @@ pub fn julia_pids(dir: &Path) -> Vec<i32> {
     std::fs::read_to_string(dir.join("julia.pids")).map(|text| text.split_whitespace().filter_map(|p| p.parse().ok()).collect()).unwrap_or_default()
 }
 
-/// Whether `pid` runs. A zombie doesn't: a container whose PID 1 doesn't reap keeps an ended process
-/// that was reparented to it, and the runtime counts it as gone too (`unixproc::start_time`).
+/// Whether `pid` runs. A zombie doesn't: a container whose PID 1 reaps slowly or not at all may keep an
+/// ended process that was reparented to it for a while, or for good, and the runtime counts it as gone
+/// too (`unixproc::start_time`).
 pub fn pid_alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     if unsafe { libc::kill(pid, 0) } != 0 {
@@ -149,6 +150,22 @@ pub fn pid_alive(pid: i32) -> bool {
     }
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
     !stat.rfind(')').and_then(|end| stat[end + 1..].split_whitespace().next()).is_some_and(|state| state == "Z" || state == "X")
+}
+
+/// Whether a process of the group `pgid` runs, by the runtime's rule (`unixproc::group_running`):
+/// zombies don't count. Without `/proc` (macOS, which reaps), any member counts.
+#[allow(dead_code)]
+pub fn group_alive(pgid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the group has a member.
+    if unsafe { libc::kill(-pgid, 0) } != 0 {
+        return false;
+    }
+    let Ok(procs) = std::fs::read_dir("/proc") else { return true };
+    procs.flatten().any(|entry| {
+        let stat = std::fs::read_to_string(entry.path().join("stat")).unwrap_or_default();
+        let Some(fields) = stat.rfind(')').map(|end| stat[end + 1..].split_whitespace().collect::<Vec<_>>()) else { return false };
+        fields.get(2).and_then(|group| group.parse::<i32>().ok()) == Some(pgid) && !matches!(fields.first(), Some(&"Z" | &"X"))
+    })
 }
 
 /// A request as the bridge received it.

@@ -982,7 +982,7 @@ fn stop_workers(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
         unsafe { libc::kill(-pid, signal) };
         let until = std::time::Instant::now() + Duration::from_secs(5);
         while left() && std::time::Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(100));
         }
         if !left() {
             break;
