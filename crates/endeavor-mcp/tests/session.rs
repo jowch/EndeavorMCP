@@ -413,7 +413,7 @@ fn a_restart_starts_another_runtime_on_the_same_port_and_calls_meanwhile_are_tol
     let first = ready(session.ensure(start(), LONG, false));
     let hold = place.state.join("hold");
     std::fs::write(&hold, "").unwrap();
-    assert!(matches!(session.restart(start(), Duration::from_millis(1500)), Outcome::StillWorking(_)));
+    assert!(matches!(session.restart(None, true, Duration::from_millis(1500)), Outcome::StillWorking(_)));
     assert!(!pid_alive(first.pid as i32), "the first runtime is gone");
     let meanwhile = call(first.port, &first.token);
     assert!(meanwhile.contains("Endeavor is restarting Julia on lab. Try again in a moment."), "{meanwhile}");
@@ -426,10 +426,31 @@ fn a_restart_starts_another_runtime_on_the_same_port_and_calls_meanwhile_are_tol
 }
 
 #[test]
+fn a_restart_whose_start_fails_tells_calls_julia_couldnt_start() {
+    let place = Place::new("restart-fails");
+    let session = place.session();
+    let first = ready(session.ensure(start(), LONG, false));
+    let hold = place.state.join("hold");
+    std::fs::write(&hold, "").unwrap();
+    assert!(matches!(session.restart(None, true, Duration::from_millis(1500)), Outcome::StillWorking(_)));
+    // The new start fails: its core is killed while Julia waits.
+    let core = Command::new("pgrep").arg("-f").arg("--").arg(format!("core --state-dir {} ", place.state.display())).output().unwrap();
+    let cores: Vec<i32> = String::from_utf8_lossy(&core.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect();
+    assert_eq!(cores.len(), 1, "{cores:?}");
+    // SAFETY: plain syscall, on the core this test's session started and what it started.
+    unsafe { libc::kill(-cores[0], libc::SIGKILL) };
+    let status = session.wait_for(LONG, |status| matches!(status.state, State::Failed(_)));
+    assert!(matches!(status.state, State::Failed(_)), "{status:?}");
+    let after = call(first.port, &first.token);
+    assert!(after.contains("Julia on lab couldn't start.") && !after.contains("restarting"), "{after}");
+    std::fs::remove_file(&hold).unwrap();
+}
+
+#[test]
 fn a_restart_with_no_connection_fails_and_starts_nothing() {
     let place = Place::new("restart-unconnected");
     let session = place.session_with(false, None);
-    let outcome = session.restart(start(), LONG);
+    let outcome = session.restart(None, true, LONG);
     assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
     assert!(!place.julia_ran());
 }
