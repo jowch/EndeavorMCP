@@ -38,6 +38,12 @@ Every P1:
   carries) it only tells the agent once, in `use_machine` or the next notebook
   call, and `client::Session` reports it as trouble: a machine's runtime is
   never stopped for the agent, since on a cluster that gives up the job.
+  A machine's runtime whose `Ready` gives neither its build nor its
+  interface is from before runs waited for the user's answer, so the
+  listener refuses its code runs for every client (the plugin, the app);
+  reading and editing still work, and the refusal says to stop it and start
+  this version. On this computer the plugin talks to its runtime without a
+  listener, so a local runtime that old isn't held back.
   `serve` doesn't need it: the agent talks to the core itself.
 - [P2] **Old builds are never removed from servers or from the plugin's
   folder.** Every build a server was sent stays in `~/.cache/endeavor/<build>/`

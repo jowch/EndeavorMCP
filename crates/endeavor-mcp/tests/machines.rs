@@ -1180,6 +1180,34 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
 }
 
 #[test]
+fn a_machines_runtime_too_old_to_ask_before_a_run_runs_no_code_and_the_agent_is_told_how_to_get_past_it() {
+    let place = Place::new("machine-no-run-gate");
+    place.add_lab();
+    let path = place.notebook("old.jl");
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab" }));
+    first.ok("open_notebook", json!({ "path": path }));
+    first.finish();
+    wait_for("the connection to end", || place.helpers().is_empty());
+
+    // A record from before the core recorded its build or interface.
+    let mut record = read_record(&place.state);
+    record.as_object_mut().unwrap().remove("interface");
+    record.as_object_mut().unwrap().remove("build");
+    std::fs::write(place.state.join("runtime.json"), record.to_string()).unwrap();
+    let mut second = place.front();
+    second.initialize();
+    second.ok("use_machine", json!({ "machine": "lab" }));
+    let (failed, said) = second.call("execute_cell", json!({ "notebook_id": NOTEBOOK, "cell_id": "00000000-0000-0000-0000-000000000000" }));
+    let said = said.to_string();
+    assert!(failed && said.contains("Julia on lab was started by a version of Endeavor too old to ask the user before running code") && said.contains("call stop_machine for lab, then use_machine for lab"), "{said}");
+    assert!(!said.contains("Restart Julia"), "no button the plugin doesn't have: {said}");
+    assert_eq!(second.ok("list_notebooks", json!({}))[0]["path"], path, "reading still works");
+    second.finish();
+}
+
+#[test]
 fn a_dropped_connection_is_made_again_in_the_same_front_on_the_same_browser_address() {
     let place = Place::new("dropped");
     place.add_lab();
