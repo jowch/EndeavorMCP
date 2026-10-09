@@ -1354,7 +1354,9 @@ pub(crate) fn this_program() -> Result<PathBuf, String> {
         return Ok(exe);
     }
     let ours = update::version_line();
-    let theirs = Command::new(&exe).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().map(|out| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().to_owned());
+    let mut command = Command::new(&exe);
+    client::no_window(&mut command);
+    let theirs = command.arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().map(|out| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().to_owned());
     match theirs {
         Ok(theirs) if theirs == ours => Ok(exe),
         Ok(theirs) => Err(format!(
@@ -1421,9 +1423,10 @@ fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child,
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
     command.stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
-    // Julia and Pluto's workers are console programs: with no console to
-    // share, each would open a console window. CREATE_NO_WINDOW gives the core
-    // one without a window, which they inherit. Breaking away from a job the
+    // CREATE_NO_WINDOW gives a console-program core a console without a
+    // window. A GUI-program core (the app's own exe) gets no console at all,
+    // so the core also starts Julia with CREATE_NO_WINDOW (core.rs), and
+    // Pluto's workers share Julia's hidden console. Breaking away from a job the
     // app runs in lets the runtime outlive the app, as it does on Unix; a job
     // that doesn't allow that refuses it, and then the runtime ends with the app.
     let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
