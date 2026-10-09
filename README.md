@@ -79,7 +79,7 @@ these ways:
 - On Windows, a computer whose name has lower-case letters, or is longer than
   15 characters, can't use its own runtime yet: `new_notebook` says Julia runs
   remotely on that name ([gaps.md](docs/gaps.md)). Names like
-  `DESKTOP-AB12CD` work.
+  `DESKTOP-AB12CD` should work (not tried).
 - agy names the server `endeavor_endeavor`. `agy -p` (print mode) refuses
   every MCP call that isn't allowed in `~/.gemini/antigravity-cli/settings.json`,
   one tool at a time:
@@ -103,7 +103,7 @@ Once the plugin has run, `endeavor.exe` is in
 macOS, Linux, the Antigravity desktop app and installing from a marketplace
 were not tried.
 
-With a plugin you need nothing else. The first start:
+On Linux and macOS, a plugin needs nothing else. The first start:
 
 - Downloads the `endeavor` program, about 30 MB, into
   `~/.local/share/endeavor/bin/`.

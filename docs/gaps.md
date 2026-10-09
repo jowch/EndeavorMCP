@@ -494,7 +494,9 @@ sign-in.
 
 ## Windows
 
-Windows is not offered until these close; the README says so.
+On Windows only the Antigravity plugin has been run, on one computer, and
+the README says so. The Claude Code plugin there was not tried, and Codex is
+not supported. These gaps stay open.
 
 - [P2] **Endeavor has run on Windows only by hand.** CI runs `cargo test` on
   `windows-latest`, but every test in `tests/` but `version.rs` is
@@ -554,7 +556,10 @@ Windows is not offered until these close; the README says so.
   runs remotely on that name, `endeavor stop` can't stop it, and `endeavor
   status` says it was recorded by another computer. Seen on Windows 10 under
   agy; setting `COMPUTERNAME` to the DNS name for the agent's process made
-  everything work. Default names such as `DESKTOP-AB12CD` are not affected.
+  everything work. Names that are all upper case and at most 15 characters,
+  such as the default `DESKTOP-AB12CD`, should not be affected (not tried).
+  The first try on Windows 11 (above) didn't hit it, presumably because that
+  computer's name was of that kind; this was not checked.
   To close: read the DNS host name (`GetComputerNameExW` with
   `ComputerNameDnsHostname`) in `hostname()`.
 - [P2] **`install.ps1` has never run.** There is no PowerShell here. It is read

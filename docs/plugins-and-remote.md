@@ -893,7 +893,7 @@ from a local copy of the repository and used through `codex exec` (below).
 |---|---|---|---|
 | Manifest | `.claude-plugin/plugin.json` | `plugin.json` at the root | `plugin.json` at the root |
 | MCP file | `.mcp.json` | `mcp.json` | `mcp_config.json` |
-| Command | `sh ${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh ${PLUGIN_ROOT}/launch/endeavor-mcp.sh …` (expanded in `args`) | `sh -c` that finds the plugin in `~/.gemini/antigravity-cli/plugins/endeavor` and runs the launcher |
+| Command | `sh ${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh …` | `sh ${PLUGIN_ROOT}/launch/endeavor-mcp.sh …` (expanded in `args`) | `sh -c` that finds the plugin in `~/.gemini/antigravity-cli/plugins/endeavor` or `~/.gemini/config/plugins/endeavor` (where agy 1.3.2 put it) and runs the launcher |
 | Skills | `skills/` (a copy) | `skills/` (a copy) | `skills/` (a copy) |
 | Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
 | Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add`, `codex plugin add endeavor@endeavor`, from `.agents/plugins/marketplace.json` | `agy plugin install <folder or its GitHub tree URL>` |
