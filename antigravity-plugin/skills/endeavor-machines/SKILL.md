@@ -46,7 +46,7 @@ On a machine, the notebook and the files are there, not on the user's computer. 
 
 ## After the session
 
-Notebooks keep running on the machine after the session ends, until the idle limit (48 hours by default; `pluto_session_status` shows `idle_stop_hours` and `exits_when_idle`). `browser_url` works only while this session is connected. `list_machines` knows a machine's state only while this session is connected to it.
+Notebooks keep running on the machine after the session ends, until the idle limit (48 hours by default; `pluto_session_status` shows `idle_stop_hours` and `exits_when_idle`). If `pluto_session_status` has `other_version`, Julia there was started by another version of Endeavor: some tools may not work as described, and stopping it needs the user's agreement. `browser_url` works only while this session is connected. `list_machines` knows a machine's state only while this session is connected to it.
 
 On a cluster the job keeps its node and the user's allocation until its time limit (`ends_at`) or the idle limit, whichever comes first. When the user is done for now, make sure they know that, and that `stop_machine` ends the job and gives the node back. Stop it only if they ask.
 

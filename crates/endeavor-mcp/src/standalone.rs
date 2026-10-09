@@ -554,8 +554,9 @@ pub(crate) fn other_build_than(dir: &Path, this: &str, interface: Option<u32>) -
         Some(build) => format!("build {build}"),
         None => "an earlier build".to_owned(),
     };
+    let version = crate::which_version(state["interface"].as_u64().and_then(|n| u32::try_from(n).ok()), interface);
     Some(format!(
-        "The Julia running from {} was started by another version of endeavor ({which}; this is build {this}). It keeps working as it was started. To use this version, run `endeavor stop`, then start it again.",
+        "The Julia running from {} was started by {version} version of endeavor ({which}; this is build {this}). It keeps working as it was started. To use this version, run `endeavor stop`, then start it again.",
         dir.display()
     ))
 }

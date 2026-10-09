@@ -196,7 +196,7 @@ fn a_running_runtime_is_described_without_its_token() {
     let dir_arg = dir.to_str().unwrap();
     let (text, json_out) = home.both(&["--state-dir", dir_arg]);
     assert!(text.contains(&format!("Running: pid {me}, port ")), "{text}");
-    assert!(text.contains("started by another version of endeavor (build 0.1.0-aaaa; this is build "), "{text}");
+    assert!(text.contains("started by an older version of endeavor (build 0.1.0-aaaa; this is build "), "{text}");
     assert!(text.contains("Notebooks folder: /work/notebooks") && text.contains("Ends itself when idle: yes") && text.contains("Answers: yes"), "{text}");
     assert_eq!(json_out["runtime"]["state"], "running");
     assert_eq!(json_out["runtime"]["answers"], true);

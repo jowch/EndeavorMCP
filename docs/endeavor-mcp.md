@@ -380,6 +380,12 @@ no notebook is open, else keeps it and tells the agent once; `serve` and
 `build` and `interface` the helper's `Ready` carries (`RuntimeInfo` has both,
 and `RuntimeInfo::usable_as_is` applies the rule); it is never stopped for the
 agent, only told of once, and `client::Session` reports it as trouble.
+While the session uses such a runtime, here or on a machine,
+`pluto_session_status` says so every time, for an agent that no longer has
+the notice: `other_version` is the same sentence and `runtime_build` the build
+that started it. What the agent is told says "an older" version when the
+runtime's number is lower or missing, "a newer" one when it is higher, and
+leaves build keys out, since an agent passes it on to the user.
 `endeavor update` reads the new binary's number from its `--version` (the
 line `interface <n>`) and compares the build only with a binary from before
 that line was printed. Two builds with one number must
