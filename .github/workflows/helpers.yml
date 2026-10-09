@@ -7,6 +7,9 @@
 # scripts/helpers.sh downloads the Linux ones, and scripts/install.sh and
 # install.ps1 the newest build for a computer, from there. LATEST, uploaded
 # after them, holds the newest key, for those scripts and for `endeavor update`.
+# Before publishing, builds nothing pins any more are pruned once the release
+# holds more than 700 files (scripts/prune-helpers.sh), if the repository
+# variable PRUNE_HELPERS_AUTO is true; prune-helpers.yml runs it by hand.
 name: Helpers
 
 on:
@@ -32,6 +35,7 @@ concurrency:
 jobs:
   key:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       key: ${{ steps.key.outputs.key }}
     steps:
@@ -57,6 +61,8 @@ jobs:
     name: ${{ matrix.platform }}
     needs: key
     runs-on: ${{ matrix.runner }}
+    # A run takes a few minutes; a hung leg would otherwise hold every later release (the group doesn't cancel) for six hours.
+    timeout-minutes: 45
     env:
       ENDEAVOR_RELEASE_KEY: ${{ needs.key.outputs.key }}
     strategy:
@@ -143,6 +149,8 @@ jobs:
     needs: [key, build]
     if: ${{ !cancelled() && needs.key.result == 'success' }}
     runs-on: ubuntu-24.04
+    # Also long enough for the pruning run (two blobless clones) that may come first.
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -156,6 +164,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+      # GitHub allows 1000 files on a release and refuses uploads to a full
+      # one. Once the release passes 700 files, builds nothing needs go; see
+      # scripts/prune-helpers.sh. Off until the repository variable
+      # PRUNE_HELPERS_AUTO is true (set it after a deleting run by hand has
+      # been checked). A failure here doesn't hold the build back; it leaves
+      # a warning on the run.
+      - name: Prune
+        if: ${{ vars.PRUNE_HELPERS_AUTO == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/prune-helpers.sh --delete --above 700 || echo "::warning::Pruning the Helpers release failed; see this step's log."
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

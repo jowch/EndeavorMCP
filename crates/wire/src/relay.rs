@@ -10,7 +10,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,9 @@ pub const STALL: Duration = Duration::from_secs(5);
 pub struct Mux {
     out: Mutex<Box<dyn Write + Send>>,
     streams: Mutex<HashMap<u32, Arc<Queue>>>,
+    /// The channel ended (`close_all`), so no stream is registered from now on.
+    /// Set and read under `streams`' lock.
+    ended: AtomicBool,
     next_id: AtomicU32,
     stall: Duration,
 }
@@ -36,19 +39,20 @@ impl Mux {
     }
 
     pub fn with_stall(out: impl Write + Send + 'static, stall: Duration) -> Arc<Mux> {
-        Arc::new(Mux { out: Mutex::new(Box::new(out)), streams: Mutex::default(), next_id: AtomicU32::new(0), stall })
+        Arc::new(Mux { out: Mutex::new(Box::new(out)), streams: Mutex::default(), ended: AtomicBool::new(false), next_id: AtomicU32::new(0), stall })
     }
 
     pub fn send(&self, frame: &Frame) -> io::Result<()> {
         frame.write_to(&mut *self.out.lock().unwrap())
     }
 
-    /// Relay a connection the app accepted to the runtime's port on the other end.
+    /// Relay a connection the app accepted to the runtime's port on the other
+    /// end. Refused once the channel has ended: nobody would answer or close it.
     pub fn open(self: &Arc<Self>, socket: TcpStream) -> io::Result<()> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         // Registered before `Open` goes out so the first reply finds it; the
         // reader starts after, so no `Data` precedes the `Open`.
-        let queue = self.register(id);
+        let queue = self.register(id)?;
         if let Err(e) = self.send(&Frame::Open { id }) {
             self.closed_here(id, false);
             return Err(e);
@@ -58,7 +62,7 @@ impl Mux {
 
     /// Relay a connection the helper dialed for the other end's `Open { id }`.
     pub fn attach(self: &Arc<Self>, id: u32, socket: TcpStream) -> io::Result<()> {
-        let queue = self.register(id);
+        let queue = self.register(id)?;
         self.spawn(id, socket, queue)
     }
 
@@ -96,22 +100,37 @@ impl Mux {
         None
     }
 
-    /// End every stream (their sockets get what was already queued, then EOF).
+    /// End every stream (their sockets get what was already queued, then EOF),
+    /// and take no new one.
     pub fn close_all(&self) {
-        let streams: Vec<_> = self.streams.lock().unwrap().drain().collect();
+        let streams: Vec<_> = {
+            let mut streams = self.streams.lock().unwrap();
+            self.ended.store(true, Ordering::SeqCst);
+            streams.drain().collect()
+        };
         for (_, queue) in streams {
             queue.end(End::Finish);
         }
+    }
+
+    /// The channel has ended (`run` returned): no stream will be taken.
+    pub fn has_ended(&self) -> bool {
+        let _streams = self.streams.lock().unwrap();
+        self.ended.load(Ordering::SeqCst)
     }
 
     pub fn open_streams(&self) -> usize {
         self.streams.lock().unwrap().len()
     }
 
-    fn register(&self, id: u32) -> Arc<Queue> {
+    fn register(&self, id: u32) -> io::Result<Arc<Queue>> {
+        let mut streams = self.streams.lock().unwrap();
+        if self.ended.load(Ordering::SeqCst) {
+            return Err(io::Error::new(ErrorKind::BrokenPipe, "the channel has ended"));
+        }
         let queue = Arc::new(Queue::default());
-        self.streams.lock().unwrap().insert(id, queue.clone());
-        queue
+        streams.insert(id, queue.clone());
+        Ok(queue)
     }
 
     fn spawn(self: &Arc<Self>, id: u32, socket: TcpStream, queue: Arc<Queue>) -> io::Result<()> {
@@ -451,6 +470,25 @@ mod tests {
         assert_eq!(Frame::read_from(&mut b).unwrap(), Some(Frame::Open { id: 1 }));
         drop(b);
         run.join().unwrap().unwrap();
+        let mut buf = [0; 1];
+        assert_eq!(client.read(&mut buf).unwrap(), 0);
+    }
+
+    /// A connection relayed just after the channel ended, as the app's listener
+    /// can still do before it hears of the end, is refused, not left open with
+    /// nobody to answer or close it.
+    #[test]
+    fn a_channel_that_ended_takes_no_new_stream() {
+        let (a, b) = UnixStream::pair().unwrap();
+        // The helper's input stays writable, as it does after a detach.
+        let app = Mux::new(Vec::new());
+        drop(b);
+        app.run(a, |_, _| {}, |_| {}).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        assert!(app.open(listener.accept().unwrap().0).is_err());
+        assert_eq!(app.open_streams(), 0);
         let mut buf = [0; 1];
         assert_eq!(client.read(&mut buf).unwrap(), 0);
     }
