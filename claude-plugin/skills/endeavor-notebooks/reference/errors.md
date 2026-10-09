@@ -24,7 +24,7 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `host_tools` | `list_folder`, `read_file` or `run_shell` in a session that isn't on a server | Use your own file and shell tools |
 | `not_found` | `list_folder`, `read_file` or `run_shell` named a folder or file that isn't there | Check the path |
 | `not_a_file`, `not_a_folder` | `read_file` was given a folder, or `list_folder` a file | Use the other tool |
-| `unsupported` | `run_shell` on a Windows server | Don't use it there |
+| `unsupported` | `run_shell` on a Windows server, or `open_notebook` on an Ember (R) notebook, which can't be opened yet | Don't use it there; tell the user R notebooks aren't supported yet |
 | `risky_source` | The notebook came from a remote source, so only the user can allow it to run | Ask the user to run it from the notebook |
 | `pluto_not_running` | The runtime isn't up | Tell the user; `pluto_session_status` shows its state |
 
