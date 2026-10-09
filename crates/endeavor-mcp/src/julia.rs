@@ -47,7 +47,7 @@ const TARBALLS: [(&str, &str, &str, &str, u64); 4] = [
 pub enum Source {
     /// `--julia PATH`
     Path(String),
-    /// `--julia auto`: the login shell's, else Endeavor's own.
+    /// `--julia auto`: the login shell's (on Windows the PATH's), else Endeavor's own (not on Windows).
     Auto,
     /// `--julia-shell LINE`: what `LINE` puts on the login shell's PATH.
     Shell(String),
@@ -97,7 +97,7 @@ pub fn find(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -
             Ok((path, version))
         }
         Source::Auto => {
-            if let (Some(path), _) = login_shell_julia("command -v julia")
+            if let Some(path) = path_julia()
                 && let Ok(version) = checked_version(&path, "")
             {
                 return Ok((path, version));
@@ -114,6 +114,24 @@ fn expand_home(path: &str) -> String {
         (Some(rest), Some(home)) => format!("{}/{rest}", home.display()),
         _ => path.to_owned(),
     }
+}
+
+/// The julia on the login shell's PATH.
+#[cfg(unix)]
+fn path_julia() -> Option<String> {
+    login_shell_julia("command -v julia").0
+}
+
+/// The first `julia.exe` on the PATH: Windows has no login shell. juliaup from
+/// the Microsoft Store puts an app alias there, which runs like any julia.exe.
+#[cfg(windows)]
+fn path_julia() -> Option<String> {
+    julia_in(&std::env::var_os("PATH")?)
+}
+
+#[cfg(windows)]
+fn julia_in(path: &std::ffi::OsStr) -> Option<String> {
+    std::env::split_paths(path).map(|dir| dir.join("julia.exe")).find(|exe| exe.is_file()).map(|exe| exe.display().to_string())
 }
 
 /// The last absolute path a login shell prints for `script` (profiles can
@@ -152,6 +170,13 @@ fn uname(flag: &str) -> String {
 
 /// `~/.cache/endeavor/julia-<version>/bin/julia`, downloading it the first time.
 fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String, Failure> {
+    if cfg!(windows) {
+        return Err(format!(
+            "No Julia {}.{} or newer on this computer's PATH, and Endeavor doesn't download Julia on Windows. Install it with juliaup (`winget install --id 9NJNWW8PVKMN -e -s msstore`), or pass its julia.exe with --julia, then try again.",
+            MIN_JULIA.0, MIN_JULIA.1
+        )
+        .into());
+    }
     let env = crate::paths::Env::here();
     if env.home.as_os_str().is_empty() {
         return Err("HOME isn't set".to_owned().into());
@@ -255,6 +280,16 @@ mod tests {
         let home = std::env::home_dir().unwrap();
         assert_eq!(expand_home("~/julia/bin/julia"), format!("{}/julia/bin/julia", home.display()));
         assert_eq!(expand_home("/opt/julia"), "/opt/julia");
+    }
+
+    /// Windows has no login shell, so `--julia auto` looks in the PATH's folders itself.
+    #[cfg(windows)]
+    #[test]
+    fn windows_finds_julia_exe_on_the_path() {
+        let (without, with) = (crate::client::scratch("julia-path-without"), crate::client::scratch("julia-path-with"));
+        std::fs::write(with.join("julia.exe"), "").unwrap();
+        assert_eq!(julia_in(&std::env::join_paths([&without, &with]).unwrap()), Some(with.join("julia.exe").display().to_string()));
+        assert_eq!(julia_in(&std::env::join_paths([&without]).unwrap()), None);
     }
 
     /// The cloud VMs' setup script installs this Julia and the pinned Rust too (Endeavor's docs/cloud.md).
