@@ -140,9 +140,15 @@ pub fn julia_pids(dir: &Path) -> Vec<i32> {
     std::fs::read_to_string(dir.join("julia.pids")).map(|text| text.split_whitespace().filter_map(|p| p.parse().ok()).collect()).unwrap_or_default()
 }
 
+/// Whether `pid` runs. A zombie doesn't: a container whose PID 1 doesn't reap keeps an ended process
+/// that was reparented to it, and the runtime counts it as gone too (`unixproc::start_time`).
 pub fn pid_alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
-    unsafe { libc::kill(pid, 0) == 0 }
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return false;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    !stat.rfind(')').and_then(|end| stat[end + 1..].split_whitespace().next()).is_some_and(|state| state == "Z" || state == "X")
 }
 
 /// A request as the bridge received it.
