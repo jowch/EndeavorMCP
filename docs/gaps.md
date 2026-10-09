@@ -435,6 +435,12 @@ sign-in.
   in `reattach`). `reattach` looks at the closing flag between its tries only.
 - [P3] **The front's exit can wait up to 5 s** for a connection that hangs (the
   connections close together).
+- [P3] **A call that reaches the listener just as the helper goes is closed
+  with no answer.** The agent sees a bare connection error ("fetch failed")
+  instead of "reconnecting by itself"; its next call gets the wording. This
+  happens when the helper's channel has ended but the listener hasn't heard
+  yet, or when the helper died and the relay can't write to it. A fix would
+  wait briefly for the listener to hear of the end and answer from that.
 
 ## Slurm
 
@@ -738,6 +744,21 @@ plugins). The rest of this file can wait or go alongside.
   servers can only fetch it once Helpers has published it. Push this
   repository and wait for Helpers before an app release that moves the pin. A
   check in the app's CI that the pinned key is published would catch it.
+- [P2] **A pruned build breaks the binaries that came from it.**
+  `scripts/prune-helpers.sh` removes builds nothing recent needs. Every
+  installed binary (plugin, install.sh or `endeavor update`, on any OS)
+  fetches the Linux helper of its own build to set up a server
+  (`release::helper_for`), so once its build's Linux files are gone it can't
+  set one up, and says only "Couldn't get the helper for linux x86_64 servers
+  from the release: Couldn't download ..." with a 404. The Linux files of the
+  newest 100 builds stay, which at 2026-10-09's pace is about a week and at a
+  quieter pace a month or more. A plugin installed from an older commit, on a
+  computer that hasn't downloaded its binary yet, also hears from the launcher
+  (install.sh exits 3) that the build "is still being published. Reconnect in
+  a few minutes", which never comes true. To close: both messages say the
+  build is too old and how to update (`endeavor update`, or update the
+  plugin), when the build is missing and LATEST names another; or publish
+  each build to a release of its own, so nothing has to be pruned.
 - [P3] **A restart that needs an install says to restart again.** When the start
   `Session::restart` begins ends `NeedsInstall`, calls to the listener are told
   `Messages::restart_failed`'s text ("Use Restart Julia to try again"), which
@@ -807,16 +828,6 @@ plugins). The rest of this file can wait or go alongside.
   not against a real download; its unit test would need a login shell that
   finds no Julia, which a developer's machine often has. That test skips
   itself where a login shell finds Julia.
-- [P3] **`a_helper_that_ends_unexpectedly_is_a_drop_and_after_the_client_let_it_go_is_not`
-  hangs now and then.** It hung in a full workspace run on 2026-10-07, and on
-  CI's `macos-15` job on 2026-10-09 (PR #5, cancelled after 20 minutes). It
-  passed 100 of 100 runs alone on Linux. Two of its calls block with no
-  limit: `channel.closed()` and the `says()` read from the listener. To
-  close: give `says()` a read timeout so a hang fails at a named step, then
-  find which call waits.
-- [P3] **CI's jobs have no time limit.** A test that hangs keeps a job running
-  for GitHub's default of six hours. To close: a `timeout-minutes` on each
-  job in `.github/workflows/ci.yml`, well above a normal run's few minutes.
 - [P3] **Tests that write a script and run it can fail with "Text file
   busy".** A script written with `fs::write` can still be open in a child that
   another test thread has just forked, so an exec of it fails with ETXTBSY.
