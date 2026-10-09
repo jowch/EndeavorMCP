@@ -159,8 +159,9 @@ Next:
   `wire` knows its files (`Backend::Ember`: `.R` with Ember's first line, a
   page at `/ember/edit`, a preview of the first cells), the folder scan the
   app asks for still lists only Pluto's, and `open_notebook` refuses an Ember
-  file as `unsupported`. Next: the core running one adapter per engine, then
-  the R adapter. The engine name a client asks a runtime for
-  (`wire::ENGINE_PLUTO`, a string) becomes `Backend` with the first of those,
-  where the core starts engines.
+  file as `unsupported`. The core routes calls to more than one engine and
+  serves `/ember/`, though nothing starts Ember yet. Next: the R adapter,
+  which the core starts when an R notebook is opened. The engine name a
+  client asks a runtime for (`wire::ENGINE_PLUTO`, a string) becomes `Backend`
+  with it.
 - marimo after Ember.

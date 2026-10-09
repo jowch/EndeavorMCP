@@ -9,6 +9,7 @@
 //! fresh snapshot each time it tells the app anything. A notebook's state goes
 //! when it shuts down, except its entry in `idle_stopped`.
 
+mod engines;
 mod tools;
 
 use std::collections::{HashMap, HashSet};
@@ -26,7 +27,9 @@ use crate::host_tools::home;
 use crate::host_tools::normpath;
 use crate::http::{self, Head};
 use crate::mcp::{WRITE_TOOLS, julia_string, to_json};
+use wire::backend::Backend;
 
+pub use engines::Engines;
 pub use tools::{Reply, WAIT_SECONDS};
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
@@ -245,7 +248,9 @@ struct Events {
 }
 
 pub struct Notebooks {
-    upstream: Arc<dyn Upstream>,
+    engines: Arc<Engines>,
+    /// Where each engine's notifications go, once `start` has run.
+    notify: OnceLock<Sender<Value>>,
     clock: Box<dyn Fn() -> f64 + Send + Sync>,
     state: Mutex<State>,
     /// Held while reading the engine's state and telling the app, so events go out in order.
@@ -459,7 +464,8 @@ impl Notebooks {
     pub fn new(upstream: Arc<dyn Upstream>, clock: Box<dyn Fn() -> f64 + Send + Sync>) -> Notebooks {
         Notebooks {
             asks: Asks::new(clock()),
-            upstream,
+            engines: Arc::new(Engines::new(upstream)),
+            notify: OnceLock::new(),
             clock,
             state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
             publishing: Mutex::default(),
@@ -472,21 +478,10 @@ impl Notebooks {
     /// Follow the engine's notifications and check for idle notebooks, once it answers.
     pub fn start(self: &Arc<Self>) {
         let (tx, rx) = mpsc::channel();
-        let notebooks = self.clone();
-        std::thread::spawn(move || {
-            loop {
-                if let Ok(stream) = notebooks.upstream.notifications() {
-                    // What changed while no stream was open.
-                    let _ = tx.send(json!({ "method": "resync" }));
-                    for line in stream.lines().map_while(Result::ok) {
-                        if let Some(message) = line.strip_prefix("data: ").and_then(|m| serde_json::from_str(m).ok()) {
-                            let _ = tx.send(message);
-                        }
-                    }
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        });
+        for (backend, upstream) in self.engines.parts() {
+            self.follow(backend, upstream, tx.clone());
+        }
+        let _ = self.notify.set(tx);
         let notebooks = self.clone();
         std::thread::spawn(move || notebooks.handle_notifications(rx));
         let every = idle_check();
@@ -495,6 +490,41 @@ impl Notebooks {
             loop {
                 std::thread::sleep(every);
                 notebooks.stop_idle();
+            }
+        });
+    }
+
+    /// Another engine, once it runs: calls for its notebooks go to it, and its notifications are followed.
+    // Called once the core starts the R adapter (the next stage).
+    #[allow(dead_code)]
+    pub fn add_engine(&self, backend: Backend, upstream: Arc<dyn Upstream>) {
+        self.engines.add(backend, upstream.clone());
+        if let Some(tx) = self.notify.get() {
+            self.follow(backend, upstream, tx.clone());
+        }
+    }
+
+    /// Pass one engine's notifications on to `tx`, from each (re)connection of its stream on.
+    fn follow(&self, backend: Backend, upstream: Arc<dyn Upstream>, tx: Sender<Value>) {
+        let engines = self.engines.clone();
+        std::thread::spawn(move || {
+            loop {
+                if let Ok(stream) = upstream.notifications() {
+                    // What changed while no stream was open.
+                    let _ = tx.send(json!({ "method": "resync" }));
+                    for line in stream.lines().map_while(Result::ok) {
+                        if let Some(message) = line.strip_prefix("data: ").and_then(|m| serde_json::from_str::<Value>(m).ok()) {
+                            let id = message["params"]["notebook_id"].as_str().unwrap_or_default();
+                            match message["method"].as_str() {
+                                Some("notebook_opened") => engines.learn(id, backend),
+                                Some("notebook_shut_down") => engines.forget(id),
+                                _ => {}
+                            }
+                            let _ = tx.send(message);
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(1));
             }
         });
     }
@@ -577,7 +607,7 @@ impl Notebooks {
     /// One call to the engine's adapter: its result, or the error it raised.
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         let message = json!({ "method": method, "params": params });
-        let reply = self.upstream.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;
+        let reply = self.engines.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;
         let mut reply: Value = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
         match reply.get("error") {
             Some(error) => Err(julia_string(error)),
@@ -588,7 +618,7 @@ impl Notebooks {
     /// Every open notebook, in the engine's order.
     fn snapshots(&self) -> Result<Vec<Snapshot>, String> {
         let all = self.call("snapshot", json!({}))?;
-        let parse = |nb: &Value| Snapshot::parse(nb).map(|nb| Snapshot { seq: all["seq"].as_u64(), ..nb }).ok_or_else(|| format!("bad snapshot {nb}"));
+        let parse = |nb: &Value| Snapshot::parse(nb).map(|nb| Snapshot { seq: nb.seq.or(all["seq"].as_u64()), ..nb }).ok_or_else(|| format!("bad snapshot {nb}"));
         all["notebooks"].as_array().ok_or("snapshot has no notebooks")?.iter().map(parse).collect()
     }
 

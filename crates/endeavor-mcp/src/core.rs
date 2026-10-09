@@ -163,7 +163,7 @@ pub fn main(argv: &[String]) -> ! {
         bridge.notebooks.set_idle_limit(hours);
     }
     Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
-    let served = Arc::new(Served { bridge, pluto: OnceLock::new(), cookie });
+    let served = Arc::new(Served { bridge, pluto: OnceLock::new(), ember: Default::default(), cookie });
     accept(listener, served.clone());
 
     let status = loop {
@@ -215,15 +215,16 @@ fn free_ports() -> Result<[u16; 2], String> {
     Ok([&pluto, &mcp].map(|l| l.local_addr().unwrap().port()))
 }
 
-/// Pluto's private port and the secret it requires.
-struct Pluto {
+/// An engine's page server (Pluto, Ember): its private port and the secret it requires.
+#[derive(Clone)]
+struct Page {
     port: u16,
     secret: String,
 }
 
 /// What `julia boot.jl` reports once it's up.
 struct JuliaReady {
-    pluto: Pluto,
+    pluto: Page,
     /// Julia's own bridge, for the adapter's calls.
     bridge_port: u16,
 }
@@ -238,7 +239,7 @@ fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, served: &Served,
     let julia: Value = serde_json::from_str(&std::fs::read_to_string(julia_state).ok()?).ok()?;
     let port_of = |key: &str| julia[key].as_u64().and_then(|p| u16::try_from(p).ok());
     let ready = JuliaReady {
-        pluto: Pluto { port: port_of("pluto_port")?, secret: julia["pluto_secret"].as_str()?.to_owned() },
+        pluto: Page { port: port_of("pluto_port")?, secret: julia["pluto_secret"].as_str()?.to_owned() },
         bridge_port: port_of("mcp_port")?,
     };
     if !bridge_call(ready.bridge_port, "/call", token, "ping").is_ok_and(|status| status == 200) {
@@ -376,7 +377,9 @@ fn pass_on_stop_signals(set: libc::sigset_t, julia_pid: i32) {
 /// What the runtime's port serves: the bridge, and once Julia is ready, Pluto.
 struct Served {
     bridge: Bridge,
-    pluto: OnceLock<Pluto>,
+    pluto: OnceLock<Page>,
+    /// Ember's, while it runs, for `/ember/`.
+    ember: std::sync::Mutex<Option<Page>>,
     /// The cookie that lets a browser into Pluto's page (`cookie_name`).
     cookie: String,
 }
@@ -424,17 +427,26 @@ enum Route {
     Call,
     /// Any other path under `/endeavor/`.
     NotFound,
+    /// `/ember` and below: Ember's page, its files and its WebSocket.
+    Ember,
     /// Everything else: Pluto's page, its files and its WebSocket.
     Pluto,
 }
 
 impl Route {
+    /// An engine's page, which a browser reaches with the cookie.
+    fn is_page(self) -> bool {
+        matches!(self, Route::Pluto | Route::Ember)
+    }
+
     fn of(path: &str) -> Route {
         match path {
             "/mcp" => Route::Mcp,
             "/endeavor/events" => Route::Events,
             "/endeavor/call" => Route::Call,
             _ if path.starts_with("/endeavor/") => Route::NotFound,
+            "/ember" => Route::Ember,
+            _ if path.starts_with("/ember/") => Route::Ember,
             _ => Route::Pluto,
         }
     }
@@ -496,6 +508,27 @@ fn serve_client(client: TcpStream, served: &Served) -> io::Result<()> {
                 forward(request, None, &mut reader, pluto.port, &|response| {
                     response.headers.retain(|(name, value)| !(name.eq_ignore_ascii_case("Set-Cookie") && value.trim_start().starts_with("secret=")));
                 })?
+            }
+            (Route::Ember, _) => {
+                let ember = served.ember.lock().unwrap().clone();
+                match (ember_target(request.target()), ember) {
+                    (Err(location), _) => {
+                        http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
+                        let close = if request.keeps_alive() { "" } else { "Connection: close\r\n" };
+                        write!(client, "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\n{close}\r\n")?;
+                        request.keeps_alive()
+                    }
+                    (Ok(_), None) => return refuse(&mut client, "503 Service Unavailable", "R notebooks aren't running"),
+                    (Ok(target), Some(ember)) => {
+                        // Ember takes its secret in the query, the only way its WebSocket does. Host stays the
+                        // browser's: Ember refuses a WebSocket whose Origin isn't its Host.
+                        request.set_target(&with_secret(&target, &ember.secret));
+                        request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Cookie"));
+                        forward(request, None, &mut reader, ember.port, &|response| {
+                            response.headers.retain(|(name, value)| !(name.eq_ignore_ascii_case("Set-Cookie") && value.trim_start().starts_with("ember_secret")));
+                        })?
+                    }
+                }
             }
             (Route::NotFound, _) => {
                 http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
@@ -568,7 +601,7 @@ fn access(request: &Head, route: Route, token: &str, cookie: &str) -> Access {
     }
     let origin = request.header("Origin");
     let bearer = same(request.header("Authorization").unwrap_or_default(), &format!("Bearer {token}"));
-    if route != Route::Pluto {
+    if !route.is_page() {
         return match (origin, bearer) {
             (Some(_), _) => Access::Refused("403 Forbidden", "browser_origin_refused"),
             (None, true) => Access::Granted,
@@ -624,6 +657,25 @@ fn without_token(target: &str) -> (Option<&str>, String) {
         .collect();
     let location = if rest.is_empty() { path.to_owned() } else { format!("{path}?{}", rest.join("&")) };
     (token, location)
+}
+
+/// Where a request under `/ember` goes on Ember's own port: its target without
+/// the prefix, or for bare `/ember`, where to send the browser instead.
+fn ember_target(target: &str) -> Result<String, String> {
+    let rest = target.strip_prefix("/ember").unwrap_or(target);
+    if rest.is_empty() || rest.starts_with('?') {
+        return Err(format!("/ember/{rest}"));
+    }
+    Ok(rest.to_owned())
+}
+
+/// `target` with Ember's `secret` as its only `secret` query parameter.
+fn with_secret(target: &str, secret: &str) -> String {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let mut pairs: Vec<&str> = query.split('&').filter(|pair| !pair.is_empty() && !pair.starts_with("secret=")).collect();
+    let ours = format!("secret={secret}");
+    pairs.push(&ours);
+    format!("{path}?{}", pairs.join("&"))
 }
 
 /// `Host` as clients send it: `127.0.0.1:2346`, `localhost`, `[::1]:2346`.
@@ -704,7 +756,10 @@ mod tests {
         assert_eq!(Route::of("/endeavor/events"), Route::Events);
         assert_eq!(Route::of("/endeavor/call"), Route::Call);
         assert_eq!(Route::of("/endeavor/nope"), Route::NotFound);
-        for path in ["/", "/edit", "/open", "/static/x.js", "/channels", "/endeavor", "/mcp/x", "/events", "/call"] {
+        for path in ["/ember", "/ember/", "/ember/edit", "/ember/channels"] {
+            assert_eq!(Route::of(path), Route::Ember, "{path}");
+        }
+        for path in ["/", "/edit", "/open", "/static/x.js", "/channels", "/endeavor", "/mcp/x", "/events", "/call", "/embers", "/emberx/edit"] {
             assert_eq!(Route::of(path), Route::Pluto, "{path}");
         }
     }
@@ -756,6 +811,86 @@ mod tests {
             Access::Refused("401 Unauthorized", "unauthorized"),
             "only Pluto's paths take it"
         );
+    }
+
+    #[test]
+    fn embers_page_is_under_its_prefix_with_its_secret_in_the_query() {
+        assert_eq!(ember_target("/ember/edit?id=1"), Ok("/edit?id=1".into()));
+        assert_eq!(ember_target("/ember/"), Ok("/".into()));
+        assert_eq!(ember_target("/ember"), Err("/ember/".into()));
+        assert_eq!(ember_target("/ember?x=1"), Err("/ember/?x=1".into()));
+        assert_eq!(with_secret("/edit?id=1", "s"), "/edit?id=1&secret=s");
+        assert_eq!(with_secret("/", "s"), "/?secret=s");
+        assert_eq!(with_secret("/edit?secret=theirs&id=1", "s"), "/edit?id=1&secret=s", "a secret the browser sends is replaced");
+    }
+
+    #[test]
+    fn embers_page_takes_the_cookie_as_plutos_does() {
+        let cookie = format!("Cookie: endeavor-abc={TOKEN}\r\n");
+        assert_eq!(access_to(&format!("GET /ember/edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n{cookie}\r\n")), Access::Granted);
+        assert_eq!(access_to("GET /ember/edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"), Access::Refused("401 Unauthorized", "unauthorized"));
+        assert_eq!(
+            access_to(&format!("GET /ember/edit?id=1&token={TOKEN} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")),
+            Access::SetCookie { location: "/ember/edit?id=1".into() }
+        );
+        assert_eq!(
+            access_to(&format!("GET /ember/channels HTTP/1.1\r\nHost: 127.0.0.1:9\r\nOrigin: http://127.0.0.1:10\r\n{cookie}\r\n")),
+            Access::Refused("403 Forbidden", "browser_origin_refused")
+        );
+    }
+
+    /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.
+    fn serving(ember: Option<u16>) -> u16 {
+        let served = Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(TOKEN) });
+        let _ = served.pluto.set(Page { port: 1, secret: "p".into() });
+        let _ = served.bridge.julia.port.set(1);
+        *served.ember.lock().unwrap() = ember.map(|port| Page { port, secret: "s3cret".into() });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        accept(listener, served);
+        port
+    }
+
+    fn get(port: u16, target: &str, headers: &str) -> String {
+        use std::io::Read;
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(stream, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n{headers}\r\n").unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        reply
+    }
+
+    #[test]
+    fn a_request_for_embers_page_reaches_ember_with_its_secret_and_the_browsers_host() {
+        use std::io::{BufRead, Read};
+        let ember = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ember_port = ember.local_addr().unwrap().port();
+        let seen = std::thread::spawn(move || {
+            let (stream, _) = ember.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            while reader.read_line(&mut head).unwrap() > 2 {}
+            let body = "hi";
+            write!(&stream, "HTTP/1.1 200 OK\r\nSet-Cookie: ember_secret_{ember_port}=s3cret\r\nSet-Cookie: theme=dark\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            let _ = reader.read_to_end(&mut Vec::new());
+            head
+        });
+        let port = serving(Some(ember_port));
+        let reply = get(port, "/ember/edit?id=1&secret=theirs", "Cookie: a=b\r\n");
+        let head = seen.join().unwrap();
+        assert!(head.starts_with("GET /edit?id=1&secret=s3cret HTTP/1.1\r\n"), "{head}");
+        assert!(head.contains(&format!("Host: 127.0.0.1:{port}\r\n")), "{head}");
+        assert!(!head.contains("Cookie") && !head.contains("Authorization"), "{head}");
+        assert!(reply.starts_with("HTTP/1.1 200") && reply.ends_with("hi"), "{reply}");
+        assert!(!reply.contains("s3cret") && reply.contains("theme=dark"), "{reply}");
+    }
+
+    #[test]
+    fn bare_ember_redirects_and_ember_not_running_is_unavailable() {
+        let port = serving(None);
+        let reply = get(port, "/ember?x=1", "");
+        assert!(reply.starts_with("HTTP/1.1 301") && reply.contains("Location: /ember/?x=1\r\n"), "{reply}");
+        assert!(get(port, "/ember/edit?id=1", "").starts_with("HTTP/1.1 503"));
     }
 
     #[test]

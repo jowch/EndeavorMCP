@@ -1755,3 +1755,20 @@ fn a_path_with_no_drive_is_not_absolute_enough_for_a_session_with_no_folder() {
         assert!(requested_path(path, &Folder::Unknown).is_err(), "{path}");
     }
 }
+
+#[test]
+fn a_second_engines_notebooks_are_listed_and_its_calls_go_to_it() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "a = 1")]);
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(Y, "b = 2")]);
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    let listed = s.call("", "list_notebooks", json!({})).unwrap();
+    let ids: Vec<&str> = listed.as_array().unwrap().iter().map(|nb| nb["notebook_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, [NB, R]);
+    s.read("", R, Y);
+    s.edit("", R, Y, "b = 3");
+    assert_eq!(ember.code(R, Y), "b = 3");
+    assert_eq!(s.engine.code(NB, X), "a = 1");
+}

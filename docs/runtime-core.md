@@ -56,6 +56,13 @@ app ── ssh/stdio frames ── endeavor ── core (Rust, the runtime's one
   port, adding Pluto's secret. With more than one engine, each later engine
   gets a path prefix of its own (`/marimo/…`, `/ember/…`) and Pluto stays at
   `/`.
+- The core's notebook state talks to the engines through one router
+  (`notebooks/engines.rs`). A call goes to the engine of the notebook it
+  names (learned from what each engine reports), of the file `open` or `new`
+  names (by its extension), or else to Pluto's; `snapshot` and `status` of
+  every notebook ask each running engine and put the notebooks together, each
+  with its own engine's `seq`. Each engine's notifications are followed on
+  their own. Only Pluto's adapter is started today.
 
 ## The engine interface
 
