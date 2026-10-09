@@ -60,6 +60,9 @@ pub enum Reply {
     /// `path` is the folder, absolute and with `~` expanded; `created`: it was
     /// made just now.
     Folder { path: PathBuf, created: bool },
+    /// Neither the folder nor the one it would go in, `parent`, is there, so
+    /// nothing was made.
+    NoFolder { path: PathBuf, parent: PathBuf },
     /// `path` is relative to the folder; `have`: a file with the same contents
     /// is already there, so there's nothing to send.
     Place { path: String, have: bool },
@@ -97,6 +100,7 @@ pub fn answer(request: &Request) -> Reply {
         Request::Preview { path } => notebooks::read_preview(&expand(path)).map(|preview| Reply::Preview { preview }),
         Request::Slurm => crate::slurm::probe().map(|scheduler| Reply::Slurm { scheduler }),
         Request::Runtime => Err("Only the helper knows about its runtime.".into()),
+        Request::Folder { path } if other_users_home(path) => Err(format!("{path} names another user's home folder, which isn't supported here. Give the full path.")),
         Request::Folder { path } => folder(&expand(path)),
         Request::Place { folder, name, size, sha256 } => place(&expand(folder), name, *size, sha256),
         Request::Write { folder, path, offset, bytes, last } => write(&expand(folder), path, *offset, bytes, *last).map(|()| Reply::Written),
@@ -131,6 +135,12 @@ pub fn expand(path: &str) -> PathBuf {
     }
 }
 
+/// `~user` or `~user/…`, which `expand` would take as a folder named `~user`
+/// in this user's home.
+fn other_users_home(path: &str) -> bool {
+    path.strip_prefix('~').is_some_and(|rest| !(rest.is_empty() || rest.starts_with('/') || cfg!(windows) && rest.starts_with('\\')))
+}
+
 /// `dir` as a session's folder: there already, or made when the folder it goes
 /// in is there. When that one is missing too, nothing is made: the path is more
 /// likely mistyped, or another computer's, than new.
@@ -143,10 +153,14 @@ fn folder(dir: &Path) -> Result<Reply, String> {
     }
     let parent = dir.parent().unwrap_or(dir);
     if !parent.is_dir() {
-        return Err(format!("Neither {} nor the folder it would go in, {}, exists.", dir.display(), parent.display()));
+        return Ok(Reply::NoFolder { path: dir.to_owned(), parent: parent.to_owned() });
     }
-    std::fs::create_dir(dir).map_err(|e| format!("Couldn't make the folder {}: {}", dir.display(), plain(&e)))?;
-    Ok(Reply::Folder { path: dir.to_owned(), created: true })
+    match std::fs::create_dir(dir) {
+        Ok(()) => Ok(Reply::Folder { path: dir.to_owned(), created: true }),
+        // Another session made it meanwhile.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(Reply::Folder { path: dir.to_owned(), created: false }),
+        Err(e) => Err(format!("Couldn't make the folder {}: {}", dir.display(), plain(&e))),
+    }
 }
 
 fn list(dir: &Path) -> Result<Reply, String> {
@@ -368,13 +382,14 @@ mod tests {
         assert!(new.is_dir());
         assert_eq!(folder(&new), Ok(Reply::Folder { path: new.clone(), created: false }), "made once");
         let deeper = dir.join("missing").join("study");
-        let refused = folder(&deeper).unwrap_err();
-        assert!(refused.contains("Neither") && refused.contains(&dir.join("missing").display().to_string()), "{refused}");
+        assert_eq!(folder(&deeper), Ok(Reply::NoFolder { path: deeper.clone(), parent: dir.join("missing") }));
         assert!(!dir.join("missing").exists(), "nothing is made when the parent is missing");
         std::fs::write(dir.join("notes.txt"), "").unwrap();
         assert!(folder(&dir.join("notes.txt")).unwrap_err().contains("is a file"));
-        // `~` is the home folder, as for the other requests.
+        // `~` is the home folder, as for the other requests; another user's home isn't made as a folder in this one.
         assert!(matches!(answer(&Request::Folder { path: "~".into() }), Reply::Folder { created: false, .. }));
+        assert!(matches!(answer(&Request::Folder { path: "~bob/study".into() }), Reply::Error { message } if message.contains("another user's home")));
+        assert!(!home().join("~bob").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -427,6 +427,12 @@ sign-in.
   the tools.** The queue here is empty and a job runs at once, so their wording
   is checked against the fake Slurm only. No agent has followed the
   `endeavor-machines` skill through a cluster.
+- [P3] **`use_machine` checks and makes a session's folder on the login
+  node.** A folder on a disk only the login node has (`/tmp/...`, a node-local
+  scratch) passes the check, or is made there, and is still missing on the
+  compute node, so `new_notebook` fails as it did before the check. To close:
+  have the runtime check the folder once the job runs, or name node-local
+  paths in the refusal.
 - [P3] **A queued job has no id in the session's status until it is submitted
   by this session.** A session that re-attaches to a job already queued shows
   `queue` but no `job` until it runs, because the library's queued event

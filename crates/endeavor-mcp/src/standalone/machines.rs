@@ -1183,10 +1183,12 @@ impl Relay {
         let local = server.id == LOCAL;
         let install = flag_arg(args, "install")?;
         let given = Given::parse(args)?;
+        let given_folder = if local { None } else { text_arg(args, "folder")? };
+        let from_memory = !local && given_folder.is_none();
         let folder = if local {
             self.options.folder.as_ref().map(|folder| folder.display().to_string())
         } else {
-            match text_arg(args, "folder")? {
+            match given_folder {
                 Some(folder) => Some(folder),
                 None => self.remembered().ok().flatten().filter(|remembered| remembered.machine == server.id).and_then(|remembered| remembered.folder),
             }
@@ -1202,17 +1204,26 @@ impl Relay {
         let provider = self.provider_for(&server, install, false)?;
         let was_ready = matches!(provider.status().state, State::Ready(_));
         let mut notes: Vec<String> = Vec::new();
-        // The folder is looked at, and made when only it is missing, before any job is asked for. A
-        // machine that isn't connected yet is looked at by a later call; this one says why.
+        // The folder is looked at, and made when only it is missing, before any job is asked for. On
+        // a machine that isn't connected by the deadline it isn't looked at, and the result says so.
         if let Some(path) = folder.as_ref().filter(|_| !local) {
+            // A remembered folder that is gone can't be fixed by leaving `folder` out, which brings it back.
+            let which = if from_memory { format!("The folder this project used on {name}, {path},") } else { format!("The folder \"{path}\"") };
+            let ask = if from_memory { "Ask the user which folder to use and pass it as `folder` (`\"~\"` is the home folder)." } else { "Ask the user which folder to use, or leave `folder` out." };
             match provider.files(wire::files::Request::Folder { path: path.clone() }, deadline.left()) {
-                Some(Ok(wire::files::Reply::Folder { path, created: true })) => notes.push(format!("Made a new folder for the session on {name}: {}. Tell the user it was made.", path.display())),
-                Some(Ok(wire::files::Reply::Folder { .. })) | None => {}
+                Some(Ok(wire::files::Reply::Folder { path, created: true })) => {
+                    let gone = if from_memory { " (the folder this project used there was gone)" } else { "" };
+                    notes.push(format!("Made a new folder for the session on {name}: {}{gone}. Tell the user it was made.", path.display()));
+                }
+                Some(Ok(wire::files::Reply::Folder { .. })) => {}
+                Some(Ok(wire::files::Reply::NoFolder { parent, .. })) => {
+                    let why = if from_memory { "It may have been removed since.".to_owned() } else { format!("The path may be mistyped, or be a path on another computer: paths here are {name}'s.") };
+                    return Err(invalid(format!("{which} can't be the session's folder: neither it nor the folder it would go in, {}, exists on {name}. Nothing was started. {why} {ask}", parent.display())));
+                }
                 Some(Ok(other)) => return Err(format!("{name}'s helper answered the folder check with {other:?}.")),
                 // The helper's own refusal (`Reply::Error`) comes as an error too.
-                Some(Err(message)) => {
-                    return Err(invalid(format!("The folder \"{path}\" can't be the session's folder on {name}: {message} Nothing was started. A path whose folders are missing may be mistyped, or be a path on another computer: paths here are {name}'s. Ask the user which folder to use, or leave `folder` out to use the home folder.")));
-                }
+                Some(Err(message)) => return Err(invalid(format!("{which} can't be the session's folder on {name}: {message} Nothing was started. {ask}"))),
+                None => notes.push(format!("The folder {path} wasn't checked, because {name} wasn't connected yet; the next `use_machine` checks it.")),
             }
         }
         let mut saved_resources = None;

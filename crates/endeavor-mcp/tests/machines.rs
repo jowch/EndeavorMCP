@@ -872,7 +872,7 @@ fn use_machine_makes_a_folder_whose_parent_is_there_and_refuses_one_whose_parent
     let elsewhere = place.dir.join("Users/me/projects/study");
     let (failed, refused) = front.call("use_machine", ask(&elsewhere));
     let message = refused["message"].as_str().unwrap();
-    assert!(failed && message.contains("can't be the session's folder on hpc") && message.contains("Nothing was started") && message.contains("Ask the user"), "{refused}");
+    assert!(failed && message.contains("can't be the session's folder: neither it nor the folder it would go in") && message.contains("exists on hpc") && message.contains("Nothing was started") && message.contains("another computer") && message.contains("Ask the user"), "{refused}");
     assert!(!place.dir.join("Users").exists(), "nothing was made");
     assert_eq!(slurm.read("sbatch.args"), "", "no job was submitted");
     assert_eq!(place.projects(), Value::Null, "the project remembers nothing");
@@ -885,6 +885,29 @@ fn use_machine_makes_a_folder_whose_parent_is_there_and_refuses_one_whose_parent
     assert!(queued["message"].as_str().unwrap().contains(&format!("Made a new folder for the session on hpc: {}", study.display())), "{queued}");
     assert_ne!(slurm.read("sbatch.args"), "", "the job was submitted");
     assert_eq!(place.projects()[place.project.display().to_string()]["folder"], study.display().to_string().as_str());
+}
+
+#[test]
+fn a_remembered_folder_that_is_gone_is_named_as_the_projects_and_a_given_folder_gets_past_it() {
+    let place = Place::new("remembered-gone");
+    place.add_lab();
+    let work = place.dir.join("home/scratch/work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab", "folder": work.display().to_string() }));
+    first.finish();
+    std::fs::remove_dir_all(place.dir.join("home/scratch")).unwrap();
+
+    // Leaving `folder` out brings the remembered folder back, so the error says it is the project's and asks for another.
+    let mut second = place.front();
+    second.initialize();
+    let (failed, refused) = second.call("use_machine", json!({ "machine": "lab" }));
+    let message = refused["message"].as_str().unwrap();
+    assert!(failed && message.contains(&format!("The folder this project used on lab, {},", work.display())) && message.contains("pass it as `folder`") && !message.contains("leave `folder` out"), "{refused}");
+    let home = second.ok("use_machine", json!({ "machine": "lab", "folder": "~" }));
+    assert_eq!(home["state"].as_str(), Some("ready"), "{home}");
+    assert_eq!(place.projects()[place.project.display().to_string()]["folder"], "~", "the folder given replaces the one that was gone");
 }
 
 #[test]
