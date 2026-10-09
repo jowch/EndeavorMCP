@@ -165,8 +165,19 @@ struct State {
 impl State {
     /// This build's callers can use it as it is: it offers this build's interface, or it is this build.
     fn usable_as_is(&self) -> bool {
-        self.interface == Some(core::INTERFACE) || self.build.as_deref() == Some(embedded::BUILD_VERSION)
+        usable_as_is(self.build.as_deref(), self.interface)
     }
+}
+
+/// Whether this build's callers can use a runtime that `build` started and whose core offers `interface`
+/// as it is: it offers this build's interface (`core::INTERFACE`), or it is this build. False when neither is known.
+pub(crate) fn usable_as_is(build: Option<&str>, interface: Option<u32>) -> bool {
+    interface == Some(core::INTERFACE) || build == Some(embedded::BUILD_VERSION)
+}
+
+/// Which build started a runtime, in words: "build <key>", or "an earlier build" when its record doesn't say.
+pub(crate) fn which_build(build: Option<&str>) -> String {
+    build.map_or("an earlier build".to_owned(), |build| format!("build {build}"))
 }
 
 /// Why a runtime from a build before one port per runtime can't be used.
@@ -470,6 +481,8 @@ impl Attached {
                 How::Process(_, port) => Some(*port),
                 How::Slurm(_) => state.port,
             },
+            build: state.build.clone(),
+            interface: state.interface,
         }
     }
 

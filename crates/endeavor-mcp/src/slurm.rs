@@ -694,6 +694,8 @@ pub fn relay_main(argv: &[String]) -> ! {
         reattached: true,
         job: None,
         port: Some(port),
+        build: state.build.clone(),
+        interface: state.interface,
     };
     let _ = mux.send(&ready.frame());
     loop {

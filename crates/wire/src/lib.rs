@@ -234,6 +234,13 @@ pub enum ToApp {
         /// The runtime's own port on `node`. A helper that doesn't say leaves it unknown.
         #[serde(default)]
         port: Option<u16>,
+        /// The build that started the runtime, as its record says; none when it doesn't, or the helper doesn't say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build: Option<String>,
+        /// The number for what the runtime's core offers its callers (`endeavor_mcp::CORE_INTERFACE`), as its
+        /// record says; none when it doesn't, or the helper doesn't say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interface: Option<u32>,
     },
     /// The runtime couldn't start (running on another node, …): the answer to the
     /// `StartRuntime` with this id. The helper stays connected, so
@@ -394,6 +401,8 @@ mod tests {
             reattached: true,
             job: None,
             port: Some(41234),
+            build: Some("abc123".into()),
+            interface: Some(1),
         };
         let Frame::Control(json) = ready.frame() else { panic!() };
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -401,7 +410,7 @@ mod tests {
         assert_eq!(value["launcher"], "process");
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), ready);
         let older = r#"{"type":"Ready","id":4,"launcher":"process","node":"labbox3","pid":81234,"token":"t","reattached":true}"#;
-        assert!(matches!(serde_json::from_str::<ToApp>(older).unwrap(), ToApp::Ready { port: None, .. }), "a helper that says no port still reads");
+        assert!(matches!(serde_json::from_str::<ToApp>(older).unwrap(), ToApp::Ready { port: None, build: None, interface: None, .. }), "a helper that says no port, build or interface still reads");
         let files = ToHelper::Files { id: 3, request: files::Request::List { path: "~".into() } };
         let Frame::Control(json) = files.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);

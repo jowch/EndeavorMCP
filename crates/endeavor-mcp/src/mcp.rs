@@ -976,6 +976,53 @@ mod tests {
         assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (1, "162714c5ccd13efa"), "see the comment in this test");
     }
 
+    /// The code of `source` before its tests.
+    fn code(source: &str) -> &str {
+        source.split("#[cfg(test)]").next().unwrap()
+    }
+
+    /// The quoted names in `code` that start with `prefix` and go on in lower case and underscores, sorted, each once.
+    fn quoted_names(code: &str, prefix: &str) -> Vec<String> {
+        let opening = format!("\"{prefix}");
+        let mut names: Vec<String> = code
+            .match_indices(&opening)
+            .filter_map(|(at, _)| {
+                let rest = &code[at + 1..];
+                let end = rest.find('"')?;
+                let name = &rest[..end];
+                name[prefix.len()..].chars().all(|c| c.is_ascii_lowercase() || c == '_').then(|| name.to_owned())
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// The fields the core writes to `runtime.json`: the keys of its `json!` and the ones it sets after.
+    fn record_fields() -> Vec<String> {
+        let core = code(include_str!("core.rs"));
+        let (from, to) = (core.find("let mut state = json!({").unwrap(), core.find("join(\"runtime.json\"), state").unwrap());
+        let record = &core[from..to];
+        let mut fields: Vec<String> = quoted_names(record, "").into_iter().filter(|name| record.contains(&format!("\"{name}\":")) || record.contains(&format!("state[\"{name}\"]"))).collect();
+        fields.dedup();
+        fields
+    }
+
+    #[test]
+    fn the_app_calls_and_the_records_fields_are_those_of_the_cores_interface() {
+        // When this fails, a call the app makes at `/endeavor/call` or a field of `runtime.json` was added,
+        // removed or renamed: raise `core::INTERFACE` if a caller of the build before would get it wrong,
+        // then record the new lists with the number. What a call or the events stream returns isn't
+        // caught here; that stays the author's to judge.
+        let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
+        let calls_then = [
+            "answer_run", "file_info", "move_notebook", "new_notebook", "recent_sessions", "restart_notebook", "run_preview", "set_folder",
+            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "stop_notebook", "tool_result",
+        ];
+        let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "pid", "port", "started", "token"];
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (1, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+    }
+
     #[test]
     fn writes_json_as_julia_does() {
         let value = json!({ "b": 1, "A": [true, null, 2.5], "a": { "z": "x\u{7f}\u{1}/\"é", "_": {} }, "aa": [] });

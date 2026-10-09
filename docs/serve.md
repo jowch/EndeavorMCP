@@ -74,7 +74,9 @@ On a Mac, `shasum -a 256 -c` replaces `sha256sum -c`.
 
 `endeavor --version` prints the version and the build, a hash of the source it
 was built from; a release build adds a second line, `release <key>`, the
-release's key for that source. A Mac or Windows computer reaches a Linux
+release's key for that source. The last line, `interface <n>`, is the number
+for what its core offers callers (`core::INTERFACE`): `endeavor update` reads
+it from the new binary and says nothing of a running Julia that offers it. A Mac or Windows computer reaches a Linux
 server with the release build: when the agent adds the machine, `endeavor`
 fetches the Linux helper from the release by that key, checks its SHA-256 and
 keeps it in `~/.cache/endeavor/helpers/` (`%LOCALAPPDATA%\Endeavor\helpers` on
@@ -112,8 +114,8 @@ Other installs update the way they were installed:
 A Julia that's already running keeps running from the build that started
 it. Another build uses it as it is when the two builds offer the same tools
 and calls. `serve` and `mcp` tell you when the running Julia came from a build
-that doesn't, and `endeavor update` when it came from a build other than the
-new one. To switch, run `endeavor stop`, then start it again.
+that doesn't, and so does `endeavor update` for the new one. To switch, run
+`endeavor stop`, then start it again.
 
 ## Start it
 

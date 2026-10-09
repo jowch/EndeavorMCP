@@ -376,15 +376,21 @@ or `status` of another build uses a runtime with the same number as it is and
 says nothing. One with another number, or none (from before it was recorded),
 is treated as before: a front stops it if it started it in the background and
 no notebook is open, else keeps it and tells the agent once; `serve` and
-`status` tell the user. `endeavor update` compares the build, since the new
-binary's number isn't known to the old one. Two builds with one number must
+`status` tell the user. A machine's runtime is checked the same way, from the
+`build` and `interface` the helper's `Ready` carries (`RuntimeInfo` has both,
+and `RuntimeInfo::usable_as_is` applies the rule); it is never stopped for the
+agent, only told of once, and `client::Session` reports it as trouble.
+`endeavor update` reads the new binary's number from its `--version` (the
+line `interface <n>`) and compares the build only with a binary from before
+that line was printed. Two builds with one number must
 take each other's calls both ways, since a newer front meets an older core as
 often as the reverse. So the number goes up with any change to what it covers,
 additions included, and with a change in what a call returns or does while its
 arguments stay the same; descriptions and changes inside the core don't count.
-A test in `mcp.rs` holds a fingerprint of the notebook tools' names and
-arguments (descriptions left out) and fails when they change; nothing catches
-the rest.
+Tests in `mcp.rs` hold a fingerprint of the notebook tools' names and
+arguments (descriptions left out), and the lists of the app's `/endeavor/call`
+methods and of `runtime.json`'s fields, and fail when they change. Nothing
+catches a change in what a call or the events stream returns.
 
 ## The machine tools
 

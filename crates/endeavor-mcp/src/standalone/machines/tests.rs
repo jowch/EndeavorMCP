@@ -108,12 +108,12 @@ fn only_a_connection_nothing_hangs_on_is_replaced() {
 }
 
 fn attached_runtime() -> RuntimeInfo {
-    RuntimeInfo { port: 1, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n".into(), pid: 2, reattached: false, job: None, remote_port: None }
+    RuntimeInfo { port: 1, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n".into(), pid: 2, reattached: false, job: None, remote_port: None, build: None, interface: None }
 }
 
 #[test]
 fn what_to_tell_about_the_page_after_the_session_depends_on_where_the_runtime_is() {
-    let runtime = |remote_port| RuntimeInfo { port: 1, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n7".into(), pid: 2, reattached: false, job: None, remote_port };
+    let runtime = |remote_port| RuntimeInfo { port: 1, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n7".into(), pid: 2, reattached: false, job: None, remote_port, build: None, interface: None };
     let lab = Server { id: "lab".into(), ssh_host: "ada@lab".into(), ..Default::default() };
     let said = reach_text(&lab, &runtime(Some(41234)));
     assert!(said.contains("works while this session is connected") && said.contains("`ssh -L 41234:127.0.0.1:41234 ada@lab`"), "{said}");
@@ -540,7 +540,7 @@ fn a_notebook_call_reports_a_failed_start_once_and_the_next_one_tries_again_and_
 #[test]
 fn a_session_is_marked_told_its_folder_only_when_the_runtime_took_it() {
     let relay = Arc::new(Relay::new(options(), "s".into(), Box::new(std::io::sink())));
-    let info = |port| RuntimeInfo { port, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n".into(), pid: 7, reattached: false, job: None, remote_port: None };
+    let info = |port| RuntimeInfo { port, token: "t".into(), mcp_url: String::new(), page_url: String::new(), node: "n".into(), pid: 7, reattached: false, job: None, remote_port: None, build: None, interface: None };
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     relay.ready(&relay.current(), &info(closed), None);
     assert_eq!(relay.current().told, None, "nobody answered, so the next call tells it again");

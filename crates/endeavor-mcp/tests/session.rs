@@ -730,3 +730,38 @@ fn helper_args(place: &Place) -> Vec<String> {
         String::from_utf8_lossy(&args.stdout).into_owned()
     }).collect()
 }
+
+#[test]
+fn a_session_reports_the_runtimes_build_and_interface_and_tells_trouble_once_for_one_of_another_interface() {
+    use std::sync::{Arc, Mutex};
+    let place = Place::new("other-build");
+    let session = place.session();
+    let started = ready(session.ensure(start(), LONG, false));
+    assert_eq!(started.interface, Some(endeavor_mcp::CORE_INTERFACE), "{started:?}");
+    assert!(started.build.is_some() && started.usable_as_is(), "{started:?}");
+    session.close();
+
+    let recorded = place.state.join("runtime.json");
+    let mut record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&recorded).unwrap()).unwrap();
+    record["build"] = "0.0.1-0123456789abcdef".into();
+    record.as_object_mut().unwrap().remove("interface");
+    std::fs::write(&recorded, record.to_string()).unwrap();
+    let trouble: Arc<Mutex<Vec<String>>> = Arc::default();
+    let mut config = place.config(true, None);
+    config.on_event = Box::new({
+        let trouble = trouble.clone();
+        move |event| {
+            if let SessionEvent::Trouble(text) = event {
+                trouble.lock().unwrap().push(text);
+            }
+        }
+    });
+    let second = Session::new(config).expect("a session");
+    let attached = ready(second.ensure(Want::Attach { install: false }, LONG, false));
+    assert_eq!((attached.pid, attached.reattached, attached.build.as_deref(), attached.interface), (started.pid, true, Some("0.0.1-0123456789abcdef"), None));
+    assert!(!attached.usable_as_is());
+    assert!(matches!(second.status().state, State::Ready(r) if r == attached), "the status carries them");
+    ready(second.ensure(Want::Attach { install: false }, LONG, false));
+    let trouble = trouble.lock().unwrap().clone();
+    assert!(trouble.len() == 1 && trouble[0].contains("another version of Endeavor (build 0.0.1-0123456789abcdef)"), "{trouble:?}");
+}

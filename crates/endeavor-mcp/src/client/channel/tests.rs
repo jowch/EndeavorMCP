@@ -158,7 +158,7 @@ fn ready(id: u32) -> ToApp {
 }
 
 fn ready_with(id: u32, token: &str) -> ToApp {
-    ToApp::Ready { id, launcher: "process".into(), node: "n".into(), pid: 1, token: token.into(), reattached: false, job: None, port: Some(4000) }
+    ToApp::Ready { id, launcher: "process".into(), node: "n".into(), pid: 1, token: token.into(), reattached: false, job: None, port: Some(4000), build: None, interface: None }
 }
 
 #[test]

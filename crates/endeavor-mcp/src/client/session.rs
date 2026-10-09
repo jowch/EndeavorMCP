@@ -149,6 +149,21 @@ pub struct RuntimeInfo {
     pub job: Option<wire::slurm::Job>,
     /// The runtime's own port on `node`, where a server's user can forward it; none when an older helper doesn't say.
     pub remote_port: Option<u16>,
+    /// The build that started it, as its record says; none when the record or an older helper doesn't say.
+    #[serde(default)]
+    pub build: Option<String>,
+    /// The number for what its core offers callers (`CORE_INTERFACE`), as its record says; none when the
+    /// record or an older helper doesn't say.
+    #[serde(default)]
+    pub interface: Option<u32>,
+}
+
+impl RuntimeInfo {
+    /// This build's tools and calls work with it as it is: its core offers this build's interface
+    /// (`CORE_INTERFACE`), or this build started it. False when neither is known.
+    pub fn usable_as_is(&self) -> bool {
+        crate::usable_as_is(self.build.as_deref(), self.interface)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -301,7 +316,7 @@ enum Msg {
     /// The helper of this connection ended by itself.
     Closed(u64),
     /// A runtime start on this connection ended (`Inner::epoch` when it began, and whether it was allowed to install).
-    Started(u64, u64, bool, Result<Runtime, StartError>),
+    Started(u64, u64, bool, Box<Result<Runtime, StartError>>),
     /// The attached runtime went away.
     Notice(u64, Notice),
 }
@@ -693,7 +708,7 @@ impl Shared {
             let tx = shared.inbox.clone();
             let options = StartOptions { job: wish.job, install: wish.install, attach_only: wish.attach, ..StartOptions::default() };
             let result = start(&channel, &shared.listener, &options, &|event| shared.on_event(event), move |notice| drop(tx.send(Msg::Notice(conn, notice))));
-            let _ = shared.inbox.send(Msg::Started(conn, epoch, options.install, result));
+            let _ = shared.inbox.send(Msg::Started(conn, epoch, options.install, Box::new(result)));
         });
     }
 
@@ -1134,10 +1149,15 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                 if !current {
                     continue;
                 }
-                match result {
+                match *result {
                     // It went before its runtime was heard of, and was handled as gone: it is not ready.
                     Ok(_) if shared.with(|i| i.run == Run::Gone) => shared.with(|i| i.run = Run::Idle),
-                    Ok(runtime) => shared.with(|i| {
+                    Ok(runtime) => {
+                        let other = (runtime.reattached && !crate::usable_as_is(runtime.build.as_deref(), runtime.interface)).then(|| {
+                            let which = crate::which_build(runtime.build.as_deref());
+                            format!("{}: Julia there was started by another version of Endeavor ({which}), and this is build {}, so a call may behave differently or be refused. It keeps running as it is; stopping it lets the next start use this version.", runtime.node, crate::embedded::BUILD_VERSION)
+                        });
+                        shared.with(|i| {
                         i.step = Some(format!("Ready on {}", runtime.node));
                         if let Some(job) = &runtime.job {
                             let known = i.job.take().unwrap_or_default();
@@ -1154,8 +1174,14 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             reattached: runtime.reattached,
                             job: runtime.job,
                             remote_port: runtime.remote_port,
+                            build: runtime.build,
+                            interface: runtime.interface,
                         });
-                    }),
+                        });
+                        if let Some(text) = other {
+                            shared.trouble(text);
+                        }
+                    }
                     // The connection ended under the start: `Closed` follows and takes the start along to the next one.
                     Err(StartError::Failed(message)) if message == CLOSED => {}
                     Err(_) if shared.with(|i| i.channel.as_ref().is_some_and(|c| c.is_closed())) => {}

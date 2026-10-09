@@ -20,13 +20,23 @@ pub(crate) fn version_line() -> String {
     format!("endeavor {} (build {})", env!("CARGO_PKG_VERSION"), embedded::BUILD_VERSION)
 }
 
-/// `version_line`, and on a release build a second line, `release <key>`.
+/// `version_line`; on a release build a line `release <key>`; and a line `interface <n>`, the number
+/// for what this build's core offers its callers (`core::INTERFACE`), which `update` reads from the new binary.
 pub(crate) fn print_version() -> ! {
     println!("{}", version_line());
     if let Some(key) = embedded::RELEASE_KEY {
         println!("release {key}");
     }
+    println!("interface {}", crate::core::INTERFACE);
     std::process::exit(0)
+}
+
+/// The build and the interface number a binary's `--version` output says; a binary from before the
+/// interface was printed says none.
+fn build_and_interface(output: &str) -> (Option<String>, Option<u32>) {
+    let build = output.lines().next().and_then(|line| Some(line.split_once("(build ")?.1.split_once(')')?.0.to_owned()));
+    let interface = output.lines().find_map(|line| line.strip_prefix("interface ")?.trim().parse().ok());
+    (build, interface)
 }
 
 /// What `update` works from.
@@ -130,11 +140,11 @@ fn update(here: &Here) -> Result<String, String> {
     let part = dir.join(format!(".endeavor.part.{}{}", std::process::id(), if cfg!(windows) { ".exe" } else { "" }));
     let installed = install(&format!("{release}/{name}"), &part, &want, exe);
     let _ = std::fs::remove_file(&part);
-    let new_build = installed?;
+    let (new_build, new_interface) = installed?;
     let mut message = format!("Updated {} to the newest build ({key}).", exe.display());
-    // The new binary's interface isn't known here, so its build is compared.
+    // The new binary's interface, when it says one: a runtime that offers it is used as it is.
     if running(&here.state_dir)
-        && let Some(note) = standalone::other_build_than(&here.state_dir, new_build.as_deref().unwrap_or_default(), None)
+        && let Some(note) = standalone::other_build_than(&here.state_dir, new_build.as_deref().unwrap_or_default(), new_interface)
     {
         message.push_str(&format!("\n{note}"));
     }
@@ -148,8 +158,8 @@ fn same(a: &Path, b: &Path) -> bool {
 }
 
 /// Download `url` to `part`, check it against `sha256`, and put it in place of
-/// `exe`. The new binary's build, if it says.
-fn install(url: &str, part: &Path, sha256: &str, exe: &Path) -> Result<Option<String>, String> {
+/// `exe`. The new binary's build and interface number, as far as it says them.
+fn install(url: &str, part: &Path, sha256: &str, exe: &Path) -> Result<(Option<String>, Option<u32>), String> {
     download(url, Some(part))?;
     let got = sha256_of(part)?;
     if got != sha256 {
@@ -163,12 +173,9 @@ fn install(url: &str, part: &Path, sha256: &str, exe: &Path) -> Result<Option<St
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(part, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("Couldn't make {} executable: {e}", part.display()))?;
     }
-    let build = Command::new(part).arg("--version").output().ok().and_then(|out| {
-        let line = String::from_utf8_lossy(&out.stdout).into_owned();
-        Some(line.split_once("(build ")?.1.split_once(')')?.0.to_owned())
-    });
+    let said = Command::new(part).arg("--version").output().map_or((None, None), |out| build_and_interface(&String::from_utf8_lossy(&out.stdout)));
     put_in_place(part, exe, cfg!(windows))?;
-    Ok(build)
+    Ok(said)
 }
 
 /// Where `put_in_place` moves a running binary that can't be overwritten: a
