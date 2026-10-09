@@ -66,7 +66,7 @@ pub(crate) fn checksum_for(sums: &str, name: &str) -> Option<String> {
 }
 
 /// How long a connection may take to open, and a whole download to finish: a
-/// release file is about 30 MB, which a slow line needs minutes for.
+/// release file is about 5 MB, which a slow line needs minutes for.
 const CONNECT_SECS: &str = "15";
 const FILE_SECS: &str = "900";
 const TEXT_SECS: &str = "60";
