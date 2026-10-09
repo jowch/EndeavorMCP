@@ -78,7 +78,8 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>)
         restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
         restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {}", install_text(name, &InstallInfo { items: items.to_vec(), helper: None }, "use_machine")),
         not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
-        no_run_gate: |name| format!("Julia on {name} was started by a version of Endeavor too old to ask the user before running code, so Endeavor doesn't let it run code. Reading and editing cells still work. Don't run code. Ask the user whether to stop Julia on {name}; stopping it closes its notebooks. If they agree, call stop_machine for {name}, then use_machine for {name}, which starts this version."),
+        // The plugin's runs aren't held for the user's answer by any runtime (it sends no policy): an old one is no worse.
+        no_run_gate: None,
     };
     Session::new(config)
 }

@@ -1180,7 +1180,7 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
 }
 
 #[test]
-fn a_machines_runtime_too_old_to_ask_before_a_run_runs_no_code_and_the_agent_is_told_how_to_get_past_it() {
+fn a_machines_runtime_too_old_to_ask_before_a_run_still_runs_the_plugins_code() {
     let place = Place::new("machine-no-run-gate");
     place.add_lab();
     let path = place.notebook("old.jl");
@@ -1199,11 +1199,11 @@ fn a_machines_runtime_too_old_to_ask_before_a_run_runs_no_code_and_the_agent_is_
     let mut second = place.front();
     second.initialize();
     second.ok("use_machine", json!({ "machine": "lab" }));
-    let (failed, said) = second.call("execute_cell", json!({ "notebook_id": NOTEBOOK, "cell_id": "00000000-0000-0000-0000-000000000000" }));
-    let said = said.to_string();
-    assert!(failed && said.contains("Julia on lab was started by a version of Endeavor too old to ask the user before running code") && said.contains("call stop_machine for lab, then use_machine for lab"), "{said}");
-    assert!(!said.contains("Restart Julia"), "no button the plugin doesn't have: {said}");
-    assert_eq!(second.ok("list_notebooks", json!({}))[0]["path"], path, "reading still works");
+    // No runtime holds the plugin's runs for the user's answer (it sends no policy), so an old one is no
+    // worse, and refusing would only push the user to stop Julia, which on a cluster gives up the job.
+    let (_, said) = second.call("execute_cell", json!({ "notebook_id": NOTEBOOK, "cell_id": "00000000-0000-0000-0000-000000000000" }));
+    assert!(!said.to_string().contains("too old"), "{said}");
+    assert_eq!(second.ok("list_notebooks", json!({}))[0]["path"], path);
     second.finish();
 }
 
