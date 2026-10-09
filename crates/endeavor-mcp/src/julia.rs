@@ -151,7 +151,9 @@ fn login_shell_julia(script: &str) -> (Option<String>, String) {
 
 /// `julia --version`, if it's new enough.
 fn checked_version(julia: &str, missing: &str) -> Result<String, String> {
-    let output = Command::new(julia).arg("--version").stdin(Stdio::null()).output().map_err(|_| missing.to_owned())?;
+    let mut command = Command::new(julia);
+    crate::client::no_window(&mut command);
+    let output = command.arg("--version").stdin(Stdio::null()).output().map_err(|_| missing.to_owned())?;
     let text = String::from_utf8_lossy(&output.stdout);
     let version = text.trim().rsplit(' ').next().unwrap_or_default().to_owned();
     match parse_version(&version) {
