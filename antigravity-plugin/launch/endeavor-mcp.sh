@@ -140,13 +140,15 @@ until err=$(mkdir "$lock" 2>&1); do
     # One start at a time removes a stale lock, and looks at it again first: by then it may be
     # another start's, just taken, with no pid in it yet. That one is never moved or removed.
     if mkdir "$lock.take" 2>/dev/null; then
+      trap 'rmdir "$lock.take" 2>/dev/null; exit 1' INT TERM HUP
       if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$owner" ] && stale "$owner"; then
         rm -rf "$lock"
       fi
       rmdir "$lock.take" 2>/dev/null || true
+      trap - INT TERM HUP
       continue
     fi
-    # Left by a start that was stopped while removing a lock.
+    # Left by a start that was killed while removing a lock.
     [ -z "$(find "$lock.take" -maxdepth 0 -mmin +1 2>/dev/null)" ] || rmdir "$lock.take" 2>/dev/null || true
   fi
   if [ "$waited" -ge 25 ]; then
