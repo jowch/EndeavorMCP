@@ -521,14 +521,26 @@ not supported. These gaps stay open.
   runner has it on the PATH; a plain Windows shell doesn't). To close: stand-ins
   written in Rust (a small test binary), or the scripts run through Git's
   `sh.exe`, and the tests' `cfg(unix)` narrowed to what is Unix only.
-- [P2] **On Windows ssh can't ask for a password or a key's passphrase.** The
-  askpass mode answers ssh's prompts through the app's Unix socket
-  (`askpass.rs`), which is not ported, so only a key without a passphrase or a
-  key in ssh-agent signs in. Windows ships its ssh-agent service disabled, so
-  the "run `ssh-add`" advice that a refused sign-in gives (`client/ssh.rs`,
-  `explain_retry`) fails there until an administrator enables the service. To
-  close: askpass over loopback TCP with a token, or a named pipe; and on Windows
-  say how to start the ssh-agent service.
+- [P2] **On Windows the app can't ask ssh's questions yet.** Since 2026-10-09
+  the askpass mode also reaches the app over loopback TCP with a one-time token
+  (`wire::askpass::ADDRESS_ENV`, `TOKEN_ENV`; `client::Asker` is the app's
+  side), and `Auth::Env` sets `SSH_ASKPASS_REQUIRE=force` on Windows. That was
+  tested on Windows 10 with Windows' OpenSSH 9.5, started as Endeavor starts it
+  (no console window), against a test sshd: a key's passphrase and an unknown
+  host's yes/no went through `client::Asker` and ssh signed in, and a wrong
+  token got no answer. A password login was not tried; it is the same kind of
+  question. Without `force` Windows' ssh ignores the askpass and waits on a
+  console nobody sees, and it cuts a prompt at about 100 characters (a long key
+  path). The app still listens only on its Unix socket. To close: the app uses
+  `client::Asker` (on every platform, or at least on Windows).
+- [P2] **On Windows a key with a passphrase needs ssh-agent, which is off.**
+  `endeavor mcp` signs in in batch mode, with no one to ask, so a key with a
+  passphrase works only from ssh-agent. Windows ships the ssh-agent service
+  disabled, and the "run `ssh-add`" advice that a refused sign-in gives
+  (`client/ssh.rs`, `explain_retry`) fails there until an administrator enables
+  it. To close: on Windows, say how to start the service
+  (`Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent`, as
+  administrator).
 - [P3] **On Windows the ssh can't be chosen.** Endeavor runs Windows' own
   `System32\OpenSSH\ssh.exe` when it is installed, and the PATH's `ssh` only
   when it isn't (`client/ssh.rs`, `ssh_program`), so a user who wants Git's

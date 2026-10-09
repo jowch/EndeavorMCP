@@ -1,15 +1,16 @@
 //! Askpass mode: ssh runs the helper as `SSH_ASKPASS` with the prompt as its
-//! only argument. Pass the prompt to the app over its socket and print the
-//! answer for ssh; exit 1 if the user cancelled.
+//! only argument. Pass the prompt to the app (over loopback TCP, or its Unix
+//! socket; see `wire::askpass`) and print the answer for ssh; exit 1 if the user
+//! cancelled.
 
-#[cfg(unix)]
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
-use wire::askpass::{Ask, Kind};
+use wire::askpass::{ADDRESS_ENV, Answer, Ask, Kind, TOKEN_ENV};
 #[cfg(unix)]
-use wire::askpass::{Answer, SOCKET_ENV};
+use wire::askpass::SOCKET_ENV;
 
 pub fn run(prompt: &str) -> ! {
     let hint = std::env::var("SSH_ASKPASS_PROMPT").ok();
@@ -33,21 +34,42 @@ pub fn run(prompt: &str) -> ! {
     }
 }
 
-#[cfg(unix)]
 fn ask_app(ask: &Ask) -> Result<Option<String>, String> {
-    let path = std::env::var(SOCKET_ENV).map_err(|_| format!("{SOCKET_ENV} isn't set"))?;
-    let mut socket = UnixStream::connect(&path).map_err(|e| format!("{path}: {e}"))?;
     let mut line = serde_json::to_string(ask).expect("serializable");
     line.push('\n');
-    socket.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    match std::env::var(ADDRESS_ENV) {
+        Ok(address) => {
+            // Only to this computer: the prompt and the token go nowhere else.
+            let to: SocketAddr = address.parse().ok().filter(|a: &SocketAddr| a.ip().is_loopback()).ok_or_else(|| format!("{ADDRESS_ENV} isn't a loopback address: {address}"))?;
+            let token = std::env::var(TOKEN_ENV).map_err(|_| format!("{TOKEN_ENV} isn't set"))?;
+            let socket = TcpStream::connect(to).map_err(|e| format!("{address}: {e}"))?;
+            exchange(socket, &format!("{token}\n{line}"))
+        }
+        Err(_) => unix_socket(&line),
+    }
+}
+
+/// Send `lines` and read the app's one-line `Answer`.
+fn exchange(mut socket: impl Read + Write, lines: &str) -> Result<Option<String>, String> {
+    socket.write_all(lines.as_bytes()).map_err(|e| e.to_string())?;
     let mut reply = String::new();
     BufReader::new(socket).read_line(&mut reply).map_err(|e| e.to_string())?;
+    if reply.is_empty() {
+        return Err("the app closed the connection without answering (over TCP: is the token right?)".into());
+    }
     let answer: Answer = serde_json::from_str(&reply).map_err(|e| format!("unreadable answer: {e}"))?;
     Ok(answer.text)
 }
 
-/// Not ported: the app's socket needs loopback TCP or a named pipe on Windows.
+#[cfg(unix)]
+fn unix_socket(line: &str) -> Result<Option<String>, String> {
+    let path = std::env::var(SOCKET_ENV).map_err(|_| format!("neither {ADDRESS_ENV} nor {SOCKET_ENV} is set"))?;
+    let socket = UnixStream::connect(&path).map_err(|e| format!("{path}: {e}"))?;
+    exchange(socket, line)
+}
+
+/// Windows has no Unix sockets in Rust's std: the app listens on loopback TCP instead.
 #[cfg(windows)]
-fn ask_app(_ask: &Ask) -> Result<Option<String>, String> {
-    Err("ssh prompts aren't supported on Windows yet".into())
+fn unix_socket(_line: &str) -> Result<Option<String>, String> {
+    Err(format!("{ADDRESS_ENV} isn't set"))
 }

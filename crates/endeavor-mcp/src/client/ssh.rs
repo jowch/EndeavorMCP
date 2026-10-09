@@ -53,7 +53,8 @@ pub enum Auth {
     /// agent and `~/.ssh/config` do the signing in.
     Batch,
     /// No batch mode, and these variables set on ssh: for a caller that answers
-    /// ssh's prompts itself (through `SSH_ASKPASS`).
+    /// ssh's prompts itself (through `SSH_ASKPASS`; `Asker::env` gives them). On
+    /// Windows `SSH_ASKPASS_REQUIRE` is always `force`.
     Env(Vec<(String, String)>),
 }
 
@@ -101,6 +102,10 @@ impl Transport {
         };
         if let Auth::Env(env) = auth {
             command.envs(env.iter().map(|(k, v)| (k, v)));
+            // Windows' ssh uses SSH_ASKPASS only when forced; otherwise it waits on a console nobody sees.
+            if cfg!(windows) {
+                command.env("SSH_ASKPASS_REQUIRE", "force");
+            }
         }
         no_window(&mut command);
         Ok(command)

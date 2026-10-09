@@ -255,7 +255,7 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some("--version" | "-V" | "version") => update::print_version(),
         Some("update") => update::main(&argv[1..]),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
-        Some(prompt) if prompt != "connect" && std::env::var_os(wire::askpass::SOCKET_ENV).is_some() => askpass::run(prompt),
+        Some(prompt) if prompt != "connect" && [wire::askpass::SOCKET_ENV, wire::askpass::ADDRESS_ENV].iter().any(|v| std::env::var_os(v).is_some()) => askpass::run(prompt),
         _ => {}
     }
     let args = match parse_args(argv) {
