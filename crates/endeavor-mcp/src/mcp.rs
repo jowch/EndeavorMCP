@@ -472,7 +472,8 @@ impl Bridge {
         let id = self.notebooks.asks.add(ask);
         eprintln!("[ Info: Session {owner} asks before {tool} (ask {id}, call {})", call.call_id.unwrap_or("?"));
         self.notebooks.publish();
-        let outcome = self.notebooks.asks.wait(id, call.gone);
+        let deadline = call.began + Duration::from_secs_f64(notebooks::WAIT_SECONDS);
+        let outcome = self.notebooks.asks.wait(id, call.gone, deadline);
         self.notebooks.publish();
         match outcome {
             Outcome::Answered(Answer { allow: true, user_ran }) => {
@@ -487,6 +488,7 @@ impl Bridge {
             Outcome::Answered(_) if matches!(tool, "edit_cell" | "add_cell") => Ok(false),
             Outcome::Answered(_) => Err(tool_error("ArgumentError: not_approved::The user chose not to run this.", false)),
             Outcome::Cancelled | Outcome::Gone => Err(tool_error("ArgumentError: cancelled::The call was cancelled before the user answered.", false)),
+            Outcome::Unanswered => Err(tool_error(&unanswered(tool), false)),
         }
     }
 
@@ -504,6 +506,14 @@ impl Bridge {
         }
         None
     }
+}
+
+/// The error of a call whose wait for the user's answer ended first: the ask stays up for the same call made again.
+fn unanswered(tool: &str) -> String {
+    format!(
+        "ArgumentError: waiting_for_user::The user hasn't answered yet, so nothing was changed or run. \
+The request is still on their screen. To keep waiting for their answer, call `{tool}` again with the same arguments."
+    )
 }
 
 /// Why a session on the user's computer may not call host tool `tool`, as the error Julia raised for it.
@@ -678,13 +688,16 @@ fn new_session_id() -> Option<String> {
 /// How often a held call's stream says it's still waiting.
 const KEEP_WAITING: Duration = Duration::from_secs(15);
 
-/// The response to a request whose reply may wait on the user. Claude Code
-/// gives up on a POST whose response hasn't begun within 60 seconds (its MCP
-/// client's first-byte budget), whatever its tool timeouts say. So once a call
+/// The response to a request whose reply may wait on the user. Once a call
 /// waits, its response begins at once as an event stream, which Streamable
 /// HTTP allows for a client that accepts one, says every `KEEP_WAITING` that
 /// the call is still waiting (a progress notification when the request asked
 /// for progress, else an SSE comment), and ends with the reply as its last event.
+/// This keeps Claude Code's idle check (five minutes without a word) and its
+/// wait for a response to begin satisfied, and lets it show the wait. It does
+/// not lengthen Claude Code's tool timeout, which ends every call after 60
+/// seconds unless `MCP_TOOL_TIMEOUT` or the server's `timeout` says otherwise,
+/// progress or not; so the wait itself ends before that (`Asks::wait`).
 struct Held {
     socket: TcpStream,
     /// The client accepts an event stream over HTTP/1.1 (chunked).

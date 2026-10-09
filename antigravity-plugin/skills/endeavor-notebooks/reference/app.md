@@ -11,7 +11,7 @@ The user sees the notebook in a pane next to the chat. `new_notebook` and `open_
 
 ## Approval
 
-The user chooses when the app asks them first, and a call that asks waits for their answer.
+The user chooses when the app asks them first, and a call that asks waits up to 45 seconds for their answer.
 
 - **Auto:** nothing asks; calls run as you make them.
 - **Ask to run:** calls that run code ask: `execute_cell`, `submit_changes`, `run_all_cells`, `allow_execution`, `delete_cell`, `run_shell`, `open_notebook` with `run_notebook=true`, and `add_cell` or `edit_cell` with `run_after=true`. Stage your edits and run once, so the user is asked once.
@@ -27,6 +27,7 @@ Other refusals:
 
 | `error` | Meaning | Do |
 |---|---|---|
+| `waiting_for_user` | The user hasn't answered yet; nothing was changed or run, and the request is still on their screen | To keep waiting, make the same call again with the same arguments. If they still haven't answered after a few tries, tell them it is waiting for them |
 | `cancelled` | The call was cancelled before the user answered | Ask before trying again |
 | `no_app` | The app isn't open to ask the user | Tell the user; try again when it is |
 | `older_runtime` | This runtime predates approval and can't ask | Don't run code. Tell the user to restart the runtime, or to switch to Auto |

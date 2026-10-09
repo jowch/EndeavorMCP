@@ -19,11 +19,11 @@ use crate::mcp::julia_string;
 /// How long the app's report of a user's run counts. (Also sent as the
 /// `timeout` of runs the engine is not asked to wait for, which it ignores.)
 pub(super) const TIMEOUT_SECONDS: f64 = 60.0;
-/// The most a tool call waits for a run, from the start of the call (the
-/// user's time over an approval card included): under the 60 seconds that some
-/// agent clients give a tool call. The wait for the user's own run of the same
-/// cells (`ran_after_user`) comes out of it.
-pub(super) const WAIT_SECONDS: f64 = 45.0;
+/// The most a tool call waits for the user's answer and then a run, from the
+/// start of the call: under the 60 seconds that Claude Code (by default, and
+/// whatever progress it hears) and Codex give a tool call. The wait for the
+/// user's own run of the same cells (`ran_after_user`) comes out of it.
+pub const WAIT_SECONDS: f64 = 45.0;
 /// The least a run is waited for, however much of `WAIT_SECONDS` went before.
 const WAIT_FLOOR_SECONDS: f64 = 5.0;
 /// Claude accepts images up to about 5 MB; plots are typically tens of KB.

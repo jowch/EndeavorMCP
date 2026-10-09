@@ -27,7 +27,7 @@ use crate::host_tools::normpath;
 use crate::http::{self, Head};
 use crate::mcp::{WRITE_TOOLS, julia_string, to_json};
 
-pub use tools::Reply;
+pub use tools::{Reply, WAIT_SECONDS};
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
 
