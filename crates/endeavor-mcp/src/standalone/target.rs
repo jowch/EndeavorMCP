@@ -130,7 +130,7 @@ enum Phase {
     Idle,
     /// A start is under way, at this step.
     Starting(String),
-    Ready(RuntimeInfo),
+    Ready(Box<RuntimeInfo>),
     /// A start ended with this, which every call is told until one asks to try again.
     Failed(String),
 }
@@ -164,7 +164,7 @@ impl Local {
             return OtherBuild::Fine;
         }
         builds.checked = Some(runtime.pid);
-        let which = state.build.as_deref().map_or("an earlier build".to_owned(), |build| format!("build {build}"));
+        let which = crate::which_build(state.build.as_deref());
         if idle {
             builds.stopped_one = true;
             eprintln!("endeavor: Julia here (pid {}) was started by {which}, and no notebook is open in it; stopping it so that this build ({this}) starts its own", runtime.pid);
@@ -174,9 +174,7 @@ impl Local {
             }
         }
         let open = open.filter(|n| *n > 0).map_or(String::new(), |n| format!(", with {n} notebook{} open", if n == 1 { "" } else { "s" }));
-        OtherBuild::Kept(format!(
-            "Note: Julia on this computer was started by another version of Endeavor ({which}{open}), and this session's tools are build {this}'s, so a tool may behave differently from its description or be refused. It keeps running as it is. Stopping it (`stop_machine` with machine \"local\", only with the user's agreement, since it ends its notebooks) lets the next call start this version."
-        ))
+        OtherBuild::Kept(other_build_notice(LOCAL, LOCAL, &which, &open))
     }
 
     /// The phase, with a runtime that is no longer the one recorded forgotten. The state folder is read with the lock let go.
@@ -230,7 +228,7 @@ impl Local {
                 }
             };
             let next = match super::start_or_reuse(&options, true, &progress, &|| false) {
-                Ok(up) => Phase::Ready(announce(&options, &up.state, up.port, up.started)),
+                Ok(up) => Phase::Ready(Box::new(announce(&options, &up.state, up.port, up.started))),
                 Err(e) => {
                     eprintln!("endeavor: {e}");
                     Phase::Failed(e)
@@ -240,6 +238,16 @@ impl Local {
             state.1.notify_all();
         });
     }
+}
+
+/// What the agent is told once about a runtime on the machine `name` (id `id`) that `which` build started
+/// and that doesn't offer this build's interface; `open` adds what is known of its open notebooks.
+pub(super) fn other_build_notice(name: &str, id: &str, which: &str, open: &str) -> String {
+    let this = crate::embedded::BUILD_VERSION;
+    let place = if name == LOCAL { "this computer" } else { name };
+    format!(
+        "Note: Julia on {place} was started by another version of Endeavor ({which}{open}), and this session's tools are build {this}'s, so a tool may behave differently from its description or be refused. It keeps running as it is. Stopping it (`stop_machine` with machine \"{id}\", only with the user's agreement, since it ends its notebooks) lets the next call start this version."
+    )
 }
 
 /// A runtime that was found or started, as the session uses it. The user is told on stderr where the
@@ -259,6 +267,8 @@ fn announce(options: &Options, state: &crate::State, port: u16, started: bool) -
         reattached: !started,
         job: None,
         remote_port: None,
+        build: state.build.clone(),
+        interface: state.interface,
     }
 }
 
@@ -271,7 +281,7 @@ impl Provider for Local {
         }
         loop {
             match &*phase {
-                Phase::Ready(runtime) => return Outcome::Ready(runtime.clone()),
+                Phase::Ready(runtime) => return Outcome::Ready((**runtime).clone()),
                 Phase::Failed(why) => return Outcome::Failed(why.clone()),
                 Phase::Starting(step) => {
                     let left = until.saturating_duration_since(Instant::now());
@@ -287,7 +297,7 @@ impl Provider for Local {
                     if let Outcome::Ready(runtime) = &outcome {
                         let mut phase = self.state.0.lock().unwrap();
                         if matches!(*phase, Phase::Idle) {
-                            *phase = Phase::Ready(runtime.clone());
+                            *phase = Phase::Ready(Box::new(runtime.clone()));
                         }
                     }
                     return outcome;
@@ -306,7 +316,7 @@ impl Provider for Local {
             Phase::Idle if runtime::lock_state(&self.options.state_dir).is_held() => (State::Starting { queue: None }, None),
             Phase::Idle => (State::Connected, None),
             Phase::Starting(step) => (State::Starting { queue: None }, Some(step.clone()).filter(|step| !step.is_empty())),
-            Phase::Ready(runtime) => (State::Ready(runtime.clone()), None),
+            Phase::Ready(runtime) => (State::Ready((**runtime).clone()), None),
             Phase::Failed(why) => (State::Failed(why.clone()), None),
         };
         Status { machine: LOCAL.into(), name: LOCAL.into(), state, step, hello: None, job: None }

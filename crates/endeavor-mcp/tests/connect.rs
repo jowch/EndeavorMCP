@@ -236,6 +236,24 @@ fn several_helpers_attach_and_one_stop_ends_the_runtime_for_all() {
 }
 
 #[test]
+fn ready_says_the_build_and_interface_the_runtime_recorded_and_none_for_a_record_without_them() {
+    let dir = state_dir("ready-build");
+    let runtime = FakeRuntime::start_as(&dir, "labbox3", serde_json::json!({ "launcher": "process", "build": "0abc", "interface": 7 }), Duration::ZERO);
+    let mut helper = Helper::start(&dir, &["--any-node"]);
+    let ToApp::Ready { build, interface, .. } = helper.start_runtime() else { panic!("expected Ready") };
+    assert_eq!((build.as_deref(), interface), (Some("0abc"), Some(7)));
+    helper.stdin.0.lock().unwrap().take();
+    let _ = helper.process.wait();
+    runtime.kill();
+
+    let dir = state_dir("ready-no-build");
+    let _runtime = FakeRuntime::start(&dir, "labbox3");
+    let helper = Helper::start(&dir, &["--any-node"]);
+    let ToApp::Ready { build, interface, .. } = helper.start_runtime() else { panic!("expected Ready") };
+    assert_eq!((build, interface), (None, None));
+}
+
+#[test]
 fn a_helper_keeps_running_and_relaying_when_it_gets_sigusr1() {
     let dir = state_dir("sigusr1");
     let _runtime = FakeRuntime::start(&dir, "labbox3");

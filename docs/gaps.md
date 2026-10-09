@@ -28,13 +28,26 @@ Every P1:
 
 ## Releases and plugins
 
-- [P2] **Only `endeavor mcp` checks the build of the runtime it uses.** A front
-  of `mcp` compares the build in `runtime.json` with its own: it replaces a
-  runtime of another build that a front started, with no notebook open, on the
-  first call that may start one, and otherwise tells the agent once. Another
-  session can open a notebook between that check and the stop. A machine's
-  runtime is not checked, because the helper's `Ready` doesn't carry a build.
+- [P2] **Only `endeavor mcp` and `client::Session` check the runtime they
+  use.** A front of `mcp` compares `runtime.json`'s `interface` with its own
+  (and the build when the record has no number). On this computer it replaces
+  a runtime of another interface that a front started, with no notebook open,
+  on the first call that may start one, and otherwise tells the agent once.
+  Another session can open a notebook between that check and the stop. On a
+  machine (since 2026-10-09, from the build and interface the helper's `Ready`
+  carries) it only tells the agent once, in `use_machine` or the next notebook
+  call, and `client::Session` reports it as trouble: a machine's runtime is
+  never stopped for the agent, since on a cluster that gives up the job.
   `serve` doesn't need it: the agent talks to the core itself.
+- [P2] **Old builds are never removed from servers or from the plugin's
+  folder.** Every build a server was sent stays in `~/.cache/endeavor/<build>/`
+  there (the bootstrap only notes that one is there), and every build the
+  plugin fetched stays in `bin/<key>/`. Each is about 30 MB, and a merge that
+  changes the build key adds one, so a cluster's home quota fills over time.
+  To close: remove a server's folders of other builds that no recorded runtime
+  or job runs from, and the plugin's folders other than the pinned or newest
+  build. Careful: removing the folder a running Slurm job's helper runs from
+  ends that job's relay.
 - [P1] **No marketplace install of the Claude Code plugin has listed its
   skills.** `claude-plugin/skills` is a synced copy of `plugin/skills`, like
   the other two plugins', so it survives a Windows checkout without
@@ -602,7 +615,8 @@ launcher per start, architecture-review.md P6, was decided against on
 2026-10-08 and an `auto` launcher built instead; the compatibility rule for
 builds that share a runtime was built on 2026-10-08, `interface` in
 `runtime.json`, and the `Config` settings and events on 2026-10-08,
-`Config::auth`, `exit_idle` and `on_event`): one real run from a
+`Config::auth`, `exit_idle` and `on_event`; a machine's runtime reports its
+`build` and `interface` in `Ready` since 2026-10-09): one real run from a
 Mac to the Linux test VM through `client::Session` (the P1 in Releases and
 plugins). The rest of this file can wait or go alongside.
 
@@ -612,7 +626,8 @@ plugins). The rest of this file can wait or go alongside.
   runtime that offers the same tools and calls as it is. The app's own rule
   compares the exact build, and once the app and the plugin share a state
   folder a mismatch is the usual case. To close when the app adopts: compare
-  `interface` as the library does.
+  `interface` as the library does (`RuntimeInfo::usable_as_is`, which a
+  machine's runtime has too).
 - [P2] **The app becomes a second pinned consumer of the Helpers release.** The
   app pins this repository by commit, so its helper key is that commit's, and
   servers can only fetch it once Helpers has published it. Push this

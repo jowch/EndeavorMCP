@@ -1065,6 +1065,47 @@ fn a_front_that_ends_leaves_the_runtime_and_a_new_front_attaches_to_it_with_the_
 }
 
 #[test]
+fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_and_one_offering_this_interface_is_not_mentioned() {
+    let place = Place::new("machine-other-build");
+    place.add_lab();
+    let path = place.notebook("kept.jl");
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab" }));
+    first.ok("open_notebook", json!({ "path": path }));
+    let runtime = place.runtime().unwrap();
+    first.finish();
+    wait_for("the connection to end", || place.helpers().is_empty());
+
+    // Another build, but this build's interface: used as it is, and nothing is said.
+    let mut record = read_record(&place.state);
+    assert_eq!(record["interface"], endeavor_mcp::CORE_INTERFACE, "the core records its interface");
+    record["build"] = ANOTHER_BUILD.into();
+    std::fs::write(place.state.join("runtime.json"), record.to_string()).unwrap();
+    let mut second = place.front();
+    second.initialize();
+    let used = second.ok("use_machine", json!({ "machine": "lab" }));
+    assert!(!used["message"].as_str().unwrap().contains("another version"), "{used}");
+    let (_, said) = second.contents("list_notebooks", json!({}));
+    assert_eq!(said.len(), 1, "nothing added: {said:?}");
+    second.finish();
+    wait_for("the connection to end", || place.helpers().is_empty());
+
+    // Another build from before the interface was recorded: kept, and the agent is told once, by use_machine.
+    record.as_object_mut().unwrap().remove("interface");
+    std::fs::write(place.state.join("runtime.json"), record.to_string()).unwrap();
+    let mut third = place.front();
+    third.initialize();
+    let used = third.ok("use_machine", json!({ "machine": "lab" }));
+    let message = used["message"].as_str().unwrap();
+    assert!(message.contains(&format!("Julia on lab was started by another version of Endeavor (build {ANOTHER_BUILD})")) && message.contains("`stop_machine` with machine \"lab\""), "{used}");
+    let (_, said) = third.contents("list_notebooks", json!({}));
+    assert_eq!(said.len(), 1, "said once: {said:?}");
+    assert_eq!(place.runtime(), Some(runtime), "kept");
+    third.finish();
+}
+
+#[test]
 fn a_dropped_connection_is_made_again_in_the_same_front_on_the_same_browser_address() {
     let place = Place::new("dropped");
     place.add_lab();

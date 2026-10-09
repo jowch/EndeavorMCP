@@ -39,8 +39,9 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// an older core as often as the reverse, and lists its own build's tools. So raise it with any
 /// change to those, additions included (a tool, an argument, a call, a field), and with a change in
 /// what one returns or does while its arguments stay the same. Descriptions and changes inside the
-/// core don't count. A test in `mcp.rs` fails when the notebook tools' names or arguments change;
-/// nothing catches the rest.
+/// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
+/// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
+/// in what a call or the events stream returns.
 pub const INTERFACE: u32 = 1;
 
 /// Where boot.jl writes its state for the core, in the state folder.

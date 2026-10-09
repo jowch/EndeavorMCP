@@ -515,14 +515,19 @@ starting; it says so instead. `stop_machine` on this computer and `endeavor stop
 do the same, and the first marks the stop as made from a connection. Those two, with `force`,
 cancel a start under way; the helper's Stop has no `force`.
 
-**A runtime from another build** is used, as `serve` and `mcp` do today.
-`use_machine` and `pluto_session_status` say that the runtime there is from
-another version of endeavor and that restarting it gets the latest changes.
-The front sends its own build's helper, so those two always match, and the
-helper reaches the runtime over its port. The front answers the tool list
-from its own build, so a tool or argument newer than the runtime fails with
-the runtime's own error. Only a runtime from before one port per runtime is
-refused, as built.
+**A runtime from another build** is used. The front sends its own build's
+helper, so those two always match, and the helper reaches the runtime over
+its port. Its `Ready` carries the `build` and `interface` the runtime's record
+gives (none from an older helper). When the runtime offers this build's
+interface, nothing is said. Otherwise `use_machine`, or the first notebook
+call, tells the agent once that the runtime there is from another version of
+Endeavor and that stopping it (with the user's agreement) lets the next call
+start this version; `client::Session` reports the same as trouble
+(`Config::on_event`). The front answers the tool list from its own build, so
+a tool or argument newer than the runtime fails with the runtime's own error.
+A machine's runtime is never stopped for the agent, unlike an idle one on
+this computer: on a cluster that gives up the job's allocation. Only a
+runtime from before one port per runtime is refused, as built.
 
 **`serve` in a job you submitted yourself** is recorded under the compute
 node's name, and a helper on the login node refuses a runtime on another
@@ -661,8 +666,9 @@ app moves its pin ([status.md](status.md)).
    whether Slurm is there, and the partitions with their limits. That report
    becomes the saved record. Julia isn't looked for until the first runtime
    starts there (the helper has no call for it), so the report has it as null
-   until then. A machine that turns out to have Slurm is saved as a cluster
-   and its connection is ended, so the next one starts the helper for Slurm.
+   until then. A new machine is connected with the `auto` launcher, so one
+   that turns out to have Slurm is saved as a cluster and its connection, with
+   the helper already started for Slurm, is the one used next.
    The same question comes with `use_machine` and `stop_machine` when a plugin
    update left the server with an older helper (an update, which sits beside the
    old one). Julia is part of the same question when it is known: if no Julia

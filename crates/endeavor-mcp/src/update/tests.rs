@@ -53,11 +53,16 @@ fn sha(bytes: &[u8]) -> String {
 
 /// A release with NEW for linux-x86_64, whose checksum file says `sum`.
 fn release(sum: &str) -> String {
+    release_of(NEW, sum)
+}
+
+/// A release with `binary` for linux-x86_64, whose checksum file says `sum`.
+fn release_of(binary: &[u8], sum: &str) -> String {
     let name = format!("endeavor-{KEY}-linux-x86_64");
     serve(HashMap::from([
         ("LATEST".to_owned(), format!("{KEY}\n").into_bytes()),
         (format!("endeavor-{KEY}.sha256"), format!("{}  endeavor-{KEY}-linux-aarch64\n{sum}  {name}\n", sha(b"other")).into_bytes()),
-        (name, NEW.to_vec()),
+        (name, binary.to_vec()),
     ]))
 }
 
@@ -123,6 +128,34 @@ fn it_ends_with_how_to_switch_when_julia_runs_from_the_old_build() {
     assert!(message.contains(&format!("({KEY}).\nThe Julia running from {}", here.state_dir.display())), "{message}");
     assert!(message.contains("this is build 0.1.0-00000000000000aa") && message.ends_with("run `endeavor stop`, then start it again."), "{message}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_new_binary_that_offers_the_runtimes_interface_says_nothing_of_it() {
+    // NEW from a build that prints its interface, as builds since it was printed do.
+    const SAYS: &[u8] = b"#!/bin/sh\necho 'endeavor 0.1.0 (build 0.1.0-00000000000000bb)'\necho 'release 4859266ddff1'\necho 'interface 7'\n";
+    let dir = scratch("same-interface");
+    let here = here(&dir, release_of(SAYS, &sha(SAYS)));
+    std::fs::create_dir_all(&here.state_dir).unwrap();
+    let state = |interface: u32| json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "port": 1, "token": "t", "build": embedded::BUILD_VERSION, "interface": interface });
+    std::fs::write(here.state_dir.join("runtime.json"), state(7).to_string()).unwrap();
+    let message = update(&here).unwrap();
+    assert_eq!(message, format!("Updated {} to the newest build ({KEY}).", here.exe.display()));
+
+    // Another number: the note, naming the new build.
+    std::fs::write(&here.exe, "old").unwrap();
+    std::fs::write(here.state_dir.join("runtime.json"), state(6).to_string()).unwrap();
+    let message = update(&here).unwrap();
+    assert!(message.contains("this is build 0.1.0-00000000000000bb") && message.ends_with("run `endeavor stop`, then start it again."), "{message}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_build_and_interface_are_read_from_version_output_and_an_older_binary_says_no_interface() {
+    let output = "endeavor 0.1.0 (build 0.1.0-00000000000000aa)\nrelease 4859266ddff1\ninterface 3\n";
+    assert_eq!(build_and_interface(output), (Some("0.1.0-00000000000000aa".into()), Some(3)));
+    assert_eq!(build_and_interface("endeavor 0.1.0 (build 0.1.0-00000000000000aa)\nrelease 4859266ddff1\n"), (Some("0.1.0-00000000000000aa".into()), None));
+    assert_eq!(build_and_interface(""), (None, None));
 }
 
 #[test]
