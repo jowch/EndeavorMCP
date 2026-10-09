@@ -1228,6 +1228,8 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             shared.begin_start();
                             continue;
                         }
+                        // What the listener tells callers names what is missing, not a restart that would only ask again.
+                        shared.listener.restart_needs_install(&items);
                         let text = shared.with(|i| {
                             (i.run, i.job) = (Run::Idle, None);
                             i.wanted = None;
@@ -1237,7 +1239,6 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             text
                         });
                         shared.trouble(text);
-                        shared.listener.restart_failed();
                     }
                     Err(StartError::NotRunning) => {
                         // The wish may have become a start while the attach waited.

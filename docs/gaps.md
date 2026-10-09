@@ -730,12 +730,6 @@ plugins). The rest of this file can wait or go alongside.
   servers can only fetch it once Helpers has published it. Push this
   repository and wait for Helpers before an app release that moves the pin. A
   check in the app's CI that the pinned key is published would catch it.
-- [P3] **A restart that needs an install says to restart again.** When the start
-  `Session::restart` begins ends `NeedsInstall`, calls to the listener are told
-  `Messages::restart_failed`'s text ("Use Restart Julia to try again"), which
-  won't help: the user has to agree to the install first. The message is given
-  only the machine's name, so it can't say why. To settle in the app's PR that
-  moves servers to `Session`.
 - [P3] **The layers under a session still write a few lines to stderr.** A
   session's own progress and trouble go to `Config::on_event` (since
   2026-10-08). Below it, ssh's stderr (`ssh: ...`), lines a login script prints
