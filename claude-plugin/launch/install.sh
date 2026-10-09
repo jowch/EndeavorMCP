@@ -142,7 +142,7 @@ limited() {
 
 # fetch URL [FILE]: the body to FILE, or to stdout. A connection that doesn't
 # open in 15 s is given up on, and so is a file that takes over 15 minutes
-# (a build is about 30 MB). curl follows a redirect only to https; wget has no
+# (a build is about 5 MB). curl follows a redirect only to https; wget has no
 # such limit.
 fetch() {
   if command -v curl >/dev/null 2>&1; then
