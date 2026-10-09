@@ -1743,7 +1743,9 @@ fn a_forced_stop_after_a_failed_start_here_reaches_a_start_another_process_has_u
     let path = local_notebook(&place, "failed.jl");
     std::fs::write(place.local_state.join("hold"), "").unwrap();
     let short = [("ENDEAVOR_START_WAIT_SECS", "2")];
-    let mut front = start_front(&place, &short);
+    // The forced stop below waits as long as each tool waits for a start, and ending the other process's
+    // core takes about 2 s here (the core ends when its Julia does, and that is polled every 500 ms).
+    let mut front = start_front(&place, &[("ENDEAVOR_START_WAIT_SECS", "8")]);
     front.initialize();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
     assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
