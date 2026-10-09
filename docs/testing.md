@@ -2,7 +2,11 @@
 
 `cargo test` runs the unit and integration tests. Two tests start real Julia
 and are ignored by default. Run them after a change to the runtime, the core,
-the MCP server or `serve`. Endeavor's own checks, including the smoke test in
+the MCP server or `serve`. The `E2E` workflow (`.github/workflows/e2e.yml`)
+runs those two on Linux for each PR or push that changes `crates/`, `runtime/`
+or `Cargo.lock`, and can be started by hand from the Actions tab. It is
+separate from CI, so CI's checks don't wait for it, and it fails when a test
+skips for want of Julia. Endeavor's own checks, including the smoke test in
 the app, are in
 [Endeavor's testing.md](https://github.com/jowch/Endeavor/blob/main/docs/testing.md).
 

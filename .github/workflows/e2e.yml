@@ -1,0 +1,80 @@
+# The tests against real Julia (e2e_julia, e2e_serve), which ci.yml skips
+# because they are ignored by default. They take a few minutes once the
+# packages are cached and much longer the first time, so they run in their own
+# workflow: CI's checks don't wait for them. Linux only for now. They run on a
+# PR or push that changes the crates, the runtime or the lockfile, and on
+# request (docs/testing.md).
+name: E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'runtime/**'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/e2e.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'runtime/**'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/e2e.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  julia:
+    name: e2e julia
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install
+      # The version Endeavor downloads (JULIA_VERSION in crates/endeavor-mcp/src/julia.rs).
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12.6'
+      # Each test installs the runtime's packages into a depot of its own under
+      # target/tmp. Keep those depots between runs, saved even when a test
+      # fails, so the next run doesn't install everything again.
+      - name: Restore depots
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/tmp/e2e-julia/depot
+            target/tmp/e2e-serve/depot
+          key: e2e-depots-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml') }}-${{ github.run_id }}
+          restore-keys: e2e-depots-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml') }}-
+      - name: Build
+        run: cargo build --locked -p endeavor-mcp --tests
+      # A test that finds no Julia prints SKIPPED and passes. Here that would
+      # hide a broken setup, so the step fails on it.
+      - name: Test
+        run: |
+          set -o pipefail
+          export ENDEAVOR_E2E_JULIA="$(command -v julia)"
+          for test in e2e_julia e2e_serve; do
+            cargo test --locked -p endeavor-mcp --test "$test" -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/$test.log"
+            if grep -q '^SKIPPED' "$RUNNER_TEMP/$test.log"; then
+              echo "::error::$test was skipped"
+              exit 1
+            fi
+          done
+      # A new entry each time would fill the cache, so save only on main (whose
+      # entries every PR can read) or when nothing was restored.
+      - name: Save depots
+        if: always() && (github.ref == 'refs/heads/main' || steps.restore.outputs.cache-matched-key == '')
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/tmp/e2e-julia/depot
+            target/tmp/e2e-serve/depot
+          key: e2e-depots-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml') }}-${{ github.run_id }}
