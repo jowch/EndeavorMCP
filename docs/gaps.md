@@ -146,12 +146,21 @@ Every P1:
   but `list_machines`). Whether Codex's approval could be avoided by what the
   tools declare is not looked into. Interactive `codex`, where the user is
   asked, was not tried.
-- [P2] **The Antigravity plugin folder was built to its documentation and tried
-  on no real install.** The manifest and MCP file names, that a plugin's server
-  starts in the project folder, the tool timeout and that it loads the skills
-  all come from its documentation, which gives no shape for `mcp_config.json`.
-  The README says Antigravity is not supported yet. To close: install it and
-  call a tool.
+- [P2] **The Antigravity plugin was tried on Windows only.** On Windows 10 with
+  agy 1.3.2 (2026-10-09), `agy plugin install` from a local `antigravity-plugin`
+  folder and from its GitHub `tree/main/antigravity-plugin` URL both worked;
+  `agy plugin validate` passes. The plugin landed in
+  `~/.gemini/config/plugins/endeavor` (the second folder `mcp_config.json`
+  looks in; `~/.gemini/antigravity-cli/plugins` was not used). agy loaded the
+  three skills, named the server `endeavor_endeavor` and listed its 34 tools;
+  `agy -p` made a notebook, edited and ran a cell and read its output, with
+  absolute paths (`--no-folder`). The first start installed Pluto in about
+  two minutes; calls answered "starting" after 45 s and the agent called
+  again. The repository's own URL installs every plugin it finds and the
+  Claude Code one overwrites this one (same name), leaving skills without
+  `launch/` or `mcp_config.json`; the README gives the folder's URL. Not
+  tried: macOS, Linux, interactive agy, the desktop app, a marketplace, and
+  whether the entry should pass `--skills plugin` as the others do.
 - [P3] **Under Codex a session without a project folder remembers no machine.**
   A project is remembered by its folder, so `use_machine` works, and the next
   session starts on this computer.
@@ -485,7 +494,9 @@ sign-in.
 
 ## Windows
 
-Windows is not offered until these close; the README says so.
+On Windows only the Antigravity plugin has been run, on one computer, and
+the README says so. The Claude Code plugin there was not tried, and Codex is
+not supported. These gaps stay open.
 
 - [P2] **Endeavor has run on Windows only by hand.** CI runs `cargo test` on
   `windows-latest`, but every test in `tests/` but `version.rs` is
@@ -528,11 +539,29 @@ Windows is not offered until these close; the README says so.
   the job with the session (read from its source, not run). Endeavor asks to
   leave the job and starts inside it when refused. To close: start the runtime
   there another way, before Windows is offered.
-- [P2] **The plugin's launcher has never run on Windows.** `install.sh` knows
-  Git Bash's `uname` (tested with a fake one), but whether Claude Code can
-  start a `sh` script as an MCP command on Windows is undocumented. To close:
-  try it under Git Bash, and give Windows a `.cmd` or PowerShell launcher if
-  not.
+- [P2] **On Windows the plugins need `sh` on the PATH.** Each plugin's command
+  is `sh`, which Git for Windows installs but only puts on the PATH when its
+  "optional Unix tools" are chosen. Under agy 1.3.2 started from PowerShell
+  without it, the server didn't start and no error showed; with
+  `C:\Program Files\Git\bin` added, the launcher downloaded the release and
+  ran (the README says to add it). Antigravity's `mcp_config.json` has no
+  per-system command and no plugin-root variable, so its plugin can't avoid
+  `sh`. Claude Code's plugin on Windows was not tried. To close: a `.cmd` or
+  PowerShell launcher where the agent allows one.
+- [P2] **On Windows a computer whose name isn't all upper case, or is longer
+  than 15 characters, sees its own runtime as remote.** The runtime records
+  Julia's `gethostname()` (the DNS name, in its own case) and the Rust side
+  compares it with `COMPUTERNAME` (`hostname()` in `lib.rs`), the NetBIOS
+  name: upper case and at most 15 characters. So `new_notebook` says Julia
+  runs remotely on that name, `endeavor stop` can't stop it, and `endeavor
+  status` says it was recorded by another computer. Seen on Windows 10 under
+  agy; setting `COMPUTERNAME` to the DNS name for the agent's process made
+  everything work. Names that are all upper case and at most 15 characters,
+  such as the default `DESKTOP-AB12CD`, should not be affected (not tried).
+  The first try on Windows 11 (above) didn't hit it, presumably because that
+  computer's name was of that kind; this was not checked.
+  To close: read the DNS host name (`GetComputerNameExW` with
+  `ComputerNameDnsHostname`) in `hostname()`.
 - [P2] **`install.ps1` has never run.** There is no PowerShell here. It is read
   against PowerShell 5.1's behaviour only. To close: run it on Windows against
   a fake release (`ENDEAVOR_RELEASE_URL`) and the real one.

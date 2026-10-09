@@ -47,11 +47,63 @@ the server in the folder Codex was started in. This was tried on Linux with
 Codex 0.161.0 through `codex exec`, installing the plugin from a local copy of
 this repository (the `owner/repo` form above was not run).
 
-**Antigravity** is not supported yet. The `antigravity-plugin/` folder was
-built to its documentation and has never been installed
-([gaps.md](docs/gaps.md)).
+**Antigravity** (the `agy` command line; tried with agy 1.3.2 on Windows 10
+only):
 
-With a plugin you need nothing else. The first start:
+```
+agy plugin install https://github.com/jowch/EndeavorMCP/tree/main/antigravity-plugin
+```
+
+Give the `antigravity-plugin` folder's URL as above, or the path to that folder
+in a local copy. The repository's own URL installs the wrong plugin: agy
+installs every plugin it finds there, and the Claude Code one overwrites this
+one under the same name, leaving the skills without the notebook tools.
+`agy plugin uninstall endeavor` removes it. It differs from Claude Code in
+these ways:
+
+- Notebook paths must be absolute, as with Codex: the plugin's server is not
+  told the project folder.
+- On Windows the plugin runs its launcher with `sh`, which Git for Windows
+  installs but doesn't put on the PATH. Without it the notebook tools are
+  silently missing. Add Git's `bin` folder to your PATH, then restart
+  Antigravity. In PowerShell:
+
+  ```powershell
+  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';C:\Program Files\Git\bin', 'User')
+  ```
+
+  Choosing "Git and optional Unix tools" when installing Git does the same.
+- Endeavor downloads no Julia on Windows. Install juliaup
+  (`winget install --id 9NJNWW8PVKMN -e -s msstore`) and Julia 1.12
+  (`juliaup add 1.12`, `juliaup default 1.12`) first.
+- On Windows, a computer whose name has lower-case letters, or is longer than
+  15 characters, can't use its own runtime yet: `new_notebook` says Julia runs
+  remotely on that name ([gaps.md](docs/gaps.md)). Names like
+  `DESKTOP-AB12CD` should work (not tried).
+- agy names the server `endeavor_endeavor`. `agy -p` (print mode) refuses
+  every MCP call that isn't allowed in `~/.gemini/antigravity-cli/settings.json`,
+  one tool at a time:
+
+  ```json
+  { "permissions": { "allow": ["mcp(endeavor_endeavor/new_notebook)", "mcp(endeavor_endeavor/edit_cell)"] } }
+  ```
+
+  `mcp(endeavor_endeavor/*)` would also allow `run_shell` without asking.
+  An interactive agy session asks instead; that was not tried.
+
+Without the plugin, agy can run `endeavor mcp` as an ordinary MCP server. It
+needs no `sh`, and you get no skills:
+
+```
+agy mcp add endeavor "C:\path\to\endeavor.exe" -- mcp --no-folder
+```
+
+Once the plugin has run, `endeavor.exe` is in
+`~/.local/share/endeavor/bin/<key>/`. agy then calls the server `endeavor`.
+macOS, Linux, the Antigravity desktop app and installing from a marketplace
+were not tried.
+
+On Linux and macOS, a plugin needs nothing else. The first start:
 
 - Downloads the `endeavor` program, about 30 MB, into
   `~/.local/share/endeavor/bin/`.
@@ -142,8 +194,9 @@ the machine's home folder.
 - Do not open one notebook file in two runtimes, for example over a shared
   disk. Each runtime saves over the other.
 - Codex on Windows is not supported: a runtime would end with the session.
-- macOS and Windows builds pass CI, but no person has used them. The plugin's
-  launcher is a `sh` script, and it has never run on Windows.
+- The macOS build passes CI, but no person has used it. On Windows, people
+  have run the Antigravity plugin and ssh to a Linux server by hand; the
+  Claude Code plugin there was not tried.
 - Sign-in is ssh keys only.
 - The skills were tried in short Claude Code runs only.
 
