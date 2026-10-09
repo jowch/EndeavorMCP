@@ -105,7 +105,7 @@ were not tried.
 
 On Linux and macOS, a plugin needs nothing else. The first start:
 
-- Downloads the `endeavor` program, about 30 MB, into
+- Downloads the `endeavor` program, about 5 MB, into
   `~/.local/share/endeavor/bin/`.
 - Downloads its own Julia into `~/.cache/endeavor/` if it finds no `julia`
   (Julia 1.11 or newer works if you have it).
