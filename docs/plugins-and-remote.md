@@ -760,10 +760,11 @@ message that says what to do:
 
 Later, for the third case: a sign-in page, the same on macOS, Linux and
 Windows. Where it lives is open, since no background process serves it. The answer goes from the page to `ssh` and
-never through the agent. Behind the page, macOS and Linux use askpass, which
-the binary already is. Windows askpass has been unreliable, so Windows needs
-a tested choice between askpass and running `ssh` under a pseudo-terminal.
-The app has the same open question.
+never through the agent. Behind the page, askpass, which the binary already
+is. On Windows it works when `SSH_ASKPASS_REQUIRE=force` is set, and it reaches
+the asker over loopback TCP with a token, since Rust has no Unix sockets there
+(`wire::askpass`, `client::Asker`; tested with Windows' OpenSSH on
+2026-10-09).
 
 ## Installing the binary
 

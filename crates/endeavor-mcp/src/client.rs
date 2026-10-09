@@ -5,12 +5,14 @@
 //! runtime, and serve its port on a loopback port of this computer. Std threads
 //! and blocking I/O; nothing here needs a window or a prompt.
 
+mod askpass;
 mod channel;
 mod listener;
 mod machines;
 mod session;
 mod ssh;
 
+pub use askpass::{AnswerFn, Asker};
 pub use channel::{CLOSED, Channel, Hello, Notice, Runtime, StartError, StartOptions, died_reason};
 pub use listener::{Listener, Messages, Refuse};
 pub use session::{Config, FoundInfo, HelloInfo, HelperFor, InstallInfo, JobInfo, OnEvent, Outcome, QueueInfo, RuntimeInfo, Session, SessionEvent, State, Status, Want};

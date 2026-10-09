@@ -1,11 +1,19 @@
 //! `ssh` asking for a password, a two-factor code or a yes/no, through the
 //! helper's askpass mode: ssh runs the app (or the `endeavor` helper) as `SSH_ASKPASS`, which
-//! sends one [`Ask`] line to the app's Unix socket (path in [`SOCKET_ENV`]) and
-//! prints the [`Answer`] for ssh.
+//! sends one [`Ask`] line to the app and prints the [`Answer`] for ssh. It reaches the app on
+//! loopback TCP when [`ADDRESS_ENV`] is set, sending [`TOKEN_ENV`]'s token as its first line, and
+//! otherwise (Unix only) on the Unix socket whose path is in [`SOCKET_ENV`].
 
 use serde::{Deserialize, Serialize};
 
 pub const SOCKET_ENV: &str = "ENDEAVOR_ASKPASS_SOCKET";
+
+/// The app's loopback TCP address for askpass (`127.0.0.1:PORT`), for Windows, whose Rust has no
+/// Unix sockets; any platform may use it. Preferred to [`SOCKET_ENV`] when both are set.
+pub const ADDRESS_ENV: &str = "ENDEAVOR_ASKPASS_ADDRESS";
+
+/// The token the askpass sends first over TCP, so that the app answers no other local process.
+pub const TOKEN_ENV: &str = "ENDEAVOR_ASKPASS_TOKEN";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
