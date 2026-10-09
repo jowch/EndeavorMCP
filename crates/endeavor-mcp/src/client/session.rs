@@ -695,8 +695,12 @@ impl Shared {
                 i.step = Some(format!("Submitted job {job} ({summary})"));
                 i.job = Some(JobInfo { id: job, summary: Some(summary), ..Default::default() });
             }
-            Event::Queued { state, reason } => {
+            Event::Queued { job, state, reason } => {
                 i.step = Some(format!("The job is {} ({reason})", state.to_lowercase()));
+                // A job this session hasn't heard submitted, such as one it re-attached to, is known from here.
+                if i.job.as_ref().is_none_or(|known| known.id != job) {
+                    i.job = Some(JobInfo { id: job, ..Default::default() });
+                }
                 // The helper reports the node, as `reason`, once the job runs.
                 if state == "RUNNING"
                     && let Some(job) = &mut i.job

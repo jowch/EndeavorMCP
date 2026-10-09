@@ -435,19 +435,16 @@ sign-in.
 
 - [P2] **Queued and starting states have not been seen on real Slurm through
   the tools.** The queue here is empty and a job runs at once, so their wording
-  is checked against the fake Slurm only. No agent has followed the
-  `endeavor-machines` skill through a cluster.
+  is checked against the fake Slurm only. `e2e_machines_slurm` now holds a job
+  in the queue (`--begin=now+90`) to give a real one, also for a session that
+  attaches to the queued job; it has not yet been run. No agent has followed
+  the `endeavor-machines` skill through a cluster.
 - [P3] **`use_machine` checks and makes a session's folder on the login
   node.** A folder on a disk only the login node has (`/tmp/...`, a node-local
   scratch) passes the check, or is made there, and is still missing on the
   compute node, so `new_notebook` fails as it did before the check. To close:
   have the runtime check the folder once the job runs, or name node-local
   paths in the refusal.
-- [P3] **A queued job has no id in the session's status until it is submitted
-  by this session.** A session that re-attaches to a job already queued shows
-  `queue` but no `job` until it runs, because the library's queued event
-  carries no id. A job already running shows its id, node and end time to a
-  new session (`e2e_machines_slurm`).
 - [P3] **The reason a job ended could come back empty.** `e2e_slurm` failed
   about one run in six on 2026-10-07: a job cancelled from outside was
   reported with no reason, because the helper asked while Slurm still listed
