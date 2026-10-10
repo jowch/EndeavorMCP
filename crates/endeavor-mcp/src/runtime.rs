@@ -50,7 +50,7 @@ impl Looked {
 /// alive is `Running`, and the port is not asked.
 pub(crate) fn look(dir: &Path, any_node: bool, ping: bool) -> Looked {
     let Some(state) = crate::read_state(dir) else { return Looked::NotRunning };
-    if state.node != crate::hostname() && !any_node {
+    if !crate::is_this_node(&state.node) && !any_node {
         return Looked::OtherNode(state);
     }
     if !crate::pid_alive(state.pid, state.started, state.boot.as_deref()) {
@@ -411,7 +411,7 @@ pub(crate) fn lock_state(dir: &Path) -> Lock {
         return Lock::Free;
     }
     let core = read_core(&file).filter(|core| {
-        core.node == crate::hostname()
+        crate::is_this_node(&core.node)
             && crate::pid_alive(core.pid, core.started, core.boot.as_deref())
             && !crate::read_state(dir).is_some_and(|state| state.pid == core.pid)
     });
@@ -720,6 +720,18 @@ mod tests {
         assert!(matches!(look(&dir, false, true), Looked::OtherNode(state) if state.node == "another-node"));
         assert!(look(&dir, false, true).alive().is_none());
         assert!(matches!(look(&dir, true, true), Looked::Running(..)), "with any_node it is this machine's");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_node_recorded_in_another_case_is_this_computer() {
+        let dir = crate::client::scratch("look-case");
+        let me = std::process::id() as i64;
+        let here = crate::hostname();
+        let other_case: String = here.chars().map(|c| if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() }).collect();
+        assert_ne!(other_case, here, "the host name has letters");
+        record(&dir, &other_case, me, Some(answering()));
+        assert!(matches!(look(&dir, false, true), Looked::Running(..)), "{other_case} is {here}");
     }
 
     #[test]

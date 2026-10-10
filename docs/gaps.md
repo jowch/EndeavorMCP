@@ -516,7 +516,11 @@ not supported. These gaps stay open.
   the `taskkill` cancel path have not run. A real ssh from Windows to a Linux
   server was run once by hand ([Releases and plugins](#releases-and-plugins)).
   Windows has no Julia download: with no `julia.exe` on the PATH, Endeavor
-  says to install juliaup, and with one too old, it says so.
+  says to install juliaup, and with one too old, it says so. With juliaup the
+  core starts the `julia.exe` in that Julia's own `Sys.BINDIR`, not juliaup's
+  launcher: started through the Store app's alias, the launcher and Julia ran
+  outside the core's job and outlived it (issue #55). Host names recorded by
+  the runtime are compared without case on Windows (issue #54).
 - [P2] **No integration test runs on Windows.** Every file in
   `crates/endeavor-mcp/tests/` but `version.rs` is `#![cfg(unix)]`, so on
   Windows `cargo test` runs only the unit tests: none of connect, session,
