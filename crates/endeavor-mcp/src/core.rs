@@ -60,7 +60,7 @@ const STOP_SIGNALS: [i32; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
 
 struct Args {
     state_dir: PathBuf,
-    /// Where to find Julia: a path, or what `--julia auto` and `--julia-shell` mean (`julia::find`).
+    /// Where to find Julia: a path, or what `--julia auto`, `--julia own` and `--julia-shell` mean (`julia::find`).
     julia: crate::julia::Source,
     /// `--install-julia`: Endeavor's own Julia may be downloaded when none is found.
     install_julia: bool,
@@ -92,7 +92,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                 match arg.as_str() {
                     "--state-dir" => state_dir = Some(PathBuf::from(value?)),
                     "--julia" | "--julia-shell" if julia.is_some() => return Err("give one of --julia and --julia-shell".into()),
-                    "--julia" => julia = Some(value.map(|v| if v == "auto" { crate::julia::Source::Auto } else { crate::julia::Source::Path(v) })?),
+                    "--julia" => julia = Some(value.map(crate::julia::Source::from_value)?),
                     "--julia-shell" => julia = Some(crate::julia::Source::Shell(value?)),
                     "--runtime" => runtime = Some(PathBuf::from(value?)),
                     "--depot" => depot = Some(value?),
