@@ -237,7 +237,17 @@ Next:
   started ahead in the background. That never downloads Julia; Pluto's
   packages install on the first start in a fresh depot, as before. `e2e_r` runs an R notebook with no Julia.
   The app doesn't pass the flag yet, so its runtimes start Julia at once; its
-  step is an app issue. The interface number is 3.
+  step is an app issue.
+- The app can ask where Julia is (#96): `endeavor/julia_status` answers
+  `not_started`, `starting` (the step in words, such as "Downloading Julia
+  1.12.6… 42%", and `quiet_seconds` since the last sign of progress), `ready`,
+  or `failed` (the error's code and why), and never starts Julia. Reading a
+  failure there leaves it for the agent's next call to hear; the app's Retry
+  is `endeavor/start_julia`, which starts Julia afresh (or ahead, before
+  anything needs it). A start ends: Julia that makes no progress for 30
+  minutes (no new step, nothing new in the runtime's log) is stopped and the
+  start fails, and a download under 1 kB/s for 5 minutes fails and resumes on
+  the next try. The interface number is 5.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds
