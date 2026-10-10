@@ -195,22 +195,42 @@ if [ -n "$into" ]; then
   mkdir -p "$dir" || fail "couldn't create $dir."
 fi
 
+# Exit 3 tells the launcher that the release answered but doesn't hold this
+# build for this platform: either it is newer than the release (a build from
+# main is published a few minutes after the push) or it is old and was removed
+# (prune-helpers.sh removes the macOS and Windows files days before the rest).
+not_held() {
+  echo "install.sh: the release doesn't hold build $key for $platform. A new build appears a few minutes after it is pushed; an old one may have been removed." >&2
+  exit 3
+}
+
+# Whether fetch's exit status $1 means the server answered that the file isn't
+# there (curl: an HTTP error, or a file:// path that can't be read; wget: an
+# error response), rather than the network failing.
+is_missing() {
+  if command -v curl >/dev/null 2>&1; then
+    [ "$1" -eq 22 ] || [ "$1" -eq 37 ]
+  else
+    [ "$1" -eq 8 ]
+  fi
+}
+
 name=endeavor-$key-$platform$suffix
 if ! fetch "$release/endeavor-$key.sha256" "$tmp/sums"; then
-  # Exit 3 tells the launcher that the release answered but doesn't hold this
-  # build: either it is newer than the release (a build from main is published
-  # a few minutes after the push) or it is old and was removed
-  # (prune-helpers.sh).
   if [ -z "$newest" ] && fetch "$release/LATEST" >/dev/null 2>&1; then
-    echo "install.sh: the release doesn't hold build $key. A new build appears a few minutes after it is pushed; an old one may have been removed." >&2
-    exit 3
+    not_held
   fi
   fail "couldn't download $release/endeavor-$key.sha256."
 fi
 want=$(awk -v n="endeavor-$key-$platform$suffix" '{ f = $2; sub(/^\*/, "", f); if (f == n) { print tolower($1); exit } }' "$tmp/sums")
 [ -n "$want" ] || fail "the newest build ($key) has no binary for $platform."
 
-fetch "$release/$name" "$tmp/$exe" || fail "couldn't download $release/$name."
+status=0
+fetch "$release/$name" "$tmp/$exe" || status=$?
+if [ "$status" -ne 0 ]; then
+  [ -z "$newest" ] && is_missing "$status" && not_held
+  fail "couldn't download $release/$name."
+fi
 have=$(sha256 "$tmp/$exe")
 if [ "$have" != "$want" ]; then
   fail "the download from $release/$name doesn't match its checksum (SHA-256 $have, expected $want). It was deleted; nothing was installed."

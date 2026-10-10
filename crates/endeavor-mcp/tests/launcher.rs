@@ -223,6 +223,21 @@ fn a_pinned_build_the_release_doesnt_hold_says_to_wait_or_update() {
 }
 
 #[test]
+fn a_pinned_build_whose_binary_was_removed_says_to_wait_or_update_too() {
+    // prune-helpers.sh keeps a build's checksum file and Linux files after its
+    // macOS and Windows files are gone.
+    let place = Place::new("binary-removed");
+    place.release(KEY);
+    place.publish(OTHER, &platform(), "", BIN, &sha(BIN));
+    std::fs::remove_file(place.dir.join(format!("release/endeavor-{OTHER}-{}", platform()))).unwrap();
+    place.pin(OTHER);
+    let run = place.launch(&[]);
+    assert!(!run.ok && run.stdout.is_empty());
+    let last = run.stderr.lines().last().unwrap();
+    assert!(last.starts_with(&format!("endeavor: the release doesn't hold build {OTHER}")) && last.contains("update the plugin"), "{}", run.stderr);
+}
+
+#[test]
 fn unpinned_it_runs_the_newest_it_has_and_fetch_only_looks_for_a_newer_one() {
     let place = Place::new("newest");
     place.release(KEY);
@@ -359,7 +374,7 @@ fn install_sh_takes_a_key_and_with_quiet_writes_nothing_to_stdout() {
     let bad = place.install(&["--key", "../x"]);
     assert!(!bad.ok && bad.stderr.contains("isn't a build's key"), "{}", bad.stderr);
     let unknown = place.install(&["--key", "ffffffffffff", "--dir", dir.to_str().unwrap()]);
-    assert!(!unknown.ok && unknown.stderr.contains("doesn't hold build ffffffffffff. A new build appears"), "{}", unknown.stderr);
+    assert!(!unknown.ok && unknown.stderr.contains("doesn't hold build ffffffffffff for ") && unknown.stderr.contains("A new build appears"), "{}", unknown.stderr);
 }
 
 #[test]
