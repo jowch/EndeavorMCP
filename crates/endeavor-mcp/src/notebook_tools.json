@@ -510,7 +510,7 @@
     "inputSchema": {
       "properties": {
         "path": {
-          "description": "Where to create it, ending in `.jl` for a Julia notebook or `.R` for an R notebook (not on Windows); a relative path is inside the session's folder. The file must not exist yet and its folder must. Default: a Julia notebook with a generated name in the session's folder.",
+          "description": "Where to create it, ending in `.jl` for a Julia notebook or `.R` for an R notebook (not on Windows); a relative path is inside the session's folder. The file must not exist yet and its folder must. Default: a notebook with a generated name in the session's folder, in R if the session was started for R notebooks and in Julia otherwise.",
           "type": "string"
         }
       },

@@ -97,7 +97,7 @@ impl Engines {
         match (method, id) {
             ("snapshot" | "status", None) => self.every(method, raw),
             ("open" | "new", _) => {
-                let backend = params["path"].as_str().map_or(Backend::Pluto, of_path);
+                let backend = of_params(params);
                 let reply = self.on(backend, raw)?;
                 if let Some(id) = result(&reply).and_then(|r| r["notebook_id"].as_str().map(str::to_owned)) {
                     self.learn(&id, backend);
@@ -194,6 +194,15 @@ pub fn of_path(path: &str) -> Backend {
     match Path::new(path).extension().and_then(|e| e.to_str()) {
         Some("R" | "r") => Backend::Ember,
         _ => Backend::Pluto,
+    }
+}
+
+/// The engine an `open` or `new` goes to: its path's, else the one `engine` names (`new_notebook`
+/// without a path, in a session of that kind), else Pluto's.
+pub fn of_params(params: &Value) -> Backend {
+    match params["path"].as_str() {
+        Some(path) => of_path(path),
+        None => serde_json::from_value(params["engine"].clone()).unwrap_or(Backend::Pluto),
     }
 }
 
