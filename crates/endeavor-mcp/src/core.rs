@@ -618,6 +618,11 @@ impl EmberBuilds {
         std::fs::rename(&tmp, folder.join("ember.dcf"))
     }
 
+    /// Whether the build in use is there, as `install.R`'s `installed` checks.
+    fn installed(&self, folder: &Path) -> bool {
+        !self.current.is_empty() && folder.join(&self.current).join("ember").is_dir()
+    }
+
     /// R's libraries with build `name`'s Ember, for `R_LIBS`.
     fn libraries(folder: &Path, name: &str) -> String {
         format!("{}:{}", folder.join(name).display(), folder.join("deps").display())
@@ -674,21 +679,29 @@ impl RStarter {
         if let Some(library) = &self.library {
             return self.launch(served, library);
         }
-        if self.update()? {
-            self.tell_previous(served);
+        match self.update() {
+            Ok(true) => self.tell_previous(served),
+            Ok(false) => {}
+            // install.R failed in a way it didn't plan for: the installed Ember still works.
+            Err(why) if why.starts_with(INSTALL_FAILED) && EmberBuilds::read(&self.ember).installed(&self.ember) => {
+                eprintln!("endeavor core: couldn't check for a newer Ember; starting R with the installed one");
+            }
+            Err(why) => return Err(why),
         }
         let mut builds = EmberBuilds::read(&self.ember);
-        if builds.current.is_empty() {
-            return Err("r_failed::Couldn't install Ember for R notebooks; the runtime's log says why".into());
+        if !builds.installed(&self.ember) {
+            return Err(INSTALL_FAILED.into());
         }
         match self.launch(served, &EmberBuilds::libraries(&self.ember, &builds.current)) {
             Err(why) if why.starts_with(STOPPED_STARTING) && !builds.previous.is_empty() => {
                 eprintln!("endeavor core: R's adapter didn't start with Ember {}; starting it with Ember {}", builds.current, builds.previous);
                 // Read again: another runtime's install may have changed it while R started.
                 let latest = EmberBuilds::read(&self.ember);
-                if latest.current == builds.current {
-                    builds = latest;
+                if latest.current != builds.current && latest.installed(&self.ember) {
+                    // It installed a newer build: start with that, and leave the record to it.
+                    return self.launch(served, &EmberBuilds::libraries(&self.ember, &latest.current));
                 }
+                builds = latest;
                 let failed = builds.current.clone();
                 builds.fall_back();
                 if let Err(e) = builds.write(&self.ember) {
@@ -768,7 +781,7 @@ impl RStarter {
             }
             Err("r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Try again in a minute.".to_owned())
         };
-        let updating = !EmberBuilds::read(&self.ember).current.is_empty();
+        let updating = EmberBuilds::read(&self.ember).installed(&self.ember);
         let mut install = self.install.lock().unwrap();
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => return installing(updating),
@@ -791,7 +804,7 @@ impl RStarter {
                 Ok(status) if status.code() == Some(KEPT_PREVIOUS) => Ok(true),
                 Ok(status) if r.not_found(status) => Err(format!("r_not_found::Couldn't find R: no {}", r.describe())),
                 Ok(status) if r.ended_early(status) => Err(format!("r_failed::{}", ENDED_EARLY)),
-                Ok(_) => Err("r_failed::Couldn't install Ember for R notebooks; the runtime's log says why".into()),
+                Ok(_) => Err(INSTALL_FAILED.into()),
                 Err(e) => Err(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
             };
             *state.lock().unwrap() = Install::Done(done);
@@ -814,6 +827,9 @@ impl RStarter {
         let _ = std::fs::remove_file(&self.state);
     }
 }
+
+/// Why R notebooks have no Ember.
+const INSTALL_FAILED: &str = "r_failed::Couldn't install Ember for R notebooks; the runtime's log says why";
 
 /// How the error that R stopped while its adapter started begins.
 const STOPPED_STARTING: &str = "r_failed::R stopped while starting";

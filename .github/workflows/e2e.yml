@@ -156,6 +156,8 @@ jobs:
             echo "::error::e2e_r was skipped"
             exit 1
           fi
+          # e2e_r starts no Julia, so nothing else makes the depot.
+          mkdir -p target/tmp/e2e-r/depot
           touch target/tmp/e2e-r/depot/.e2e-complete
       # Only a passing run saves, so the Ember library saved is one that worked.
       - name: Save depot and Ember
