@@ -28,7 +28,7 @@ Waits up to 45 seconds. Result: `machine`, `host`, `state` `connected`, `saved`,
 
 `state` `connecting` means the 45 seconds ran out: call again with the same host. A new machine is saved only once a call has connected (`saved` is false until then), and an existing one keeps its saved settings until the new ones have connected. If it can't connect, nothing is saved and the call is an error.
 
-`slurm`: `true` runs notebooks in Slurm jobs (an error if Slurm isn't there), `false` runs it directly on the machine even if Slurm is there (on a cluster that is the shared login node, so only for the user's own workstation or once the user confirms it isn't a shared cluster). Left out, a new machine uses jobs when Slurm is there and a machine added before stays as saved. Changing a machine between the two is refused while Endeavor runs there; `stop_machine` first, with the user's agreement.
+`slurm`: `true` runs notebooks in Slurm jobs (an error if Slurm isn't there), `false` runs them directly on the machine even if Slurm is there (on a cluster that is the shared login node, so only for the user's own workstation or once the user confirms it isn't a shared cluster). Left out, a new machine uses jobs when Slurm is there and a machine added before stays as saved. Changing a machine between the two is refused while Endeavor runs there; `stop_machine` first, with the user's agreement.
 
 ## use_machine
 
