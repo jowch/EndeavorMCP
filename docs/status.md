@@ -205,7 +205,12 @@ Next:
   main and publishes it as a one-build repository in a GitHub release per R
   version (`core::EMBER_MAC_ARM64`, `macos-arm64-r4.6`). An Apple Silicon Mac
   installs from that first, then from r-universe; an R version with no such
-  release gets r-universe's source.
+  release gets r-universe's source. A Mac without the developer tools that has
+  an Ember skips r-universe's source, which it couldn't build: when GitHub
+  can't be reached it keeps its Ember and says nothing. With the tools, it
+  installs r-universe's source build then, and goes back to GitHub's at the
+  next start that reaches it. The downloaded file must have the SHA256 the
+  index lists, or it isn't installed (and isn't counted as a failed build).
   Each time the core starts R, `runtime/r/install.R` installs it, or updates it
   when there's a newer build, into `~/.cache/endeavor/r/ember`
   (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
