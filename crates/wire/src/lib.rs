@@ -23,6 +23,7 @@ pub mod backend;
 pub mod files;
 pub mod notebooks;
 pub mod relay;
+pub mod server_path;
 pub mod slurm;
 pub mod tree;
 

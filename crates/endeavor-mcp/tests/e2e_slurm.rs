@@ -284,7 +284,7 @@ fn a_runtime_in_a_slurm_job() {
 
     let join = |log: &Log| -> Client {
         let (channel, hello) = connect(&server, &Transport::for_server(&server), &options, &Cancel::default(), &log.on()).map_err(|e| e.message).expect("connect over ssh");
-        eprintln!("[{:?}] {}: hello from {}, home {}, slurm {}", began.elapsed(), log.who, hello.node, hello.home.display(), hello.slurm);
+        eprintln!("[{:?}] {}: hello from {}, home {}, slurm {}", began.elapsed(), log.who, hello.node, hello.home, hello.slurm);
         assert!(hello.slurm, "the login node has Slurm's commands");
         let listener = Listener::start(&host).unwrap();
         let channel = Arc::new(channel);

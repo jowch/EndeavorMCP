@@ -97,7 +97,7 @@ fn a_runtime_over_real_ssh() {
     let on = move |event: Event| drop(events_tx.send(event));
 
     let (channel, hello) = connect(&server, &Transport::for_server(&server), &options, &Cancel::default(), &on).map_err(|e| e.message).expect("connect over ssh");
-    eprintln!("[{:?}] hello from {}, home {}", started.elapsed(), hello.node, hello.home.display());
+    eprintln!("[{:?}] hello from {}, home {}", started.elapsed(), hello.node, hello.home);
     assert!(!hello.node.is_empty() && hello.uploads);
     let installed = root.join(endeavor_mcp::embedded::BUILD_VERSION);
     assert!(installed.join("endeavor").is_file() && installed.join("runtime/boot.jl").is_file(), "the helper is installed in {}", installed.display());

@@ -51,8 +51,10 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Reply {
-    /// `path` is the folder listed, absolute and with `~` expanded.
-    List { path: PathBuf, entries: Vec<Entry> },
+    /// `path` is the folder listed, absolute and with `~` expanded. Paths in
+    /// replies follow the rules of the machine that answered: on a server,
+    /// `/` rules whatever the app's computer uses ([`crate::server_path`]).
+    List { path: String, entries: Vec<Entry> },
     /// Paths relative to the folder asked about; folders end with `/`.
     Files { paths: Vec<String> },
     Notebooks { found: Vec<Found> },
@@ -61,10 +63,10 @@ pub enum Reply {
     Runtime { runtime: RuntimeState },
     /// `path` is the folder, absolute and with `~` expanded; `created`: it was
     /// made just now.
-    Folder { path: PathBuf, created: bool },
+    Folder { path: String, created: bool },
     /// Neither the folder nor the one it would go in, `parent`, is there, so
     /// nothing was made.
-    NoFolder { path: PathBuf, parent: PathBuf },
+    NoFolder { path: String, parent: String },
     /// `path` is relative to the folder; `have`: a file with the same contents
     /// is already there, so there's nothing to send.
     Place { path: String, have: bool },
@@ -128,6 +130,11 @@ pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
     dunce::canonicalize(path)
 }
 
+/// A path of this machine as a reply carries it.
+pub fn text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 /// `~` and `~/…` as the home folder; anything relative is taken from there.
 pub fn expand(path: &str) -> PathBuf {
     match path.strip_prefix('~') {
@@ -148,19 +155,19 @@ fn other_users_home(path: &str) -> bool {
 /// likely mistyped, or another computer's, than new.
 fn folder(dir: &Path) -> Result<Reply, String> {
     match std::fs::metadata(dir) {
-        Ok(meta) if meta.is_dir() => return Ok(Reply::Folder { path: dir.to_owned(), created: false }),
+        Ok(meta) if meta.is_dir() => return Ok(Reply::Folder { path: text(dir), created: false }),
         Ok(_) => return Err(format!("{} is a file, not a folder.", dir.display())),
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("Couldn't open {}: {}", dir.display(), plain(&e))),
         Err(_) => {}
     }
     let parent = dir.parent().unwrap_or(dir);
     if !parent.is_dir() {
-        return Ok(Reply::NoFolder { path: dir.to_owned(), parent: parent.to_owned() });
+        return Ok(Reply::NoFolder { path: text(dir), parent: text(parent) });
     }
     match std::fs::create_dir(dir) {
-        Ok(()) => Ok(Reply::Folder { path: dir.to_owned(), created: true }),
+        Ok(()) => Ok(Reply::Folder { path: text(dir), created: true }),
         // Another session made it meanwhile.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(Reply::Folder { path: dir.to_owned(), created: false }),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(Reply::Folder { path: text(dir), created: false }),
         Err(e) => Err(format!("Couldn't make the folder {}: {}", dir.display(), plain(&e))),
     }
 }
@@ -178,7 +185,7 @@ fn list(dir: &Path) -> Result<Reply, String> {
         .collect();
     entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
     let path = real_path(dir).unwrap_or_else(|_| dir.to_path_buf());
-    Ok(Reply::List { path, entries })
+    Ok(Reply::List { path: text(&path), entries })
 }
 
 const WALK_DEPTH: usize = 4;
@@ -259,6 +266,9 @@ pub fn place(folder: &Path, name: &str, size: u64, sha256: &str) -> Result<Reply
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
         return Err(format!("{name:?} isn't a file name"));
     }
+    if cfg!(windows) && !windows_name(name) {
+        return Err(not_on_windows(name));
+    }
     if std::fs::symlink_metadata(folder.join(DATA)).is_err() {
         std::fs::create_dir(folder.join(DATA)).map_err(|e| format!("Couldn't make {}: {}", folder.join(DATA).display(), plain(&e)))?;
     }
@@ -282,6 +292,22 @@ pub fn place(folder: &Path, name: &str, size: u64, sha256: &str) -> Result<Reply
     unreachable!("some numbered name is free")
 }
 
+/// Windows can't hold a file named `name`: one with `\`, a `:` (which names
+/// another stream of a file) or another character it refuses, one ending in a
+/// dot or a space, or a device's name such as `CON` or `com1.txt`. Linux and
+/// macOS can, so only a Windows machine refuses these.
+fn windows_name(name: &str) -> bool {
+    const DEVICES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    let device = DEVICES.iter().any(|d| stem.eq_ignore_ascii_case(d))
+        || stem.len() == 4 && ["COM", "LPT"].iter().any(|d| stem[..3].eq_ignore_ascii_case(d)) && matches!(stem.as_bytes()[3], b'1'..=b'9');
+    !device && !name.ends_with(['.', ' ']) && !name.chars().any(|c| c < ' ' || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+}
+
+fn not_on_windows(name: &str) -> String {
+    format!("{name:?} can't be a file's name on Windows; rename it and attach it again")
+}
+
 /// `rel`, a relative path without `..`, inside `folder` once links are
 /// resolved (as the app's `relative_inside` checks); it must exist.
 fn inside(folder: &Path, rel: &Path) -> Result<PathBuf, String> {
@@ -303,6 +329,9 @@ pub fn upload_paths(folder: &Path, path: &str) -> Result<(PathBuf, PathBuf), Str
         return Err(format!("{path} isn't inside the session's folder"));
     };
     let name = name.to_string_lossy().into_owned();
+    if cfg!(windows) && !windows_name(&name) {
+        return Err(not_on_windows(&name));
+    }
     let dir = inside(folder, rel.parent().unwrap_or(Path::new("")))?;
     Ok((dir.join(format!(".{name}.part")), dir.join(name)))
 }
@@ -378,13 +407,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("endeavor-folder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(folder(&dir), Ok(Reply::Folder { path: dir.clone(), created: false }));
+        assert_eq!(folder(&dir), Ok(Reply::Folder { path: text(&dir), created: false }));
         let new = dir.join("new-study");
-        assert_eq!(folder(&new), Ok(Reply::Folder { path: new.clone(), created: true }));
+        assert_eq!(folder(&new), Ok(Reply::Folder { path: text(&new), created: true }));
         assert!(new.is_dir());
-        assert_eq!(folder(&new), Ok(Reply::Folder { path: new.clone(), created: false }), "made once");
+        assert_eq!(folder(&new), Ok(Reply::Folder { path: text(&new), created: false }), "made once");
         let deeper = dir.join("missing").join("study");
-        assert_eq!(folder(&deeper), Ok(Reply::NoFolder { path: deeper.clone(), parent: dir.join("missing") }));
+        assert_eq!(folder(&deeper), Ok(Reply::NoFolder { path: text(&deeper), parent: text(&dir.join("missing")) }));
         assert!(!dir.join("missing").exists(), "nothing is made when the parent is missing");
         std::fs::write(dir.join("notes.txt"), "").unwrap();
         assert!(folder(&dir.join("notes.txt")).unwrap_err().contains("is a file"));
@@ -406,7 +435,7 @@ mod tests {
             std::fs::write(dir.join(file), "").unwrap();
         }
         let Reply::List { path, entries } = answer(&Request::List { path: dir.display().to_string() }) else { panic!() };
-        assert_eq!(path, real_path(&dir).unwrap());
+        assert_eq!(path, text(&real_path(&dir).unwrap()));
         let names: Vec<(&str, bool)> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
         assert_eq!(names, [("A-figures", true), ("b-data", true), ("Analysis.jl", false), ("fit.jl", false)]);
         let missing = answer(&Request::List { path: dir.join("nope").display().to_string() });
@@ -544,6 +573,29 @@ mod tests {
         assert_eq!(write(&folder, "data/big.csv", 0, b"new", true).unwrap_err(), "data/big.csv appeared while it was being sent; send it again");
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "abcd");
         assert!(!part.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn names_windows_cant_hold() {
+        for name in ["run:1.csv", "a\\b.csv", "CON", "con.txt", "Nul", "COM1.csv", "lpt9", "notes.", "notes ", "a*b", "a\u{1}b"] {
+            assert!(!windows_name(name), "{name:?}");
+        }
+        for name in ["run 1.csv", "decay.csv", "console.txt", "COM0.csv", "COM10", "LPT", ".env", "über.csv"] {
+            assert!(windows_name(name), "{name:?}");
+        }
+        // Only a Windows machine refuses them: a Linux server holds "run:1.csv" fine.
+        let dir = session("windows-names");
+        let placed = place(&dir, "run:1.csv", 1, &sha(b"x"));
+        let sent = write(&dir, "data/run:1.csv", 0, b"x", true);
+        if cfg!(windows) {
+            assert!(placed.unwrap_err().contains("on Windows"));
+            assert!(sent.unwrap_err().contains("on Windows"));
+            assert!(std::fs::read_dir(dir.join("data")).map_or(true, |mut d| d.next().is_none()), "nothing written");
+        } else {
+            assert_eq!(placed, Ok(Reply::Place { path: "data/run:1.csv".into(), have: false }));
+            assert_eq!(sent, Ok(()));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
