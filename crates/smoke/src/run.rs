@@ -2,6 +2,12 @@
 //! started on the task's prompt with the plugin and this binary as its
 //! server, then the checks, then the runtime stopped. A task that fails runs
 //! twice more, to tell a flaky failure from a real one.
+//!
+//! The agent runs in a folder under the system's temporary folder, outside any
+//! checkout, so it sees no CLAUDE.md of ours; with an environment of its own,
+//! so it can't reach the session that started the run; and with only the
+//! notebook tools and the file-reading ones. Its first event is checked for
+//! that before the task counts.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,6 +19,53 @@ use crate::checks::{self, Evidence};
 
 /// How long one agent run may take before it is ended.
 const AGENT_LIMIT: Duration = Duration::from_secs(20 * 60);
+
+/// The built-in tools the agent has.
+const BUILT_IN_TOOLS: &[&str] = &["Read", "Glob", "Grep", "Skill", "ToolSearch"];
+
+/// The plugin's MCP server, as Claude Code names its tools (`mcp__plugin_endeavor_endeavor__new_notebook`).
+const OUR_SERVER: &str = "mcp__plugin_endeavor_endeavor";
+
+/// The variables the agent keeps from this process's environment: enough to
+/// run, sign in and reach the network. Anything else (a Claude Code session's
+/// own variables above all, which would connect the agent to that session) is
+/// left out.
+fn agent_env() -> Vec<(String, String)> {
+    const KEEP: &[&str] = &[
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ",
+        "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "ALL_PROXY", "all_proxy",
+        "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+        "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+        // Windows.
+        "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH",
+    ];
+    std::env::vars().filter(|(k, _)| KEEP.contains(&k.as_str())).collect()
+}
+
+/// What in the agent's first event says the run isn't the isolated one this
+/// harness promises: a tool beyond ours, a plugin or server beyond the
+/// plugin's, or the starting session's memory.
+fn isolation_problems(init: &Value) -> Vec<String> {
+    let mut problems = Vec::new();
+    let tools: Vec<&str> = init["tools"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let extra: Vec<&&str> = tools.iter().filter(|t| !BUILT_IN_TOOLS.contains(t) && !t.starts_with(&format!("{OUR_SERVER}__"))).collect();
+    if !extra.is_empty() {
+        problems.push(format!("the agent had other tools: {extra:?}"));
+    }
+    let servers: Vec<&str> = init["mcp_servers"].as_array().into_iter().flatten().filter_map(|s| s["name"].as_str()).filter(|n| *n != "plugin:endeavor:endeavor").collect();
+    if !servers.is_empty() {
+        problems.push(format!("the agent had other MCP servers: {servers:?}"));
+    }
+    // Claude Code's own built-in plugins come along; any other doesn't belong.
+    let plugins: Vec<&str> = init["plugins"].as_array().into_iter().flatten().filter(|p| p["path"] != "builtin").filter_map(|p| p["name"].as_str()).filter(|n| *n != "endeavor").collect();
+    if !plugins.is_empty() {
+        problems.push(format!("the agent had other plugins: {plugins:?}"));
+    }
+    if init["memory_paths"].get("team").is_some() {
+        problems.push(format!("the agent had a shared memory folder: {}", init["memory_paths"]));
+    }
+    problems
+}
 
 struct Options {
     only: Option<Vec<String>>,
@@ -93,6 +146,7 @@ pub fn main(args: &[String]) -> i32 {
         return 2;
     }
     eprintln!("endeavor-smoke: {} task(s), results in {}", tasks.len(), out.display());
+    let scratch = std::env::temp_dir().join(format!("endeavor-smoke-{}-{}", utc_stamp(), std::process::id()));
     let mut rows = Vec::new();
     for task in &tasks {
         let id = task.file_name().unwrap().to_string_lossy().into_owned();
@@ -100,10 +154,16 @@ pub fn main(args: &[String]) -> i32 {
         loop {
             let n = attempts.len() + 1;
             eprintln!("── {id}, attempt {n}");
-            let work = out.join(&id).join(format!("attempt-{n}"));
+            let work = scratch.join(&id).join(format!("attempt-{n}"));
             let result = attempt(&id, task, &work, &endeavor, &exe, &repo, &o.julia, &depot);
             eprintln!("   {} in {:.0}s", if result["passed"] == true { "passed" } else { "FAILED" }, result["metrics"]["seconds"].as_f64().unwrap_or(0.0));
             let _ = std::fs::write(work.join("result.json"), serde_json::to_string_pretty(&result).unwrap());
+            // Keep what the attempt left, not the runtime's own folders.
+            let kept = out.join(&id).join(format!("attempt-{n}"));
+            let _ = std::fs::remove_dir_all(&kept);
+            std::fs::create_dir_all(&kept).unwrap();
+            copy_dir(&work, &kept, &["state", "home"]);
+            let _ = std::fs::remove_dir_all(&work);
             let passed = result["passed"] == true;
             attempts.push(result);
             // A first run that passes is enough; one that fails runs `retries` more times.
@@ -113,6 +173,7 @@ pub fn main(args: &[String]) -> i32 {
         }
         rows.push(row(&id, &attempts));
     }
+    let _ = std::fs::remove_dir_all(&scratch);
     let summary = json!({ "commit": commit, "agent": agent, "tasks": rows });
     let _ = std::fs::write(out.join("summary.json"), serde_json::to_string_pretty(&summary).unwrap());
     let md = summary_md(&summary);
@@ -127,7 +188,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     let project = work.join("project");
     std::fs::create_dir_all(&project).unwrap();
     if task.join("project").is_dir() {
-        copy_dir(&task.join("project"), &project);
+        copy_dir(&task.join("project"), &project, &[]);
     }
     let project = project.canonicalize().unwrap();
     std::fs::write(work.join("settings.json"), json!({ "julia": julia, "depot": depot }).to_string()).unwrap();
@@ -187,11 +248,15 @@ fn run_claude(prompt: &str, work: &Path, project: &Path, endeavor: &Path, exe: &
         .args(["-p", prompt, "--output-format", "stream-json", "--verbose", "--max-turns", "80"])
         .arg("--plugin-dir")
         .arg(repo.join("claude-plugin"))
-        // The notebook tools and reading files; anything else is refused and shows in the transcript.
-        .args(["--allowedTools", "mcp__plugin_endeavor_endeavor,Read,Glob,Grep"])
-        // Only the project's settings: the user's own plugins and servers stay out of the run.
+        // The only built-in tools there are: reading files, and the two that load skills and deferred tools.
+        .args(["--tools", &BUILT_IN_TOOLS.join(",")])
+        // Approved without asking: those, and the plugin's server.
+        .args(["--allowedTools", &format!("{OUR_SERVER},{}", BUILT_IN_TOOLS.join(","))])
+        // Only the project's settings: the user's own plugins, servers and hooks stay out of the run.
         .args(["--setting-sources", "project,local"])
         .current_dir(project)
+        .env_clear()
+        .envs(agent_env())
         .env("ENDEAVOR_BIN", exe)
         .env("SMOKE_ENDEAVOR", endeavor)
         .env("SMOKE_WORK", work)
@@ -226,9 +291,13 @@ fn run_claude(prompt: &str, work: &Path, project: &Path, endeavor: &Path, exe: &
     for event in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         match event["type"].as_str() {
             Some("system") if event["subtype"] == "init" => {
-                let ours = event["mcp_servers"].as_array().into_iter().flatten().find(|s| s["name"].as_str().is_some_and(|n| n.contains("endeavor")));
-                if ours.is_none_or(|s| s["status"] != "connected") && run.problem.is_none() {
-                    run.problem = Some(format!("the plugin's server didn't connect: {}", ours.cloned().unwrap_or(Value::Null)));
+                let ours = event["mcp_servers"].as_array().into_iter().flatten().find(|s| s["name"] == "plugin:endeavor:endeavor");
+                let mut problems = isolation_problems(&event);
+                if ours.is_none_or(|s| s["status"] != "connected") {
+                    problems.insert(0, format!("the plugin's server didn't connect: {}", ours.cloned().unwrap_or(Value::Null)));
+                }
+                if run.problem.is_none() && !problems.is_empty() {
+                    run.problem = Some(problems.join("; "));
                 }
             }
             Some("assistant") => {
@@ -315,12 +384,16 @@ fn git(repo: &Path, args: &[&str]) -> String {
     Command::new("git").args(args).current_dir(repo).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".into())
 }
 
-fn copy_dir(from: &Path, to: &Path) {
+/// Copy a folder's contents, leaving out the top-level entries named in `skip`.
+fn copy_dir(from: &Path, to: &Path, skip: &[&str]) {
     for entry in std::fs::read_dir(from).into_iter().flatten().flatten() {
+        if skip.iter().any(|s| entry.file_name() == *s) {
+            continue;
+        }
         let target = to.join(entry.file_name());
         if entry.path().is_dir() {
             std::fs::create_dir_all(&target).unwrap();
-            copy_dir(&entry.path(), &target);
+            copy_dir(&entry.path(), &target, &[]);
         } else {
             std::fs::copy(entry.path(), &target).unwrap();
         }

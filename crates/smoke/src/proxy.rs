@@ -9,14 +9,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use crate::log::Log;
 
 pub fn main(args: &[String]) -> i32 {
     let var = |name: &str| std::env::var_os(name).map(PathBuf::from).unwrap_or_else(|| panic!("{name} isn't set: the runner sets it"));
     let (real, work) = (var("SMOKE_ENDEAVOR"), var("SMOKE_WORK"));
-    let log = Arc::new(Mutex::new(Log::create(&work.join("mcp.jsonl"), Instant::now())));
+    let log = Arc::new(Mutex::new(Log::create(&work.join("mcp.jsonl"))));
     let mut child = match Command::new(&real)
         .arg("mcp")
         .args(args)

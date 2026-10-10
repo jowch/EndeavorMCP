@@ -1,11 +1,16 @@
 {
-  "about": "A run that outlasts the 45 s wait: the agent reads the cell later and doesn't run it again. Tags: execution.still_running, WAIT_SECONDS.",
+  "about": "A cell that takes 70 s: the agent doesn't run it again while it runs, and reports the result only once a tool has shown it. Tags: execution.still_running, WAIT_SECONDS, running twice.",
   "checks": [
-    { "check": "no_rerun_of_still_running" },
-    { "check": "no_rerun_of_still_running", "require": true, "soft": true },
+    { "check": "no_rerun_of_running_cells" },
+    { "check": "no_rerun_of_running_cells", "require_still_running": true, "soft": true },
     { "check": "no_errored_cells" },
-    { "check": "final_message_contains_any", "texts": ["5050", "still running", "still be running", "is running"] },
-    { "check": "output_contains", "texts": ["5050"], "soft": true },
-    { "check": "final_message_contains_any", "texts": ["5050"], "soft": true }
+    { "check": "any_of", "checks": [
+      { "check": "all_of", "checks": [
+        { "check": "final_message_contains_any", "texts": ["5050"] },
+        { "check": "reply_contains", "texts": ["5050"] }
+      ] },
+      { "check": "final_message_contains_any", "texts": ["still running", "still be running", "is running", "not finished", "hasn't finished"] }
+    ] },
+    { "check": "output_contains", "texts": ["5050"], "soft": true }
   ]
 }

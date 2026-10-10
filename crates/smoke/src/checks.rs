@@ -100,28 +100,57 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 None => Err(format!("last message: {:?}", clip(ev.final_message, 300))),
             }
         }
-        // After a waited run came back with cells in `execution.still_running`,
-        // no later call ran any of those cells again. With `require`, such a run
-        // must also have happened (an agent may rightly not wait at all).
-        "no_rerun_of_still_running" => {
-            let mut still: HashSet<String> = HashSet::new();
-            let mut saw = false;
+        // No call ran a cell again while an earlier run of it was still going.
+        // A cell is in flight from a reply that says it is running or queued
+        // (a run returned early, a waited run stopped waiting with it in
+        // `execution.still_running`, or a read shows it running) until a read
+        // shows it done. With `require_still_running`, a waited run must also
+        // have stopped waiting: an agent may rightly not wait at all.
+        "no_rerun_of_running_cells" => {
+            let start = ev.calls.first().map_or(0.0, |c| c.at);
+            let mut in_flight: HashSet<String> = HashSet::new();
+            let mut saw_still_running = false;
             for call in ev.calls {
-                if !still.is_empty() && runs(call) {
-                    let ran = ran_cells(call);
-                    if call.tool == "run_all_cells" || ran.iter().any(|c| still.contains(c)) {
-                        return Err(format!("{} at {:.0}s ran {:?} again", call.tool, call.at, ran.iter().filter(|c| still.contains(*c)).collect::<Vec<_>>()));
+                if runs(call) {
+                    let mut again: Vec<String> = ran_cells(call).into_iter().filter(|c| in_flight.contains(c)).collect();
+                    if call.tool == "run_all_cells" || call.tool == "allow_execution" {
+                        again = in_flight.iter().cloned().collect();
+                    }
+                    again.sort();
+                    again.dedup();
+                    if !again.is_empty() {
+                        return Err(format!("{} at {:.0}s ran {again:?} while still running", call.tool, call.at - start));
                     }
                 }
-                for id in call.reply["execution"]["still_running"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                    saw = true;
-                    still.insert(id.to_owned());
-                }
+                track(call, &mut in_flight, &mut saw_still_running);
             }
-            match (saw, spec["require"] == true) {
-                (true, _) => Ok("a run outlasted the wait; nothing ran it again".into()),
-                (false, false) => Ok("no run outlasted the wait".into()),
-                (false, true) => Err("no run outlasted the wait".into()),
+            match (saw_still_running, spec["require_still_running"] == true) {
+                (true, _) => Ok("a waited run stopped waiting; nothing ran its cells again".into()),
+                (false, false) => Ok(String::new()),
+                (false, true) => Err("no waited run stopped waiting".into()),
+            }
+        }
+        // Some tool reply contains every one of `texts`: a result the agent
+        // reports was really computed, not guessed.
+        "reply_contains" => {
+            let texts = str_list("texts");
+            let found = ev.calls.iter().any(|c| {
+                let reply = c.reply.to_string();
+                texts.iter().all(|t| reply.contains(t.as_str()))
+            });
+            if found { Ok(String::new()) } else { Err("no tool reply has them".into()) }
+        }
+        // Every check in `checks` passes, or at least one does.
+        "all_of" | "any_of" => {
+            let outcomes: Vec<Outcome> = spec["checks"].as_array().into_iter().flatten().map(|c| run(c, ev)).collect();
+            let detail = outcomes.iter().map(|o| format!("{} {}{}", if o.passed { "✓" } else { "✗" }, o.name, if o.detail.is_empty() { String::new() } else { format!(": {}", o.detail) })).collect::<Vec<_>>().join("; ");
+            let passed = if kind == "all_of" { outcomes.iter().all(|o| o.passed) } else { outcomes.iter().any(|o| o.passed) };
+            if outcomes.is_empty() {
+                Err("no checks given".into())
+            } else if passed {
+                Ok(detail)
+            } else {
+                Err(detail)
             }
         }
         // The agent never used these tools of its own (e.g. writing the notebook's file).
@@ -134,13 +163,49 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
     }
 }
 
-/// Whether a call runs cells.
+/// Whether a call runs cells (each tool's own default for its run argument).
 fn runs(call: &Call) -> bool {
     match call.tool.as_str() {
         "execute_cell" | "submit_changes" | "run_all_cells" => true,
-        "add_cell" => call.args["run_after"] == true,
+        "add_cell" | "edit_cell" | "edit_cells" => call.args["run_after"] == true,
+        "open_notebook" => call.args["run_notebook"] == true,
         "allow_execution" => call.args["run_notebook"] != false,
         _ => false,
+    }
+}
+
+/// What a call's reply says about which cells are still going.
+fn track(call: &Call, in_flight: &mut HashSet<String>, saw_still_running: &mut bool) {
+    let r = &call.reply;
+    let ids = |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect() };
+    let still = ids(&r["execution"]["still_running"]);
+    if !still.is_empty() {
+        *saw_still_running = true;
+    }
+    if runs(call) {
+        let status = r["execution"]["status"].as_str().unwrap_or_default();
+        // A run that ended is done with its cells; one that returned early isn't.
+        if matches!(status, "completed" | "errored") && still.is_empty() {
+            for c in ids(&r["affected_cells"]) {
+                in_flight.remove(&c);
+            }
+        } else {
+            in_flight.extend(ids(&r["affected_cells"]));
+        }
+        in_flight.extend(still);
+    }
+    // A cell's own state, from a read.
+    if call.tool == "read_cell" && let Some(id) = r["cell_id"].as_str().or(call.args["cell_id"].as_str()) {
+        if r["running"] == true || r["queued"] == true {
+            in_flight.insert(id.to_owned());
+        } else if r["running"] == false && r["queued"] == false {
+            in_flight.remove(id);
+        }
+    }
+    // list_notebooks names each notebook's running cells.
+    if call.tool == "list_notebooks" {
+        let running: HashSet<String> = r.as_array().into_iter().flatten().flat_map(|nb| ids(&nb["running"])).collect();
+        in_flight.retain(|c| running.contains(c));
     }
 }
 
@@ -173,7 +238,6 @@ pub fn to_json(outcomes: &[Outcome]) -> Value {
 mod tests {
     use super::*;
     use crate::log::Log;
-    use std::time::Instant;
 
     /// A log of these (request, reply) pairs, read back as calls.
     fn calls(pairs: &[(&str, Value, Value)]) -> Vec<Call> {
@@ -181,7 +245,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mcp.jsonl");
         let _ = std::fs::remove_file(&path);
-        let mut log = Log::create(&path, Instant::now());
+        let mut log = Log::create(&path);
         for (i, (tool, args, reply)) in pairs.iter().enumerate() {
             log.write("in", &json!({ "jsonrpc": "2.0", "id": i, "method": "tools/call", "params": { "name": tool, "arguments": args } }).to_string());
             log.write("out", &json!({ "jsonrpc": "2.0", "id": i, "result": { "content": [{ "type": "text", "text": reply.to_string() }] } }).to_string());
@@ -203,17 +267,34 @@ mod tests {
     }
 
     #[test]
-    fn running_a_still_running_cell_again_fails_and_reading_it_doesnt() {
+    fn running_a_running_cell_again_fails_and_reading_it_doesnt() {
+        let spec = json!({ "check": "no_rerun_of_running_cells" });
         let waited = ("submit_changes", json!({ "wait_for_completion": true }), json!({ "affected_cells": ["a"], "execution": { "status": "running", "still_running": ["a"] } }));
-        let read = ("read_cell", json!({ "cell_id": "a" }), json!({ "running": true }));
-        let again = ("execute_cell", json!({ "cell_id": "a" }), json!({ "affected_cells": ["a"] }));
-        let other = ("execute_cell", json!({ "cell_id": "b" }), json!({ "affected_cells": ["b"] }));
-        let spec = json!({ "check": "no_rerun_of_still_running" });
-        assert!(judge(spec.clone(), &calls(&[waited.clone(), read.clone(), other])).passed);
-        assert!(!judge(spec.clone(), &calls(&[waited.clone(), read, again])).passed);
-        assert!(!judge(spec, &calls(&[waited, ("run_all_cells", json!({}), json!({}))])).passed);
-        let required = json!({ "check": "no_rerun_of_still_running", "require": true });
-        assert!(!judge(required, &calls(&[("execute_cell", json!({ "cell_id": "a" }), json!({ "affected_cells": ["a"] }))])).passed, "required, and no run outlasted the wait");
+        let early = ("submit_changes", json!({}), json!({ "affected_cells": ["a"], "execution": { "status": "running" } }));
+        let running = ("read_cell", json!({ "cell_id": "a" }), json!({ "cell_id": "a", "running": true, "queued": false }));
+        let done = ("read_cell", json!({ "cell_id": "a" }), json!({ "cell_id": "a", "running": false, "queued": false, "output": "5050" }));
+        let again = ("execute_cell", json!({ "cell_id": "a" }), json!({ "affected_cells": ["a"], "execution": { "status": "completed" } }));
+        let other = ("execute_cell", json!({ "cell_id": "b" }), json!({ "affected_cells": ["b"], "execution": { "status": "completed" } }));
+        assert!(judge(spec.clone(), &calls(&[waited.clone(), running.clone(), other])).passed);
+        assert!(!judge(spec.clone(), &calls(&[waited.clone(), running.clone(), again.clone()])).passed, "after the wait stopped");
+        assert!(!judge(spec.clone(), &calls(&[early.clone(), again.clone()])).passed, "after a run that returned at once");
+        assert!(!judge(spec.clone(), &calls(&[waited.clone(), ("run_all_cells", json!({}), json!({}))])).passed);
+        assert!(judge(spec.clone(), &calls(&[early.clone(), running, done, again])).passed, "a run after it finished isn't a rerun of a running cell");
+        let required = json!({ "check": "no_rerun_of_running_cells", "require_still_running": true });
+        assert!(!judge(required.clone(), &calls(&[early])).passed, "required, and no waited run stopped waiting");
+        assert!(judge(required, &calls(&[waited])).passed);
+    }
+
+    #[test]
+    fn a_result_must_be_in_a_tool_reply_and_any_of_takes_one_branch() {
+        let calls = calls(&[("read_cell", json!({ "cell_id": "a" }), json!({ "output": "5050" }))]);
+        assert!(judge(json!({ "check": "reply_contains", "texts": ["5050"] }), &calls).passed);
+        assert!(!judge(json!({ "check": "reply_contains", "texts": ["4950"] }), &calls).passed);
+        let either = json!({ "check": "any_of", "checks": [{ "check": "reply_contains", "texts": ["4950"] }, { "check": "called", "tool": "read_cell" }] });
+        assert!(judge(either, &calls).passed);
+        let both = json!({ "check": "all_of", "checks": [{ "check": "reply_contains", "texts": ["4950"] }, { "check": "called", "tool": "read_cell" }] });
+        assert!(!judge(both, &calls).passed);
+        assert!(!judge(json!({ "check": "any_of", "checks": [] }), &calls).passed);
     }
 
     #[test]

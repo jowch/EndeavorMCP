@@ -1,27 +1,29 @@
-//! The proxy's log: one JSON object per line, `{"t": seconds, "dir": "in"|"out", "msg": ...}`,
+//! The proxy's log: one JSON object per line, `{"pid": ..., "t": Unix seconds, "dir": "in"|"out", "msg": ...}`,
 //! "in" from the agent and "out" from the server. A line that isn't JSON is kept as a string.
+//! `pid` is the proxy's: an agent that restarts its server starts a second proxy on the
+//! same log, whose request ids start over.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
 pub struct Log {
     file: File,
-    began: Instant,
 }
 
 impl Log {
-    pub fn create(path: &Path, began: Instant) -> Log {
+    pub fn create(path: &Path) -> Log {
         let file = File::options().create(true).append(true).open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        Log { file, began }
+        Log { file }
     }
 
     pub fn write(&mut self, dir: &str, line: &str) {
         let msg = serde_json::from_str(line).unwrap_or_else(|_| json!(line));
-        let entry = json!({ "t": self.began.elapsed().as_secs_f64(), "dir": dir, "msg": msg });
+        let t = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        let entry = json!({ "pid": std::process::id(), "t": t, "dir": dir, "msg": msg });
         let _ = writeln!(self.file, "{entry}");
     }
 }
@@ -34,7 +36,7 @@ pub struct Call {
     /// The reply's text, parsed as JSON where it is JSON.
     pub reply: Value,
     pub is_error: bool,
-    /// Seconds from the proxy's start to the request.
+    /// When the request was sent, in Unix seconds.
     pub at: f64,
 }
 
@@ -42,12 +44,13 @@ pub struct Call {
 /// (the agent gave up on it) has a null reply.
 pub fn calls(path: &Path) -> Vec<Call> {
     let Ok(file) = File::open(path) else { return Vec::new() };
-    let mut calls: Vec<(Value, Call)> = Vec::new();
+    // Keyed by (proxy pid, request id).
+    let mut calls: Vec<((Value, Value), Call)> = Vec::new();
     for entry in BufReader::new(file).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str::<Value>(&l).ok()) {
         let msg = &entry["msg"];
         match entry["dir"].as_str() {
             Some("in") if msg["method"] == "tools/call" => calls.push((
-                msg["id"].clone(),
+                (entry["pid"].clone(), msg["id"].clone()),
                 Call {
                     tool: msg["params"]["name"].as_str().unwrap_or_default().to_owned(),
                     args: msg["params"]["arguments"].clone(),
@@ -57,7 +60,8 @@ pub fn calls(path: &Path) -> Vec<Call> {
                 },
             )),
             Some("out") if !msg["id"].is_null() => {
-                if let Some((_, call)) = calls.iter_mut().rev().find(|(id, c)| *id == msg["id"] && c.reply.is_null()) {
+                let key = (entry["pid"].clone(), msg["id"].clone());
+                if let Some((_, call)) = calls.iter_mut().rev().find(|(k, c)| *k == key && c.reply.is_null()) {
                     call.is_error = msg["result"]["isError"] == true || !msg["error"].is_null();
                     let text = msg["result"]["content"][0]["text"].as_str().or(msg["error"]["message"].as_str()).unwrap_or_default();
                     call.reply = serde_json::from_str(text).unwrap_or_else(|_| json!(text));
