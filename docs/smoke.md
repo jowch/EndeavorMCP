@@ -231,8 +231,10 @@ results, the agent's last message and `endeavor status`.
    | a first package install that looked stuck | N9 |
 
 2. **Find whose problem it is.** Run that task with Claude at the reporter's
-   version (`git checkout` the build in their `endeavor --version`), then on
-   `main`. If it fails with Claude too, the bug is ours: fix it, and the task
+   build, then on `main`. The build in `endeavor --version` is a hash of
+   the source, not a commit: finding theirs means building commits from
+   around when they installed until one gives the same build. Often `main`
+   alone settles it. If it fails with Claude too, the bug is ours: fix it, and the task
    now guards it. If it passes with Claude and the reporter used another
    agent, that agent reads our text differently: tune the skill text with the
    reporter's help, and keep Claude passing. If it passes everywhere, it
