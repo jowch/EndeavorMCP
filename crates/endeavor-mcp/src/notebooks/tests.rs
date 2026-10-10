@@ -874,9 +874,24 @@ fn cells_waiting_on_a_package_install_say_so_and_a_read_of_one_waits() {
     assert!(began.elapsed() < Duration::from_secs(super::tools::WAIT_SECONDS as u64), "within the cap");
     assert_eq!((&read["queued"], &read["packages"]), (&json!(true), &installing));
     let message = read["message"].as_str().unwrap();
-    for part in ["DataFrames", "precompiling, 2 minutes so far", "several minutes", "call read_cell", "Precompiling DataFrames..."] {
+    for part in ["DataFrames", "precompiling, about 2 minutes so far", "normal the first time", "call read_cell", "Precompiling DataFrames..."] {
         assert!(message.contains(part), "{part}: {message}");
     }
+
+    // A caller that hangs up during the wait gets no read: the edit after it is refused.
+    let gone = s.notebooks.tool_watched("", "read_cell", &json!({ "notebook_id": NB, "cell_id": X }), &Folder::Process, Instant::now(), &|| true);
+    assert!(gone.is_err_and(|e| e.contains("client_gone")));
+    assert_eq!(s.refused("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "using CSV" })), "read_required");
+
+    // Past the usual time, the agent is told to wait only while the log moves.
+    s.engine.with(NB, |nb| nb.packages.as_mut().unwrap()["seconds"] = json!(660));
+    let began = Instant::now().checked_sub(Duration::from_secs(44)).expect("a clock that has run that long");
+    let late = super::tools::tool_json(s.notebooks.tool("", "read_cell", &json!({ "notebook_id": NB, "cell_id": Y }), &Folder::Process, began).unwrap());
+    let message = late["message"].as_str().unwrap();
+    for part in ["about 11 minutes", "longer than usual", "Tell the user", "only if that line has changed", "stop waiting"] {
+        assert!(message.contains(part), "{part}: {message}");
+    }
+    s.engine.with(NB, |nb| nb.packages = Some(installing.clone()));
 
     // A run's receipt while the install goes on says the same.
     s.engine.with(NB, |nb| nb.cells[1].queued = false);
@@ -913,6 +928,24 @@ fn cells_waiting_on_a_package_install_say_so_and_a_read_of_one_waits() {
     let began = Instant::now();
     s.read("", NB, X);
     assert!(began.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn a_waited_run_that_outlasts_the_cap_during_an_install_keeps_its_still_running_list() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    s.engine.with(NB, |nb| {
+        nb.packages = Some(json!({ "step": "installing", "packages": ["CSV"], "seconds": 20, "last_line": null }));
+        nb.cells[0].queued = true;
+    });
+    s.read("", NB, Y);
+    s.edit("", NB, Y, "y = x + linger() + 1");
+    s.engine.with(NB, |nb| nb.cells[0].queued = true);
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["execution"], json!({ "status": "running", "still_running": [Y] }), "{ran}");
+    assert_eq!(ran["packages"]["packages"], json!(["CSV"]));
+    let message = ran["message"].as_str().unwrap();
+    assert!(message.contains("CSV") && message.contains("Don't run the cells in `execution.still_running` again"), "{message}");
 }
 
 #[test]

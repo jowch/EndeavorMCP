@@ -180,8 +180,11 @@ end
 # adds, installs and precompiles a notebook's packages inside its run task,
 # before any cell runs, with the cells queued; the first time a package is used
 # that takes minutes. `step` is the part under way, `packages` the ones it is
-# busy with (none until Pluto says), `seconds` how long the step has taken so
-# far, and `last_line` the last line of Pluto's package log.
+# busy with (none until Pluto says), `seconds` how long Pluto's package work
+# has taken so far, and `last_line` the last line of its package log, with any
+# user name or token in a URL taken out (a private registry's URL may carry
+# one). It reads Pluto's internals, so if a Pluto release changes them it
+# reports nothing rather than failing the snapshot.
 const _PKG_STEPS = Dict(
     :analysis => "checking", :registry_update => "updating the package registry",
     :waiting_for_others => "waiting for another notebook's packages",
@@ -193,6 +196,17 @@ const _PKG_STEPS = Dict(
 _business_going(b) = b.started_at !== nothing && b.finished_at === nothing
 
 function package_step(nb)
+    try
+        _package_step(nb)
+    catch
+        nothing
+    end
+end
+
+# A URL's `user:token@` taken out of a line of text.
+_without_userinfo(line) = replace(line, r"(\w+://)[^/\s@]+@" => s"\1")
+
+function _package_step(nb)
     pkg = lock(() -> get(nb.status_tree.subtasks, :pkg, nothing), nb.status_tree.lock)
     (pkg === nothing || !_business_going(pkg)) && return nothing
     going = lock(() -> [b for b in values(pkg.subtasks) if _business_going(b)], pkg.lock)
@@ -205,7 +219,7 @@ function package_step(nb)
         # Pluto lists its own log, `nbpkg_sync`, with the packages.
         "packages"  => filter(!=("nbpkg_sync"), nb.nbpkg_busy_packages),
         "seconds"   => round(Int, time() - pkg.started_at),
-        "last_line" => isempty(lines) ? nothing : first(String(last(lines)), 300),
+        "last_line" => isempty(lines) ? nothing : first(_without_userinfo(String(last(lines))), 300),
     )
 end
 

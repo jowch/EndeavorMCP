@@ -695,7 +695,13 @@ not supported. These gaps stay open.
   spaced out. Not covered: the new notebook's own Julia starting (seconds,
   not minutes), and a Pluto that changes its status tree's names, which the
   step names come from (`_PKG_STEPS` in `Adapter.jl`; an unknown name is shown
-  as is).
+  as is; a change that breaks the read reports no step rather than failing).
+  After 10 minutes the text tells the agent to wait only while the log's last
+  line changes, since a step can hang (another notebook's install, a registry
+  update on a node with no outside network). URLs in that line lose any
+  `user:token@`. The runtime reads Pluto's package log, a plain `Dict` that
+  Pluto writes from its own task; that is safe while Julia runs one thread,
+  not if a user sets `JULIA_NUM_THREADS`.
 - [P2] **A call that waits for the user's answer stops waiting at 45
   seconds, or 20 for `open_notebook` and `new_notebook`.** Before, it waited
   as long as the card was up, and Claude Code ended it at 60 seconds: in
