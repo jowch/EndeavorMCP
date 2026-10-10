@@ -38,7 +38,7 @@ const APP: &str = "These tools edit and run a live Pluto (Julia) notebook that t
 /// which side the agent is on.
 pub const STANDALONE: &str = "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
 the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
-`new_notebook` and `open_notebook` return `browser_url`: give it to the user. \
+`new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. \
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts.";
 

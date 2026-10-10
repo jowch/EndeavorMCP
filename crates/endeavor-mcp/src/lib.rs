@@ -251,7 +251,7 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some("relay") => slurm::relay_main(&argv[1..]),
         Some("node-start") => slurm::node_start_main(&argv[1..]),
         Some("core") => core::main(&argv[1..]),
-        Some("serve" | "mcp" | "stop" | "status") => standalone::main(&argv),
+        Some("serve" | "mcp" | "stop" | "status" | "open") => standalone::main(&argv),
         Some("--version" | "-V" | "version") => update::print_version(),
         Some("update") => update::main(&argv[1..]),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
