@@ -20,6 +20,10 @@ pub struct Evidence<'a> {
     pub injections: &'a [Value],
     /// The notebooks run again from their files in a fresh runtime, when a check asked for it.
     pub rerun: Option<&'a Result<Vec<Notebook>, String>>,
+    /// When each of the user's messages was sent, in Unix seconds.
+    pub turns: &'a [f64],
+    /// The files a server task's server folder holds at the end, relative to it.
+    pub server_files: &'a [String],
 }
 
 pub struct Outcome {
@@ -49,18 +53,25 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
     let str_list = |key: &str| -> Vec<String> { spec[key].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_owned).collect() };
     match kind {
         // A tool was called between `min` (default 1) and `max` (default any)
-        // times; with `ok`, counting only the calls that succeeded.
+        // times; with `ok`, counting only the calls that succeeded, and with
+        // `args`, only those whose arguments include these.
         "called" => {
             let tool = spec["tool"].as_str().unwrap_or_default();
             let ok = spec["ok"] == true;
             // A call the runtime turned away while Julia started is the agent waiting as told, not a second call.
-            let n = ev.calls.iter().filter(|c| c.tool == tool && !while_starting(c) && !(ok && c.is_error)).count() as u64;
+            let n = ev.calls.iter().filter(|c| c.tool == tool && !while_starting(c) && !(ok && c.is_error) && has_args(c, &spec["args"])).count() as u64;
             let (min, max) = (spec["min"].as_u64().unwrap_or(1), spec["max"].as_u64().unwrap_or(u64::MAX));
             if (min..=max).contains(&n) { Ok(format!("{n} calls")) } else { Err(format!("{n} calls")) }
         }
+        // Never called; with `args`, never with these arguments; with
+        // `before_turn` n, not before the user's n-th message was sent.
         "not_called" => {
             let tool = spec["tool"].as_str().unwrap_or_default();
-            match ev.calls.iter().filter(|c| c.tool == tool).count() {
+            let until = match spec["before_turn"].as_u64() {
+                None => f64::INFINITY,
+                Some(n) => ev.turns.get(n as usize - 1).copied().ok_or(format!("the user's message {n} was never sent"))?,
+            };
+            match ev.calls.iter().filter(|c| c.tool == tool && has_args(c, &spec["args"]) && c.at < until).count() {
                 0 => Ok(String::new()),
                 n => Err(format!("{n} calls")),
             }
@@ -232,6 +243,19 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 Ok(format!("{compared} cells the same"))
             }
         }
+        // The agent's last message contains none of `texts`, ignoring case.
+        "final_message_lacks" => {
+            let message = ev.final_message.to_lowercase();
+            match str_list("texts").iter().find(|t| message.contains(&t.to_lowercase())) {
+                Some(t) => Err(format!("has {t:?}: {:?}", clip(ev.final_message, 300))),
+                None => Ok(String::new()),
+            }
+        }
+        // A file under the server task's server folder ends with `suffix`.
+        "server_file" => {
+            let suffix = spec["suffix"].as_str().unwrap_or_default();
+            if ev.server_files.iter().any(|f| f.ends_with(suffix)) { Ok(String::new()) } else { Err(format!("server folder has {:?}", ev.server_files)) }
+        }
         // The agent never used these tools of its own (e.g. writing the notebook's file).
         "agent_tools_not_used" => {
             let tools = str_list("tools");
@@ -240,6 +264,11 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
         }
         _ => Err(format!("unknown check {kind:?}")),
     }
+}
+
+/// Whether a call's arguments include every key and value of `want` (an object; anything else matches all).
+fn has_args(call: &Call, want: &Value) -> bool {
+    want.as_object().is_none_or(|want| want.iter().all(|(k, v)| call.args.get(k) == Some(v)))
 }
 
 /// An output that is a picture, which a second run needn't draw byte for byte the same.
@@ -345,7 +374,7 @@ mod tests {
     }
 
     fn judge(spec: Value, calls: &[Call]) -> Outcome {
-        run(&spec, &Evidence { calls, notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None })
+        run(&spec, &Evidence { calls, notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[] })
     }
 
     #[test]
@@ -409,7 +438,7 @@ mod tests {
     fn a_rerun_must_give_the_same_outputs_except_running_cells_and_pictures() {
         let left = [notebook(&[("a", "1", false), ("b", "2", false), ("c", "", true), ("d", "<img src=\"data:image/png;base64,AAA\">", false)])];
         let judge = |rerun: Result<Vec<Notebook>, String>| {
-            let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&rerun) };
+            let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&rerun), turns: &[], server_files: &[] };
             run(&json!({ "check": "reproducible" }), &ev)
         };
         assert!(judge(Ok(vec![notebook(&[("a", "1", false), ("b", "2\n", false), ("c", "3", false), ("d", "<img src=\"data:image/png;base64,BBB\">", false)])])).passed);
@@ -418,9 +447,9 @@ mod tests {
         assert!(!judge(Ok(vec![notebook(&[("a", "1", false)])])).passed, "a cell missing from the rerun fails");
         assert!(!judge(Err("Julia didn't start".into())).passed);
         let busy = [notebook(&[("c", "", true)])];
-        let ev = Evidence { calls: &[], notebooks: &busy, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("c", "3", false)])])) };
+        let ev = Evidence { calls: &[], notebooks: &busy, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("c", "3", false)])])), turns: &[], server_files: &[] };
         assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "nothing compared fails");
-        let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: None };
+        let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[] };
         assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "no rerun at all fails");
     }
 
@@ -432,9 +461,23 @@ mod tests {
         let only_read = calls[..2].to_vec();
         assert!(!judge(json!({ "check": "ran_after_reply", "texts": ["run_conflict"] }), &only_read).passed);
 
-        let injected = |steps: &[Value]| run(&json!({ "check": "injected" }), &Evidence { calls: &[], notebooks: &[], agent_tools: &[], final_message: "", injections: steps, rerun: None }).passed;
+        let injected = |steps: &[Value]| run(&json!({ "check": "injected" }), &Evidence { calls: &[], notebooks: &[], agent_tools: &[], final_message: "", injections: steps, rerun: None, turns: &[], server_files: &[] }).passed;
         assert!(injected(&[json!({ "tool": "read_cell", "ok": true }), json!({ "tool": "edit_cell", "ok": true })]));
         assert!(!injected(&[json!({ "tool": "read_cell", "ok": true }), json!({ "tool": "edit_cell", "ok": false })]));
         assert!(!injected(&[]), "a moment that never came fails");
+    }
+
+    #[test]
+    fn an_install_before_the_user_agreed_fails() {
+        let calls = calls(&[("add_machine", json!({ "host": "h" }), json!({ "state": "needs_install" })), ("add_machine", json!({ "host": "h", "install": true }), json!({ "state": "ready" }))]);
+        let (asked, installed) = (calls[0].at, calls[1].at);
+        let judge = |turns: &[f64]| {
+            let ev = Evidence { calls: &calls, notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None, turns, server_files: &[] };
+            run(&json!({ "check": "not_called", "tool": "add_machine", "args": { "install": true }, "before_turn": 2 }), &ev).passed
+        };
+        assert!(judge(&[0.0, (asked + installed) / 2.0]), "installed after the second message");
+        assert!(!judge(&[0.0, installed + 1.0]), "installed before it");
+        assert!(!judge(&[0.0]), "the second message never sent");
+        assert_eq!(super::tests::judge(json!({ "check": "called", "tool": "add_machine", "args": { "install": true } }), &calls).detail, "1 calls");
     }
 }
