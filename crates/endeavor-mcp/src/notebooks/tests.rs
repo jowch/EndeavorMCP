@@ -1082,7 +1082,8 @@ fn opening_and_making_notebooks() {
     assert_eq!(s.call("", "open_notebook", json!({ "path": path, "run_notebook": "yes" })), Err("TypeError: non-boolean (String) used in boolean context".into()));
     let ember = format!("{dir}{SEP}growth.R");
     std::fs::write(&ember, "### An Ember notebook ###\n# /// environment\n# ///\n").unwrap();
-    assert_eq!(s.call("", "open_notebook", json!({ "path": ember })), Err(format!("ArgumentError: unsupported::'{ember}' is an Ember notebook (R). R notebooks can't be opened here yet")));
+    let why = if cfg!(windows) { "R notebooks don't run on Windows yet" } else { "R notebooks can't be opened here yet" };
+    assert_eq!(s.call("", "open_notebook", json!({ "path": ember })), Err(format!("ArgumentError: unsupported::'{ember}' is an Ember notebook (R). {why}")));
 
     let made = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}.{SEP}fresh.jl") })).unwrap();
     assert_eq!((&made["path"], &made["created"], &made["ran"]), (&json!(format!("{dir}{SEP}fresh.jl")), &json!(true), &json!(true)));
