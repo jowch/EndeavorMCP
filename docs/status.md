@@ -34,7 +34,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   release and each build adds six, so `scripts/prune-helpers.sh` removes the
   builds nothing needs any more: it keeps `LATEST`, every branch head's pin
   here and in Endeavor, main's last 40 plugin pins and Endeavor's last 10,
-  and anything from the last 7 days; of the rest, the newest 100 builds keep
+  and anything from the last 3 days (7 until 2026-10-10, when the release was gaining about 85 files a day); of the rest, the newest 100 builds keep
   their Linux files and checksums. The Prune helpers workflow runs it by hand,
   listing only unless asked to delete; Helpers runs it once the release holds
   more than 700 files, when the repository variable `PRUNE_HELPERS_AUTO` is

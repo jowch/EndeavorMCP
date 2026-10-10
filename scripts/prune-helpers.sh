@@ -17,7 +17,7 @@
 #   - Endeavor's Cargo.lock pins the commit it was built from, at the head of
 #     any of Endeavor's branches or as one of the last APP_PINS (10) pins on
 #     its main (the app's scripts/helpers.sh downloads it to bundle);
-#   - it was published in the last NEW_DAYS days (7).
+#   - it was published in the last NEW_DAYS days (3).
 # Of the other builds, the newest LINUX_BUILDS (100) keep their Linux files and
 # checksum file, and lose only the macOS and Windows ones. Every installed
 # binary, from a plugin, install.sh or `endeavor update`, fetches the Linux
@@ -26,7 +26,7 @@
 # Pins and builds are counted rather than dated so that what is kept stays
 # bounded however often main moves: at most about 240 files for the pins and
 # 300 for the Linux files. At 2026-10-09's pace (about 15 pins a day) the 40
-# pins cover two or three days, and the 7 days and the Linux files are what
+# pins cover two or three days, and the 3 days and the Linux files are what
 # protect a binary that isn't updated.
 # LATEST itself and any file whose name holds no key are never deleted. If any
 # of this can't be worked out (a clone, a pinned commit, the release), the
@@ -43,7 +43,7 @@ mcp_repo=${ENDEAVOR_MCP_REPO:-jowch/EndeavorMCP}
 app_repo=${ENDEAVOR_APP_REPO:-jowch/Endeavor}
 plugin_pins=${PLUGIN_PINS:-40}
 app_pins=${APP_PINS:-10}
-new_days=${NEW_DAYS:-7}
+new_days=${NEW_DAYS:-3}
 linux_builds=${LINUX_BUILDS:-100}
 tag=helpers
 # The kept builds' files above this many get a warning: pruning can't help then.
