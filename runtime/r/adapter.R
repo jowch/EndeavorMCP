@@ -226,9 +226,17 @@ cap_text <- function(text) {
 
 # Ember's error as the tools show it, in Pluto's shape ({kind, msg}); "error"
 # (R's own) is Pluto's "runtime".
+# A package the code doesn't name: Ember's fix is to add it to the header's
+# [extra_packages], which no tool does and an agent mustn't do by editing the
+# file. Naming it in the cell does the same through the tools, so that is the
+# fix the agent hears; Ember's page keeps its own wording.
 structure_error <- function(e) {
   d <- list(kind = if (identical(e$kind, "error")) "runtime" else e$kind, msg = e$message %||% "")
-  if (length(e$fixes) > 0) d$fixes <- I(e$fixes)
+  fixes <- e$fixes
+  if (identical(e$kind, "missing_package") && length(e$names) == 1 && any(grepl("[extra_packages]", fixes, fixed = TRUE))) {
+    fixes <- sprintf("Add `requireNamespace(\"%s\")` as the first line of this cell and run it", e$names)
+  }
+  if (length(fixes) > 0) d$fixes <- I(fixes)
   if (length(e$names) > 0) d$names <- I(e$names)
   if (length(e$cells) > 0) d$cells <- I(e$cells)
   if (!is.null(e$line)) d$line <- e$line
@@ -284,6 +292,35 @@ snapshot_cell <- function(v) {
   d
 }
 
+# Ember's package work as it goes, in the shape Adapter.jl's `package_step`
+# gives the core, or NULL when there is none: while queued cells wait for
+# packages (`waiting_for`) or the library installs. The core then counts queued cells
+# as running, and `read_cell` waits and tells the agent what is going on.
+# `packages` are the ones the cells wait for, `seconds` how long since this
+# adapter first saw the work, and `last_line` the installer's last line, or
+# the package it is on.
+package_step <- function(rec, snap, state) {
+  # A cell that isn't queued may name a package that isn't installed; only a run makes it wait.
+  waits <- unique(unlist(lapply(snap$cells, function(c) if (isTRUE(c$queued)) c$waiting_for), use.names = FALSE))
+  lib <- state$packages$target
+  installing <- identical(lib$status, "installing")
+  if (length(waits) == 0 && !installing) {
+    rec$packages_since <- NULL
+    return(NULL)
+  }
+  rec$packages_since <- rec$packages_since %||% Sys.time()
+  progress <- lib$progress
+  step <- if (installing) {
+    if (is.numeric(progress$total) && progress$total > 1) sprintf("installing, %d of %d", as.integer(progress$done %||% 0), as.integer(progress$total)) else "installing"
+  } else if (identical(lib$status, "checking")) "checking" else "resolving"
+  lines <- trimws(lib$log %||% character())
+  lines <- lines[nzchar(lines)]
+  last <- if (length(lines) > 0) utils::tail(lines, 1) else if (length(progress$current) == 1 && !is.na(progress$current)) paste("installing", progress$current) else NULL
+  if (!is.null(last)) last <- substr(sub("(\\w+://)[^/[:space:]@]+@", "\\1", last), 1, 300)
+  list(step = step, packages = I(sort(as.character(waits))), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
+       last_line = last)
+}
+
 snapshot <- function(rec) {
   snap <- notebook_snapshot(rec$nb)
   state <- notebook_state(rec$nb)
@@ -296,6 +333,7 @@ snapshot <- function(rec) {
     execution_allowed = will_run(state),
     safe_preview = !isTRUE(state$allowed),
     exited = if (is.null(exited)) NULL else I(exited),
+    packages = package_step(rec, snap, state),
     cells = unname(lapply(snap$cells, snapshot_cell)))
 }
 

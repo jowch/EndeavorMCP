@@ -877,7 +877,7 @@ fn cells_waiting_on_a_package_install_say_so_and_a_read_of_one_waits() {
     assert!(began.elapsed() < Duration::from_secs(super::tools::WAIT_SECONDS as u64), "within the cap");
     assert_eq!((&read["queued"], &read["packages"]), (&json!(true), &installing));
     let message = read["message"].as_str().unwrap();
-    for part in ["DataFrames", "precompiling, about 2 minutes so far", "normal the first time", "call read_cell", "Precompiling DataFrames..."] {
+    for part in ["Julia is getting DataFrames", "precompiling, about 2 minutes so far", "normal the first time", "call read_cell", "Precompiling DataFrames..."] {
         assert!(message.contains(part), "{part}: {message}");
     }
 
@@ -1929,6 +1929,25 @@ fn what_the_engine_knows_of_a_cell_shows_in_read_cell() {
     assert_eq!(read(NB, X).get("not_run"), None, "and never for Julia");
     let code = s.call("", "read_notebook_code", json!({ "notebook_id": R })).unwrap();
     assert_eq!(code["stale_cell_ids"], json!([Y]), "and in the whole notebook's read: {code}");
+}
+
+#[test]
+fn an_r_notebooks_package_install_says_r_is_getting_them_ready() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "library(dplyr)"), (Y, "summarise(mtcars, m = mean(mpg))")]);
+    ember.with(R, |nb| {
+        nb.packages = Some(json!({ "step": "installing", "packages": ["dplyr"], "seconds": 20, "last_line": "installing dplyr" }));
+        nb.cells.iter_mut().for_each(|c| c.queued = true);
+    });
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    let began = Instant::now().checked_sub(Duration::from_secs(44)).expect("a clock that has run that long");
+    let read = super::tools::tool_json(s.notebooks.tool("", "read_cell", &json!({ "notebook_id": R, "cell_id": Y }), &Folder::Process, began).unwrap());
+    let message = read["message"].as_str().unwrap();
+    assert!(message.starts_with("R is getting dplyr ready for this notebook (installing, 20 seconds so far)."), "{message}");
+    assert_eq!(read["packages"]["packages"], json!(["dplyr"]));
 }
 
 #[test]

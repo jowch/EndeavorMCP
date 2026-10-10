@@ -1109,7 +1109,8 @@ fn installing_message(nb: &Snapshot) -> String {
     let seconds = packages["seconds"].as_u64().unwrap_or(0);
     let so_far = if seconds >= 90 { format!("about {} minutes", (seconds + 30) / 60) } else { format!("{seconds} seconds") };
     let last = packages["last_line"].as_str().map(|line| format!(" Last line of the package log: {line}")).unwrap_or_default();
-    let what = format!("Julia is getting {which} ready for this notebook ({step}, {so_far} so far). The cells are queued and run when that is done.");
+    let language = super::engines::language(super::engines::of_path(&nb.path));
+    let what = format!("{language} is getting {which} ready for this notebook ({step}, {so_far} so far). The cells are queued and run when that is done.");
     if seconds >= INSTALL_USUAL_SECONDS {
         format!(
             "{what} This is taking longer than usual. Tell the user, with the last line of the package log. \

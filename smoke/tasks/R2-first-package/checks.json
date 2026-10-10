@@ -1,0 +1,13 @@
+{
+  "about": "R's first package install: dplyr isn't in the task's fresh package cache, so it installs while the agent works. The agent waits through it and reports the table without running the cells again (#78). When the install outlasts a waited run, the tools say R is getting dplyr ready; with Package Manager's binaries it often doesn't, so that check is soft. Tags: r, package install.",
+  "checks": [
+    { "check": "notebooks", "count": 1, "ending": ".R" },
+    { "check": "reply_contains", "texts": ["R is getting", "dplyr"], "soft": true },
+    { "check": "no_rerun_of_running_cells" },
+    { "check": "no_errored_cells" },
+    { "check": "output_contains", "texts": ["74.1"] },
+    { "check": "output_contains", "texts": ["33.8"] },
+    { "check": "agent_tools_not_used", "tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"] },
+    { "check": "reproducible" }
+  ]
+}
