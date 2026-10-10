@@ -1,0 +1,14 @@
+{
+  "about": "Someone else changes the rate between the agent's read and its edit. The agent's edit is refused as stale; it reads again, and tells the user about the other change rather than overwriting it silently. Setting 0.5 after saying so, or keeping 0.4 and asking, both pass. Tags: stale_read, other sessions.",
+  "checks": [
+    { "check": "injected" },
+    { "check": "reply_contains", "texts": ["stale_read"], "soft": true },
+    { "check": "no_errored_cells" },
+    { "check": "any_of", "checks": [
+      { "check": "output_contains", "texts": ["0.674"] },
+      { "check": "code_contains", "texts": ["rate = 0.4"] }
+    ] },
+    { "check": "final_message_contains_any", "texts": ["0.4", "another session", "other session", "someone else", "colleague"] },
+    { "check": "reproducible" }
+  ]
+}

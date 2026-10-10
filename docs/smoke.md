@@ -51,8 +51,22 @@ run the suite: it has Julia, and Claude uses the sign-in in `~/.claude`.
 Each task is a folder in `smoke/tasks/`:
 
 - `prompt.md`: what the user asks, in a user's words.
+- `followup.md` (optional): what the user asks next, in the same session,
+  sent only once the agent's answer to the first has ended. An attempt where
+  the agent answered fewer messages than it was sent fails.
 - `checks.json`: what decides pass or fail.
 - `project/` (optional): files the project folder starts with.
+- `setup.json` (optional): `{ "open": ["analysis.jl"] }` opens those
+  notebooks before the agent starts, allowed to run and run to the end, as if
+  the user had them open already. `{ "depot": "empty" }` gives the task an
+  empty depot of its own, for a first install. It is that folder alone: not
+  the user's `~/.julia`, which may have the packages already.
+- `inject.json` (optional): a second person working in the same notebook.
+  It names a moment, the first time the agent calls one of `tools` (`"when":
+  "before"` the call reaches the server or `"after"` its reply), and the calls
+  another Endeavor session then makes, such as reading a cell and changing
+  it. The proxy holds the agent's message until they are done, so the moment
+  is the same in every run. The `injected` check fails if it never came.
 
 For each task, the runner makes a fresh folder with its own runtime state and
 a copy of `project/`. It starts `claude -p` there, with this checkout's
@@ -66,10 +80,23 @@ any agent that runs the plugin.
 The proxy writes into the attempt's folder, and the plugin's own hooks still
 run, as they do for a user. When the agent ends, the runner opens its own MCP session on the same
 runtime and reads every open notebook: each cell's code, output and error.
-Then it stops the runtime and runs the checks.
+Then it stops the runtime. If the task has a `reproducible` check, it copies
+the task's `project/` and the notebook files the agent left into a fresh
+folder, opens each notebook there in a fresh runtime, runs every cell from
+the top, and reads them again. Then it runs the checks. The re-run shares the
+depot, so a notebook whose packages weren't saved in its file can still pass.
+
+Before the first task, the runner warms the shared depot: it opens
+`smoke/warm/warm.jl`, which loads the packages the tasks' notebooks reach for
+(DataFrames, Plots), so no task passes or fails on whether an earlier one
+installed them. On a new machine this takes several minutes. N9 is the one
+task with an empty depot of its own, for a first install.
 
 A task that fails runs twice more. It is **failing** if all three runs fail,
-and **flaky** if only some do. Read why before blaming the agent: in the
+and **flaky** if only some do. A task whose `checks.json` has
+`"expected_to_fail"` naming an issue (`"#58"`) fails today on that issue: it
+runs once, shows as an **expected failure**, and doesn't fail the run. When it
+passes, the summary says the issue may be fixed. No task has it now. Read why before blaming the agent: in the
 first runs, N1 was flaky because its check wanted `4.978` and Claude
 sometimes rounded to `4.979`. The check was wrong.
 
@@ -81,7 +108,7 @@ folder, and is copied here without the runtime's own `state/` and `home/`):
 - `summary.md` and `summary.json`: one line per task, with its status, the
   checks that failed, and the first attempt's tool calls, tool errors, time
   and cost.
-- `<task>/attempt-<n>/`: `result.json` (each check and the metrics),
+- `<task>/attempt-<n>/`: `result.json` (each check, the metrics, and every cell as the agent left it and as it ran again),
   `mcp.jsonl` (the proxy's log), `transcript.jsonl` (Claude's stream-json
   output), `agent-stderr.txt`, and `project/` with the notebook as the agent
   left it.
@@ -93,7 +120,7 @@ makes it reported only: a failed soft check doesn't fail the task.
 
 | Check | Passes when |
 |---|---|
-| `called` `tool`, `min` (1), `max` | the agent called `tool` between `min` and `max` times |
+| `called` `tool`, `min` (1), `max`, `ok` | the agent called `tool` between `min` and `max` times; with `ok`, counting only calls that worked. A call turned away while Julia starts doesn't count |
 | `not_called` `tool` | it never called `tool` |
 | `called_after_last_run` `tool` | it called `tool` after the last call that ran cells |
 | `notebooks` `count` | that many notebooks are open at the end |
@@ -104,6 +131,10 @@ makes it reported only: a failed soft check doesn't fail the task.
 | `no_rerun_of_running_cells` `require_still_running` (false) | no call ran a cell that was still running, as far as the log shows: a run that returned before its cells finished, a `still_running` list, or `read_cell` and `list_notebooks` saying so; with `require_still_running`, a waited run also stopped waiting |
 | `reply_contains` `texts` | some tool reply in the log contains every one of `texts`, so a number the agent reports came from the notebook |
 | `all_of` / `any_of` `checks` | every one, or at least one, of the nested checks passes |
+| `injected` | the second person in `inject.json` made all its calls |
+| `code_contains` `texts`, `not` | some cell's code contains every one of `texts` and none of `not` |
+| `ran_after_reply` `texts` | after a tool reply containing every one of `texts` (an error to deal with), a later call ran cells and worked |
+| `reproducible` | run again from its file in a fresh runtime and a fresh copy of the project folder, every notebook gives the same output and errors, cell by cell. Cells still running when the agent ended, and pictures, aren't compared, and a notebook with nothing left to compare fails |
 | `agent_tools_not_used` `tools` | the agent didn't use these tools of its own (read from Claude's transcript) |
 
 An unknown check fails. A check on the last message is loose by design: it
@@ -115,8 +146,20 @@ something subtle, make it soft.
 | Task | Asks | Covers |
 |---|---|---|
 | `N1-new` | a small simulation shown as a table, in a new notebook | `new_notebook`, read, stage, run; no edits to the file |
+| `N2-fix` | fix the error in a notebook that is already open | joining an open notebook (`already_open`), errors, the cells that depend on the fix |
 | `N3-preview` | open a notebook from disk and say what it computes | safe preview: nothing runs, and the agent says so |
 | `N4-long-run` | a cell that takes 70 s | `execution.still_running`: the cell isn't run again, and a result reported came from the notebook |
+| `N5-stale` | change a value; someone else changes it right after the agent reads it | `stale_read`: the agent reads again and tells the user, not overwriting silently |
+| `N6-conflict` | change a value; someone else changes a cell it depends on just before the edit | `run_conflict`: the agent reads the change, runs again, keeps the other person's edit |
+| `N7-plot` | a plot | the agent looks at the picture (`view_cell_output`) before it reports |
+| `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
+| `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: the agent waits through it and reports the table (#58) |
+
+Every task that leaves a notebook also checks it is `reproducible`, except
+N3, whose notebook isn't meant to run, and N9.
+
+Each `result.json` and the summary record the model or models that answered
+(from Claude's own events), so runs can be compared across models later.
 
 ## Other agents
 
@@ -130,7 +173,7 @@ need their own version of those parts.
 ## When a user reports a problem
 
 The error code in a tool result, or what the agent did, points to a task.
-For example, `stale_read` belongs to N5 once it exists, "it ran my cells
+For example, `stale_read` belongs to N5, `run_conflict` to N6, "it ran my cells
 twice" is N4, and "it ran a notebook I only opened" is N3. Run that task
 here at the user's version and on `main`. If it fails with Claude too, the
 bug is ours. If it passes with Claude, our text reads differently to the

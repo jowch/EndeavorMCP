@@ -1,0 +1,12 @@
+{
+  "about": "After N1, in the same session, the user asks for a second notebook. A session works on one notebook: the agent adds a section to this one or says a new session is needed, and makes no second notebook. Tags: one_notebook.",
+  "checks": [
+    { "check": "notebooks", "count": 1 },
+    { "check": "output_contains", "texts": ["74.08", "4.97"] },
+    { "check": "any_of", "checks": [
+      { "check": "output_contains", "texts": ["0.24"] },
+      { "check": "final_message_contains_any", "texts": ["new session", "another session", "separate session", "start a new", "fresh session", "new conversation", "new chat"] }
+    ] },
+    { "check": "reproducible" }
+  ]
+}

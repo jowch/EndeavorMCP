@@ -6,6 +6,7 @@
     { "check": "no_errored_cells" },
     { "check": "output_contains", "texts": ["74.08", "4.97"] },
     { "check": "agent_tools_not_used", "tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"] },
-    { "check": "final_message_contains_any", "texts": ["http://"], "soft": true }
+    { "check": "final_message_contains_any", "texts": ["http://"], "soft": true },
+    { "check": "reproducible" }
   ]
 }

@@ -1,0 +1,14 @@
+{
+  "about": "Someone else changes t, which the agent's cell depends on, just before the agent's edit. Its run is refused as a conflict; it reads the change, runs again, and keeps the other person's t. Tags: run_conflict, other sessions.",
+  "checks": [
+    { "check": "injected" },
+    { "check": "reply_contains", "texts": ["run_conflict"] },
+    { "check": "ran_after_reply", "texts": ["run_conflict"] },
+    { "check": "code_contains", "texts": ["0:20"] },
+    { "check": "code_contains", "texts": ["0.5"] },
+    { "check": "no_errored_cells" },
+    { "check": "output_contains", "texts": ["0.005"] },
+    { "check": "final_message_contains_any", "texts": ["0:20", "another session", "other session", "someone else", "colleague"], "soft": true },
+    { "check": "reproducible" }
+  ]
+}
