@@ -103,6 +103,43 @@ end
         @test EndeavorRuntime._snapshot_cell(manifest)["hidden"]
     end
 
+    @testset "package_step: Pluto's package step as it goes, cleaned for the tools" begin
+        session, nb, _ = make_session_with_notebook("using DataFrames")
+        @test EndeavorRuntime.package_step(nb) === nothing
+        @test EndeavorRuntime.snapshot(nb)["packages"] === nothing
+
+        pkg = Pluto.Status.report_business_started!(nb.status_tree, :pkg)
+        pkg.started_at = time() - 75
+        Pluto.Status.report_business!(() -> nothing, pkg, :resolve)
+        Pluto.Status.report_business_started!(pkg, :precompile)
+        nb.nbpkg_busy_packages = ["nbpkg_sync", "DataFrames"]
+        nb.nbpkg_terminal_outputs["nbpkg_sync"] = "\e[1mUpdating\e[22m git-repo `https://lab:s3cret@git.example.org/Registry.git`\n===\n" *
+            "Precompiling...\r\e[32m  ◐ \e[39mDataFrames\r  ✓ https://ghp_token123@github.com/x/Y.jl  \n\n"
+        step = EndeavorRuntime.package_step(nb)
+        @test step["step"] == "precompiling"
+        @test step["packages"] == ["DataFrames"]
+        @test 74 <= step["seconds"] <= 80
+        @test step["last_line"] == "✓ https://github.com/x/Y.jl"
+        @test !occursin("s3cret", JSON.json(step)) && !occursin("ghp_token123", JSON.json(step))
+        # The same, but for the clock.
+        same(other) = delete!(copy(other), "seconds") == delete!(copy(step), "seconds")
+        @test same(EndeavorRuntime.snapshot(nb)["packages"])
+        @test same(only(EndeavorRuntime._notebook_summaries(session))["packages"])
+
+        # No log yet, and a step Pluto names that the runtime doesn't know.
+        empty!(nb.nbpkg_terminal_outputs)
+        Pluto.Status.report_business_finished!(pkg, :precompile)
+        Pluto.Status.report_business_started!(pkg, :something_new)
+        @test EndeavorRuntime.package_step(nb)["step"] == "something_new"
+        @test EndeavorRuntime.package_step(nb)["last_line"] === nothing
+
+        Pluto.Status.report_business_finished!(nb.status_tree, :pkg)
+        @test EndeavorRuntime.package_step(nb) === nothing
+
+        # A Pluto whose internals changed shape: no package step, not an error.
+        @test EndeavorRuntime.package_step((; notebook_id = nb.notebook_id)) === nothing
+    end
+
     @testset "graph: the packages each cell loads, as the cells are now" begin
         session, nb, cells = make_session_with_notebook("using Statistics, Dates", "import LinearAlgebra: norm", "using Dates", "x = 1")
         graph = EndeavorRuntime.graph(nb; fresh=true, packages=true)

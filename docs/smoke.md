@@ -18,6 +18,7 @@ With Julia 1.12 and a signed-in `claude` on the PATH:
 ```sh
 scripts/smoke.sh                       # every task in smoke/tasks
 scripts/smoke.sh --only N1-new,N4-long-run
+scripts/smoke.sh --model claude-haiku-4-5    # a model other than the agent's default
 ```
 
 The script builds `endeavor` and `endeavor-smoke`, then runs the tasks one at
@@ -94,9 +95,9 @@ task with an empty depot of its own, for a first install.
 
 A task that fails runs twice more. It is **failing** if all three runs fail,
 and **flaky** if only some do. A task whose `checks.json` has
-`"expected_to_fail": "#58"` fails today on that issue: it runs once, shows
-as an **expected failure**, and doesn't fail the run. When it passes, the
-summary says the issue may be fixed. Read why before blaming the agent: in the
+`"expected_to_fail"` naming an issue (`"#58"`) fails today on that issue: it
+runs once, shows as an **expected failure**, and doesn't fail the run. When it
+passes, the summary says the issue may be fixed. No task has it now. Read why before blaming the agent: in the
 first runs, N1 was flaky because its check wanted `4.978` and Claude
 sometimes rounded to `4.979`. The check was wrong.
 
@@ -188,7 +189,7 @@ something subtle, make it soft.
 | `N6-conflict` | change a value; someone else changes a cell it depends on just before the edit | `run_conflict`: the agent reads the change, runs again, keeps the other person's edit |
 | `N7-plot` | a plot | the agent looks at the picture (`view_cell_output`) before it reports |
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
-| `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: expected to fail until #58 is fixed |
+| `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: the agent waits through it and reports the table (#58) |
 | `M1-machine` | add my server and compute something in a notebook there; then "yes, install it" | `add_machine`'s `needs_install`: the agent asks first and installs only after the yes, then works on the server |
 | `M2-no-reach` | a notebook on a server that refuses connections | the agent reports the failure, doesn't ask for a password, and makes no notebook here instead |
 
@@ -210,10 +211,38 @@ need their own version of those parts.
 
 ## When a user reports a problem
 
-The error code in a tool result, or what the agent did, points to a task.
-For example, `stale_read` belongs to N5, `run_conflict` to N6, "it ran my cells
-twice" is N4, and "it ran a notebook I only opened" is N3. Run that task
-here at the user's version and on `main`. If it fails with Claude too, the
-bug is ours. If it passes with Claude, our text reads differently to the
-user's agent; tune it with their help, and keep Claude passing. A report
-that no task covers becomes a new task.
+Users report a problem with the agent on the issue form "The agent did
+something wrong" (`.github/ISSUE_TEMPLATE/agent-problem.yml`). It asks for
+the agent and its version, the model if known, Endeavor's version, where the
+notebook ran, the prompt, what went wrong, any error code in the tool
+results, the agent's last message and `endeavor status`, and tells people
+to take out secrets, folder paths and server names first.
+
+1. **Find the task.** The error code, or what the agent did, points to one:
+
+   | In the report | Task |
+   |---|---|
+   | `already_open`, "it couldn't fix the error in my open notebook" | N2 |
+   | `stale_read` | N5 |
+   | `run_conflict` | N6 |
+   | `one_notebook`, a second notebook | N8 |
+   | `still_running`, "it ran my cells twice" | N4 |
+   | "it ran a notebook I only opened" | N3 |
+   | a plot it described without looking | N7 |
+   | `needs_install`, an install it didn't ask about | M1 |
+   | a server it couldn't reach, a password prompt | M2 |
+   | a first package install that looked stuck | N9 |
+
+2. **Find whose problem it is.** Run that task with Claude at the reporter's
+   build, then on `main`. A `Release:` line in their `endeavor status` means
+   a released build: `scripts/helpers.sh --key` at a commit prints that key,
+   so finding the commit needs no build. A local build has no such line, and
+   its build in `endeavor --version` is a hash of the source, not a commit:
+   finding it means building commits until one matches. Often `main` alone
+   settles it. If it fails with Claude too, the bug is ours: fix it, and the task
+   now guards it. If it passes with Claude and the reporter used another
+   agent, that agent reads our text differently: tune the skill text with the
+   reporter's help, and keep Claude passing. If it passes everywhere, it
+   depended on their data, model or setup; ask for the notebook.
+3. **No task covers it:** write one from the report, with a prompt as close
+   to theirs as their data allows.

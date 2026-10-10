@@ -8,7 +8,9 @@ runs those two on Linux for each PR or push that changes `crates/`, `runtime/`,
 started by hand from the Actions tab. It is
 separate from CI, so CI's checks don't wait for it, and it fails when a test
 skips for want of Julia. The agent smoke suite, which runs fixed notebook
-tasks through Claude Code, is in [smoke.md](smoke.md). Endeavor's own checks,
+tasks through Claude Code, is in [smoke.md](smoke.md), with what to do
+with a user's report on the "The agent did something wrong" issue form.
+Endeavor's own checks,
 including the smoke test in the app, are in
 [Endeavor's testing.md](https://github.com/jowch/Endeavor/blob/main/docs/testing.md).
 

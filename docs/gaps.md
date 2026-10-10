@@ -699,6 +699,23 @@ not supported. These gaps stay open.
   before the cell runs, the cell is not staged any more. If the agent runs the
   still-running cells again, Pluto queues the run as it does for an unwaited
   one; `run_conflict` only covers another session's edits.
+- [P3] **A first package install is waited for only through `read_cell`.**
+  Pluto installs and precompiles a notebook's new packages before any cell
+  runs, with the cells queued; the first time that takes minutes (#58). The
+  runtime reports the step (`packages`: step, packages, seconds so far, the
+  log's last line) in snapshots, `list_notebooks` and `pluto_session_status`,
+  and a run's receipt and `read_cell` add a `message`. Only `read_cell` on a
+  queued cell waits for it, up to 45 seconds a call, so the agent's polls are
+  spaced out. Not covered: the new notebook's own Julia starting (seconds,
+  not minutes), and a Pluto that changes its status tree's names, which the
+  step names come from (`_PKG_STEPS` in `Adapter.jl`; an unknown name is shown
+  as is; a change that breaks the read reports no step rather than failing).
+  After 10 minutes the text tells the agent to wait only while the log's last
+  line changes, since a step can hang (another notebook's install, a registry
+  update on a node with no outside network). URLs in that line lose any
+  `user:token@`. The runtime reads Pluto's package log, a plain `Dict` that
+  Pluto writes from its own task; that is safe while Julia runs one thread,
+  not if a user sets `JULIA_NUM_THREADS`.
 - [P2] **A call that waits for the user's answer stops waiting at 45
   seconds, or 20 for `open_notebook` and `new_notebook`.** Before, it waited
   as long as the card was up, and Claude Code ended it at 60 seconds: in
@@ -775,11 +792,14 @@ plugins). The rest of this file can wait or go alongside.
   (`release::helper_for`), so once its build's Linux files are gone it can't
   set one up, and says only "Couldn't get the helper for linux x86_64 servers
   from the release: Couldn't download ..." with a 404. The Linux files of the
-  newest 100 builds stay, which at 2026-10-09's pace is about a week and at a
-  quieter pace a month or more. A plugin installed from an older commit, on a
-  computer that hasn't downloaded its binary yet, also hears from the launcher
-  (install.sh exits 3) that the build "is still being published. Reconnect in
-  a few minutes", which never comes true. To close: both messages say the
+  newest 150 builds stay, which at 2026-10-09's pace (19 builds) is about 8
+  days and at a quieter pace a month or more. A plugin installed from an older
+  commit, on a computer that hasn't downloaded its binary yet, also hears from
+  the launcher (install.sh exits 3) that the build "is still being published.
+  Reconnect in a few minutes", which never comes true. Since whole builds are
+  kept 3 days rather than 7 (2026-10-10), that first download is protected
+  only by the 3 days and the last 40 pins (two or three days at that pace),
+  so this message is more likely than before. To close: both messages say the
   build is too old and how to update (`endeavor update`, or update the
   plugin), when the build is missing and LATEST names another; or publish
   each build to a release of its own, so nothing has to be pruned.

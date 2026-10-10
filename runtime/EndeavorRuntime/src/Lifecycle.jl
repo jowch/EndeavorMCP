@@ -52,6 +52,7 @@ function _notebook_summaries(session)
             "notebook_id" => string(nb.notebook_id),
             "path"        => nb.path,
             "cell_count"  => length(nb.cell_order),
+            "packages"    => package_step(nb),
         )
         for nb in values(session.notebooks)
     ]
