@@ -240,8 +240,6 @@ fn free_ports() -> Result<[u16; 2], String> {
 /// Where R's adapter writes its state for the core, in the state folder.
 const R_STATE: &str = "r.json";
 
-/// The Ember commit R notebooks use (https://github.com/jowch/Ember), installed
-/// from source the first time one is opened (`runtime/r/install.R`).
 /// Ember's page secret, which is the core's to make: R is handed it, not asked for it. It goes into
 /// page URLs and a cookie, so it is hex; and it is 32 random bytes, more than Ember's own
 /// `random_secret(32)` (32 letters and digits, about 190 bits).
@@ -249,6 +247,8 @@ fn ember_secret() -> Result<String, String> {
     crate::random_hex::<32>()
 }
 
+/// The Ember commit R notebooks use (https://github.com/jowch/Ember), installed
+/// from source the first time one is opened (`runtime/r/install.R`).
 pub const EMBER_COMMIT: &str = "0176bea6c969d3e6a9dd1d825f9672d62b1959d2";
 
 /// Why R didn't start when its shell line ended well.
