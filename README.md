@@ -121,8 +121,10 @@ Ask the agent for notebook work, for example:
 >
 > Open `analysis.jl` and fix the cell that fails.
 
-The agent gives you a browser address. Open it to watch the notebook. It is
-Pluto's own page, so you can read, edit and run cells there too. The agent can:
+The notebook opens in your browser when the agent makes or opens it. It is
+Pluto's own page, so you can read, edit and run cells there too. If it doesn't
+open (on a computer you reach over ssh, say), the agent gives you the address,
+and the page says how to get in. The agent can:
 
 - Create a notebook, or open one you have. An opened notebook starts in safe
   preview: nothing runs until you click **Run notebook code** or ask the agent
@@ -176,9 +178,10 @@ the machine's home folder.
   ssh -L PORT:127.0.0.1:PORT HOST
   ```
 
-  Then open `http://localhost:PORT/?token=TOKEN`. `TOKEN` is the content of the
-  file `token` in the runtime's state folder on the server, by default
-  `~/.local/state/endeavor/serve/<server's host name>/`. On a cluster the
+  A browser that opened the notebooks during the session still gets in at
+  `http://localhost:PORT/`. Another browser gets a page that names the
+  `endeavor open` command to run on the server, which prints the link with the
+  runtime's token. On a cluster the
   runtime is on a compute node, and there is no supported way to open it
   between sessions.
 

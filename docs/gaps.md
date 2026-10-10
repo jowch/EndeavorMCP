@@ -854,6 +854,21 @@ plugins). The rest of this file can wait or go alongside.
 
 ## Not checked or not designed
 
+- [P2] **The MCP token still opens Pluto's page.** Tool results no longer carry
+  the runtime's token (`browser_url` has none; the `mcp` front opens the
+  notebook in the user's browser itself), but the bearer header an agent's MCP
+  client sends is also accepted on Pluto's routes, past the notebook tools and
+  the app's run gate. The app relies on it for exports (`pluto::fetch`). A
+  separate page token would only help against a client that leaks its MCP
+  config: an agent that runs shell commands as the user can read the token
+  file either way. To close: a page token apart from the bearer, given to the
+  app with `page_url`, and the bearer refused on page routes.
+- [P3] **Opening the browser is not tried on a real desktop by the tests.** A
+  debug build never opens one (`ENDEAVOR_TEST_BROWSER` records the link), so
+  `open` on macOS, `rundll32` on Windows and `xdg-open` on Linux have not been
+  tried on a desktop yet. Each `new_notebook` or `open_notebook` opens a tab, also for a
+  notebook that is open already.
+
 - [P2] **A second session's edit can replace a first session's edit made a
   moment earlier, and neither is told.** It happens when the second session
   read the cell after the first one wrote it: the edit is then valid for the

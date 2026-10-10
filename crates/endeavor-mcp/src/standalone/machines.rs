@@ -1334,7 +1334,7 @@ impl Relay {
             "machine": name,
             "state": "ready",
             "ready": true,
-            "browser_url": browser_link(route.port, &route.token, "/"),
+            "browser_url": browser_link(route.port, "/"),
             "folder": target.folder.clone().or(home),
         });
         if target.is_local() {
@@ -1354,9 +1354,8 @@ impl Relay {
         };
         let ends = job_json(&reached.status).and_then(|j| j["ends_in_minutes"].as_u64()).map(|m| format!(" The job ends in {}.", wire::slurm::duration_text(m as u32))).unwrap_or_default();
         result["message"] = format!(
-            "{on} (node {}). Give the user this address to watch the notebooks: {}.{ends}{} This session has no notebook on {name} yet, unless it is still in one it made there that is open (`list_notebooks` shows `this_session`): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
+            "{on} (node {}). When you make or open a notebook there, it opens in the user's browser.{ends}{} This session has no notebook on {name} yet, unless it is still in one it made there that is open (`list_notebooks` shows `this_session`): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
             runtime.node,
-            result["browser_url"].as_str().unwrap_or_default(),
             reach_text(server, runtime)
         )
         .into();
@@ -1477,7 +1476,7 @@ fn reach_text(server: &Server, runtime: &RuntimeInfo) -> String {
         return format!(" The page works while this session is connected. The runtime is on node {}, port {port}, behind the login node, so there is no ssh command for it between sessions.", runtime.node);
     }
     let via = server.port.map(|p| format!(" -p {p}")).unwrap_or_default();
-    format!(" The page works while this session is connected. Once it has ended, `ssh -L {port}:127.0.0.1:{port}{via} {}` run on the user's computer reaches the runtime on port {port}, with the same token.", server.ssh_host)
+    format!(" The page works while this session is connected. Once it has ended, `ssh -L {port}:127.0.0.1:{port}{via} {}` run on the user's computer reaches the runtime on port {port}, at http://localhost:{port}/ in a browser that opened its notebooks in this session.", server.ssh_host)
 }
 
 /// What `stop_machine` says, without `force`, when Julia is starting or a job is queued: other

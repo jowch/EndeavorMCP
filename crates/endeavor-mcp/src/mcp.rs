@@ -120,10 +120,26 @@ pub struct Standalone {
     pub host: Option<String>,
 }
 
-/// A link to `target` on Pluto's page, at `port` on this computer, that lets a browser in.
-pub(crate) fn browser_link(port: u16, token: &str, target: &str) -> String {
-    let join = if target.contains('?') { '&' } else { '?' };
-    format!("http://localhost:{port}{target}{join}token={token}")
+/// A link to `target` on Pluto's page, at `port` on this computer, for a browser that has been let
+/// in (it has the runtime's cookie). It carries no token: this is the link tool results give, and
+/// an agent is never given the runtime's token.
+pub(crate) fn browser_link(port: u16, target: &str) -> String {
+    format!("http://localhost:{port}{target}")
+}
+
+/// `url` with the runtime's `token`, which lets a browser in: its first visit gets the cookie. Only
+/// for the user's own browser and terminal, never for a tool result.
+pub(crate) fn entry_link(url: &str, token: &str) -> String {
+    let join = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{join}token={token}")
+}
+
+/// `url` without any `token` query parameter: a runtime from before tool results stopped carrying
+/// the token still puts it in `browser_url`.
+pub(crate) fn without_token(url: &str) -> String {
+    let Some((path, query)) = url.split_once('?') else { return url.to_owned() };
+    let rest: Vec<&str> = query.split('&').filter(|pair| !pair.is_empty() && !pair.starts_with("token=")).collect();
+    if rest.is_empty() { path.to_owned() } else { format!("{path}?{}", rest.join("&")) }
 }
 
 /// What every client connection shares.
@@ -440,7 +456,8 @@ impl Bridge {
     /// Without the app, the user watches notebooks in a browser: the results
     /// that name a notebook, or the session, carry the link to it. A caller
     /// that says which port its browser uses (`X-Endeavor-Browser-Port`) gets it on any
-    /// runtime; otherwise only a standalone runtime adds one, with its own port.
+    /// runtime; otherwise only a standalone runtime adds one, with its own port. The link has no
+    /// token: the `mcp` front opens the notebook in the user's browser with it, and `serve` prints it.
     fn add_browser_url(&self, tool: &str, caller: &Caller, result: &mut Value) {
         let Some(port) = caller.browser_port.or_else(|| self.standalone.as_ref().map(|s| s.port)) else { return };
         let Value::Object(fields) = result else { return };
@@ -455,7 +472,7 @@ impl Bridge {
             "pluto_session_status" => "/".to_owned(),
             _ => return,
         };
-        fields.insert("browser_url".into(), browser_link(port, &self.token, &target).into());
+        fields.insert("browser_url".into(), browser_link(port, &target).into());
     }
 
     /// Wait for the user's answer to a call the session's policy holds
@@ -992,6 +1009,17 @@ fn write_string(out: &mut String, text: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_link_without_the_token_and_the_one_that_lets_a_browser_in() {
+        assert_eq!(super::browser_link(9, "/edit?id=a"), "http://localhost:9/edit?id=a");
+        assert_eq!(super::entry_link("http://localhost:9/edit?id=a", "t"), "http://localhost:9/edit?id=a&token=t");
+        assert_eq!(super::entry_link("http://localhost:9/", "t"), "http://localhost:9/?token=t");
+        assert_eq!(super::without_token("http://localhost:9/edit?id=a&token=t"), "http://localhost:9/edit?id=a");
+        assert_eq!(super::without_token("http://localhost:9/?token=t"), "http://localhost:9/");
+        assert_eq!(super::without_token("http://localhost:9/edit?token=t&id=a"), "http://localhost:9/edit?id=a");
+        assert_eq!(super::without_token("http://localhost:9/edit?id=a"), "http://localhost:9/edit?id=a");
+    }
+
     #[test]
     fn an_open_waits_less_for_the_users_answer_than_a_run_so_the_open_after_it_fits_in_a_minute() {
         use std::time::Duration;

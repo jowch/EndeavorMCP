@@ -1251,7 +1251,7 @@ fn results_carry_a_browser_url_on_the_port_a_caller_names() {
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{reply}"))).unwrap()
     };
     assert_eq!(status(&[("X-Endeavor-Session", "7")]).get("browser_url"), None, "without the header, a runtime the app or a helper started has none");
-    assert_eq!(status(&[("X-Endeavor-Browser-Port", "45678")])["browser_url"], format!("http://localhost:45678/?token={TOKEN}"), "through a front's connection, whatever started the runtime");
+    assert_eq!(status(&[("X-Endeavor-Browser-Port", "45678")])["browser_url"], "http://localhost:45678/", "through a front's connection, whatever started the runtime; it never holds the token");
     for bad in ["0", "65536", "-1", "http", ""] {
         assert_eq!(status(&[("X-Endeavor-Browser-Port", bad)]).get("browser_url"), None, "{bad:?}");
     }
@@ -1267,9 +1267,9 @@ fn results_carry_a_browser_url_on_the_port_a_caller_names() {
         let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), caller).1).unwrap();
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
     };
-    assert_eq!(status(&[])["browser_url"], format!("http://localhost:{own}/?token={TOKEN}"));
-    assert_eq!(status(&[("X-Endeavor-Browser-Port", "45678")])["browser_url"], format!("http://localhost:45678/?token={TOKEN}"), "the caller's port wins");
-    assert_eq!(status(&[("X-Endeavor-Browser-Port", "0")])["browser_url"], format!("http://localhost:{own}/?token={TOKEN}"), "a bad one is ignored");
+    assert_eq!(status(&[])["browser_url"], format!("http://localhost:{own}/"));
+    assert_eq!(status(&[("X-Endeavor-Browser-Port", "45678")])["browser_url"], "http://localhost:45678/", "the caller's port wins");
+    assert_eq!(status(&[("X-Endeavor-Browser-Port", "0")])["browser_url"], format!("http://localhost:{own}/"), "a bad one is ignored");
 }
 
 #[test]
@@ -1503,6 +1503,13 @@ fn a_browser_gets_in_with_its_link_and_then_reaches_only_plutos_page() {
     let origin = format!("Origin: http://127.0.0.1:{}\r\n", core.port + 1);
     assert_eq!(ask(&format!("GET /edit?id=n1 HTTP/1.1\r\n{host}{origin}{cookie}\r\n")), refused("403 Forbidden", "browser_origin_refused"), "another runtime's page");
     assert_eq!(ask(&format!("GET /?token=nope HTTP/1.1\r\n{host}\r\n")), refused("401 Unauthorized", "unauthorized"));
+    // A browser opening a page without the cookie, as from the link in a tool result, is told how to get in.
+    for page in ["Sec-Fetch-Dest: document\r\n", "Accept: text/html,application/xhtml+xml\r\n"] {
+        let (status, body) = ask(&format!("GET /edit?id=n1 HTTP/1.1\r\n{host}{page}\r\n"));
+        assert!(status == "HTTP/1.1 401 Unauthorized" && body.contains("endeavor open") && !body.contains(TOKEN), "{page}: {status} {body}");
+    }
+    let script = ask(&format!("GET /editor.js HTTP/1.1\r\n{host}Sec-Fetch-Dest: script\r\nAccept: text/html\r\n\r\n"));
+    assert_eq!(script, refused("401 Unauthorized", "unauthorized"), "only a page gets the page");
     assert_eq!(bridge.pluto_seen().len(), 1);
 }
 

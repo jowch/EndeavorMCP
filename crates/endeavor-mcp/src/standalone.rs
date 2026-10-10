@@ -11,6 +11,7 @@
 //!   outlives the agent and ends itself after the idle stop, and relays MCP
 //!   between stdin/stdout and the runtime's `/mcp`.
 //! - `stop` ends the runtime running from the state folder.
+//! - `open` lets the user's browser in to it, with the link that holds its token.
 //! - `status` says what Endeavor has on this computer, and changes nothing.
 //!
 //! `runtime/` is built into this binary (build.rs) and unpacked to a folder
@@ -34,6 +35,7 @@ use crate::{Args, Launcher, embedded, julia, stopped};
 use machines::Need;
 use target::{Local, Target};
 
+mod browser;
 mod machines;
 mod projects;
 mod status;
@@ -44,6 +46,7 @@ const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Julia here and print 
        endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
        endeavor stop [--force]    stop the Julia that serve or mcp started; --force cancels a start under way
        endeavor status [--json]   show what Endeavor has on this computer; changes nothing
+       endeavor open              open the notebooks of the Julia that serve or mcp started in your browser
 
 options:
   --folder DIR         where new notebooks go (default: the current folder)
@@ -55,7 +58,7 @@ options:
   --julia-shell LINE   a shell line that puts julia on the PATH, such as 'module load julia'
   --depot DEPOT        JULIA_DEPOT_PATH (default ~/.cache/endeavor/depot:, or $SCRATCH/endeavor/depot:)
   --idle-stop HOURS    stop notebooks unused this long; 0 never (default 48)
-  --state-dir DIR      the runtime's state (default ~/.local/state/endeavor/serve/<host>) [serve, mcp, stop, status]
+  --state-dir DIR      the runtime's state (default ~/.local/state/endeavor/serve/<host>) [serve, mcp, stop, status, open]
   --json               print the facts as one JSON object [status]
   --force              end Julia while it is still starting, with what it began [stop]
 ";
@@ -73,6 +76,7 @@ pub(crate) enum Command {
     Mcp(Options),
     Stop { state_dir: PathBuf, force: bool },
     Status { state_dir: PathBuf, json: bool },
+    Open { state_dir: PathBuf },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,7 +100,7 @@ pub(crate) struct Options {
 }
 
 pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
-    let (command, rest) = argv.split_first().ok_or("expected serve, mcp, stop or status")?;
+    let (command, rest) = argv.split_first().ok_or("expected serve, mcp, stop, status or open")?;
     let (mut state_dir, mut julia, mut depot, mut folder, mut port) = (None, None::<julia::Source>, None, None, 0);
     let (mut host_tools, mut idle_hours, mut skills_plugin, mut json, mut force, mut no_folder) = (false, crate::notebooks::IDLE_HOURS, false, false, false, false);
     let mut args = rest.iter();
@@ -160,6 +164,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     match command.as_str() {
         "stop" => return Ok(Command::Stop { state_dir, force }),
         "status" => return Ok(Command::Status { state_dir, json }),
+        "open" => return Ok(Command::Open { state_dir }),
         _ => {}
     }
     let folder = match folder {
@@ -187,7 +192,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     }
 }
 
-/// `endeavor serve|mcp|stop|status …`.
+/// `endeavor serve|mcp|stop|status|open …`.
 pub fn main(argv: &[String]) -> ! {
     if argv.iter().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
@@ -203,6 +208,7 @@ pub fn main(argv: &[String]) -> ! {
         Command::Mcp(options) => relay(options),
         Command::Stop { state_dir, force } => stop(&state_dir, force),
         Command::Status { state_dir, json } => status::main(&env, &state_dir, json),
+        Command::Open { state_dir } => open(&state_dir),
     }
 }
 
@@ -705,6 +711,31 @@ fn stop(dir: &Path, force: bool) -> ! {
     std::process::exit(0)
 }
 
+/// `open`: let the user's browser in to the runtime running from `dir`, with the link that holds its
+/// token, which tool results don't carry. The browser is opened when this computer shows one;
+/// otherwise the link is printed.
+fn open(dir: &Path) -> ! {
+    let failed = |message: String| -> ! {
+        eprintln!("{message}");
+        std::process::exit(1)
+    };
+    match runtime::look(dir, false, true) {
+        Looked::Running(state, port) => {
+            let link = crate::mcp::entry_link(&crate::mcp::browser_link(port, "/"), &state.token);
+            if browser::open(&link) {
+                println!("Opened Endeavor's notebooks in your browser.");
+            } else {
+                println!("Open this link in your browser. It holds the notebooks' key: don't share it.\n    {link}");
+            }
+        }
+        Looked::OtherNode(state) => failed(format!("The Julia recorded in {} runs on {}, not here ({}). Run `endeavor open` there.", dir.display(), state.node, crate::hostname())),
+        Looked::Silent(_) => failed("Julia is running but not answering. Try again in a moment.".into()),
+        Looked::Older(_) => failed(format!("The Julia running from {} was started by an older Endeavor, which has no page for a browser. `endeavor stop` stops it.", dir.display())),
+        Looked::NotRunning | Looked::Dead(_) => failed(format!("No Julia is running from {}.", dir.display())),
+    }
+    std::process::exit(0)
+}
+
 /// `mcp`: the agent's MCP messages, one JSON-RPC message per line on stdin,
 /// relayed to the runtime's `/mcp` and the answers written to stdout.
 struct Relay {
@@ -890,7 +921,6 @@ impl Relay {
                 self.write(&self.decorate(&message, tool.as_deref(), tool_failure(id, &message, &why)));
             }
         };
-        let sink = |reply: String| self.write(&self.decorate(&message, tool.as_deref(), reply));
         // These two use a runtime that is running, and start none.
         let need = match tool.as_deref() {
             Some("pluto_session_status") => Need::Peek,
@@ -902,6 +932,7 @@ impl Relay {
                 Ok(route) => route,
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
+            let sink = |reply: String| self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, reply)));
             match self.post(&route, line, &sink) {
                 Ok(()) => return,
                 Err(Sent::NotConnected(e)) if attempt == 0 => {
@@ -910,6 +941,26 @@ impl Relay {
                 Err(Sent::NotConnected(e) | Sent::Failed(e)) => return failed(format!("Endeavor's Julia didn't answer: {e}")),
             }
         }
+    }
+
+    /// A runtime's reply to the agent's call, with no token in its `browser_url` (a runtime from
+    /// before results stopped carrying it still adds one), and the notebook that `new_notebook` or
+    /// `open_notebook` made or opened opened in the user's browser, with the link that lets the
+    /// browser in. Each such call opens it, so that asking the agent to open it again works.
+    /// `opened_in_browser` says whether it was opened.
+    fn in_browser(&self, message: &Value, tool: Option<&str>, route: &Route, reply: String) -> String {
+        let Ok(mut parsed) = serde_json::from_str::<Value>(&reply) else { return reply };
+        if parsed["id"] != message["id"] || parsed["result"]["isError"] != false {
+            return reply;
+        }
+        let Some(Value::Object(mut fields)) = parsed["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()) else { return reply };
+        let Some(url) = fields.get("browser_url").and_then(Value::as_str).map(crate::mcp::without_token) else { return reply };
+        if matches!(tool, Some("new_notebook" | "open_notebook")) {
+            fields.insert("opened_in_browser".into(), browser::open(&crate::mcp::entry_link(&url, &route.token)).into());
+        }
+        fields.insert("browser_url".into(), url.into());
+        parsed["result"]["content"][0]["text"] = to_json(&Value::Object(fields)).into();
+        to_json(&parsed)
     }
 
     /// POST one message to the runtime and give what it answers to `sink`.

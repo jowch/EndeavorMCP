@@ -172,7 +172,8 @@ pub fn main(argv: &[String]) -> ! {
         bridge.notebooks.set_idle_limit(hours);
     }
     Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
-    let served = Arc::new(Served { bridge, pluto: OnceLock::new(), ember: Default::default(), cookie });
+    let not_let_in = not_let_in(&open_command(&args.state_dir));
+    let served = Arc::new(Served { bridge, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in });
     let r = Arc::new(RStarter::new(&args, &token_for_r));
     let starting_r = (r.clone(), served.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend| match backend {
@@ -548,6 +549,8 @@ struct Served {
     ember: std::sync::Mutex<Option<Page>>,
     /// The cookie that lets a browser into Pluto's page (`cookie_name`).
     cookie: String,
+    /// What a browser that hasn't been let in sees (`not_let_in`).
+    not_let_in: String,
 }
 
 /// Serve the runtime's port: a thread per client, of which there are only a
@@ -637,8 +640,12 @@ fn serve_client(client: TcpStream, served: &Served) -> io::Result<()> {
             }
             Access::Refused(status, error) => {
                 http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
-                let body = json!({ "error": error }).to_string();
-                http::respond(&mut client, status, Some("application/json"), body.as_bytes(), request.keeps_alive())?;
+                if error == "unauthorized" && route.is_page() && opens_a_page(&request) {
+                    http::respond(&mut client, status, Some("text/html; charset=utf-8"), served.not_let_in.as_bytes(), request.keeps_alive())?;
+                } else {
+                    let body = json!({ "error": error }).to_string();
+                    http::respond(&mut client, status, Some("application/json"), body.as_bytes(), request.keeps_alive())?;
+                }
                 Some(request.keeps_alive())
             }
         };
@@ -786,6 +793,46 @@ fn access(request: &Head, route: Route, token: &str, cookie: &str) -> Access {
         (Some(given), location) if same(given, token) => Access::SetCookie { location },
         _ => Access::Refused("401 Unauthorized", "unauthorized"),
     }
+}
+
+/// What a browser that hasn't been let in sees when it opens one of the pages: the link in a tool
+/// result has no token, so the way in is a link the agent never sees. `open` is the command that
+/// gives one (`open_command`).
+fn not_let_in(open: &str) -> String {
+    let open = open.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    format!(
+        "<!doctype html><meta charset=utf-8><title>Endeavor</title>
+<body style=\"font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; line-height: 1.5\">
+<h1>This browser can't open Endeavor's notebooks yet</h1>
+<p>Endeavor lets a browser in with a link that holds the notebooks' key. The key is kept from your agent, so the link your agent gave you doesn't hold it.</p>
+<ul>
+<li>If an agent works with the notebooks, ask it to open the notebook again: Endeavor opens it in your browser with the key.</li>
+<li>If you started <code>endeavor serve</code>, open the link it printed.</li>
+<li>Or run this in a terminal on the computer where the notebooks run:<br><code>{open}</code></li>
+</ul>
+</body>
+"
+    )
+}
+
+/// The command that lets a browser in to this runtime (`endeavor open`), as this program and the
+/// state folder `dir` are named here: the plugin's program isn't on the PATH.
+fn open_command(dir: &Path) -> String {
+    let quote = |text: &str| if text.is_empty() || text.contains([' ', '"', '\'', '$', '&']) { format!("\"{text}\"") } else { text.to_owned() };
+    let program = std::env::current_exe().map_or_else(|_| "endeavor".to_owned(), |exe| exe.display().to_string());
+    let mut words = vec![quote(&program)];
+    words.extend(crate::HELPER_ARGS.get().copied().unwrap_or_default().iter().map(|arg| arg.to_string()));
+    words.extend(["open".to_owned(), "--state-dir".to_owned(), quote(&dir.display().to_string())]);
+    words.join(" ")
+}
+
+/// Whether `request` is a browser opening a page (not a script, an image or a WebSocket).
+fn opens_a_page(request: &Head) -> bool {
+    request.method() == "GET"
+        && match request.header("Sec-Fetch-Dest") {
+            Some(dest) => dest == "document",
+            None => request.header("Accept").is_some_and(|accept| accept.contains("text/html")),
+        }
 }
 
 /// The name of the cookie that holds `token` for browsers: one per runtime,
@@ -1007,7 +1054,7 @@ mod tests {
 
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.
     fn serving(ember: Option<u16>) -> u16 {
-        let served = Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(TOKEN) });
+        let served = Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(TOKEN), not_let_in: String::new() });
         let _ = served.pluto.set(Page { port: 1, secret: "p".into() });
         let _ = served.bridge.julia.port.set(1);
         *served.ember.lock().unwrap() = ember.map(|port| Page { port, secret: "s3cret".into() });

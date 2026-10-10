@@ -143,6 +143,7 @@ fn the_machine_tools_over_real_slurm() {
             .env("XDG_CACHE_HOME", work.join("cache"))
             .env("ENDEAVOR_TEST_ROOT", &root)
             .env("ENDEAVOR_TEST_STATE", &state)
+            .env("ENDEAVOR_TEST_BROWSER", work.join("opened.txt"))
             .env("ENDEAVOR_TEST_DEPOT", &depot_path)
             .env("ENDEAVOR_START_WAIT_SECS", "45")
             .current_dir(&project);
@@ -225,12 +226,14 @@ fn the_machine_tools_over_real_slurm() {
     let message = ready["message"].as_str().unwrap();
     assert!(message.contains(&format!("node {node}, port {remote_port}")) && !message.contains("ssh -L"), "a compute node's port is given, and no command is promised: {message}");
     let page = ready["browser_url"].as_str().unwrap().to_owned();
-    let (port, token) = page.strip_prefix("http://localhost:").unwrap().split_once("/?token=").map(|(p, t)| (p.parse::<u16>().unwrap(), t.to_owned())).unwrap();
+    let port: u16 = page.strip_prefix("http://localhost:").and_then(|rest| rest.strip_suffix('/')).unwrap_or_else(|| panic!("a page without the token: {page}")).parse().unwrap();
 
     // The notebook runs inside the job.
     let created = one.ok("new_notebook", json!({ "path": "slurm.jl" }));
     let notebook = created["notebook_id"].as_str().expect("a notebook").to_owned();
     let notebook_path = notebooks.join("slurm.jl").display().to_string();
+    let opened = std::fs::read_to_string(work.join("opened.txt")).unwrap();
+    let token = opened.lines().last().and_then(|line| line.strip_prefix(&format!("http://localhost:{port}/edit?id={notebook}&token="))).unwrap_or_else(|| panic!("the browser got the link with the token: {opened}")).to_owned();
     assert_eq!(created["path"], json!(notebook_path), "{created}");
     let order = one.ok("get_cell_order", json!({ "notebook_id": notebook }));
     let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
@@ -384,6 +387,7 @@ fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_
             .env("XDG_CACHE_HOME", work.join("cache"))
             .env("ENDEAVOR_TEST_ROOT", &root)
             .env("ENDEAVOR_TEST_STATE", &state)
+            .env("ENDEAVOR_TEST_BROWSER", work.join("opened.txt"))
             .env("ENDEAVOR_TEST_DEPOT", &depot_path)
             .env("ENDEAVOR_START_WAIT_SECS", "45")
             .current_dir(&project);
