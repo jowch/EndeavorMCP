@@ -2,12 +2,12 @@
 
 Read this only when you work inside the Endeavor app. Nothing here applies to an agent that reaches the notebooks from its own client.
 
-The user sees the notebook in a pane next to the chat. The pane shows Julia notebooks only, so make and open `.jl` notebooks here; if the user asks for R, tell them R notebooks don't open in the app yet. `new_notebook` and `open_notebook` switch the pane to that notebook, so there is no address to give and nothing to tell the user to open, unless a result carries `browser_url`: then give it to the user.
+The user sees the notebook in a pane next to the chat. `new_notebook` and `open_notebook` switch the pane to that notebook, so there is no address to give and nothing to tell the user to open, unless a result carries `browser_url`: then give it to the user.
 
 ## Which notebook and cells a prompt means
 
-- A prompt that starts "[Endeavor] The user is viewing Pluto notebook {id} in the notebook pane" names the notebook to work in, unless the user names another.
-- A prompt that starts "[Endeavor] The user annotated notebook cells" carries `notebook://pluto/{notebook_id}/cell/{cell_id}` links and then the user's comment on those cells. The links can't be fetched; they give the ids. Call `read_cell` on every linked cell before you answer, since the comment may be about how the cells relate, and `view_cell_output` if it is about how an output looks. Answer from what the cells hold now, not from what the pane showed when the user clicked.
+- A prompt that starts "[Endeavor] The user is viewing notebook {id} in the notebook pane" names the notebook to work in, unless the user names another.
+- A prompt that starts "[Endeavor] The user annotated notebook cells" carries `notebook://pluto/{notebook_id}/cell/{cell_id}` links (`notebook://ember/…` for an R notebook) and then the user's comment on those cells. The links can't be fetched; they give the ids. Call `read_cell` on every linked cell before you answer, since the comment may be about how the cells relate, and `view_cell_output` if it is about how an output looks. Answer from what the cells hold now, not from what the pane showed when the user clicked.
 
 ## Approval
 

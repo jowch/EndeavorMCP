@@ -56,8 +56,9 @@ pub const MACHINE_NAMES: [&str; 4] = ["list_machines", "add_machine", "use_machi
 /// Tools that were renamed, as (old name, name now). `tools/list` shows only the name now, so an
 /// agent sees one tool and calls it by that name. A call by the old name still runs for one release:
 /// one an agent took from text written before the rename (an older skill copy, an app from before
-/// its pin, the user's own notes). Drop the old names in the release after.
-const RENAMED_TOOLS: [(&str, &str); 1] = [("pluto_session_status", "session_status")];
+/// its pin, the user's own notes). Drop the old names in the release after. None now:
+/// `pluto_session_status` (now `session_status`) was dropped after its release.
+const RENAMED_TOOLS: [(&str, &str); 0] = [];
 
 /// The name tool `name` has now: the new name of a renamed tool, else `name` itself.
 pub(crate) fn current_name(name: &str) -> &str {
@@ -563,18 +564,6 @@ impl Bridge {
     fn refusal(&self, caller: &Caller, tool: &str, arguments: &Value) -> Option<String> {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(host_tool_refusal(tool));
-        }
-        // ponytail: the app's pane shows only Pluto's page, so its agents get no R notebooks until it shows Ember's.
-        // A caller is the app's when the runtime isn't standalone and the caller isn't `endeavor mcp`'s front,
-        // whether here (`front`) or on a server, where the front's calls carry a browser port and the app's don't.
-        let from_app = self.standalone.is_none() && !caller.front && caller.browser_port.is_none();
-        let r_path = match arguments.get("path").filter(|path| !path.is_null()) {
-            Some(path) => path.as_str().is_some_and(|path| notebooks::backend_of_path(path) == wire::backend::Backend::Ember),
-            // A new notebook without a path is of the session's kind.
-            None => tool == "new_notebook" && self.notebooks.kind(&caller.owner) == Some(wire::backend::Backend::Ember),
-        };
-        if from_app && matches!(tool, "new_notebook" | "open_notebook") && r_path {
-            return Some("ArgumentError: unsupported::R notebooks don't open in the Endeavor app yet. Tell the user, and offer a Julia notebook (.jl) instead.".into());
         }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
         if plan && (WRITE_TOOLS.contains(&tool) || runs_code(tool, arguments)) {
@@ -1121,7 +1110,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (6, "00783e892a3fcb3d"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (7, "00783e892a3fcb3d"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1168,7 +1157,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (6, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (7, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

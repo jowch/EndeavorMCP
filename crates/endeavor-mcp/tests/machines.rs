@@ -552,7 +552,6 @@ fn a_session_on_a_working_connection_does_not_need_the_machines_file() {
     let text = std::fs::read_to_string(&path).unwrap();
     place.machines().remove("lab").unwrap();
     assert_eq!(front.ok("session_status", json!({}))["machine"], "lab", "the machine left the list");
-    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab", "the tool's old name gets the front's fields too");
     std::fs::write(&path, "{not json").unwrap();
     assert_eq!(front.ok("session_status", json!({}))["machine"], "lab", "the file is broken for a moment");
     std::fs::write(&path, text).unwrap();

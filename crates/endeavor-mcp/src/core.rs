@@ -50,7 +50,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 6;
+pub const INTERFACE: u32 = 7;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -707,6 +707,21 @@ const EMBER_WAIT: Duration = JULIA_WAIT;
 /// What `install.R` exits with when Ember's newest build failed and the one before it is used.
 const KEPT_PREVIOUS: i32 = 3;
 
+/// The answer that offers Endeavor's own R, `item`, when no R is found on the user's Mac. Through
+/// `endeavor mcp` the agent installs it with `use_machine` once the user agrees; the app's agents
+/// have no `use_machine`, so there the user installs it in Settings.
+fn own_r_offer(item: &wire::Item, in_app: bool) -> String {
+    if in_app {
+        format!(
+            "r_not_found::No R was found on this computer. Endeavor can install its own R: {item}. Tell the user they can install it in the app's Settings, under Notebooks, then R. Once it's installed, open the notebook again."
+        )
+    } else {
+        format!(
+            "r_not_found::No R was found here, and Endeavor may install its own R only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then open the notebook again."
+        )
+    }
+}
+
 /// Why R wasn't found, and what the user can do about it: Endeavor installs its own R only on a Mac.
 fn r_not_found(r: &crate::r::Source) -> String {
     format!(
@@ -839,7 +854,7 @@ impl RStarter {
         if cfg!(windows) {
             return Err("unsupported::R notebooks don't work on Windows yet".into());
         }
-        self.own_r()?;
+        self.own_r(served.bridge.standalone.is_none())?;
         let folder = &self.ember_folder();
         if let Some(library) = &self.library {
             return self.launch(served, library);
@@ -944,7 +959,8 @@ impl RStarter {
     /// When `--r auto` finds no R on a Mac, Endeavor's own: nothing when R is there, else why R
     /// notebooks can't open yet. Without the user's yes, the answer asks for it; with it, R is
     /// installed in the background (a minute or two), and the call that starts that returns at once.
-    fn own_r(&self) -> Result<(), String> {
+    /// In the app (`in_app`), whose agents have no `use_machine`, the user installs it from Settings.
+    fn own_r(&self, in_app: bool) -> Result<(), String> {
         use std::sync::atomic::Ordering::SeqCst;
         let Some(item) = self.r.own_item().filter(|_| self.offer_own) else { return Ok(()) };
         if self.shell_has_r.load(SeqCst) {
@@ -965,15 +981,13 @@ impl RStarter {
             }
             Install::Idle | Install::Done(_) if !self.allow_own.load(SeqCst) => {
                 *install = Install::Idle;
-                return Err(format!(
-                    "r_not_found::No R was found here, and Endeavor may install its own R only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then open the notebook again."
-                ));
+                return Err(own_r_offer(&item, in_app));
             }
             Install::Idle | Install::Done(_) => {
                 let state = self.own_install.clone();
                 std::thread::spawn(move || {
                     let done = match crate::r::install_own(&mut |line| eprintln!("{line}")) {
-                        Ok(()) => Install::Idle,
+                        Ok(_) => Install::Idle,
                         Err(why) => {
                             eprintln!("endeavor core: {why}");
                             Install::Failed(format!("r_failed::{why}"))
@@ -1708,6 +1722,15 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_r_is_offered_through_use_machine_or_the_apps_settings() {
+        let item = wire::Item { kind: wire::KIND_RUNTIME.into(), name: "R 4.6.1".into(), size_mb: Some(165), place: Some("/x/R-4.6.1".into()) };
+        let standalone = own_r_offer(&item, false);
+        assert!(standalone.starts_with("r_not_found::") && standalone.contains("`use_machine`") && standalone.contains("R 4.6.1 (about 165 MB"), "{standalone}");
+        let app = own_r_offer(&item, true);
+        assert!(app.starts_with("r_not_found::") && app.contains("Settings, under Notebooks, then R") && !app.contains("use_machine"), "{app}");
+    }
 
     #[test]
     fn ember_builds_read_what_install_r_writes_and_fall_back_to_the_one_before() {

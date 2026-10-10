@@ -25,9 +25,9 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `not_found` | `list_folder`, `read_file` or `run_shell` named a folder or file that isn't there | Check the path |
 | `not_a_file`, `not_a_folder` | `read_file` was given a folder, or `list_folder` a file | Use the other tool |
 | `unsupported` | `run_shell` on a Windows server | Don't use it there |
-| `unsupported` | An R notebook (`.R`) on Windows, in the Endeavor app, or in a runtime without R notebooks | Tell the user R notebooks don't run there yet; offer a Julia notebook |
+| `unsupported` | An R notebook (`.R`) on Windows, or in a runtime without R notebooks | Tell the user R notebooks don't run there yet; offer a Julia notebook |
 | `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Tell the user, then make the same call again in a minute |
-| `r_not_found` | No R was found: `Rscript` isn't on the PATH, or the R set for this machine isn't there. On the user's own Mac, the message offers Endeavor's own R | If it offers Endeavor's own R, ask the user, as the message says; don't pass `install: true` without their yes. Otherwise tell the user how to get R, as the message says |
+| `r_not_found` | No R was found: `Rscript` isn't on the PATH, or the R set for this machine isn't there. On the user's own Mac, the message offers Endeavor's own R | If it offers Endeavor's own R, do what the message says: through `use_machine`, ask the user and don't pass `install: true` without their yes; in the Endeavor app, tell the user to install it in Settings. Otherwise tell the user how to get R, as the message says |
 | `r_failed` | R started but Ember didn't: it couldn't install, or it stopped | Tell the user what the message says; the runtime's log has the rest |
 | `risky_source` | The notebook came from a remote source, so only the user can allow it to run | Ask the user to run it from the notebook |
 | `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take several minutes | Tell the user, then make the same call again in a minute |
