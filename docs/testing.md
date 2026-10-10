@@ -198,8 +198,9 @@ and R. An agent opens an Ember notebook, which starts R's adapter; it reads,
 edits and runs a cell, and the browser link reaches Ember's page at
 `/ember/`. Ctrl-C ends R's adapter with the core. R notebooks aren't open to
 agents yet, so the test sets `ENDEAVOR_TEST_R_NOTEBOOKS` (read only by debug
-builds). It prints `SKIPPED` and passes without Julia or without `Rscript`
-on the PATH. The first run installs Ember at its pinned commit into
+builds). R comes from a `--r-shell` line that puts a wrapper
+`Rscript` on the PATH, and the test checks the line ran. It prints `SKIPPED`
+and passes without Julia or without `Rscript` on the PATH. The first run installs Ember at its pinned commit into
 `~/.cache/endeavor/r`, as a user's first R notebook does. The `E2E` workflow
 runs it too, in a job of its own with R from Ubuntu's packages.
 

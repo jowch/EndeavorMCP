@@ -21,6 +21,7 @@ mod guide;
 mod host_tools;
 mod http;
 mod julia;
+mod r;
 mod mcp;
 mod notebooks;
 pub mod paths;
@@ -75,12 +76,12 @@ use wire::slurm::JobRequest;
 use runtime::{Ended, Hooks, Looked, Outcome, Up, Waiting, Want};
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
+const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
                         (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster;
                          auto is slurm where Slurm's sinfo is, else process)
        endeavor relay --state-dir DIR
-       endeavor node-start --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
-       endeavor core --state-dir DIR --julia JULIA --runtime RUNTIME_DIR --depot DEPOT
+       endeavor node-start --state-dir DIR --julia JULIA [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
+       endeavor core --state-dir DIR --julia JULIA [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT
        endeavor askpass PROMPT
        endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)
        endeavor update                      replace this binary with the newest build (Linux, macOS, Windows)
@@ -90,6 +91,8 @@ const LOG_TAIL: usize = 40;
 struct Args {
     state_dir: PathBuf,
     julia: julia::Source,
+    /// The R for R notebooks, which the core looks for when one is first opened.
+    r: r::Source,
     runtime: PathBuf,
     depot: String,
     launcher: Launcher,
@@ -295,7 +298,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     if args.next().as_deref() != Some("connect") {
         return Err("expected the `connect` command".into());
     }
-    let (mut state_dir, mut julia, mut runtime, mut depot) = (None, None::<julia::Source>, None, None);
+    let (mut state_dir, mut julia, mut runtime, mut depot, mut r) = (None, None::<julia::Source>, None, None, None);
     let (mut quit_with_client, mut any_node, mut launcher, mut build, mut exit_idle) = (false, false, Launcher::Process, None, false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -304,6 +307,8 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             "--julia" | "--julia-shell" if julia.is_some() => return Err("give one of --julia and --julia-shell".into()),
             "--julia" => julia = Some(value().map(|v| if v == "auto" { julia::Source::Auto } else { julia::Source::Path(v) })?),
             "--julia-shell" => julia = Some(julia::Source::Shell(value()?)),
+            "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
+            "--r" | "--r-shell" => r = Some(r::Source::from_flag(&arg, value()?)),
             "--runtime" => runtime = Some(PathBuf::from(value()?)),
             "--depot" => depot = Some(value()?),
             "--launcher" => {
@@ -327,6 +332,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             Launcher::Slurm => paths::Env::here().cluster_state_dir(),
         }),
         julia: julia.ok_or("--julia or --julia-shell is required")?,
+        r: r.unwrap_or_default(),
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
         launcher,
@@ -1311,7 +1317,7 @@ pub(crate) fn random_hex<const N: usize>() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// `endeavor core`, which starts `julia boot.jl` (see core).
+/// `endeavor core`, which starts `julia boot.jl` (see core). Callers add the R flags (`r::Source::args`).
 fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str, build: Option<&str>) -> Result<Command, String> {
     let _ = std::fs::remove_file(state_dir.join("runtime.json"));
     let mut command = Command::new(this_program()?);
@@ -1393,7 +1399,7 @@ fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child,
     let dir = &args.state_dir;
     let (log, stderr) = open_log(&dir.join("runtime.log"))?;
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
-    command.stdout(log).stderr(stderr);
+    command.args(args.r.args()).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
     // SAFETY: setsid and sigprocmask are async-signal-safe.
     unsafe {
@@ -1421,7 +1427,7 @@ fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child,
     let dir = &args.state_dir;
     let (log, stderr) = open_log(&dir.join("runtime.log"))?;
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
-    command.stdout(log).stderr(stderr);
+    command.args(args.r.args()).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
     not_inherited_std_handles();
     // CREATE_NO_WINDOW gives a console-program core a console without a
@@ -1660,6 +1666,9 @@ mod tests {
         assert_eq!((a.state_dir, a.julia, a.depot.as_str()), (PathBuf::from("/s"), julia::Source::Path("/j".into()), "/d:"));
         assert!(a.quit_with_client && !a.any_node && a.launcher == Launcher::Process);
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().julia, julia::Source::Auto);
+        assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().r, r::Source::Auto);
+        assert_eq!(args("connect --state-dir /s --julia auto --r /opt/R/bin/Rscript --runtime /r --depot /d").unwrap().r, r::Source::Path("/opt/R/bin/Rscript".into()));
+        assert!(args("connect --state-dir /s --julia auto --r auto --r-shell x --runtime /r --depot /d").is_err());
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --launcher slurm").unwrap().launcher, Launcher::Slurm);
         assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --launcher pbs").is_err());
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --launcher auto").unwrap().launcher, Launcher::here(), "auto is settled as the helper starts");

@@ -1,0 +1,8 @@
+{
+  "about": "Right after the agent first reads the notebook, someone else changes the rate to 0.4 and runs it.",
+  "when": "after", "tools": ["read_cell", "read_notebook_code"], "notebook": "decay.jl",
+  "steps": [
+    { "tool": "read_cell", "args": { "cell_id": "7c3f2a51-2d4e-4f60-9bac-1d2e3f4a5b01" } },
+    { "tool": "edit_cell", "args": { "cell_id": "7c3f2a51-2d4e-4f60-9bac-1d2e3f4a5b01", "code": "rate = 0.4", "run_after": true } }
+  ]
+}

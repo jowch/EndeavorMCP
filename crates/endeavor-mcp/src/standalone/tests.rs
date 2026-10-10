@@ -25,6 +25,7 @@ fn serve_without_flags_uses_this_folder_and_per_host_state() {
             state_dir: PathBuf::from("/home/ada/.local/state/endeavor/serve/lab3"),
             cache: PathBuf::from("/home/ada/.cache/endeavor/serve"),
             julia: julia::Source::Auto,
+            r: crate::r::Source::Auto,
             depot: "/home/ada/.cache/endeavor/depot:".into(),
             folder: Some(PathBuf::from("/home/ada/project")),
             port: 0,
@@ -51,6 +52,12 @@ fn flags_set_what_they_name() {
     let shell = parse(&["mcp", "--julia-shell", "module load julia", "--skills", "plugin", "--folder", "/abs"].map(String::from), &env());
     let Ok(Command::Mcp(o)) = shell else { panic!() };
     assert_eq!((o.julia, o.skills_plugin, o.folder), (julia::Source::Shell("module load julia".into()), true, Some(PathBuf::from("/abs"))));
+    let Ok(Command::Serve(o)) = parsed("serve --r /opt/R/bin/Rscript") else { panic!() };
+    assert_eq!(o.r, crate::r::Source::Path("/opt/R/bin/Rscript".into()));
+    let Ok(Command::Mcp(o)) = parse(&["mcp", "--r-shell", "module load R"].map(String::from), &env()) else { panic!() };
+    assert_eq!(o.r, crate::r::Source::Shell("module load R".into()));
+    assert!(parsed("serve --r auto --r-shell x").unwrap_err().contains("give one of --r and --r-shell"));
+    assert!(parsed("stop --r auto").unwrap_err().contains("--r isn't an option of stop"));
     assert_eq!(parsed("stop --state-dir /s").unwrap(), Command::Stop { state_dir: PathBuf::from("/s"), force: false });
     assert_eq!(parsed("stop --force --state-dir /s").unwrap(), Command::Stop { state_dir: PathBuf::from("/s"), force: true });
     assert!(parsed("status --force").unwrap_err().contains("--force isn't an option of status"));

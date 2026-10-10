@@ -1,0 +1,8 @@
+{
+  "about": "Just before the agent's first edit reaches the notebook, someone else changes t, which the agent's cell depends on, and runs it.",
+  "when": "before", "tools": ["edit_cell", "edit_cells", "add_cell"], "notebook": "decay.jl",
+  "steps": [
+    { "tool": "read_cell", "args": { "cell_id": "8d4a3b62-3e5f-4071-acbd-2e3f4a5b6c01" } },
+    { "tool": "edit_cell", "args": { "cell_id": "8d4a3b62-3e5f-4071-acbd-2e3f4a5b6c01", "code": "t = 0:20", "run_after": true } }
+  ]
+}
