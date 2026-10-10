@@ -193,12 +193,14 @@ Next:
   when there's a newer build, into `~/.cache/endeavor/r/ember`
   (`$SCRATCH/endeavor/r/ember` on clusters): one library per build, named by
   the SHA256 of its file, and one with any package Ember needs that R lacks or can't load.
-  The call waits up to 30 seconds for that, then returns `r_installing` until
-  it's done. Offline, R starts with the installed Ember. A build that fails to
+  The call waits up to 30 seconds for that. The first install then returns
+  `r_installing` until it's done; an update goes on while R starts with the
+  installed Ember. Offline, R starts with the installed Ember. A build that fails to
   install or load, or that R's adapter doesn't start with, isn't tried again;
   R starts with the build before it, and the agent gets an `ember_previous`
   warning. A `--r-library` is used as it is, never updated. The E2E workflow's
-  R job runs every day against Ember's latest build (#82). The app passes a server's and Settings'
+  R job runs every day against a fresh install of Ember's latest build and fails
+  on a fallback (#82). The app passes a server's and Settings'
   `r` through, with no field to set them yet. The engine
   name a client asks a runtime for (`wire::ENGINE_PLUTO`, a string) is still
   a string; it becomes `Backend` later.

@@ -234,6 +234,8 @@ fn an_r_notebook_through_the_runtime() {
             assert!(opened["error"] == "r_installing" && Instant::now() < deadline, "{opened}");
             std::thread::sleep(Duration::from_secs(5));
         };
+        // A warning here is `ember_previous`: Ember's newest build didn't work, which the daily run is for.
+        assert_eq!(opened.get("warnings"), None, "{opened}");
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("growth.R").display().to_string()), &json!(false)), "{opened}");
         assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}")));
@@ -284,7 +286,7 @@ fn an_r_notebook_through_the_runtime() {
         let mut agent = Agent::new(port, &token);
         agent.initialize();
         let made = agent.ok("new_notebook", json!({ "path": "fresh.R" }));
-        assert!(folder.join("fresh.R").exists() && made["created"] == true, "{made}");
+        assert!(folder.join("fresh.R").exists() && made["created"] == true && made.get("warnings").is_none(), "{made}");
         assert!(wire::backend::Backend::of_file(&folder.join("fresh.R")) == Some(wire::backend::Backend::Ember), "an Ember file");
         let (id, cell) = (made["notebook_id"].as_str().unwrap(), made["cell_ids"][0].as_str().unwrap());
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "warning(\"careful\")\n7", "run_after": true }));
@@ -313,6 +315,12 @@ fn an_r_notebook_through_the_runtime() {
         let opened = agent.ok("open_notebook", json!({ "path": "growth.R" }));
         let read = agent.ok("read_cell", json!({ "notebook_id": opened["notebook_id"], "cell_id": A }));
         assert_eq!(read["code"], "x <- 41", "Ember saved the edit: {read}");
+    });
+
+    step("Ember's newest build installed and loaded: none failed", || {
+        let builds = PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/endeavor/r/ember/ember.dcf");
+        let builds = std::fs::read_to_string(&builds).unwrap();
+        assert!(builds.lines().any(|line| line.trim_end() == "Failed:"), "{builds}");
     });
 
     step("nothing started Julia", || {

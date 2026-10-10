@@ -684,10 +684,18 @@ impl RStarter {
         match self.launch(served, &EmberBuilds::libraries(&self.ember, &builds.current)) {
             Err(why) if why.starts_with(STOPPED_STARTING) && !builds.previous.is_empty() => {
                 eprintln!("endeavor core: R's adapter didn't start with Ember {}; starting it with Ember {}", builds.current, builds.previous);
+                // Read again: another runtime's install may have changed it while R started.
+                let latest = EmberBuilds::read(&self.ember);
+                if latest.current == builds.current {
+                    builds = latest;
+                }
+                let failed = builds.current.clone();
                 builds.fall_back();
                 if let Err(e) = builds.write(&self.ember) {
                     eprintln!("endeavor core: couldn't record that Ember failed: {e}");
                 }
+                // Dated from now for install.R's cleanup, which waits a week: another runtime may have it loaded.
+                let _ = std::fs::File::open(self.ember.join(&failed)).and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
                 let started = self.launch(served, &EmberBuilds::libraries(&self.ember, &builds.current))?;
                 self.tell_previous(served);
                 Ok(started)
@@ -750,14 +758,15 @@ impl RStarter {
     /// (`install.R`), waiting a little for it: true when the newest build failed and the one
     /// before it is used. Installing the first time takes minutes (packages build from source),
     /// longer than an agent's call may wait, so then the call answers `r_installing` and the
-    /// install goes on.
+    /// install goes on. An update that takes longer goes on too, and R starts with the Ember
+    /// installed; the next start uses the new one.
     fn update(&self) -> Result<bool, String> {
         let installing = |updating: bool| {
-            Err(if updating {
-                "r_installing::Updating Ember for R notebooks to its newest build. Try again in a minute.".to_owned()
-            } else {
-                "r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Try again in a minute.".to_owned()
-            })
+            if updating {
+                eprintln!("endeavor core: still updating Ember; starting R with the installed one");
+                return Ok(false);
+            }
+            Err("r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Try again in a minute.".to_owned())
         };
         let updating = !EmberBuilds::read(&self.ember).current.is_empty();
         let mut install = self.install.lock().unwrap();

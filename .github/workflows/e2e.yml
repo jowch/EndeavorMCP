@@ -132,6 +132,12 @@ jobs:
             ~/.cache/endeavor/r
           key: e2e-r-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml', 'runtime/r/install.R') }}-${{ github.run_id }}
           restore-keys: e2e-r-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml', 'runtime/r/install.R') }}-
+      # The daily run installs Ember's latest build afresh (keeping the
+      # packages it needs), so a build that doesn't install or load fails the
+      # test instead of falling back to the cached one.
+      - name: Fresh Ember on the daily run
+        if: github.event_name == 'schedule'
+        run: find ~/.cache/endeavor/r/ember -mindepth 1 -maxdepth 1 ! -name deps -exec rm -rf {} + 2>/dev/null || true
       # As for Julia's: a passing run marks what it restored or installed complete.
       - name: Check depot
         id: depot-r

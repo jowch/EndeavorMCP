@@ -138,13 +138,16 @@ message("Installed Ember ", name, " (commit ", packageDescription("ember", lib.l
 
 state <- read_state()
 if (state$Current != name) {
+  # The build that stops being Previous is dated from now, for the cleanup below.
+  if (nzchar(state$Previous) && state$Previous != name) invisible(Sys.setFileTime(file.path(folder, state$Previous), Sys.time()))
   state$Previous <- if (installed(state$Current)) state$Current else ""
   state$Current <- name
   write_state(state)
 }
 
-# Builds before Previous, a week after they were installed: a runtime started
-# before them may still have one loaded. And unfinished installs a day old.
+# Builds that are neither Current nor Previous, a week after they stopped being
+# either: a runtime started before then may still have one loaded. And
+# unfinished installs a day old.
 others <- setdiff(list.files(folder), c("deps", "ember.dcf", state$Current, state$Previous))
 age <- difftime(Sys.time(), file.mtime(file.path(folder, others)), units = "days")
 unlink(file.path(folder, others[!grepl(".", others, fixed = TRUE) & age > 7]), recursive = TRUE)
