@@ -239,7 +239,7 @@ fn serve_and_mcp_without_the_app() {
         let created = agent.ok("new_notebook", json!({ "path": "analysis.jl" }));
         let notebook = created["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!(created["path"], json!(folder.join("analysis.jl").display().to_string()), "{created}");
-        assert_eq!(created["browser_url"], json!(format!("http://localhost:{port}/edit?id={notebook}&token={token}")));
+        assert_eq!(created["browser_url"], json!(format!("http://localhost:{port}/edit?id={notebook}")), "no token: the agent is never given it");
         let order = agent.ok("get_cell_order", json!({ "notebook_id": notebook }));
         let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
         let added = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "x = 21 * 2", "after_cell_id": last }));
@@ -248,7 +248,7 @@ fn serve_and_mcp_without_the_app() {
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": cell }));
         assert_eq!((&read["output"], &read["errored"]), (&json!("42"), &json!(false)), "{read}");
         let status = agent.ok("pluto_session_status", json!({}));
-        assert_eq!(status["browser_url"], json!(format!("http://localhost:{port}/?token={token}")), "{status}");
+        assert_eq!(status["browser_url"], json!(format!("http://localhost:{port}/")), "{status}");
         assert_eq!(agent.this_session(), vec![("analysis.jl".to_owned(), true)], "the notebook it made is this session's");
         notebook
     });
@@ -363,7 +363,7 @@ fn serve_and_mcp_without_the_app() {
                 break link.to_owned();
             }
         };
-        assert!(link.starts_with("http://localhost:") && link.contains("/?token="), "{link}");
+        assert!(link.starts_with("http://localhost:") && !link.contains("token"), "where the notebooks are, without the token: {link}");
     });
     step("a tool call goes through to the runtime", || {
         send(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
@@ -409,7 +409,7 @@ fn serve_and_mcp_without_the_app() {
 fn said_standalone() -> &'static str {
     "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
 the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
-`new_notebook` and `open_notebook` return `browser_url`: give it to the user. \
+`new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. \
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts. \
 This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \

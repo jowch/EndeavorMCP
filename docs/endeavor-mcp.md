@@ -361,7 +361,13 @@ a port from 1 to 65535, and then the link is on `http://localhost:<port>`, on
 any runtime. That is how a runtime reached through the front's connection (its
 loopback port on the user's computer) gives a link that works there. Without the header, or
 with one that isn't a port, only a runtime started by `serve` or `mcp` adds a
-`browser_url`, on its own port, as before.
+`browser_url`, on its own port, as before. `browser_url` never carries the token:
+it opens in a browser that has the runtime's cookie. The `mcp` front opens the
+notebook of each successful `new_notebook` and `open_notebook` in the user's
+browser with the link that sets the cookie, and adds `opened_in_browser` (false
+where it can't: in a debug build, over ssh, or on Linux without a display). It
+also takes `token=` out of a `browser_url` from an older runtime. A browser that
+opens a page without the cookie gets a page naming `endeavor open`.
 
 **How a runtime ends when idle.** A notebook with no activity for the idle
 limit stops: 48 hours unless the caller sets another (`--idle-stop`,

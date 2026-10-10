@@ -767,7 +767,7 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     assert_eq!(used["node"], this_host());
     assert_eq!(used["folder"], place.dir.join("home/work").display().to_string());
     let port = url_port(&used["browser_url"]);
-    assert_eq!(used["browser_url"], format!("http://localhost:{port}/?token={TOKEN}"));
+    assert_eq!(used["browser_url"], format!("http://localhost:{port}/"), "no token: the agent is never given it");
     assert!(used["message"].as_str().unwrap().contains("no notebook on lab yet"));
 
     // The agent's calls go to the machine's runtime, with its host and browser port.
@@ -2545,5 +2545,42 @@ fn a_front_with_a_folder_still_resolves_relative_paths_in_it() {
     let joined = front.ok("open_notebook", json!({ "path": "a.jl" }));
     assert_eq!((joined["already_open"].clone(), joined["path"].as_str()), (json!(true), Some(path.as_str())), "{joined}");
     assert!(read_record(&place.local_state)["folder"].as_str().is_some());
+    front.finish();
+}
+
+#[test]
+fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
+    let place = Place::new("browser");
+    let opened = place.dir.join("opened.txt");
+    let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", opened.to_str().unwrap())]);
+    front.initialize();
+    let path = local_notebook(&place, "seen.jl");
+    let first = front.ok("open_notebook", json!({ "path": path }));
+    let port = read_record(&place.local_state)["port"].as_u64().unwrap();
+    let page = format!("http://localhost:{port}/edit?id={NOTEBOOK}");
+    assert_eq!((first["browser_url"].as_str(), first["opened_in_browser"].clone()), (Some(page.as_str()), json!(true)), "{first}");
+    let again = front.ok("open_notebook", json!({ "path": path }));
+    assert_eq!(again["opened_in_browser"], true, "it was opened a moment ago: {again}");
+    let lines: Vec<String> = std::fs::read_to_string(&opened).unwrap().lines().map(str::to_owned).collect();
+    assert_eq!(lines, [format!("{page}&token={TOKEN}")], "the browser gets the link that lets it in, and no second tab at once");
+    let status = front.ok("pluto_session_status", json!({}));
+    assert_eq!((status["browser_url"].as_str(), status.get("opened_in_browser")), (Some(format!("http://localhost:{port}/").as_str()), None), "{status}");
+    for result in [&first, &again, &status] {
+        assert!(!result.to_string().contains(TOKEN), "{result}");
+    }
+    assert!(!front.said().iter().any(|line| line.contains(TOKEN)), "nor what it writes to the agent's MCP log: {:?}", front.said());
+
+    // `endeavor open` prints the link only to a terminal: an agent's shell gets no token.
+    let out = Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["open", "--state-dir"]).arg(&place.local_state).env_clear().envs(place.env.iter().map(|(k, v)| (k, v))).output().unwrap();
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success() && !stdout.contains(TOKEN) && !stderr.contains(TOKEN) && stderr.contains("in your own terminal"), "{stdout} {stderr}");
+    front.finish();
+
+    // Where no browser can be opened, the agent is told so, and gives the link.
+    let mut front = place.front();
+    front.initialize();
+    let shut = front.ok("open_notebook", json!({ "path": path }));
+    assert_eq!((shut["browser_url"].as_str(), shut["opened_in_browser"].clone()), (Some(page.as_str()), json!(false)), "{shut}");
+    assert!(!shut.to_string().contains(TOKEN), "{shut}");
     front.finish();
 }

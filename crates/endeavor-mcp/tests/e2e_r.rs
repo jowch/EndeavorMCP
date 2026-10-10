@@ -244,7 +244,7 @@ fn an_r_notebook_through_the_runtime() {
         };
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("growth.R").display().to_string()), &json!(false)), "{opened}");
-        assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}&token={token}")));
+        assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}")));
         assert!(state.join("r.json").exists(), "R's adapter wrote its state");
         let ran = std::fs::read_to_string(&ran).unwrap_or_default();
         assert!(!ran.is_empty() && ran.lines().all(|l| l == "by-the-line"), "R ran from --r-shell's line, with what it set: {ran:?}");
