@@ -1384,6 +1384,30 @@ impl FakeSlurm {
 }
 
 #[test]
+fn an_r_shell_line_reaches_the_job_script_word_for_word() {
+    let dir = state_dir("slurm-r-shell");
+    let julia = fake_julia(&dir);
+    let slurm = FakeSlurm::new(&dir);
+    let line = r#"module load R && export R_CHECK="a b $HOME" X='it''s' `echo tick`"#;
+    let mut command = slurm.command(&julia, 100);
+    command.arg("--state-dir").arg(&dir).args(["--r-shell", line]);
+    let mut helper = Helper::spawn(command);
+    helper.hello();
+    helper.request_start(small_job(), true);
+    assert!(matches!(helper.after_progress(), ToApp::Found { .. }));
+    assert!(matches!(helper.next(), ToApp::Submitted { .. }));
+    let script = slurm.read("job.sh");
+    assert!(Command::new("sh").arg("-n").arg(dir.join("job.sh")).status().unwrap().success(), "{script}");
+    // The script's words, as sh reads them, with printf in the helper's place.
+    let exec = script.lines().find_map(|l| l.strip_prefix("exec ")).unwrap();
+    let words = Command::new("sh").arg("-c").arg(format!("set -- {exec}; shift; printf '%s\\n' \"$@\"")).output().unwrap();
+    let words: Vec<String> = String::from_utf8(words.stdout).unwrap().lines().map(str::to_owned).collect();
+    let at = words.iter().position(|w| w == "--r-shell").expect("--r-shell is in the job script");
+    assert_eq!(words[at + 1], line, "{script}");
+    drop(helper);
+}
+
+#[test]
 fn a_start_that_may_not_install_submits_no_job_and_lists_what_it_needs() {
     let dir = state_dir("slurm-no-julia");
     let slurm = FakeSlurm::new(&dir);

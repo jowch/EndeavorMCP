@@ -50,20 +50,31 @@ impl Source {
         }
     }
 
-    /// `Rscript ARGS`. Through a login shell, the arguments are passed in the
+    /// `Rscript ARGS`. Through the user's shell, the arguments are passed in the
     /// environment, which every shell reads the same way (sh, bash, zsh, fish,
-    /// csh), and not as the script's own arguments, which they don't. A shell
-    /// that ran but found no Rscript ends with 127 (`not_found`).
+    /// csh and tcsh), and not as the script's own arguments, which they don't. A
+    /// shell that ran but found no Rscript ends with 127 (`not_found`); one that
+    /// ended with 0 never started it (`ended_early`).
     pub fn command(&self, args: &[&Path]) -> Command {
+        self.command_in(&std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into()), args)
+    }
+
+    /// `command` with `shell` as the user's shell.
+    fn command_in(&self, shell: &str, args: &[&Path]) -> Command {
         let shell = |line: Option<&str>| {
-            let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
             let quoted: String = (0..args.len()).map(|i| format!(" \"$ENDEAVOR_R_ARG{i}\"")).collect();
-            let script = match line {
-                Some(line) => format!("{} >/dev/null && exec Rscript{quoted}", line.replace('\n', "; ")),
-                None => format!("exec Rscript{quoted}"),
-            };
+            let line = line.map(|line| line.replace('\n', "; "));
             let mut command = Command::new(shell);
-            command.args(["-lc", &script]);
+            if is_csh(shell) {
+                // csh and tcsh take `-l` only as their one flag, so they run as a plain `-c`, which still reads
+                // ~/.cshrc or ~/.tcshrc, where module setup goes. Their `exit` doesn't end a `-c` early, and their
+                // `exec` of a missing program ends with 1, so after the line, sh starts R.
+                let line = line.map_or(String::new(), |line| format!("{line}; "));
+                command.args(["-c", &format!("{line}exec /bin/sh -c 'command -v Rscript >/dev/null || exit 127; exec Rscript{quoted}'")]);
+            } else {
+                let line = line.map_or(String::new(), |line| format!("{line} && "));
+                command.args(["-lc", &format!("{line}exec Rscript{quoted}")]);
+            }
             for (i, arg) in args.iter().enumerate() {
                 command.env(format!("ENDEAVOR_R_ARG{i}"), arg);
             }
@@ -85,10 +96,21 @@ impl Source {
         }
     }
 
-    /// Whether `status` is a login shell's that found no Rscript.
+    /// Whether `status` is a shell's that found no Rscript.
     pub fn not_found(&self, status: std::process::ExitStatus) -> bool {
         !matches!(self, Source::Path(_)) && status.code() == Some(127)
     }
+
+    /// Whether `status` is a shell's that ended well without starting R: a shell line
+    /// that ends in a comment (`module load R  # 4.4`) comments out the rest of the script.
+    pub fn ended_early(&self, status: std::process::ExitStatus) -> bool {
+        matches!(self, Source::Shell(_)) && status.success()
+    }
+}
+
+/// csh and tcsh, which read `-c` scripts their own way.
+fn is_csh(shell: &str) -> bool {
+    matches!(shell.rsplit('/').next(), Some("csh" | "tcsh" | "bsd-csh"))
 }
 
 /// `path` with `~/` expanded, and the Rscript beside it when it names R itself.
@@ -97,8 +119,9 @@ fn rscript_at(path: &str) -> String {
         (Some(rest), Some(home)) => format!("{}/{rest}", home.display()),
         _ => path.to_owned(),
     };
-    match Path::new(&path).file_name().and_then(|n| n.to_str()) {
-        Some(name @ ("R" | "R.exe")) => Path::new(&path).with_file_name(name.replacen('R', "Rscript", 1)).display().to_string(),
+    // As text, so the path keeps the separators it was given.
+    match path.rsplit(['/', '\\']).next() {
+        Some(name @ ("R" | "R.exe")) => format!("{}{}", &path[..path.len() - name.len()], name.replacen('R', "Rscript", 1)),
         _ => path,
     }
 }
@@ -125,23 +148,52 @@ mod tests {
         assert_eq!(rscript_at("/Rig/R"), "/Rig/Rscript");
     }
 
+    #[test]
+    fn a_path_keeps_its_separators() {
+        assert_eq!(rscript_at(r"C:\Program Files\R\R-4.4.1\bin\R.exe"), r"C:\Program Files\R\R-4.4.1\bin\Rscript.exe");
+    }
+
+    /// In each shell this machine has: the line runs first and what it sets reaches R, the arguments
+    /// arrive whole, a line that leaves no Rscript is `not_found`, and one that ends in a comment is `ended_early`.
     #[cfg(unix)]
     #[test]
     fn a_shell_line_runs_before_rscript_with_the_arguments_whole() {
         let dir = std::env::temp_dir().join(format!("endeavor-r-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("Rscript");
-        // Prints its arguments one per line, and what the shell line set.
+        // Prints what the shell line set, then its arguments one per line.
         std::fs::write(&fake, "#!/bin/sh\necho \"loaded=$LOADED\"\nfor a in \"$@\"; do echo \"$a\"; done\n").unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let line = format!("export PATH=\"{}:$PATH\" LOADED=yes; echo noise", dir.display());
-        let args = [Path::new("--vanilla"), Path::new("/a path/with 'quotes' and $dollars.R")];
-        let output = Source::Shell(line).command(&args).output().unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "loaded=yes\n--vanilla\n/a path/with 'quotes' and $dollars.R\n");
-        let none = Source::Shell("PATH=/nonexistent".into());
-        assert!(none.not_found(none.command(&args).status().unwrap()));
+        let args = [Path::new("--vanilla"), Path::new("/a path/with 'quotes', \"double\", $dollars, `ticks` and !bang.R")];
+        let expected = format!("loaded=yes\n--vanilla\n{}\n", args[1].display());
+        let d = dir.display();
+        let shells = [
+            ("/bin/sh", format!("export PATH=\"{d}:$PATH\" LOADED=yes"), "PATH=/nonexistent"),
+            ("/bin/bash", format!("export PATH=\"{d}:$PATH\" LOADED=yes"), "PATH=/nonexistent"),
+            ("/bin/zsh", format!("export PATH=\"{d}:$PATH\" LOADED=yes"), "PATH=/nonexistent"),
+            ("/usr/bin/fish", format!("set -gx PATH {d} $PATH; set -gx LOADED yes"), "set -gx PATH /nonexistent"),
+            ("/bin/tcsh", format!("setenv PATH \"{d}:$PATH\"; setenv LOADED yes"), "setenv PATH /nonexistent"),
+            ("/bin/csh", format!("setenv PATH \"{d}:$PATH\"; setenv LOADED yes"), "setenv PATH /nonexistent"),
+        ];
+        let mut tried = 0;
+        for (shell, line, no_r) in shells {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            tried += 1;
+            let source = Source::Shell(line);
+            let output = source.command_in(shell, &args).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "{shell}: {}", String::from_utf8_lossy(&output.stderr));
+            let none = Source::Shell(no_r.into());
+            let status = none.command_in(shell, &args).stderr(std::process::Stdio::null()).status().unwrap();
+            assert!(none.not_found(status), "{shell}: {status}");
+            let commented = Source::Shell("true # R 4.4".into());
+            let status = commented.command_in(shell, &args).status().unwrap();
+            assert!(commented.ended_early(status), "{shell}: {status}");
+        }
+        assert!(tried > 0);
         let output = Source::Path(fake.display().to_string()).command(&args).output().unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "loaded=\n--vanilla\n/a path/with 'quotes' and $dollars.R\n");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected.replace("loaded=yes", "loaded="));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

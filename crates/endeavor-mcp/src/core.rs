@@ -243,6 +243,9 @@ const R_STATE: &str = "r.json";
 /// from source the first time one is opened (`runtime/r/install.R`).
 pub const EMBER_COMMIT: &str = "0176bea6c969d3e6a9dd1d825f9672d62b1959d2";
 
+/// Why R didn't start when its shell line ended well.
+const ENDED_EARLY: &str = "The shell line for R ended without starting R. A line that ends in a comment (#) hides what comes after it.";
+
 /// Where installing Ember is.
 enum Install {
     Idle,
@@ -323,6 +326,9 @@ impl RStarter {
                 if self.r.not_found(status) {
                     return Err(format!("r_not_found::Couldn't find R: no {}", self.r.describe()));
                 }
+                if self.r.ended_early(status) {
+                    return Err(format!("r_failed::{}", ENDED_EARLY));
+                }
                 return Err(format!("r_failed::R stopped while starting ({status}); the runtime's log says why"));
             }
             if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
@@ -368,6 +374,7 @@ impl RStarter {
                     let done = match command.status() {
                         Ok(status) if status.success() => Install::Idle,
                         Ok(status) if r.not_found(status) => Install::Failed(format!("r_not_found::Couldn't find R: no {}", r.describe())),
+                        Ok(status) if r.ended_early(status) => Install::Failed(format!("r_failed::{}", ENDED_EARLY)),
                         Ok(_) => Install::Failed("r_failed::Couldn't install Ember for R notebooks; the runtime's log says why".into()),
                         Err(e) => Install::Failed(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
                     };
