@@ -9,7 +9,9 @@
 //!
 //! On the server side, Endeavor's debug-only `ENDEAVOR_TEST_ROOT`, `_STATE` and
 //! `_DEPOT` put the helper's install, its runtime's state and its depot inside
-//! the attempt's folder, so nothing is installed in the user's real home.
+//! the attempt's folder, so nothing is installed in the user's real home. The
+//! depot is the shared one, with its trailing `:`, so the server's Julia also
+//! searches the account's own `~/.julia`, as the local tasks' does.
 
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -74,6 +76,9 @@ pub fn start(work: &Path) -> Result<Server, String> {
         }
     };
     if user.is_empty() { return Err("couldn't tell this account's user name".into()); }
+    // `closed` is a port that was free a moment ago. Something could start
+    // listening on it during the run, and M2 would then see another error than
+    // a refusal; unlikely enough not to guard.
     let (port, closed) = (free_port(), free_port());
     std::fs::write(
         dir.join("sshd_config"),

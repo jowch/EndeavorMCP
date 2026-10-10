@@ -127,13 +127,24 @@ read nor changed.
 The helper on the server is this `endeavor`, as for any server on the same
 platform, so nothing is downloaded. Endeavor's debug-only `ENDEAVOR_TEST_ROOT`,
 `_STATE` and `_DEPOT` put the server's install, its runtime's state and its
-depot (the shared one) in the attempt's folder. `{server_folder}` in a
-prompt or follow-up is the attempt's folder for the server's notebooks.
+depot (the shared one) in the attempt's folder. As for the local tasks, that
+depot's trailing `:` lets the server's Julia also find packages in the
+account's own `~/.julia`. `{server_folder}` in a
+prompt or follow-up is the attempt's folder for the server's notebooks. The
+notebook checks run in a new session for the project folder, which goes to
+the machine the project remembers, so after `use_machine` they read the
+server's notebooks. A notebook made on this computer at the server folder's
+path looks the same to them; only a check on `use_machine` tells the two apart.
 
 It needs `sshd` and `ssh` (on Debian and Ubuntu, `openssh-server` and
-`openssh-client`). Run as root, sshd also needs `/run/sshd` to exist
-(`mkdir -p /run/sshd`); otherwise the attempt fails as a harness problem that
-says so.
+`openssh-client`). sshd may also need `/run/sshd` to exist (`mkdir -p
+/run/sshd`), as it does when run as root; otherwise the attempt fails as a
+harness problem that says so.
+
+On a computer with Slurm (`sinfo` on the PATH), a new server uses Slurm jobs
+unless the agent passes `slurm: false`. M1's prompt says the server is the
+user's own workstation with no Slurm jobs, as the tool text asks before
+passing false; an agent that ignores that submits a real job there.
 
 ## Checks
 
