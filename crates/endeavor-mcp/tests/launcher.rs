@@ -216,10 +216,17 @@ fn a_pinned_build_the_release_doesnt_hold_says_to_wait_or_update() {
     let place = Place::new("removed");
     place.release(KEY);
     place.pin(OTHER);
-    let run = place.launch(&[]);
-    assert!(!run.ok && run.stdout.is_empty());
-    let last = run.stderr.lines().last().unwrap();
-    assert!(last.starts_with(&format!("endeavor: the release doesn't hold build {OTHER}. If the plugin was just updated, reconnect in a few minutes. Otherwise this build is old and was removed: update the plugin")), "{}", run.stderr);
+    let last = || place.launch(&[]).stderr.lines().last().unwrap().to_owned();
+    let said = last();
+    assert!(said.starts_with(&format!("endeavor: the release doesn't hold build {OTHER} for this computer. If the plugin was just updated, reconnect in a few minutes. Otherwise this build is old and was removed: update the plugin.")), "{said}");
+    assert!(said.ends_with("Update it the way you installed it."), "{said}");
+    // Each agent's copy says how to update in that agent, told apart by its manifest.
+    std::fs::write(place.dir.join("plugin/mcp.json"), "{}").unwrap();
+    assert!(last().ends_with("In Codex, run `codex plugin marketplace upgrade endeavor`, then start Codex again."));
+    std::fs::write(place.dir.join("plugin/mcp_config.json"), "{}").unwrap();
+    assert!(last().contains("`agy plugin install "));
+    std::fs::create_dir(place.dir.join("plugin/.claude-plugin")).unwrap();
+    assert!(last().ends_with("In Claude Code, run `claude plugin marketplace update endeavor` and then `claude plugin update endeavor@endeavor`."));
 }
 
 #[test]
