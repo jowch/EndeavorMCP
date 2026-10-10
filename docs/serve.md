@@ -151,7 +151,9 @@ Claude Code:
 It also prints a Codex, a Gemini CLI and a generic JSON configuration with
 the same URL and header.
 
-`serve` starts Julia when an agent opens a Julia notebook, not before. Until
+`serve` starts Julia when an agent opens a Julia notebook, not before, unless
+the folder already has Julia notebooks: then it starts Julia in the background
+right away, so the first notebook doesn't wait. Until
 then the link shows a page that says Julia isn't running, with a button that
 starts it. While Julia starts, the page says so and reloads itself.
 

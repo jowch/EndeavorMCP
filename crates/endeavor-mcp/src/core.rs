@@ -198,7 +198,7 @@ pub fn main(argv: &[String]) -> ! {
 
     if !args.julia_when_needed {
         // As before Julia started only when needed: `runtime.json` once Julia is ready, and the core gone if it can't start.
-        served.julia.begin(&served);
+        served.julia.begin(&served, false);
         if let Err(why) = served.julia.wait(&served, Duration::MAX) {
             match served.julia.exited() {
                 Some(status) => {
@@ -218,6 +218,16 @@ pub fn main(argv: &[String]) -> ! {
         exit_when_idle(served.clone());
     }
     served.bridge.notebooks.start();
+    // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait.
+    let weak = Arc::downgrade(&served);
+    let _ = served.bridge.on_folder.set(Box::new(move |folder, kind| {
+        if let Some(served) = weak.upgrade() {
+            warm_for(&served, folder, kind);
+        }
+    }));
+    if let Some(standalone) = served.bridge.standalone.as_ref().filter(|standalone| !standalone.no_folder) {
+        warm_for(&served, &standalone.folder, "unknown");
+    }
 
     let stop = stopped.recv().unwrap_or(Stop::Shutdown);
     if !matches!(stop, Stop::Julia(_)) {
@@ -402,7 +412,9 @@ impl JuliaStarter {
     }
 
     /// Start Julia in the background unless it runs or is starting, or failed and that hasn't been said yet.
-    fn begin(&self, served: &Arc<Served>) {
+    /// A `warm` start is one nothing asked for yet (`warm_for`): it downloads nothing, and if Julia
+    /// would need downloading it leaves Julia not started, for the first call that needs it.
+    fn begin(&self, served: &Arc<Served>, warm: bool) {
         let mut now = self.now.lock().unwrap();
         let again = matches!(now.phase, Phase::Failed(_)) && now.said;
         if !(matches!(now.phase, Phase::Idle) || again) || self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
@@ -414,7 +426,7 @@ impl JuliaStarter {
         let served = served.clone();
         std::thread::spawn(move || {
             let julia = &served.julia;
-            let started = julia.start(&served);
+            let started = julia.start(&served, warm);
             let mut now = julia.now.lock().unwrap();
             now.said = false;
             now.phase = match (started, now.exited) {
@@ -425,6 +437,10 @@ impl JuliaStarter {
                     Phase::Ready
                 }
                 (Ok(_), Some(status)) => Phase::Failed(format!("julia_failed::Julia stopped as it started ({status}). The runtime's log ({}) says why.", julia.log.display())),
+                (Err(why), _) if warm && why.starts_with("julia_not_found::") => {
+                    eprintln!("[ Info: Julia isn't here to start ahead; it's found or installed when a Julia notebook needs it");
+                    Phase::Idle
+                }
                 (Err(why), _) => {
                     if julia.when_needed {
                         eprintln!("endeavor core: {}", why.split_once("::").map_or(why.as_str(), |(_, text)| text));
@@ -443,7 +459,7 @@ impl JuliaStarter {
 
     /// Start Julia unless it runs, and wait up to `wait` for it: why it isn't ready, with its code, if it isn't.
     fn wait(&self, served: &Arc<Served>, wait: Duration) -> Result<(), String> {
-        self.begin(served);
+        self.begin(served, false);
         let deadline = std::time::Instant::now().checked_add(wait);
         let mut now = self.now.lock().unwrap();
         loop {
@@ -454,6 +470,12 @@ impl JuliaStarter {
                     let why = why.clone();
                     now.said = true;
                     return Err(why);
+                }
+                // A warm start that left Julia to be found now.
+                Phase::Idle if !self.stopping.load(std::sync::atomic::Ordering::SeqCst) => {
+                    drop(now);
+                    self.begin(served, false);
+                    now = self.now.lock().unwrap();
                 }
                 Phase::Idle => return Err("julia_failed::The runtime is stopping.".into()),
                 Phase::Starting(step) if left.is_zero() => {
@@ -481,8 +503,8 @@ impl JuliaStarter {
     }
 
     /// Find Julia, start it, and wait until its bridge answers; then have Pluto suggest the notebooks' folder.
-    fn start(&self, served: &Arc<Served>) -> Result<JuliaReady, String> {
-        let install = self.install.load(std::sync::atomic::Ordering::SeqCst);
+    fn start(&self, served: &Arc<Served>, warm: bool) -> Result<JuliaReady, String> {
+        let install = !warm && self.install.load(std::sync::atomic::Ordering::SeqCst);
         let found = crate::julia::find(&self.source, install, &mut |line| {
             eprintln!("{line}");
             self.step(line);
@@ -750,6 +772,23 @@ fn set_pluto_folder(julia_port: u16, token: &str, folder: &str) {
     if let Err(e) = http::post(julia_port, "/call", &headers, body.as_bytes()) {
         eprintln!("endeavor core: couldn't give Pluto the notebooks' folder: {e}");
     }
+}
+
+/// Start Julia ahead, in the background, for a session that will use it, so its first notebook
+/// doesn't wait. A caller that knows says so with `kind`: `julia` starts it, `r` never does. Otherwise
+/// (`unknown`) a folder that has Julia (Pluto) notebooks starts it, and one with only R notebooks, or
+/// none, never does. Nothing is downloaded for it (`JuliaStarter::begin`).
+fn warm_for(served: &Arc<Served>, folder: &str, kind: &str) {
+    if !served.julia.when_needed || !served.julia.idle() || kind == "r" {
+        return;
+    }
+    let (served, folder, said) = (served.clone(), folder.to_owned(), kind == "julia");
+    std::thread::spawn(move || {
+        if (said || !wire::notebooks::scan(Path::new(&folder), &[Backend::Pluto]).is_empty()) && served.julia.idle() {
+            eprintln!("[ Info: Starting Julia ahead for {}", if said { "a Julia session".to_owned() } else { format!("{folder}, which has Julia notebooks") });
+            served.julia.begin(&served, true);
+        }
+    });
 }
 
 /// End the runtime once no notebook has been open for the idle limit (none

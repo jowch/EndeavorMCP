@@ -199,7 +199,9 @@ Next:
   opened or made or a page of Pluto's past the runtime's link is asked for, and answers
   `julia_starting` while Julia starts. The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
-  before, and only starting it waits. `e2e_r` runs an R notebook with no Julia.
+  before, and only starting it waits. A session whose folder has Pluto
+  notebooks, or whose caller says it is a Julia session (`kind`), gets Julia
+  started ahead in the background, without a download. `e2e_r` runs an R notebook with no Julia.
   The app doesn't pass the flag yet, so its runtimes start Julia at once; its
   step is an app issue. The interface number is 3.
 - marimo after Ember.
