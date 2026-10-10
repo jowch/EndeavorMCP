@@ -47,7 +47,8 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
         // A tool was called between `min` (default 1) and `max` (default any) times.
         "called" => {
             let tool = spec["tool"].as_str().unwrap_or_default();
-            let n = ev.calls.iter().filter(|c| c.tool == tool).count() as u64;
+            // A call the runtime turned away while Julia started is the agent waiting as told, not a second call.
+            let n = ev.calls.iter().filter(|c| c.tool == tool && !while_starting(c)).count() as u64;
             let (min, max) = (spec["min"].as_u64().unwrap_or(1), spec["max"].as_u64().unwrap_or(u64::MAX));
             if (min..=max).contains(&n) { Ok(format!("{n} calls")) } else { Err(format!("{n} calls")) }
         }
@@ -161,6 +162,11 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
         }
         _ => Err(format!("unknown check {kind:?}")),
     }
+}
+
+/// Whether the runtime turned the call away because Julia was still starting.
+fn while_starting(call: &Call) -> bool {
+    call.is_error && call.reply.as_str().is_some_and(|t| t.contains("is starting"))
 }
 
 /// Whether a call runs cells (each tool's own default for its run argument).
@@ -304,5 +310,10 @@ mod tests {
         assert!(judge(json!({ "check": "called", "tool": "new_notebook", "min": 2 }), &calls).passed);
         assert!(!judge(json!({ "check": "not_called", "tool": "new_notebook" }), &calls).passed);
         assert!(!judge(json!({ "check": "no_such_check" }), &calls).passed, "an unknown check fails rather than passing");
+
+        let mut waited = calls.clone();
+        waited[0].is_error = true;
+        waited[0].reply = json!("Julia is starting on this computer. To wait, call the notebook tool you want again.");
+        assert!(judge(json!({ "check": "called", "tool": "new_notebook", "max": 1 }), &waited).passed, "a call turned away while Julia starts isn't counted");
     }
 }
