@@ -346,6 +346,7 @@ fn runtime_args(options: &Options, exit_idle: bool) -> Args {
         depot: options.depot.clone(),
         launcher: Launcher::Process,
         quit_with_client: false,
+        own_with_client: false,
         any_node: false,
         build: Some(embedded::BUILD_VERSION.into()),
         exit_idle,

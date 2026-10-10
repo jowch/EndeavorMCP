@@ -454,6 +454,60 @@ fn a_stop_ends_a_start_and_so_does_the_end_of_input_where_the_runtime_goes_with_
     common::wait_for("the core to end", || !common::pid_alive(core));
 }
 
+/// What the app's Test connection asks for: a start of its own goes with the client, whether still starting or
+/// ready, and one it waited for or found running is left.
+#[test]
+fn the_end_of_input_stops_only_a_start_of_its_own_with_own_with_client() {
+    let (dir, cores, julia) = held_dir("start-own-eof");
+    let mut own = held_start(&dir, &julia, &["--own-with-client"]);
+    let core = cores.pids()[0];
+    own.stdin.0.lock().unwrap().take();
+    own.exits();
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    assert!(!dir.join("runtime.json").exists());
+
+    let first = held_start(&dir, &julia, &[]);
+    let started = cores.pids();
+    assert_eq!(started.len(), 1, "{started:?}");
+    let mut waiter = held_start(&dir, &julia, &["--own-with-client"]);
+    waiter.stdin.0.lock().unwrap().take();
+    waiter.exits();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(cores.pids(), started, "a start another connection began goes on");
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    assert!(matches!(after_start(&first), ToApp::Ready { reattached: false, .. }));
+
+    let mut found = Helper::start(&dir, &["--own-with-client"]);
+    assert!(matches!(found.start_runtime(), ToApp::Ready { reattached: true, .. }));
+    found.stdin.0.lock().unwrap().take();
+    found.exits();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(common::pid_alive(started[0]) && dir.join("runtime.json").exists(), "a runtime it found running is left");
+    let stop = first.request_stop();
+    assert_eq!(first.next(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(started[0]));
+
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let mut own = held_start(&dir, &julia, &["--own-with-client"]);
+    let core = cores.pids()[0];
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    assert!(matches!(after_start(&own), ToApp::Ready { reattached: false, .. }));
+    own.stdin.0.lock().unwrap().take();
+    own.exits();
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    assert!(!dir.join("runtime.json").exists());
+    first.stdin.0.lock().unwrap().take();
+
+    // A core that starts Julia only when needed is ready at once, and goes the same way.
+    let mut lazy = Helper::start(&dir, &["--julia-when-needed", "--own-with-client"]);
+    assert!(matches!(lazy.start_runtime(), ToApp::Ready { reattached: false, .. }));
+    let core = cores.pids()[0];
+    lazy.stdin.0.lock().unwrap().take();
+    lazy.exits();
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    assert!(!dir.join("runtime.json").exists());
+}
+
 /// `dir` with a fake Julia that is held back, and the guard that ends the cores started in it.
 fn held_dir(name: &str) -> (PathBuf, Cores, PathBuf) {
     let dir = state_dir(name);
