@@ -238,8 +238,10 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     }
     let project = project.canonicalize().unwrap();
     let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    // A task about a first install gets an empty depot of its own instead of the shared, warmed one.
-    let depot = if setup["depot"] == "empty" { format!("{}:", work.join("depot").display()) } else { depot.to_owned() };
+    // A task about a first install gets an empty depot of its own instead of the shared, warmed one: that
+    // folder alone, with no trailing ":", which would add Julia's defaults and so the user's ~/.julia,
+    // where the packages may well be installed. Julia's own libraries are precompiled again into it.
+    let depot = if setup["depot"] == "empty" { work.join("depot").display().to_string() } else { depot.to_owned() };
     std::fs::write(work.join("settings.json"), json!({ "julia": julia, "depot": depot }).to_string()).unwrap();
     if task.join("inject.json").is_file() {
         std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();

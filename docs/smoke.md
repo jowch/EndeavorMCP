@@ -58,7 +58,8 @@ Each task is a folder in `smoke/tasks/`:
 - `setup.json` (optional): `{ "open": ["analysis.jl"] }` opens those
   notebooks before the agent starts, allowed to run and run to the end, as if
   the user had them open already. `{ "depot": "empty" }` gives the task an
-  empty depot of its own, for a first install.
+  empty depot of its own, for a first install. It is that folder alone: not
+  the user's `~/.julia`, which may have the packages already.
 - `inject.json` (optional): a second person working in the same notebook.
   It names a moment, the first time the agent calls one of `tools` (`"when":
   "before"` the call reaches the server or `"after"` its reply), and the calls
