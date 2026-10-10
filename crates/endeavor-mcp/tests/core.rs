@@ -1864,3 +1864,50 @@ fn a_session_said_to_be_julias_starts_julia_ahead_whatever_its_folder_has() {
     give_folder_of(&core, "s1", &empty, Some("julia"));
     wait_for("Julia to start ahead", || julia_pids(&dir).len() == 1);
 }
+
+/// Where Julia is, as the app's `endeavor/julia_status` says.
+fn julia_status(core: &Core) -> serde_json::Value {
+    let reply: serde_json::Value = serde_json::from_str(&app_call(core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/julia_status"}"#)).unwrap();
+    reply["result"].clone()
+}
+
+#[test]
+fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fails() {
+    require_debug_build();
+    let dir = state_dir("core-julia-status");
+    let bridge = FakeBridge::start(&dir);
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let julia = serving_julia(&dir, &bridge);
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed")];
+    let core = Core::try_start_with(&dir, &[("ENDEAVOR_TEST_JULIA_STALL_SECS", "2")], &args).unwrap();
+    assert_eq!(julia_status(&core), serde_json::json!({ "state": "not_started" }));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(julia_pids(&dir).is_empty(), "asking doesn't start Julia");
+
+    // A page of Pluto's starts Julia. Held, the stand-in says nothing more, as a hung start would.
+    let start = || {
+        let mut page = core.connect();
+        write!(page, "GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
+        let _ = page.read_to_string(&mut String::new());
+    };
+    start();
+    let status = julia_status(&core);
+    assert_eq!((status["state"].as_str(), status["quiet_seconds"].as_u64().is_some()), (Some("starting"), true), "{status}");
+    wait_for("Julia to start", || julia_pids(&dir).len() == 1 && julia_status(&core)["step"].as_str().unwrap().contains("loading Pluto"));
+    let mut failed = serde_json::Value::Null;
+    wait_for("the stalled start to fail", || {
+        failed = julia_status(&core);
+        failed["state"] == "failed"
+    });
+    assert_eq!(failed["code"], "julia_failed", "{failed}");
+    assert!(failed["message"].as_str().unwrap().contains("no progress"), "{failed}");
+    let stalled = julia_pids(&dir)[0];
+    // SAFETY: plain syscall; the core reaps its Julia, so a gone pid is not a zombie.
+    wait_for("the stalled Julia to end", || unsafe { libc::kill(stalled, 0) } != 0);
+
+    // The failure was read, so the next page starts Julia afresh, and this time it gets ready.
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    start();
+    wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
+    assert_eq!(julia_pids(&dir).len(), 2, "a second Julia");
+}
