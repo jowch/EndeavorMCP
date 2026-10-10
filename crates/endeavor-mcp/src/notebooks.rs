@@ -268,6 +268,8 @@ pub struct Notebooks {
     pub starter: OnceLock<Starter>,
     /// Held while an engine starts, so it starts once.
     starting: Mutex<()>,
+    /// What an engine's start has to tell the agent: warnings for the next notebook opened or made.
+    notices: Mutex<Vec<String>>,
     clock: Box<dyn Fn() -> f64 + Send + Sync>,
     state: Mutex<State>,
     /// Held while reading the engine's state and telling the app, so events go out in order.
@@ -506,6 +508,7 @@ impl Notebooks {
             notify: OnceLock::new(),
             starter: OnceLock::new(),
             starting: Mutex::default(),
+            notices: Mutex::default(),
             clock,
             state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
             publishing: Mutex::default(),
@@ -542,6 +545,16 @@ impl Notebooks {
         {
             self.follow(backend, upstream, tx.clone());
         }
+    }
+
+    /// Say `warning` with the next notebook opened or made.
+    pub fn warn_next(&self, warning: String) {
+        self.notices.lock().unwrap().push(warning);
+    }
+
+    /// What to say with this notebook opened or made, said once.
+    fn take_notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notices.lock().unwrap())
     }
 
     /// The engine notebook `id` is open in.

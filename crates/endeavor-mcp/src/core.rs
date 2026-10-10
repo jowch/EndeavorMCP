@@ -571,27 +571,74 @@ fn ember_secret() -> Result<String, String> {
     crate::random_hex::<32>()
 }
 
-/// The Ember commit R notebooks use (https://github.com/jowch/Ember), installed
-/// from source the first time one is opened (`runtime/r/install.R`).
-pub const EMBER_COMMIT: &str = "0176bea6c969d3e6a9dd1d825f9672d62b1959d2";
+/// Ember's r-universe repository, which builds Ember's latest main. R notebooks install Ember from
+/// it, and update it when R starts (`runtime/r/install.R`).
+pub const EMBER_REPOSITORY: &str = "https://jowch.r-universe.dev";
+
+/// How long the call that starts R waits for the check for a newer Ember, or its install, before
+/// answering `r_installing`: as long as Julia's start.
+const EMBER_WAIT: Duration = JULIA_WAIT;
+
+/// What `install.R` exits with when Ember's newest build failed and the one before it is used.
+const KEPT_PREVIOUS: i32 = 3;
 
 /// Why R didn't start when its shell line ended well.
 const ENDED_EARLY: &str = "The shell line for R ended without starting R. A line that ends in a comment (#) hides what comes after it.";
 
-/// Where installing Ember is.
+/// Why R notebooks use the Ember before the newest, for the agent.
+const EMBER_PREVIOUS: &str = "ember_previous::Ember's newest build didn't work here, so R notebooks use the Ember before it. The runtime's log says why. Mention it to the user if R notebooks act up.";
+
+/// Where installing or updating Ember is.
 enum Install {
     Idle,
     Running,
-    Failed(String),
+    /// Done while no call waited for it: what the next call says.
+    Done(Result<bool, String>),
+}
+
+/// The Ember builds in Endeavor's own folder (`ember.dcf`, which `install.R` writes): the one in use,
+/// the one before it, and the ones that failed here.
+#[derive(Debug, Default, PartialEq)]
+struct EmberBuilds {
+    current: String,
+    previous: String,
+    failed: String,
+}
+
+impl EmberBuilds {
+    fn read(folder: &Path) -> EmberBuilds {
+        let text = std::fs::read_to_string(folder.join("ember.dcf")).unwrap_or_default();
+        let field = |key: &str| text.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix(':')).unwrap_or_default().trim().to_owned();
+        EmberBuilds { current: field("Current"), previous: field("Previous"), failed: field("Failed") }
+    }
+
+    fn write(&self, folder: &Path) -> std::io::Result<()> {
+        let tmp = folder.join(format!("ember.dcf.{}", std::process::id()));
+        std::fs::write(&tmp, format!("Current: {}\nPrevious: {}\nFailed: {}\n", self.current, self.previous, self.failed))?;
+        std::fs::rename(&tmp, folder.join("ember.dcf"))
+    }
+
+    /// R's libraries with build `name`'s Ember, for `R_LIBS`.
+    fn libraries(folder: &Path, name: &str) -> String {
+        format!("{}:{}", folder.join(name).display(), folder.join("deps").display())
+    }
+
+    /// The build in use failed: use the one before it, and don't try this one again.
+    fn fall_back(&mut self) {
+        self.failed = self.failed.split_whitespace().chain([self.current.as_str()]).collect::<Vec<_>>().join(" ");
+        self.current = std::mem::take(&mut self.previous);
+    }
 }
 
 /// Starts R's adapter (`runtime/r/adapter.R`), with Ember in it, the first time an R notebook is
 /// opened, and stops it when the core ends.
 struct RStarter {
     r: crate::r::Source,
-    /// The core's `--r-library`, which has Ember; else Endeavor's own, installed when first needed.
+    /// The core's `--r-library`, which has Ember; else Endeavor's own, installed and updated from r-universe.
     library: Option<String>,
-    own_library: PathBuf,
+    ember: PathBuf,
+    /// `EMBER_REPOSITORY`, or in a debug build `ENDEAVOR_TEST_EMBER_REPOSITORY`.
+    repository: String,
     install: Arc<std::sync::Mutex<Install>>,
     adapter: PathBuf,
     state: PathBuf,
@@ -605,7 +652,8 @@ impl RStarter {
         RStarter {
             r: args.r.clone(),
             library: args.r_library.clone(),
-            own_library: crate::paths::Env::here().r_library(EMBER_COMMIT),
+            ember: crate::paths::Env::here().ember_folder(),
+            repository: cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_EMBER_REPOSITORY").ok()).flatten().unwrap_or_else(|| EMBER_REPOSITORY.into()),
             install: Arc::new(std::sync::Mutex::new(Install::Idle)),
             adapter: args.runtime.join("r").join("adapter.R"),
             state: args.state_dir.join(R_STATE),
@@ -616,24 +664,48 @@ impl RStarter {
     }
 
     /// Start the adapter and wait until it's up: what answers for R, and Ember's page on `/ember/`.
+    /// With Endeavor's own Ember, first update it if r-universe has a newer build, and if the
+    /// adapter doesn't start with a new build, start it with the one before.
     fn start(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         // Ember, its install and R's adapter haven't been tried on Windows.
         if cfg!(windows) {
             return Err("unsupported::R notebooks don't work on Windows yet".into());
         }
-        let library = match &self.library {
-            Some(library) => PathBuf::from(library),
-            None => {
-                if !self.own_library.is_dir() {
-                    return Err(self.install());
+        if let Some(library) = &self.library {
+            return self.launch(served, library);
+        }
+        if self.update()? {
+            self.tell_previous(served);
+        }
+        let mut builds = EmberBuilds::read(&self.ember);
+        if builds.current.is_empty() {
+            return Err("r_failed::Couldn't install Ember for R notebooks; the runtime's log says why".into());
+        }
+        match self.launch(served, &EmberBuilds::libraries(&self.ember, &builds.current)) {
+            Err(why) if why.starts_with(STOPPED_STARTING) && !builds.previous.is_empty() => {
+                eprintln!("endeavor core: R's adapter didn't start with Ember {}; starting it with Ember {}", builds.current, builds.previous);
+                builds.fall_back();
+                if let Err(e) = builds.write(&self.ember) {
+                    eprintln!("endeavor core: couldn't record that Ember failed: {e}");
                 }
-                self.own_library.clone()
+                let started = self.launch(served, &EmberBuilds::libraries(&self.ember, &builds.current))?;
+                self.tell_previous(served);
+                Ok(started)
             }
-        };
+            started => started,
+        }
+    }
+
+    /// Tell the agent, with its next notebook, that R notebooks use the Ember before the newest.
+    fn tell_previous(&self, served: &Served) {
+        served.bridge.notebooks.warn_next(EMBER_PREVIOUS.into());
+    }
+
+    fn launch(&self, served: &Served, library: &str) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("r_failed::{e}"))?;
         let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
-        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", &library).stdin(Stdio::null());
+        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null());
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
         unsafe {
@@ -652,7 +724,7 @@ impl RStarter {
                 if self.r.ended_early(status) {
                     return Err(format!("r_failed::{}", ENDED_EARLY));
                 }
-                return Err(format!("r_failed::R stopped while starting ({status}); the runtime's log says why"));
+                return Err(format!("{STOPPED_STARTING} ({status}); the runtime's log says why"));
             }
             if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
                 break state;
@@ -674,37 +746,55 @@ impl RStarter {
         Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone())))
     }
 
-    /// Install Ember into Endeavor's own library in the background, the first
-    /// time it's needed: why R notebooks can't open yet. Installing takes
-    /// minutes (packages build from source), longer than an agent's call may
-    /// wait, so the call that starts it returns at once.
-    fn install(&self) -> String {
+    /// Install Ember into Endeavor's own folder, or update it if r-universe has a newer build
+    /// (`install.R`), waiting a little for it: true when the newest build failed and the one
+    /// before it is used. Installing the first time takes minutes (packages build from source),
+    /// longer than an agent's call may wait, so then the call answers `r_installing` and the
+    /// install goes on.
+    fn update(&self) -> Result<bool, String> {
+        let installing = |updating: bool| {
+            Err(if updating {
+                "r_installing::Updating Ember for R notebooks to its newest build. Try again in a minute.".to_owned()
+            } else {
+                "r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Try again in a minute.".to_owned()
+            })
+        };
+        let updating = !EmberBuilds::read(&self.ember).current.is_empty();
         let mut install = self.install.lock().unwrap();
         match std::mem::replace(&mut *install, Install::Running) {
-            Install::Running => {}
-            // Said once; the next call tries again.
-            Install::Failed(why) => {
+            Install::Running => return installing(updating),
+            // Finished after the call that started it stopped waiting; a failure is said once, and the next call tries again.
+            Install::Done(done) => {
                 *install = Install::Idle;
-                return why;
+                return done;
             }
-            Install::Idle => {
-                let install_r = self.adapter.with_file_name("install.R");
-                let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, &self.own_library, Path::new(EMBER_COMMIT)]);
-                command.stdin(Stdio::null());
-                let (state, r) = (self.install.clone(), self.r.clone());
-                std::thread::spawn(move || {
-                    let done = match command.status() {
-                        Ok(status) if status.success() => Install::Idle,
-                        Ok(status) if r.not_found(status) => Install::Failed(format!("r_not_found::Couldn't find R: no {}", r.describe())),
-                        Ok(status) if r.ended_early(status) => Install::Failed(format!("r_failed::{}", ENDED_EARLY)),
-                        Ok(_) => Install::Failed("r_failed::Couldn't install Ember for R notebooks; the runtime's log says why".into()),
-                        Err(e) => Install::Failed(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
-                    };
-                    *state.lock().unwrap() = done;
-                });
-            }
+            Install::Idle => {}
         }
-        "r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Try again in a minute.".into()
+        drop(install);
+        let install_r = self.adapter.with_file_name("install.R");
+        let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, &self.ember, Path::new(&self.repository)]);
+        command.stdin(Stdio::null());
+        let (state, r) = (self.install.clone(), self.r.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let done = match command.status() {
+                Ok(status) if status.success() => Ok(false),
+                Ok(status) if status.code() == Some(KEPT_PREVIOUS) => Ok(true),
+                Ok(status) if r.not_found(status) => Err(format!("r_not_found::Couldn't find R: no {}", r.describe())),
+                Ok(status) if r.ended_early(status) => Err(format!("r_failed::{}", ENDED_EARLY)),
+                Ok(_) => Err("r_failed::Couldn't install Ember for R notebooks; the runtime's log says why".into()),
+                Err(e) => Err(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
+            };
+            *state.lock().unwrap() = Install::Done(done);
+            let _ = tx.send(());
+        });
+        if rx.recv_timeout(EMBER_WAIT).is_err() {
+            return installing(updating);
+        }
+        match std::mem::replace(&mut *self.install.lock().unwrap(), Install::Idle) {
+            Install::Done(done) => done,
+            _ => unreachable!("the install thread said it was done"),
+        }
     }
 
     fn stop(&self) {
@@ -715,6 +805,9 @@ impl RStarter {
         let _ = std::fs::remove_file(&self.state);
     }
 }
+
+/// How the error that R stopped while its adapter started begins.
+const STOPPED_STARTING: &str = "r_failed::R stopped while starting";
 
 /// An engine's page server (Pluto, Ember): its private port and the secret it requires.
 #[derive(Clone)]
@@ -1338,6 +1431,23 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ember_builds_read_what_install_r_writes_and_fall_back_to_the_one_before() {
+        let folder = std::env::temp_dir().join(format!("endeavor-ember-builds-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(EmberBuilds::read(&folder), EmberBuilds::default(), "nothing installed");
+        // As R's write.dcf writes it.
+        std::fs::write(folder.join("ember.dcf"), "Current: bbbbbbbbbbbb\nPrevious: aaaaaaaaaaaa\nFailed:\n").unwrap();
+        let mut builds = EmberBuilds::read(&folder);
+        assert_eq!(builds, EmberBuilds { current: "bbbbbbbbbbbb".into(), previous: "aaaaaaaaaaaa".into(), failed: String::new() });
+        assert_eq!(EmberBuilds::libraries(&folder, &builds.current), format!("{}/bbbbbbbbbbbb:{}/deps", folder.display(), folder.display()));
+        builds.fall_back();
+        assert_eq!(builds, EmberBuilds { current: "aaaaaaaaaaaa".into(), previous: String::new(), failed: "bbbbbbbbbbbb".into() });
+        builds.write(&folder).unwrap();
+        assert_eq!(EmberBuilds::read(&folder), builds);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 
     #[test]
     fn embers_secret_is_url_safe_and_32_random_bytes() {

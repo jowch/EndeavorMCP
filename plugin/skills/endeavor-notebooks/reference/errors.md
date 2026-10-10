@@ -11,6 +11,7 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `placement_required` | `add_cell` without `after_cell_id` in a notebook that has cells | Pass the cell to add after |
 | `not_staged` | `submit_changes` was given a `cell_ids` entry that isn't in `pending_run` | Leave `cell_ids` out, or use `execute_cell` for a cell you didn't edit |
 | `one_notebook` | The call is for a notebook other than this session's | Work in this session's notebook; read the other one as a file |
+| `ember_previous` | From opening or making an R notebook: Ember's newest build didn't work here, so R notebooks use the one before it. Mention it to the user if R notebooks act up |
 | `run_conflict` | Cells you ran depend on cells another session changed since you read them; nothing ran | Read the cells it names, then run again |
 | `notebook_not_found`, `cell_not_found` | The id is wrong, or the notebook was closed or the cell deleted | `list_notebooks`, or read the notebook again |
 | `file_exists` | `new_notebook` on a path that exists | `open_notebook` it, or pick another name |
@@ -26,7 +27,7 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `not_a_file`, `not_a_folder` | `read_file` was given a folder, or `list_folder` a file | Use the other tool |
 | `unsupported` | `run_shell` on a Windows server | Don't use it there |
 | `unsupported` | An R notebook (`.R`) on Windows, in the Endeavor app, or in a runtime without R notebooks | Tell the user R notebooks don't run there yet; offer a Julia notebook |
-| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing Ember, which takes a few minutes | Tell the user, then make the same call again in a minute |
+| `r_installing` | Endeavor is installing Ember, which takes a few minutes for the first R notebook on this computer or machine, or updating it to a newer build | Tell the user, then make the same call again in a minute |
 | `r_not_found` | No R was found: `Rscript` isn't on the PATH, or the R set for this machine isn't there | Tell the user R notebooks need R installed; nothing else to try |
 | `r_failed` | R started but Ember didn't: it couldn't install, or it stopped | Tell the user what the message says; the runtime's log has the rest |
 | `risky_source` | The notebook came from a remote source, so only the user can allow it to run | Ask the user to run it from the notebook |
