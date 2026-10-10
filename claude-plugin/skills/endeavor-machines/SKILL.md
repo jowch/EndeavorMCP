@@ -17,6 +17,7 @@ Without these tools the notebooks run on the user's own computer. With them (`li
 - **Never install without a yes.** See below.
 - **Never submit a job with resources the user hasn't agreed to.** See step 3.
 - **A call that fails leaves the session where it was.**
+- **R notebooks.** Endeavor's runtime is Julia, so a machine needs Julia for R notebooks too. They use the R found there (`Rscript` on the PATH of a login shell), unless the user set another R for that machine. If none is found, opening one fails with `r_not_found`: tell the user. Not on Windows machines.
 
 ## Installing needs the user
 

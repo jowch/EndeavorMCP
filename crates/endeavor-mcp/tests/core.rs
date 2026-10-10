@@ -1044,6 +1044,19 @@ fn in_manual_an_edit_waits_for_the_users_answer() {
 }
 
 #[test]
+fn an_agent_in_the_app_gets_no_r_notebooks() {
+    let dir = state_dir("core-app-r");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let call = |id: u32, name: &str, path: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"path":"{path}"}}}}}}"#);
+    let why = "R notebooks don't open in the Endeavor app yet; make a Julia notebook (.jl) here";
+    let seven = [("X-Endeavor-Session", "7")];
+    assert_eq!(mcp(&core, &call(1, "new_notebook", "/tmp/growth.R"), &seven).1, tool_error(1, "unsupported", why));
+    assert_eq!(mcp(&core, &call(2, "open_notebook", "/tmp/growth.r"), &seven).1, tool_error(2, "unsupported", why));
+    assert!(!mcp(&core, &call(3, "open_notebook", "/tmp/nope.jl"), &seven).1.contains("unsupported"), "Julia notebooks open");
+}
+
+#[test]
 fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let dir = state_dir("core-policy");
     let bridge = FakeBridge::start(&dir);

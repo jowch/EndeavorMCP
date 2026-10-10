@@ -537,6 +537,10 @@ impl Bridge {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(host_tool_refusal(tool));
         }
+        // ponytail: the app's pane shows only Pluto's page, so its agents get no R notebooks until it shows Ember's.
+        if self.standalone.is_none() && !caller.front && matches!(tool, "new_notebook" | "open_notebook") && arguments.get("path").and_then(Value::as_str).is_some_and(is_r_path) {
+            return Some("ArgumentError: unsupported::R notebooks don't open in the Endeavor app yet; make a Julia notebook (.jl) here".into());
+        }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
         if plan && (WRITE_TOOLS.contains(&tool) || runs_code(tool, arguments)) {
             let what = if tool == "run_shell" { "run a command on the server" } else { "change or run the notebook" };
@@ -546,6 +550,11 @@ impl Bridge {
         }
         None
     }
+}
+
+/// Whether a notebook path names an R notebook (`.R`), by its name alone.
+fn is_r_path(path: &str) -> bool {
+    std::path::Path::new(path).extension().is_some_and(|e| e == "R" || e == "r")
 }
 
 /// How long into a call it waits for the user's answer: what is left of the 60 seconds agents give a
@@ -869,7 +878,7 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
 
 /// The `path` descriptions of the tools that take one, in a front without a project folder: the usual
 /// ones say relative paths go in the session's folder, and that a name is generated there.
-const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl`. The file must not exist yet and its folder must. \
+const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl` for a Julia notebook or `.R` for an R notebook (not on Windows). The file must not exist yet and its folder must. \
 Required on this computer: this server was not told the project folder, so it can't choose one. \
 On a server after `use_machine`, a relative path starts in the session's folder there.";
 const NO_FOLDER_OPEN: &str = "The notebook file, as an absolute path: this server was not told the project folder. \
@@ -1175,7 +1184,7 @@ mod tests {
             ask("initialize", false)["instructions"],
             "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat. \
 Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
-how to find this session's notebook, the read-edit-run loop, and the rules for a Pluto cell. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`."
+how to find this session's notebook, the read-edit-run loop, and the rules for a cell. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`."
         );
         assert_eq!(names(ask("tools/list", false))[0], "notebook_guide");
         assert_eq!(ask("tools/list", false)["tools"][0]["annotations"]["readOnlyHint"], true);

@@ -1,9 +1,7 @@
 //! An R notebook end to end, with real R and Julia: `endeavor serve`, then
 //! an agent opens an Ember notebook, which starts R's adapter with Ember in it;
 //! it reads, edits and runs a cell, and the browser reaches Ember's page at
-//! `/ember/` through the runtime's port. R notebooks aren't open to agents yet
-//! (their tools and skills come later), so the test lets them in with
-//! ENDEAVOR_TEST_R_NOTEBOOKS.
+//! `/ember/` through the runtime's port.
 //!
 //! Ignored by default, like e2e_julia (which says where Julia comes from); R is
 //! `Rscript` on the PATH. The first run installs Ember at its pinned commit into
@@ -207,7 +205,6 @@ fn an_r_notebook_through_the_runtime() {
     std::fs::set_permissions(module.join("Rscript"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let line = format!("export PATH=\"{}:$PATH\" LOADED=by-the-line; echo the line ran", module.display());
     let mut serve = command(&["serve", "--folder", folder.to_str().unwrap(), "--r-shell", &line], &work, &julia, &depot)
-        .env("ENDEAVOR_TEST_R_NOTEBOOKS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

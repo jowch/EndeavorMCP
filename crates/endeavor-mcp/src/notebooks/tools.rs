@@ -1001,7 +1001,7 @@ impl Call<'_> {
                 match super::engines::of_path(&path) {
                     wire::backend::Backend::Ember => r_notebooks(&format!("'{path}' would be an R notebook"))?,
                     _ if !path.ends_with(".jl") => {
-                        let ends = if r_notebooks("").is_ok() { ".jl (Julia) or .R (R)" } else { ".jl" };
+                        let ends = if cfg!(windows) { ".jl" } else { ".jl (Julia) or .R (R)" };
                         return Err(argument_error(&format!("invalid_path::Notebook path must end in {ends}: '{path}'")));
                     }
                     _ => {}
@@ -1150,14 +1150,10 @@ pub(super) fn already_open(error: &str) -> bool {
     error.strip_prefix("ArgumentError: ").is_some_and(|rest| rest.starts_with("notebook_already_open::"))
 }
 
-/// Whether R notebooks can open here: not on Windows (Ember doesn't run there yet), and only in
-/// tests until their tools and skills are ready (ENDEAVOR_TEST_R_NOTEBOOKS, a debug build only).
+/// Whether R notebooks can open here: not on Windows, where Ember doesn't run yet.
 fn r_notebooks(what: &str) -> Result<(), String> {
     if cfg!(windows) {
-        return Err(argument_error(&format!("unsupported::{what}. R notebooks don't run on Windows yet")));
-    }
-    if !(cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_R_NOTEBOOKS").is_some()) {
-        return Err(argument_error(&format!("unsupported::{what}. R notebooks can't be opened here yet")));
+        return Err(argument_error(&format!("unsupported::{what}. R notebooks don't run on Windows yet; they need macOS or Linux")));
     }
     Ok(())
 }

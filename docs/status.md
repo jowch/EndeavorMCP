@@ -171,17 +171,19 @@ Next:
   ([runtime-core.md](runtime-core.md), [one-port.md](one-port.md)). So far
   `wire` knows its files (`Backend::Ember`: `.R` with Ember's first line, a
   page at `/ember/edit`, a preview of the first cells), the folder scan the
-  app asks for still lists only Pluto's, and `open_notebook` and
-  `new_notebook` refuse an Ember file as `unsupported` (on Windows always,
-  until Ember runs there). The core routes calls to more than one engine and
-  serves `/ember/`. R's adapter (`runtime/r/adapter.R`) is built: the core
-  starts it, with Ember in it, the first time an R notebook is opened, and
-  follows its notifications by long-polling. Only tests open R notebooks so
-  far (`ENDEAVOR_TEST_R_NOTEBOOKS`). The tools already work for them:
-  `new_notebook` makes one from an `.R` path, `read_cell` shows Ember's own
-  `stale` and `not_run` (every cell after a restart), and a warning in a
-  cell's output starts with `Warning:`. The skill text for R, and opening R
-  notebooks to agents, come next. R is the login shell's `Rscript`, or what
+  app asks for still lists only Pluto's, and agents open and make R notebooks
+  (`.R`) like Julia ones, except on Windows (until Ember runs there) and in
+  the app (until its pane shows Ember's page), where they are refused as
+  `unsupported`. The core routes calls to more than one engine and serves
+  `/ember/`. R's adapter (`runtime/r/adapter.R`) is built: the core starts
+  it, with Ember in it, the first time an R notebook is opened, and follows
+  its notifications by long-polling. The core makes Ember's page secret and
+  hands it to R. `new_notebook` makes one from an `.R` path, `read_cell`
+  shows Ember's own `stale` and `not_run` (every cell after a restart), and a
+  warning in a cell's output starts with `Warning:`. The skills route R
+  notebooks to `reference/ember.md`, and smoke task R1 runs one through a
+  real agent. R notebooks still need Julia: the core starts it first
+  (#76). R is the login shell's `Rscript`, or what
   `--r` or
   `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names.
   The first R notebook installs Ember at the commit the core pins

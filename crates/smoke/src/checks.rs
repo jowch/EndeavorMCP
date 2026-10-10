@@ -84,9 +84,18 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             let after = last_run.map_or(0, |i| i + 1);
             if ev.calls[after.min(ev.calls.len())..].iter().any(|c| c.tool == tool) { Ok(String::new()) } else { Err(format!("no {tool} after the last run")) }
         }
+        // `count` (default 1) notebooks are open; with `ending`, each one's path ends so (".R": R notebooks).
         "notebooks" => {
             let want = spec["count"].as_u64().unwrap_or(1) as usize;
-            if ev.notebooks.len() == want { Ok(String::new()) } else { Err(format!("{} open: {:?}", ev.notebooks.len(), ev.notebooks.iter().map(|n| &n.path).collect::<Vec<_>>())) }
+            let paths: Vec<&String> = ev.notebooks.iter().map(|n| &n.path).collect();
+            let ending = spec["ending"].as_str();
+            if ev.notebooks.len() != want {
+                Err(format!("{} open: {paths:?}", ev.notebooks.len()))
+            } else if let Some(end) = ending.filter(|end| !paths.iter().all(|p| p.ends_with(end))) {
+                Err(format!("not all end in {end}: {paths:?}"))
+            } else {
+                Ok(String::new())
+            }
         }
         "no_errored_cells" => {
             let errored: Vec<String> = ev.notebooks.iter().flat_map(|n| n.cells.iter().filter(|c| c.errored).map(move |c| format!("{}: {}", n.path, first_line(&c.code)))).collect();

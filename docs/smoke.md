@@ -13,12 +13,13 @@ about the half that needs an agent.
 
 ## Running it
 
-With Julia 1.12 and a signed-in `claude` on the PATH:
+With Julia 1.12, R (for the R task) and a signed-in `claude` on the PATH:
 
 ```sh
 scripts/smoke.sh                       # every task in smoke/tasks
 scripts/smoke.sh --only N1-new,N4-long-run
 scripts/smoke.sh --model claude-haiku-4-5    # a model other than the agent's default
+scripts/smoke.sh --skip-r              # on a computer known to have no R
 ```
 
 The script builds `endeavor` and `endeavor-smoke`, then runs the tasks one at
@@ -27,6 +28,12 @@ a time. It prints a summary and writes everything under
 else the one `endeavor` would find. The tasks share one depot,
 `target/smoke/depot` unless `--depot` names another, so packages install
 once. The first run installs Pluto and takes several minutes longer.
+
+R is `--r`, else `ENDEAVOR_E2E_R`, else `Rscript` on the login shell's PATH.
+Without it, the R task **fails** with "no R here", so a run that gates a merge
+can't pass a broken R as skipped; `--skip-r` shows it as **skipped (no R)**
+instead and doesn't fail the run. Ember goes where it goes for anyone's first
+R notebook, `~/.cache/endeavor/r`, so it installs once per computer.
 
 The agent is kept apart from whoever started the run:
 
@@ -61,7 +68,8 @@ Each task is a folder in `smoke/tasks/`:
   the user had them open already. `{ "depot": "empty" }` gives the task an
   empty depot of its own, for a first install. It is that folder alone: not
   the user's `~/.julia`, which may have the packages already.
-  `{ "ssh": true }` gives the task a server (below).
+  `{ "ssh": true }` gives the task a server (below). `{ "r": true }` marks an
+  R task, which needs R (above).
 - `inject.json` (optional): a second person working in the same notebook.
   It names a moment, the first time the agent calls one of `tools` (`"when":
   "before"` the call reaches the server or `"after"` its reply), and the calls
@@ -91,7 +99,9 @@ Before the first task, the runner warms the shared depot: it opens
 `smoke/warm/warm.jl`, which loads the packages the tasks' notebooks reach for
 (DataFrames, Plots), so no task passes or fails on whether an earlier one
 installed them. On a new machine this takes several minutes. N9 is the one
-task with an empty depot of its own, for a first install.
+task with an empty depot of its own, for a first install. When an R task is
+to run and R is there, it also opens `smoke/warm/warm.R`, so Ember's first
+install isn't charged to that task.
 
 A task that fails runs twice more. It is **failing** if all three runs fail,
 and **flaky** if only some do. A task whose `checks.json` has
@@ -157,7 +167,7 @@ makes it reported only: a failed soft check doesn't fail the task.
 | `called` `tool`, `min` (1), `max`, `ok` | the agent called `tool` between `min` and `max` times; with `ok`, counting only calls that worked; with `args`, counting only calls whose arguments include those. A call turned away while Julia starts doesn't count |
 | `not_called` `tool`, `args`, `before_turn` | it never called `tool`; with `before_turn` n, not before the user's n-th message, which must have been sent |
 | `called_after_last_run` `tool` | it called `tool` after the last call that ran cells |
-| `notebooks` `count` | that many notebooks are open at the end |
+| `notebooks` `count`, `ending` | that many notebooks are open at the end; with `ending`, each one's path ends so (`.R`) |
 | `no_errored_cells` | no cell of an open notebook has an error |
 | `output_contains` `texts` | some cell's output contains every one of `texts` |
 | `execution_allowed` `value` | every open notebook's `execution_allowed` is `value` |
@@ -190,6 +200,7 @@ something subtle, make it soft.
 | `N7-plot` | a plot | the agent looks at the picture (`view_cell_output`) before it reports |
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
 | `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: the agent waits through it and reports the table (#58) |
+| `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
 | `M1-machine` | add my server and compute something in a notebook there; then "yes, install it" | `add_machine`'s `needs_install`: the agent asks first and installs only after the yes, then works on the server |
 | `M2-no-reach` | a notebook on a server that refuses connections | the agent reports the failure, doesn't ask for a password, and makes no notebook here instead |
 

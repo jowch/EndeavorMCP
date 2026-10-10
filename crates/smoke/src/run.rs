@@ -80,12 +80,16 @@ struct Options {
     only: Option<Vec<String>>,
     out: Option<PathBuf>,
     julia: String,
+    /// The R for R notebooks: a path, or `auto` for Rscript on the PATH.
+    r: String,
+    /// An R task shows as skipped on a computer without R, instead of failing.
+    skip_r: bool,
     depot: Option<String>,
     retries: u32,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
-    let mut o = Options { only: None, out: None, julia: std::env::var("ENDEAVOR_E2E_JULIA").unwrap_or_else(|_| "auto".into()), depot: None, retries: 2 };
+    let mut o = Options { only: None, out: None, julia: std::env::var("ENDEAVOR_E2E_JULIA").unwrap_or_else(|_| "auto".into()), r: std::env::var("ENDEAVOR_E2E_R").unwrap_or_else(|_| "auto".into()), skip_r: false, depot: None, retries: 2 };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let mut value = || it.next().cloned().ok_or(format!("{arg} needs a value"));
@@ -93,6 +97,8 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--only" => o.only = Some(value()?.split(',').map(|s| s.trim().to_owned()).collect()),
             "--out" => o.out = Some(PathBuf::from(value()?)),
             "--julia" => o.julia = value()?,
+            "--r" => o.r = value()?,
+            "--skip-r" => o.skip_r = true,
             "--depot" => o.depot = Some(value()?),
             "--retries" => o.retries = value()?.parse().map_err(|e| format!("--retries: {e}"))?,
             "--model" => MODEL.set(value()?).map_err(|_| "--model given twice".to_owned())?,
@@ -111,7 +117,7 @@ fn repo() -> PathBuf {
 pub fn runtime_args(work: &Path) -> Vec<String> {
     let settings: Value = std::fs::read_to_string(work.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     let mut args = vec!["--state-dir".to_owned(), work.join("state").display().to_string()];
-    for key in ["julia", "depot"] {
+    for key in ["julia", "r", "depot"] {
         if let Some(v) = settings[key].as_str() {
             args.extend([format!("--{key}"), v.to_owned()]);
         }
@@ -173,19 +179,28 @@ pub fn main(args: &[String]) -> i32 {
     }
     eprintln!("endeavor-smoke: {} task(s), results in {}", tasks.len(), out.display());
     let scratch = std::env::temp_dir().join(format!("endeavor-smoke-{}-{}", utc_stamp(), std::process::id()));
-    if let Err(e) = warm(&repo, &scratch.join("warm"), &endeavor, &o.julia, &depot) {
+    let have_r = have_r(&o.r);
+    let warm_r = have_r && tasks.iter().any(|t| r_task(t));
+    if let Err(e) = warm(&repo, &scratch.join("warm"), &endeavor, &o.julia, &o.r, &depot, warm_r) {
         eprintln!("endeavor-smoke: warming the depot failed: {e}");
         return 2;
     }
     let mut rows = Vec::new();
     for task in &tasks {
         let id = task.file_name().unwrap().to_string_lossy().into_owned();
+        // An R task on a computer without R fails, so a run that gates a merge can't pass a broken R
+        // as skipped; `--skip-r` says this computer is known to have none.
+        if r_task(task) && !have_r {
+            eprintln!("── {id}: no R here ({})", if o.r == "auto" { "no Rscript on the login shell's PATH".to_owned() } else { o.r.clone() });
+            rows.push(no_r_row(&id, &o.r, o.skip_r));
+            continue;
+        }
         let mut attempts = Vec::new();
         loop {
             let n = attempts.len() + 1;
             eprintln!("── {id}, attempt {n}");
             let work = scratch.join(&id).join(format!("attempt-{n}"));
-            let result = attempt(&id, task, &work, &endeavor, &exe, &repo, &o.julia, &depot);
+            let result = attempt(&id, task, &work, &endeavor, &exe, &repo, &o.julia, &o.r, &depot);
             eprintln!("   {} in {:.0}s", if result["passed"] == true { "passed" } else { "FAILED" }, result["metrics"]["seconds"].as_f64().unwrap_or(0.0));
             let _ = std::fs::write(work.join("result.json"), serde_json::to_string_pretty(&result).unwrap());
             // Keep what the attempt left, not the runtime's own folders.
@@ -213,22 +228,30 @@ pub fn main(args: &[String]) -> i32 {
     let md = summary_md(&summary);
     let _ = std::fs::write(out.join("summary.md"), &md);
     println!("{md}");
-    if rows.iter().all(|r| r["status"] == "pass" || r["status"] == "expected failure") { 0 } else { 1 }
+    if rows.iter().all(|r| r["status"] == "pass" || r["status"] == "expected failure" || r["status"] == SKIPPED_NO_R) { 0 } else { 1 }
 }
 
 /// Install and precompile, into the shared depot, the packages the tasks'
 /// notebooks reach for (smoke/warm/warm.jl), so no task's result depends on
 /// whether an earlier task installed them. A first install on an empty depot is
-/// a task of its own.
-fn warm(repo: &Path, work: &Path, endeavor: &Path, julia: &str, depot: &str) -> Result<(), String> {
+/// a task of its own. With `r`, also open an R notebook (smoke/warm/warm.R), so
+/// Ember's first install isn't charged to the R task. Ember goes into the R
+/// library that the app and `endeavor mcp` share (`~/.cache/endeavor/r`), as it
+/// would for anyone's first R notebook.
+#[allow(clippy::too_many_arguments)]
+fn warm(repo: &Path, work: &Path, endeavor: &Path, julia: &str, r: &str, depot: &str, with_r: bool) -> Result<(), String> {
     eprintln!("── warming the depot (the first time, this installs Pluto and the packages, and takes several minutes)");
     let project = work.join("project");
     std::fs::create_dir_all(&project).unwrap();
     copy_dir(&repo.join("smoke/warm"), &project, &[]);
-    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "depot": depot }).to_string()).unwrap();
+    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "r": r, "depot": depot }).to_string()).unwrap();
     let began = Instant::now();
     let result = crate::mcp::Session::start(endeavor, work, &project).and_then(|mut s| {
         crate::mcp::open_and_run(&mut s, "warm.jl", RUN_LIMIT)?;
+        if with_r {
+            eprintln!("   and Ember, for R notebooks");
+            crate::mcp::open_and_run(&mut s, "warm.R", RUN_LIMIT)?;
+        }
         let errored: Vec<String> = crate::mcp::notebooks(&mut s)?.iter().flat_map(|nb| nb.cells.iter().filter(|c| c.errored).map(|c| format!("{}: {}", c.code, c.output))).collect();
         if errored.is_empty() { Ok(()) } else { Err(errored.join("; ")) }
     });
@@ -244,8 +267,37 @@ fn expected_failure(task: &Path) -> Option<String> {
     specs["expected_to_fail"].as_str().map(str::to_owned)
 }
 
+/// Whether a task is about R notebooks: `"r": true` in its setup.json.
+fn r_task(task: &Path) -> bool {
+    let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    setup["r"] == true
+}
+
+/// Whether there is an R to run: `r` is a path to it, or `auto` for Rscript on the login shell's PATH (as the runtime looks).
+fn have_r(r: &str) -> bool {
+    let mut command = if r == "auto" {
+        let mut c = Command::new(std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into()));
+        c.args(["-lc", "command -v Rscript"]);
+        c
+    } else {
+        let mut c = Command::new(r);
+        c.arg("--version");
+        c
+    };
+    command.stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+const SKIPPED_NO_R: &str = "skipped (no R)";
+
+/// The row of an R task on a computer without R: skipped with `--skip-r`, else failing.
+fn no_r_row(id: &str, r: &str, skip: bool) -> Value {
+    let failure = format!("no R here ({}); install R, or give --skip-r on a computer known to have none", if r == "auto" { "no Rscript on the login shell's PATH" } else { r });
+    let (status, failed, failures) = if skip { (SKIPPED_NO_R, 0, vec![]) } else { ("failing", 1, vec![failure]) };
+    json!({ "task": id, "status": status, "expected_to_fail": null, "attempts": 0, "failed": failed, "failures": failures, "first": {}, "models": [] })
+}
+
 #[allow(clippy::too_many_arguments)]
-fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo: &Path, julia: &str, depot: &str) -> Value {
+fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo: &Path, julia: &str, r: &str, depot: &str) -> Value {
     let _ = std::fs::remove_dir_all(work);
     let project = work.join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -259,7 +311,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     // where the packages may well be installed. Julia's own libraries are precompiled again into it.
     let depot = if setup["depot"] == "empty" { work.join("depot").display().to_string() } else { depot.to_owned() };
     let ssh = setup["ssh"] == true;
-    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "depot": depot, "ssh": ssh }).to_string()).unwrap();
+    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "r": r, "depot": depot, "ssh": ssh }).to_string()).unwrap();
     if task.join("inject.json").is_file() {
         std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();
     }
@@ -588,6 +640,10 @@ fn summary_md(summary: &Value) -> String {
     let mut md = format!("# Smoke run at {}\n\nAgent: {}\n\nModels: {models}\n\n| Task | Status | Failed attempts | Tool calls | Tool errors | Time | Cost |\n|---|---|---|---|---|---|---|\n", summary["commit"].as_str().unwrap_or("?"), summary["agent"].as_str().unwrap_or("?"));
     for r in summary["tasks"].as_array().into_iter().flatten() {
         let m = &r["first"];
+        if r["attempts"] == 0 {
+            md += &format!("| {} | {} | 0/0 | | | | |\n", r["task"].as_str().unwrap_or_default(), r["status"].as_str().unwrap_or_default());
+            continue;
+        }
         md += &format!(
             "| {} | {} | {}/{} | {} | {} | {:.0} s | {} |\n",
             r["task"].as_str().unwrap_or_default(),
@@ -682,5 +738,16 @@ mod tests {
         assert_eq!(row("N9", std::slice::from_ref(&failed), Some("#58"))["status"], "expected failure");
         assert_eq!(row("N9", &[passed], Some("#58"))["status"], "pass: #58 may be fixed");
         assert_eq!(row("N1", &[failed], None)["models"], json!(["m", "n"]));
+    }
+
+    #[test]
+    fn an_r_task_without_r_fails_unless_skip_r_is_given() {
+        let failing = no_r_row("R1", "auto", false);
+        assert_eq!(failing["status"], "failing");
+        assert!(failing["failures"][0].as_str().unwrap().contains("--skip-r"));
+        assert_eq!(no_r_row("R1", "/opt/R/bin/Rscript", true)["status"], SKIPPED_NO_R);
+        let md = summary_md(&json!({ "commit": "c", "agent": "a", "models": [], "tasks": [failing] }));
+        assert!(md.contains("| R1 | failing | 0/0 |") && md.contains("no R here"), "{md}");
+        assert!(!have_r("/no/such/Rscript"));
     }
 }
