@@ -588,6 +588,18 @@ fn r_not_found(r: &crate::r::Source) -> String {
     )
 }
 
+/// Whether this computer can build R packages from source: on a Mac, whether its developer tools are
+/// installed (asked without running `cc`, which on a Mac without them opens an installer), elsewhere
+/// whether `cc` and `make` are on the PATH.
+fn has_compiler() -> bool {
+    let quiet = |command: &mut Command| command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    if cfg!(target_os = "macos") {
+        quiet(Command::new("xcode-select").arg("-p"))
+    } else {
+        quiet(Command::new("sh").args(["-c", "command -v cc && command -v make"]))
+    }
+}
+
 /// Why R didn't start when its shell line ended well.
 const ENDED_EARLY: &str = "The shell line for R ended without starting R. A line that ends in a comment (#) hides what comes after it.";
 
@@ -775,6 +787,9 @@ impl RStarter {
                         Ok(status) if status.success() => Install::Idle,
                         Ok(status) if r.not_found(status) => Install::Failed(r_not_found(&r)),
                         Ok(status) if r.ended_early(status) => Install::Failed(format!("r_failed::{}", ENDED_EARLY)),
+                        Ok(_) if !has_compiler() => Install::Failed(
+                            "r_failed::Couldn't install Ember for R notebooks: it has to be built on this computer, and there is no compiler here to build it. The runtime's log has the details.".into(),
+                        ),
                         Ok(_) => Install::Failed("r_failed::Couldn't install Ember for R notebooks; the runtime's log says why".into()),
                         Err(e) => Install::Failed(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
                     };
