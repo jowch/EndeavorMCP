@@ -210,10 +210,32 @@ need their own version of those parts.
 
 ## When a user reports a problem
 
-The error code in a tool result, or what the agent did, points to a task.
-For example, `stale_read` belongs to N5, `run_conflict` to N6, "it ran my cells
-twice" is N4, and "it ran a notebook I only opened" is N3. Run that task
-here at the user's version and on `main`. If it fails with Claude too, the
-bug is ours. If it passes with Claude, our text reads differently to the
-user's agent; tune it with their help, and keep Claude passing. A report
-that no task covers becomes a new task.
+Users report a problem with the agent on the issue form "The agent did
+something wrong" (`.github/ISSUE_TEMPLATE/agent-problem.yml`). It asks for
+the agent and its version, the model if known, Endeavor's version, where the
+notebook ran, the prompt, what went wrong, any error code in the tool
+results, the agent's last message and `endeavor status`.
+
+1. **Find the task.** The error code, or what the agent did, points to one:
+
+   | In the report | Task |
+   |---|---|
+   | `stale_read` | N5 |
+   | `run_conflict` | N6 |
+   | `one_notebook`, a second notebook | N8 |
+   | `still_running`, "it ran my cells twice" | N4 |
+   | "it ran a notebook I only opened" | N3 |
+   | a plot it described without looking | N7 |
+   | `needs_install`, an install it didn't ask about | M1 |
+   | a server it couldn't reach, a password prompt | M2 |
+   | a first package install that looked stuck | N9 |
+
+2. **Find whose problem it is.** Run that task with Claude at the reporter's
+   version (`git checkout` the build in their `endeavor --version`), then on
+   `main`. If it fails with Claude too, the bug is ours: fix it, and the task
+   now guards it. If it passes with Claude and the reporter used another
+   agent, that agent reads our text differently: tune the skill text with the
+   reporter's help, and keep Claude passing. If it passes everywhere, it
+   depended on their data, model or setup; ask for the notebook.
+3. **No task covers it:** write one from the report, with a prompt as close
+   to theirs as their data allows.

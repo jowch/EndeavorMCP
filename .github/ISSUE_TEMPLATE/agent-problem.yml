@@ -1,0 +1,87 @@
+name: The agent did something wrong
+description: The agent misused a notebook, a tool gave it an error it didn't handle, or it told you something the notebook doesn't show.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. We use it to find the smoke-suite task that should catch the problem, or to write a new one.
+
+        Before you paste anything, take out what you don't want public: passwords, tokens (a notebook link's `?token=` part), server names, user names and data.
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      options:
+        - Claude Code
+        - Codex
+        - Antigravity
+        - Another agent (say which below)
+    validations:
+      required: true
+  - type: input
+    id: agent-version
+    attributes:
+      label: Agent version and model
+      description: "For example `claude --version` and the model it used, if you know it."
+      placeholder: "Claude Code 2.1.296, model unknown"
+  - type: input
+    id: endeavor-version
+    attributes:
+      label: Endeavor version
+      description: "The first line of `endeavor --version`, or the app's version."
+      placeholder: "endeavor 0.1.0 (build 0.1.0-...)"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where the notebook ran
+      options:
+        - This computer
+        - A server over ssh
+        - A Slurm cluster
+        - Not sure
+  - type: textarea
+    id: prompt
+    attributes:
+      label: What you asked
+      description: Your message to the agent, as close to your words as you can share.
+    validations:
+      required: true
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What went wrong
+      description: What the agent did, and what you expected instead.
+    validations:
+      required: true
+  - type: checkboxes
+    id: codes
+    attributes:
+      label: Error codes in the tool results
+      description: "If a notebook tool's result named one of these, tick it. They point us to the right task."
+      options:
+        - label: "`stale_read`: a cell changed since the agent read it"
+        - label: "`run_conflict`: someone else changed a cell before the agent's run"
+        - label: "`one_notebook`: the session already has a notebook"
+        - label: "`read_required`: the agent edited a cell it hadn't read"
+        - label: "`not_staged` or `placement_required`"
+        - label: "`still_running`: a cell was still running when the tool returned"
+        - label: "`needs_install`: a server needed Endeavor or Julia installed"
+        - label: "Another code (say which in the next box)"
+  - type: textarea
+    id: last-message
+    attributes:
+      label: The agent's last message
+      description: Paste it, or the part that was wrong.
+  - type: textarea
+    id: status
+    attributes:
+      label: endeavor status
+      description: "The output of `endeavor status`. If the runtime was running, also the last lines of the `runtime.log` it names."
+      render: text
+  - type: textarea
+    id: notebook
+    attributes:
+      label: The notebook, if you can share it
+      description: Attach the `.jl` file or paste the cells that matter. A notebook that shows the problem with made-up data is ideal.
