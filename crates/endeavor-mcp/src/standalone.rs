@@ -891,7 +891,7 @@ impl Relay {
         if message["method"] == "notifications/initialized" {
             return;
         }
-        let tool = (message["method"] == "tools/call").then(|| message["params"]["name"].as_str().unwrap_or_default().to_owned());
+        let tool = (message["method"] == "tools/call").then(|| crate::mcp::current_name(message["params"]["name"].as_str().unwrap_or_default()).to_owned());
         if let Some(tool) = tool.as_deref().filter(|tool| crate::mcp::MACHINE_NAMES.contains(tool)) {
             return self.machine_tool(&message, tool, deadline);
         }
@@ -946,7 +946,7 @@ impl Relay {
         };
         // These two use a runtime that is running, and start none.
         let need = match tool.as_deref() {
-            Some("pluto_session_status") => Need::Peek,
+            Some("session_status") => Need::Peek,
             Some("list_notebooks") => Need::Look,
             _ => Need::Start,
         };

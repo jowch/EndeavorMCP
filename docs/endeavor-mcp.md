@@ -145,7 +145,7 @@ the same check. A call that passes goes to the runtime, which checks it again
 against its own schema, after its refusals (plan mode, host tools) and before the
 call counts as the session's activity. Missing or null `arguments` is `{}`. A notebook call that finds none running starts one, on this
 computer and on a plain server alike; on a cluster it asks for a job instead.
-`list_notebooks` and `pluto_session_status` use a runtime that is running (the
+`list_notebooks` and `session_status` use a runtime that is running (the
 provider's `Want::Attach`: this computer's looks in the state folder, the
 session's asks the helper; the session's folder is told to the runtime before
 the call goes through, and the notebooks line is printed) and otherwise answer
@@ -159,7 +159,7 @@ fails with it. A start another process has under way is a start under way, not
 a runtime that another session or the app started since is found. The first call
 that starts a runtime waits up to `start_wait()` (45 s), then fails with "Julia is
 starting on this computer ... call the notebook tool again" (each call waits again;
-`pluto_session_status` answers at once), and the start goes on in
+`session_status` answers at once), and the start goes on in
 a thread of the provider.
 
 A failure is kept, the same on this computer and on a machine, and every call that
@@ -167,7 +167,7 @@ asks is told it (`Provider::ensure` takes `retry`; a start that failed is not
 cleared by being told). Who asks to try again is decided in one place, `route`: a
 notebook call that needs a runtime reports a failure it has not reported yet and
 asks to try again on the call after that (`Target::failed`); `use_machine` and
-`stop_machine` always ask; `list_notebooks` and `pluto_session_status` never do and
+`stop_machine` always ask; `list_notebooks` and `session_status` never do and
 never use up the report, and the status tool's result for a failure carries
 `error`. A runtime that has gone (its process ended, it exited when idle, another
 connection stopped it or took it over) is just not running: the next notebook call
@@ -270,7 +270,7 @@ ever taken from the process's working folder, which is the plugin's cache folder
   route, `serve`'s HTTP clients) resolves against that folder as it would
   against any runtime's. `endeavor status` and `serve` say the runtime was
   started without a project folder and that new notebooks without a path go
-  there; `pluto_session_status` has never had a folder field.
+  there; `session_status` has never had a folder field.
 - **No project is remembered.** `projects.json` is keyed by the folder, so a
   session without one reads and writes nothing there: `use_machine` works and
   the next session starts on this computer.
@@ -341,7 +341,7 @@ call (after it was bound, if it made none), with the binding; clearing a binding
 leaves the record. Nothing else is kept about a session but the notebook it
 works in and what it has read (for `stale_read` and `run_conflict`): there is
 no sign-out, no label for the client, and no list of other sessions in
-`list_notebooks` or `pluto_session_status`. A session whose agent has gone
+`list_notebooks` or `session_status`. A session whose agent has gone
 just stops calling. A call still under way when it goes may bind it to a
 notebook; that is forgotten a week after its last call like any other.
 
@@ -351,11 +351,11 @@ sessions other than `owner` that work in a notebook that is open made a tool
 call within that time, and how long ago the latest did: `{count, active_seconds_ago}` (null when none). The question
 records no call. `endeavor/end_session` is gone, as are `other_sessions` and
 `active_seconds_ago` in the results of `list_notebooks` and
-`pluto_session_status`, the `X-Endeavor-Client` header and the `other_session`
+`session_status`, the `X-Endeavor-Client` header and the `other_session`
 warning.
 
 **Where the browser reaches the runtime.** The results that name a notebook or
-the session (`new_notebook`, `open_notebook`, `pluto_session_status`) carry a
+the session (`new_notebook`, `open_notebook`, `session_status`) carry a
 `browser_url`. A request to `/mcp` may send `X-Endeavor-Browser-Port: <port>`,
 a port from 1 to 65535, and then the link is on `http://localhost:<port>`, on
 any runtime. That is how a runtime reached through the front's connection (its
@@ -378,7 +378,7 @@ end once no notebook has been open for that long (`ENDEAVOR_EXIT_IDLE`, which
 `endeavor connect --exit-idle` sets); `serve` is not. `runtime.json` records
 which it is as `"exits_when_idle": true|false`, written when the runtime is
 ready; a record without it is from before and says nothing. The limit itself
-is not in the file, since it can change: `pluto_session_status` carries
+is not in the file, since it can change: `session_status` carries
 `idle_stop_hours` (the limit now in force; 0 for never, also for a negative
 or non-finite one) and `exits_when_idle`. A runtime with `exits_when_idle` true
 and `idle_stop_hours` 0 never ends. The app reads `runtime.json` and calls the runtime in the same way.
@@ -397,7 +397,7 @@ no notebook is open, else keeps it and tells the agent once; `serve` and
 and `RuntimeInfo::usable_as_is` applies the rule); it is never stopped for the
 agent, only told of once, and `client::Session` reports it as trouble.
 While the session uses such a runtime that was kept, here or on a machine,
-`pluto_session_status` says so every time (not for an idle one here that the
+`session_status` says so every time (not for an idle one here that the
 next call that may start a runtime stops), for an agent that no longer has
 the notice: `other_version` is the same sentence and `runtime_build` the build
 that started it. What the agent is told says "an older" version when the
@@ -483,7 +483,7 @@ target's lock that `route` takes to check that and issue a start, so a start can
 come between; a stop that fails, even after the call answered "taking a while", puts
 the session back. It uses the connection this front holds whatever the machine's
 settings are now, so a runtime in use through old settings can be stopped. A notebook call while the target's runtime isn't up fails with a plain
-message built from the `Outcome` of asking the connection; `pluto_session_status`
+message built from the `Outcome` of asking the connection; `session_status`
 is answered by the front from it (`{machine, state, ready, step, error, queue,
 job, message}`), and when the runtime is up it is relayed with `machine` (and for
 a cluster `job`, and `remote_port`) added to its JSON. A queued job is not waited
@@ -507,7 +507,7 @@ binary owns, maps a project folder (the front's `--folder`, canonical) to
 project with an entry targets that machine and starts nothing. On its first
 runtime call it makes a connection to that machine and attaches only to a
 runtime that is already there (`Want::Attach`): a notebook call on a plain server then starts one
-if none runs, `list_notebooks` and `pluto_session_status` start none, and a cluster submits nothing, and says so with the defaults to
+if none runs, `list_notebooks` and `session_status` start none, and a cluster submits nothing, and says so with the defaults to
 ask the user about.
 An entry whose machine is gone from the machines file is ignored, and the first
 result says so once.

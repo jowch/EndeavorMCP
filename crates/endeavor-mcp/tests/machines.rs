@@ -523,7 +523,7 @@ fn settings_that_changed_under_a_runtime_in_use_are_refused_in_plain_words() {
     assert_eq!(place.helpers(), helpers, "the connection stays");
     assert_eq!(place.machines().find_by_name("lab").unwrap().unwrap().ssh_host, "lab");
     // The file's record is the one the tools use, so they keep working.
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), url_port(&status["browser_url"])), (Some("lab"), url_port(&used["browser_url"])));
     front.finish();
 }
@@ -538,9 +538,10 @@ fn a_session_on_a_working_connection_does_not_need_the_machines_file() {
     let path = place.machines().path().to_owned();
     let text = std::fs::read_to_string(&path).unwrap();
     place.machines().remove("lab").unwrap();
-    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab", "the machine left the list");
+    assert_eq!(front.ok("session_status", json!({}))["machine"], "lab", "the machine left the list");
+    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab", "the tool's old name gets the front's fields too");
     std::fs::write(&path, "{not json").unwrap();
-    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab", "the file is broken for a moment");
+    assert_eq!(front.ok("session_status", json!({}))["machine"], "lab", "the file is broken for a moment");
     std::fs::write(&path, text).unwrap();
     front.finish();
 }
@@ -746,7 +747,7 @@ fn a_use_machine_that_fails_leaves_the_session_its_key_and_the_project_as_they_w
     let (failed, said) = front.call("use_machine", json!({ "machine": "hpc", "partition": "nope" }));
     assert!(failed && text(&said).contains("There is no partition \"nope\""), "{said}");
     bound(&mut front, &path);
-    assert_eq!(front.ok("pluto_session_status", json!({}))["machine"], "lab");
+    assert_eq!(front.ok("session_status", json!({}))["machine"], "lab");
     assert_eq!(std::fs::read(place.dir.join("state-home/endeavor/projects.json")).unwrap(), remembered, "projects.json is byte for byte what it was");
 }
 
@@ -773,7 +774,7 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     // The agent's calls go to the machine's runtime, with its host and browser port.
     let listed = front.ok("list_notebooks", json!({}));
     assert_eq!(listed[0]["path"], machine_notebook, "the machine's notebooks, not this computer's: {listed}");
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!(url_port(&status["browser_url"]), port, "the connection's port, which the user's browser reaches");
     assert_eq!(status["machine"], "lab");
     assert_eq!((&status["exits_when_idle"], &status["idle_stop_hours"], status.get("message")), (&json!(true), &json!(48.0), None), "a runtime a session starts exits when idle: {status}");
@@ -789,10 +790,10 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     assert_eq!((back["machine"].as_str(), back["state"].as_str()), (Some("local"), Some("ready")), "{back}");
     let listed = front.ok("list_notebooks", json!({}));
     assert_eq!(listed[0]["path"], local_file.display().to_string(), "this computer's notebooks: {listed}");
-    let local_port = url_port(&front.ok("pluto_session_status", json!({}))["browser_url"]);
+    let local_port = url_port(&front.ok("session_status", json!({}))["browser_url"]);
     assert_ne!(local_port, port);
     assert_eq!(read_record(&place.local_state)["exits_when_idle"], true, "so does the one `mcp` starts on this computer");
-    assert!(front.ok("pluto_session_status", json!({})).get("machine").is_none());
+    assert!(front.ok("session_status", json!({})).get("machine").is_none());
     let (failed, refused) = front.call("list_folder", json!({ "path": "/" }));
     assert!(failed && refused["message"].as_str().unwrap().contains("only for sessions on a server"), "{refused}");
     assert_eq!(place.projects().get(place.project.display().to_string()), None, "local clears what the project remembers");
@@ -820,7 +821,7 @@ fn a_second_front_in_the_same_project_comes_up_on_the_remembered_machine() {
 
     let mut second = place.front();
     second.initialize();
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert_eq!(status["machine"], "lab", "attached without use_machine: {status}");
     let shell = second.ok("run_shell", json!({ "command": "pwd" }));
     assert!(shell.to_string().contains(&work.display().to_string()), "the folder there is remembered too: {shell}");
@@ -921,7 +922,7 @@ fn a_remembered_plain_server_is_started_when_nothing_runs_there() {
     assert_eq!(stopped["stopped"], true, "{stopped}");
     let (failed, said) = first.call("list_notebooks", json!({}));
     assert!(failed && text(&said).contains("was stopped from this session") && text(&said).contains("`use_machine` with machine \"lab\""), "{said}");
-    let status = first.ok("pluto_session_status", json!({}));
+    let status = first.ok("session_status", json!({}));
     assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("stopped"), json!(false)), "{status}");
     first.finish();
     assert!(place.runtime().is_none());
@@ -967,13 +968,13 @@ fn a_notebook_call_while_the_runtime_is_still_starting_returns_the_status_within
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
     assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
     assert_eq!((used["state"].as_str(), used["ready"].clone()), (Some("starting"), json!(false)), "{used}");
-    assert!(used["message"].as_str().unwrap().contains("Julia is starting on lab") && used["message"].as_str().unwrap().contains("`pluto_session_status`"), "{used}");
+    assert!(used["message"].as_str().unwrap().contains("Julia is starting on lab") && used["message"].as_str().unwrap().contains("`session_status`"), "{used}");
 
     let started = Instant::now();
     let (failed, said) = front.call("list_notebooks", json!({}));
     assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
     assert!(failed && text(&said).contains("Julia is starting on lab"), "{said}");
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["state"].as_str(), status["ready"].clone()), (Some("lab"), Some("starting"), json!(false)), "{status}");
     assert!(status["step"].is_string());
 
@@ -981,12 +982,12 @@ fn a_notebook_call_while_the_runtime_is_still_starting_returns_the_status_within
     let refused = front.ok("stop_machine", json!({ "machine": "lab" }));
     assert_eq!((refused["stopped"].clone(), refused["state"].clone()), (json!(false), json!("starting")), "{refused}");
     assert!(refused["message"].as_str().unwrap().contains("Julia is starting on lab") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
-    assert_eq!(front.ok("pluto_session_status", json!({}))["state"], "starting", "nothing was cancelled");
+    assert_eq!(front.ok("session_status", json!({}))["state"], "starting", "nothing was cancelled");
 
     std::fs::remove_file(place.state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
-        let status = front.ok("pluto_session_status", json!({}));
+        let status = front.ok("session_status", json!({}));
         if status.get("browser_url").is_some() {
             break status;
         }
@@ -1024,7 +1025,7 @@ fn stop_machine_refuses_when_another_session_was_active_and_stops_with_force() {
     assert!(!place.helpers().is_empty(), "the connection stays");
     let (failed, said) = front.call("list_notebooks", json!({}));
     assert!(failed && text(&said).contains("was stopped from this session") && text(&said).contains("`use_machine`"), "{said}");
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["ready"].clone()), (Some("lab"), json!(false)), "{status}");
 
     // Starting it again works, on the same port.
@@ -1061,7 +1062,7 @@ fn stop_machine_works_on_this_computer_with_the_same_check() {
     wait_for("the local runtime to end", || !pid_alive(local));
     let (failed, said) = front.call("list_notebooks", json!({}));
     assert!(failed && text(&said).contains("Julia on this computer was stopped") && text(&said).contains("`use_machine` with machine \"local\""), "{said}");
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!((status["state"].as_str(), status["machine"].as_str()), (Some("stopped"), Some("local")), "{status}");
     assert!(place.local_runtime().is_none() || !pid_alive(place.local_runtime().unwrap()), "not started again by the call");
     let back = front.ok("use_machine", json!({ "machine": "local" }));
@@ -1145,7 +1146,7 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
     assert!(!used["message"].as_str().unwrap().contains("version of Endeavor"), "{used}");
     let (_, said) = second.contents("list_notebooks", json!({}));
     assert_eq!(said.len(), 1, "nothing added: {said:?}");
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert!(status.get("other_version").is_none() && status.get("runtime_build").is_none(), "{status}");
     second.finish();
     wait_for("the connection to end", || place.helpers().is_empty());
@@ -1162,7 +1163,7 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
     let (_, said) = third.contents("list_notebooks", json!({}));
     assert_eq!(said.len(), 1, "said once: {said:?}");
     // The status says it every time, for an agent that no longer has the notice, with the build in a field of its own.
-    let status = third.ok("pluto_session_status", json!({}));
+    let status = third.ok("session_status", json!({}));
     let other = status["other_version"].as_str().unwrap_or_default();
     assert!(other.starts_with("Julia on lab was started by an older version of Endeavor") && !other.contains(ANOTHER_BUILD), "{status}");
     assert_eq!((status["runtime_build"].as_str(), status["machine"].as_str()), (Some(ANOTHER_BUILD), Some("lab")), "{status}");
@@ -1229,7 +1230,7 @@ fn a_dropped_connection_is_made_again_in_the_same_front_on_the_same_browser_addr
     });
     let deadline = Instant::now() + Duration::from_secs(60);
     let status = loop {
-        let (failed, status) = front.call("pluto_session_status", json!({}));
+        let (failed, status) = front.call("session_status", json!({}));
         if !failed && status.get("browser_url").is_some() {
             break status;
         }
@@ -1278,7 +1279,7 @@ fn one_front_uses_two_machines_each_with_its_own_connection_and_runtime() {
     let back = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!((back["already_running"].clone(), url_port(&back["browser_url"])), (json!(true), one), "the first one's connection was kept: {back}");
     assert!(front.ok("list_notebooks", json!({}))[0]["path"].as_str().unwrap().ends_with("/lab.jl"));
-    assert_eq!(url_port(&front.ok("pluto_session_status", json!({}))["browser_url"]), one);
+    assert_eq!(url_port(&front.ok("session_status", json!({}))["browser_url"]), one);
     // Stopping one leaves the other.
     assert_eq!(front.ok("stop_machine", json!({ "machine": "lab2", "force": true }))["stopped"], true);
     wait_for("the second runtime to end", || !pid_alive(r2));
@@ -1331,7 +1332,7 @@ fn the_runtimes_own_port_on_the_server_is_in_the_results() {
     assert_ne!(url_port(&used["browser_url"]), port, "the address in the browser is this computer's, not the server's");
     let message = used["message"].as_str().unwrap();
     assert!(message.contains("works while this session is connected") && message.contains(&format!("`ssh -L {port}:127.0.0.1:{port} lab`")), "{message}");
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!(status["remote_port"], port, "{status}");
     front.finish();
 }
@@ -1357,12 +1358,12 @@ fn a_front_that_only_initializes_and_lists_tools_starts_no_local_runtime() {
     place.add_lab();
     let mut front = place.front();
     front.initialize();
-    for name in ["list_machines", "notebook_guide", "list_notebooks", "pluto_session_status"] {
+    for name in ["list_machines", "notebook_guide", "list_notebooks", "session_status"] {
         let (failed, said) = front.call(name, json!({}));
         assert!(!failed, "{name}: {said}");
     }
     assert_eq!(front.ok("list_notebooks", json!({})), json!([]));
-    assert_eq!(front.ok("pluto_session_status", json!({}))["pluto"], "not running");
+    assert_eq!(front.ok("session_status", json!({}))["pluto"], "not running");
     assert_eq!(front.ok("list_machines", json!({}))["local"]["state"], "not running");
     assert!(!place.local_state.join("runtime.json").exists());
     assert!(core_of(&place).is_empty(), "{:?}", core_of(&place));
@@ -1383,7 +1384,7 @@ fn the_first_notebook_call_starts_the_local_runtime_and_a_second_front_finds_it(
     let mut second = place.front();
     second.initialize();
     assert_eq!(second.ok("list_notebooks", json!({}))[0]["path"], path);
-    assert!(second.ok("pluto_session_status", json!({})).get("browser_url").is_some());
+    assert!(second.ok("session_status", json!({})).get("browser_url").is_some());
     assert_eq!(place.local_runtime(), Some(runtime));
     assert_eq!(second.ok("list_machines", json!({}))["local"]["state"], "running");
     second.finish();
@@ -1434,11 +1435,11 @@ fn a_status_query_after_the_runtime_it_used_has_exited_starts_none() {
     let runtime = place.local_runtime().expect("started by the call");
     let mut second = place.front();
     second.initialize();
-    assert!(second.ok("pluto_session_status", json!({})).get("browser_url").is_some(), "it uses the runtime that is running");
+    assert!(second.ok("session_status", json!({})).get("browser_url").is_some(), "it uses the runtime that is running");
     // SAFETY: plain syscall, on the core this test's front started.
     unsafe { libc::kill(-runtime, libc::SIGTERM) };
     wait_for("the runtime to end", || core_of(&place).is_empty() && !pid_alive(runtime));
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert_eq!(status["pluto"], "not running", "{status}");
     assert_eq!(second.ok("list_notebooks", json!({})), json!([]));
     assert!(core_of(&place).is_empty(), "no runtime was started for it");
@@ -1501,7 +1502,7 @@ fn a_runtime_of_another_build_with_no_notebook_open_is_replaced_by_the_first_cal
     let (failed, listed) = second.contents("list_notebooks", json!({}));
     assert!(!failed && listed == [json!([])], "a query is answered by the runtime there, with nothing to add: {listed:?}");
     assert_eq!(place.local_runtime(), Some(old), "a query starts nothing, so it stops nothing");
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert!(status.get("other_version").is_none() && status.get("runtime_build").is_none(), "the next start stops it, so the status doesn't say it is kept: {status}");
     second.call("open_notebook", json!({ "path": path }));
     let new = place.local_runtime().expect("a runtime");
@@ -1533,7 +1534,7 @@ fn a_runtime_of_another_build_with_a_notebook_open_is_kept_and_the_agent_is_told
     second.ok("open_notebook", json!({ "path": path }));
     let (_, again) = second.contents("list_notebooks", json!({}));
     assert_eq!(again.len(), 1, "said once: {again:?}");
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert!(status["other_version"].as_str().is_some_and(|t| t.starts_with("Julia on this computer was started by an older version")), "{status}");
     assert_eq!(status["runtime_build"].as_str(), Some(ANOTHER_BUILD), "{status}");
     assert_eq!(place.local_runtime(), Some(runtime), "kept");
@@ -1574,7 +1575,7 @@ fn a_recorded_runtime_that_cannot_be_used_is_an_error_for_the_two_queries_and_st
         assert_eq!(failed, tool == "list_notebooks", "{tool}: {said}");
         if failed { text(&said).to_owned() } else { said["message"].as_str().unwrap().to_owned() }
     };
-    for tool in ["pluto_session_status", "list_notebooks"] {
+    for tool in ["session_status", "list_notebooks"] {
         record("another-node", sleeper.id(), Some(1));
         assert!(why(&mut front, tool).contains("running on another-node"), "{tool}");
         record(&this_host(), sleeper.id(), None);
@@ -1582,7 +1583,7 @@ fn a_recorded_runtime_that_cannot_be_used_is_an_error_for_the_two_queries_and_st
     }
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     record(&this_host(), sleeper.id(), Some(port));
-    assert!(why(&mut front, "pluto_session_status").contains("isn't answering"));
+    assert!(why(&mut front, "session_status").contains("isn't answering"));
     assert!(core_of(&place).is_empty(), "no runtime was started");
     let _ = sleeper.kill();
     let _ = sleeper.wait();
@@ -1630,7 +1631,7 @@ fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call
     let started = Instant::now();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
     assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
-    assert!(failed && text(&said).contains("Julia is starting on this computer") && text(&said).contains("`pluto_session_status`"), "{said}");
+    assert!(failed && text(&said).contains("Julia is starting on this computer") && text(&said).contains("`session_status`"), "{said}");
     assert!(place.local_runtime().is_none());
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1697,7 +1698,7 @@ fn a_forced_stop_cancels_a_start_another_process_began_and_the_next_call_starts_
 
     let mut second = start_front(&place, &short);
     second.initialize();
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("starting"), json!(false)), "{status}");
     let refused = second.ok("stop_machine", json!({ "machine": "local" }));
     assert_eq!(refused["stopped"], false, "{refused}");
@@ -1709,7 +1710,7 @@ fn a_forced_stop_cancels_a_start_another_process_began_and_the_next_call_starts_
     assert!(core_of(&place).is_empty() && !place.local_state.join("runtime.json").exists(), "nothing of the start is left");
     wait_for("the lock to be let go", || std::fs::File::open(place.local_state.join("starting.lock")).is_ok_and(|file| file.try_lock_shared().is_ok()));
     assert_eq!(std::fs::read_to_string(place.local_state.join("stopped")).unwrap(), format!("{} connection", started[0]));
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert_eq!(status["state"], "stopped", "the cancelled start is a stop, not a failed start: {status}");
     let again = second.ok("stop_machine", json!({ "machine": "local", "force": true }));
     assert_eq!(again["stopped"], false, "{again}");
@@ -1749,7 +1750,7 @@ fn a_forced_stop_cancels_the_start_this_session_began_and_it_is_not_left_as_a_fa
     let stopped = front.ok("stop_machine", json!({ "machine": "local", "force": true }));
     assert_eq!(stopped["stopped"], true, "{stopped}");
     wait_for("the core to end", || !pid_alive(started[0]));
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!(status["state"], "stopped", "{status}");
     // Read without a call that asks to try again: the start it cancelled is not a failure kept for every call.
     assert!(status.get("error").is_none(), "no failure is kept and told to every call: {status}");
@@ -1818,7 +1819,7 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     // A front that comes while the start is still under way waits for it and starts none.
     let mut second = start_front(&place, &short);
     second.initialize();
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("starting"), json!(false)), "another process's start is a start: {status}");
     let refused = second.ok("stop_machine", json!({ "machine": "local" }));
     let said = refused["message"].as_str().unwrap();
@@ -1860,12 +1861,12 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     assert!(asked["message"].as_str().unwrap().contains("this session has not moved: it stays on this computer until `use_machine` is called"), "{asked}");
     assert_eq!(place.projects(), Value::Null, "needs_job writes no project");
     assert_eq!(front.ok("list_notebooks", json!({})), json!([]), "the session is still on this computer");
-    assert_eq!(front.ok("pluto_session_status", json!({})).get("machine"), None);
+    assert_eq!(front.ok("session_status", json!({})).get("machine"), None);
     assert_eq!(slurm.read("sbatch.args"), "", "a notebook call submits nothing either");
     let (failed, plain) = front.call("use_machine", json!({ "machine": "lab", "cpus": 4 }));
     assert!(failed && plain["message"].as_str().unwrap().contains("There is no machine"), "{plain}");
 
-    // With resources: the job is submitted, and the queue shows through pluto_session_status.
+    // With resources: the job is submitted, and the queue shows through session_status.
     let queued = front.ok("use_machine", json!({ "machine": "hpc", "cpus": 4, "memory_gb": 16, "hours": 2, "partition": "shared", "account": "lab" }));
     assert_eq!((queued["state"].as_str(), queued["ready"].clone()), (Some("queued"), json!(false)), "{queued}");
     assert_eq!((queued["job"]["id"].as_str(), queued["queue"]["state"].as_str(), queued["queue"]["reason"].as_str()), (Some("42"), Some("PENDING"), Some("Priority")), "{queued}");
@@ -1875,11 +1876,11 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     let saved = place.machines().find_by_name("hpc").unwrap().unwrap().cluster.unwrap();
     assert_eq!((saved.resources.cpus, saved.resources.mem_gb, saved.resources.minutes, saved.account.as_deref()), (4, 16, 120, Some("lab")), "what was used is the new default");
 
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["state"].as_str(), status["ready"].clone()), (Some("hpc"), Some("queued"), json!(false)), "{status}");
     assert_eq!((status["queue"]["state"].as_str(), status["queue"]["reason_text"].as_str(), status["job"]["id"].as_str()), (Some("PENDING"), Some("other jobs are ahead of it"), Some("42")), "{status}");
     slurm.set("reason", "Resources");
-    wait_for("the queue's new reason", || front.ok("pluto_session_status", json!({}))["queue"]["reason"] == "Resources");
+    wait_for("the queue's new reason", || front.ok("session_status", json!({}))["queue"]["reason"] == "Resources");
     let (failed, said) = front.call("list_notebooks", json!({}));
     assert!(failed && text(&said).contains("Slurm job 42 on hpc is waiting in the queue"), "{said}");
 
@@ -1901,7 +1902,7 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     slurm.set("node.pid", &node.id().to_string());
     let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
-        let status = front.ok("pluto_session_status", json!({}));
+        let status = front.ok("session_status", json!({}));
         if status.get("browser_url").is_some() {
             break status;
         }
@@ -1919,7 +1920,7 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     front.finish();
     let mut second = place.front();
     second.initialize();
-    assert_eq!(second.ok("pluto_session_status", json!({}))["job"]["id"], "42");
+    assert_eq!(second.ok("session_status", json!({}))["job"]["id"], "42");
     let used = second.ok("use_machine", json!({ "machine": "hpc" }));
     assert_eq!((used["state"].as_str(), used["already_running"].clone(), used["job"]["id"].as_str()), (Some("ready"), json!(true), Some("42")), "{used}");
     assert!(used["message"].as_str().unwrap().contains("The job ends in"), "{used}");
@@ -1954,7 +1955,7 @@ fn a_remembered_cluster_with_no_job_is_not_submitted_for_but_told_what_to_ask() 
     let message = text(&said);
     assert!(failed && message.contains("This project uses hpc, a Slurm cluster, and no job is running there") && message.contains("The defaults would be 8 CPUs · 32 GB · 8 h on the cluster's default partition") && message.contains("`use_machine`"), "{said}");
     assert_eq!(slurm.read("sbatch.args"), "", "nothing was submitted");
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["state"].as_str()), (Some("hpc"), Some("connected")), "{status}");
 }
 
@@ -1973,7 +1974,7 @@ fn a_queued_job_is_cancelled_only_when_the_user_agreed() {
     let message = refused["message"].as_str().unwrap();
     assert!(message.contains("the Slurm job 42 on hpc is pending (other jobs are ahead of it)") && message.contains("can't see which other sessions are waiting") && message.contains("force true"), "{message}");
     assert_eq!(slurm.read("scancel.log"), "", "nothing was cancelled");
-    assert_eq!(front.ok("pluto_session_status", json!({}))["state"], "queued");
+    assert_eq!(front.ok("session_status", json!({}))["state"], "queued");
 
     let stopped = front.ok("stop_machine", json!({ "machine": "hpc", "force": true }));
     assert_eq!(stopped["stopped"], true, "{stopped}");
@@ -2098,7 +2099,7 @@ fn use_machine_installs_the_helper_only_when_told_to() {
     assert!(text(&first).contains("`install: true`"), "{first}");
     assert!(!place.dir.join("root").exists(), "nothing was installed");
     assert_eq!(place.projects(), Value::Null, "the project doesn't remember it");
-    assert_eq!(front.ok("pluto_session_status", json!({})).get("machine"), None, "the session stays where it was");
+    assert_eq!(front.ok("session_status", json!({})).get("machine"), None, "the session stays where it was");
     assert_eq!(front.ok("list_machines", json!({}))["machines"][0]["state"], "needs_install");
 
     let used = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
@@ -2136,7 +2137,7 @@ fn a_remembered_project_never_installs() {
     front.initialize();
     let (failed, said) = front.call("list_notebooks", json!({}));
     assert!(failed && text(&said).contains("needs to install Endeavor's helper") && text(&said).contains("`install: true`") && text(&said).contains("Ask the user"), "{said}");
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("needs_install"), json!(false)), "{status}");
     assert!(!place.dir.join("root").exists(), "nothing was installed");
     front.finish();
@@ -2179,7 +2180,7 @@ fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
     assert!(message.contains("wasn't found on lab") && message.contains("download its own copy") && message.contains("MB") && message.contains("`julia`") && message.contains("`install: true` for this call only"), "{message}");
     assert!(!tried.exists(), "nothing was downloaded");
     assert_eq!(place.projects(), Value::Null);
-    assert_eq!(front.ok("pluto_session_status", json!({})).get("machine"), None, "the session stays where it was");
+    assert_eq!(front.ok("session_status", json!({})).get("machine"), None, "the session stays where it was");
 
     // With the agreement the download is tried (the fake curl fails), on the same connection.
     let (failed, said) = front.call("use_machine", json!({ "machine": "lab", "install": true }));
@@ -2433,7 +2434,7 @@ fn an_update_of_a_saved_machine_that_is_still_connecting_is_not_used_by_anything
     let listed = front.ok("list_machines", json!({}));
     assert_eq!(listed["machines"][0]["state"], "not connected", "the attempt with other settings is not the saved machine's connection: {listed}");
     // The session's own machine is reached with its saved settings, by a connection of its own.
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!(status["machine"], "lab", "{status}");
     assert_eq!(attempts(&place), 2, "a new connection, not the one being tried");
     assert_eq!(place.machines().find_by_name("lab").unwrap().unwrap().ssh_host, "lab");
@@ -2496,7 +2497,7 @@ fn a_front_without_a_folder_refuses_relative_paths_before_it_starts_a_runtime_or
     assert!(described("new_notebook").starts_with("Where to create it: an absolute path ending in `.jl`."), "{}", described("new_notebook"));
 
     // The status names no project folder.
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert!(status.get("folder").is_none(), "{status}");
     let said = Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["status", "--json", "--state-dir"]).arg(&place.local_state).env_clear().envs(place.env.iter().map(|(k, v)| (k, v))).output().unwrap();
     let report: Value = serde_json::from_slice(&said.stdout).unwrap();
@@ -2531,7 +2532,7 @@ fn a_front_without_a_folder_remembers_no_project_and_a_machine_resolves_relative
     // A second front without a folder does not come up on the machine.
     let mut second = place.front_without_folder();
     second.initialize();
-    let status = second.ok("pluto_session_status", json!({}));
+    let status = second.ok("session_status", json!({}));
     assert!(status.get("machine").is_none(), "{status}");
     second.finish();
 }
@@ -2563,7 +2564,7 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     assert_eq!(again["opened_in_browser"], true, "it was opened a moment ago: {again}");
     let lines: Vec<String> = std::fs::read_to_string(&opened).unwrap().lines().map(str::to_owned).collect();
     assert_eq!(lines, [format!("{page}&token={TOKEN}")], "the browser gets the link that lets it in, and no second tab at once");
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!((status["browser_url"].as_str(), status.get("opened_in_browser")), (Some(format!("http://localhost:{port}/").as_str()), None), "{status}");
     for result in [&first, &again, &status] {
         assert!(!result.to_string().contains(TOKEN), "{result}");

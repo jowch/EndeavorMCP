@@ -53,9 +53,16 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   binary's number; it compares builds with a binary from before the line was
   printed). A machine's runtime is checked too, since 2026-10-09: the helper's
   `Ready` carries its build and interface, the front tells the agent once and
-  never stops it, `pluto_session_status` says it every time (`other_version`,
+  never stops it, `session_status` says it every time (`other_version`,
   since 2026-10-09), and `client::Session` reports it as trouble (serve.md,
   "Update it"; endeavor-mcp.md, "A runtime from another build").
+- The status tool is `session_status` since 2026-10-10 (interface 2); it was
+  `pluto_session_status`, a name that told agents every notebook is Pluto's.
+  The old name still runs the tool but isn't listed, so setups and permission
+  rules that name it keep working; drop it in the release after
+  (`mcp::RENAMED_TOOLS`). Error kinds the Pluto adapter returns
+  (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
+  Pluto's rules and say so.
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
   SHA-256 and keeps it (tested against a fake release; the wiring is

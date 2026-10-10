@@ -53,13 +53,24 @@ static MACHINE_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(MA
 /// The machine tools, which `endeavor mcp` answers and a runtime doesn't have.
 pub const MACHINE_NAMES: [&str; 4] = ["list_machines", "add_machine", "use_machine", "stop_machine"];
 
+/// Tools that were renamed, as (old name, name now). A call by the old name still runs, so an
+/// agent's setup or permission rule that names it keeps working for one release; `tools/list`
+/// shows only the name now, so an agent sees one tool. Drop the old names in the release after.
+const RENAMED_TOOLS: [(&str, &str); 1] = [("pluto_session_status", "session_status")];
+
+/// The name tool `name` has now: the new name of a renamed tool, else `name` itself.
+pub(crate) fn current_name(name: &str) -> &str {
+    RENAMED_TOOLS.iter().find(|(old, _)| *old == name).map_or(name, |(_, now)| now)
+}
+
 /// `/call` methods Julia still answers: Pluto's folder for new notebooks, and
 /// ending the process.
 const JULIA_CALLS: [&str; 2] = ["endeavor/set_folder", "endeavor/shutdown"];
 
-/// Whether a runtime offers a tool by this name, to some session. The machine tools are the front's.
+/// Whether a runtime offers a tool by this name, to some session, the old name of a renamed tool
+/// included (a past session's calls use it). The machine tools are the front's.
 pub fn is_tool(name: &str) -> bool {
-    known_tool(name, false).is_some()
+    known_tool(current_name(name), false).is_some()
 }
 
 /// Tools that change the notebook or run code, here or on the server.
@@ -364,7 +375,7 @@ impl Bridge {
             let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);
-                self.results.record(&caller.owner, call.call_id, params["name"].as_str().unwrap_or_default(), arguments, &result);
+                self.results.record(&caller.owner, call.call_id, current_name(params["name"].as_str().unwrap_or_default()), arguments, &result);
             }
             self.notebooks.publish();
             result
@@ -469,7 +480,7 @@ impl Bridge {
                 },
                 None => return,
             },
-            "pluto_session_status" => "/".to_owned(),
+            "session_status" => "/".to_owned(),
             _ => return,
         };
         fields.insert("browser_url".into(), browser_link(port, &target).into());
@@ -634,7 +645,7 @@ pub(crate) fn check_arguments(tool: &str, arguments: &Value, help: bool) -> Resu
 pub(crate) fn call_parts(params: &Value, help: bool, machines: bool) -> Result<(&str, Value), Value> {
     let arguments = call_arguments(params, help)?;
     match params.get("name") {
-        Some(Value::String(name)) if known_tool(name, machines).is_some() => Ok((name, arguments)),
+        Some(Value::String(name)) if known_tool(current_name(name), machines).is_some() => Ok((current_name(name), arguments)),
         Some(Value::String(name)) => Err(unknown_tool_result(name, help)),
         Some(other) => Err(unknown_tool_result(&julia_string(other), help)),
         None => Err(unknown_tool_result("", help)),
@@ -1070,7 +1081,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (1, "162714c5ccd13efa"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (2, "00783e892a3fcb3d"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1117,7 +1128,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "stop_notebook", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (1, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (2, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

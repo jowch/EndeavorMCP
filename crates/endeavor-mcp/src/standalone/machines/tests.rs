@@ -43,7 +43,7 @@ fn a_machine_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
     let job = Some(JobInfo { id: "4242".into(), ..Default::default() });
     let queued = Outcome::Queued { job: job.clone(), queue: QueueInfo { state: "PENDING".into(), reason: "Priority".into() } };
     let said = not_ready_message("hpc", &reached(queued, status(State::Queued(QueueInfo { state: "PENDING".into(), reason: "Priority".into() }))));
-    assert_eq!(said, "The Slurm job 4242 on hpc is waiting in the queue: other jobs are ahead of it. Tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds. `pluto_session_status` answers at once and only shows the job's state, so don't call it repeatedly. A queued job can wait minutes or hours: after a few tries, stop and let the user say when to check again.");
+    assert_eq!(said, "The Slurm job 4242 on hpc is waiting in the queue: other jobs are ahead of it. Tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds. `session_status` answers at once and only shows the job's state, so don't call it repeatedly. A queued job can wait minutes or hours: after a few tries, stop and let the user say when to check again.");
     let running = Outcome::Queued { job, queue: QueueInfo { state: "RUNNING".into(), reason: "n123".into() } };
     let said = not_ready_message("hpc", &reached(running, status(State::Starting { queue: Some(QueueInfo { state: "RUNNING".into(), reason: "n123".into() }) })));
     assert!(said.contains("running on node n123, and Julia is starting there") && said.contains("call the notebook tool you want again") && !said.contains("minutes or hours"), "{said}");
@@ -400,12 +400,12 @@ fn a_notice_is_added_once_to_the_first_reply_that_answers_a_call() {
 #[test]
 fn the_status_of_a_session_on_a_machine_names_the_machine() {
     let relay = Relay::new(options(), "s".into(), Box::new(std::io::sink()));
-    let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "pluto_session_status" } });
+    let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "session_status" } });
     let reply = json!({ "jsonrpc": "2.0", "id": 1, "result": { "content": [{ "type": "text", "text": "{\"browser_url\":\"http://localhost:1/\",\"notebooks\":[]}" }], "isError": false } }).to_string();
-    assert_eq!(relay.decorate(&message, Some("pluto_session_status"), reply.clone()), reply, "on this computer it is left as it is");
+    assert_eq!(relay.decorate(&message, Some("session_status"), reply.clone()), reply, "on this computer it is left as it is");
     let server = Server { id: "lab".into(), name: "Lab".into(), ssh_host: "lab".into(), ..Default::default() };
     *relay.target.lock().unwrap() = Target::new(&server, None);
-    let decorated: Value = serde_json::from_str(&relay.decorate(&message, Some("pluto_session_status"), reply)).unwrap();
+    let decorated: Value = serde_json::from_str(&relay.decorate(&message, Some("session_status"), reply)).unwrap();
     let fields: Value = serde_json::from_str(decorated["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!((fields["machine"].as_str(), fields["browser_url"].as_str(), fields["job"].clone()), (Some("Lab"), Some("http://localhost:1/"), Value::Null));
 }

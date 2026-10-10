@@ -250,7 +250,7 @@ Starting, stopping, idle exit and updates.
 - [P2] **The app's runtime on a server stays up when idle**, since the app does
   not pass `--exit-idle`. A runtime a session started exits when idle, so an
   app that attaches to one and leaves it with no notebook open for 48 hours
-  sees it end. `runtime.json` and `pluto_session_status` now say which kind it
+  sees it end. `runtime.json` and `session_status` now say which kind it
   is.
 - [P3] **A forced stop cancels a start only when `starting.lock` names its
   core.** `endeavor stop --force` and `stop_machine` with `force` end the
@@ -347,17 +347,17 @@ sign-in.
   attach to one runtime, which is built to allow it.
 - [P3] **A front's status tool waits up to 10 s for a connection it has just
   made** to say whether a runtime is there, so the first
-  `pluto_session_status` of a session on a remembered machine can take that
+  `session_status` of a session on a remembered machine can take that
   long over a slow network. It never waits for a start.
 - [P3] **A failure is told to every call that asks** until a call asks to try
   again (`use_machine`, or the notebook call after the one that reported it).
-  A `list_notebooks` or `pluto_session_status` call on a machine whose
+  A `list_notebooks` or `session_status` call on a machine whose
   connection failed (sign-in refused, say) says so each time and does not try
   again; only the next notebook call that needs a runtime does. A runtime that
   ended while the connection was down is kept as a failure with its reason.
 - [P3] **A runtime that died while connected is "not running",** not a
   failure: its reason (the job's time limit, say) is in the connection's last
-  step, which `pluto_session_status` shows as `step` until something else
+  step, which `session_status` shows as `step` until something else
   happens, and the next notebook call starts another one.
 - [P3] **`list_machines` says "not running" for a local runtime recorded on
   another node** (a state folder shared between computers). A notebook call

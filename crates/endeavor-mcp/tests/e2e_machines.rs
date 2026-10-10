@@ -168,7 +168,7 @@ fn the_machine_tools_over_real_ssh() {
     front.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": cell, "wait_for_completion": true }));
     let read = front.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": cell }));
     assert_eq!((&read["output"], &read["errored"]), (&json!("42"), &json!(false)), "{read}");
-    let status = front.ok("pluto_session_status", json!({}));
+    let status = front.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["browser_url"].as_str()), (Some("e2e-machines"), Some(page.as_str())), "{status}");
     eprintln!("[{:?}] a cell ran on the machine", started.elapsed());
 
@@ -205,7 +205,7 @@ fn the_machine_tools_over_real_ssh() {
     });
     let deadline = Instant::now() + Duration::from_secs(120);
     let again = loop {
-        let (failed, again) = front.call("pluto_session_status", json!({}));
+        let (failed, again) = front.call("session_status", json!({}));
         if !failed && again.get("browser_url").is_some() {
             break again;
         }
