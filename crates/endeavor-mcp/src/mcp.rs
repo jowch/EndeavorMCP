@@ -53,9 +53,10 @@ static MACHINE_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(MA
 /// The machine tools, which `endeavor mcp` answers and a runtime doesn't have.
 pub const MACHINE_NAMES: [&str; 4] = ["list_machines", "add_machine", "use_machine", "stop_machine"];
 
-/// Tools that were renamed, as (old name, name now). A call by the old name still runs, so an
-/// agent's setup or permission rule that names it keeps working for one release; `tools/list`
-/// shows only the name now, so an agent sees one tool. Drop the old names in the release after.
+/// Tools that were renamed, as (old name, name now). `tools/list` shows only the name now, so an
+/// agent sees one tool and calls it by that name. A call by the old name still runs for one release:
+/// one an agent took from text written before the rename (an older skill copy, an app from before
+/// its pin, the user's own notes). Drop the old names in the release after.
 const RENAMED_TOOLS: [(&str, &str); 1] = [("pluto_session_status", "session_status")];
 
 /// The name tool `name` has now: the new name of a renamed tool, else `name` itself.

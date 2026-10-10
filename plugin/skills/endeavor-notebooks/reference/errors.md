@@ -27,7 +27,7 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `unsupported` | `run_shell` on a Windows server | Don't use it there |
 | `unsupported` | `open_notebook` on an Ember (R) notebook, which can't be opened yet | Tell the user R notebooks aren't supported yet |
 | `risky_source` | The notebook came from a remote source, so only the user can allow it to run | Ask the user to run it from the notebook |
-| `pluto_not_running` | The runtime isn't up | Tell the user; `session_status` shows its state |
+| `pluto_not_running` | The notebook server isn't up yet | Tell the user; `session_status` shows its state |
 
 `not_approved`, `waiting_for_user`, `cancelled`, `no_app`, `older_runtime` and `plan_mode` come from the Endeavor app: see [app.md](app.md).
 

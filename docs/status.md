@@ -58,9 +58,13 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   "Update it"; endeavor-mcp.md, "A runtime from another build").
 - The status tool is `session_status` since 2026-10-10 (interface 2); it was
   `pluto_session_status`, a name that told agents every notebook is Pluto's.
-  The old name still runs the tool but isn't listed, so setups and permission
-  rules that name it keep working; drop it in the release after
-  (`mcp::RENAMED_TOOLS`). Error kinds the Pluto adapter returns
+  The old name still runs the tool but isn't listed, so an agent calls the new
+  one; the old name only keeps working where an agent read it in text written
+  before (an older skill copy, an app from before its pin, the user's notes). A
+  permission rule that names the old tool doesn't match the new name. Drop the
+  old name in the release after (`mcp::RENAMED_TOOLS`). Runtimes started before
+  this build offer interface 1, so they show the "another version" notice until
+  they restart. Error kinds the Pluto adapter returns
   (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
   Pluto's rules and say so.
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
