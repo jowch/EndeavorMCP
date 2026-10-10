@@ -18,16 +18,17 @@
 #     any of Endeavor's branches or as one of the last APP_PINS (10) pins on
 #     its main (the app's scripts/helpers.sh downloads it to bundle);
 #   - it was published in the last NEW_DAYS days (3).
-# Of the other builds, the newest LINUX_BUILDS (100) keep their Linux files and
+# Of the other builds, the newest LINUX_BUILDS (150) keep their Linux files and
 # checksum file, and lose only the macOS and Windows ones. Every installed
 # binary, from a plugin, install.sh or `endeavor update`, fetches the Linux
 # helper of its own build when it sets up a server, so this is what keeps a
 # binary nobody has updated working; the Linux files are half a build.
 # Pins and builds are counted rather than dated so that what is kept stays
 # bounded however often main moves: at most about 240 files for the pins and
-# 300 for the Linux files. At 2026-10-09's pace (about 15 pins a day) the 40
-# pins cover two or three days, and the 3 days and the Linux files are what
-# protect a binary that isn't updated.
+# 450 for the Linux files. At 2026-10-09's pace (19 builds, about 15 pins) the
+# 40 pins cover two or three days, so a first download of an older plugin's
+# macOS or Windows binary rests on the 3 days, and 150 builds of Linux files
+# keep an installed binary setting up servers for about 8 days.
 # LATEST itself and any file whose name holds no key are never deleted. If any
 # of this can't be worked out (a clone, a pinned commit, the release), the
 # script stops before deleting anything.
@@ -44,7 +45,7 @@ app_repo=${ENDEAVOR_APP_REPO:-jowch/Endeavor}
 plugin_pins=${PLUGIN_PINS:-40}
 app_pins=${APP_PINS:-10}
 new_days=${NEW_DAYS:-3}
-linux_builds=${LINUX_BUILDS:-100}
+linux_builds=${LINUX_BUILDS:-150}
 tag=helpers
 # The kept builds' files above this many get a warning: pruning can't help then.
 warn_at=800
