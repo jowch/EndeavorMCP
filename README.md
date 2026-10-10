@@ -217,7 +217,7 @@ the machine's home folder.
 - Sign-in is ssh keys only.
 - The skills were tried in short Claude Code runs only.
 
-The full list is in [docs/gaps.md](docs/gaps.md).
+Known gaps are tracked as [GitHub issues](https://github.com/jowch/EndeavorMCP/issues).
 
 ## Without a plugin
 
@@ -276,7 +276,7 @@ app with a Claude Code agent beside a live Pluto notebook, which uses the same
 - `scripts/`: the install scripts, the plugins' launcher and the helper builds.
 - `docs/`: [plugins-and-remote.md](docs/plugins-and-remote.md) (the design),
   [endeavor-mcp.md](docs/endeavor-mcp.md), [runtime-core.md](docs/runtime-core.md),
-  [one-port.md](docs/one-port.md), [gaps.md](docs/gaps.md),
-  [testing.md](docs/testing.md) and [status.md](docs/status.md).
+  [one-port.md](docs/one-port.md), [testing.md](docs/testing.md) and
+  [status.md](docs/status.md). Known gaps are [GitHub issues](https://github.com/jowch/EndeavorMCP/issues).
 
 Build and test with `cargo build` and `cargo test`.

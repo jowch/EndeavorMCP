@@ -40,7 +40,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   listing only unless asked to delete; Helpers runs it once the release holds
   more than 700 files, when the repository variable `PRUNE_HELPERS_AUTO` is
   true. Not yet run with deleting on (dry runs only, 2026-10-09). An installed
-  binary whose build has lost its Linux files can't set up a new server (gaps.md).
+  binary whose build has lost its Linux files can't set up a new server ([#77](https://github.com/jowch/EndeavorMCP/issues/77)).
 - `scripts/install.sh` (tested against a fake release and the public one) and
   `scripts/install.ps1` (not run) install the newest build.
 - `endeavor update` replaces the binary from the Helpers release with the
@@ -141,7 +141,7 @@ Not yet checked:
 - Gemini against `endeavor serve` and `endeavor mcp`, and Codex against
   `serve`. Their config lines in serve.md come from each tool's documentation.
   (Codex against `endeavor mcp` over stdio was tried through `codex exec` on
-  Linux; see [gaps.md](gaps.md).) Over HTTP, that
+  Linux; see [#17](https://github.com/jowch/EndeavorMCP/issues/17).) Over HTTP, that
   each sends back the `Mcp-Session-Id` from `initialize`, which gives it a
   notebook of its own. The spec requires it; no client is checked live yet,
   Claude Code included.
@@ -156,7 +156,7 @@ Not yet checked:
 Known gaps:
 
 - `serve` on Windows has started Julia and been stopped by `endeavor stop`,
-  by hand (`gaps.md`, Windows). It also stops Julia on Ctrl-C and when its
+  by hand ([#9](https://github.com/jowch/EndeavorMCP/issues/9)). It also stops Julia on Ctrl-C and when its
   console closes, but only `cargo check` and clippy for the Windows target
   have seen that code.
 - Unpacking a new version removes older folders that no runtime holds and
