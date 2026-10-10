@@ -446,7 +446,10 @@ impl Bridge {
         let Value::Object(fields) = result else { return };
         let target = match tool {
             "new_notebook" | "open_notebook" => match fields.get("notebook_id").and_then(Value::as_str) {
-                Some(id) => format!("/edit?id={id}"),
+                Some(id) => match self.notebooks.backend_of(id) {
+                    wire::backend::Backend::Pluto => format!("/edit?id={id}"),
+                    wire::backend::Backend::Ember => format!("/ember/edit?id={id}"),
+                },
                 None => return,
             },
             "pluto_session_status" => "/".to_owned(),
