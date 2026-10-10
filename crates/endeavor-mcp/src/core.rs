@@ -1441,7 +1441,7 @@ mod tests {
         std::fs::write(folder.join("ember.dcf"), "Current: bbbbbbbbbbbb\nPrevious: aaaaaaaaaaaa\nFailed:\n").unwrap();
         let mut builds = EmberBuilds::read(&folder);
         assert_eq!(builds, EmberBuilds { current: "bbbbbbbbbbbb".into(), previous: "aaaaaaaaaaaa".into(), failed: String::new() });
-        assert_eq!(EmberBuilds::libraries(&folder, &builds.current), format!("{}/bbbbbbbbbbbb:{}/deps", folder.display(), folder.display()));
+        assert_eq!(EmberBuilds::libraries(&folder, &builds.current), format!("{}:{}", folder.join("bbbbbbbbbbbb").display(), folder.join("deps").display()));
         builds.fall_back();
         assert_eq!(builds, EmberBuilds { current: "aaaaaaaaaaaa".into(), previous: String::new(), failed: "bbbbbbbbbbbb".into() });
         builds.write(&folder).unwrap();
