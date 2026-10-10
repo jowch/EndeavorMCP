@@ -130,7 +130,8 @@ pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
     dunce::canonicalize(path)
 }
 
-/// A path of this machine as a reply carries it.
+/// A path of this machine as a reply carries it. Lossy: a name that isn't
+/// UTF-8 goes out with U+FFFD in it (a `PathBuf` field failed to serialize).
 pub fn text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -300,7 +301,7 @@ fn windows_name(name: &str) -> bool {
     const DEVICES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
     let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
     let device = DEVICES.iter().any(|d| stem.eq_ignore_ascii_case(d))
-        || stem.len() == 4 && ["COM", "LPT"].iter().any(|d| stem[..3].eq_ignore_ascii_case(d)) && matches!(stem.as_bytes()[3], b'1'..=b'9');
+        || stem.len() == 4 && ["COM", "LPT"].iter().any(|d| stem.as_bytes()[..3].eq_ignore_ascii_case(d.as_bytes())) && matches!(stem.as_bytes()[3], b'1'..=b'9');
     !device && !name.ends_with(['.', ' ']) && !name.chars().any(|c| c < ' ' || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
 }
 
@@ -581,7 +582,7 @@ mod tests {
         for name in ["run:1.csv", "a\\b.csv", "CON", "con.txt", "Nul", "COM1.csv", "lpt9", "notes.", "notes ", "a*b", "a\u{1}b"] {
             assert!(!windows_name(name), "{name:?}");
         }
-        for name in ["run 1.csv", "decay.csv", "console.txt", "COM0.csv", "COM10", "LPT", ".env", "über.csv"] {
+        for name in ["run 1.csv", "decay.csv", "console.txt", "COM0.csv", "COM10", "LPT", ".env", "über.csv", "a€.csv", "😀.png", "a中.txt"] {
             assert!(windows_name(name), "{name:?}");
         }
         // Only a Windows machine refuses them: a Linux server holds "run:1.csv" fine.
