@@ -118,7 +118,7 @@ check("new over an existing file: file_exists", startsWith(call("new", list(path
 existing <- file.path(dir, "existing.R")
 writeLines(c(
   "### An Ember notebook ###", "# /// environment", '# ember_version = "0.0.0.9000"',
-  '# r_version = "4.3.3"', '# snapshot = "2026-01-01"', "# ///", "",
+  '# r_version = "4.3.3"', '# snapshot = "2026-01-01"', '# on_cell_change = "lazy"', "# ///", "",
   "# %% id=11111111-1111-4111-8111-111111111111", "x <- 1:10", "",
   "# %% id=22222222-2222-4222-8222-222222222222", "y <- sum(x)", "",
   "# %% id=33333333-3333-4333-8333-333333333333", "y * 2", "",
@@ -253,6 +253,7 @@ check("a warning reads as one, before the value", grepl("^Warning: careful\n\\[1
 r <- result("run", list(notebook_id = nid, cells = list(ids[3]), wait = TRUE, timeout = 60))
 r <- result("run", list(notebook_id = nid, cells = list(ids[2]), wait = TRUE, timeout = 60))
 snap <- result("snapshot", list(notebook_id = nid))
+# existing.R is lazy, so the stale result stays stale (in autorun Ember would rerun it on its own).
 check("a result made before its ancestor last ran: stale", isTRUE(cell_of(snap, ids[3])$stale) && identical(cell_of(snap, ids[2])$stale, FALSE))
 
 # ---- a long run: timeout, interrupt ----
