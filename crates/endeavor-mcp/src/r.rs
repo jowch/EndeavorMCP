@@ -7,6 +7,8 @@
 //! Endeavor's folder rather than run, so it needs no admin rights, puts nothing
 //! on the PATH and edits no shell startup file. On Linux and on servers, people
 //! install R themselves (rig, the system's packages, or a cluster's module).
+//! `own_offered`, `own_installed`, `install_own` and `remove_own` are for the
+//! app's Settings too, as `julia`'s are.
 //!
 //! Unlike Julia, R isn't looked for when the runtime starts: the core starts it
 //! the first time an R notebook opens, and a runtime that never opens one never
@@ -126,7 +128,7 @@ impl Source {
     /// Endeavor's own R, which may be installed here, when this is `--r auto`, it isn't installed yet,
     /// and this is a Mac with an installer for its kind of processor: what installing it means.
     pub fn own_item(&self) -> Option<wire::Item> {
-        (matches!(self, Source::Auto) && own_rscript().is_none()).then(|| own_item_for(macos_version(), &crate::julia::uname("-m"), &crate::paths::Env::here())).flatten()
+        (matches!(self, Source::Auto) && own_rscript().is_none()).then(own_offered).flatten()
     }
 
     /// Whether `status` is a shell's that ended well without starting R: a shell line
@@ -188,6 +190,26 @@ pub fn own_dir(env: &crate::paths::Env) -> PathBuf {
     env.server_root().join(format!("R-{OWN_VERSION}"))
 }
 
+/// Endeavor's own R as it is installed on this computer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnR {
+    /// Its `Rscript`.
+    pub rscript: PathBuf,
+    /// Its version: always `OWN_VERSION`, whose folder it is in.
+    pub version: &'static str,
+}
+
+/// Endeavor's own R if it's installed; nothing is downloaded.
+pub fn own_installed() -> Option<OwnR> {
+    own_rscript().map(|rscript| OwnR { rscript, version: OWN_VERSION })
+}
+
+/// What installing Endeavor's own R here would mean ("R 4.6.1 (about 165 MB, into …)"), or nothing
+/// where it isn't offered: anywhere but a Mac it has an installer for.
+pub fn own_offered() -> Option<wire::Item> {
+    own_item_for(macos_version(), &crate::julia::uname("-m"), &crate::paths::Env::here())
+}
+
 /// Endeavor's own Rscript, if it's installed.
 fn own_rscript() -> Option<PathBuf> {
     let env = crate::paths::Env::here();
@@ -209,14 +231,14 @@ fn own_item_for(macos: Option<u32>, arch: &str, env: &crate::paths::Env) -> Opti
 /// Install Endeavor's own R on this Mac: download CRAN's installer, check it, and unpack it
 /// into `own_dir` without running it (as rig's user mode does), then make it run from there.
 /// Only after the user agreed. `progress` hears each step.
-pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<(), String> {
+pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnR, String> {
     let env = crate::paths::Env::here();
     let arch = crate::julia::uname("-m");
     if own_item_for(macos_version(), &arch, &env).is_none() {
         return Err(format!("Endeavor installs its own R only on a Mac, and has no R {OWN_VERSION} for this one ({arch})."));
     }
-    if own_rscript().is_some() {
-        return Ok(());
+    if let Some(own) = own_installed() {
+        return Ok(own);
     }
     let &(_, _, url, sha256, size) = INSTALLERS.iter().find(|i| i.0 == arch).expect("own_item_for checked it");
     let (root, dir, name) = (env.server_root(), own_dir(&env), format!("R {OWN_VERSION}"));
@@ -242,6 +264,26 @@ pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<(), String> {
     // Fonts for plots, as R's installer does; R still runs if it fails.
     progress(format!("Setting up fonts for {name}…"));
     let _ = Command::new(dir.join("bin").join("fc-cache")).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    own_installed().ok_or(format!("{name} was unpacked, but its Rscript isn't in {}", dir.display()))
+}
+
+/// Remove Endeavor's own R, with the R packages and the Ember installed in it, and what an install
+/// that didn't finish left beside it. Stop the runtimes that use it first.
+pub fn remove_own() -> Result<(), String> {
+    let env = crate::paths::Env::here();
+    if env.home.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let root = env.server_root();
+    let dir = own_dir(&env);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("Couldn't remove {}: {e}", dir.display()))?;
+    }
+    let _ = std::fs::remove_dir_all(root.join(format!("R-{OWN_VERSION}.unpacking")));
+    for arch in INSTALLERS.map(|i| i.0) {
+        let _ = std::fs::remove_file(root.join(format!("R-{OWN_VERSION}-{arch}.pkg.part")));
+        let _ = std::fs::remove_file(root.join(format!("R-{OWN_VERSION}-{arch}.pkg")));
+    }
     Ok(())
 }
 

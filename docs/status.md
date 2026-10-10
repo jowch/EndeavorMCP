@@ -59,13 +59,12 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   "Update it"; endeavor-mcp.md, "A runtime from another build").
 - The status tool is `session_status` since 2026-10-10 (interface 2); it was
   `pluto_session_status`, a name that told agents every notebook is Pluto's.
-  The old name still runs the tool but isn't listed, so an agent calls the new
-  one; the old name only keeps working where an agent read it in text written
-  before (an older skill copy, an app from before its pin, the user's notes). A
-  permission rule that names the old tool doesn't match the new name. Drop the
-  old name in the release after (`mcp::RENAMED_TOOLS`). Runtimes started before
-  this build offer interface 1, so they show the "another version" notice until
-  they restart. Error kinds the Pluto adapter returns
+  The old name ran the tool, unlisted, for one release (`mcp::RENAMED_TOOLS`);
+  since interface 7 (the release that let R notebooks into the app) it is an
+  unknown tool. A permission rule that names the old tool doesn't match the new
+  name. A runtime started before a rise in the interface shows the "another
+  version" notice until it restarts; one from before interface 7 also refuses
+  the app's R notebooks. Error kinds the Pluto adapter returns
   (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
   Pluto's rules and say so.
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
@@ -171,10 +170,10 @@ Next:
   ([runtime-core.md](runtime-core.md), [one-port.md](one-port.md)). So far
   `wire` knows its files (`Backend::Ember`: `.R` with Ember's first line, a
   page at `/ember/edit`, a preview of the first cells), the folder scan the
-  app asks for still lists only Pluto's, and agents open and make R notebooks
-  (`.R`) like Julia ones, except on Windows (until Ember runs there) and in
-  the app (until its pane shows Ember's page), where they are refused as
-  `unsupported`. The core routes calls to more than one engine and serves
+  app asks for lists every engine's notebooks (the app leaves R ones out on
+  Windows), and agents open and make R notebooks (`.R`) like Julia ones, in
+  the app too, except on Windows (until Ember runs there), where they are
+  refused as `unsupported`. The core routes calls to more than one engine and serves
   `/ember/`. R's adapter (`runtime/r/adapter.R`) is built: the core starts
   it, with Ember in it, the first time an R notebook is opened, and follows
   its notifications by long-polling. The core makes Ember's page secret and
@@ -196,7 +195,10 @@ Next:
   unpacks it into `~/.cache/endeavor/R-4.6.1` without running it, the way rig's
   user mode does but without editing shell startup files. It runs with its own
   `R_LIBS_USER` and its own Ember library inside that folder, and is on no PATH.
-  Its fonts cache is inside that folder too. On Linux and servers Endeavor installs no R; `r_not_found` says to install
+  Its fonts cache is inside that folder too. In the app, whose agents have no
+  `use_machine`, `r_not_found` tells the agent to have the user install it from
+  the notebook pane's Install R or Settings instead; the app does that with `r::install_own` (and `own_offered`,
+  `own_installed`, `remove_own`), as it does Julia with `julia`'s. On Linux and servers Endeavor installs no R; `r_not_found` says to install
   it with rig or the system's packages, or to use a cluster's module.
   Ember comes from its r-universe repository (`core::EMBER_REPOSITORY`), which
   builds Ember's latest main: a binary where r-universe has one, else the

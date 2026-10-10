@@ -1062,19 +1062,19 @@ fn in_manual_an_edit_waits_for_the_users_answer() {
 }
 
 #[test]
-fn an_agent_in_the_app_gets_no_r_notebooks() {
+fn an_agent_in_the_app_gets_r_notebooks() {
     let dir = state_dir("core-app-r");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
     let call = |id: u32, name: &str, path: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"path":"{path}"}}}}}}"#);
-    let why = "R notebooks don't open in the Endeavor app yet. Tell the user, and offer a Julia notebook (.jl) instead.";
+    // The app's pane shows Ember's page, so its agents' R notebooks aren't refused (on Windows they
+    // still are, as everywhere there).
     let seven = [("X-Endeavor-Session", "7")];
-    assert_eq!(mcp(&core, &call(1, "new_notebook", "/tmp/growth.R"), &seven).1, tool_error(1, "unsupported", why));
-    assert_eq!(mcp(&core, &call(2, "open_notebook", "/tmp/growth.r"), &seven).1, tool_error(2, "unsupported", why));
-    assert!(!mcp(&core, &call(3, "open_notebook", "/tmp/nope.jl"), &seven).1.contains("unsupported"), "Julia notebooks open");
-    // `endeavor mcp`'s front on a server sends a browser port, which the app never does: its R notebooks open.
-    let front = [("X-Endeavor-Session", "8"), ("X-Endeavor-Host", "gpu-box"), ("X-Endeavor-Browser-Port", "4321")];
-    assert!(!mcp(&core, &call(4, "open_notebook", "/tmp/growth.R"), &front).1.contains("Endeavor app"), "a server's runtime serves R to the front");
+    for (id, name, path) in [(1, "new_notebook", "/nope/growth.R"), (2, "open_notebook", "/nope/growth.r")] {
+        let said = mcp(&core, &call(id, name, path), &seven).1;
+        assert!(!said.contains("Endeavor app"), "{said}");
+        assert_eq!(said.contains("unsupported"), cfg!(windows), "{said}");
+    }
 }
 
 #[test]
@@ -1307,7 +1307,7 @@ fn results_carry_a_browser_url_on_the_port_a_caller_names() {
 }
 
 #[test]
-fn a_renamed_tool_still_answers_to_its_old_name_but_is_listed_once() {
+fn the_status_tools_old_name_is_gone() {
     let dir = state_dir("core-renamed-tool");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
@@ -1317,11 +1317,11 @@ fn a_renamed_tool_still_answers_to_its_old_name_but_is_listed_once() {
     };
     let names: Vec<String> = ask("tools/list", serde_json::json!({}))["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
     assert!(names.contains(&"session_status".to_owned()) && !names.iter().any(|n| n.contains("pluto")), "{names:?}");
+    // `pluto_session_status` ran for one release after the rename (interface 2); not any more.
     let old = ask("tools/call", serde_json::json!({ "name": "pluto_session_status", "arguments": {} }));
-    assert_eq!(old["isError"], false, "{old}");
-    let said: serde_json::Value = serde_json::from_str(old["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert!(said.get("idle_stop_hours").is_some(), "the old name runs the same tool: {said}");
-    assert!(endeavor_mcp::is_tool("pluto_session_status") && endeavor_mcp::is_tool("session_status"), "a past session's calls by the old name are still notebook tools");
+    assert_eq!(old["isError"], true, "{old}");
+    assert!(old["content"][0]["text"].as_str().unwrap().contains("unknown_tool"), "{old}");
+    assert!(!endeavor_mcp::is_tool("pluto_session_status") && endeavor_mcp::is_tool("session_status"));
 }
 
 #[test]

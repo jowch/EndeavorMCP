@@ -27,7 +27,7 @@ The notebook is reactive. Running a cell also runs every cell that depends on it
 
 A session works in one notebook: the first it creates or opens. `list_notebooks` marks it `this_session`.
 
-- No notebook yet and the user wants notebook work: call `new_notebook` with a short descriptive file name, ending in `.jl` for Julia or `.R` for R. Make an R notebook when the user asks for R or their project is in R; otherwise Julia. R notebooks don't run on Windows or in the Endeavor app yet: there, tell the user and offer Julia. Don't ask the user to make one. Its empty first cell is in `cell_ids` and counts as read, so edit that cell first.
+- No notebook yet and the user wants notebook work: call `new_notebook` with a short descriptive file name, ending in `.jl` for Julia or `.R` for R. Make an R notebook when the user asks for R or their project is in R; otherwise Julia. R notebooks don't run on Windows yet: there, tell the user and offer Julia. Don't ask the user to make one. Its empty first cell is in `cell_ids` and counts as read, so edit that cell first.
 - The user names an existing notebook: `open_notebook`. If it is unclear which file they mean, ask; don't search for one to open. If the notebook is already open, the session joins it as it is and nothing runs (`already_open`). That is also how a second agent shares your notebook: give it the path.
 - After that, any call that opens, creates, changes or runs another notebook fails with `one_notebook`. A new step of the analysis is a new section in this notebook. If the user wants to work in another notebook, they start a new session.
 
