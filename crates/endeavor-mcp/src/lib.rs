@@ -212,7 +212,7 @@ pub(crate) fn which_version(theirs: Option<u32>, ours: Option<u32>) -> &'static 
 /// user, to whom they mean nothing.
 pub(crate) fn other_version_text(place: &str, machine: &str, interface: Option<u32>, open: &str) -> String {
     format!(
-        "Julia on {place} was started by {} version of Endeavor, and it keeps running as it is.{open} Some notebook tools may not work as described, or may be refused. If that happens, ask the user whether to stop it, since stopping it closes its notebooks. To stop it, call `stop_machine` with machine \"{machine}\"; then `use_machine` with machine \"{machine}\" starts this version.",
+        "Endeavor on {place} was started by {} version, and it keeps running as it is.{open} Some notebook tools may not work as described, or may be refused. If that happens, ask the user whether to stop it, since stopping it closes its notebooks. To stop it, call `stop_machine` with machine \"{machine}\"; then `use_machine` with machine \"{machine}\" starts this version.",
         which_version(interface, Some(core::INTERFACE))
     )
 }

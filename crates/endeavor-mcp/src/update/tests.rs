@@ -125,7 +125,7 @@ fn it_ends_with_how_to_switch_when_julia_runs_from_the_old_build() {
     let state = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "port": 1, "token": "t", "build": embedded::BUILD_VERSION });
     std::fs::write(here.state_dir.join("runtime.json"), state.to_string()).unwrap();
     let message = update(&here).unwrap();
-    assert!(message.contains(&format!("({KEY}).\nThe Julia running from {}", here.state_dir.display())), "{message}");
+    assert!(message.contains(&format!("({KEY}).\nThe Endeavor running from {}", here.state_dir.display())), "{message}");
     assert!(message.contains("this is build 0.1.0-00000000000000aa") && message.ends_with("run `endeavor stop`, then start it again."), "{message}");
     let _ = std::fs::remove_dir_all(&dir);
 }

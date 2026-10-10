@@ -409,7 +409,7 @@ fn serve_and_mcp_without_the_app() {
         drop(stdin);
         assert!(mcp.wait().unwrap().success());
         let stopped = command(&["stop"], &work, &julia, &depot).output().unwrap();
-        assert_eq!(String::from_utf8_lossy(&stopped.stdout), format!("Stopped Julia (pid {core}).\n"));
+        assert_eq!(String::from_utf8_lossy(&stopped.stdout), format!("Stopped Endeavor (pid {core}).\n"));
         wait_for("the core to exit", || !pid_alive(core));
         assert!(!group_alive(core), "Julia's process group is gone");
     });

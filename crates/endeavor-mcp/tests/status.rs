@@ -148,8 +148,8 @@ fn it_reports_the_machines_the_projects_and_a_dead_runtime() {
 
     let (text, json_out) = home.both(&[]);
     assert!(text.contains("Recorded, but its process is gone (pid 2147483647)"), "{text}");
-    assert!(text.contains("Lab: ada@lab.example.org:2222, Julia in Slurm jobs: no"), "{text}");
-    assert!(text.contains("Cluster: login.hpc.example.org, Julia in Slurm jobs: yes"), "{text}");
+    assert!(text.contains("Lab: ada@lab.example.org:2222, Slurm jobs: no"), "{text}");
+    assert!(text.contains("Cluster: login.hpc.example.org, Slurm jobs: yes"), "{text}");
     assert!(text.contains("(2 remembered)"), "{text}");
     assert!(text.contains("10 B; builds: 0123456789ab"), "{text}");
     assert!(text.contains("runtime.log") && text.contains("Cluster state folder:") && text.contains("holds job.json"), "{text}");

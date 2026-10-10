@@ -685,7 +685,7 @@ pub fn relay_main(argv: &[String]) -> ! {
     let home = wire::files::home().display().to_string();
     let _ = mux.send(&ToApp::Hello { protocol: wire::PROTOCOL, version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false, launcher: String::new() }.frame());
     let runtime::Looked::Running(state, port) = runtime::look(&dir, false, true) else {
-        let _ = mux.send(&ToApp::StartFailed { id: 0, message: format!("Julia isn't running on {}.", hostname()) }.frame());
+        let _ = mux.send(&ToApp::StartFailed { id: 0, message: format!("Endeavor isn't running on {}.", hostname()) }.frame());
         std::process::exit(1);
     };
     let runtime = Runtime::recorded(&state, &dir, &events);

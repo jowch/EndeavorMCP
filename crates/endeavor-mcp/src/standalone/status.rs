@@ -333,7 +333,7 @@ fn text(report: &Report) -> String {
         (None, true) => line("  none".into()),
         (None, false) => {
             for machine in &machines.machines {
-                line(format!("  {}: {}, Julia in Slurm jobs: {}", machine.name, machine.host, if machine.slurm { "yes" } else { "no" }));
+                line(format!("  {}: {}, Slurm jobs: {}", machine.name, machine.host, if machine.slurm { "yes" } else { "no" }));
             }
         }
     }

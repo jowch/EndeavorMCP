@@ -98,7 +98,7 @@ impl StartError {
     pub fn message(self) -> String {
         match self {
             StartError::NeedsInstall(items) => format!("{} Installing wasn't allowed, and an agreement to it (`StartOptions::install`) is for one start only.", wire::needs_text(&items, "that machine")),
-            StartError::NotRunning => "No Julia is running there.".to_owned(),
+            StartError::NotRunning => "Endeavor isn't running there.".to_owned(),
             StartError::Failed(message) => message,
         }
     }

@@ -78,8 +78,8 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>)
     // that waits for Julia turn it off (as `Options::julia_when_needed`).
     config.julia_when_needed = test_var("ENDEAVOR_TEST_JULIA_AT_START").is_none();
     config.messages = Messages {
-        restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
-        restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {}", install_text(name, &InstallInfo { items: items.to_vec(), helper: None }, "use_machine")),
+        restart_failed: |name| format!("Endeavor on {name} couldn't start. Call use_machine to try again."),
+        restart_needs_install: |name, items| format!("Endeavor on {name} couldn't start. {}", install_text(name, &InstallInfo { items: items.to_vec(), helper: None }, "use_machine")),
         not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
         // The plugin's runs aren't held for the user's answer by any runtime (it sends no policy): an old one is no worse.
         no_run_gate: None,
@@ -145,7 +145,7 @@ impl Drop for Unsaved<'_> {
 }
 
 fn settings_changed(name: &str) -> String {
-    format!("The settings of {name} changed while Julia is in use on it through this session with the old ones. Call `stop_machine` for {name} (with the user's agreement), or put the settings back.")
+    format!("The settings of {name} changed while Endeavor is in use on it through this session with the old ones. Call `stop_machine` for {name} (with the user's agreement), or put the settings back.")
 }
 
 impl Connections {
@@ -339,16 +339,16 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
         Outcome::StillWorking(step) => {
             let step = if step.is_empty() { String::new() } else { format!(" Last step: {}.", step.trim_end_matches('.')) };
             if matches!(reached.status.state, State::Starting { .. }) {
-                format!("Julia is starting on {at}. The first start installs packages and takes a few minutes.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds for Julia. `session_status` answers at once and only shows the step, so don't call it repeatedly.")
+                format!("Endeavor is starting on {at}. The first start can take a few minutes.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds. `session_status` answers at once and only shows the step, so don't call it repeatedly.")
             } else {
                 format!("Endeavor is connecting to {name}.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds. `session_status` answers at once and only shows the step, so don't call it repeatedly. If it stays like this, call `use_machine` again.")
             }
         }
-        Outcome::NothingRunning => format!("Julia isn't running on {at} right now. Call `use_machine` with machine \"{name}\" to start it."),
+        Outcome::NothingRunning => format!("Endeavor isn't running on {at} right now. Call `use_machine` with machine \"{name}\" to start it."),
         Outcome::Queued { job, queue } => {
             let job = job.as_ref().map(|j| format!(" {}", j.id)).unwrap_or_default();
             let (what, wait) = if queue.state == "RUNNING" {
-                (format!("running on node {}, and Julia is starting there", queue.reason), "")
+                (format!("running on node {}, and Endeavor is starting there", queue.reason), "")
             } else {
                 (format!("waiting in the queue: {}", queue_reason_text(&queue.reason)), " A queued job can wait minutes or hours: after a few tries, stop and let the user say when to check again.")
             };
@@ -356,10 +356,10 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
         }
         Outcome::Failed(error) => {
             let error = if error.is_empty() { "it didn't say why" } else { error };
-            format!("Julia on {at} isn't available: {error}\nCall `use_machine` with machine \"{name}\" to try again, or tell the user.")
+            format!("Endeavor on {at} isn't available: {error}\nCall `use_machine` with machine \"{name}\" to try again, or tell the user.")
         }
         Outcome::NeedsInstall(info) => format!("{} Nothing was installed.", install_text(name, info, "use_machine")),
-        Outcome::Ready(_) => format!("Julia on {at} is ready."),
+        Outcome::Ready(_) => format!("Endeavor on {at} is ready."),
     }
 }
 
@@ -377,11 +377,11 @@ fn install_text(name: &str, info: &InstallInfo, tool: &str) -> String {
         let update = if helper.update { " A helper of an older version is installed there already (this is an update); it stays beside the new one." } else { "" };
         let attach = "installing the helper doesn't touch it, and the helper is what lets Endeavor attach to it.";
         let running = match &helper.running {
-            Some(Running::Process { pid, checked: true }) => format!(" Julia is already running there (process {pid}); {attach}"),
-            Some(Running::Process { pid, checked: false }) => format!(" A process ({pid}) that was recorded as Julia's is alive there, but Endeavor couldn't check what it is; {attach}"),
-            Some(Running::Job { id, listed: true }) => format!(" A Slurm job ({id}) for Julia is pending or running there; {attach}"),
-            Some(Running::Job { id, listed: false }) => format!(" A Slurm job ({id}) is recorded there for Julia, but Endeavor couldn't ask Slurm whether it still exists; {attach}"),
-            None => " No running Julia was found there.".to_owned(),
+            Some(Running::Process { pid, checked: true }) => format!(" Endeavor is already running there (process {pid}); {attach}"),
+            Some(Running::Process { pid, checked: false }) => format!(" A process ({pid}) that was recorded as Endeavor's is alive there, but Endeavor couldn't check what it is; {attach}"),
+            Some(Running::Job { id, listed: true }) => format!(" A Slurm job ({id}) for Endeavor is pending or running there; {attach}"),
+            Some(Running::Job { id, listed: false }) => format!(" A Slurm job ({id}) is recorded there for Endeavor, but Endeavor couldn't ask Slurm whether it still exists; {attach}"),
+            None => " Endeavor isn't running there.".to_owned(),
         };
         let needed = if tool == "stop_machine" { " Stopping the runtime there needs it." } else { "" };
         let later = match tool {
@@ -454,7 +454,7 @@ fn queue_json(status: &Status) -> Option<Value> {
     let queue = status.state.queue()?;
     // Once the job runs, the helper gives its node in place of a reason.
     if queue.state == "RUNNING" {
-        return Some(json!({ "state": queue.state, "node": queue.reason, "reason_text": format!("running on node {}, and Julia is starting there", queue.reason) }));
+        return Some(json!({ "state": queue.state, "node": queue.reason, "reason_text": format!("running on node {}, and Endeavor is starting there", queue.reason) }));
     }
     Some(json!({ "state": queue.state, "reason": queue.reason, "reason_text": queue_reason_text(&queue.reason) }))
 }
@@ -768,7 +768,7 @@ impl Relay {
             Outcome::Ready(runtime) => Ok(self.ready(&target, &runtime, status.hello.as_ref().map(|h| h.home.as_str()))),
             Outcome::NothingRunning if provider.cluster() => Err(NotReady::of(&name, Outcome::NothingRunning, status, self.needs_job_message(&target))),
             Outcome::NothingRunning => {
-                let message = format!("Julia on {} isn't running. It starts at the first notebook tool call, which then takes a few minutes the first time.", place(&name));
+                let message = format!("Endeavor on {} isn't running. It starts at the first notebook tool call, which then takes a few minutes the first time.", place(&name));
                 Err(NotReady { idle: true, ..NotReady::of(&name, Outcome::NothingRunning, status, message) })
             }
             other => {
@@ -812,7 +812,7 @@ impl Relay {
     /// Why a call can't go to a runtime that `stop_machine` ended.
     fn stopped(&self, target: &Target) -> NotReady {
         let name = &target.name;
-        let message = format!("Julia on {} was stopped from this session with stop_machine. Call `use_machine` with machine \"{name}\" to start it again.", place(name));
+        let message = format!("Endeavor on {} was stopped from this session with stop_machine. Call `use_machine` with machine \"{name}\" to start it again.", place(name));
         let unready = match self.held(target) {
             Some(provider) => NotReady::of(name, Outcome::NothingRunning, provider.status(), message),
             None => NotReady::plain(message),
@@ -852,7 +852,7 @@ impl Relay {
         let name = &target.name;
         let defaults = defaults.map(|d| format!(" The defaults would be {d}.")).unwrap_or_default();
         format!(
-            "This project uses {name}, a Slurm cluster, and no job is running there. Starting Julia means submitting a job that waits in the queue and uses the user's allocation, so nothing was submitted.{defaults} Ask the user to confirm those resources or choose others, then call `use_machine` with machine \"{name}\" and the resources to submit it."
+            "This project uses {name}, a Slurm cluster, and no job is running there. Starting Endeavor there means submitting a job that waits in the queue and uses the user's allocation, so nothing was submitted.{defaults} Ask the user to confirm those resources or choose others, then call `use_machine` with machine \"{name}\" and the resources to submit it."
         )
     }
 
@@ -1003,7 +1003,7 @@ impl Relay {
             "local": { "name": LOCAL, "state": local_state, "this_session": target.is_local() },
             "this_session": { "machine": used },
             "ssh_hosts_not_added": ssh_hosts,
-            "message": format!("This session works on {}. A machine shows a state only while this session is connected to it: \"not connected\" says nothing about whether Julia runs there, and `use_machine` finds out. `add_machine` adds a server from the ssh hosts listed; `use_machine` moves the session to a machine, or back to \"{LOCAL}\".", place(used)),
+            "message": format!("This session works on {}. A machine shows a state only while this session is connected to it: \"not connected\" says nothing about whether Endeavor runs there, and `use_machine` finds out. `add_machine` adds a server from the ssh hosts listed; `use_machine` moves the session to a machine, or back to \"{LOCAL}\".", place(used)),
         }))
     }
 
@@ -1024,7 +1024,7 @@ impl Relay {
         let slurm = match args.get("slurm") {
             None | Some(Value::Null) => None,
             Some(Value::Bool(slurm)) => Some(*slurm),
-            Some(_) => return Err(invalid("slurm must be true (run Julia in Slurm jobs) or false (run it directly on the machine)")),
+            Some(_) => return Err(invalid("slurm must be true (run notebooks in Slurm jobs) or false (run them directly on the machine)")),
         };
         let servers = self.machines.load_writable()?;
         // Which saved machine this call is about: by the name given, else by the name it would get, else by its host.
@@ -1092,7 +1092,7 @@ impl Relay {
         };
         if existing.as_ref().is_some_and(|p| p.cluster.is_some() != cluster) && (status.job.is_some() || matches!(status.state, State::Starting { .. } | State::Queued(_) | State::Ready(_))) {
             return Err(format!(
-                "Julia is running, or starting, on {} through the way it is saved now. Changing between running Julia in Slurm jobs and running it directly would leave that one where `stop_machine` can't reach it. Nothing was changed. Call `stop_machine` first (with the user's agreement), then call `add_machine` again.",
+                "Endeavor is running, or starting, on {} through the way it is saved now. Changing between running in Slurm jobs and running it directly would leave that one where `stop_machine` can't reach it. Nothing was changed. Call `stop_machine` first (with the user's agreement), then call `add_machine` again.",
                 record.display_name()
             ));
         }
@@ -1137,19 +1137,19 @@ impl Relay {
         let partitions: Vec<Partition> = record.cluster.as_ref().map(|c| c.partitions.clone()).or_else(|| hello.partitions.clone()).unwrap_or_default();
         let mut message = format!("Connected to {} (node {}, home folder {}). ", record.ssh_target(), hello.node, hello.home);
         if let Some(saved) = &record.cluster {
-            message.push_str("It has Slurm, and Julia runs in Slurm jobs there");
+            message.push_str("It has Slurm, and notebooks run in Slurm jobs there");
             if partitions.is_empty() {
                 message.push_str(if hello.partitions_failed { ", but its partitions couldn't be read. " } else { ", but it didn't list its partitions. " });
             } else {
                 message.push_str(&format!(". Partitions: {}. ", partitions.iter().map(partition_text).collect::<Vec<_>>().join("; ")));
             }
             message.push_str(&format!("Default job: {}. ", saved.resources.summary()));
-            message.push_str("To run Julia directly on the machine instead, call `add_machine` again with slurm false (the saved job defaults are then dropped), but only if the machine is the user's own workstation or the user confirms it isn't a shared cluster: on a cluster that runs Julia on the login node, which other people share. ");
+            message.push_str("To run notebooks directly on the machine instead, call `add_machine` again with slurm false (the saved job defaults are then dropped), but only if the machine is the user's own workstation or the user confirms it isn't a shared cluster: on a cluster that runs them on the login node, which other people share. ");
         } else if hello.slurm {
             let why = if slurm == Some(false) { "as asked" } else { "since it was saved before as a plain server" };
-            message.push_str(&format!("It has Slurm, but Julia runs on it directly and not in a job, {why}. To run Julia in Slurm jobs instead, call `add_machine` again with slurm true. "));
+            message.push_str(&format!("It has Slurm, but notebooks run on it directly and not in a job, {why}. To run them in Slurm jobs instead, call `add_machine` again with slurm true. "));
         } else {
-            message.push_str("It has no Slurm, so Julia runs there directly. ");
+            message.push_str("It has no Slurm, so notebooks run there directly. ");
         }
         if hello.found.is_empty() {
             message.push_str("Endeavor looks for Julia when it first starts a runtime there. ");
@@ -1362,7 +1362,7 @@ impl Relay {
         let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Endeavor started there" };
         // Julia starts with the first Julia notebook (`open_session`), not here.
         let julia = match test_var("ENDEAVOR_TEST_JULIA_AT_START") {
-            None => " Julia starts the first time a Julia notebook is made or opened there; the first time can take a few minutes, and the call says `julia_starting` until it's ready.",
+            None => " Julia starts there when a Julia notebook needs it, or may be starting already; the first start can take a few minutes, and calls say `julia_starting` until it's ready. R notebooks don't need Julia.",
             Some(_) => "",
         };
         let notes = match self.machine_other_build(&target, runtime, server.cluster.is_some()) {
@@ -1399,7 +1399,7 @@ impl Relay {
             let wait = if starting_here { Duration::ZERO } else { deadline.left() };
             match provider.ensure(Want::Attach { install }, wait, true) {
                 Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, &info, "stop_machine")),
-                Outcome::NothingRunning => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Julia isn't running on {at}, so there is nothing to stop.") })),
+                Outcome::NothingRunning => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Endeavor isn't running on {at}, so there is nothing to stop.") })),
                 _ => {}
             }
         }
@@ -1431,13 +1431,13 @@ impl Relay {
         match waited.recv_timeout(deadline.left()) {
             Ok(Ok(())) => {}
             Ok(Err(why)) => return Err(why),
-            Err(_) => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Stopping Julia on {at} is taking a while. It goes on in the background: call `session_status` or `list_machines` later to see whether it ended.") })),
+            Err(_) => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Stopping Endeavor on {at} is taking a while. It goes on in the background: call `session_status` or `list_machines` later to see whether it ended.") })),
         }
         let cluster = if server.cluster.is_some() { " and its Slurm job was cancelled" } else { "" };
         Ok(json!({
             "machine": name,
             "stopped": true,
-            "message": format!("Julia on {at} was stopped{cluster}. Every notebook running there ended. `use_machine` with machine \"{name}\" starts it again."),
+            "message": format!("Endeavor on {at} was stopped{cluster}. Every notebook running there ended. `use_machine` with machine \"{name}\" starts it again."),
         }))
     }
 
@@ -1478,7 +1478,7 @@ impl Relay {
             "defaults": defaults,
             "partitions": partitions,
             "message": format!(
-                "No job is running on {name}, and starting Julia there means submitting a Slurm job that waits in the queue and uses the user's allocation, so nothing was submitted and this session has not moved: it stays on {stays} until `use_machine` is called with machine \"{name}\" and the resources. The saved defaults are {} on {partition}. Ask the user to confirm them or choose others, then call `use_machine` again with machine \"{name}\" and the resources to submit it.",
+                "No job is running on {name}, and starting Endeavor there means submitting a Slurm job that waits in the queue and uses the user's allocation, so nothing was submitted and this session has not moved: it stays on {stays} until `use_machine` is called with machine \"{name}\" and the resources. The saved defaults are {} on {partition}. Ask the user to confirm them or choose others, then call `use_machine` again with machine \"{name}\" and the resources to submit it.",
                 cluster.resources.summary()
             ),
         })
@@ -1496,19 +1496,19 @@ fn reach_text(server: &Server, runtime: &RuntimeInfo) -> String {
     format!(" The page works while this session is connected. Once it has ended, `ssh -L {port}:127.0.0.1:{port}{via} {}` run on the user's computer reaches the runtime on port {port}, at http://localhost:{port}/ in a browser that opened its notebooks in this session.", server.ssh_host)
 }
 
-/// What `stop_machine` says, without `force`, when Julia is starting or a job is queued: other
+/// What `stop_machine` says, without `force`, when Endeavor is starting or a job is queued: other
 /// sessions that wait for it can't be seen, and stopping cancels it for them too.
 fn waiting_result(name: &str, status: &Status) -> Value {
     let at = place(name);
     let cancels = " Stopping cancels it. Endeavor can't see which other sessions are waiting for a runtime that isn't up yet, and they would lose it. Tell the user, and call `stop_machine` again with force true only if they agree.";
     let (what, then) = match (&status.job, &status.state) {
-        _ if name == LOCAL => (format!("Julia is starting on {at}"), cancels),
+        _ if name == LOCAL => (format!("Endeavor is starting on {at}"), cancels),
         (job, State::Queued(queue)) => {
             let id = job.as_ref().map_or(String::new(), |j| format!(" {}", j.id));
             (format!("the Slurm job{id} on {name} is {} ({})", queue.state.to_lowercase(), queue_reason_text(&queue.reason)), cancels)
         }
-        (Some(job), _) => (format!("the Slurm job {} on {name} is starting Julia", job.id), cancels),
-        _ => (format!("Julia is starting on {name}"), cancels),
+        (Some(job), _) => (format!("the Slurm job {} on {name} is starting Endeavor", job.id), cancels),
+        _ => (format!("Endeavor is starting on {name}"), cancels),
     };
     let mut result = json!({
         "machine": name,
@@ -1529,7 +1529,7 @@ fn waiting_result(name: &str, status: &Status) -> Value {
 /// record it had when it was connected to before (`prior`), and whether the helper found Slurm.
 fn choose_mode(slurm: Option<bool>, prior: Option<&Server>, found: bool) -> Result<bool, String> {
     match (slurm, prior) {
-        (Some(true), _) if !found => Err("slurm true can't be used: Endeavor's helper found no Slurm on that machine (no sinfo). Leave slurm out, or give false, to run Julia there directly.".into()),
+        (Some(true), _) if !found => Err("slurm true can't be used: Endeavor's helper found no Slurm on that machine (no sinfo). Leave slurm out, or give false, to run notebooks there directly.".into()),
         (Some(wanted), _) => Ok(wanted),
         (None, Some(prior)) => Ok(prior.cluster.is_some()),
         (None, None) => Ok(found),
