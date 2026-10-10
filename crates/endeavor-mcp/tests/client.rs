@@ -204,7 +204,7 @@ fn the_helper_is_installed_then_reused_and_attaches() {
 
     let (seen, on) = events();
     let (channel, hello) = connect(&server, &transport, &options, &Cancel::default(), &on).map_err(|e| e.message).expect("first connect");
-    assert_eq!((hello.node.as_str(), hello.home.as_path()), (hostname().as_str(), place.home.as_path()));
+    assert_eq!((hello.node.as_str(), hello.home.as_str()), (hostname().as_str(), place.home.to_str().unwrap()));
     let installed = place.installed();
     assert!(installed.join("endeavor").is_file() && installed.join("runtime/boot.jl").is_file());
 

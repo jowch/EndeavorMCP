@@ -1237,12 +1237,12 @@ impl Relay {
             match provider.files(wire::files::Request::Folder { path: path.clone() }, deadline.left()) {
                 Some(Ok(wire::files::Reply::Folder { path, created: true })) => {
                     let gone = if from_memory { " (the folder this project used there was gone)" } else { "" };
-                    notes.push(format!("Made a new folder for the session on {name}: {}{gone}. Tell the user it was made.", path.display()));
+                    notes.push(format!("Made a new folder for the session on {name}: {path}{gone}. Tell the user it was made."));
                 }
                 Some(Ok(wire::files::Reply::Folder { .. })) => {}
                 Some(Ok(wire::files::Reply::NoFolder { parent, .. })) => {
                     let why = if from_memory { "It may have been removed since.".to_owned() } else { format!("The path may be mistyped, or be a path on another computer: paths here are {name}'s.") };
-                    return Err(invalid(format!("{which} can't be the session's folder: neither it nor the folder it would go in, {}, exists on {name}. Nothing was started. {why} {ask}", parent.display())));
+                    return Err(invalid(format!("{which} can't be the session's folder: neither it nor the folder it would go in, {}, exists on {name}. Nothing was started. {why} {ask}", parent)));
                 }
                 Some(Ok(other)) => return Err(format!("{name}'s helper answered the folder check with {other:?}.")),
                 // The helper's own refusal (`Reply::Error`) comes as an error too.

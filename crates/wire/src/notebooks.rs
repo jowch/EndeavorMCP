@@ -2,7 +2,7 @@
 //! folder, and the first cells of one for the new-session screen's static
 //! preview. The app reads This Mac's files with these; the helper a server's.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,8 @@ const PACKAGE_CELLS: [&str; 2] = ["PLUTO_PROJECT_TOML_CONTENTS", "PLUTO_MANIFEST
 /// notebook it is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Found {
-    pub path: PathBuf,
+    /// As text, in the rules of the machine it is on ([`crate::server_path`]).
+    pub path: String,
     pub modified: SystemTime,
     /// Missing from an older helper, which finds only Pluto's.
     #[serde(default = "pluto")]
@@ -62,7 +63,7 @@ pub fn scan(folder: &Path, backends: &[Backend]) -> Vec<Found> {
                 && let Some(backend) = Backend::of_file(&path).filter(|b| backends.contains(b))
             {
                 let modified = entry.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-                found.push(Found { path, modified, backend });
+                found.push(Found { path: crate::files::text(&path), modified, backend });
             }
         }
     }
@@ -225,6 +226,7 @@ fn trim_blank<'a, 'b>(lines: &'b [&'a str]) -> &'b [&'a str] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     const SAMPLE: &str = r#"### A Pluto.jl notebook ###
 # v0.19.40
@@ -325,7 +327,7 @@ julia_version = "1.12.6"
         std::fs::write(dir.join("sub/f.R"), "### An Ember notebook ###\n").unwrap();
         std::fs::write(dir.join("script.R"), "x <- 1\n").unwrap();
         let found = |backends: &[Backend]| {
-            let mut found: Vec<_> = scan(&dir, backends).into_iter().map(|f| (f.path.strip_prefix(&dir).unwrap().to_path_buf(), f.backend)).collect();
+            let mut found: Vec<_> = scan(&dir, backends).into_iter().map(|f| (Path::new(&f.path).strip_prefix(&dir).unwrap().to_path_buf(), f.backend)).collect();
             found.sort_by(|a, b| a.0.cmp(&b.0));
             found
         };

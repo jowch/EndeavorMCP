@@ -1125,7 +1125,7 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
     let (channel, hello) = connect(&config.server, &config.transport, &options, &cancel, &|event| shared.on_event(event))?;
     shared.with(|i| {
         let hello_info = i.hello.get_or_insert_with(HelloInfo::default);
-        (hello_info.node, hello_info.home, hello_info.slurm, hello_info.uploads) = (hello.node, hello.home.display().to_string(), hello.slurm, hello.uploads);
+        (hello_info.node, hello_info.home, hello_info.slurm, hello_info.uploads) = (hello.node, hello.home, hello.slurm, hello.uploads);
         hello_info.launcher = hello.launcher.map(|l| l.word().to_owned());
         i.settled = i.settled.or(hello.launcher);
     });

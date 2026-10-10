@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -111,8 +110,8 @@ pub struct Hello {
     /// The helper's `wire::PROTOCOL`; 0 for a helper that says none.
     pub protocol: u32,
     pub node: String,
-    /// The home folder on its machine.
-    pub home: PathBuf,
+    /// The home folder on its machine, in that machine's rules ([`wire::server_path`]).
+    pub home: String,
     /// Slurm's commands are there: probably a cluster's login node.
     pub slurm: bool,
     /// It can save attached files into a session's folder (`files::Request::Write`).
@@ -335,7 +334,7 @@ impl Channel {
                     "slurm" => Some(Launcher::Slurm),
                     _ => None,
                 };
-                Ok(Hello { protocol, node, home: PathBuf::from(home), slurm, uploads, launcher })
+                Ok(Hello { protocol, node, home, slurm, uploads, launcher })
             }
             Ok(ToApp::Error { message }) => Err(message),
             Ok(other) => Err(format!("Endeavor's helper said {other:?} before hello.")),
