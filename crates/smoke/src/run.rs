@@ -1,7 +1,10 @@
-//! The runner: for each task, a fresh state and project folder, the agent
-//! started on the task's prompt with the plugin and this binary as its
-//! server, then the checks, then the runtime stopped. A task that fails runs
-//! twice more, to tell a flaky failure from a real one.
+//! The runner: for each task, a fresh state and project folder, the notebooks
+//! its `setup.json` opens, the agent started on the task's prompt (and its
+//! `followup.md`, in the same session) with the plugin and this binary as its
+//! server, then the checks, then the runtime stopped. A task whose checks ask
+//! for it also has its notebooks run again from their files in a fresh
+//! runtime. A task that fails runs twice more, to tell a flaky failure from a
+//! real one.
 //!
 //! The agent runs in a folder under the system's temporary folder, outside any
 //! checkout, so it sees no CLAUDE.md of ours; with an environment of its own,
@@ -19,6 +22,9 @@ use crate::checks::{self, Evidence};
 
 /// How long one agent run may take before it is ended.
 const AGENT_LIMIT: Duration = Duration::from_secs(20 * 60);
+
+/// How long the harness's own runs of a notebook (setting one up, running one again) may take.
+const RUN_LIMIT: Duration = Duration::from_secs(15 * 60);
 
 /// The built-in tools the agent has.
 const BUILT_IN_TOOLS: &[&str] = &["Read", "Glob", "Grep", "Skill", "ToolSearch"];
@@ -129,7 +135,11 @@ pub fn main(args: &[String]) -> i32 {
         eprintln!("endeavor-smoke: no {} next to this binary; build it first: cargo build -p endeavor-mcp -p endeavor-smoke", endeavor.display());
         return 2;
     }
-    let commit = git(&repo, &["rev-parse", "--short", "HEAD"]);
+    let mut commit = git(&repo, &["rev-parse", "--short", "HEAD"]);
+    // A run of uncommitted changes says so, so it isn't taken for that commit's.
+    if git(&repo, &["status", "--porcelain"]) != "unknown" {
+        commit += "-dirty";
+    }
     let out = o.out.clone().unwrap_or_else(|| repo.join("target/smoke").join(format!("{}-{commit}", utc_stamp())));
     // The agent runs in each task's project folder, so every path it is given is absolute.
     std::fs::create_dir_all(&out).unwrap();
@@ -162,7 +172,7 @@ pub fn main(args: &[String]) -> i32 {
             let kept = out.join(&id).join(format!("attempt-{n}"));
             let _ = std::fs::remove_dir_all(&kept);
             std::fs::create_dir_all(&kept).unwrap();
-            copy_dir(&work, &kept, &["state", "home"]);
+            copy_dir(&work, &kept, &["state", "home", "rerun"]);
             let _ = std::fs::remove_dir_all(&work);
             let passed = result["passed"] == true;
             attempts.push(result);
@@ -192,13 +202,29 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     }
     let project = project.canonicalize().unwrap();
     std::fs::write(work.join("settings.json"), json!({ "julia": julia, "depot": depot }).to_string()).unwrap();
-    let prompt = std::fs::read_to_string(task.join("prompt.md")).unwrap().trim().to_owned();
+    if task.join("inject.json").is_file() {
+        std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();
+    }
+    let mut turns = vec![std::fs::read_to_string(task.join("prompt.md")).unwrap().trim().to_owned()];
+    turns.extend(std::fs::read_to_string(task.join("followup.md")).ok().map(|t| t.trim().to_owned()));
     let specs: Value = std::fs::read_to_string(task.join("checks.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({ "checks": [] }));
+    let mut problems: Vec<String> = Vec::new();
+
+    // The notebooks the task starts with open, as a person working in them left them.
+    let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let opens: Vec<&str> = setup["open"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    if !opens.is_empty() {
+        let opened = crate::mcp::Session::start(endeavor, work, &project).and_then(|mut s| opens.iter().try_for_each(|path| crate::mcp::open_and_run(&mut s, path, RUN_LIMIT).map(drop)));
+        if let Err(e) = opened {
+            problems.push(format!("setting up: {e}"));
+        }
+    }
 
     let began = Instant::now();
-    let agent = run_claude(&prompt, work, &project, endeavor, exe, repo);
+    let agent = if problems.is_empty() { run_claude(&turns, work, &project, endeavor, exe, repo) } else { AgentRun::default() };
     let seconds = began.elapsed().as_secs_f64();
     let calls = crate::log::calls(&work.join("mcp.jsonl"));
+    let injections = crate::log::injections(&work.join("mcp.jsonl"));
     let read = crate::mcp::Session::start(endeavor, work, &project).and_then(|mut s| crate::mcp::notebooks(&mut s));
     stop_runtime(endeavor, work);
 
@@ -206,9 +232,10 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         Ok(n) => (n, None),
         Err(e) => (Vec::new(), Some(e)),
     };
-    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message };
+    let wants_rerun = specs["checks"].as_array().into_iter().flatten().any(|c| c["check"] == "reproducible");
+    let rerun = (wants_rerun && read_error.is_none()).then(|| rerun(&notebooks, work, &project, endeavor));
+    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref() };
     let outcomes: Vec<checks::Outcome> = specs["checks"].as_array().into_iter().flatten().map(|spec| checks::run(spec, &ev)).collect();
-    let mut problems: Vec<String> = Vec::new();
     if let Some(e) = &agent.problem {
         problems.push(e.clone());
     }
@@ -229,9 +256,37 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
             "cost_usd": agent.cost_usd,
         },
         "final_message": agent.final_message,
+        "notebooks": notebooks_json(&notebooks),
+        "rerun": rerun.as_ref().map(|r| r.as_ref().map_or_else(|e| json!(e), |n| notebooks_json(n))),
     })
 }
 
+/// The agent's notebooks run again from their files, from the top, in a
+/// runtime of their own: what someone who opens them later would see.
+fn rerun(notebooks: &[crate::mcp::Notebook], work: &Path, project: &Path, endeavor: &Path) -> Result<Vec<crate::mcp::Notebook>, String> {
+    let fresh = work.join("rerun");
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::copy(work.join("settings.json"), fresh.join("settings.json")).unwrap();
+    let result = crate::mcp::Session::start(endeavor, &fresh, project).and_then(|mut s| {
+        for nb in notebooks {
+            crate::mcp::open_and_run(&mut s, &nb.path, RUN_LIMIT)?;
+        }
+        crate::mcp::notebooks(&mut s)
+    });
+    stop_runtime(endeavor, &fresh);
+    result
+}
+
+/// Notebooks as a result shows them: each cell's first line, state and output, cut short.
+fn notebooks_json(notebooks: &[crate::mcp::Notebook]) -> Value {
+    json!(notebooks.iter().map(|nb| json!({
+        "path": nb.path,
+        "execution_allowed": nb.execution_allowed,
+        "cells": nb.cells.iter().map(|c| json!({ "id": c.id, "code": checks::clip(c.code.lines().next().unwrap_or_default(), 80), "errored": c.errored, "busy": c.busy, "output": checks::clip(&c.output, 300) })).collect::<Vec<_>>(),
+    })).collect::<Vec<_>>())
+}
+
+#[derive(Default)]
 struct AgentRun {
     final_message: String,
     tools: Vec<String>,
@@ -240,12 +295,14 @@ struct AgentRun {
     problem: Option<String>,
 }
 
-/// Claude Code, headless, with the plugin from this checkout and this binary as its server.
-fn run_claude(prompt: &str, work: &Path, project: &Path, endeavor: &Path, exe: &Path, repo: &Path) -> AgentRun {
+/// Claude Code, headless, with the plugin from this checkout and this binary as
+/// its server. Each of `turns` is a message from the user, in one session: the
+/// next is taken once Claude has answered the last.
+fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, exe: &Path, repo: &Path) -> AgentRun {
     let transcript = std::fs::File::create(work.join("transcript.jsonl")).unwrap();
     let stderr = std::fs::File::create(work.join("agent-stderr.txt")).unwrap();
     let spawned = Command::new("claude")
-        .args(["-p", prompt, "--output-format", "stream-json", "--verbose", "--max-turns", "80"])
+        .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--max-turns", "80"])
         .arg("--plugin-dir")
         .arg(repo.join("claude-plugin"))
         // The only built-in tools there are: reading files, and the two that load skills and deferred tools.
@@ -260,14 +317,23 @@ fn run_claude(prompt: &str, work: &Path, project: &Path, endeavor: &Path, exe: &
         .env("ENDEAVOR_BIN", exe)
         .env("SMOKE_ENDEAVOR", endeavor)
         .env("SMOKE_WORK", work)
-        .stdin(Stdio::null())
+        .env("SMOKE_PROJECT", project)
+        .stdin(Stdio::piped())
         .stdout(transcript)
         .stderr(stderr)
         .spawn();
     let mut child = match spawned {
         Ok(c) => c,
-        Err(e) => return AgentRun { final_message: String::new(), tools: Vec::new(), turns: None, cost_usd: None, problem: Some(format!("can't start claude: {e}")) },
+        Err(e) => return AgentRun { problem: Some(format!("can't start claude: {e}")), ..AgentRun::default() },
     };
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().unwrap();
+        for turn in turns {
+            let _ = writeln!(stdin, "{}", json!({ "type": "user", "message": { "role": "user", "content": turn } }));
+        }
+        // Closed, so Claude ends after its answer to the last.
+    }
     let began = Instant::now();
     let mut problem = None;
     loop {
@@ -286,7 +352,7 @@ fn run_claude(prompt: &str, work: &Path, project: &Path, endeavor: &Path, exe: &
             }
         }
     }
-    let mut run = AgentRun { final_message: String::new(), tools: Vec::new(), turns: None, cost_usd: None, problem };
+    let mut run = AgentRun { problem, ..AgentRun::default() };
     let text = std::fs::read_to_string(work.join("transcript.jsonl")).unwrap_or_default();
     for event in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         match event["type"].as_str() {
@@ -305,9 +371,10 @@ fn run_claude(prompt: &str, work: &Path, project: &Path, endeavor: &Path, exe: &
                     run.tools.push(part["name"].as_str().unwrap_or_default().to_owned());
                 }
             }
+            // One per user message: its turns count alone, its cost is the session's so far.
             Some("result") => {
                 run.final_message = event["result"].as_str().unwrap_or_default().to_owned();
-                run.turns = event["num_turns"].as_u64();
+                run.turns = Some(run.turns.unwrap_or(0) + event["num_turns"].as_u64().unwrap_or(0));
                 run.cost_usd = event["total_cost_usd"].as_f64();
                 if event["is_error"] == true && run.problem.is_none() {
                     run.problem = Some(format!("the agent's run ended in an error: {}", event["subtype"]));

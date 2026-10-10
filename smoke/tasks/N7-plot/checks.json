@@ -1,0 +1,9 @@
+{
+  "about": "A plot. The agent looks at the picture after drawing it and before it reports. Tags: plots, view_cell_output.",
+  "checks": [
+    { "check": "notebooks", "count": 1 },
+    { "check": "no_errored_cells" },
+    { "check": "called_after_last_run", "tool": "view_cell_output" },
+    { "check": "reproducible" }
+  ]
+}

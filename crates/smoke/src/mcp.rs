@@ -1,5 +1,7 @@
-//! The checker's own MCP session: `endeavor mcp` over stdio, joining the
-//! runtime the agent's session used, to read the notebooks it left.
+//! The harness's own MCP sessions: `endeavor mcp` over stdio, joining the
+//! runtime the agent's session uses. The runner sets notebooks up with one and
+//! reads what the agent left with another; the proxy plays a second person
+//! with a third.
 
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::path::Path;
@@ -83,9 +85,19 @@ pub struct Notebook {
 
 #[derive(Debug, Default, Clone)]
 pub struct Cell {
+    pub id: String,
     pub code: String,
     pub errored: bool,
+    /// The output as text: `read_cell`'s `output_text` where the runtime renders one, else its `output`.
     pub output: String,
+    /// Still running or queued when it was read.
+    pub busy: bool,
+}
+
+impl Notebook {
+    pub fn cell(&self, id: &str) -> Option<&Cell> {
+        self.cells.iter().find(|c| c.id == id)
+    }
 }
 
 /// Every notebook open in the runtime, with each cell's code, output and error.
@@ -100,12 +112,56 @@ pub fn notebooks(session: &mut Session) -> Result<Vec<Notebook>, String> {
             let read = session.tool("read_cell", json!({ "notebook_id": id, "cell_id": cell }))?;
             let output = read["output_text"].as_str().or(read["output"].as_str()).unwrap_or_default().to_owned();
             cells.push(Cell {
+                id: cell.as_str().unwrap_or_default().to_owned(),
                 code: read["code"].as_str().unwrap_or_default().to_owned(),
                 errored: read["errored"] == true,
                 output,
+                busy: read["running"] == true || read["queued"] == true,
             });
         }
         out.push(Notebook { path: nb["path"].as_str().unwrap_or_default().to_owned(), execution_allowed: nb["execution_allowed"] == true, cells });
     }
     Ok(out)
+}
+
+/// The id of the open notebook whose file is `name` (a path relative to the project, or its file name).
+pub fn notebook_id(session: &mut Session, name: &str) -> Result<String, String> {
+    let listed = session.tool("list_notebooks", json!({}))?;
+    listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|nb| nb["path"].as_str().is_some_and(|p| Path::new(p).ends_with(name)))
+        .and_then(|nb| nb["notebook_id"].as_str().map(str::to_owned))
+        .ok_or_else(|| format!("no open notebook is {name}: {listed}"))
+}
+
+/// Open a notebook from the project, allowed to run, and run every cell to the end.
+pub fn open_and_run(session: &mut Session, path: &str, limit: Duration) -> Result<String, String> {
+    let opened = session.tool("open_notebook", json!({ "path": path }))?;
+    let id = opened["notebook_id"].as_str().ok_or_else(|| format!("open_notebook: no notebook_id: {opened}"))?.to_owned();
+    session.tool("allow_execution", json!({ "notebook_id": id, "run_notebook": false }))?;
+    session.tool("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }))?;
+    wait_until_done(session, &id, limit)?;
+    Ok(id)
+}
+
+/// Wait until no cell of a notebook is running or queued.
+pub fn wait_until_done(session: &mut Session, id: &str, limit: Duration) -> Result<(), String> {
+    let began = Instant::now();
+    loop {
+        let code = session.tool("read_notebook_code", json!({ "notebook_id": id }))?;
+        let mut busy = false;
+        for cell in code["cell_ids"].as_array().cloned().unwrap_or_default() {
+            let read = session.tool("read_cell", json!({ "notebook_id": id, "cell_id": cell }))?;
+            busy |= read["running"] == true || read["queued"] == true;
+        }
+        if !busy {
+            return Ok(());
+        }
+        if began.elapsed() > limit {
+            return Err(format!("cells still running after {} s", limit.as_secs()));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }

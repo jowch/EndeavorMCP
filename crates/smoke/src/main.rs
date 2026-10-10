@@ -5,6 +5,7 @@
 //!     endeavor-smoke mcp ARGS...    the recording proxy, started by the plugin as ENDEAVOR_BIN
 
 mod checks;
+mod inject;
 mod log;
 mod mcp;
 mod proxy;

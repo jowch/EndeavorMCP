@@ -1,0 +1,11 @@
+{
+  "about": "A notebook already open and run, with one cell erroring and two depending on it. The agent works in the open notebook and fixes it; the dependents run. Tags: already_open, errors, dependents.",
+  "checks": [
+    { "check": "reply_contains", "texts": ["\"already_open\":true"], "soft": true },
+    { "check": "notebooks", "count": 1 },
+    { "check": "no_errored_cells" },
+    { "check": "output_contains", "texts": ["average is 4.0"] },
+    { "check": "called", "tool": "submit_changes", "max": 2, "soft": true },
+    { "check": "reproducible" }
+  ]
+}

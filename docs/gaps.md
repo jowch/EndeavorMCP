@@ -660,12 +660,17 @@ not supported. These gaps stay open.
   the machine tools through `add_machine`, `needs_install`, `use_machine` and
   switching back. Still untested: the new text against the old (the trial in
   the skills audit) and whether a current model needs any rule that was cut.
-  Since 2026-10-10 the smoke suite ([smoke.md](smoke.md)) repeats three tasks
-  with Claude Code (a new notebook, safe preview, a 70 s run); the rest of its
-  tasks are still to write (#26). In its first runs, Claude asked to "open
-  old.jl and tell me what it computes" read the file with its own `Read` and
-  never called `open_notebook`, though the skill says to open a notebook the
-  user names. Seen once; the task now says the user wants to see it.
+  Since 2026-10-10 the smoke suite ([smoke.md](smoke.md)) repeats eight
+  notebook tasks with Claude Code, among them a `stale_read`, a `run_conflict`
+  and a second notebook asked for in one session; the machine tasks are still
+  to write (#26). In its first runs, Claude asked to "open old.jl and tell me
+  what it computes" read the file with its own `Read` and never called
+  `open_notebook`, though the skill says to open a notebook the user names
+  (#52; the task now says the user wants to see it). And when a new notebook
+  used a package the depot hadn't installed yet (DataFrames), Claude polled
+  `read_cell` about ten times while the cells sat queued, then ended its turn
+  saying the install was still going. That is honest, but the user gets no
+  result; seen twice, both on a cold depot.
 - [P2] **A tool call during a start ends after 45 seconds with `isError`
   true.** The text says Julia is starting and to call the tool again. Codex
   shows it as a failed call, as the trial saw. The 45 seconds are chosen to
