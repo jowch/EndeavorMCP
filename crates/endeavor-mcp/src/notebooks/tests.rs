@@ -22,11 +22,13 @@ struct FakeCell {
     last_run: f64,
     output: String,
     hidden: bool,
+    stale: bool,
+    not_run: bool,
 }
 
 impl FakeCell {
     fn new(id: &str, code: &str) -> FakeCell {
-        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false }
+        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false }
     }
 
     /// What `a, b = 1, 2` defines, and the names the rest of the code uses.
@@ -104,6 +106,7 @@ impl Engine {
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
                 "last_run": c.last_run, "runtime": 0, "output": c.output, "hidden": c.hidden, "markdown": c.code.starts_with("md\""),
+                "stale": c.stale, "not_run": c.not_run,
             })).collect::<Vec<_>>(),
         })
     }
@@ -1777,4 +1780,36 @@ fn a_second_engines_notebooks_are_listed_and_its_calls_go_to_it() {
         assert_eq!(s.notebooks.move_notebook(R, &format!("{dir}{SEP}{name}")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .R: '{dir}{SEP}{name}'")));
     }
     assert_eq!(s.notebooks.move_notebook(NB, &format!("{dir}{SEP}c.R")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{dir}{SEP}c.R'")), "and a Julia one a Julia one");
+}
+
+#[test]
+fn what_the_engine_knows_of_a_cell_shows_in_read_cell() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "a = 1")]);
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "a <- 1"), (Y, "b <- a + 1")]);
+    ember.with(R, |nb| {
+        nb.cells[0].not_run = true;
+        nb.cells[1].stale = true;
+    });
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    let read = |nb: &str, cell: &str| s.call("", "read_cell", json!({ "notebook_id": nb, "cell_id": cell })).unwrap();
+    let (not_run, stale) = (read(R, X), read(R, Y));
+    assert_eq!((&not_run["not_run"], &not_run["stale"]), (&json!(true), &json!(false)));
+    assert_eq!((&stale["stale"], stale.get("not_run")), (&json!(true), None), "not_run shows only when it is so");
+    assert_eq!(read(NB, X).get("not_run"), None, "and never for Julia");
+}
+
+#[test]
+fn new_notebook_takes_an_r_path_only_where_r_notebooks_open() {
+    let s = setup();
+    let dir = std::env::temp_dir().to_string_lossy().trim_end_matches(SEP).to_owned();
+    let refused = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}endeavor-new-r-test.R") })).unwrap_err();
+    let why = if cfg!(windows) { "R notebooks don't run on Windows yet" } else { "R notebooks can't be opened here yet" };
+    assert!(refused.contains("unsupported::") && refused.contains(why), "{refused}");
+    let other = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}notes.txt") })).unwrap_err();
+    let ends = if cfg!(windows) { ".jl" } else { ".jl (Julia) or .R (R)" };
+    assert!(other.contains(&format!("invalid_path::Notebook path must end in {ends}: ")), "{other}");
 }

@@ -246,6 +246,14 @@ check("validate: a syntax error", length(v$errors) == 1 && identical(v$errors[[1
 check("validate: fine code", length(result("validate", list(notebook_id = nid, cell_id = ids[3], code = "x + 1"))$errors) == 0)
 check("validate: an unknown cell", startsWith(call("validate", list(notebook_id = nid, cell_id = "x", code = "1"))$error, "KeyError: key \"cell_not_found::"))
 check("unknown method", startsWith(call("frobnicate", list(notebook_id = nid))$error, "ArgumentError: unknown_method::"))
+warned <- result("apply", list(notebook_id = nid, ops = list(list(op = "insert", index = 6, code = "warning(\"careful\")\n7", folded = FALSE))))
+r <- result("run", list(notebook_id = nid, cells = warned$inserted, wait = TRUE, timeout = 60))
+wc <- cell_of(result("snapshot", list(notebook_id = nid)), warned$inserted[[1]])
+check("a warning reads as one, before the value", grepl("^Warning: careful\n\\[1\\] 7$", wc$output))
+r <- result("run", list(notebook_id = nid, cells = list(ids[3]), wait = TRUE, timeout = 60))
+r <- result("run", list(notebook_id = nid, cells = list(ids[2]), wait = TRUE, timeout = 60))
+snap <- result("snapshot", list(notebook_id = nid))
+check("a result made before its ancestor last ran: stale", isTRUE(cell_of(snap, ids[3])$stale) && identical(cell_of(snap, ids[2])$stale, FALSE))
 
 # ---- a long run: timeout, interrupt ----
 
@@ -278,6 +286,8 @@ check("a run after that starts a new R", identical(unlist(r$completed), ids[3]) 
 target <- file.path(dir, "moved.R")
 check("move", identical(result("move", list(notebook_id = nid, path = target))$path, target) && file.exists(target) && !file.exists(existing))
 check("restart", isTRUE(result("restart", list(notebook_id = nid, timeout = 30))$restarted))
+snap <- result("snapshot", list(notebook_id = nid))
+check("after a restart every code cell is not run", all(vapply(snap$cells, function(c) isTRUE(c$not_run) || isTRUE(c$markdown), logical(1))))
 s <- result("status")
 before <- s$seq
 check("status lists the notebooks", length(s$notebooks) == 3)

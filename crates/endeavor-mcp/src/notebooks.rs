@@ -305,6 +305,11 @@ struct Cell {
     /// Boilerplate the tools don't show (Pluto's package cells and the like).
     hidden: bool,
     markdown: bool,
+    /// What the engine itself knows: a result made before an ancestor last ran
+    /// (Ember's), and a cell that hasn't run since the notebook started (Ember's
+    /// restart leaves every cell so). Pluto's are always false.
+    stale: bool,
+    not_run: bool,
 }
 
 impl Cell {
@@ -333,6 +338,8 @@ impl Snapshot {
                 error: c.get("error").filter(|e| !e.is_null()).cloned(),
                 hidden: flag(&c["hidden"]),
                 markdown: flag(&c["markdown"]),
+                stale: flag(&c["stale"]),
+                not_run: flag(&c["not_run"]),
             };
             Some((text(&c["cell_id"])?, cell))
         });

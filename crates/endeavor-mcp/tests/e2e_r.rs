@@ -268,6 +268,31 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["output"].as_str().unwrap().contains("42"), "{read}");
     });
 
+    step("an ancestor run alone leaves its dependent's result stale", || {
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 50" }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
+        // Ember runs only the cell asked for; had it run B as well, B would show 51.
+        assert!(read["stale"] == true || read["output"].as_str().unwrap().contains("51"), "{read}");
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
+    });
+
+    step("new_notebook makes an R notebook from an .R path; a warning reads as one", || {
+        // A session works on one notebook, so another session makes this one.
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let made = agent.ok("new_notebook", json!({ "path": "fresh.R" }));
+        assert!(folder.join("fresh.R").exists() && made["created"] == true, "{made}");
+        assert!(wire::backend::Backend::of_file(&folder.join("fresh.R")) == Some(wire::backend::Backend::Ember), "an Ember file");
+        let (id, cell) = (made["notebook_id"].as_str().unwrap(), made["cell_ids"][0].as_str().unwrap());
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "warning(\"careful\")\n7", "run_after": true }));
+        common::wait_for("the new cell to run", || agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }))["output"].as_str().is_some_and(|o| o.contains("7")));
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+        assert!(read["output"].as_str().unwrap().starts_with("Warning: careful"), "{read}");
+    });
+
     step("the browser link reaches Ember's page through the port", || {
         let (status, head, _) = get(port, &format!("/ember/edit?id={notebook}&token={token}"), "");
         assert_eq!(status, "HTTP/1.1 303 See Other", "{head}");

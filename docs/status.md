@@ -159,18 +159,24 @@ Next:
   ([runtime-core.md](runtime-core.md), [one-port.md](one-port.md)). So far
   `wire` knows its files (`Backend::Ember`: `.R` with Ember's first line, a
   page at `/ember/edit`, a preview of the first cells), the folder scan the
-  app asks for still lists only Pluto's, and `open_notebook` refuses an Ember
-  file as `unsupported`. The core routes calls to more than one engine and
+  app asks for still lists only Pluto's, and `open_notebook` and
+  `new_notebook` refuse an Ember file as `unsupported` (on Windows always,
+  until Ember runs there). The core routes calls to more than one engine and
   serves `/ember/`. R's adapter (`runtime/r/adapter.R`) is built: the core
   starts it, with Ember in it, the first time an R notebook is opened, and
   follows its notifications by long-polling. Only tests open R notebooks so
-  far (`ENDEAVOR_TEST_R_NOTEBOOKS`); the agent's tools and skills for R come
-  after the agent-loop eval. R is the login shell's `Rscript`, or what `--r` or
+  far (`ENDEAVOR_TEST_R_NOTEBOOKS`). The tools already work for them:
+  `new_notebook` makes one from an `.R` path, `read_cell` shows Ember's own
+  `stale` and `not_run` (every cell after a restart), and a warning in a
+  cell's output starts with `Warning:`. The skill text for R, and opening R
+  notebooks to agents, come next. R is the login shell's `Rscript`, or what
+  `--r` or
   `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names.
   The first R notebook installs Ember at the commit the core pins
   (`core::EMBER_COMMIT`) into `~/.cache/endeavor/r/<commit>` (`$SCRATCH/endeavor/r`
   on clusters), with any package it needs that R lacks; the open returns
-  `r_installing` until that's done. The app's R setting is next. The engine
+  `r_installing` until that's done. The app passes a server's and Settings'
+  `r` through, with no field to set them yet. The engine
   name a client asks a runtime for (`wire::ENGINE_PLUTO`, a string) is still
   a string; it becomes `Backend` later.
 - marimo after Ember.
