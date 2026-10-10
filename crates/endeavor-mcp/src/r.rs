@@ -445,7 +445,8 @@ mod tests {
     fn own_r_is_offered_only_on_a_mac_it_has_an_installer_for() {
         let env = crate::paths::Env::from_vars(&|name| (name == "HOME").then(|| "/Users/ada".into()));
         let item = own_item_for(Some(14), "arm64", &env).unwrap();
-        assert_eq!(item.to_string(), format!("R {OWN_VERSION} (about {INSTALLED_MB} MB, into /Users/ada/.cache/endeavor/R-{OWN_VERSION})"));
+        assert_eq!(item.to_string(), format!("R {OWN_VERSION} (about {INSTALLED_MB} MB, into {})", own_dir(&env).display()));
+        assert!(own_dir(&env).ends_with(format!("R-{OWN_VERSION}")));
         assert!(own_item_for(Some(11), "x86_64", &env).is_some());
         assert_eq!(own_item_for(Some(13), "arm64", &env), None, "CRAN's arm64 R needs macOS 14");
         assert_eq!(own_item_for(None, "arm64", &env), None, "not a Mac");
