@@ -134,7 +134,7 @@ fn the_bootstrap_runs_under_a_shell_and_asks_for_an_install() {
     for (name, shell) in shells() {
         let home = crate::client::scratch(&format!("bootstrap-need-{name}"));
         let path = server_path(&home.join("bin"), &shell, None, None);
-        let said = run_script_in(&bootstrap_script("v1", false), "\n\n\n--julia\nauto\nprocess\n", &home, &[("PATH", &path)]);
+        let said = run_script_in(&bootstrap_script("v1", false), "\n\n\n--julia\nauto\nprocess\n--r\nauto\n", &home, &[("PATH", &path)]);
         assert!(said.starts_with("ENDEAVOR ") && said.trim_end().contains(" need none first ") && said.trim_end().ends_with("/.cache/endeavor/v1"), "{said}");
         assert!(!home.join(".cache").exists());
     }
@@ -168,14 +168,14 @@ fn root_state_and_depot_land_where_given() {
     let root = home.join("my root with spaces");
     fake_install(&root);
     let root = root.display();
-    let args = connect_args(&home, &format!("{root}\nstate-a\n/depots/mine:\n--julia\n/opt/julia\nslurm\n"));
+    let args = connect_args(&home, &format!("{root}\nstate-a\n/depots/mine:\n--julia\n/opt/julia\nslurm\n--r\nauto\n"));
     assert_eq!(
         args,
-        ["connect", "--state-dir", &format!("{root}/state-a"), "--launcher", "slurm", "--julia", "/opt/julia", "--runtime", &format!("{root}/v1/runtime"), "--depot", "/depots/mine:", "--build", "v1"]
+        ["connect", "--state-dir", &format!("{root}/state-a"), "--launcher", "slurm", "--julia", "/opt/julia", "--r", "auto", "--runtime", &format!("{root}/v1/runtime"), "--depot", "/depots/mine:", "--build", "v1"]
     );
-    let args = connect_args(&home, &format!("{root}\n/var/endeavor/state\n\n--julia\nauto\nprocess\n"));
+    let args = connect_args(&home, &format!("{root}\n/var/endeavor/state\n\n--julia\nauto\nprocess\n--r\nauto\n"));
     assert_eq!(args[2], "/var/endeavor/state", "an absolute state folder is used as it is");
-    assert_eq!(args[10], format!("{root}/depot:"), "no depot means one in the install folder");
+    assert_eq!(args[12], format!("{root}/depot:"), "no depot means one in the install folder");
 }
 
 #[test]
@@ -183,7 +183,7 @@ fn root_state_and_depot_land_where_given() {
 fn exit_idle_reaches_the_helper_with_the_same_six_lines() {
     let home = crate::client::scratch("bootstrap-exit-idle");
     fake_install(&home.join("root"));
-    let preamble = format!("{}/root\nstate\n/d:\n--julia\nauto\nprocess\n", home.display());
+    let preamble = format!("{}/root\nstate\n/d:\n--julia\nauto\nprocess\n--r\nauto\n", home.display());
     let args_of = |exit_idle| run_script(&bootstrap_script("v1", exit_idle), &preamble, &home).lines().skip(1).map(str::to_owned).collect::<Vec<_>>();
     assert!(!args_of(false).iter().any(|a| a == "arg:--exit-idle"));
     let with = args_of(true);
@@ -197,7 +197,7 @@ fn exit_idle_reaches_the_helper_with_the_same_six_lines() {
 fn needs_line(home: &Path, state: &Path, launcher: &str, path: &str) -> String {
     let mut shell = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false))).env("HOME", home).env("PATH", path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     // It waits for the byte count, and the end of its input ends it.
-    shell.stdin.take().unwrap().write_all(format!("{}/root\n{}\n\n--julia\nauto\n{launcher}\n", home.display(), state.display()).as_bytes()).unwrap();
+    shell.stdin.take().unwrap().write_all(format!("{}/root\n{}\n\n--julia\nauto\n{launcher}\n--r\nauto\n", home.display(), state.display()).as_bytes()).unwrap();
     String::from_utf8_lossy(&shell.wait_with_output().unwrap().stdout).into_owned()
 }
 
@@ -282,7 +282,7 @@ fn ids_that_are_not_digits_are_not_reported_and_values_are_never_read_as_escapes
         for odd in [r"x\cy", r"a\nb", "with space", "$HOME"] {
             let root = home.join(odd);
             let mut sh = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false))).env("HOME", &home).env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-            sh.stdin.take().unwrap().write_all(format!("{}\n\n\n--julia\nauto\nprocess\n", root.display()).as_bytes()).unwrap();
+            sh.stdin.take().unwrap().write_all(format!("{}\n\n\n--julia\nauto\nprocess\n--r\nauto\n", root.display()).as_bytes()).unwrap();
             let said = String::from_utf8_lossy(&sh.wait_with_output().unwrap().stdout).into_owned();
             assert_eq!(said.lines().count(), 1, "{name}: {said:?}");
             assert!(said.ends_with(&format!(" first {}/v1\n", root.display())), "{name}: {said:?}");
@@ -295,7 +295,7 @@ fn ids_that_are_not_digits_are_not_reported_and_values_are_never_read_as_escapes
 fn an_empty_state_folder_leaves_the_flag_out() {
     let home = crate::client::scratch("bootstrap-default-state");
     fake_install(&home.join("root"));
-    let args = connect_args(&home, &format!("{}/root\n\n/d:\n--julia\nauto\nprocess\n", home.display()));
+    let args = connect_args(&home, &format!("{}/root\n\n/d:\n--julia\nauto\nprocess\n--r\nauto\n", home.display()));
     assert_eq!(args[..2], ["connect", "--launcher"], "{args:?}");
     assert!(!args.iter().any(|a| a == "--state-dir"), "{args:?}");
 }
@@ -306,17 +306,20 @@ fn an_empty_root_means_the_cache_folder_in_home() {
     let home = crate::client::scratch("bootstrap-home");
     let cache = crate::paths::Env::from_vars(&|name| (name == "HOME").then(|| home.display().to_string())).server_root();
     fake_install(&cache);
-    let args = connect_args(&home, "\nstate\n\n--julia\nauto\nprocess\n");
-    assert_eq!((args[2].as_str(), args[8].as_str(), args[10].as_str()), (cache.join("state").to_str().unwrap(), cache.join("v1/runtime").to_str().unwrap(), cache.join("depot:").to_str().unwrap()));
+    let args = connect_args(&home, "\nstate\n\n--julia\nauto\nprocess\n--r\nauto\n");
+    assert_eq!((args[2].as_str(), args[10].as_str(), args[12].as_str()), (cache.join("state").to_str().unwrap(), cache.join("v1/runtime").to_str().unwrap(), cache.join("depot:").to_str().unwrap()));
 }
 
 #[test]
 fn the_preamble_carries_the_parameters_not_the_script() {
     let server = Server { julia: Some("module load julia".into()), ..Default::default() };
     let sent = String::from_utf8(preamble(&server, &options("/opt/e", "st", "/d:")).unwrap()).unwrap();
-    assert_eq!(sent, "/opt/e\nst\n/d:\n--julia-shell\nmodule load julia\nprocess\n");
+    assert_eq!(sent, "/opt/e\nst\n/d:\n--julia-shell\nmodule load julia\nprocess\n--r\nauto\n");
+    let with_r = Server { r: Some("module load R/4.4".into()), ..Default::default() };
+    let sent = String::from_utf8(preamble(&with_r, &options("", "st", "")).unwrap()).unwrap();
+    assert!(sent.ends_with("\n--r-shell\nmodule load R/4.4\n"), "{sent}");
     let cluster = Server { id: "c1".into(), cluster: Some(Default::default()), ..Default::default() };
-    assert_eq!(String::from_utf8(preamble(&cluster, &options("", "mine", "")).unwrap()).unwrap(), "\nmine\n\n--julia\nauto\nslurm\n");
+    assert_eq!(String::from_utf8(preamble(&cluster, &options("", "mine", "")).unwrap()).unwrap(), "\nmine\n\n--julia\nauto\nslurm\n--r\nauto\n");
 }
 
 #[test]
@@ -510,7 +513,7 @@ fn a_cancel_forgets_ssh_once_it_has_exited() {
 /// What the script hands the helper for `root`, `state` and `depot` under `home`.
 #[cfg(unix)]
 fn where_they_land(home: &Path, root: &str, state: &str, depot: &str) -> (String, String, String) {
-    let args = connect_args(home, &format!("{root}\n{state}\n{depot}\n--julia\nauto\nprocess\n"));
+    let args = connect_args(home, &format!("{root}\n{state}\n{depot}\n--julia\nauto\nprocess\n--r\nauto\n"));
     let at = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
     (at("--state-dir"), at("--runtime"), at("--depot"))
 }

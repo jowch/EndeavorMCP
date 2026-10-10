@@ -53,6 +53,8 @@ options:
   --skills plugin      the agent has Endeavor's skills from its plugin [mcp]
   --julia PATH|auto    the julia to use (default auto: your login shell's, else Endeavor's own download)
   --julia-shell LINE   a shell line that puts julia on the PATH, such as 'module load julia'
+  --r RSCRIPT|auto     the R for R notebooks (default auto: your login shell's Rscript) [serve, mcp]
+  --r-shell LINE       a shell line that puts Rscript on the PATH, such as 'module load R' [serve, mcp]
   --depot DEPOT        JULIA_DEPOT_PATH (default ~/.cache/endeavor/depot:, or $SCRATCH/endeavor/depot:)
   --idle-stop HOURS    stop notebooks unused this long; 0 never (default 48)
   --state-dir DIR      the runtime's state (default ~/.local/state/endeavor/serve/<host>) [serve, mcp, stop, status]
@@ -82,6 +84,8 @@ pub(crate) struct Options {
     /// Where `runtime/` is unpacked, a folder per version.
     cache: PathBuf,
     julia: julia::Source,
+    /// The R for R notebooks.
+    r: crate::r::Source,
     /// JULIA_DEPOT_PATH.
     depot: String,
     /// Where notebooks are created, and relative paths start; none for `--no-folder`.
@@ -97,7 +101,7 @@ pub(crate) struct Options {
 
 pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     let (command, rest) = argv.split_first().ok_or("expected serve, mcp, stop or status")?;
-    let (mut state_dir, mut julia, mut depot, mut folder, mut port) = (None, None::<julia::Source>, None, None, 0);
+    let (mut state_dir, mut julia, mut depot, mut folder, mut port, mut r) = (None, None::<julia::Source>, None, None, 0, None);
     let (mut host_tools, mut idle_hours, mut skills_plugin, mut json, mut force, mut no_folder) = (false, crate::notebooks::IDLE_HOURS, false, false, false, false);
     let mut args = rest.iter();
     while let Some(arg) = args.next() {
@@ -113,6 +117,11 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
             "--julia-shell" => {
                 only(&["serve", "mcp"])?;
                 julia = Some(julia::Source::Shell(value()?))
+            }
+            "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
+            "--r" | "--r-shell" => {
+                only(&["serve", "mcp"])?;
+                r = Some(crate::r::Source::from_flag(arg, value()?))
             }
             "--depot" => {
                 only(&["serve", "mcp"])?;
@@ -173,6 +182,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
         state_dir,
         cache: env.cache(),
         julia: julia.unwrap_or(julia::Source::Auto),
+        r: r.unwrap_or_default(),
         depot: depot.unwrap_or_else(|| env.depot()),
         folder,
         port,
@@ -315,6 +325,7 @@ fn runtime_args(options: &Options, exit_idle: bool) -> Args {
     Args {
         state_dir: options.state_dir.clone(),
         julia: options.julia.clone(),
+        r: options.r.clone(),
         runtime: PathBuf::new(),
         depot: options.depot.clone(),
         launcher: Launcher::Process,

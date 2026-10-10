@@ -178,7 +178,7 @@ package `endeavor-mcp`; it was `endeavor-remote` until the rename.
   `mcp` and `stop` already give that. For a terminal you leave, `tmux` or a
   batch job does what `--detach` would. Keeping `serve` in the foreground
   keeps one rule: the terminal that started Julia owns it.
-- **Flags.** `--folder`, `--port`, `--julia`/`--julia-shell`, `--depot`,
+- **Flags.** `--folder`, `--port`, `--julia`/`--julia-shell`, `--r`/`--r-shell`, `--depot`,
   `--idle-stop`, `--host-tools` (serve only), `--skills plugin` (mcp only),
   `--state-dir`. Dropped: `--no-browser-hint` (the printout is the point) and
   `--detach` (above).

@@ -1458,6 +1458,7 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     assert!(sbatch.contains(&format!("--output={}", dir.join("runtime.log").display())), "{sbatch}");
     let script = slurm.read("job.sh");
     assert!(script.contains("node-start") && script.contains("--depot '/scratch/jc/endeavor/depot:' --build '1.0.0-abc'"), "{script}");
+    assert!(script.contains(" --r 'auto' --runtime "), "R is the node's login shell's: {script}");
     assert!(dir.join("job.json").exists());
 
     // Still queued, for another reason; then it runs and its runtime comes up.
