@@ -38,7 +38,10 @@ suppressPackageStartupMessages({
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
+# The core's bearer token, read once and taken out of the environment, so code a notebook runs can't
+# pick it up and call the core itself (as Julia's boot.jl does for Pluto's processes).
 TOKEN <- Sys.getenv("ENDEAVOR_TOKEN")
+Sys.unsetenv("ENDEAVOR_TOKEN")
 STATE_FILE <- Sys.getenv("ENDEAVOR_R_STATE")
 # Ember's page secret, made by the core, which already knows it: it isn't written back. Not left in the
 # environment, which the notebooks' R processes would inherit.

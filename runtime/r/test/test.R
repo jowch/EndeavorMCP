@@ -169,6 +169,15 @@ check("the cell ran (and its ancestors): output [1] 110", grepl("110", c3$output
 check("last_run is when the run ended, runtime in ns", abs(c3$last_run - as.numeric(Sys.time())) < 120 && c3$runtime < 120e9)
 check("process ready", identical(snap$process_status, "ready") && isTRUE(snap$execution_allowed))
 
+# Code a notebook runs can't read the core's token or Ember's secret from its environment.
+peek <- result("apply", list(notebook_id = nid, ops = list(list(op = "insert", index = 3,
+  code = "cat(sprintf('token=[%s] secret=[%s]', Sys.getenv('ENDEAVOR_TOKEN'), Sys.getenv('ENDEAVOR_EMBER_SECRET')))", folded = FALSE))))
+peek_id <- peek$inserted[[1]]
+result("run", list(notebook_id = nid, cells = list(peek_id), wait = TRUE, timeout = 60))
+peeked <- Find(function(c) identical(c$cell_id, peek_id), result("snapshot", list(notebook_id = nid))$cells)$output
+check("a notebook's code sees no token and no secret", grepl("token=[] secret=[]", peeked, fixed = TRUE))
+result("apply", list(notebook_id = nid, ops = list(list(op = "delete", cell_id = peek_id))))
+
 # ---- graph ----
 
 g <- result("graph", list(notebook_id = nid, edges = TRUE, packages = TRUE))

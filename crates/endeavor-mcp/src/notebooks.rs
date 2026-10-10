@@ -945,7 +945,7 @@ impl Notebooks {
             }
             Some(format!(
                 "ArgumentError: one_notebook::This session works on one notebook, {bound}, so it can't {what}. \
-                 You can still read other notebooks as plain .jl files. \
+                 You can still read other notebooks as plain files. \
                  To work on another notebook, suggest the user start a new session with it."
             ))
         };

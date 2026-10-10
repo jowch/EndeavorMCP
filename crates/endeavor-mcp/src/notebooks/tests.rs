@@ -1312,7 +1312,7 @@ fn one_notebook_per_session() {
         refusal,
         format!(
             "ArgumentError: one_notebook::This session works on one notebook, {first_nb}, so it can't open {second_nb}. \
-             You can still read other notebooks as plain .jl files. To work on another notebook, suggest the user start a new session with it."
+             You can still read other notebooks as plain files. To work on another notebook, suggest the user start a new session with it."
         )
     );
     assert!(s.call("a", "new_notebook", json!({})).unwrap_err().contains("so it can't create another notebook."));
@@ -1344,7 +1344,7 @@ fn one_notebook_per_session() {
         s.call("a", "run_all_cells", json!({ "notebook_id": second_id })).unwrap_err(),
         format!(
             "ArgumentError: one_notebook::This session works on one notebook, {first_nb}, so it can't change or run {second_nb}. \
-             You can still read other notebooks as plain .jl files. To work on another notebook, suggest the user start a new session with it."
+             You can still read other notebooks as plain files. To work on another notebook, suggest the user start a new session with it."
         )
     );
     assert_eq!(refused(s.call("a", "read_notebook_code", json!({ "notebook_id": second_id }))), None);

@@ -250,7 +250,13 @@ fn warm(repo: &Path, work: &Path, endeavor: &Path, julia: &str, r: &str, depot: 
         crate::mcp::open_and_run(&mut s, "warm.jl", RUN_LIMIT)?;
         if with_r {
             eprintln!("   and Ember, for R notebooks");
-            crate::mcp::open_and_run(&mut s, "warm.R", RUN_LIMIT)?;
+            // A session works in one notebook, so the R one gets a session of its own on the same runtime.
+            let mut r = crate::mcp::Session::start(endeavor, work, &project)?;
+            crate::mcp::open_and_run(&mut r, "warm.R", RUN_LIMIT)?;
+            let errored: Vec<String> = crate::mcp::notebooks(&mut r)?.iter().flat_map(|nb| nb.cells.iter().filter(|c| c.errored).map(|c| format!("{}: {}", c.code, c.output))).collect();
+            if !errored.is_empty() {
+                return Err(errored.join("; "));
+            }
         }
         let errored: Vec<String> = crate::mcp::notebooks(&mut s)?.iter().flat_map(|nb| nb.cells.iter().filter(|c| c.errored).map(|c| format!("{}: {}", c.code, c.output))).collect();
         if errored.is_empty() { Ok(()) } else { Err(errored.join("; ")) }

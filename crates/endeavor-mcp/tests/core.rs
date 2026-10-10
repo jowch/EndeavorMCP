@@ -412,7 +412,7 @@ fn an_agent_without_the_session_header_is_told_apart_by_its_mcp_session_id() {
     assert_eq!(
         refused["message"],
         format!(
-            "This session works on one notebook, {a}, so it can't open {b}. You can still read other notebooks as plain .jl files. \
+            "This session works on one notebook, {a}, so it can't open {b}. You can still read other notebooks as plain files. \
              To work on another notebook, suggest the user start a new session with it.\n\
              See `notebook_guide` for how to use these tools."
         )
