@@ -792,11 +792,14 @@ plugins). The rest of this file can wait or go alongside.
   (`release::helper_for`), so once its build's Linux files are gone it can't
   set one up, and says only "Couldn't get the helper for linux x86_64 servers
   from the release: Couldn't download ..." with a 404. The Linux files of the
-  newest 100 builds stay, which at 2026-10-09's pace is about a week and at a
-  quieter pace a month or more. A plugin installed from an older commit, on a
-  computer that hasn't downloaded its binary yet, also hears from the launcher
-  (install.sh exits 3) that the build "is still being published. Reconnect in
-  a few minutes", which never comes true. To close: both messages say the
+  newest 150 builds stay, which at 2026-10-09's pace (19 builds) is about 8
+  days and at a quieter pace a month or more. A plugin installed from an older
+  commit, on a computer that hasn't downloaded its binary yet, also hears from
+  the launcher (install.sh exits 3) that the build "is still being published.
+  Reconnect in a few minutes", which never comes true. Since whole builds are
+  kept 3 days rather than 7 (2026-10-10), that first download is protected
+  only by the 3 days and the last 40 pins (two or three days at that pace),
+  so this message is more likely than before. To close: both messages say the
   build is too old and how to update (`endeavor update`, or update the
   plugin), when the build is missing and LATEST names another; or publish
   each build to a release of its own, so nothing has to be pruned.
