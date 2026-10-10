@@ -88,24 +88,19 @@ Every P1:
   release (a debug build has no release key), sent it, and started and stopped
   Julia there. A release build fetching from the real release, the Slurm
   launcher, and a Mac were not run.
-- [P2] **An install from before 2026-10-10 hears nothing about updating.**
-  Claude Code's manifest has had no version since 2026-10-10, so Claude Code
-  versions the plugin by commit, and `claude plugin update` or the
-  marketplace's auto-update (off by default for a marketplace like this one)
-  brings each new commit. Codex's manifest keeps `0.1.0`, and
-  `codex plugin marketplace upgrade` still brings new commits (checked with
-  codex-cli 0.162.1). But a copy installed before then is still on `0.1.0`,
-  with the old "still being published" text, until someone updates it once;
-  with auto-update off nothing tells them to. To act on at the first tagged
-  release: give each release its own version, and say how to update in the
-  release notes.
+- [P2] **The plugin manifests say `"version": "0.1.0"` and never change.** The
+  Claude Code and Codex manifests and the app's `plugin/` carry it;
+  Antigravity's has no version. This is deliberate until the first plugin
+  release. Claude Code caches a plugin by its version, so a new commit with the
+  same version likely never reaches a user who installed it. To act on at the
+  first release: change the version with each release, or drop it, so that
+  updates are delivered.
 - [P2] **Every commit that changes the helper's source needs a new pin and a
   new build.** `release-key` must equal `scripts/helpers.sh --key`
   (`plugins.sh check`, run in CI), and the key covers `crates/`, `runtime/` and
   `plugin/`, so a skill edit or a code comment changes it. Each such push to
   `main` publishes five builds, and until Helpers finishes (1 to 6 minutes) a
-  plugin updated to that commit says the release doesn't hold its build and to
-  reconnect in a few minutes. A
+  plugin updated to that commit says the build is still being published. A
   branch's build is published only by a manual run, so a plugin installed from
   a branch waits for it. To ease: narrow the key to what the binary needs, if
   the skills embedded in it can be checked another way.
@@ -790,26 +785,24 @@ plugins). The rest of this file can wait or go alongside.
   servers can only fetch it once Helpers has published it. Push this
   repository and wait for Helpers before an app release that moves the pin. A
   check in the app's CI that the pinned key is published would catch it.
-- [P2] **A pruned build stops the binaries that came from it.**
+- [P2] **A pruned build breaks the binaries that came from it.**
   `scripts/prune-helpers.sh` removes builds nothing recent needs. Every
   installed binary (plugin, install.sh or `endeavor update`, on any OS)
   fetches the Linux helper of its own build to set up a server
   (`release::helper_for`), so once its build's Linux files are gone it can't
-  set one up. The Linux files of the newest 150 builds stay, which at
-  2026-10-09's pace (19 builds) is about 8 days and at a quieter pace a month
-  or more. A plugin installed from an older commit, on a computer that hasn't
-  downloaded its binary yet, can't get its macOS or Windows binary once the
-  build is past the 3 days and the last 40 pins (two or three days at that
-  pace), while its checksum file stays with the Linux files. Since 2026-10-10
-  both say so: the helper's error says the build is old and was removed and to
-  update (when the release's `LATEST` names another build), and the launcher,
-  for a missing checksum file or a missing binary, says to reconnect in a few
-  minutes if the plugin was just updated and otherwise gives its agent's
-  update step. The launcher can't tell a build not yet published from one
-  removed, which reads oddly to someone whose plugin updated itself. The
-  helper's error follows any failed checksum download once `LATEST` answers,
-  not only a 404. To close: tagged releases that are never pruned, once the
-  plugin is stable enough to release.
+  set one up, and says only "Couldn't get the helper for linux x86_64 servers
+  from the release: Couldn't download ..." with a 404. The Linux files of the
+  newest 150 builds stay, which at 2026-10-09's pace (19 builds) is about 8
+  days and at a quieter pace a month or more. A plugin installed from an older
+  commit, on a computer that hasn't downloaded its binary yet, also hears from
+  the launcher (install.sh exits 3) that the build "is still being published.
+  Reconnect in a few minutes", which never comes true. Since whole builds are
+  kept 3 days rather than 7 (2026-10-10), that first download is protected
+  only by the 3 days and the last 40 pins (two or three days at that pace),
+  so this message is more likely than before. To close: both messages say the
+  build is too old and how to update (`endeavor update`, or update the
+  plugin), when the build is missing and LATEST names another; or publish
+  each build to a release of its own, so nothing has to be pruned.
 - [P3] **The layers under a session still write a few lines to stderr.** A
   session's own progress and trouble go to `Config::on_event` (since
   2026-10-08). Below it, ssh's stderr (`ssh: ...`), lines a login script prints
