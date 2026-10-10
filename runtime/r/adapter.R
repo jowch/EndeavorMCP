@@ -309,7 +309,7 @@ package_step <- function(rec, snap, state) {
   lines <- lines[nzchar(lines)]
   last <- if (length(lines) > 0) utils::tail(lines, 1) else if (length(progress$current) == 1 && !is.na(progress$current)) paste("installing", progress$current) else NULL
   if (!is.null(last)) last <- substr(sub("(\\w+://)[^/[:space:]@]+@", "\\1", last), 1, 300)
-  list(step = step, packages = I(sort(waits)), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
+  list(step = step, packages = I(sort(as.character(waits))), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
        last_line = last)
 }
 

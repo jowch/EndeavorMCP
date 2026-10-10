@@ -201,6 +201,7 @@ something subtle, make it soft.
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
 | `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: the agent waits through it and reports the table (#58) |
 | `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
+| `R2-first-package` | a dplyr table and its mean in a new R notebook | R's first package install: the agent waits through it and doesn't run the cells again; when the install outlasts a waited run, the tools say R is getting dplyr ready (#78) |
 | `M1-machine` | add my server and compute something in a notebook there; then "yes, install it" | `add_machine`'s `needs_install`: the agent asks first and installs only after the yes, then works on the server |
 | `M2-no-reach` | a notebook on a server that refuses connections | the agent reports the failure, doesn't ask for a password, and makes no notebook here instead |
 
