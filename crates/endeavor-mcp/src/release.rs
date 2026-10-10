@@ -145,7 +145,7 @@ fn fetch(os: &str, arch: &str, key: &str, platform: &str, release: &str, dir: &P
         }
     }
     let name = asset_name(key, platform);
-    let sums = download(&format!("{release}/endeavor-{key}.sha256"), None).map_err(|e| format!("Couldn't get the helper for {os} {arch} servers from the release: {e}"))?;
+    let sums = download(&format!("{release}/endeavor-{key}.sha256"), None).map_err(|e| removed(release, key, os, arch).unwrap_or_else(|| format!("Couldn't get the helper for {os} {arch} servers from the release: {e}")))?;
     let want = checksum_for(&String::from_utf8_lossy(&sums), &name).ok_or_else(|| format!("The release has no helper for {os} {arch} servers in build {key} ({name} isn't in its checksum file)."))?;
     let pid = std::process::id();
     let (part, part_sum) = (dir.join(format!("endeavor.part.{pid}")), dir.join(format!("endeavor.sha256.part.{pid}")));
@@ -163,6 +163,16 @@ fn fetch(os: &str, arch: &str, key: &str, platform: &str, release: &str, dir: &P
     let _ = std::fs::remove_file(&part);
     let _ = std::fs::remove_file(&part_sum);
     fetched.map(|()| kept)
+}
+
+/// What to say when the release has no checksum file for `key` but names
+/// another build as its newest: this build was removed (prune-helpers.sh),
+/// since an installed binary's build was on the release once.
+fn removed(release: &str, key: &str, os: &str, arch: &str) -> Option<String> {
+    let newest = String::from_utf8_lossy(&download(&format!("{release}/LATEST"), None).ok()?).trim().to_owned();
+    (!newest.is_empty() && newest != key && newest.chars().all(|c| c.is_ascii_hexdigit())).then(|| {
+        format!("Build {key} of endeavor is old and was removed from the release, so it can't get the helper for {os} {arch} servers. Update endeavor: update the plugin, or run `endeavor update` if you installed it with the install script.")
+    })
 }
 
 /// Hold `dir`'s lock until the file is dropped.
