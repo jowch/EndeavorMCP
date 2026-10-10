@@ -1532,6 +1532,14 @@ fn hostname() -> String {
     String::from_utf16_lossy(&buf[..len as usize])
 }
 
+/// Whether `node`, a host name a runtime recorded, names this computer.
+/// Windows host names don't keep case: Julia's `gethostname()` and ours can
+/// give the same name in different cases (EndeavorMCP #54).
+pub(crate) fn is_this_node(node: &str) -> bool {
+    let here = hostname();
+    if cfg!(windows) { node.eq_ignore_ascii_case(&here) } else { node == here }
+}
+
 /// The app's calls on the runtime's port.
 const CALL: &str = "/endeavor/call";
 
