@@ -484,7 +484,10 @@ impl Call<'_> {
             "warnings": warnings,
         });
         let Value::Object(mut receipt) = receipt else { unreachable!() };
-        if !still_running.is_empty() {
+        if nb.installing() {
+            receipt.insert("packages".into(), nb.packages.clone().unwrap_or_default());
+            receipt.insert("message".into(), json!(installing_message(&nb)));
+        } else if !still_running.is_empty() {
             receipt["execution"]["still_running"] = json!(still_running);
             receipt.insert(
                 "message".into(),
@@ -537,12 +540,25 @@ impl Call<'_> {
     }
 
     fn read_cell(&self) -> Result<Value, String> {
-        let nb = self.notebook()?;
+        let mut nb = self.notebook()?;
         let cell = self.cell(&nb)?;
-        self.record_read(&nb.id, &cell, &nb.cells[&cell].code);
+        // A cell waiting on a package step is waited for, within the call's
+        // `WAIT_SECONDS`: an agent that reads it at once sees no change and
+        // gives up long before a first install ends.
+        let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
+        while nb.installing() && nb.cells.get(&cell).is_some_and(|c| c.queued) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(500));
+            nb = self.nbs.snapshot(&nb.id)?;
+        }
+        let Some(code) = nb.cells.get(&cell).map(|c| c.code.clone()) else { return Err(key_error(&format!("cell_not_found::No cell with id '{cell}' in notebook"))) };
+        self.record_read(&nb.id, &cell, &code);
         let mut out = self.cell_json(&nb, &cell);
         if let Some(text) = self.output_text(&nb, &cell)? {
             out.insert("output_text".into(), json!(text));
+        }
+        if nb.installing() {
+            out.insert("packages".into(), nb.packages.clone().unwrap_or_default());
+            out.insert("message".into(), json!(installing_message(&nb)));
         }
         Ok(Value::Object(out))
     }
@@ -1044,6 +1060,23 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
         }
     };
     status.to_owned()
+}
+
+/// What the agent hears while a notebook's cells wait on a package step, in
+/// plain words: what is going on, that it is slow only the first time, and how to wait.
+fn installing_message(nb: &Snapshot) -> String {
+    let packages = nb.packages.as_ref().cloned().unwrap_or_default();
+    let names: Vec<&str> = packages["packages"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let which = if names.is_empty() { "the packages it uses".to_owned() } else { names.join(", ") };
+    let step = packages["step"].as_str().unwrap_or("installing");
+    let seconds = packages["seconds"].as_u64().unwrap_or(0);
+    let so_far = if seconds >= 120 { format!("{} minutes", seconds / 60) } else { format!("{seconds} seconds") };
+    let last = packages["last_line"].as_str().map(|line| format!(" Last line of the package log: {line}")).unwrap_or_default();
+    format!(
+        "Julia is getting {which} ready for this notebook ({step}, {so_far} so far). The cells are queued and run when that is done. \
+         The first time a package is used this can take several minutes; later notebooks reuse it. Nothing is wrong: tell the user it is installing, then wait. \
+         To wait, call read_cell on a cell that is queued: while packages install, each call waits up to {WAIT_SECONDS} seconds.{last}"
+    )
 }
 
 /// What Claude hears when a notebook's own Julia ends during a run it waits

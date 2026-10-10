@@ -286,6 +286,9 @@ struct Snapshot {
     /// Its own Julia process ended by itself (not stopped by Pluto or the
     /// app) and hasn't been restarted: the cells that were running then.
     exited: Option<Vec<String>>,
+    /// Pluto's package step while one is under way (`package_step` in the
+    /// runtime): the cells wait, queued, until it ends.
+    packages: Option<Value>,
     cells: HashMap<String, Cell>,
 }
 
@@ -345,15 +348,22 @@ impl Snapshot {
             safe_preview: flag(&value["safe_preview"]),
             process_status: value["process_status"].clone(),
             exited: value["exited"].as_array().map(|ids| ids.iter().filter_map(text).collect()),
+            packages: value.get("packages").filter(|p| p.is_object()).cloned(),
             cells: cells.collect::<Option<_>>()?,
         })
     }
 
     /// Pluto marks every cell `queued` when it loads a notebook, ahead of the
     /// planned run; in safe preview that run never happens, so the flag
-    /// lingers. A queued cell only counts while the notebook is running something.
+    /// lingers. A queued cell only counts while the notebook is running
+    /// something or installing the packages its run needs.
     fn is_running(&self, cell: &Cell) -> bool {
-        cell.running || (cell.queued && self.cells.values().any(|c| c.running))
+        cell.running || (cell.queued && (self.packages.is_some() || self.cells.values().any(|c| c.running)))
+    }
+
+    /// Whether its cells wait on a package step: one is under way and a cell is queued.
+    fn installing(&self) -> bool {
+        self.packages.is_some() && self.cells.values().any(|c| c.queued)
     }
 
     /// What `list_notebooks` says of it; `this_session`: it's the caller's
@@ -367,6 +377,9 @@ impl Snapshot {
         });
         if let Some(exited) = &self.exited {
             summary["exited"] = json!({ "running": exited });
+        }
+        if let Some(packages) = &self.packages {
+            summary["packages"] = packages.clone();
         }
         summary
     }

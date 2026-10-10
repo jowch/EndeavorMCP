@@ -176,6 +176,38 @@ function _snapshot_cell(cell)
     return d
 end
 
+# Pluto's package step as it goes, or nothing when none is under way. Pluto
+# adds, installs and precompiles a notebook's packages inside its run task,
+# before any cell runs, with the cells queued; the first time a package is used
+# that takes minutes. `step` is the part under way, `packages` the ones it is
+# busy with (none until Pluto says), `seconds` how long the step has taken so
+# far, and `last_line` the last line of Pluto's package log.
+const _PKG_STEPS = Dict(
+    :analysis => "checking", :registry_update => "updating the package registry",
+    :waiting_for_others => "waiting for another notebook's packages",
+    :resolve => "resolving", :remove => "removing", :add => "adding",
+    :instantiate1 => "installing", :instantiate2 => "installing", :instantiate => "installing",
+    :precompile => "precompiling", :write_project_toml => "checking",
+)
+
+_business_going(b) = b.started_at !== nothing && b.finished_at === nothing
+
+function package_step(nb)
+    pkg = lock(() -> get(nb.status_tree.subtasks, :pkg, nothing), nb.status_tree.lock)
+    (pkg === nothing || !_business_going(pkg)) && return nothing
+    going = lock(() -> [b for b in values(pkg.subtasks) if _business_going(b)], pkg.lock)
+    sort!(going; by = b -> b.started_at)
+    step = isempty(going) ? "checking" : get(_PKG_STEPS, last(going).name, string(last(going).name))
+    log = replace(get(nb.nbpkg_terminal_outputs, "nbpkg_sync", ""), r"\e\[[0-9;]*[A-Za-z]" => "", '\r' => '\n')
+    lines = filter(l -> !isempty(l) && !all(==('='), l), strip.(split(log, '\n')))
+    Dict{String,Any}(
+        "step"      => step,
+        "packages"  => copy(nb.nbpkg_busy_packages),
+        "seconds"   => round(Int, time() - pkg.started_at),
+        "last_line" => isempty(lines) ? nothing : first(String(last(lines)), 300),
+    )
+end
+
 function snapshot(nb)
     Dict{String,Any}(
         "notebook_id"       => string(nb.notebook_id),
@@ -185,7 +217,8 @@ function snapshot(nb)
         "execution_allowed" => Pluto.will_run_code(nb),
         "safe_preview"      => nb.process_status === Pluto.ProcessStatus.waiting_for_permission,
         "exited"            => exited_cells(nb),
-        "cells"           => [_snapshot_cell(nb.cells_dict[id]) for id in nb.cell_order],
+        "packages"          => package_step(nb),
+        "cells"          => [_snapshot_cell(nb.cells_dict[id]) for id in nb.cell_order],
     )
 end
 
