@@ -363,7 +363,7 @@ fn serve_and_mcp_without_the_app() {
                 break link.to_owned();
             }
         };
-        assert!(link.starts_with("http://localhost:") && link.contains("/?token="), "{link}");
+        assert!(link.starts_with("http://localhost:") && !link.contains("token"), "where the notebooks are, without the token: {link}");
     });
     step("a tool call goes through to the runtime", || {
         send(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
@@ -409,7 +409,7 @@ fn serve_and_mcp_without_the_app() {
 fn said_standalone() -> &'static str {
     "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
 the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
-`new_notebook` and `open_notebook` return `browser_url`. When the result has `opened_in_browser` true, the notebook is already open in the user's browser: tell them. Otherwise give them `browser_url`. \
+`new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. \
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts. \
 This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \

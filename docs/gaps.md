@@ -861,13 +861,19 @@ plugins). The rest of this file can wait or go alongside.
   the app's run gate. The app relies on it for exports (`pluto::fetch`). A
   separate page token would only help against a client that leaks its MCP
   config: an agent that runs shell commands as the user can read the token
-  file either way. To close: a page token apart from the bearer, given to the
-  app with `page_url`, and the bearer refused on page routes.
+  file either way. That case is concrete for Antigravity in the app: the app
+  hands the bearer to its agent in the ACP `mcpServers` headers, and
+  Antigravity keeps session data on disk. Revisit before the app ships
+  Antigravity. To close: a page token apart from the bearer, given to the app
+  with `page_url`, and the bearer refused on page routes.
 - [P3] **Opening the browser is not tried on a real desktop by the tests.** A
   debug build never opens one (`ENDEAVOR_TEST_BROWSER` records the link), so
   `open` on macOS, `rundll32` on Windows and `xdg-open` on Linux have not been
   tried on a desktop yet. Each `new_notebook` or `open_notebook` opens a tab, also for a
-  notebook that is open already.
+  notebook that is open already, unless this session opened it in the last 10
+  seconds. On Linux a stale `DISPLAY` (an agent started in a tmux session first
+  made on the workstation's desktop, then reached over ssh) opens the browser
+  on the workstation's screen, not the user's; this can't be told apart.
 
 - [P2] **A second session's edit can replace a first session's edit made a
   moment earlier, and neither is told.** It happens when the second session

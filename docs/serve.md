@@ -263,8 +263,8 @@ Without the plugin, the agent gets a `notebook_guide` tool that serves
 the same skills, and the server's instructions tell it to read the guide
 first.
 
-`mcp` writes its progress and the browser link to stderr, which agents keep
-in their MCP logs. When the agent makes or opens a notebook, `mcp` opens it in
+`mcp` writes its progress to stderr, which agents keep in their MCP logs, and
+never the token. When the agent makes or opens a notebook, `mcp` opens it in
 your browser itself. The agent gets the address without the token
 (`browser_url`), and `opened_in_browser` tells it whether the notebook was
 opened for you.
@@ -282,8 +282,9 @@ how to get in.
 
 `endeavor open` lets a browser in to the runtime running from the state
 folder: it opens the start page in your browser, or prints the link with the
-token when the computer shows no browser (over ssh, say). It takes
-`--state-dir` like `stop`.
+token when the computer shows no browser (over ssh, say). It prints the link
+only to a terminal, so an agent that runs it in its shell doesn't get the
+token. It takes `--state-dir` like `stop`.
 
 If you forward a different local port than the runtime's, change the port in
 the link.

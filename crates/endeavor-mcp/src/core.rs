@@ -800,6 +800,7 @@ fn access(request: &Head, route: Route, token: &str, cookie: &str) -> Access {
 /// gives one (`open_command`).
 fn not_let_in(open: &str) -> String {
     let open = open.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let terminal = if cfg!(windows) { "PowerShell window" } else { "terminal" };
     format!(
         "<!doctype html><meta charset=utf-8><title>Endeavor</title>
 <body style=\"font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; line-height: 1.5\">
@@ -808,7 +809,7 @@ fn not_let_in(open: &str) -> String {
 <ul>
 <li>If an agent works with the notebooks, ask it to open the notebook again: Endeavor opens it in your browser with the key.</li>
 <li>If you started <code>endeavor serve</code>, open the link it printed.</li>
-<li>Or run this in a terminal on the computer where the notebooks run:<br><code>{open}</code></li>
+<li>If the notebooks run on this computer, you can also run this in a {terminal}:<br><code>{open}</code></li>
 </ul>
 </body>
 "
@@ -816,14 +817,16 @@ fn not_let_in(open: &str) -> String {
 }
 
 /// The command that lets a browser in to this runtime (`endeavor open`), as this program and the
-/// state folder `dir` are named here: the plugin's program isn't on the PATH.
+/// state folder `dir` are named here: the plugin's program isn't on the PATH. On Windows in
+/// PowerShell's form (`& "C:\…\endeavor.exe" …`), since a quoted path alone is a string there.
 fn open_command(dir: &Path) -> String {
     let quote = |text: &str| if text.is_empty() || text.contains([' ', '"', '\'', '$', '&']) { format!("\"{text}\"") } else { text.to_owned() };
     let program = std::env::current_exe().map_or_else(|_| "endeavor".to_owned(), |exe| exe.display().to_string());
     let mut words = vec![quote(&program)];
     words.extend(crate::HELPER_ARGS.get().copied().unwrap_or_default().iter().map(|arg| arg.to_string()));
     words.extend(["open".to_owned(), "--state-dir".to_owned(), quote(&dir.display().to_string())]);
-    words.join(" ")
+    let line = words.join(" ");
+    if cfg!(windows) { format!("& {line}") } else { line }
 }
 
 /// Whether `request` is a browser opening a page (not a script, an image or a WebSocket).

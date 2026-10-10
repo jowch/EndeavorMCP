@@ -1354,7 +1354,7 @@ impl Relay {
         };
         let ends = job_json(&reached.status).and_then(|j| j["ends_in_minutes"].as_u64()).map(|m| format!(" The job ends in {}.", wire::slurm::duration_text(m as u32))).unwrap_or_default();
         result["message"] = format!(
-            "{on} (node {}). When you make or open a notebook there, it opens in the user's browser.{ends}{} This session has no notebook on {name} yet, unless it is still in one it made there that is open (`list_notebooks` shows `this_session`): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
+            "{on} (node {}). When you make or open a notebook there, it usually opens in the user's browser (`opened_in_browser` says); give the user its `browser_url` too.{ends}{} This session has no notebook on {name} yet, unless it is still in one it made there that is open (`list_notebooks` shows `this_session`): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
             runtime.node,
             reach_text(server, runtime)
         )

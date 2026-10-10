@@ -27,7 +27,12 @@ pub(crate) fn command(url: &str) -> (&'static str, Vec<String>) {
     }
 }
 
-/// Open `url` in the user's browser. Whether it was handed to the browser.
+/// How long the opener is waited for: `open` and `xdg-open` exit soon and say when no browser took the
+/// link. One still running then is taken as opening it.
+const OPENER_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Open `url` in the user's browser. Whether it was handed to the browser: on macOS and Linux the
+/// opener's exit says so; on Windows `rundll32` always exits 0, so there it is whether it started.
 ///
 /// A debug build never opens a real browser, so that the tests don't: with
 /// `ENDEAVOR_TEST_BROWSER` set to a file it adds each URL to that file as a line and counts it as
@@ -45,12 +50,37 @@ pub(crate) fn open(url: &str) -> bool {
     // stdout is the agent's MCP connection: the opener writes nothing there.
     match Command::new(program).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         Ok(mut child) => {
-            std::thread::spawn(move || child.wait());
-            true
+            if cfg!(windows) {
+                std::thread::spawn(move || child.wait());
+                return true;
+            }
+            took(child, program, OPENER_WAIT)
         }
         Err(e) => {
             eprintln!("endeavor: couldn't open the browser ({program}): {e}");
             false
+        }
+    }
+}
+
+/// Whether the opener `child` (`program`) took the link: it exited with success within `wait`, or
+/// is still running then (and is left to end on its own).
+fn took(mut child: std::process::Child, program: &str, wait: std::time::Duration) -> bool {
+    let until = std::time::Instant::now() + wait;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    eprintln!("endeavor: {program} couldn't open the browser ({status})");
+                }
+                return status.success();
+            }
+            Ok(None) if std::time::Instant::now() < until => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Ok(None) => {
+                std::thread::spawn(move || child.wait());
+                return true;
+            }
+            Err(_) => return false,
         }
     }
 }
@@ -76,6 +106,16 @@ mod tests {
             assert!(can_open(vars(&[("WAYLAND_DISPLAY", "wayland-0")])));
             assert!(over_ssh, "ssh -X: the browser shows on the user's display");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_opener_that_fails_is_no_open_browser() {
+        let run = |line: &str| Command::new("sh").args(["-c", line]).spawn().unwrap();
+        let wait = std::time::Duration::from_millis(500);
+        assert!(!took(run("exit 3"), "sh", wait), "no browser took the link");
+        assert!(took(run("exit 0"), "sh", wait));
+        assert!(took(run("sleep 5"), "sh", wait), "still opening it");
     }
 
     #[test]

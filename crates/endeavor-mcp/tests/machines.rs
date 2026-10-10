@@ -2560,14 +2560,20 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     let page = format!("http://localhost:{port}/edit?id={NOTEBOOK}");
     assert_eq!((first["browser_url"].as_str(), first["opened_in_browser"].clone()), (Some(page.as_str()), json!(true)), "{first}");
     let again = front.ok("open_notebook", json!({ "path": path }));
-    assert_eq!(again["opened_in_browser"], true, "asking again opens it again: {again}");
+    assert_eq!(again["opened_in_browser"], true, "it was opened a moment ago: {again}");
     let lines: Vec<String> = std::fs::read_to_string(&opened).unwrap().lines().map(str::to_owned).collect();
-    assert_eq!(lines, [format!("{page}&token={TOKEN}"), format!("{page}&token={TOKEN}")], "the browser gets the link that lets it in");
+    assert_eq!(lines, [format!("{page}&token={TOKEN}")], "the browser gets the link that lets it in, and no second tab at once");
     let status = front.ok("pluto_session_status", json!({}));
     assert_eq!((status["browser_url"].as_str(), status.get("opened_in_browser")), (Some(format!("http://localhost:{port}/").as_str()), None), "{status}");
     for result in [&first, &again, &status] {
         assert!(!result.to_string().contains(TOKEN), "{result}");
     }
+    assert!(!front.said().iter().any(|line| line.contains(TOKEN)), "nor what it writes to the agent's MCP log: {:?}", front.said());
+
+    // `endeavor open` prints the link only to a terminal: an agent's shell gets no token.
+    let out = Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["open", "--state-dir"]).arg(&place.local_state).env_clear().envs(place.env.iter().map(|(k, v)| (k, v))).output().unwrap();
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success() && !stdout.contains(TOKEN) && !stderr.contains(TOKEN) && stderr.contains("in your own terminal"), "{stdout} {stderr}");
     front.finish();
 
     // Where no browser can be opened, the agent is told so, and gives the link.

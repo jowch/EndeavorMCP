@@ -63,6 +63,10 @@ options:
   --force              end Julia while it is still starting, with what it began [stop]
 ";
 
+/// A notebook this session opened in the browser this recently isn't opened again: agents call
+/// `open_notebook` on an open notebook to get its id, sometimes several times in a turn.
+const REOPEN_AFTER: Duration = Duration::from_secs(10);
+
 /// How long a relayed call, and each machine tool, waits for a runtime that is
 /// still starting before it says so, under the time agents give a tool call.
 /// `ENDEAVOR_START_WAIT_SECS` sets it (the tests do).
@@ -713,7 +717,8 @@ fn stop(dir: &Path, force: bool) -> ! {
 
 /// `open`: let the user's browser in to the runtime running from `dir`, with the link that holds its
 /// token, which tool results don't carry. The browser is opened when this computer shows one;
-/// otherwise the link is printed.
+/// otherwise the link is printed, but only to a terminal: an agent that runs this in its shell would
+/// otherwise read the token and could quote it.
 fn open(dir: &Path) -> ! {
     let failed = |message: String| -> ! {
         eprintln!("{message}");
@@ -722,10 +727,13 @@ fn open(dir: &Path) -> ! {
     match runtime::look(dir, false, true) {
         Looked::Running(state, port) => {
             let link = crate::mcp::entry_link(&crate::mcp::browser_link(port, "/"), &state.token);
+            use std::io::IsTerminal;
             if browser::open(&link) {
                 println!("Opened Endeavor's notebooks in your browser.");
-            } else {
+            } else if io::stdout().is_terminal() {
                 println!("Open this link in your browser. It holds the notebooks' key: don't share it.\n    {link}");
+            } else {
+                failed("No browser could be opened here. Run `endeavor open` in your own terminal: the link it prints holds the notebooks' key, so it isn't printed anywhere else.".into());
             }
         }
         Looked::OtherNode(state) => failed(format!("The Julia recorded in {} runs on {}, not here ({}). Run `endeavor open` there.", dir.display(), state.node, crate::hostname())),
@@ -758,6 +766,9 @@ struct Relay {
     told_other_build: Mutex<std::collections::HashSet<(String, u32)>>,
     machines: crate::client::MachinesFile,
     projects: projects::Projects,
+    /// When this session last opened each notebook in the user's browser, by the browser's port and the
+    /// notebook's id: an agent that calls `open_notebook` again at once, for its id, opens no second tab.
+    opened: Mutex<std::collections::HashMap<(u16, String), Instant>>,
     /// What `initialize` negotiated, for `MCP-Protocol-Version`.
     protocol: Mutex<Option<String>>,
     /// The runtime's `Mcp-Session-Id`, if it gives one.
@@ -797,6 +808,7 @@ impl Relay {
             told_other_build: Mutex::default(),
             machines: crate::client::MachinesFile::here(),
             projects: projects::Projects::at(Env::here().projects_path()),
+            opened: Mutex::default(),
             protocol: Mutex::default(),
             mcp_session: Mutex::default(),
             out: Mutex::new(out),
@@ -946,8 +958,8 @@ impl Relay {
     /// A runtime's reply to the agent's call, with no token in its `browser_url` (a runtime from
     /// before results stopped carrying it still adds one), and the notebook that `new_notebook` or
     /// `open_notebook` made or opened opened in the user's browser, with the link that lets the
-    /// browser in. Each such call opens it, so that asking the agent to open it again works.
-    /// `opened_in_browser` says whether it was opened.
+    /// browser in. Each such call opens it, so that asking the agent to open it again works, except
+    /// within `REOPEN_AFTER` of opening the same one. `opened_in_browser` says whether it is open.
     fn in_browser(&self, message: &Value, tool: Option<&str>, route: &Route, reply: String) -> String {
         let Ok(mut parsed) = serde_json::from_str::<Value>(&reply) else { return reply };
         if parsed["id"] != message["id"] || parsed["result"]["isError"] != false {
@@ -956,7 +968,13 @@ impl Relay {
         let Some(Value::Object(mut fields)) = parsed["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()) else { return reply };
         let Some(url) = fields.get("browser_url").and_then(Value::as_str).map(crate::mcp::without_token) else { return reply };
         if matches!(tool, Some("new_notebook" | "open_notebook")) {
-            fields.insert("opened_in_browser".into(), browser::open(&crate::mcp::entry_link(&url, &route.token)).into());
+            let key = (route.port, fields.get("notebook_id").and_then(Value::as_str).unwrap_or_default().to_owned());
+            let just = self.opened.lock().unwrap().get(&key).is_some_and(|at| at.elapsed() < REOPEN_AFTER);
+            let opened = just || browser::open(&crate::mcp::entry_link(&url, &route.token));
+            if opened && !just {
+                self.opened.lock().unwrap().insert(key, Instant::now());
+            }
+            fields.insert("opened_in_browser".into(), opened.into());
         }
         fields.insert("browser_url".into(), url.into());
         parsed["result"]["content"][0]["text"] = to_json(&Value::Object(fields)).into();
