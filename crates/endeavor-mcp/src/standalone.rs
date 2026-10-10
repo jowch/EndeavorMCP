@@ -54,7 +54,8 @@ options:
   --port PORT          the port to listen on, on 127.0.0.1 (default: a free one) [serve, mcp]
   --host-tools         give every agent session list_folder, read_file and run_shell here [serve]
   --skills plugin      the agent has Endeavor's skills from its plugin [mcp]
-  --julia PATH|auto    the julia to use (default auto: your login shell's, else Endeavor's own download)
+  --julia PATH|auto|own  the julia to use (default auto: your login shell's, else Endeavor's own;
+                       own: Endeavor's own Julia 1.12.6 only, with juliaup when you have it)
   --julia-shell LINE   a shell line that puts julia on the PATH, such as 'module load julia'
   --r RSCRIPT|auto     the R for R notebooks (default auto: your login shell's Rscript) [serve, mcp]
   --r-shell LINE       a shell line that puts Rscript on the PATH, such as 'module load R' [serve, mcp]
@@ -124,7 +125,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
             "--julia" | "--julia-shell" if julia.is_some() => return Err("give one of --julia and --julia-shell".into()),
             "--julia" => {
                 only(&["serve", "mcp"])?;
-                julia = Some(value().map(|v| if v == "auto" { julia::Source::Auto } else { julia::Source::Path(v) })?)
+                julia = Some(value().map(julia::Source::from_value)?)
             }
             "--julia-shell" => {
                 only(&["serve", "mcp"])?;

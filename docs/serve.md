@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/inst
 ```
 
 On Windows, in PowerShell (this script has never been run, see
-[gaps.md](gaps.md)):
+[#17](https://github.com/jowch/EndeavorMCP/issues/17)):
 
 ```
 irm https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.ps1 | iex
@@ -98,7 +98,7 @@ already have the newest build, it says so. It needs curl or wget, and write
 access to the binary's folder. On Windows the running `endeavor.exe` can't be
 overwritten, so the old one is renamed `endeavor.exe.old`, and the next
 update removes it. It has not been run on macOS or Windows
-([gaps.md](gaps.md)).
+([#17](https://github.com/jowch/EndeavorMCP/issues/17)).
 
 Other installs update the way they were installed:
 
@@ -174,7 +174,7 @@ status` shows what is running and where.
 | `--folder DIR` | Where new notebooks go, and where relative paths start | The current folder |
 | `--no-folder` | The agent is not told a project folder, so its notebook paths must be absolute (`mcp` only; not with `--folder`). Used by the Codex plugin | |
 | `--port PORT` | The port on `127.0.0.1`. Fix it so your `ssh -L` line stays the same | A free port |
-| `--julia PATH` | The `julia` to use, or `auto` | `auto`: your login shell's `julia` (on Windows, the first `julia.exe` on the PATH), else Endeavor's own download (not on Windows) |
+| `--julia PATH` | The `julia` to use, `auto` or `own`. `own` is Endeavor's own Julia 1.12.6 only, never the one on your PATH | `auto`: your login shell's `julia` (on Windows, the first `julia.exe` on the PATH), else Endeavor's own. Endeavor's own is juliaup's channel for 1.12.6 when you have juliaup (Endeavor adds it, and on Windows installs juliaup first), else a download into `~/.cache/endeavor/` |
 | `--julia-shell LINE` | A shell line that puts `julia` on the `PATH`, such as `'module load julia/1.12'` | |
 | `--r PATH` | The `Rscript` for R notebooks (not open to agents yet), or `auto`. On a Mac with no R, Endeavor can install its own R 4.6.1 once you agree | `auto`: Endeavor's own R if it's installed, else your login shell's `Rscript` |
 | `--r-shell LINE` | A shell line that puts `Rscript` on the `PATH`, such as `'module load R/4.4'`. It runs each time R starts, so what else it sets up (libraries, a compiler) is there too | |
@@ -198,7 +198,7 @@ often share one home folder.
 
 Run the agent where it can reach `localhost:PORT`: on the same machine, or on
 your computer after you forward the port. No real agent client has been tried
-against `serve` over HTTP yet ([gaps.md](gaps.md)), and the Codex and Gemini
+against `serve` over HTTP yet, and the Codex and Gemini
 lines below come from those tools' documentation. (Codex was tried with the
 stdio form, below.)
 

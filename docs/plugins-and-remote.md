@@ -238,7 +238,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 - Codex on Windows is not supported for now: it puts an MCP server in a job
   object that its children cannot leave (read from its source, not run), so
   a runtime started from it would end with the session. In
-  [gaps.md](gaps.md).
+  [#17](https://github.com/jowch/EndeavorMCP/issues/17).
 - Sign-in stays with keys only. A page for servers that ask for a password
   or a code is not planned; it stays under "Not in the first version".
 - A start, once begun, finishes without the client that asked for it, so
@@ -827,7 +827,7 @@ shouldn't check it, and the Rust linker signs Apple Silicon binaries ad hoc.
 Untested.
 
 **Built, run on a real agent only once:** the plugin's launcher, below. Its
-download ran once on Linux, by accident, under Codex ([gaps.md](gaps.md)).
+download ran once on Linux, by accident, under Codex ([#16](https://github.com/jowch/EndeavorMCP/issues/16)).
 
 When the launcher can't get the binary, it exits with one line saying what
 failed and the manual install line. The server then fails to start, but the
@@ -1081,7 +1081,7 @@ agents).
    `endeavor mcp` in `e2e_machines_slurm`).
 5. macOS and Windows builds, the install scripts, the build's release key
    (built; the workflow's new rows and the PowerShell script are unrun, see
-   [gaps.md](gaps.md)).
+   [#17](https://github.com/jowch/EndeavorMCP/issues/17)).
 6. The plugin gets the binary itself: the launcher, the Claude Code plugin
    using it, the Codex plugin folder (used in a trial through
    `codex exec`, with absolute paths only) and the Antigravity one (used through

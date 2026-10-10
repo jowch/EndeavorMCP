@@ -88,9 +88,10 @@ updates it. It differs from Claude Code in these ways:
   ```
 
   Choosing "Git and optional Unix tools" when installing Git does the same.
-- Endeavor downloads no Julia on Windows. Install juliaup
-  (`winget install --id 9NJNWW8PVKMN -e -s msstore`) and Julia 1.12
-  (`juliaup add 1.12`, `juliaup default 1.12`) first.
+- With no `julia.exe` on the PATH, Endeavor offers to install juliaup and
+  Julia 1.12.6 for you (no admin needed). To do it yourself instead:
+  `winget install --id 9NJNWW8PVKMN -e -s msstore`, then `juliaup add 1.12`
+  and `juliaup default 1.12`.
 - agy names the server `endeavor_endeavor`. `agy -p` (print mode) refuses
   every MCP call that isn't allowed in `~/.gemini/antigravity-cli/settings.json`,
   one tool at a time:
@@ -119,8 +120,9 @@ On Linux and macOS, a plugin needs nothing else. The first start:
 - Downloads the `endeavor` program, about 5 MB, into
   `~/.local/share/endeavor/bin/`.
 - Starts Julia only when the first Julia notebook is opened or made. Then it
-  downloads its own Julia into `~/.cache/endeavor/` if it finds no `julia`
-  (Julia 1.11 or newer works if you have it), and installs Julia's packages.
+  gets its own Julia 1.12.6 if it finds no `julia` (Julia 1.11 or newer works
+  if you have it): with juliaup if you have it, else downloaded into
+  `~/.cache/endeavor/`. Then it installs Julia's packages.
   That takes a few minutes the first time. Someone who only opens R notebooks
   never needs Julia.
 
@@ -215,7 +217,7 @@ the machine's home folder.
 - Sign-in is ssh keys only.
 - The skills were tried in short Claude Code runs only.
 
-The full list is in [docs/gaps.md](docs/gaps.md).
+Known gaps are tracked as [GitHub issues](https://github.com/jowch/EndeavorMCP/issues).
 
 ## Without a plugin
 
@@ -274,7 +276,7 @@ app with a Claude Code agent beside a live Pluto notebook, which uses the same
 - `scripts/`: the install scripts, the plugins' launcher and the helper builds.
 - `docs/`: [plugins-and-remote.md](docs/plugins-and-remote.md) (the design),
   [endeavor-mcp.md](docs/endeavor-mcp.md), [runtime-core.md](docs/runtime-core.md),
-  [one-port.md](docs/one-port.md), [gaps.md](docs/gaps.md),
-  [testing.md](docs/testing.md) and [status.md](docs/status.md).
+  [one-port.md](docs/one-port.md), [testing.md](docs/testing.md) and
+  [status.md](docs/status.md). Known gaps are [GitHub issues](https://github.com/jowch/EndeavorMCP/issues).
 
 Build and test with `cargo build` and `cargo test`.
