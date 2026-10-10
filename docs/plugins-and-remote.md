@@ -86,7 +86,7 @@ harness ── stdio ── endeavor mcp ── ssh ── endeavor connect ─�
   `stop_machine` makes before it stops a runtime.
 - **No list of other sessions** (built). `other_sessions` and
   `active_seconds_ago` are gone from `list_notebooks` and
-  `pluto_session_status`, with the label a client sent, and the skill no
+  `session_status`, with the label a client sent, and the skill no
   longer tells the agent to mention other sessions. Reading before writing
   (`stale_read`) and the check before a run (`run_conflict`) are what keep
   two sessions from undoing each other, and they stay. The note that named
@@ -181,7 +181,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    that has gone (died, exited when idle, stopped from elsewhere) is treated
    alike: it is not running, and the next notebook call that needs one starts
    one on this computer and on a plain server (a cluster asks for a job),
-   while `list_notebooks` and `pluto_session_status` never start one. Nothing
+   while `list_notebooks` and `session_status` never start one. Nothing
    running is never remembered: each call that attaches looks again. A
    failure is kept for every call, on this computer and on a machine, until a
    call asks to try again: `use_machine` always does, a notebook call that
@@ -190,7 +190,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    it end. `list_machines` shows the state only of the machines this front is
    connected to and connects to nothing. `ToApp::Ready` has `port`
    (`#[serde(default)]`, protocol still 1), and `use_machine` and
-   `pluto_session_status` give it as `remote_port`, with `ssh -L` for a
+   `session_status` give it as `remote_port`, with `ssh -L` for a
    plain server. The test variables that were the link's (`ENDEAVOR_TEST_SHELL`,
    `_ROOT`, `_STATE`, `_DEPOT`, `_ASK`) are read where the session is made.
 4. The session records: no `end_session`, no other-sessions list; the
@@ -216,7 +216,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
    long; `serve` is not. The core writes `"exits_when_idle": true|false` to
    `runtime.json` (absent in a record from before: not known). The live limit
    is not in the file, since `endeavor/set_idle_limit` changes it:
-   `pluto_session_status` carries `idle_stop_hours` (0 never ends it, even with
+   `session_status` carries `idle_stop_hours` (0 never ends it, even with
    `exits_when_idle` true) and `exits_when_idle`.
 6. One local state folder for the app and the plugin, with the paths module.
    _Built 2026-10-07._ `paths.rs` defines every folder Endeavor uses (`Env`
@@ -379,7 +379,7 @@ be a folder's name on every system.
   notebook has been open for that long, so a runtime nobody uses doesn't stay
   up for good. `serve` runs in your terminal until you stop it and does not.
   Attaching to a running runtime changes nothing about it, and
-  `pluto_session_status` says which kind it is. On a cluster the flag goes to
+  `session_status` says which kind it is. On a cluster the flag goes to
   the core in the job, and the job's time limit ends it too.
 
 **The token.** The helper sends the runtime's token when the runtime is
@@ -410,7 +410,7 @@ state folder; a machine's is its session. A call that needs a runtime asks
 whether one runs, and starts one when none does, on this computer and on a
 plain server alike. A cluster is not started without a job the user agreed to:
 the call fails with a message that says what to ask. `list_notebooks` and
-`pluto_session_status` use a runtime that runs and start none. A runtime that
+`session_status` use a runtime that runs and start none. A runtime that
 `stop_machine` ended is not started again by a call until `use_machine`. When
 the front's input ends it ends its key on the runtime it is on and closes its
 sessions, leaving every runtime running.
@@ -525,7 +525,7 @@ gives (none from an older helper). When the runtime offers this build's
 interface, nothing is said. Otherwise `use_machine`, or the first notebook
 call, tells the agent once that the runtime there is from an older (or
 newer) version of Endeavor and that stopping it (with the user's agreement)
-and then `use_machine` starts this version; `pluto_session_status` says it again
+and then `use_machine` starts this version; `session_status` says it again
 every time (`other_version`, with the build in `runtime_build`), and
 `client::Session` reports the same as trouble (`Config::on_event`). The front answers the tool list from its own build, so
 a tool or argument newer than the runtime fails with the runtime's own error.
@@ -550,7 +550,7 @@ it with the relay.
 - It no longer hears "In use from another connection": nothing makes it
   exit. The runtime has no list of other sessions to show instead.
 - It does not call `endeavor/end_session` (gone: an unknown method) or read
-  `other_sessions` (gone from `list_notebooks` and `pluto_session_status`). A
+  `other_sessions` (gone from `list_notebooks` and `session_status`). A
   session it drops is left to go quiet; the runtime forgets it after 7 days.
 - Its rule for a runtime from another build compares builds for equality,
   so it would hold back runs in Ask to run whenever the plugin's build
@@ -689,7 +689,7 @@ app moves its pin ([status.md](status.md)).
    `shared`?"), then calls `use_machine`.
 
 **Waiting for a job.** `use_machine` returns with the job's number once the job is
-queued. `pluto_session_status` then gives the queue state, Slurm's reason in
+queued. `session_status` then gives the queue state, Slurm's reason in
 plain words, and once the runtime is up, when the job ends. No call waits
 longer than 45 seconds (Codex's tool timeout defaults to 60), and a queued job
 is not waited for. The time waited is not given: the front doesn't know when a
@@ -714,7 +714,7 @@ needs a new job, the result says so and the agent asks you.
 | `stop_machine` | Stop the runtime there for every client; on a cluster, cancel the job. Refuses first, without `force`, when another session working in an open notebook made a tool call in the last 15 minutes, and says how many and how long ago. Needs this build's helper there, so it can ask to install it too |
 
 `open_notebook` joins a notebook that is already open. `list_notebooks` and
-`pluto_session_status` gain the machine, the job and its end time.
+`session_status` gain the machine, the job and its end time.
 
 `list_folder`, `read_file` and `run_shell` run on the server. The runtime
 lists and allows them only for a session that names its server, so the

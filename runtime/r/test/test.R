@@ -118,7 +118,7 @@ check("new over an existing file: file_exists", startsWith(call("new", list(path
 existing <- file.path(dir, "existing.R")
 writeLines(c(
   "### An Ember notebook ###", "# /// environment", '# ember_version = "0.0.0.9000"',
-  '# r_version = "4.3.3"', '# snapshot = "2026-01-01"', "# ///", "",
+  '# r_version = "4.3.3"', '# snapshot = "2026-01-01"', '# on_cell_change = "lazy"', "# ///", "",
   "# %% id=11111111-1111-4111-8111-111111111111", "x <- 1:10", "",
   "# %% id=22222222-2222-4222-8222-222222222222", "y <- sum(x)", "",
   "# %% id=33333333-3333-4333-8333-333333333333", "y * 2", "",
@@ -246,6 +246,15 @@ check("validate: a syntax error", length(v$errors) == 1 && identical(v$errors[[1
 check("validate: fine code", length(result("validate", list(notebook_id = nid, cell_id = ids[3], code = "x + 1"))$errors) == 0)
 check("validate: an unknown cell", startsWith(call("validate", list(notebook_id = nid, cell_id = "x", code = "1"))$error, "KeyError: key \"cell_not_found::"))
 check("unknown method", startsWith(call("frobnicate", list(notebook_id = nid))$error, "ArgumentError: unknown_method::"))
+warned <- result("apply", list(notebook_id = nid, ops = list(list(op = "insert", index = 6, code = "warning(\"careful\")\n7", folded = FALSE))))
+r <- result("run", list(notebook_id = nid, cells = warned$inserted, wait = TRUE, timeout = 60))
+wc <- cell_of(result("snapshot", list(notebook_id = nid)), warned$inserted[[1]])
+check("a warning reads as one, before the value", grepl("^Warning: careful\n\\[1\\] 7$", wc$output))
+r <- result("run", list(notebook_id = nid, cells = list(ids[3]), wait = TRUE, timeout = 60))
+r <- result("run", list(notebook_id = nid, cells = list(ids[2]), wait = TRUE, timeout = 60))
+snap <- result("snapshot", list(notebook_id = nid))
+# existing.R is lazy, so the stale result stays stale (in autorun Ember would rerun it on its own).
+check("a result made before its ancestor last ran: stale", isTRUE(cell_of(snap, ids[3])$stale) && identical(cell_of(snap, ids[2])$stale, FALSE))
 
 # ---- a long run: timeout, interrupt ----
 
@@ -278,6 +287,8 @@ check("a run after that starts a new R", identical(unlist(r$completed), ids[3]) 
 target <- file.path(dir, "moved.R")
 check("move", identical(result("move", list(notebook_id = nid, path = target))$path, target) && file.exists(target) && !file.exists(existing))
 check("restart", isTRUE(result("restart", list(notebook_id = nid, timeout = 30))$restarted))
+snap <- result("snapshot", list(notebook_id = nid))
+check("after a restart every code cell is not run", all(vapply(snap$cells, function(c) isTRUE(c$not_run) || isTRUE(c$markdown), logical(1))))
 s <- result("status")
 before <- s$seq
 check("status lists the notebooks", length(s$notebooks) == 3)

@@ -261,7 +261,7 @@ pub(super) struct NotReady {
     name: String,
     message: String,
     reached: Option<Box<Reached>>,
-    /// Nothing runs and none was asked for: `list_notebooks` and `pluto_session_status` answer that.
+    /// Nothing runs and none was asked for: `list_notebooks` and `session_status` answer that.
     idle: bool,
     /// `stop_machine` ended it.
     stopped: bool,
@@ -289,7 +289,7 @@ pub(super) enum Need {
     Start,
     /// What runs, waited for while it is on its way; none is started (`list_notebooks`).
     Look,
-    /// How it stands now, with none started and no wait for one that is on its way (`pluto_session_status`).
+    /// How it stands now, with none started and no wait for one that is on its way (`session_status`).
     Peek,
 }
 
@@ -336,9 +336,9 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
         Outcome::StillWorking(step) => {
             let step = if step.is_empty() { String::new() } else { format!(" Last step: {}.", step.trim_end_matches('.')) };
             if matches!(reached.status.state, State::Starting { .. }) {
-                format!("Julia is starting on {at}. The first start installs packages and takes a few minutes.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds for Julia. `pluto_session_status` answers at once and only shows the step, so don't call it repeatedly.")
+                format!("Julia is starting on {at}. The first start installs packages and takes a few minutes.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds for Julia. `session_status` answers at once and only shows the step, so don't call it repeatedly.")
             } else {
-                format!("Endeavor is connecting to {name}.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds. `pluto_session_status` answers at once and only shows the step, so don't call it repeatedly. If it stays like this, call `use_machine` again.")
+                format!("Endeavor is connecting to {name}.{step} To wait, call the notebook tool you want again: each call waits up to 45 seconds. `session_status` answers at once and only shows the step, so don't call it repeatedly. If it stays like this, call `use_machine` again.")
             }
         }
         Outcome::NothingRunning => format!("Julia isn't running on {at} right now. Call `use_machine` with machine \"{name}\" to start it."),
@@ -349,7 +349,7 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
             } else {
                 (format!("waiting in the queue: {}", queue_reason_text(&queue.reason)), " A queued job can wait minutes or hours: after a few tries, stop and let the user say when to check again.")
             };
-            format!("The Slurm job{job} on {name} is {what}. Tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds. `pluto_session_status` answers at once and only shows the job's state, so don't call it repeatedly.{wait}")
+            format!("The Slurm job{job} on {name} is {what}. Tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds. `session_status` answers at once and only shows the job's state, so don't call it repeatedly.{wait}")
         }
         Outcome::Failed(error) => {
             let error = if error.is_empty() { "it didn't say why" } else { error };
@@ -461,7 +461,7 @@ fn cluster_clause(cluster: bool) -> &'static str {
     if cluster { " It runs in a Slurm job, so stopping it also gives up the job: the next start waits in the queue again. Tell the user that too." } else { "" }
 }
 
-/// What `pluto_session_status` says when the machine's runtime isn't up.
+/// What `session_status` says when the machine's runtime isn't up.
 fn status_result(name: &str, reached: &Reached, message: &str) -> Value {
     let Reached { outcome, status } = reached;
     let mut out = json!({ "machine": name, "state": state_word(&status.state), "ready": false, "message": message });
@@ -859,8 +859,8 @@ impl Relay {
         let answer = |result: Value| to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": text_result(&to_json(&result)) }));
         let reply = match (tool, &unready.reached) {
             (Some("list_notebooks"), _) if unready.idle => answer(json!([])),
-            (Some("pluto_session_status"), _) if unready.idle => answer(json!({ "pluto": "not running", "notebooks": [], "message": unready.message })),
-            (Some("pluto_session_status"), Some(reached)) => {
+            (Some("session_status"), _) if unready.idle => answer(json!({ "pluto": "not running", "notebooks": [], "message": unready.message })),
+            (Some("session_status"), Some(reached)) => {
                 let mut result = status_result(&unready.name, reached, &unready.message);
                 if unready.stopped {
                     result["state"] = "stopped".into();
@@ -873,14 +873,14 @@ impl Relay {
     }
 
     /// A runtime's reply to the agent's call, with what only the front knows: that the session is on a
-    /// machine (and its job) in `pluto_session_status`, and a notice that is owed once.
+    /// machine (and its job) in `session_status`, and a notice that is owed once.
     pub(super) fn decorate(&self, message: &Value, tool: Option<&str>, reply: String) -> String {
         let Ok(mut parsed) = serde_json::from_str::<Value>(&reply) else { return reply };
         if parsed["id"] != message["id"] || (parsed.get("result").is_none() && parsed.get("error").is_none()) {
             return reply;
         }
         let mut changed = false;
-        if tool == Some("pluto_session_status") && parsed["result"]["isError"] == false {
+        if tool == Some("session_status") && parsed["result"]["isError"] == false {
             changed |= self.add_machine_fields(&mut parsed);
         }
         if let Some(notice) = self.notice.lock().unwrap().take() {
@@ -1414,7 +1414,7 @@ impl Relay {
         match waited.recv_timeout(deadline.left()) {
             Ok(Ok(())) => {}
             Ok(Err(why)) => return Err(why),
-            Err(_) => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Stopping Julia on {at} is taking a while. It goes on in the background: call `pluto_session_status` or `list_machines` later to see whether it ended.") })),
+            Err(_) => return Ok(json!({ "machine": name, "stopped": false, "message": format!("Stopping Julia on {at} is taking a while. It goes on in the background: call `session_status` or `list_machines` later to see whether it ended.") })),
         }
         let cluster = if server.cluster.is_some() { " and its Slurm job was cancelled" } else { "" };
         Ok(json!({

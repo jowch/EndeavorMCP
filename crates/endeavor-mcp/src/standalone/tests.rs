@@ -306,7 +306,7 @@ impl Out {
     }
 }
 
-/// A stand-in for the runtime's `/mcp`: answers `tools/call` `pluto_session_status` as JSON,
+/// A stand-in for the runtime's `/mcp`: answers `tools/call` `session_status` as JSON,
 /// `list_notebooks` as an event stream (a progress notification, then the reply), and
 /// a notification with `202`. What each request's head and body were.
 fn fake_core() -> (u16, Arc<Mutex<Vec<(Head, String)>>>) {
@@ -389,11 +389,11 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     assert_eq!(init["result"]["instructions"], format!("{} {}", crate::guide::STANDALONE, crate::guide::MACHINES), "with the plugin's skills, what differs without the app, and the machine tools");
     assert!(seen.lock().unwrap().is_empty(), "the runtime saw neither");
 
-    relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"pluto_session_status","arguments":{}}}"#);
+    relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_status","arguments":{}}}"#);
     assert_eq!(out.lines()[1], r#"{"id":1,"jsonrpc":"2.0","result":{"content":[]}}"#);
     let seen = seen.lock().unwrap();
     let (head, body) = &seen[0];
-    assert_eq!(body, r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"pluto_session_status","arguments":{}}}"#);
+    assert_eq!(body, r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_status","arguments":{}}}"#);
     let header = |name| head.header(name).unwrap_or("(none)");
     assert_eq!(
         [header("Authorization"), header("X-Endeavor-Session"), header("X-Endeavor-Skills"), header("MCP-Protocol-Version"), header("Accept")],
@@ -431,7 +431,7 @@ fn the_relay_passes_on_an_event_stream_event_by_event() {
         ]
     );
     // The session id the runtime gave goes back with the next request.
-    relay.handle(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pluto_session_status","arguments":{}}}"#);
+    relay.handle(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session_status","arguments":{}}}"#);
     assert_eq!(seen.lock().unwrap()[1].0.header("Mcp-Session-Id"), Some("s-1"));
     assert!(seen.lock().unwrap()[0].0.header("X-Endeavor-Skills").is_none(), "no plugin, no header");
 }

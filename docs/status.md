@@ -54,9 +54,20 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   binary's number; it compares builds with a binary from before the line was
   printed). A machine's runtime is checked too, since 2026-10-09: the helper's
   `Ready` carries its build and interface, the front tells the agent once and
-  never stops it, `pluto_session_status` says it every time (`other_version`,
+  never stops it, `session_status` says it every time (`other_version`,
   since 2026-10-09), and `client::Session` reports it as trouble (serve.md,
   "Update it"; endeavor-mcp.md, "A runtime from another build").
+- The status tool is `session_status` since 2026-10-10 (interface 2); it was
+  `pluto_session_status`, a name that told agents every notebook is Pluto's.
+  The old name still runs the tool but isn't listed, so an agent calls the new
+  one; the old name only keeps working where an agent read it in text written
+  before (an older skill copy, an app from before its pin, the user's notes). A
+  permission rule that names the old tool doesn't match the new name. Drop the
+  old name in the release after (`mcp::RENAMED_TOOLS`). Runtimes started before
+  this build offer interface 1, so they show the "another version" notice until
+  they restart. Error kinds the Pluto adapter returns
+  (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
+  Pluto's rules and say so.
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
   SHA-256 and keeps it (tested against a fake release; the wiring is
@@ -160,18 +171,24 @@ Next:
   ([runtime-core.md](runtime-core.md), [one-port.md](one-port.md)). So far
   `wire` knows its files (`Backend::Ember`: `.R` with Ember's first line, a
   page at `/ember/edit`, a preview of the first cells), the folder scan the
-  app asks for still lists only Pluto's, and `open_notebook` refuses an Ember
-  file as `unsupported`. The core routes calls to more than one engine and
+  app asks for still lists only Pluto's, and `open_notebook` and
+  `new_notebook` refuse an Ember file as `unsupported` (on Windows always,
+  until Ember runs there). The core routes calls to more than one engine and
   serves `/ember/`. R's adapter (`runtime/r/adapter.R`) is built: the core
   starts it, with Ember in it, the first time an R notebook is opened, and
   follows its notifications by long-polling. Only tests open R notebooks so
-  far (`ENDEAVOR_TEST_R_NOTEBOOKS`); the agent's tools and skills for R come
-  after the agent-loop eval. R is the login shell's `Rscript`, or what `--r` or
+  far (`ENDEAVOR_TEST_R_NOTEBOOKS`). The tools already work for them:
+  `new_notebook` makes one from an `.R` path, `read_cell` shows Ember's own
+  `stale` and `not_run` (every cell after a restart), and a warning in a
+  cell's output starts with `Warning:`. The skill text for R, and opening R
+  notebooks to agents, come next. R is the login shell's `Rscript`, or what
+  `--r` or
   `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names.
   The first R notebook installs Ember at the commit the core pins
   (`core::EMBER_COMMIT`) into `~/.cache/endeavor/r/<commit>` (`$SCRATCH/endeavor/r`
   on clusters), with any package it needs that R lacks; the open returns
-  `r_installing` until that's done. The app's R setting is next. The engine
+  `r_installing` until that's done. The app passes a server's and Settings'
+  `r` through, with no field to set them yet. The engine
   name a client asks a runtime for (`wire::ENGINE_PLUTO`, a string) is still
   a string; it becomes `Backend` later.
 - marimo after Ember.

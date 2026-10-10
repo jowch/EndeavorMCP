@@ -38,7 +38,7 @@ Only after the user agrees to what the result names, call the same tool again wi
 
 ## Waiting
 
-No call waits longer than 45 seconds. If `use_machine` returns `starting` or `queued`, tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds for Julia, and a first start takes a few minutes. A queued Slurm job can wait minutes or hours: after a few tries, stop and let the user say when to check again. `pluto_session_status` answers at once and only shows the step: the state, the queue's state and reason, the job, and when the job ends. Don't call it repeatedly, and don't use `run_shell` to wait.
+No call waits longer than 45 seconds. If `use_machine` returns `starting` or `queued`, tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds for Julia, and a first start takes a few minutes. A queued Slurm job can wait minutes or hours: after a few tries, stop and let the user say when to check again. `session_status` answers at once and only shows the step: the state, the queue's state and reason, the job, and when the job ends. Don't call it repeatedly, and don't use `run_shell` to wait.
 
 ## Files are on the machine
 
@@ -46,7 +46,7 @@ On a machine, the notebook and the files are there, not on the user's computer. 
 
 ## After the session
 
-Notebooks keep running on the machine after the session ends, until the idle limit (48 hours by default; `pluto_session_status` shows `idle_stop_hours` and `exits_when_idle`). If `pluto_session_status` has `other_version`, Julia there was started by another version of Endeavor: some tools may not work as described, and stopping it needs the user's agreement. `browser_url` works only while this session is connected. `list_machines` knows a machine's state only while this session is connected to it.
+Notebooks keep running on the machine after the session ends, until the idle limit (48 hours by default; `session_status` shows `idle_stop_hours` and `exits_when_idle`). If `session_status` has `other_version`, Julia there was started by another version of Endeavor: some tools may not work as described, and stopping it needs the user's agreement. `browser_url` works only while this session is connected. `list_machines` knows a machine's state only while this session is connected to it.
 
 On a cluster the job keeps its node and the user's allocation until its time limit (`ends_at`) or the idle limit, whichever comes first. When the user is done for now, make sure they know that, and that `stop_machine` ends the job and gives the node back. Stop it only if they ask.
 
@@ -66,7 +66,7 @@ Each tool's arguments and results: [machine-tools.md](reference/machine-tools.md
 | `slurm: false` on a cluster to skip the queue | That runs Julia on the shared login node. Only for the user's own workstation, or once they confirm it isn't a shared cluster |
 | Read a server's files with your own file or shell tools | `read_file` and `run_shell`; your own tools see the user's computer |
 | Ask the user for a password or passphrase | Never. Tell the user the failure and what it says to do in a terminal |
-| Call `pluto_session_status` again and again while Julia starts | It answers at once and does not wait. Call the notebook tool you want again: each call waits up to 45 seconds |
+| Call `session_status` again and again while Julia starts | It answers at once and does not wait. Call the notebook tool you want again: each call waits up to 45 seconds |
 | `stop_machine` to fix a problem in one notebook | Restart or fix that notebook; stopping ends everyone's work on the machine |
 | Treat `ready` as a sign the notebook is there | The session starts empty on a machine: `new_notebook` or `open_notebook` there |
 
