@@ -151,9 +151,9 @@ Claude Code:
 It also prints a Codex, a Gemini CLI and a generic JSON configuration with
 the same URL and header.
 
-`serve` starts Julia when you open the link or an agent opens a Julia notebook,
-not before. Until it is ready, the link shows a page that says Julia is
-starting and reloads itself.
+`serve` starts Julia when an agent opens a Julia notebook, not before. Until
+then the link shows a page that says Julia isn't running, with a button that
+starts it. While Julia starts, the page says so and reloads itself.
 
 To stop Endeavor, press Ctrl-C in that terminal. That stops Julia and R too.
 `serve` also stops when it gets SIGTERM or SIGHUP, such as when the terminal

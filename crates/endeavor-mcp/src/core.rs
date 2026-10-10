@@ -418,8 +418,13 @@ impl JuliaStarter {
             let mut now = julia.now.lock().unwrap();
             now.said = false;
             now.phase = match (started, now.exited) {
-                (Ok(()), None) => Phase::Ready,
-                (Ok(()), Some(status)) => Phase::Failed(format!("julia_failed::Julia stopped as it started ({status}). The runtime's log ({}) says why.", julia.log.display())),
+                (Ok(ready), None) => {
+                    // Set once: Julia ending after this ends the core, so there is never a second Ready.
+                    let _ = served.pluto.set(ready.pluto);
+                    let _ = served.bridge.julia.port.set(ready.bridge_port);
+                    Phase::Ready
+                }
+                (Ok(_), Some(status)) => Phase::Failed(format!("julia_failed::Julia stopped as it started ({status}). The runtime's log ({}) says why.", julia.log.display())),
                 (Err(why), _) => {
                     if julia.when_needed {
                         eprintln!("endeavor core: {}", why.split_once("::").map_or(why.as_str(), |(_, text)| text));
@@ -459,6 +464,11 @@ impl JuliaStarter {
         }
     }
 
+    /// Nothing has asked for Julia yet.
+    fn idle(&self) -> bool {
+        matches!(self.now.lock().unwrap().phase, Phase::Idle)
+    }
+
     /// How the Julia started last ended, if it did.
     fn exited(&self) -> Option<ExitStatus> {
         self.now.lock().unwrap().exited
@@ -471,7 +481,7 @@ impl JuliaStarter {
     }
 
     /// Find Julia, start it, and wait until its bridge answers; then have Pluto suggest the notebooks' folder.
-    fn start(&self, served: &Arc<Served>) -> Result<(), String> {
+    fn start(&self, served: &Arc<Served>) -> Result<JuliaReady, String> {
         let install = self.install.load(std::sync::atomic::Ordering::SeqCst);
         let found = crate::julia::find(&self.source, install, &mut |line| {
             eprintln!("{line}");
@@ -481,7 +491,7 @@ impl JuliaStarter {
             crate::julia::Failure::Missing(item) => format!(
                 "julia_not_found::Julia wasn't found here, and Endeavor may download its own copy only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` again with `install: true`."
             ),
-            crate::julia::Failure::Failed(message) => format!("julia_not_found::{message}"),
+            crate::julia::Failure::Failed(message) => format!("julia_failed::{message}"),
         })?;
         if self.when_needed {
             eprintln!("[ Info: Starting Julia {version} ({julia})");
@@ -503,6 +513,10 @@ impl JuliaStarter {
         }
         let mut child = self.spawn.spawn(command).map_err(|e| format!("julia_failed::Couldn't start {julia}: {e}"))?;
         self.pid.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
+        // A stop that came before the pid was stored found nothing to end.
+        if self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = child.kill();
+        }
         let watching = served.clone();
         std::thread::spawn(move || {
             let Ok(status) = child.wait() else { return };
@@ -530,9 +544,7 @@ impl JuliaStarter {
         if let Some(folder) = folder {
             set_pluto_folder(ready.bridge_port, &self.token, &folder);
         }
-        let _ = served.pluto.set(ready.pluto);
-        let _ = served.bridge.julia.port.set(ready.bridge_port);
-        Ok(())
+        Ok(ready)
     }
 
     /// End Julia if it runs: the core is stopping.
@@ -1014,9 +1026,14 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
                 if !opens_a_page(&request) {
                     return refuse(&mut client, "503 Service Unavailable", "Julia isn't running");
                 }
-                // A browser opening Pluto's page starts Julia, and sees how that goes until it's ready.
-                let page = julia_starting_page(served.julia.wait(served, Duration::ZERO).err().unwrap_or_default());
-                http::respond(&mut client, "503 Service Unavailable", Some("text/html; charset=utf-8"), page.as_bytes(), request.keeps_alive())?;
+                // The runtime's own link, which an R user opens too, doesn't start Julia by itself.
+                if request.target() == "/" && served.julia.idle() {
+                    http::respond(&mut client, "200 OK", Some("text/html; charset=utf-8"), JULIA_NOT_STARTED_PAGE.as_bytes(), request.keeps_alive())?;
+                } else {
+                    // A browser opening Pluto's page starts Julia, and sees how that goes until it's ready.
+                    let page = julia_starting_page(served.julia.wait(served, Duration::ZERO).err().unwrap_or_default());
+                    http::respond(&mut client, "503 Service Unavailable", Some("text/html; charset=utf-8"), page.as_bytes(), request.keeps_alive())?;
+                }
                 request.keeps_alive()
             }
             (Route::Pluto, _) => {
@@ -1066,6 +1083,16 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// The runtime's own link before anything asked for Julia: starting it can mean a download, so it
+/// waits for a click. `/?start-julia` is any other Pluto page as far as Julia goes.
+const JULIA_NOT_STARTED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Endeavor</title>
+<body style=\"font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; line-height: 1.5\">
+<h1>Julia isn't running</h1>
+<p>Julia starts when a Julia notebook is opened, or when you start it here. R notebooks don't need it: each opens from its own link.</p>
+<p><a href=\"/?start-julia\">Start Julia and open Pluto</a></p>
+</body>
+";
 
 /// What a browser opening Pluto's page sees while Julia isn't ready: that it's starting, and the page
 /// reloads itself; or why it couldn't start, and that reloading tries again.

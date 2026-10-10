@@ -52,7 +52,8 @@ app ── ssh/stdio frames ── endeavor ── core (Rust, the runtime's one
   [marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md) proposes. Julia does too when the core is
   started with `--julia-when-needed` (the plugin, its machines and `serve`):
   it starts on the first Julia notebook opened or made, or when a browser asks
-  for Pluto's page. A user who only uses R never finds, downloads or starts
+  for a page of Pluto's other than the runtime's own link (`/`), which offers a
+  button instead. A user who only uses R never finds, downloads or starts
   Julia. The app starts the core without the flag for now, so Julia starts
   with the core, as before.
 - Each relayed connection goes to the core's one port. The core passes

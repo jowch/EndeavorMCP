@@ -105,6 +105,11 @@ impl Engines {
                 Ok(reply)
             }
             (_, Some(id)) => {
+                // An id no running engine reported: not open, rather than "Julia isn't running".
+                if !self.ids.lock().unwrap().contains_key(id) && !self.has(Backend::Pluto) {
+                    let error = format!("notebook_not_found::No notebook with id '{id}' is open. Run list_notebooks to see what's open.");
+                    return Ok(json!({ "error": error }).to_string());
+                }
                 let backend = self.backend_of(id);
                 let reply = self.on(backend, raw)?;
                 if method == "shutdown" && result(&reply).is_some() {

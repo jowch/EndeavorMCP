@@ -196,7 +196,7 @@ Next:
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is
-  opened or made or Pluto's page is asked for, and answers
+  opened or made or a page of Pluto's past the runtime's link is asked for, and answers
   `julia_starting` while Julia starts. The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
   before, and only starting it waits. `e2e_r` runs an R notebook with no Julia.

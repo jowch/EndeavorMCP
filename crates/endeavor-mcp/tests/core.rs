@@ -1677,9 +1677,18 @@ fn a_core_started_when_needed_starts_julia_for_a_julia_notebook_and_not_before()
     assert_eq!(status["notebooks"], serde_json::json!([]), "{status}");
     assert!(julia_pids(&dir).is_empty(), "neither starts Julia");
 
-    // A browser opening Pluto's page starts Julia and is told it's starting; Julia then joins.
+    // The runtime's own link, which an R user opens too, says Julia isn't running and starts nothing.
     let mut page = core.connect();
     write!(page, "GET / HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
+    let mut said = String::new();
+    page.read_to_string(&mut said).unwrap();
+    assert!(said.starts_with("HTTP/1.1 200") && said.contains("Julia isn't running") && said.contains("href=\"/?start-julia\""), "{said}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(julia_pids(&dir).is_empty() && !dir.join("julia.json").exists(), "the link alone doesn't start Julia");
+
+    // Any other page of Pluto's starts Julia and is told it's starting; Julia then joins.
+    let mut page = core.connect();
+    write!(page, "GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
     let mut said = String::new();
     page.read_to_string(&mut said).unwrap();
     assert!(said.starts_with("HTTP/1.1 503") && said.contains("Julia is starting"), "{said}");
@@ -1738,7 +1747,7 @@ fn without_julia_a_julia_notebook_says_why_and_the_core_stops_on_a_signal_or_a_s
     let path = folder.join("a.jl").display().to_string();
     std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
     let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path }));
-    assert_eq!(opened["error"], "julia_not_found", "{opened}");
+    assert_eq!(opened["error"], "julia_failed", "a Julia that can't be used, not one to download: {opened}");
     assert!(opened["message"].as_str().unwrap().contains(&missing.display().to_string()), "{opened}");
     assert_eq!(tool_call(&core, "list_notebooks", serde_json::json!({})), serde_json::json!([]), "the runtime still answers");
     // SAFETY: plain syscall.
@@ -1751,4 +1760,30 @@ fn without_julia_a_julia_notebook_says_why_and_the_core_stops_on_a_signal_or_a_s
     app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/shutdown"}"#);
     assert_eq!(core.exits().code(), Some(0));
     assert!(!dir.join("runtime.json").exists());
+}
+
+#[test]
+fn two_julia_notebooks_opened_at_once_start_one_julia() {
+    let dir = state_dir("core-when-needed-two");
+    let bridge = FakeBridge::start(&dir);
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let julia = serving_julia(&dir, &bridge);
+    let core = Core::start_when_needed(&dir, &julia);
+    let folder = temp_folder("core-when-needed-two-notebooks");
+    let paths: Vec<String> = ["a.jl", "b.jl"].iter().map(|name| folder.join(name).display().to_string()).collect();
+    for path in &paths {
+        std::fs::write(path, "### A Pluto.jl notebook ###").unwrap();
+    }
+    std::thread::scope(|scope| {
+        let core = &core;
+        let opens: Vec<_> = paths.iter().map(|path| scope.spawn(move || tool_call(core, "open_notebook", serde_json::json!({ "path": path })))).collect();
+        wait_for("Julia to start", || julia_pids(&dir).len() == 1);
+        std::thread::sleep(Duration::from_millis(500));
+        std::fs::remove_file(dir.join("hold")).unwrap();
+        for open in opens {
+            let opened = open.join().unwrap();
+            assert_eq!(opened["message"], "not a notebook here", "each call waited for the one Julia: {opened}");
+        }
+    });
+    assert_eq!(julia_pids(&dir).len(), 1, "one Julia for both");
 }
