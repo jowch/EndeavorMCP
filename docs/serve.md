@@ -176,7 +176,7 @@ status` shows what is running and where.
 | `--port PORT` | The port on `127.0.0.1`. Fix it so your `ssh -L` line stays the same | A free port |
 | `--julia PATH` | The `julia` to use, or `auto` | `auto`: your login shell's `julia` (on Windows, the first `julia.exe` on the PATH), else Endeavor's own download (not on Windows) |
 | `--julia-shell LINE` | A shell line that puts `julia` on the `PATH`, such as `'module load julia/1.12'` | |
-| `--r PATH` | The `Rscript` for R notebooks (not open to agents yet), or `auto`. Endeavor doesn't download R | `auto`: your login shell's `Rscript` |
+| `--r PATH` | The `Rscript` for R notebooks (not open to agents yet), or `auto`. On a Mac with no R, Endeavor can install its own R 4.6.1 once you agree | `auto`: Endeavor's own R if it's installed, else your login shell's `Rscript` |
 | `--r-shell LINE` | A shell line that puts `Rscript` on the `PATH`, such as `'module load R/4.4'`. It runs each time R starts, so what else it sets up (libraries, a compiler) is there too | |
 | `--depot DEPOT` | `JULIA_DEPOT_PATH` for the runtime | `~/.cache/endeavor/depot:`, or `$SCRATCH/endeavor/depot:` when `$SCRATCH` is set |
 | `--idle-stop HOURS` | Stop a notebook nobody has used for this long. `0` never stops one | `48` |

@@ -328,3 +328,113 @@ fn an_r_notebook_through_the_runtime() {
         assert!(!state.join("r.json").exists());
     });
 }
+
+/// What a call to the core's `/endeavor/call` answers, as the app and `use_machine` make them.
+#[cfg(target_os = "macos")]
+fn app_call(port: u16, token: &str, method: &str) -> Value {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method }).to_string();
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(socket, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    let mut reply = String::new();
+    socket.read_to_string(&mut reply).unwrap();
+    serde_json::from_str(reply.split_once("\r\n\r\n").unwrap().1).unwrap()
+}
+
+/// On a Mac with no R, opening an R notebook offers Endeavor's own R and installs nothing; after the
+/// user's yes it installs R from CRAN into Endeavor's folder, and the notebook runs on that R, loading
+/// nothing from the user's R library. No shell startup file is written or changed, here or in the real home folder.
+///
+/// It runs with a scratch home folder and a login shell whose PATH has no R, so the R the Mac has, if
+/// any, isn't found. It downloads R (about 105 MB) and installs Ember, which needs a compiler:
+///
+///     cargo test -p endeavor-mcp --test e2e_r endeavors_own_r -- --ignored --nocapture
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "downloads and installs R: cargo test -p endeavor-mcp --test e2e_r endeavors_own_r -- --ignored"]
+fn endeavors_own_r_on_a_mac() {
+    const STARTUP: [&str; 6] = [".zshrc", ".zprofile", ".zshenv", ".profile", ".bash_profile", ".bashrc"];
+    let startup = |home: &Path| STARTUP.map(|name| std::fs::read(home.join(name)).ok());
+    let real_home = std::env::home_dir().unwrap();
+    let real_before = startup(&real_home);
+
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-own-r");
+    let julia = work.join("no julia here");
+    let depot = format!("{}:", work.join("depot").display());
+    if let Some(pid) = recorded_pid(&work.join("state")) {
+        // SAFETY: plain syscall.
+        unsafe { libc::kill(-pid, libc::SIGTERM) };
+    }
+    let state = fresh(work.join("state"));
+    let folder = fresh(work.join("project"));
+    let home = fresh(work.join("home"));
+    let mut cleanup = Cleanup { state: state.clone(), children: Vec::new() };
+    // Which R runs the cell, and whether any library it loads from is the user's own R's. (Ember gives each
+    // notebook a library of its own, so that is what R_LIBS_USER is inside the cell.)
+    let users_library = real_home.join("Library/R");
+    let cell = format!("paste(R.version$major, R.version$minor, R.home(), any(startsWith(.libPaths(), \"{}\")))", users_library.display());
+    std::fs::write(folder.join("which.R"), format!("### An Ember notebook ###\n\n# %% id={A}\n{cell}\n\n# /// cell order\n# {A}\n# ///\n")).unwrap();
+    // A login shell whose PATH has no R.
+    let shell = work.join("shell without r");
+    std::fs::write(&shell, "#!/bin/sh\nshift\nPATH=/usr/bin:/bin exec /bin/sh -c \"$1\"\n").unwrap();
+    std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let mut serve = command(&["serve", "--folder", folder.to_str().unwrap()], &work, &julia, &depot)
+        .env("HOME", &home)
+        .env("SHELL", &shell)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = lines(serve.stdout.take().unwrap());
+    let err = lines(serve.stderr.take().unwrap());
+    let mut printed = Vec::new();
+    loop {
+        match out.recv_timeout(Duration::from_secs(300)) {
+            Ok(line) if line == "Press Ctrl-C to stop Endeavor." => break,
+            Ok(line) => printed.push(line),
+            Err(_) => panic!("serve printed {printed:?}; its log:\n{}", err.try_iter().collect::<Vec<_>>().join("\n")),
+        }
+    }
+    cleanup.children.push(serve);
+    let link = printed.iter().find_map(|l| l.trim().strip_prefix("http://localhost:")).filter(|l| l.contains("/?token=")).unwrap();
+    let (port, token) = link.split_once("/?token=").unwrap();
+    let (port, token): (u16, String) = (port.parse().unwrap(), token.to_owned());
+    let mut agent = Agent::new(port, &token);
+    agent.initialize();
+    let own = home.join(".cache/endeavor/R-4.6.1");
+
+    step("with no R, opening an R notebook asks for Endeavor's own and installs nothing", || {
+        let (failed, said) = agent.call("open_notebook", json!({ "path": "which.R" }));
+        assert!(failed && said["error"] == "r_not_found", "{said}");
+        let message = said["message"].as_str().unwrap_or_default();
+        assert!(message.contains("only if the user agrees") && message.contains("R 4.6.1") && message.contains(&own.display().to_string()), "{said}");
+        assert!(!own.exists());
+    });
+
+    let notebook = step("after the user's yes, R installs and the notebook opens", || {
+        assert_eq!(app_call(port, &token, "endeavor/allow_r_install")["result"], json!({}));
+        let deadline = Instant::now() + Duration::from_secs(1800);
+        loop {
+            let (failed, opened) = agent.call("open_notebook", json!({ "path": "which.R" }));
+            if !failed {
+                break opened["notebook_id"].as_str().unwrap().to_owned();
+            }
+            assert!(opened["error"] == "r_installing" && Instant::now() < deadline, "{opened}; the log:\n{}", err.try_iter().collect::<Vec<_>>().join("\n"));
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+
+    step("the notebook runs on Endeavor's R, and loads nothing from the user's R library", || {
+        agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
+        let output = read["output"].as_str().unwrap_or_default();
+        assert!(read["errored"] == false && output.contains(&format!("4 6.1 {} FALSE", own.display())), "{read}");
+    });
+
+    step("no shell startup file was written or changed", || {
+        assert_eq!(startup(&home), [None, None, None, None, None, None], "in the scratch home");
+        assert!(!home.join(".local").exists(), "nothing in ~/.local");
+        assert!(startup(&real_home) == real_before, "in the real home folder");
+    });
+}

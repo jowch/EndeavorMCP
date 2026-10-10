@@ -81,7 +81,7 @@ const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|au
                          auto is slurm where Slurm's sinfo is, else process)
        endeavor relay --state-dir DIR
        endeavor node-start --state-dir DIR --julia JULIA [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
-       endeavor core --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) [--install-julia] [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT
+       endeavor core --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) [--install-julia] [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] [--own-r [--install-r]] --runtime RUNTIME_DIR --depot DEPOT
        endeavor askpass PROMPT
        endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)
        endeavor update                      replace this binary with the newest build (Linux, macOS, Windows)
@@ -97,6 +97,9 @@ struct Args {
     julia_when_needed: bool,
     /// The R for R notebooks, which the core looks for when one is first opened.
     r: r::Source,
+    /// `--own-r`: the runtime is on the user's own computer, where the core may offer Endeavor's own R
+    /// when it finds none (`r::install_own`). Never on a server.
+    own_r: bool,
     runtime: PathBuf,
     depot: String,
     launcher: Launcher,
@@ -308,6 +311,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     }
     let (mut state_dir, mut julia, mut runtime, mut depot, mut r) = (None, None::<julia::Source>, None, None, None);
     let (mut quit_with_client, mut own_with_client, mut any_node, mut launcher, mut build, mut exit_idle, mut julia_when_needed) = (false, false, false, Launcher::Process, None, false, false);
+    let mut own_r = false;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -333,6 +337,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             "--own-with-client" => own_with_client = true,
             "--any-node" => any_node = true,
             "--exit-idle" => exit_idle = true,
+            "--own-r" => own_r = true,
             "--build" => build = Some(value()?),
             _ => return Err(format!("unknown argument {arg}")),
         }
@@ -352,6 +357,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         own_with_client,
         any_node,
         build,
+        own_r,
         exit_idle,
         core_env: if exit_idle { vec![("ENDEAVOR_EXIT_IDLE", Some("1".into()))] } else { Vec::new() },
     })
@@ -1434,7 +1440,7 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     let dir = &args.state_dir;
     let (log, stderr) = open_log(&dir.join("runtime.log"))?;
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
-    command.args(args.r.args()).stdout(log).stderr(stderr);
+    command.args(args.r.args()).args(args.own_r.then_some("--own-r")).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
     // SAFETY: setsid and sigprocmask are async-signal-safe.
     unsafe {
@@ -1462,7 +1468,7 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     let dir = &args.state_dir;
     let (log, stderr) = open_log(&dir.join("runtime.log"))?;
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
-    command.args(args.r.args()).stdout(log).stderr(stderr);
+    command.args(args.r.args()).args(args.own_r.then_some("--own-r")).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
     not_inherited_std_handles();
     // CREATE_NO_WINDOW gives a console-program core a console without a

@@ -75,7 +75,7 @@
           "type": "number"
         },
         "install": {
-          "description": "true: Endeavor may install what `needs_install` named, and what this call then needs (such as Julia). Only after the user agreed; this call only; never on a first call.",
+          "description": "true: Endeavor may install what `needs_install` named, and what this call then needs (such as Julia, or R on a Mac). Only after the user agreed; this call only; never on a first call.",
           "type": "boolean"
         },
         "machine": {

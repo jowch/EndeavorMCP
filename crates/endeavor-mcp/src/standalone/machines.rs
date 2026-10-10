@@ -1271,14 +1271,14 @@ impl Relay {
             }
         };
         let reached = Reached { outcome, status: provider.status() };
-        // A runtime that runs already was started without leave to download Julia, which it asks for
-        // only when a Julia notebook first needs it: the user's yes reaches it now.
-        if install
-            && !local
-            && let (Outcome::Ready(_), Some(runtime)) = (&reached.outcome, reached.status.state.runtime())
-            && let Err(e) = crate::bridge_rpc(runtime.port, &runtime.token, "endeavor/allow_julia_install", json!({}))
-        {
-            notes.push(format!("Couldn't pass the user's leave to download Julia on to {name} ({e}); calling use_machine again with `install: true` tries again."));
+        // A runtime that runs already was started without leave to download Julia (on a machine) or to
+        // install Endeavor's own R (on this computer, the only place it's offered), which it asks for only
+        // when a notebook first needs one: the user's yes reaches it now.
+        if install && let (Outcome::Ready(_), Some(runtime)) = (&reached.outcome, reached.status.state.runtime()) {
+            let (call, what) = if local { ("endeavor/allow_r_install", "install R") } else { ("endeavor/allow_julia_install", "download Julia") };
+            if let Err(e) = crate::bridge_rpc(runtime.port, &runtime.token, call, json!({})) {
+                notes.push(format!("Couldn't pass the user's leave to {what} on to {name} ({e}); calling use_machine again with `install: true` tries again."));
+            }
         }
         match &reached.outcome {
             Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, info, "use_machine")),
