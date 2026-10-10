@@ -867,10 +867,16 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
   leaves at most a temporary folder in `<bin>`, never a partial binary. The
   next start downloads again and removes temporary folders older than an hour.
 - **Failure** is non-zero with a last line starting `endeavor:`. A pinned
-  build that the release doesn't hold yet (the release answers `LATEST` but
-  has no `endeavor-<key>.sha256`; `install.sh` exits 3) fails with "still
-  being published", since the Helpers workflow publishes a change to `main`
-  a few minutes after the push. No older build is run in its place.
+  build that the release doesn't hold (the release answers `LATEST` but has
+  no `endeavor-<key>.sha256`; `install.sh` exits 3) fails saying to reconnect
+  in a few minutes if the plugin was just updated, since the Helpers workflow
+  publishes a change to `main` a few minutes after the push, and otherwise to
+  update the plugin, since old builds are removed (`prune-helpers.sh`), with
+  the update step for the agent whose copy it is (told apart by the manifest
+  beside `launch/`). It says the same when the checksum file is there but the
+  release answers that this platform's binary isn't, since pruning removes
+  the macOS and Windows files days before the rest. No older build is run in
+  its place.
 - `--fetch-only` only gets the binary. Claude Code's `SessionStart` hook
   (matcher `startup`, so not on resume, clear or compact) runs it in the
   background so the download is usually done before the server starts.
@@ -899,6 +905,7 @@ from a local copy of the repository and used through `codex exec` (below).
 | Skills | `skills/` (a copy) | `skills/` (a copy) | `skills/` (a copy) |
 | Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
 | Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add`, `codex plugin add endeavor@endeavor`, from `.agents/plugins/marketplace.json` | `agy plugin install <folder or its GitHub tree URL>` |
+| Update | `claude plugin marketplace update endeavor`, `claude plugin update endeavor@endeavor`, or the marketplace's auto-update (off by default). The manifest has no `version` on purpose: Claude Code then versions the plugin by commit, and a fixed version would keep every install on its first commit | `codex plugin marketplace upgrade endeavor`. It replaced the installed `0.1.0` copy with the new commit's files although the version stayed (codex-cli 0.162.1, 2026-10-10) | `agy plugin install` again (not checked over an existing install) |
 | Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable, so notebook paths must be absolute | none: `--no-folder`, as Codex |
 
 Each plugin folder holds `launch/endeavor-mcp.sh`, `launch/install.sh` and

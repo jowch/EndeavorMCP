@@ -15,6 +15,19 @@ claude plugin install endeavor@endeavor
 
 Then start Claude Code in your project folder. New notebooks go there.
 
+Claude Code doesn't update a plugin from this marketplace on its own. Turn
+that on in `/plugin`, under Marketplaces, with "Enable auto-update", or update
+by hand:
+
+```
+claude plugin marketplace update endeavor
+claude plugin update endeavor@endeavor
+```
+
+Each plugin pins one build of the `endeavor` program, and old builds are
+removed from the release after a few days. A plugin that is behind says so
+when it can't get its build, with the update step for its agent.
+
 **Codex:**
 
 ```
@@ -22,7 +35,9 @@ codex plugin marketplace add jowch/EndeavorMCP
 codex plugin add endeavor@endeavor
 ```
 
-Start Codex in your project folder. It differs from Claude Code in three ways:
+Start Codex in your project folder. To update the plugin, run
+`codex plugin marketplace upgrade endeavor` and start Codex again. It differs
+from Claude Code in three ways:
 
 - Codex does not tell the plugin's server the project folder, so notebook paths
   must be absolute. The agent gives its working folder plus the file name, or
@@ -58,8 +73,8 @@ Give the `antigravity-plugin` folder's URL as above, or the path to that folder
 in a local copy. The repository's own URL installs the wrong plugin: agy
 installs every plugin it finds there, and the Claude Code one overwrites this
 one under the same name, leaving the skills without the notebook tools.
-`agy plugin uninstall endeavor` removes it. It differs from Claude Code in
-these ways:
+`agy plugin uninstall endeavor` removes it, and running the install line again
+updates it. It differs from Claude Code in these ways:
 
 - Notebook paths must be absolute, as with Codex: the plugin's server is not
   told the project folder.
