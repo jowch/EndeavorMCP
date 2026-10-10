@@ -174,7 +174,7 @@ status` shows what is running and where.
 | `--folder DIR` | Where new notebooks go, and where relative paths start | The current folder |
 | `--no-folder` | The agent is not told a project folder, so its notebook paths must be absolute (`mcp` only; not with `--folder`). Used by the Codex plugin | |
 | `--port PORT` | The port on `127.0.0.1`. Fix it so your `ssh -L` line stays the same | A free port |
-| `--julia PATH` | The `julia` to use, or `auto` | `auto`: your login shell's `julia` (on Windows, the first `julia.exe` on the PATH), else Endeavor's own download (not on Windows) |
+| `--julia PATH` | The `julia` to use, `auto` or `own`. `own` is Endeavor's own Julia 1.12.6 only, never the one on your PATH | `auto`: your login shell's `julia` (on Windows, the first `julia.exe` on the PATH), else Endeavor's own. Endeavor's own is juliaup's channel for 1.12.6 when you have juliaup (Endeavor adds it, and on Windows installs juliaup first), else a download into `~/.cache/endeavor/` |
 | `--julia-shell LINE` | A shell line that puts `julia` on the `PATH`, such as `'module load julia/1.12'` | |
 | `--r PATH` | The `Rscript` for R notebooks (not open to agents yet), or `auto`. On a Mac with no R, Endeavor can install its own R 4.6.1 once you agree | `auto`: Endeavor's own R if it's installed, else your login shell's `Rscript` |
 | `--r-shell LINE` | A shell line that puts `Rscript` on the `PATH`, such as `'module load R/4.4'`. It runs each time R starts, so what else it sets up (libraries, a compiler) is there too | |

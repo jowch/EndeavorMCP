@@ -228,4 +228,16 @@ Next:
   packages install on the first start in a fresh depot, as before. `e2e_r` runs an R notebook with no Julia.
   The app doesn't pass the flag yet, so its runtimes start Julia at once; its
   step is an app issue. The interface number is 3.
+- Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
+  (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
+  Julia is juliaup's channel for that version, which Endeavor adds
+  (`juliaup add 1.12.6`) instead of downloading a second Julia; without
+  juliaup it downloads into `~/.cache/endeavor/`, as before. On Windows it
+  installs juliaup first when there is none (from the Microsoft Store, else
+  juliaup's App Installer file), so `--julia auto` with no `julia.exe` on the
+  PATH now offers that download too. `julia::own_installed`, `install_own` and
+  `remove_own` are public for the app's Settings; removing takes away the
+  download, and juliaup's channel only if Endeavor added it. `tests/own_julia.rs`
+  covers both routes with real downloads (ignored by default); run on Linux
+  only so far.
 - marimo after Ember.
