@@ -58,8 +58,9 @@ app ── ssh/stdio frames ── endeavor ── core (Rust, the runtime's one
   the background, for a session whose folder has Pluto notebooks (three levels
   deep, as the app's folder scan), or which its caller says is a Julia session
   (`kind` in `endeavor/set_session_folder`: `julia`, `r` or `unknown`; `r`
-  never starts it). Starting ahead downloads nothing: if Julia would need
-  downloading, it waits for the first Julia notebook. The app starts the core without the flag for now, so Julia starts
+  never starts it). Starting ahead never downloads Julia: if Julia would need
+  downloading, it waits for the first Julia notebook. In a fresh depot, Pluto's
+  packages still install on that first start, as on any start. The app starts the core without the flag for now, so Julia starts
   with the core, as before.
 - Each relayed connection goes to the core's one port. The core passes
   `/mcp` and `/endeavor/…` to itself and every other path to Pluto's private

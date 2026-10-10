@@ -155,10 +155,10 @@ pub(crate) fn without_token(url: &str) -> String {
     if rest.is_empty() { path.to_owned() } else { format!("{path}?{}", rest.join("&")) }
 }
 
-/// What every client connection shares.
 /// What the core does with a session's folder and kind (`Bridge::on_folder`).
 pub type OnFolder = Box<dyn Fn(&str, &str) + Send + Sync>;
 
+/// What every client connection shares.
 pub struct Bridge {
     pub julia: Arc<Julia>,
     pub notebooks: Arc<Notebooks>,
