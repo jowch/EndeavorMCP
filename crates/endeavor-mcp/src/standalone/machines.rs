@@ -56,7 +56,7 @@ fn test_var(name: &str) -> Option<std::ffi::OsString> {
 /// computer through `sh`, as `Transport::Shell` does, so no sshd is needed; `ENDEAVOR_TEST_ROOT`,
 /// `ENDEAVOR_TEST_STATE` and `ENDEAVOR_TEST_DEPOT` set `Options::root`, `state` and `depot`, which otherwise
 /// are the machine's own default folders (`{id}` in them is the machine's id, so that two machines don't
-/// share a runtime); `ENDEAVOR_TEST_ASK` is a command that runs in the shell before each connect
+/// share a runtime); `ENDEAVOR_TEST_JULIA_AT_START` starts Julia with the runtime; `ENDEAVOR_TEST_ASK` is a command that runs in the shell before each connect
 /// (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
 fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>) -> Result<Session, String> {
     let id = server.id.clone();
@@ -74,6 +74,9 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>)
     }
     (config.root, config.state, config.depot, config.allow_install) = (var("ENDEAVOR_TEST_ROOT"), var("ENDEAVOR_TEST_STATE"), var("ENDEAVOR_TEST_DEPOT"), allow_install);
     config.launcher = launcher;
+    // An agent that only opens R notebooks there never needs Julia. A debug build's tests of a start
+    // that waits for Julia turn it off (as `Options::julia_when_needed`).
+    config.julia_when_needed = test_var("ENDEAVOR_TEST_JULIA_AT_START").is_none();
     config.messages = Messages {
         restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
         restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {}", install_text(name, &InstallInfo { items: items.to_vec(), helper: None }, "use_machine")),
@@ -1268,6 +1271,15 @@ impl Relay {
             }
         };
         let reached = Reached { outcome, status: provider.status() };
+        // A runtime that runs already was started without leave to download Julia, which it asks for
+        // only when a Julia notebook first needs it: the user's yes reaches it now.
+        if install
+            && !local
+            && let (Outcome::Ready(_), Some(runtime)) = (&reached.outcome, reached.status.state.runtime())
+            && let Err(e) = crate::bridge_rpc(runtime.port, &runtime.token, "endeavor/allow_julia_install", json!({}))
+        {
+            notes.push(format!("Couldn't pass the user's leave to download Julia on to {name} ({e}); calling use_machine again with `install: true` tries again."));
+        }
         match &reached.outcome {
             Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, info, "use_machine")),
             Outcome::Failed(_) => return Err(format!("{}{}", not_ready_message(&name, &reached), notes.iter().map(|n| format!(" {n}")).collect::<String>())),
@@ -1347,14 +1359,19 @@ impl Relay {
         if let Some(job) = job_json(&reached.status) {
             result["job"] = job;
         }
-        let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Julia started there" };
+        let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Endeavor started there" };
+        // Julia starts with the first Julia notebook (`open_session`), not here.
+        let julia = match test_var("ENDEAVOR_TEST_JULIA_AT_START") {
+            None => " Julia starts the first time a Julia notebook is made or opened there; the first time can take a few minutes, and the call says `julia_starting` until it's ready.",
+            Some(_) => "",
+        };
         let notes = match self.machine_other_build(&target, runtime, server.cluster.is_some()) {
             Some(other) => format!("{notes} {other}"),
             None => notes,
         };
         let ends = job_json(&reached.status).and_then(|j| j["ends_in_minutes"].as_u64()).map(|m| format!(" The job ends in {}.", wire::slurm::duration_text(m as u32))).unwrap_or_default();
         result["message"] = format!(
-            "{on} (node {}). When you make or open a notebook there, it usually opens in the user's browser (`opened_in_browser` says); give the user its `browser_url` too.{ends}{} This session has no notebook on {name} yet, unless it is still in one it made there that is open (`list_notebooks` shows `this_session`): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
+            "{on} (node {}).{julia} When you make or open a notebook there, it usually opens in the user's browser (`opened_in_browser` says); give the user its `browser_url` too.{ends}{} This session has no notebook on {name} yet, unless it is still in one it made there that is open (`list_notebooks` shows `this_session`): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
             runtime.node,
             reach_text(server, runtime)
         )

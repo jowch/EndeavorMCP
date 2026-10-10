@@ -1,20 +1,27 @@
 //! `endeavor core`: the runtime the helper starts (docs/runtime-core.md).
-//! It starts `julia boot.jl` as its child, serves the runtime's one port, and
-//! writes `runtime.json` once Julia is ready. On that port it serves the
-//! agent's MCP connection at `/mcp` and the app's `/endeavor/call`s itself (see
-//! `mcp`), and the app's `/endeavor/events` stream (see `notebooks`), driving
-//! Pluto through Julia's adapter; the few calls Julia answers
-//! (`endeavor/set_folder`, `endeavor/shutdown`) go on to Julia's own bridge.
-//! Every other path is Pluto's page, passed through to Pluto's private port
-//! with Pluto's secret added, WebSockets included (docs/one-port.md).
+//! It serves the runtime's one port and writes `runtime.json`. On that port it
+//! serves the agent's MCP connection at `/mcp` and the app's `/endeavor/call`s
+//! itself (see `mcp`), and the app's `/endeavor/events` stream (see
+//! `notebooks`), driving each notebook engine through its adapter. Every other
+//! path is Pluto's page, passed through to Pluto's private port with Pluto's
+//! secret added, WebSockets included (docs/one-port.md), or under `/ember/`,
+//! Ember's.
+//!
+//! Julia (`julia boot.jl`, with Pluto) is the core's child. With
+//! `--julia-when-needed` it starts the first time something needs it: a Julia
+//! notebook opened or made, or a browser opening Pluto's page. The core finds
+//! Julia only then, so a runtime that only ever opens R notebooks never finds,
+//! downloads or starts Julia. Without the flag Julia starts at once, and
+//! `runtime.json` is written once it's ready, as the app expects.
 //!
 //! Julia shares the core's process group, which the helper created, so the
-//! helper's signals to the group reach both. The core exits when Julia does,
-//! the same way, and passes a stop signal sent to it alone on to Julia. On
-//! Windows the core puts itself in a Job Object before starting Julia, so
-//! Julia and its workers end when the core does.
+//! helper's signals to the group reach both. A stop signal sent to the core
+//! alone goes on to Julia. Once Julia has started, the core exits when Julia
+//! does, the same way; before that it ends on a stop signal itself. On
+//! Windows the core puts itself in a Job Object as it starts, so Julia and its
+//! workers end when the core does.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
@@ -43,7 +50,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 2;
+pub const INTERFACE: u32 = 3;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -53,7 +60,12 @@ const STOP_SIGNALS: [i32; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
 
 struct Args {
     state_dir: PathBuf,
-    julia: String,
+    /// Where to find Julia: a path, or what `--julia auto` and `--julia-shell` mean (`julia::find`).
+    julia: crate::julia::Source,
+    /// `--install-julia`: Endeavor's own Julia may be downloaded when none is found.
+    install_julia: bool,
+    /// `--julia-when-needed`: Julia starts the first time something needs it, not at once.
+    julia_when_needed: bool,
     runtime: PathBuf,
     depot: String,
     /// The R for R notebooks, and the R library Ember is installed in (none: Endeavor's own).
@@ -64,22 +76,33 @@ struct Args {
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut args = argv.iter();
     let (mut state_dir, mut julia, mut runtime, mut depot, mut r, mut r_library) = (None, None, None, None, None, None);
+    let (mut install_julia, mut julia_when_needed) = (false, false);
     while let Some(arg) = args.next() {
-        let value = args.next().cloned().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
-            "--state-dir" => state_dir = Some(PathBuf::from(value?)),
-            "--julia" => julia = Some(value?),
-            "--runtime" => runtime = Some(PathBuf::from(value?)),
-            "--depot" => depot = Some(value?),
-            "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
-            "--r" | "--r-shell" => r = Some(crate::r::Source::from_flag(arg, value?)),
-            "--r-library" => r_library = Some(value?),
-            _ => return Err(format!("unknown argument {arg}")),
+            "--install-julia" => install_julia = true,
+            "--julia-when-needed" => julia_when_needed = true,
+            _ => {
+                let value = args.next().cloned().ok_or(format!("{arg} needs a value"));
+                match arg.as_str() {
+                    "--state-dir" => state_dir = Some(PathBuf::from(value?)),
+                    "--julia" | "--julia-shell" if julia.is_some() => return Err("give one of --julia and --julia-shell".into()),
+                    "--julia" => julia = Some(value.map(|v| if v == "auto" { crate::julia::Source::Auto } else { crate::julia::Source::Path(v) })?),
+                    "--julia-shell" => julia = Some(crate::julia::Source::Shell(value?)),
+                    "--runtime" => runtime = Some(PathBuf::from(value?)),
+                    "--depot" => depot = Some(value?),
+                    "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
+                    "--r" | "--r-shell" => r = Some(crate::r::Source::from_flag(arg, value?)),
+                    "--r-library" => r_library = Some(value?),
+                    _ => return Err(format!("unknown argument {arg}")),
+                }
+            }
         }
     }
     Ok(Args {
         state_dir: state_dir.ok_or("--state-dir is required")?,
-        julia: julia.ok_or("--julia is required")?,
+        julia: julia.ok_or("--julia or --julia-shell is required")?,
+        install_julia,
+        julia_when_needed,
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
         r: r.unwrap_or_default(),
@@ -113,8 +136,8 @@ pub fn main(argv: &[String]) -> ! {
     };
     let token = std::env::var("ENDEAVOR_TOKEN").unwrap_or_else(|_| fail("ENDEAVOR_TOKEN is not set".into()));
     let launcher = std::env::var("ENDEAVOR_LAUNCHER").unwrap_or_else(|_| "process".into());
-    // Held until `runtime.json` is written (`julia_ready`), so that a client can tell a start under way from one that died.
-    let mut starting = Some(crate::runtime::hold_starting(&args.state_dir).unwrap_or_else(|e| fail(format!("Couldn't lock {}: {e}", args.state_dir.display()))));
+    // Held until `runtime.json` is written (`record`), so that a client can tell a start under way from one that died.
+    let starting_lock = crate::runtime::hold_starting(&args.state_dir).unwrap_or_else(|e| fail(format!("Couldn't lock {}: {e}", args.state_dir.display())));
     #[cfg(unix)]
     let (stop_signals, inherited_mask) = block_stop_signals();
     // The runtime is the `runtime/` inside the folder `unpack` made.
@@ -140,29 +163,17 @@ pub fn main(argv: &[String]) -> ! {
     let idle_hours = env("ENDEAVOR_IDLE_HOURS").and_then(|h| h.parse::<f64>().ok());
     let exit_idle = env("ENDEAVOR_EXIT_IDLE").is_some();
     let listener = TcpListener::bind(("127.0.0.1", fixed_port)).unwrap_or_else(|e| fail(format!("Couldn't open the runtime's port {fixed_port}: {e}")));
-    let julia_state = args.state_dir.join(JULIA_STATE);
-    let _ = std::fs::remove_file(&julia_state);
-    let mut command = julia_command(&args, &token, &launcher, &julia_state).unwrap_or_else(|e| fail(e));
-    // Kept, unused, until the process exits: closing it ends the job.
+    // Kept, unused, until the process exits: closing it ends the job. Before any child starts.
     #[cfg(windows)]
     let _job = crate::winproc::job_ending_with_this_process().unwrap_or_else(|e| fail(format!("Couldn't keep Julia's processes together with this one (Job Object): {e}")));
-    // SAFETY: only async-signal-safe calls between fork and exec.
-    #[cfg(unix)]
-    unsafe {
-        command.pre_exec(move || {
-            libc::pthread_sigmask(libc::SIG_SETMASK, &inherited_mask, std::ptr::null_mut());
-            #[cfg(target_os = "linux")]
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            Ok(())
-        });
-    }
-    let mut julia = command.spawn().unwrap_or_else(|e| fail(format!("Couldn't start {}: {e}", args.julia)));
-    #[cfg(unix)]
-    pass_on_stop_signals(stop_signals, julia.id() as i32);
+    let (stops, stopped) = std::sync::mpsc::channel();
 
     let cookie = cookie_name(&token);
     let port = listener.local_addr().unwrap().port();
     let token_for_r = token.clone();
+    let julia = JuliaStarter::new(&args, &token, &launcher, stops.clone());
+    #[cfg(unix)]
+    let julia = JuliaStarter { mask: Some(inherited_mask), ..julia };
     let mut bridge = Bridge::new(token, &args.depot);
     bridge.standalone = folder.map(|folder| crate::mcp::Standalone { port, folder, no_folder, host: env("ENDEAVOR_HOST_TOOLS") });
     if let Ok(build) = std::env::var("ENDEAVOR_BUILD") {
@@ -174,47 +185,108 @@ pub fn main(argv: &[String]) -> ! {
     }
     Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
     let not_let_in = not_let_in(&open_command(&args.state_dir));
-    let served = Arc::new(Served { bridge, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in });
+    let served = Arc::new(Served { bridge, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops });
+    #[cfg(unix)]
+    pass_on_stop_signals(stop_signals, served.clone());
     let r = Arc::new(RStarter::new(&args, &token_for_r));
-    let starting_r = (r.clone(), served.clone());
+    let starting = (r.clone(), served.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend| match backend {
-        Backend::Ember => starting_r.0.start(&starting_r.1),
-        Backend::Pluto => Err("Pluto starts with the runtime".into()),
+        Backend::Ember => starting.0.start(&starting.1),
+        Backend::Pluto => starting.1.julia.wait(&starting.1, JULIA_WAIT).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     accept(listener, served.clone());
 
-    let status = loop {
-        if let Some(status) = julia.try_wait().unwrap_or(None) {
-            break status;
-        }
-        if let Some(bridge_port) = julia_ready(&julia_state, &args.state_dir, port, &served, &mut starting) {
-            if exit_idle {
-                exit_when_idle(served.clone(), bridge_port);
+    if !args.julia_when_needed {
+        // As before Julia started only when needed: `runtime.json` once Julia is ready, and the core gone if it can't start.
+        served.julia.begin(&served);
+        if let Err(why) = served.julia.wait(&served, Duration::MAX) {
+            match served.julia.exited() {
+                Some(status) => {
+                    remove_state(&args.state_dir, std::process::id() as i32, None);
+                    exit_like(status)
+                }
+                None => fail(why.split_once("::").map_or(why.clone(), |(_, text)| text.to_owned())),
             }
-            served.bridge.notebooks.start();
-            break julia.wait().unwrap_or_else(|e| fail(format!("waiting for Julia: {e}")));
         }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    let _ = std::fs::remove_file(&julia_state);
+    }
+    if let Err(e) = record(&args.state_dir, port, &launcher, &served.bridge) {
+        fail(e);
+    }
+    // Let go after the record is written: whoever sees the lock free and no record knows the start died.
+    crate::runtime::release_starting(starting_lock);
+    if exit_idle {
+        exit_when_idle(served.clone());
+    }
+    served.bridge.notebooks.start();
+
+    let stop = stopped.recv().unwrap_or(Stop::Shutdown);
+    if !matches!(stop, Stop::Julia(_)) {
+        served.julia.kill();
+    }
+    let _ = std::fs::remove_file(args.state_dir.join(JULIA_STATE));
     r.stop();
     remove_state(&args.state_dir, std::process::id() as i32, None);
-    exit_like(status)
+    match stop {
+        Stop::Julia(status) => exit_like(status),
+        #[cfg(unix)]
+        Stop::Signal(signal) => exit_like(ExitStatus::from_raw(signal)),
+        Stop::Shutdown => std::process::exit(0),
+    }
+}
+
+/// How long a call that needs Julia waits for it to start before it's told Julia is still starting:
+/// well within the 45 s an agent's call waits.
+const JULIA_WAIT: Duration = Duration::from_secs(30);
+
+/// What ends the core.
+enum Stop {
+    /// Julia, once started, ended (on its own, from `endeavor/shutdown`, or from a stop signal passed on).
+    Julia(ExitStatus),
+    /// A stop signal came while Julia wasn't running.
+    #[cfg(unix)]
+    Signal(i32),
+    /// `endeavor/shutdown`, or idle, while Julia wasn't running.
+    Shutdown,
+}
+
+/// Write `runtime.json` for the helper: the core's pid and its one `port`, its launcher, node and
+/// job, and whether it ends itself when idle.
+fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge) -> Result<(), String> {
+    // A Slurm job's id, so a reconnect can find the job with squeue.
+    let job = if launcher == "slurm" { std::env::var("SLURM_JOB_ID").unwrap_or_default() } else { String::new() };
+    // With the pid, what tells the core from a later process given its pid.
+    let started = crate::own_start_time();
+    let boot = crate::own_boot();
+    let mut state = json!({
+        "launcher": launcher, "node": crate::hostname(), "job": job,
+        "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": bridge.token, "exits_when_idle": bridge.notebooks.exits_when_idle,
+        "interface": INTERFACE,
+    });
+    if let Some(standalone) = &bridge.standalone {
+        state["folder"] = standalone.folder.clone().into();
+        if standalone.no_folder {
+            state["no_folder"] = true.into();
+        }
+    }
+    if let Some(build) = bridge.notebooks.build.get() {
+        state["build"] = build.clone().into();
+    }
+    write_private(&state_dir.join("runtime.json"), state.to_string().as_bytes())
 }
 
 /// `julia boot.jl` with the environment it reads (see runtime/boot.jl), on
 /// private ports free here (Pluto's, and Julia's bridge for the core), writing
 /// its state to `julia_state` for the core.
-fn julia_command(args: &Args, token: &str, launcher: &str, julia_state: &Path) -> Result<Command, String> {
+fn julia_command(julia: &str, runtime: &Path, depot: &str, token: &str, launcher: &str, julia_state: &Path) -> Result<Command, String> {
     let ports = free_ports()?;
-    let runtime = args.runtime.display();
-    let mut command = Command::new(&args.julia);
+    let runtime = runtime.display();
+    let mut command = Command::new(julia);
     command
         .arg("--color=no")
         .arg(format!("--project={runtime}"))
         .arg(format!("{runtime}/boot.jl"))
         .args(ports.map(|p| p.to_string()))
-        .env("JULIA_DEPOT_PATH", &args.depot)
+        .env("JULIA_DEPOT_PATH", depot)
         // Not argv, which `ps` shows to every user.
         .env("ENDEAVOR_TOKEN", token)
         .env("ENDEAVOR_STATE", julia_state)
@@ -235,6 +307,258 @@ fn free_ports() -> Result<[u16; 2], String> {
     let pluto = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let mcp = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     Ok([&pluto, &mcp].map(|l| l.local_addr().unwrap().port()))
+}
+
+/// Runs each start on one thread that lasts as long as the core: a process started on Linux ends with
+/// the thread that started it (`PR_SET_PDEATHSIG`), and a request's thread ends with its connection.
+struct Spawner(std::sync::Mutex<std::sync::mpsc::Sender<(Command, std::sync::mpsc::Sender<io::Result<std::process::Child>>)>>);
+
+impl Spawner {
+    fn new() -> Spawner {
+        let (tx, rx) = std::sync::mpsc::channel::<(Command, std::sync::mpsc::Sender<io::Result<std::process::Child>>)>();
+        std::thread::spawn(move || {
+            for (mut command, reply) in rx {
+                let _ = reply.send(command.spawn());
+            }
+        });
+        Spawner(std::sync::Mutex::new(tx))
+    }
+
+    fn spawn(&self, command: Command) -> io::Result<std::process::Child> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.0.lock().unwrap().send((command, tx)).map_err(io::Error::other)?;
+        rx.recv().map_err(io::Error::other)?
+    }
+}
+
+/// Where Julia is.
+enum Phase {
+    /// Not started yet.
+    Idle,
+    /// Being found, downloaded or started: what it's doing, in words for the user.
+    Starting(String),
+    Ready,
+    /// The last start failed: why, with its code. Once that has been said, the next call that needs Julia tries again.
+    Failed(String),
+}
+
+struct JuliaNow {
+    phase: Phase,
+    /// Why the last start failed has been said.
+    said: bool,
+    /// How Julia ended, if the one started last did.
+    exited: Option<ExitStatus>,
+}
+
+/// Finds and starts Julia (`julia boot.jl`, with Pluto) when it's first needed, once at a time.
+struct JuliaStarter {
+    source: crate::julia::Source,
+    /// Whether Endeavor's own Julia may be downloaded; `endeavor/allow_julia_install` allows it later.
+    install: std::sync::atomic::AtomicBool,
+    /// Started when first needed: the client didn't find Julia, so the log says which one starts and why
+    /// it couldn't. Started at once, the client said both, and the log is Julia's alone, as it was.
+    when_needed: bool,
+    runtime: PathBuf,
+    depot: String,
+    token: String,
+    launcher: String,
+    /// Where `julia boot.jl` writes its state for the core.
+    state: PathBuf,
+    log: PathBuf,
+    /// The signal mask the core was started with, for Julia.
+    #[cfg(unix)]
+    mask: Option<libc::sigset_t>,
+    spawn: Spawner,
+    now: std::sync::Mutex<JuliaNow>,
+    changed: std::sync::Condvar,
+    /// Julia's pid while it runs, else 0.
+    pid: std::sync::atomic::AtomicI32,
+    /// The core is stopping: Julia ending now ends it, even mid-start.
+    stopping: std::sync::atomic::AtomicBool,
+    stops: std::sync::mpsc::Sender<Stop>,
+}
+
+impl JuliaStarter {
+    fn new(args: &Args, token: &str, launcher: &str, stops: std::sync::mpsc::Sender<Stop>) -> JuliaStarter {
+        JuliaStarter {
+            source: args.julia.clone(),
+            install: args.install_julia.into(),
+            when_needed: args.julia_when_needed,
+            runtime: args.runtime.clone(),
+            depot: args.depot.clone(),
+            token: token.to_owned(),
+            launcher: launcher.to_owned(),
+            state: args.state_dir.join(JULIA_STATE),
+            log: args.state_dir.join("runtime.log"),
+            #[cfg(unix)]
+            mask: None,
+            spawn: Spawner::new(),
+            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, said: false, exited: None }),
+            changed: std::sync::Condvar::new(),
+            pid: 0.into(),
+            stopping: false.into(),
+            stops,
+        }
+    }
+
+    /// Start Julia in the background unless it runs or is starting, or failed and that hasn't been said yet.
+    fn begin(&self, served: &Arc<Served>) {
+        let mut now = self.now.lock().unwrap();
+        let again = matches!(now.phase, Phase::Failed(_)) && now.said;
+        if !(matches!(now.phase, Phase::Idle) || again) || self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        now.phase = Phase::Starting("Julia is starting".into());
+        now.exited = None;
+        drop(now);
+        let served = served.clone();
+        std::thread::spawn(move || {
+            let julia = &served.julia;
+            let started = julia.start(&served);
+            let mut now = julia.now.lock().unwrap();
+            now.said = false;
+            now.phase = match (started, now.exited) {
+                (Ok(ready), None) => {
+                    // Set once: Julia ending after this ends the core, so there is never a second Ready.
+                    let _ = served.pluto.set(ready.pluto);
+                    let _ = served.bridge.julia.port.set(ready.bridge_port);
+                    Phase::Ready
+                }
+                (Ok(_), Some(status)) => Phase::Failed(format!("julia_failed::Julia stopped as it started ({status}). The runtime's log ({}) says why.", julia.log.display())),
+                (Err(why), _) => {
+                    if julia.when_needed {
+                        eprintln!("endeavor core: {}", why.split_once("::").map_or(why.as_str(), |(_, text)| text));
+                    }
+                    Phase::Failed(why)
+                }
+            };
+            julia.changed.notify_all();
+            if matches!(now.phase, Phase::Ready) {
+                drop(now);
+                // Its notebooks are followed and listed from now on, whatever started it.
+                served.bridge.notebooks.add_engine(Backend::Pluto, served.bridge.julia.clone());
+            }
+        });
+    }
+
+    /// Start Julia unless it runs, and wait up to `wait` for it: why it isn't ready, with its code, if it isn't.
+    fn wait(&self, served: &Arc<Served>, wait: Duration) -> Result<(), String> {
+        self.begin(served);
+        let deadline = std::time::Instant::now().checked_add(wait);
+        let mut now = self.now.lock().unwrap();
+        loop {
+            let left = deadline.map_or(Duration::from_secs(3600), |deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+            match &now.phase {
+                Phase::Ready => return Ok(()),
+                Phase::Failed(why) => {
+                    let why = why.clone();
+                    now.said = true;
+                    return Err(why);
+                }
+                Phase::Idle => return Err("julia_failed::The runtime is stopping.".into()),
+                Phase::Starting(step) if left.is_zero() => {
+                    return Err(format!("julia_starting::{step}. The first start can take several minutes (Julia, then Pluto's packages). Try again in a minute."));
+                }
+                Phase::Starting(_) => now = self.changed.wait_timeout(now, left).unwrap().0,
+            }
+        }
+    }
+
+    /// Nothing has asked for Julia yet.
+    fn idle(&self) -> bool {
+        matches!(self.now.lock().unwrap().phase, Phase::Idle)
+    }
+
+    /// How the Julia started last ended, if it did.
+    fn exited(&self) -> Option<ExitStatus> {
+        self.now.lock().unwrap().exited
+    }
+
+    fn step(&self, words: String) {
+        if let Phase::Starting(step) = &mut self.now.lock().unwrap().phase {
+            *step = words;
+        }
+    }
+
+    /// Find Julia, start it, and wait until its bridge answers; then have Pluto suggest the notebooks' folder.
+    fn start(&self, served: &Arc<Served>) -> Result<JuliaReady, String> {
+        let install = self.install.load(std::sync::atomic::Ordering::SeqCst);
+        let found = crate::julia::find(&self.source, install, &mut |line| {
+            eprintln!("{line}");
+            self.step(line);
+        });
+        let (julia, version) = found.map_err(|failure| match failure {
+            crate::julia::Failure::Missing(item) => format!(
+                "julia_not_found::Julia wasn't found here, and Endeavor may download its own copy only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` again with `install: true`."
+            ),
+            crate::julia::Failure::Failed(message) => format!("julia_failed::{message}"),
+        })?;
+        if self.when_needed {
+            eprintln!("[ Info: Starting Julia {version} ({julia})");
+        }
+        self.step(format!("Julia {version} is starting and loading Pluto"));
+        let _ = std::fs::remove_file(&self.state);
+        let mut command = julia_command(&julia, &self.runtime, &self.depot, &self.token, &self.launcher, &self.state)?;
+        #[cfg(unix)]
+        if let Some(mask) = self.mask {
+            // SAFETY: only async-signal-safe calls between fork and exec.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                    #[cfg(target_os = "linux")]
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
+            }
+        }
+        let mut child = self.spawn.spawn(command).map_err(|e| format!("julia_failed::Couldn't start {julia}: {e}"))?;
+        self.pid.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
+        // A stop that came before the pid was stored found nothing to end.
+        if self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = child.kill();
+        }
+        let watching = served.clone();
+        std::thread::spawn(move || {
+            let Ok(status) = child.wait() else { return };
+            let julia = &watching.julia;
+            julia.pid.store(0, std::sync::atomic::Ordering::SeqCst);
+            let mut now = julia.now.lock().unwrap();
+            now.exited = Some(status);
+            // Once it ran, or once the core is stopping, Julia ending ends the core, as it always has.
+            if matches!(now.phase, Phase::Ready) || julia.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = julia.stops.send(Stop::Julia(status));
+            }
+            julia.changed.notify_all();
+        });
+        let ready = loop {
+            if let Some(status) = self.exited() {
+                return Err(format!("julia_failed::Julia stopped while starting ({status}). The runtime's log ({}) says why.", self.log.display()));
+            }
+            if let Some(ready) = julia_ready(&self.state, &self.token) {
+                break ready;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        // Before Julia counts as ready: whoever then opens a notebook may rely on the folder.
+        let folder = served.app_folder.lock().unwrap().clone().or_else(|| served.bridge.standalone.as_ref().map(|standalone| standalone.folder.clone()));
+        if let Some(folder) = folder {
+            set_pluto_folder(ready.bridge_port, &self.token, &folder);
+        }
+        Ok(ready)
+    }
+
+    /// End Julia if it runs: the core is stopping.
+    fn kill(&self) {
+        self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        let pid = self.pid.load(std::sync::atomic::Ordering::SeqCst);
+        // On Windows the job ends it with the core.
+        #[cfg(unix)]
+        if pid > 0 {
+            // SAFETY: plain syscall.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+        let _ = pid;
+    }
 }
 
 /// Where R's adapter writes its state for the core, in the state folder.
@@ -272,20 +596,12 @@ struct RStarter {
     adapter: PathBuf,
     state: PathBuf,
     token: String,
-    /// Runs each start: a process started on Linux ends with the thread that started it
-    /// (`PR_SET_PDEATHSIG`), and a request's thread ends with its connection.
-    spawn: std::sync::Mutex<std::sync::mpsc::Sender<(Command, std::sync::mpsc::Sender<io::Result<std::process::Child>>)>>,
+    spawn: Spawner,
     child: std::sync::Mutex<Option<std::process::Child>>,
 }
 
 impl RStarter {
     fn new(args: &Args, token: &str) -> RStarter {
-        let (tx, rx) = std::sync::mpsc::channel::<(Command, std::sync::mpsc::Sender<io::Result<std::process::Child>>)>();
-        std::thread::spawn(move || {
-            for (mut command, reply) in rx {
-                let _ = reply.send(command.spawn());
-            }
-        });
         RStarter {
             r: args.r.clone(),
             library: args.r_library.clone(),
@@ -294,7 +610,7 @@ impl RStarter {
             adapter: args.runtime.join("r").join("adapter.R"),
             state: args.state_dir.join(R_STATE),
             token: token.to_owned(),
-            spawn: std::sync::Mutex::new(tx),
+            spawn: Spawner::new(),
             child: std::sync::Mutex::default(),
         }
     }
@@ -326,9 +642,7 @@ impl RStarter {
                 Ok(())
             });
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.spawn.lock().unwrap().send((command, tx)).map_err(|e| e.to_string())?;
-        let mut child = rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("r_not_found::Couldn't start R ({}): {e}", self.r.describe()))?;
+        let mut child = self.spawn.spawn(command).map_err(|e| format!("r_not_found::Couldn't start R ({}): {e}", self.r.describe()))?;
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let state = loop {
             if let Ok(Some(status)) = child.try_wait() {
@@ -416,56 +730,15 @@ struct JuliaReady {
     bridge_port: u16,
 }
 
-/// Once Julia has written its state and its bridge answers, write
-/// `runtime.json` for the helper: the core's pid and its one `port`, and
-/// Julia's launcher, node and job, and whether it ends itself when idle. Pluto's port and secret stay out of it.
-/// Gives Julia's bridge port.
-fn julia_ready(julia_state: &Path, state_dir: &Path, port: u16, served: &Served, starting: &mut Option<File>) -> Option<u16> {
-    let bridge = &served.bridge;
-    let token = &bridge.token;
+/// What Julia wrote in its state, once its bridge answers.
+fn julia_ready(julia_state: &Path, token: &str) -> Option<JuliaReady> {
     let julia: Value = serde_json::from_str(&std::fs::read_to_string(julia_state).ok()?).ok()?;
     let port_of = |key: &str| julia[key].as_u64().and_then(|p| u16::try_from(p).ok());
     let ready = JuliaReady {
         pluto: Page { port: port_of("pluto_port")?, secret: julia["pluto_secret"].as_str()?.to_owned() },
         bridge_port: port_of("mcp_port")?,
     };
-    if !bridge_call(ready.bridge_port, "/call", token, "ping").is_ok_and(|status| status == 200) {
-        return None;
-    }
-    // Before `runtime.json` says the runtime is ready: whoever finds it then may rely on the folder.
-    if let Some(standalone) = &bridge.standalone {
-        set_pluto_folder(ready.bridge_port, token, &standalone.folder);
-    }
-    // With the pid, what tells the core from a later process given its pid.
-    let started = crate::own_start_time();
-    let boot = crate::own_boot();
-    let mut state = json!({
-        "launcher": julia["launcher"], "node": julia["node"], "job": julia["job"],
-        "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": token, "exits_when_idle": bridge.notebooks.exits_when_idle,
-        "interface": INTERFACE,
-    });
-    if let Some(standalone) = &bridge.standalone {
-        state["folder"] = standalone.folder.clone().into();
-        if standalone.no_folder {
-            state["no_folder"] = true.into();
-        }
-    }
-    if let Some(build) = bridge.notebooks.build.get() {
-        state["build"] = build.clone().into();
-    }
-    // Before the record: a client that finds it may call at once, so these must be set first.
-    let bridge_port = ready.bridge_port;
-    let _ = served.pluto.set(ready.pluto);
-    let _ = bridge.julia.port.set(bridge_port);
-    if let Err(e) = write_private(&state_dir.join("runtime.json"), state.to_string().as_bytes()) {
-        eprintln!("endeavor core: {e}");
-        return None;
-    }
-    // Let go after the record is written: whoever sees the lock free and no record knows the start died.
-    if let Some(file) = starting.take() {
-        crate::runtime::release_starting(file);
-    }
-    Some(bridge_port)
+    bridge_call(ready.bridge_port, "/call", token, "ping").is_ok_and(|status| status == 200).then_some(ready)
 }
 
 /// Have Pluto's page suggest the notebooks' folder for new notebooks, as the
@@ -482,7 +755,7 @@ fn set_pluto_folder(julia_port: u16, token: &str, folder: &str) {
 /// End the runtime once no notebook has been open for the idle limit (none
 /// when it's 0): a runtime the stdio form or a server connection started in the
 /// background has no one to stop it.
-fn exit_when_idle(served: Arc<Served>, julia_port: u16) {
+fn exit_when_idle(served: Arc<Served>) {
     std::thread::spawn(move || {
         let notebooks = &served.bridge.notebooks;
         let mut empty_since = std::time::Instant::now();
@@ -493,7 +766,7 @@ fn exit_when_idle(served: Arc<Served>, julia_port: u16) {
                 empty_since = std::time::Instant::now();
             } else if empty_since.elapsed().as_secs_f64() >= hours * 3600.0 {
                 eprintln!("[ Info: No notebook open for {hours} hours; stopping");
-                let _ = bridge_call(julia_port, "/call", &served.bridge.token, "endeavor/shutdown");
+                served.shutdown();
                 return;
             }
         }
@@ -546,16 +819,26 @@ fn block_stop_signals() -> (libc::sigset_t, libc::sigset_t) {
     }
 }
 
-/// A stop signal sent to the core goes to Julia; the core exits when Julia does.
+/// A stop signal sent to the core goes to Julia, and the core exits when Julia does; with no Julia
+/// running, it ends the core.
 #[cfg(unix)]
-fn pass_on_stop_signals(set: libc::sigset_t, julia_pid: i32) {
+fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
     std::thread::spawn(move || {
         loop {
             let mut signal = 0;
             // SAFETY: `set` holds only signals blocked in every thread.
             if unsafe { libc::sigwait(&set, &mut signal) } == 0 {
-                // SAFETY: plain syscall.
-                unsafe { libc::kill(julia_pid, signal) };
+                let julia = &served.julia;
+                julia.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+                match julia.pid.load(std::sync::atomic::Ordering::SeqCst) {
+                    // SAFETY: plain syscall.
+                    pid if pid > 0 => unsafe {
+                        libc::kill(pid, signal);
+                    },
+                    _ => {
+                        let _ = served.stops.send(Stop::Signal(signal));
+                    }
+                }
             }
         }
     });
@@ -564,13 +847,58 @@ fn pass_on_stop_signals(set: libc::sigset_t, julia_pid: i32) {
 /// What the runtime's port serves: the bridge, and once Julia is ready, Pluto.
 struct Served {
     bridge: Bridge,
+    /// Set once Julia is ready.
     pluto: OnceLock<Page>,
+    julia: JuliaStarter,
+    /// The folder the app last gave Pluto for new notebooks (`endeavor/set_folder`), for a Julia started later.
+    app_folder: std::sync::Mutex<Option<String>>,
+    stops: std::sync::mpsc::Sender<Stop>,
     /// Ember's, while it runs, for `/ember/`.
     ember: std::sync::Mutex<Option<Page>>,
     /// The cookie that lets a browser into Pluto's page (`cookie_name`).
     cookie: String,
     /// What a browser that hasn't been let in sees (`not_let_in`).
     not_let_in: String,
+}
+
+impl Served {
+    /// End the runtime: through Julia if it runs (it exits, and the core with it), else at once.
+    fn shutdown(&self) {
+        let julia = &self.julia;
+        julia.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        match self.bridge.julia.port.get() {
+            Some(&port) if julia.pid.load(std::sync::atomic::Ordering::SeqCst) > 0 && bridge_call(port, "/call", &self.bridge.token, "endeavor/shutdown").is_ok() => {}
+            _ => {
+                let _ = self.stops.send(Stop::Shutdown);
+            }
+        }
+    }
+
+    /// One of the app's calls about Julia (`mcp::JULIA_CALLS`), which the core answers here.
+    fn julia_call(self: &Arc<Self>, method: &str, body: &[u8]) -> String {
+        let message: Value = serde_json::from_slice(body).unwrap_or_default();
+        match method {
+            "endeavor/set_folder" => {
+                let folder = message["params"]["path"].as_str().unwrap_or_default().to_owned();
+                *self.app_folder.lock().unwrap() = Some(folder.clone());
+                if let Some(&port) = self.bridge.julia.port.get() {
+                    set_pluto_folder(port, &self.bridge.token, &folder);
+                }
+            }
+            "endeavor/shutdown" => {
+                eprintln!("[ Info: Shutting down at the app's request");
+                let served = self.clone();
+                // After this reply is out.
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(200));
+                    served.shutdown();
+                });
+            }
+            "endeavor/allow_julia_install" => self.julia.install.store(true, std::sync::atomic::Ordering::SeqCst),
+            _ => {}
+        }
+        json!({ "jsonrpc": "2.0", "id": message["id"], "result": {} }).to_string()
+    }
 }
 
 /// Serve the runtime's port: a thread per client, of which there are only a
@@ -642,7 +970,7 @@ impl Route {
 }
 
 /// One client's requests in turn, until either side closes.
-fn serve_client(client: TcpStream, served: &Served) -> io::Result<()> {
+fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
     let _ = client.set_nodelay(true);
     let mut reader = BufReader::new(client.try_clone()?);
     let mut client = client;
@@ -675,9 +1003,6 @@ fn serve_client(client: TcpStream, served: &Served) -> io::Result<()> {
             }
             continue;
         }
-        let (Some(pluto), Some(&julia)) = (served.pluto.get(), bridge.julia.port.get()) else {
-            return refuse(&mut client, "503 Service Unavailable", "Julia isn't ready yet");
-        };
         let keep_alive = match (route, request.method()) {
             (Route::Events, "GET") => return bridge.notebooks.stream_events(&request, client),
             (Route::Mcp, "POST") => bridge.mcp(&request, &mut reader, &mut client)?,
@@ -689,13 +1014,30 @@ fn serve_client(client: TcpStream, served: &Served) -> io::Result<()> {
                         request.keeps_alive()
                     }
                     None => {
-                        request.set_target("/call");
-                        request.replace("Host", &format!("127.0.0.1:{julia}"));
-                        forward(request, Some(&body), &mut reader, julia, "Julia", &|_| {})?
+                        let method = serde_json::from_slice::<Value>(&body).ok().and_then(|m| m["method"].as_str().map(str::to_owned)).unwrap_or_default();
+                        let reply = served.julia_call(&method, &body);
+                        http::respond(&mut client, "200 OK", Some("application/json"), reply.as_bytes(), request.keeps_alive())?;
+                        request.keeps_alive()
                     }
                 }
             }
+            (Route::Pluto, _) if served.pluto.get().is_none() => {
+                http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
+                if !opens_a_page(&request) {
+                    return refuse(&mut client, "503 Service Unavailable", "Julia isn't running");
+                }
+                // The runtime's own link, which an R user opens too, doesn't start Julia by itself.
+                if request.target() == "/" && served.julia.idle() {
+                    http::respond(&mut client, "200 OK", Some("text/html; charset=utf-8"), JULIA_NOT_STARTED_PAGE.as_bytes(), request.keeps_alive())?;
+                } else {
+                    // A browser opening Pluto's page starts Julia, and sees how that goes until it's ready.
+                    let page = julia_starting_page(served.julia.wait(served, Duration::ZERO).err().unwrap_or_default());
+                    http::respond(&mut client, "503 Service Unavailable", Some("text/html; charset=utf-8"), page.as_bytes(), request.keeps_alive())?;
+                }
+                request.keeps_alive()
+            }
             (Route::Pluto, _) => {
+                let pluto = served.pluto.get().expect("Pluto is ready");
                 request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Cookie"));
                 request.headers.push(("Cookie".into(), format!("secret={}", pluto.secret)));
                 forward(request, None, &mut reader, pluto.port, "Julia", &|response| {
@@ -740,6 +1082,36 @@ fn serve_client(client: TcpStream, served: &Served) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The runtime's own link before anything asked for Julia: starting it can mean a download, so it
+/// waits for a click. `/?start-julia` is any other Pluto page as far as Julia goes.
+const JULIA_NOT_STARTED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Endeavor</title>
+<body style=\"font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; line-height: 1.5\">
+<h1>Julia isn't running</h1>
+<p>Julia starts when a Julia notebook is opened, or when you start it here. R notebooks don't need it: each opens from its own link.</p>
+<p><a href=\"/?start-julia\">Start Julia and open Pluto</a></p>
+</body>
+";
+
+/// What a browser opening Pluto's page sees while Julia isn't ready: that it's starting, and the page
+/// reloads itself; or why it couldn't start, and that reloading tries again.
+fn julia_starting_page(why: String) -> String {
+    let (code, text) = why.split_once("::").unwrap_or(("", why.as_str()));
+    let text = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let (refresh, title, more) = match code {
+        "julia_starting" | "" => ("<meta http-equiv=refresh content=3>", "Julia is starting", "This page opens Pluto by itself once Julia is ready."),
+        _ => ("", "Julia couldn't start", "Reload this page to try again."),
+    };
+    format!(
+        "<!doctype html><meta charset=utf-8>{refresh}<title>Endeavor</title>
+<body style=\"font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; line-height: 1.5\">
+<h1>{title}</h1>
+<p>{text}</p>
+<p>{more}</p>
+</body>
+"
+    )
 }
 
 /// Answer one request on the app's listener while the app can't reach the
@@ -1083,9 +1455,17 @@ mod tests {
         );
     }
 
+    /// What a runtime serves, with no Julia started and none to be found.
+    fn stand_in() -> Arc<Served> {
+        let (stops, _) = std::sync::mpsc::channel();
+        let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
+        let julia = JuliaStarter::new(&parse_args(&argv).unwrap(), TOKEN, "process", stops.clone());
+        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(TOKEN), not_let_in: String::new(), julia, app_folder: Default::default(), stops })
+    }
+
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.
     fn serving(ember: Option<u16>) -> u16 {
-        let served = Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(TOKEN), not_let_in: String::new() });
+        let served = stand_in();
         let _ = served.pluto.set(Page { port: 1, secret: "p".into() });
         let _ = served.bridge.julia.port.set(1);
         *served.ember.lock().unwrap() = ember.map(|port| Page { port, secret: "s3cret".into() });

@@ -486,6 +486,7 @@ fn a_failed_start_on_this_computer_goes_to_every_caller_and_only_a_call_that_ask
     options.state_dir = dir.join("state");
     options.cache = dir.join("cache");
     options.julia = crate::julia::Source::Path(dir.join("no-julia").display().to_string());
+    options.julia_when_needed = false;
     let local = Arc::new(super::super::target::Local::new(options));
     let start = Want::Start { job: None, install: false };
     let waiters: Vec<_> = (0..2)
@@ -554,6 +555,7 @@ fn a_notebook_call_reports_a_failed_start_once_and_the_next_one_tries_again_and_
     options.state_dir = dir.join("state");
     options.cache = dir.join("cache");
     options.julia = crate::julia::Source::Path(script.display().to_string());
+    options.julia_when_needed = false;
     let relay = Relay::new(options, "s".into(), Box::new(std::io::sink()));
     let runs = || std::fs::read_to_string(&log).map_or(0, |text| text.lines().count());
     let route = |need| relay.route(need, Deadline::after(Duration::from_secs(60))).err().expect("no runtime comes up");

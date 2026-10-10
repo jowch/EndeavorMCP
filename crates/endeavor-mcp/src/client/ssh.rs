@@ -208,6 +208,9 @@ pub struct Options<'a> {
     /// open for the idle limit (`endeavor connect --exit-idle`). One that is
     /// already running is left as it was started.
     pub exit_idle: bool,
+    /// The runtime this connect starts finds and starts Julia only when something needs it
+    /// (`endeavor connect --julia-when-needed`). The plugin's machines ask for it; the app doesn't yet.
+    pub julia_when_needed: bool,
     /// The user agreed that Endeavor installs its helper on the server. Without
     /// it a server that lacks this build's helper is only looked at, and
     /// `connect` ends with `ConnectError::needs`. The app, which asks its user
@@ -248,9 +251,10 @@ pub fn no_helper(os: &str, arch: &str) -> String {
 /// unless the client ends it first. Then it becomes the helper. The values come
 /// over stdin and not in the script, so no path can break it; the line is
 /// written with `printf %s`, which reads no escapes, and the ids are checked to
-/// be digits. `exit_idle` adds the helper's `--exit-idle`, and `own_with_client` its
-/// `--own-with-client`; being fixed words, they are in the script and not in the lines it reads.
-pub fn bootstrap_script(version: &str, exit_idle: bool, own_with_client: bool) -> String {
+/// be digits. `exit_idle` adds the helper's `--exit-idle`, `julia_when_needed` its `--julia-when-needed`,
+/// and `own_with_client` its `--own-with-client`; being fixed words, they are in the script and not in the
+/// lines it reads.
+pub fn bootstrap_script(version: &str, exit_idle: bool, julia_when_needed: bool, own_with_client: bool) -> String {
     [
         &format!("v={version}"),
         r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln && read -r rf && read -r rv || exit 1"#,
@@ -269,8 +273,9 @@ pub fn bootstrap_script(version: &str, exit_idle: bool, own_with_client: bool) -
         r#"if [ "$s" = need ]; then printf %s "ENDEAVOR $(uname -s) $(uname -m) need $r $u $d"; else printf %s "ENDEAVOR $(uname -s) $(uname -m) have"; fi; echo"#,
         r#"if [ "$s" = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; printf %s "Endeavor: installing into $d failed" >&2; echo >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
         &format!(
-            r#"exec "$d/endeavor" connect "$@" {}{}--launcher "$ln" "$jf" "$jv" "$rf" "$rv" --runtime "$d/runtime" --depot "$dp" --build "$v""#,
+            r#"exec "$d/endeavor" connect "$@" {}{}{}--launcher "$ln" "$jf" "$jv" "$rf" "$rv" --runtime "$d/runtime" --depot "$dp" --build "$v""#,
             if exit_idle { "--exit-idle " } else { "" },
+            if julia_when_needed { "--julia-when-needed " } else { "" },
             if own_with_client { "--own-with-client " } else { "" }
         ),
     ]
@@ -507,7 +512,7 @@ fn connect_as(server: &Server, transport: &Transport, options: &Options, own_wit
     let wrong = |message: String| ConnectError { message, retry: false, needs: None };
     let preamble = preamble(server, options).map_err(wrong)?;
     let version = crate::embedded::BUILD_VERSION;
-    let mut command = transport.command(&bootstrap_script(version, options.exit_idle, own_with_client), &options.auth).map_err(wrong)?;
+    let mut command = transport.command(&bootstrap_script(version, options.exit_idle, options.julia_when_needed, own_with_client), &options.auth).map_err(wrong)?;
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);

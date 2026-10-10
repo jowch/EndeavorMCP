@@ -92,6 +92,10 @@ pub(crate) struct Options {
     /// Where `runtime/` is unpacked, a folder per version.
     cache: PathBuf,
     julia: julia::Source,
+    /// Julia is found and started only when something needs it, so an agent that only opens R
+    /// notebooks never needs Julia. Always so for `serve` and `mcp`, except in tests of a start that
+    /// waits for Julia: a debug build reads ENDEAVOR_TEST_JULIA_AT_START.
+    julia_when_needed: bool,
     /// The R for R notebooks.
     r: crate::r::Source,
     /// JULIA_DEPOT_PATH.
@@ -191,6 +195,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
         state_dir,
         cache: env.cache(),
         julia: julia.unwrap_or(julia::Source::Auto),
+        julia_when_needed: !(cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_JULIA_AT_START").is_some()),
         r: r.unwrap_or_default(),
         depot: depot.unwrap_or_else(|| env.depot()),
         folder,
@@ -335,6 +340,7 @@ fn runtime_args(options: &Options, exit_idle: bool) -> Args {
     Args {
         state_dir: options.state_dir.clone(),
         julia: options.julia.clone(),
+        julia_when_needed: options.julia_when_needed,
         r: options.r.clone(),
         runtime: PathBuf::new(),
         depot: options.depot.clone(),
@@ -660,7 +666,7 @@ fn serve(options: Options) -> ! {
     let started_with = options.folder.as_ref().map(|folder| folder.display().to_string()).unwrap_or_default();
     let (folder, project) = recorded_folder(dir).unwrap_or_else(|| (started_with.clone(), true));
     if !up.started {
-        eprintln!("Julia was already running from {} (pid {}); using it as it was started.", dir.display(), up.state.pid);
+        eprintln!("Endeavor was already running from {} (pid {}); using it as it was started.", dir.display(), up.state.pid);
         if options.port != 0 && options.port != up.port {
             eprintln!("It listens on port {}, not {}. To change that, stop it first (`endeavor stop`).", up.port, options.port);
         }
@@ -677,18 +683,18 @@ fn serve(options: Options) -> ! {
     let node = crate::hostname();
     print!("\n{}", connection_text(&Connection { port: up.port, token: &up.state.token, node: &node, folder: &folder, project, login: login.as_deref() }));
     if up.started {
-        println!("Press Ctrl-C to stop Julia.");
+        println!("Press Ctrl-C to stop Endeavor.");
     } else {
-        println!("Ctrl-C leaves this Julia running; `endeavor stop` ends it.");
+        println!("Ctrl-C leaves Endeavor running; `endeavor stop` ends it.");
     }
     let _ = io::stdout().flush();
     while !stopping() {
         if !crate::pid_alive(up.state.pid, up.state.started, up.state.boot.as_deref()) {
             match crate::stopped::why(dir, crate::stopped::Of::Runtime(up.state.pid)) {
-                Some(crate::stopped::How::Stop) => eprintln!("Julia was stopped with `endeavor stop`."),
-                Some(crate::stopped::How::Connection) => eprintln!("Julia was stopped from another connection."),
+                Some(crate::stopped::How::Stop) => eprintln!("Endeavor was stopped with `endeavor stop`."),
+                Some(crate::stopped::How::Connection) => eprintln!("Endeavor was stopped from another connection."),
                 None => {
-                    eprintln!("Julia stopped. Its log is {}.", dir.join("runtime.log").display());
+                    eprintln!("Endeavor stopped. Its log is {}.", dir.join("runtime.log").display());
                     std::process::exit(1);
                 }
             }
@@ -697,7 +703,7 @@ fn serve(options: Options) -> ! {
         std::thread::sleep(Duration::from_millis(300));
     }
     if up.started {
-        eprintln!("Stopping Julia…");
+        eprintln!("Stopping Endeavor…");
         if closing() {
             up.runtime.kill();
         } else {

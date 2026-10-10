@@ -13,7 +13,7 @@ fn no_helper_here(os: &str, arch: &str) -> Result<PathBuf, String> {
 }
 
 fn options(root: &str, state: &str, depot: &str) -> Options<'static> {
-    Options { auth: Auth::Batch, root: root.into(), state: state.into(), depot: depot.into(), exit_idle: false, allow_install: true, helper: &no_helper_here, launcher: None }
+    Options { auth: Auth::Batch, root: root.into(), state: state.into(), depot: depot.into(), exit_idle: false, julia_when_needed: false, allow_install: true, helper: &no_helper_here, launcher: None }
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn a_host_that_is_not_a_host_never_reaches_ssh() {
 #[test]
 fn the_bootstrap_holds_nothing_a_login_shell_would_change() {
     for exit_idle in [false, true] {
-        let script = bootstrap_script(crate::embedded::BUILD_VERSION, exit_idle, false);
+        let script = bootstrap_script(crate::embedded::BUILD_VERSION, exit_idle, false, false);
         for bad in ['\'', '\\', '!', '\n'] {
             assert!(!script.contains(bad), "{bad:?} in {script}");
         }
@@ -134,7 +134,7 @@ fn the_bootstrap_runs_under_a_shell_and_asks_for_an_install() {
     for (name, shell) in shells() {
         let home = crate::client::scratch(&format!("bootstrap-need-{name}"));
         let path = server_path(&home.join("bin"), &shell, None, None);
-        let said = run_script_in(&bootstrap_script("v1", false, false), "\n\n\n--julia\nauto\nprocess\n--r\nauto\n", &home, &[("PATH", &path)]);
+        let said = run_script_in(&bootstrap_script("v1", false, false, false), "\n\n\n--julia\nauto\nprocess\n--r\nauto\n", &home, &[("PATH", &path)]);
         assert!(said.starts_with("ENDEAVOR ") && said.trim_end().contains(" need none first ") && said.trim_end().ends_with("/.cache/endeavor/v1"), "{said}");
         assert!(!home.join(".cache").exists());
     }
@@ -155,7 +155,7 @@ fn fake_install(root: &Path) {
 /// The `connect` arguments the script gives the helper, as lines.
 #[cfg(unix)]
 fn connect_args(home: &Path, preamble: &str) -> Vec<String> {
-    let said = run_script(&bootstrap_script("v1", false, false), preamble, home);
+    let said = run_script(&bootstrap_script("v1", false, false, false), preamble, home);
     let mut lines = said.lines();
     assert!(lines.next().is_some_and(|l| l.starts_with("ENDEAVOR ") && l.ends_with(" have")), "{said}");
     lines.map(|l| l.strip_prefix("arg:").unwrap_or(l).to_owned()).collect()
@@ -184,7 +184,7 @@ fn exit_idle_and_own_with_client_reach_the_helper_with_the_same_six_lines() {
     let home = crate::client::scratch("bootstrap-exit-idle");
     fake_install(&home.join("root"));
     let preamble = format!("{}/root\nstate\n/d:\n--julia\nauto\nprocess\n--r\nauto\n", home.display());
-    let args_of = |exit_idle, own| run_script(&bootstrap_script("v1", exit_idle, own), &preamble, &home).lines().skip(1).map(str::to_owned).collect::<Vec<_>>();
+    let args_of = |exit_idle, own| run_script(&bootstrap_script("v1", exit_idle, false, own), &preamble, &home).lines().skip(1).map(str::to_owned).collect::<Vec<_>>();
     let without = args_of(false, false);
     assert!(!without.iter().any(|a| a == "arg:--exit-idle" || a == "arg:--own-with-client"));
     for (exit_idle, own, flag) in [(true, false, "arg:--exit-idle"), (false, true, "arg:--own-with-client")] {
@@ -198,7 +198,7 @@ fn exit_idle_and_own_with_client_reach_the_helper_with_the_same_six_lines() {
 /// What the script says about a server with no helper, with `launcher` and the state folder given.
 #[cfg(unix)]
 fn needs_line(home: &Path, state: &Path, launcher: &str, path: &str) -> String {
-    let mut shell = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false, false))).env("HOME", home).env("PATH", path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut shell = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false, false, false))).env("HOME", home).env("PATH", path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     // It waits for the byte count, and the end of its input ends it.
     shell.stdin.take().unwrap().write_all(format!("{}/root\n{}\n\n--julia\nauto\n{launcher}\n--r\nauto\n", home.display(), state.display()).as_bytes()).unwrap();
     String::from_utf8_lossy(&shell.wait_with_output().unwrap().stdout).into_owned()
@@ -284,7 +284,7 @@ fn ids_that_are_not_digits_are_not_reported_and_values_are_never_read_as_escapes
         // `\c` ends an echo's output in dash and busybox, and `\n` is a line break there: the line is printed as it is.
         for odd in [r"x\cy", r"a\nb", "with space", "$HOME"] {
             let root = home.join(odd);
-            let mut sh = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false, false))).env("HOME", &home).env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            let mut sh = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false, false, false))).env("HOME", &home).env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
             sh.stdin.take().unwrap().write_all(format!("{}\n\n\n--julia\nauto\nprocess\n--r\nauto\n", root.display()).as_bytes()).unwrap();
             let said = String::from_utf8_lossy(&sh.wait_with_output().unwrap().stdout).into_owned();
             assert_eq!(said.lines().count(), 1, "{name}: {said:?}");
@@ -561,7 +561,7 @@ fn only_sign_in_and_host_key_failures_end_a_reconnect() {
 #[cfg(unix)]
 #[test]
 fn the_bootstrap_script_settles_auto_as_the_helper_does() {
-    assert!(bootstrap_script("v1", false, false).contains(PICK_LAUNCHER_SH), "the script holds the shell text that is tested");
+    assert!(bootstrap_script("v1", false, false, false).contains(PICK_LAUNCHER_SH), "the script holds the shell text that is tested");
     for folder in wire::slurm::FOLDERS {
         assert!(PICK_LAUNCHER_SH.contains(&format!(":{folder}:")) || PICK_LAUNCHER_SH.contains(&format!(":{folder}\"")), "the script looks in {folder}, as `has` does");
     }

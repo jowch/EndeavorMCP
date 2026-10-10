@@ -1,10 +1,12 @@
-//! An R notebook end to end, with real R and Julia: `endeavor serve`, then
+//! An R notebook end to end, with real R and no Julia: `endeavor serve`, then
 //! an agent opens an Ember notebook, which starts R's adapter with Ember in it;
 //! it reads, edits and runs a cell, and the browser reaches Ember's page at
 //! `/ember/` through the runtime's port.
 //!
-//! Ignored by default, like e2e_julia (which says where Julia comes from); R is
-//! `Rscript` on the PATH. The first run installs Ember at its pinned commit into
+//! Julia is given as a path that doesn't exist, so the test fails if anything
+//! tries to start it: an R user needs no Julia.
+//!
+//! Ignored by default, like e2e_julia; R is `Rscript` on the PATH. The first run installs Ember at its pinned commit into
 //! ~/.cache/endeavor/r, which needs CRAN and GitHub for any package R lacks:
 //!
 //!     cargo test -p endeavor-mcp --test e2e_r -- --ignored --nocapture
@@ -20,7 +22,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::find_julia;
 use serde_json::{Value, json};
 
 fn fresh(path: PathBuf) -> PathBuf {
@@ -166,23 +167,15 @@ const A: &str = "0b7d0000-0000-4000-8000-000000000001";
 const B: &str = "0b7d0000-0000-4000-8000-000000000002";
 
 #[test]
-#[ignore = "starts real Julia and R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
+#[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
 fn an_r_notebook_through_the_runtime() {
-    let Some((julia, app)) = find_julia() else {
-        eprintln!("SKIPPED: no Julia. Set ENDEAVOR_E2E_JULIA, install Endeavor's own, or put julia on the PATH.");
-        return;
-    };
     if !Command::new("Rscript").arg("--version").stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
         eprintln!("SKIPPED: no Rscript on the PATH.");
         return;
     }
     let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-r");
-    let depot = work.join("depot");
-    std::fs::create_dir_all(&depot).unwrap();
-    let depot = match &app {
-        Some(app) => format!("{}:{}:", depot.display(), app.join("depot").display()),
-        None => format!("{}:", depot.display()),
-    };
+    let julia = work.join("no julia here");
+    let depot = format!("{}:", work.join("depot").display());
     if let Some(pid) = recorded_pid(&work.join("state")) {
         // SAFETY: plain syscall.
         unsafe { libc::kill(-pid, libc::SIGTERM) };
@@ -211,11 +204,11 @@ fn an_r_notebook_through_the_runtime() {
         .unwrap();
     let out = lines(serve.stdout.take().unwrap());
     let err = lines(serve.stderr.take().unwrap());
-    let printed = step("serve starts Julia", || {
+    let printed = step("serve starts without Julia", || {
         let mut printed = Vec::new();
         loop {
             match out.recv_timeout(Duration::from_secs(900)) {
-                Ok(line) if line == "Press Ctrl-C to stop Julia." => break printed,
+                Ok(line) if line == "Press Ctrl-C to stop Endeavor." => break printed,
                 Ok(line) => printed.push(line),
                 Err(_) => panic!("serve printed {printed:?}; its log:\n{}", err.try_iter().collect::<Vec<_>>().join("\n")),
             }
@@ -320,7 +313,12 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(read["code"], "x <- 41", "Ember saved the edit: {read}");
     });
 
-    step("Ctrl-C stops Julia and R", || {
+    step("nothing started Julia", || {
+        assert!(!state.join("julia.json").exists(), "Julia's state file is there");
+        assert!(!work.join("cache/endeavor").read_dir().into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with("julia")), "a Julia was downloaded");
+    });
+
+    step("Ctrl-C stops R", || {
         let r_pid = std::fs::read_to_string(state.join("r.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["pid"].as_i64()).unwrap();
         let mut serve = cleanup.children.pop().unwrap();
         // SAFETY: plain syscall.

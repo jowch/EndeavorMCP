@@ -25,6 +25,7 @@ fn serve_without_flags_uses_this_folder_and_per_host_state() {
             state_dir: PathBuf::from("/home/ada/.local/state/endeavor/serve/lab3"),
             cache: PathBuf::from("/home/ada/.cache/endeavor/serve"),
             julia: julia::Source::Auto,
+            julia_when_needed: true,
             r: crate::r::Source::Auto,
             depot: "/home/ada/.cache/endeavor/depot:".into(),
             folder: Some(PathBuf::from("/home/ada/project")),

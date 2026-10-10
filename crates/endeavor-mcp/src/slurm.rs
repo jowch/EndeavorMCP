@@ -280,8 +280,10 @@ fn submit_job(args: &Args, mux: &Arc<Mux>, request: &JobRequest, flags: Vec<Stri
     let build = args.build.as_deref().map_or(String::new(), |build| format!(" --build {}", quote(build)));
     let exit_idle = if args.exit_idle { " --exit-idle" } else { "" };
     let [r_flag, r] = args.r.args();
+    // Found here, on the login node, where there is internet to download it; started on the node when needed.
+    let when_needed = if args.julia_when_needed { " --julia-when-needed" } else { "" };
     let script = format!(
-        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {} {r_flag} {} --runtime {} --depot {}{build}{exit_idle}\n",
+        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {}{when_needed} {r_flag} {} --runtime {} --depot {}{build}{exit_idle}\n",
         quote(&exe.display().to_string()),
         quote(&dir.display().to_string()),
         quote(julia),
@@ -740,6 +742,10 @@ pub fn node_start_main(argv: &[String]) -> ! {
         (Some(value), None) => crate::r::Source::from_flag("--r", value),
         (None, None) => crate::r::Source::Auto,
     };
+    let mut julia = vec!["--julia".to_owned(), julia];
+    if argv.iter().any(|a| a == "--julia-when-needed") {
+        julia.push("--julia-when-needed".into());
+    }
     let mut command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm", flag(argv, "--build").as_deref()).unwrap_or_else(|e| fail(e));
     command.args(r.args());
     if argv.iter().any(|a| a == "--exit-idle") {

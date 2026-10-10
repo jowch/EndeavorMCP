@@ -1,8 +1,8 @@
 //! The notebook engines a runtime drives, one adapter each, behind one
-//! `POST /adapter` for the rest of the core (docs/runtime-core.md). Pluto's,
-//! the first, is always there; another engine's joins when it starts. A call
-//! goes to the engine of the notebook it names, of the file it opens, or, with
-//! neither, to Pluto's; `snapshot` and `status` without a notebook ask every
+//! `POST /adapter` for the rest of the core (docs/runtime-core.md). Each
+//! engine joins when it starts, Pluto's too (Julia starts when it's first
+//! needed). A call goes to the engine of the notebook it names, of the file it
+//! opens, or, with neither, to Pluto's; `snapshot` and `status` without a notebook ask every
 //! engine that runs and put their notebooks together.
 
 use std::collections::HashMap;
@@ -16,22 +16,28 @@ use wire::backend::Backend;
 use super::Upstream;
 
 pub struct Engines {
-    /// In the order they joined; Pluto's first.
+    /// In the order they joined.
     parts: Mutex<Vec<(Backend, Arc<dyn Upstream>)>>,
     /// The engine each notebook it has seen is open in.
     ids: Mutex<HashMap<String, Backend>>,
 }
 
 impl Engines {
-    pub fn new(pluto: Arc<dyn Upstream>) -> Engines {
-        Engines { parts: Mutex::new(vec![(Backend::Pluto, pluto)]), ids: Mutex::default() }
+    /// The engines, starting with Pluto's if it runs.
+    pub fn new(pluto: Option<Arc<dyn Upstream>>) -> Engines {
+        Engines { parts: Mutex::new(pluto.map(|pluto| (Backend::Pluto, pluto)).into_iter().collect()), ids: Mutex::default() }
     }
 
-    /// Another engine, once it runs. The caller follows its notifications.
-    pub fn add(&self, backend: Backend, upstream: Arc<dyn Upstream>) {
+    /// An engine, once it runs, in the place of one it replaces. False if it's there already: the
+    /// caller follows the notifications of one that's new.
+    pub fn add(&self, backend: Backend, upstream: Arc<dyn Upstream>) -> bool {
         let mut parts = self.parts.lock().unwrap();
+        if parts.iter().any(|(b, u)| *b == backend && Arc::ptr_eq(u, &upstream)) {
+            return false;
+        }
         parts.retain(|(b, _)| *b != backend);
         parts.push((backend, upstream));
+        true
     }
 
     pub fn parts(&self) -> Vec<(Backend, Arc<dyn Upstream>)> {
@@ -99,6 +105,11 @@ impl Engines {
                 Ok(reply)
             }
             (_, Some(id)) => {
+                // An id no running engine reported: not open, rather than "Julia isn't running".
+                if !self.ids.lock().unwrap().contains_key(id) && !self.has(Backend::Pluto) {
+                    let error = format!("notebook_not_found::No notebook with id '{id}' is open. Run list_notebooks to see what's open.");
+                    return Ok(json!({ "error": error }).to_string());
+                }
                 let backend = self.backend_of(id);
                 let reply = self.on(backend, raw)?;
                 if method == "shutdown" && result(&reply).is_some() {
@@ -117,8 +128,8 @@ impl Engines {
         }
     }
 
-    /// `snapshot` or `status` of every notebook: Pluto's reply, with the other
-    /// engines' notebooks added to its own. Each notebook in a snapshot carries
+    /// `snapshot` or `status` of every notebook: the first engine's reply
+    /// (Pluto's, when Julia runs), with the other engines' notebooks added to its own. Each notebook in a snapshot carries
     /// its engine's `seq`, which only means something within that engine.
     /// Pluto failing fails the call. Another engine failing is left out, so a
     /// broken R never hides the Julia notebooks; one that doesn't answer at all
@@ -248,7 +259,7 @@ mod tests {
     fn two() -> (Engines, Arc<Fake>, Arc<Fake>) {
         let pluto = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "p1" })], seq: 7, ..Default::default() });
         let ember = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "e1" }), json!({ "notebook_id": "e2" })], seq: 3, ..Default::default() });
-        let engines = Engines::new(pluto.clone());
+        let engines = Engines::new(Some(pluto.clone()));
         engines.add(Backend::Ember, ember.clone());
         (engines, pluto, ember)
     }
@@ -256,7 +267,7 @@ mod tests {
     #[test]
     fn with_pluto_alone_every_call_is_plutos() {
         let pluto = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "p1" })], seq: 7, ..Default::default() });
-        let engines = Engines::new(pluto.clone());
+        let engines = Engines::new(Some(pluto.clone()));
         assert_eq!(call(&engines, "snapshot", json!({})), json!({ "result": { "notebooks": [{ "notebook_id": "p1", "seq": 7 }], "seq": 7 } }));
         call(&engines, "run", json!({ "notebook_id": "unknown" }));
         call(&engines, "open", json!({ "path": "/a/b.jl", "run": false }));
@@ -305,7 +316,7 @@ mod tests {
     #[test]
     fn an_engine_not_running_has_no_notebooks_and_takes_no_calls() {
         let pluto = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "p1" })], seq: 7, ..Default::default() });
-        let engines = Engines::new(pluto.clone());
+        let engines = Engines::new(Some(pluto.clone()));
         let opened = call(&engines, "open", json!({ "path": "/a/b.R", "run": false }));
         assert_eq!(opened["error"], "unsupported::R notebooks aren't running in this runtime");
         assert!(asked(&pluto).is_empty());
@@ -316,9 +327,9 @@ mod tests {
     #[test]
     fn pluto_failing_fails_the_whole_snapshot() {
         let pluto = Arc::new(Fake { down: true, ..Default::default() });
-        let engines = Engines::new(pluto);
+        let engines = Engines::new(Some(pluto));
         assert_eq!(engines.adapter(json!({ "method": "snapshot", "params": {} }).to_string().as_bytes()).unwrap_err().kind(), io::ErrorKind::NotConnected, "Pluto not answering yet is an error, as before");
-        let engines = Engines::new(Arc::new(Failing));
+        let engines = Engines::new(Some(Arc::new(Failing)));
         engines.add(Backend::Ember, Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "e1" })], ..Default::default() }));
         assert_eq!(call(&engines, "snapshot", json!({}))["error"], "ArgumentError: broken", "and so is Pluto's error");
     }

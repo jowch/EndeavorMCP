@@ -30,6 +30,9 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `r_not_found` | No R was found: `Rscript` isn't on the PATH, or the R set for this machine isn't there | Tell the user R notebooks need R installed; nothing else to try |
 | `r_failed` | R started but Ember didn't: it couldn't install, or it stopped | Tell the user what the message says; the runtime's log has the rest |
 | `risky_source` | The notebook came from a remote source, so only the user can allow it to run | Ask the user to run it from the notebook |
+| `julia_starting` | Julia starts the first time a Julia notebook is opened or made, which can take minutes the first time | Tell the user, then make the same call again in a minute |
+| `julia_not_found` | No Julia was found, and Endeavor may download one only if the user agrees | Ask the user, as the message says; don't pass `install: true` without their yes |
+| `julia_failed` | Julia couldn't start: the Julia or shell line set for it doesn't work, or it stopped while starting | Tell the user what the message says. On a machine, they can set Julia's path with `add_machine`. Calling again tries once more |
 | `pluto_not_running` | Julia's notebook server isn't up yet | Tell the user; `session_status` shows its state |
 
 `not_approved`, `waiting_for_user`, `cancelled`, `no_app`, `older_runtime` and `plan_mode` come from the Endeavor app: see [app.md](app.md).

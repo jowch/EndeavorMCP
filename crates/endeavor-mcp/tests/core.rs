@@ -20,7 +20,9 @@ use common::*;
 struct Core {
     process: Child,
     port: u16,
+    /// Julia's, if it started with the core.
     julia_pid: i32,
+    dir: Option<std::path::PathBuf>,
 }
 
 impl Core {
@@ -40,13 +42,23 @@ impl Core {
     /// `start_with_env`, which gives the core's exit status if it ends before it writes `runtime.json`.
     fn try_start_with_env(dir: &Path, bridge: &FakeBridge, env: &[(&str, &str)]) -> Result<Core, ExitStatus> {
         let julia = serving_julia(dir, bridge);
+        Core::try_start_with(dir, env, &[std::ffi::OsStr::new("--julia"), julia.as_os_str()])
+    }
+
+    /// The core with `--julia-when-needed` and `julia`, which hasn't started Julia once it wrote `runtime.json`.
+    fn start_when_needed(dir: &Path, julia: &Path) -> Core {
+        let core = Core::try_start_with(dir, &[], &[std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed")]).unwrap();
+        assert!(julia_pids(dir).is_empty() && !dir.join("julia.json").exists(), "Julia waits until it's needed");
+        core
+    }
+
+    fn try_start_with(dir: &Path, env: &[(&str, &str)], julia_args: &[&std::ffi::OsStr]) -> Result<Core, ExitStatus> {
         let mut process = Command::new(env!("CARGO_BIN_EXE_endeavor"))
             .envs(env.iter().copied())
             .arg("core")
             .arg("--state-dir")
             .arg(dir)
-            .arg("--julia")
-            .arg(&julia)
+            .args(julia_args)
             .args(["--runtime", "/opt/runtime", "--depot", "/opt/depot:"])
             .env("ENDEAVOR_TOKEN", TOKEN)
             .env("ENDEAVOR_LAUNCHER", "process")
@@ -66,8 +78,8 @@ impl Core {
             return Err(status);
         }
         let state = read_json(&dir.join("runtime.json"));
-        let julia_pid = read_json(&dir.join("julia.json"))["pid"].as_i64().unwrap() as i32;
-        Ok(Core { port: state["port"].as_u64().unwrap() as u16, process, julia_pid })
+        let julia_pid = std::fs::read_to_string(dir.join("julia.json")).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).and_then(|julia| julia["pid"].as_i64()).unwrap_or(0) as i32;
+        Ok(Core { port: state["port"].as_u64().unwrap() as u16, process, julia_pid, dir: Some(dir.to_path_buf()) })
     }
 
     fn connect(&self) -> TcpStream {
@@ -88,11 +100,22 @@ impl Core {
 
 impl Drop for Core {
     fn drop(&mut self) {
-        // SAFETY: plain syscall.
-        unsafe { libc::kill(self.julia_pid, libc::SIGKILL) };
+        for julia in julia_pids_of(self) {
+            // SAFETY: plain syscall.
+            unsafe { libc::kill(julia, libc::SIGKILL) };
+        }
         let _ = self.process.kill();
         let _ = self.process.wait();
     }
+}
+
+/// The Julias the core started: the one it had at its start, and any it started later.
+fn julia_pids_of(core: &Core) -> Vec<i32> {
+    let mut pids: Vec<i32> = Some(core.julia_pid).into_iter().filter(|pid| *pid > 0).collect();
+    if let Some(dir) = &core.dir {
+        pids.extend(julia_pids(dir));
+    }
+    pids
 }
 
 /// Read one response: its head, and its body undone from chunks or by length.
@@ -169,39 +192,30 @@ fn starts_julia_and_writes_its_own_runtime_json() {
 }
 
 #[test]
-fn forwards_calls_with_their_headers_and_host_rewritten() {
+fn answers_julias_calls_itself_and_hands_the_folder_to_julia() {
     let dir = state_dir("core-call");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let body = r#"{"jsonrpc":"2.0","id":7,"method":"endeavor/set_folder","params":{"path":"/n"}}"#;
-    write!(
-        socket,
-        "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nX-Endeavor-Host: labbox3\r\nContent-Length: {}\r\n\r\n{body}",
-        core.port,
-        body.len()
-    )
-    .unwrap();
-    let (status, headers, reply) = response(&mut reader);
+    write!(socket, "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", core.port, body.len()).unwrap();
+    let (status, _, reply) = response(&mut reader);
     assert_eq!(status, "HTTP/1.1 200 OK");
-    assert!(headers.contains(&("transfer-encoding".into(), "chunked".into())), "Julia's framing passes through");
-    let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
-    assert_eq!(reply["result"]["body"].as_str(), Some(body));
-
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap(), serde_json::json!({ "jsonrpc": "2.0", "id": 7, "result": {} }));
     let seen = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1" && String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")).expect("Julia's `/call`");
     assert_eq!(seen.header("Host"), Some(format!("127.0.0.1:{}", bridge.port).as_str()));
     assert_eq!(seen.header("Authorization"), Some(format!("Bearer {TOKEN}").as_str()));
-    assert_eq!(seen.header("Content-Type"), Some("application/json"));
-    assert_eq!(seen.header("X-Endeavor-Host"), Some("labbox3"));
+    assert!(String::from_utf8_lossy(&seen.body).contains(r#""path":"/n""#));
 
-    // A chunked call, which the core reads whole to see its method, reaches Julia whole.
+    // A chunked call, which the core reads whole to see its method.
+    let allow = r#"{"jsonrpc":"2.0","id":8,"method":"endeavor/allow_julia_install"}"#;
     write!(socket, "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
-    write!(socket, "{:x}\r\n{}\r\n", 20, &body[..20]).unwrap();
+    write!(socket, "{:x}\r\n{}\r\n", 20, &allow[..20]).unwrap();
     std::thread::sleep(Duration::from_millis(50));
-    write!(socket, "{:x}\r\n{}\r\n0\r\n\r\n", body.len() - 20, &body[20..]).unwrap();
+    write!(socket, "{:x}\r\n{}\r\n0\r\n\r\n", allow.len() - 20, &allow[20..]).unwrap();
     let reply: serde_json::Value = serde_json::from_str(&response(&mut reader).2).unwrap();
-    assert_eq!(reply["result"]["body"].as_str(), Some(body));
+    assert_eq!(reply["id"], 8);
 
     // The same connection carries the next request.
     write!(socket, "GET /endeavor/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
@@ -209,14 +223,14 @@ fn forwards_calls_with_their_headers_and_host_rewritten() {
     write!(socket, "GET /edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     assert_eq!(response(&mut reader).2, "Pluto: GET /edit?id=1 HTTP/1.1");
 
-    // HTTP/1.0, as the helper's own calls are: the reply runs to the end of the connection.
+    // HTTP/1.0, as the helper's own calls are.
     let mut socket = core.connect();
     write!(socket, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut reply = String::new();
     socket.read_to_string(&mut reply).unwrap();
     let (head, body) = reply.split_once("\r\n\r\n").unwrap();
     assert!(head.starts_with("HTTP/1.1 200 OK"), "{reply}");
-    assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap()["result"]["said"], "POST /call HTTP/1.0");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap()["id"], 7);
 }
 
 #[test]
@@ -621,7 +635,7 @@ fn serve_and_status_say_a_runtime_has_no_project_folder_and_where_notebooks_go()
     let mut serve = command(&["serve", "--folder", dir.to_str().unwrap()]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let mut out = BufReader::new(serve.stdout.take().unwrap());
     let mut said = String::new();
-    while !said.contains("Ctrl-C leaves this Julia running") {
+    while !said.contains("Ctrl-C leaves Endeavor running") {
         let mut line = String::new();
         assert!(out.read_line(&mut line).unwrap() > 0, "serve ended: {said}");
         said.push_str(&line);
@@ -1640,4 +1654,136 @@ fn a_script_written_while_other_threads_start_processes_can_be_run_at_once() {
             result.unwrap();
         }
     });
+}
+
+fn tool_call(core: &Core, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+    let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+    let reply: serde_json::Value = serde_json::from_str(&mcp(core, &message.to_string(), &[]).1).unwrap();
+    serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[test]
+fn a_core_started_when_needed_starts_julia_for_a_julia_notebook_and_not_before() {
+    let dir = state_dir("core-when-needed");
+    let bridge = FakeBridge::start(&dir);
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let julia = serving_julia(&dir, &bridge);
+    let mut core = Core::start_when_needed(&dir, &julia);
+    let state = read_json(&dir.join("runtime.json"));
+    let host = String::from_utf8(Command::new("hostname").output().unwrap().stdout).unwrap();
+    assert_eq!((state["launcher"].as_str(), state["node"].as_str(), state["job"].as_str()), (Some("process"), Some(host.trim()), Some("")), "the core's own words for what Julia used to say");
+    assert_eq!(tool_call(&core, "list_notebooks", serde_json::json!({})), serde_json::json!([]), "no Julia notebooks while Julia doesn't run");
+    let status = tool_call(&core, "session_status", serde_json::json!({}));
+    assert_eq!(status["notebooks"], serde_json::json!([]), "{status}");
+    assert!(julia_pids(&dir).is_empty(), "neither starts Julia");
+
+    // The runtime's own link, which an R user opens too, says Julia isn't running and starts nothing.
+    let mut page = core.connect();
+    write!(page, "GET / HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
+    let mut said = String::new();
+    page.read_to_string(&mut said).unwrap();
+    assert!(said.starts_with("HTTP/1.1 200") && said.contains("Julia isn't running") && said.contains("href=\"/?start-julia\""), "{said}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(julia_pids(&dir).is_empty() && !dir.join("julia.json").exists(), "the link alone doesn't start Julia");
+
+    // Any other page of Pluto's starts Julia and is told it's starting; Julia then joins.
+    let mut page = core.connect();
+    write!(page, "GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
+    let mut said = String::new();
+    page.read_to_string(&mut said).unwrap();
+    assert!(said.starts_with("HTTP/1.1 503") && said.contains("Julia is starting"), "{said}");
+    wait_for("Julia to start", || julia_pids(&dir).len() == 1);
+    let mut script = core.connect();
+    write!(script, "GET /static/x.js HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
+    let mut said = String::new();
+    script.read_to_string(&mut said).unwrap();
+    assert!(said.starts_with("HTTP/1.1 503") && !said.contains("<html"), "only a page gets the page: {said}");
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    wait_for("Pluto's page", || {
+        let mut page = core.connect();
+        write!(page, "GET /edit?id=1 HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+        let mut said = String::new();
+        let _ = page.read_to_string(&mut said);
+        said.contains("Pluto: GET /edit?id=1")
+    });
+    assert_eq!(julia_pids(&dir).len(), 1, "one Julia");
+    let set = bridge.seen().into_iter().any(|s| String::from_utf8_lossy(&s.body).contains("endeavor/set_folder"));
+    assert!(!set, "no folder to give a runtime of the app's that wasn't given one");
+
+    // From now on the core ends with Julia, as it always has.
+    let julia = julia_pids(&dir)[0];
+    // SAFETY: plain syscall.
+    unsafe { libc::kill(julia, libc::SIGKILL) };
+    assert_eq!(core.exits().signal(), Some(libc::SIGKILL));
+    assert!(!dir.join("runtime.json").exists());
+}
+
+#[test]
+fn a_julia_notebook_waits_for_julia_and_the_folder_the_app_gave_reaches_it() {
+    let dir = state_dir("core-when-needed-open");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    let core = Core::start_when_needed(&dir, &julia);
+    let set = r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_folder","params":{"path":"/the/app/folder"}}"#;
+    assert!(app_call(&core, set).contains(r#""result":{}"#));
+    let folder = temp_folder("core-when-needed-open-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path }));
+    // The stand-in Pluto opens nothing it wasn't given, so its own answer shows the call reached it.
+    assert_eq!(opened["message"], "not a notebook here", "the call waited for Julia: {opened}");
+    assert_eq!(julia_pids(&dir).len(), 1);
+    assert!(engine_calls(&bridge).iter().any(|(method, params)| method == "open" && params["path"] == path.as_str()), "{:?}", engine_calls(&bridge));
+    let given = bridge.seen().into_iter().find(|s| String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")).expect("the folder given to Julia as it started");
+    assert!(String::from_utf8_lossy(&given.body).contains("/the/app/folder"));
+}
+
+#[test]
+fn without_julia_a_julia_notebook_says_why_and_the_core_stops_on_a_signal_or_a_shutdown() {
+    let dir = state_dir("core-no-julia");
+    let missing = dir.join("no-julia");
+    let mut core = Core::start_when_needed(&dir, &missing);
+    let folder = temp_folder("core-no-julia-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path }));
+    assert_eq!(opened["error"], "julia_failed", "a Julia that can't be used, not one to download: {opened}");
+    assert!(opened["message"].as_str().unwrap().contains(&missing.display().to_string()), "{opened}");
+    assert_eq!(tool_call(&core, "list_notebooks", serde_json::json!({})), serde_json::json!([]), "the runtime still answers");
+    // SAFETY: plain syscall.
+    unsafe { libc::kill(core.process.id() as i32, libc::SIGTERM) };
+    assert_eq!(core.exits().signal(), Some(libc::SIGTERM), "with no Julia to pass it to, the signal ends the core");
+    assert!(!dir.join("runtime.json").exists());
+
+    let dir = state_dir("core-no-julia-shutdown");
+    let mut core = Core::start_when_needed(&dir, &missing);
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/shutdown"}"#);
+    assert_eq!(core.exits().code(), Some(0));
+    assert!(!dir.join("runtime.json").exists());
+}
+
+#[test]
+fn two_julia_notebooks_opened_at_once_start_one_julia() {
+    let dir = state_dir("core-when-needed-two");
+    let bridge = FakeBridge::start(&dir);
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let julia = serving_julia(&dir, &bridge);
+    let core = Core::start_when_needed(&dir, &julia);
+    let folder = temp_folder("core-when-needed-two-notebooks");
+    let paths: Vec<String> = ["a.jl", "b.jl"].iter().map(|name| folder.join(name).display().to_string()).collect();
+    for path in &paths {
+        std::fs::write(path, "### A Pluto.jl notebook ###").unwrap();
+    }
+    std::thread::scope(|scope| {
+        let core = &core;
+        let opens: Vec<_> = paths.iter().map(|path| scope.spawn(move || tool_call(core, "open_notebook", serde_json::json!({ "path": path })))).collect();
+        wait_for("Julia to start", || julia_pids(&dir).len() == 1);
+        std::thread::sleep(Duration::from_millis(500));
+        std::fs::remove_file(dir.join("hold")).unwrap();
+        for open in opens {
+            let opened = open.join().unwrap();
+            assert_eq!(opened["message"], "not a notebook here", "each call waited for the one Julia: {opened}");
+        }
+    });
+    assert_eq!(julia_pids(&dir).len(), 1, "one Julia for both");
 }

@@ -41,7 +41,7 @@ impl Place {
     }
 
     fn options(&self) -> Options<'static> {
-        Options { auth: Auth::Batch, root: self.root.display().to_string(), state: self.state.display().to_string(), depot: String::new(), exit_idle: false, allow_install: true, helper: &helper_binary, launcher: None }
+        Options { auth: Auth::Batch, root: self.root.display().to_string(), state: self.state.display().to_string(), depot: String::new(), exit_idle: false, julia_when_needed: false, allow_install: true, helper: &helper_binary, launcher: None }
     }
 
     fn transport(&self) -> Transport {
