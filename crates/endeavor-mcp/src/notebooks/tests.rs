@@ -22,11 +22,13 @@ struct FakeCell {
     last_run: f64,
     output: String,
     hidden: bool,
+    stale: bool,
+    not_run: bool,
 }
 
 impl FakeCell {
     fn new(id: &str, code: &str) -> FakeCell {
-        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false }
+        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false }
     }
 
     /// What `a, b = 1, 2` defines, and the names the rest of the code uses.
@@ -53,6 +55,8 @@ struct FakeNotebook {
     exited: Option<Vec<String>>,
     /// Its snapshot can't be read.
     broken: bool,
+    /// The package step under way, as the runtime's `package_step` reports it.
+    packages: Option<Value>,
 }
 
 #[derive(Default)]
@@ -77,7 +81,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -100,10 +104,12 @@ impl Engine {
             "notebook_id": nb.id, "path": nb.path,
             "process_status": if nb.safe_preview { "waiting_for_permission" } else if nb.exited.is_some() { "no_process" } else { "ready" },
             "execution_allowed": !nb.safe_preview && nb.exited.is_none(), "safe_preview": nb.safe_preview, "exited": nb.exited,
+            "packages": nb.packages,
             "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
                 "last_run": c.last_run, "runtime": 0, "output": c.output, "hidden": c.hidden, "markdown": c.code.starts_with("md\""),
+                "stale": c.stale, "not_run": c.not_run,
             })).collect::<Vec<_>>(),
         })
     }
@@ -158,7 +164,7 @@ impl Engine {
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
                 let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed }));
             }
             _ => {}
@@ -851,6 +857,101 @@ fn a_waited_run_that_outlasts_the_cap_returns_with_its_cells_still_running() {
 }
 
 #[test]
+fn cells_waiting_on_a_package_install_say_so_and_a_read_of_one_waits() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "using DataFrames"), (Y, "y = 1")]);
+    let installing = json!({ "step": "precompiling", "packages": ["DataFrames"], "seconds": 130, "last_line": "Precompiling DataFrames..." });
+    s.engine.with(NB, |nb| {
+        nb.packages = Some(installing.clone());
+        nb.cells.iter_mut().for_each(|c| c.queued = true);
+    });
+
+    // Queued cells count as running while packages install, and the notebook says what it is doing.
+    let listed = s.call("", "list_notebooks", json!({})).unwrap();
+    assert_eq!((&listed[0]["running"], &listed[0]["packages"]), (&json!([X, Y]), &installing));
+
+    // A read of a queued cell waits for the install, within the call's cap, then says what is going on.
+    let began = Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+    let read = super::tools::tool_json(s.notebooks.tool("", "read_cell", &json!({ "notebook_id": NB, "cell_id": Y }), &Folder::Process, began).unwrap());
+    assert!(began.elapsed() >= Duration::from_secs(44), "it waited");
+    assert!(began.elapsed() < Duration::from_secs(super::tools::WAIT_SECONDS as u64), "within the cap");
+    assert_eq!((&read["queued"], &read["packages"]), (&json!(true), &installing));
+    let message = read["message"].as_str().unwrap();
+    for part in ["DataFrames", "precompiling, about 2 minutes so far", "normal the first time", "call read_cell", "Precompiling DataFrames..."] {
+        assert!(message.contains(part), "{part}: {message}");
+    }
+
+    // A caller that hangs up during the wait gets no read: the edit after it is refused.
+    let gone = s.notebooks.tool_watched("", "read_cell", &json!({ "notebook_id": NB, "cell_id": X }), &Folder::Process, Instant::now(), &|| true);
+    assert!(gone.is_err_and(|e| e.contains("client_gone")));
+    assert_eq!(s.refused("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "using CSV" })), "read_required");
+
+    // Past the usual time, the agent is told to wait only while the log moves.
+    s.engine.with(NB, |nb| nb.packages.as_mut().unwrap()["seconds"] = json!(660));
+    let began = Instant::now().checked_sub(Duration::from_secs(44)).expect("a clock that has run that long");
+    let late = super::tools::tool_json(s.notebooks.tool("", "read_cell", &json!({ "notebook_id": NB, "cell_id": Y }), &Folder::Process, began).unwrap());
+    let message = late["message"].as_str().unwrap();
+    for part in ["about 11 minutes", "longer than usual", "Tell the user", "only if that line has changed", "stop waiting"] {
+        assert!(message.contains(part), "{part}: {message}");
+    }
+    s.engine.with(NB, |nb| nb.packages = Some(installing.clone()));
+
+    // A run's receipt while the install goes on says the same.
+    s.engine.with(NB, |nb| nb.cells[1].queued = false);
+    s.read("", NB, Y);
+    s.edit("", NB, Y, "y = 2");
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!(ran["packages"], installing, "{ran}");
+    assert!(ran["message"].as_str().unwrap().contains("DataFrames"), "{ran}");
+    s.engine.with(NB, |nb| nb.cells[1].queued = true);
+
+    // The install ends and the cell runs: the waiting read returns then, with the output.
+    let engine = s.engine.clone();
+    let now = *s.clock.lock().unwrap();
+    let finish = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(600));
+        engine.with(NB, |nb| {
+            nb.packages = None;
+            for cell in &mut nb.cells {
+                cell.queued = false;
+                cell.last_run = now;
+                cell.output = "done".into();
+            }
+        });
+    });
+    let began = Instant::now();
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    finish.join().unwrap();
+    assert!(began.elapsed() < Duration::from_secs(5), "returned when the install ended");
+    assert_eq!((&read["queued"], &read["output"], read.get("message"), read.get("packages")), (&json!(false), &json!("done"), None, None));
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0].get("packages"), None);
+
+    // A queued cell with no install under way (safe preview's leftover flag) is read at once.
+    s.engine.with(NB, |nb| nb.cells[0].queued = true);
+    let began = Instant::now();
+    s.read("", NB, X);
+    assert!(began.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn a_waited_run_that_outlasts_the_cap_during_an_install_keeps_its_still_running_list() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    s.engine.with(NB, |nb| {
+        nb.packages = Some(json!({ "step": "installing", "packages": ["CSV"], "seconds": 20, "last_line": null }));
+        nb.cells[0].queued = true;
+    });
+    s.read("", NB, Y);
+    s.edit("", NB, Y, "y = x + linger() + 1");
+    s.engine.with(NB, |nb| nb.cells[0].queued = true);
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["execution"], json!({ "status": "running", "still_running": [Y] }), "{ran}");
+    assert_eq!(ran["packages"]["packages"], json!(["CSV"]));
+    let message = ran["message"].as_str().unwrap();
+    assert!(message.contains("CSV") && message.contains("Don't run the cells in `execution.still_running` again"), "{message}");
+}
+
+#[test]
 fn a_cell_that_errored_is_reported_before_the_cells_still_running() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = error(1)"), (Y, "y = linger()")]);
@@ -1079,7 +1180,8 @@ fn opening_and_making_notebooks() {
     assert_eq!(s.call("", "open_notebook", json!({ "path": path, "run_notebook": "yes" })), Err("TypeError: non-boolean (String) used in boolean context".into()));
     let ember = format!("{dir}{SEP}growth.R");
     std::fs::write(&ember, "### An Ember notebook ###\n# /// environment\n# ///\n").unwrap();
-    assert_eq!(s.call("", "open_notebook", json!({ "path": ember })), Err(format!("ArgumentError: unsupported::'{ember}' is an Ember notebook (R). R notebooks can't be opened here yet")));
+    let why = if cfg!(windows) { "R notebooks don't run on Windows yet" } else { "R notebooks can't be opened here yet" };
+    assert_eq!(s.call("", "open_notebook", json!({ "path": ember })), Err(format!("ArgumentError: unsupported::'{ember}' is an Ember notebook (R). {why}")));
 
     let made = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}.{SEP}fresh.jl") })).unwrap();
     assert_eq!((&made["path"], &made["created"], &made["ran"]), (&json!(format!("{dir}{SEP}fresh.jl")), &json!(true), &json!(true)));
@@ -1777,4 +1879,60 @@ fn a_second_engines_notebooks_are_listed_and_its_calls_go_to_it() {
         assert_eq!(s.notebooks.move_notebook(R, &format!("{dir}{SEP}{name}")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .R: '{dir}{SEP}{name}'")));
     }
     assert_eq!(s.notebooks.move_notebook(NB, &format!("{dir}{SEP}c.R")), Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{dir}{SEP}c.R'")), "and a Julia one a Julia one");
+}
+
+/// A notebook made while the app's summary is being put together isn't in that summary's snapshots,
+/// and the reads new_notebook recorded of its cells stay: its first edit needs no read first.
+#[test]
+fn a_notebook_made_during_a_summary_keeps_its_reads() {
+    let s = setup();
+    let dir = std::env::temp_dir().to_string_lossy().trim_end_matches(SEP).to_owned();
+    let (read_tx, read) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    *s.engine.hold_snapshot.lock().unwrap() = Some((read_tx, release_rx));
+    std::thread::scope(|scope| {
+        let publishing = scope.spawn(|| s.notebooks.publish());
+        read.recv().unwrap();
+        let making = scope.spawn(|| s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}endeavor-made-during-a-summary.jl") })).unwrap());
+        // new_notebook has recorded its reads, and then waits for the summary.
+        std::thread::sleep(Duration::from_millis(300));
+        release.send(()).unwrap();
+        publishing.join().unwrap();
+        let made = making.join().unwrap();
+        let (id, cell) = (made["notebook_id"].as_str().unwrap(), made["cell_ids"][0].as_str().unwrap());
+        assert!(s.call("", "edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "x = 1" })).is_ok(), "no read needed");
+    });
+}
+
+#[test]
+fn what_the_engine_knows_of_a_cell_shows_in_read_cell() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "a = 1")]);
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "a <- 1"), (Y, "b <- a + 1")]);
+    ember.with(R, |nb| {
+        nb.cells[0].not_run = true;
+        nb.cells[1].stale = true;
+    });
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    let read = |nb: &str, cell: &str| s.call("", "read_cell", json!({ "notebook_id": nb, "cell_id": cell })).unwrap();
+    let (not_run, stale) = (read(R, X), read(R, Y));
+    assert_eq!((&not_run["not_run"], &not_run["stale"]), (&json!(true), &json!(false)));
+    assert_eq!((&stale["stale"], stale.get("not_run")), (&json!(true), None), "not_run shows only when it is so");
+    assert_eq!(read(NB, X).get("not_run"), None, "and never for Julia");
+    let code = s.call("", "read_notebook_code", json!({ "notebook_id": R })).unwrap();
+    assert_eq!(code["stale_cell_ids"], json!([Y]), "and in the whole notebook's read: {code}");
+}
+
+#[test]
+fn new_notebook_takes_an_r_path_only_where_r_notebooks_open() {
+    let s = setup();
+    let dir = std::env::temp_dir().to_string_lossy().trim_end_matches(SEP).to_owned();
+    let refused = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}endeavor-new-r-test.R") })).unwrap_err();
+    let why = if cfg!(windows) { "R notebooks don't run on Windows yet" } else { "R notebooks can't be opened here yet" };
+    assert!(refused.contains("unsupported::") && refused.contains(why), "{refused}");
+    let other = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}notes.txt") })).unwrap_err();
+    assert!(other.contains("invalid_path::Notebook path must end in .jl: "), "R isn't offered while R notebooks can't open: {other}");
 }

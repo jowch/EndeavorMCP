@@ -28,6 +28,9 @@ pub const WAIT_SECONDS: f64 = 45.0;
 const WAIT_FLOOR_SECONDS: f64 = 5.0;
 /// Claude accepts images up to about 5 MB; plots are typically tens of KB.
 const MAX_IMAGE_BYTES: usize = 4_000_000;
+/// How long a package step can take before the agent is told it is taking
+/// longer than usual and to stop waiting unless the package log moves.
+const INSTALL_USUAL_SECONDS: u64 = 600;
 /// How `read_notebook_code` starts each cell, as Pluto's file does.
 const CELL_MARKER: &str = "# ╔═╡ ";
 /// How much of each output's text a change's receipt carries; `read_cell` has
@@ -46,7 +49,13 @@ impl Notebooks {
     /// where `new_notebook` puts notebooks and relative paths start. `began` is
     /// when the call arrived, which a waited run's cap counts from.
     pub fn tool(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant) -> Result<Reply, String> {
-        let t = Call { nbs: self, owner, args, began };
+        self.tool_watched(owner, name, args, folder, began, &|| false)
+    }
+
+    /// `tool` for a caller that can hang up: `gone` says it has, which ends a
+    /// wait in the call early.
+    pub fn tool_watched(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant, gone: &dyn Fn() -> bool) -> Result<Reply, String> {
+        let t = Call { nbs: self, owner, args, began, gone };
         let result = match name {
             "list_notebooks" => t.list_notebooks(),
             "read_cell" => t.read_cell(),
@@ -111,7 +120,7 @@ impl Notebooks {
     /// whole-notebook run loads, in notebook order. For `allow_execution`,
     /// `count` is the notebook's size whether or not it runs.
     pub fn run_preview(&self, tool: &str, args: &Value) -> Result<Value, String> {
-        let t = Call { nbs: self, owner: "", args, began: Instant::now() };
+        let t = Call { nbs: self, owner: "", args, began: Instant::now(), gone: &|| false };
         let nb = t.notebook()?;
         let graph = self.graph(&nb.id, GraphQuery { refresh: true, edges: true, ..Default::default() })?;
         let targets: Vec<String> = if tool == "submit_changes" {
@@ -192,6 +201,8 @@ struct Call<'a> {
     owner: &'a str,
     args: &'a Value,
     began: Instant,
+    /// Whether the caller has hung up.
+    gone: &'a dyn Fn() -> bool,
 }
 
 impl Call<'_> {
@@ -486,6 +497,15 @@ impl Call<'_> {
         let Value::Object(mut receipt) = receipt else { unreachable!() };
         if !still_running.is_empty() {
             receipt["execution"]["still_running"] = json!(still_running);
+        }
+        if nb.installing() {
+            receipt.insert("packages".into(), nb.packages.clone().unwrap_or_default());
+            let mut message = installing_message(&nb);
+            if !still_running.is_empty() {
+                message.push_str(" Don't run the cells in `execution.still_running` again: they run once the packages are ready.");
+            }
+            receipt.insert("message".into(), json!(message));
+        } else if !still_running.is_empty() {
             receipt.insert(
                 "message".into(),
                 json!(format!(
@@ -512,13 +532,16 @@ impl Call<'_> {
     /// A cell as `read_cell` shows it.
     fn cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
         let cell = &nb.cells[id];
-        let stale = self.pending_run(nb).iter().any(|p| p == id);
+        let stale = cell.stale || self.pending_run(nb).iter().any(|p| p == id);
         let mut out = json!({
             "cell_id": id, "code": cell.code, "output": cell.output, "errored": cell.errored,
             "running": cell.running, "queued": cell.queued, "code_folded": cell.folded, "stale": stale,
         });
         if let Some(error) = &cell.error {
             out["error"] = error.clone();
+        }
+        if cell.not_run {
+            out["not_run"] = json!(true);
         }
         let Value::Object(out) = out else { unreachable!() };
         out
@@ -537,12 +560,29 @@ impl Call<'_> {
     }
 
     fn read_cell(&self) -> Result<Value, String> {
-        let nb = self.notebook()?;
+        let mut nb = self.notebook()?;
         let cell = self.cell(&nb)?;
-        self.record_read(&nb.id, &cell, &nb.cells[&cell].code);
+        // A cell waiting on a package step is waited for, within the call's
+        // `WAIT_SECONDS`: an agent that reads it at once sees no change and
+        // gives up long before a first install ends.
+        let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
+        while nb.installing() && nb.cells.get(&cell).is_some_and(|c| c.queued) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(500));
+            // Nobody will see this read, so it doesn't count as one.
+            if (self.gone)() {
+                return Err(argument_error("client_gone::The caller hung up during the wait"));
+            }
+            nb = self.nbs.snapshot(&nb.id)?;
+        }
+        let Some(code) = nb.cells.get(&cell).map(|c| c.code.clone()) else { return Err(key_error(&format!("cell_not_found::No cell with id '{cell}' in notebook"))) };
+        self.record_read(&nb.id, &cell, &code);
         let mut out = self.cell_json(&nb, &cell);
         if let Some(text) = self.output_text(&nb, &cell)? {
             out.insert("output_text".into(), json!(text));
+        }
+        if nb.installing() {
+            out.insert("packages".into(), nb.packages.clone().unwrap_or_default());
+            out.insert("message".into(), json!(installing_message(&nb)));
         }
         Ok(Value::Object(out))
     }
@@ -809,7 +849,7 @@ impl Call<'_> {
             self.record_read(&nb.id, id, &nb.cells[id].code);
         }
         let pending = self.pending_run(&nb);
-        let stale: Vec<&String> = nb.order.iter().filter(|id| pending.contains(id)).collect();
+        let stale: Vec<&String> = nb.order.iter().filter(|id| pending.contains(id) || nb.cells[*id].stale).collect();
         let mut result = json!({
             "notebook_id": nb.id,
             "path": nb.path,
@@ -905,10 +945,8 @@ impl Call<'_> {
         if !std::path::Path::new(path).exists() {
             return Err(argument_error(&format!("file_not_found::No file at '{path}'")));
         }
-        // ENDEAVOR_TEST_R_NOTEBOOKS (a debug build only): the R tests open them before the tools and skills are ready for R.
-        let r_notebooks = cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_R_NOTEBOOKS").is_some();
-        if !r_notebooks && wire::backend::Backend::of_file(std::path::Path::new(path)) == Some(wire::backend::Backend::Ember) {
-            return Err(argument_error(&format!("unsupported::'{path}' is an Ember notebook (R). R notebooks can't be opened here yet")));
+        if wire::backend::Backend::of_file(std::path::Path::new(path)) == Some(wire::backend::Backend::Ember) {
+            r_notebooks(&format!("'{path}' is an Ember notebook (R)"))?;
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
@@ -960,8 +998,13 @@ impl Call<'_> {
             },
             Some(Value::String(requested)) => {
                 let path = absolute_path(&super::requested_path(requested, folder)?)?;
-                if !path.ends_with(".jl") {
-                    return Err(argument_error(&format!("invalid_path::Notebook path must end in .jl: '{path}'")));
+                match super::engines::of_path(&path) {
+                    wire::backend::Backend::Ember => r_notebooks(&format!("'{path}' would be an R notebook"))?,
+                    _ if !path.ends_with(".jl") => {
+                        let ends = if r_notebooks("").is_ok() { ".jl (Julia) or .R (R)" } else { ".jl" };
+                        return Err(argument_error(&format!("invalid_path::Notebook path must end in {ends}: '{path}'")));
+                    }
+                    _ => {}
                 }
                 if std::path::Path::new(&path).exists() {
                     return Err(argument_error(&format!("file_exists::'{path}' already exists; use open_notebook to load it")));
@@ -1046,6 +1089,31 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
     status.to_owned()
 }
 
+/// What the agent hears while a notebook's cells wait on a package step, in
+/// plain words: what is going on, that it is slow only the first time, and
+/// how to wait; past `INSTALL_USUAL_SECONDS`, to wait only while the log moves.
+fn installing_message(nb: &Snapshot) -> String {
+    let packages = nb.packages.as_ref().cloned().unwrap_or_default();
+    let names: Vec<&str> = packages["packages"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let which = if names.is_empty() { "the packages it uses".to_owned() } else { names.join(", ") };
+    let step = packages["step"].as_str().unwrap_or("installing");
+    let seconds = packages["seconds"].as_u64().unwrap_or(0);
+    let so_far = if seconds >= 90 { format!("about {} minutes", (seconds + 30) / 60) } else { format!("{seconds} seconds") };
+    let last = packages["last_line"].as_str().map(|line| format!(" Last line of the package log: {line}")).unwrap_or_default();
+    let what = format!("Julia is getting {which} ready for this notebook ({step}, {so_far} so far). The cells are queued and run when that is done.");
+    if seconds >= INSTALL_USUAL_SECONDS {
+        format!(
+            "{what} This is taking longer than usual. Tell the user, with the last line of the package log. \
+             Call read_cell again only if that line has changed since your last read; if it hasn't, stop waiting and let the user decide.{last}"
+        )
+    } else {
+        format!(
+            "{what} This is normal the first time a package is used, and can take several minutes; later notebooks reuse it. \
+             Tell the user it is installing, then wait: call read_cell on a cell that is queued, and while packages install each call waits up to {WAIT_SECONDS} seconds.{last}"
+        )
+    }
+}
+
 /// What Claude hears when a notebook's own Julia ends during a run it waits
 /// for, in the words of the app's crash page.
 fn exited_message(cell: Option<&str>) -> String {
@@ -1080,6 +1148,18 @@ fn julia_iterate(value: &Value) -> Result<Vec<Value>, String> {
 /// its error's kind, as for every adapter error (`ArgumentError: kind::message`).
 pub(super) fn already_open(error: &str) -> bool {
     error.strip_prefix("ArgumentError: ").is_some_and(|rest| rest.starts_with("notebook_already_open::"))
+}
+
+/// Whether R notebooks can open here: not on Windows (Ember doesn't run there yet), and only in
+/// tests until their tools and skills are ready (ENDEAVOR_TEST_R_NOTEBOOKS, a debug build only).
+fn r_notebooks(what: &str) -> Result<(), String> {
+    if cfg!(windows) {
+        return Err(argument_error(&format!("unsupported::{what}. R notebooks don't run on Windows yet")));
+    }
+    if !(cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_R_NOTEBOOKS").is_some()) {
+        return Err(argument_error(&format!("unsupported::{what}. R notebooks can't be opened here yet")));
+    }
+    Ok(())
 }
 
 pub fn argument_error(message: &str) -> String {

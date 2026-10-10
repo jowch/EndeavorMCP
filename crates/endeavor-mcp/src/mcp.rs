@@ -445,7 +445,7 @@ impl Bridge {
             Err(result) => return result,
         };
         let reply = if run {
-            self.notebooks.tool(&caller.owner, name, &arguments, &folder, call.began)
+            self.notebooks.tool_watched(&caller.owner, name, &arguments, &folder, call.began, call.gone)
         } else {
             self.notebooks.tool_unrun(&caller.owner, name, &arguments, &folder, call.began)
         };

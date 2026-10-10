@@ -1,6 +1,6 @@
 [
   {
-    "description": "List the notebooks open in the runtime, with each one's run state. `this_session` marks this session's notebook; if none has it, the session has no notebook yet and `new_notebook` makes one. `pending_run` is the edited cells not yet run, `running` the cells queued or running, and `execution_allowed` is false in safe preview or while the notebook's process is stopped. A session changes only its own notebook. If the user asks you to work in one whose `this_session` is false: when this session has no notebook yet, `open_notebook` with its path joins it; otherwise tell the user that needs a new session.",
+    "description": "List the notebooks open in the runtime, with each one's run state. `this_session` marks this session's notebook; if none has it, the session has no notebook yet and `new_notebook` makes one. `pending_run` is the edited cells not yet run, `running` the cells queued or running, `packages` the package install under way if there is one, and `execution_allowed` is false in safe preview or while the notebook's process is stopped. A session changes only its own notebook. If the user asks you to work in one whose `this_session` is false: when this session has no notebook yet, `open_notebook` with its path joins it; otherwise tell the user that needs a new session.",
     "inputSchema": {
       "properties": {},
       "required": [],
@@ -9,7 +9,7 @@
     "name": "list_notebooks"
   },
   {
-    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run). Counts as the read an edit needs. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`.",
+    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run). Counts as the read an edit needs. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`. While the notebook installs the packages its cells need, a queued cell's read waits for that, up to 45 seconds, and then has `packages` (the step, the packages, how long so far, and the last line of the package log) and a `message`.",
     "inputSchema": {
       "properties": {
         "cell_id": {
