@@ -51,12 +51,14 @@ Each task is a folder in `smoke/tasks/`:
 
 - `prompt.md`: what the user asks, in a user's words.
 - `followup.md` (optional): what the user asks next, in the same session,
-  once the agent has answered.
+  sent only once the agent's answer to the first has ended. An attempt where
+  the agent answered fewer messages than it was sent fails.
 - `checks.json`: what decides pass or fail.
 - `project/` (optional): files the project folder starts with.
 - `setup.json` (optional): `{ "open": ["analysis.jl"] }` opens those
   notebooks before the agent starts, allowed to run and run to the end, as if
-  the user had them open already.
+  the user had them open already. `{ "depot": "empty" }` gives the task an
+  empty depot of its own, for a first install.
 - `inject.json` (optional): a second person working in the same notebook.
   It names a moment, the first time the agent calls one of `tools` (`"when":
   "before"` the call reaches the server or `"after"` its reply), and the calls
@@ -76,12 +78,23 @@ any agent that runs the plugin.
 The proxy writes into the attempt's folder, and the plugin's own hooks still
 run, as they do for a user. When the agent ends, the runner opens its own MCP session on the same
 runtime and reads every open notebook: each cell's code, output and error.
-Then it stops the runtime. If the task has a `reproducible` check, it opens
-each notebook again from its file in a fresh runtime, runs every cell from
-the top, and reads them again. Then it runs the checks.
+Then it stops the runtime. If the task has a `reproducible` check, it copies
+the task's `project/` and the notebook files the agent left into a fresh
+folder, opens each notebook there in a fresh runtime, runs every cell from
+the top, and reads them again. Then it runs the checks. The re-run shares the
+depot, so a notebook whose packages weren't saved in its file can still pass.
+
+Before the first task, the runner warms the shared depot: it opens
+`smoke/warm/warm.jl`, which loads the packages the tasks' notebooks reach for
+(DataFrames, Plots), so no task passes or fails on whether an earlier one
+installed them. On a new machine this takes several minutes. N9 is the one
+task with an empty depot of its own, for a first install.
 
 A task that fails runs twice more. It is **failing** if all three runs fail,
-and **flaky** if only some do. Read why before blaming the agent: in the
+and **flaky** if only some do. A task whose `checks.json` has
+`"expected_to_fail": "#58"` fails today on that issue: it runs once, shows
+as an **expected failure**, and doesn't fail the run. When it passes, the
+summary says the issue may be fixed. Read why before blaming the agent: in the
 first runs, N1 was flaky because its check wanted `4.978` and Claude
 sometimes rounded to `4.979`. The check was wrong.
 
@@ -105,7 +118,7 @@ makes it reported only: a failed soft check doesn't fail the task.
 
 | Check | Passes when |
 |---|---|
-| `called` `tool`, `min` (1), `max` | the agent called `tool` between `min` and `max` times |
+| `called` `tool`, `min` (1), `max`, `ok` | the agent called `tool` between `min` and `max` times; with `ok`, counting only calls that worked. A call turned away while Julia starts doesn't count |
 | `not_called` `tool` | it never called `tool` |
 | `called_after_last_run` `tool` | it called `tool` after the last call that ran cells |
 | `notebooks` `count` | that many notebooks are open at the end |
@@ -119,7 +132,7 @@ makes it reported only: a failed soft check doesn't fail the task.
 | `injected` | the second person in `inject.json` made all its calls |
 | `code_contains` `texts`, `not` | some cell's code contains every one of `texts` and none of `not` |
 | `ran_after_reply` `texts` | after a tool reply containing every one of `texts` (an error to deal with), a later call ran cells and worked |
-| `reproducible` | run again from its file in a fresh runtime, every notebook gives the same output and errors, cell by cell. Cells still running when the agent ended, and pictures, aren't compared, and a notebook with nothing left to compare fails |
+| `reproducible` | run again from its file in a fresh runtime and a fresh copy of the project folder, every notebook gives the same output and errors, cell by cell. Cells still running when the agent ended, and pictures, aren't compared, and a notebook with nothing left to compare fails |
 | `agent_tools_not_used` `tools` | the agent didn't use these tools of its own (read from Claude's transcript) |
 
 An unknown check fails. A check on the last message is loose by design: it
@@ -138,9 +151,13 @@ something subtle, make it soft.
 | `N6-conflict` | change a value; someone else changes a cell it depends on just before the edit | `run_conflict`: the agent reads the change, runs again, keeps the other person's edit |
 | `N7-plot` | a plot | the agent looks at the picture (`view_cell_output`) before it reports |
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
+| `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: expected to fail until #58 is fixed |
 
 Every task that leaves a notebook also checks it is `reproducible`, except
-N3, whose notebook isn't meant to run.
+N3, whose notebook isn't meant to run, and N9.
+
+Each `result.json` and the summary record the model or models that answered
+(from Claude's own events), so runs can be compared across models later.
 
 ## Other agents
 

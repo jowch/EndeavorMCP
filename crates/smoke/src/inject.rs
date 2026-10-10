@@ -1,7 +1,8 @@
 //! A second person in the notebook. A task's `inject.json` names a moment, the
-//! first time the agent calls one of `tools` on `notebook` (`"when": "before"`
-//! the call reaches the server, or `"after"` its reply, if it succeeded), and
-//! the calls another Endeavor session then makes there. The proxy holds the
+//! first time the agent calls one of `tools` (`"when": "before"` the call
+//! reaches the server, or `"after"` its reply, if it succeeded), and the calls
+//! another Endeavor session then makes in `notebook`. Which notebook the
+//! agent's call was on isn't checked: a task has one. The proxy holds the
 //! agent's message until they are done, so the timing is the same every run.
 //! Each step is logged as `"dir": "inject"`, which the `injected` check reads.
 //!

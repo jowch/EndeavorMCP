@@ -157,6 +157,10 @@ pub fn main(args: &[String]) -> i32 {
     }
     eprintln!("endeavor-smoke: {} task(s), results in {}", tasks.len(), out.display());
     let scratch = std::env::temp_dir().join(format!("endeavor-smoke-{}-{}", utc_stamp(), std::process::id()));
+    if let Err(e) = warm(&repo, &scratch.join("warm"), &endeavor, &o.julia, &depot) {
+        eprintln!("endeavor-smoke: warming the depot failed: {e}");
+        return 2;
+    }
     let mut rows = Vec::new();
     for task in &tasks {
         let id = task.file_name().unwrap().to_string_lossy().into_owned();
@@ -172,24 +176,56 @@ pub fn main(args: &[String]) -> i32 {
             let kept = out.join(&id).join(format!("attempt-{n}"));
             let _ = std::fs::remove_dir_all(&kept);
             std::fs::create_dir_all(&kept).unwrap();
-            copy_dir(&work, &kept, &["state", "home", "rerun"]);
+            copy_dir(&work, &kept, &["state", "home", "rerun", "depot"]);
             let _ = std::fs::remove_dir_all(&work);
             let passed = result["passed"] == true;
             attempts.push(result);
             // A first run that passes is enough; one that fails runs `retries` more times.
-            if (n == 1 && passed) || n as u32 > o.retries {
+            // A task known to fail runs once: its retries would only say so again.
+            if (n == 1 && passed) || n as u32 > o.retries || expected_failure(task).is_some() {
                 break;
             }
         }
-        rows.push(row(&id, &attempts));
+        rows.push(row(&id, &attempts, expected_failure(task).as_deref()));
     }
     let _ = std::fs::remove_dir_all(&scratch);
-    let summary = json!({ "commit": commit, "agent": agent, "tasks": rows });
+    let mut models: Vec<String> = rows.iter().flat_map(|r| r["models"].as_array().cloned().unwrap_or_default()).filter_map(|m| m.as_str().map(str::to_owned)).collect();
+    models.sort();
+    models.dedup();
+    let summary = json!({ "commit": commit, "agent": agent, "models": models, "tasks": rows });
     let _ = std::fs::write(out.join("summary.json"), serde_json::to_string_pretty(&summary).unwrap());
     let md = summary_md(&summary);
     let _ = std::fs::write(out.join("summary.md"), &md);
     println!("{md}");
-    if rows.iter().all(|r| r["status"] == "pass") { 0 } else { 1 }
+    if rows.iter().all(|r| r["status"] == "pass" || r["status"] == "expected failure") { 0 } else { 1 }
+}
+
+/// Install and precompile, into the shared depot, the packages the tasks'
+/// notebooks reach for (smoke/warm/warm.jl), so no task's result depends on
+/// whether an earlier task installed them. A first install on an empty depot is
+/// a task of its own.
+fn warm(repo: &Path, work: &Path, endeavor: &Path, julia: &str, depot: &str) -> Result<(), String> {
+    eprintln!("── warming the depot (the first time, this installs Pluto and the packages, and takes several minutes)");
+    let project = work.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    copy_dir(&repo.join("smoke/warm"), &project, &[]);
+    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "depot": depot }).to_string()).unwrap();
+    let began = Instant::now();
+    let result = crate::mcp::Session::start(endeavor, work, &project).and_then(|mut s| {
+        crate::mcp::open_and_run(&mut s, "warm.jl", RUN_LIMIT)?;
+        let errored: Vec<String> = crate::mcp::notebooks(&mut s)?.iter().flat_map(|nb| nb.cells.iter().filter(|c| c.errored).map(|c| format!("{}: {}", c.code, c.output))).collect();
+        if errored.is_empty() { Ok(()) } else { Err(errored.join("; ")) }
+    });
+    stop_runtime(endeavor, work);
+    let _ = std::fs::remove_dir_all(work);
+    eprintln!("   done in {:.0}s", began.elapsed().as_secs_f64());
+    result
+}
+
+/// The issue a task is known to fail on until it is fixed: `"expected_to_fail": "#58"` in its checks.json.
+fn expected_failure(task: &Path) -> Option<String> {
+    let specs: Value = serde_json::from_str(&std::fs::read_to_string(task.join("checks.json")).ok()?).ok()?;
+    specs["expected_to_fail"].as_str().map(str::to_owned)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -201,6 +237,9 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         copy_dir(&task.join("project"), &project, &[]);
     }
     let project = project.canonicalize().unwrap();
+    let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    // A task about a first install gets an empty depot of its own instead of the shared, warmed one.
+    let depot = if setup["depot"] == "empty" { format!("{}:", work.join("depot").display()) } else { depot.to_owned() };
     std::fs::write(work.join("settings.json"), json!({ "julia": julia, "depot": depot }).to_string()).unwrap();
     if task.join("inject.json").is_file() {
         std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();
@@ -211,7 +250,6 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     let mut problems: Vec<String> = Vec::new();
 
     // The notebooks the task starts with open, as a person working in them left them.
-    let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     let opens: Vec<&str> = setup["open"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     if !opens.is_empty() {
         let opened = crate::mcp::Session::start(endeavor, work, &project).and_then(|mut s| opens.iter().try_for_each(|path| crate::mcp::open_and_run(&mut s, path, RUN_LIMIT).map(drop)));
@@ -233,7 +271,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         Err(e) => (Vec::new(), Some(e)),
     };
     let wants_rerun = specs["checks"].as_array().into_iter().flatten().any(|c| c["check"] == "reproducible");
-    let rerun = (wants_rerun && read_error.is_none()).then(|| rerun(&notebooks, work, &project, endeavor));
+    let rerun = (wants_rerun && read_error.is_none()).then(|| rerun(&notebooks, task, work, &project, endeavor));
     let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref() };
     let outcomes: Vec<checks::Outcome> = specs["checks"].as_array().into_iter().flatten().map(|spec| checks::run(spec, &ev)).collect();
     if let Some(e) = &agent.problem {
@@ -255,6 +293,8 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
             "turns": agent.turns,
             "cost_usd": agent.cost_usd,
         },
+        "model": agent.model,
+        "models_used": agent.models_used,
         "final_message": agent.final_message,
         "notebooks": notebooks_json(&notebooks),
         "rerun": rerun.as_ref().map(|r| r.as_ref().map_or_else(|e| json!(e), |n| notebooks_json(n))),
@@ -263,18 +303,42 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
 
 /// The agent's notebooks run again from their files, from the top, in a
 /// runtime of their own: what someone who opens them later would see.
-fn rerun(notebooks: &[crate::mcp::Notebook], work: &Path, project: &Path, endeavor: &Path) -> Result<Vec<crate::mcp::Notebook>, String> {
+///
+/// They run in a fresh copy of the task's project folder holding only the
+/// notebook files the agent left, so a file a cell wrote, which a later cell
+/// read after the first was deleted, isn't there. The notebooks come back
+/// under the agent's paths, to compare.
+fn rerun(notebooks: &[crate::mcp::Notebook], task: &Path, work: &Path, project: &Path, endeavor: &Path) -> Result<Vec<crate::mcp::Notebook>, String> {
     let fresh = work.join("rerun");
-    std::fs::create_dir_all(&fresh).unwrap();
+    let copy = fresh.join("project");
+    std::fs::create_dir_all(&copy).unwrap();
     std::fs::copy(work.join("settings.json"), fresh.join("settings.json")).unwrap();
-    let result = crate::mcp::Session::start(endeavor, &fresh, project).and_then(|mut s| {
-        for nb in notebooks {
-            crate::mcp::open_and_run(&mut s, &nb.path, RUN_LIMIT)?;
+    if task.join("project").is_dir() {
+        copy_dir(&task.join("project"), &copy, &[]);
+    }
+    let copy = copy.canonicalize().unwrap();
+    let mut paths = Vec::new();
+    for nb in notebooks {
+        let relative = Path::new(&nb.path).strip_prefix(project).map_err(|_| format!("{} isn't in the project folder", nb.path))?;
+        let target = copy.join(relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(&nb.path, &target).map_err(|e| format!("{}: {e}", nb.path))?;
+        paths.push((target.display().to_string(), nb.path.clone()));
+    }
+    let result = crate::mcp::Session::start(endeavor, &fresh, &copy).and_then(|mut s| {
+        for (path, _) in &paths {
+            crate::mcp::open_and_run(&mut s, path, RUN_LIMIT)?;
         }
         crate::mcp::notebooks(&mut s)
     });
     stop_runtime(endeavor, &fresh);
-    result
+    let mut again = result?;
+    for nb in &mut again {
+        if let Some((_, agents)) = paths.iter().find(|(path, _)| Path::new(path) == Path::new(&nb.path)) {
+            nb.path = agents.clone();
+        }
+    }
+    Ok(again)
 }
 
 /// Notebooks as a result shows them: each cell's first line, state and output, cut short.
@@ -289,6 +353,9 @@ fn notebooks_json(notebooks: &[crate::mcp::Notebook]) -> Value {
 #[derive(Default)]
 struct AgentRun {
     final_message: String,
+    /// The model the session started with, and every model that answered (a subagent can use another).
+    model: Option<String>,
+    models_used: Vec<String>,
     tools: Vec<String>,
     turns: Option<u64>,
     cost_usd: Option<f64>,
@@ -297,9 +364,9 @@ struct AgentRun {
 
 /// Claude Code, headless, with the plugin from this checkout and this binary as
 /// its server. Each of `turns` is a message from the user, in one session: the
-/// next is taken once Claude has answered the last.
+/// next is sent once Claude's answer to the one before has ended.
 fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, exe: &Path, repo: &Path) -> AgentRun {
-    let transcript = std::fs::File::create(work.join("transcript.jsonl")).unwrap();
+    let mut transcript = std::fs::File::create(work.join("transcript.jsonl")).unwrap();
     let stderr = std::fs::File::create(work.join("agent-stderr.txt")).unwrap();
     let spawned = Command::new("claude")
         .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--max-turns", "80"])
@@ -319,44 +386,73 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
         .env("SMOKE_WORK", work)
         .env("SMOKE_PROJECT", project)
         .stdin(Stdio::piped())
-        .stdout(transcript)
+        .stdout(Stdio::piped())
         .stderr(stderr)
         .spawn();
     let mut child = match spawned {
         Ok(c) => c,
         Err(e) => return AgentRun { problem: Some(format!("can't start claude: {e}")), ..AgentRun::default() },
     };
-    {
-        use std::io::Write;
-        let mut stdin = child.stdin.take().unwrap();
-        for turn in turns {
-            let _ = writeln!(stdin, "{}", json!({ "type": "user", "message": { "role": "user", "content": turn } }));
-        }
-        // Closed, so Claude ends after its answer to the last.
+    use std::io::{BufRead, Write};
+    let say = |stdin: &mut std::process::ChildStdin, turn: &str| writeln!(stdin, "{}", json!({ "type": "user", "message": { "role": "user", "content": turn } }));
+    let mut stdin = child.stdin.take();
+    let mut sent = 0;
+    if let Some(stdin) = stdin.as_mut() {
+        let _ = say(stdin, &turns[0]);
+        sent = 1;
     }
+    if sent == turns.len() {
+        // Closed, so Claude ends after its answer.
+        stdin = None;
+    }
+    let (lines, events) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
     let began = Instant::now();
     let mut problem = None;
+    let mut answers = 0;
     loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if began.elapsed() > AGENT_LIMIT => {
+        match events.recv_timeout(Duration::from_millis(500)) {
+            Ok(line) => {
+                let _ = writeln!(transcript, "{line}");
+                if serde_json::from_str::<Value>(&line).is_ok_and(|e| e["type"] == "result") {
+                    answers += 1;
+                    // The user's next message, only now that the last answer has ended.
+                    if let Some(input) = stdin.as_mut().filter(|_| sent < turns.len()) {
+                        let _ = say(input, &turns[sent]);
+                        sent += 1;
+                    }
+                    if sent == turns.len() {
+                        stdin = None;
+                    }
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if began.elapsed() > AGENT_LIMIT => {
                 let _ = child.kill();
-                let _ = child.wait();
                 problem = Some(format!("the agent ran over {} minutes and was ended", AGENT_LIMIT.as_secs() / 60));
                 break;
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(500)),
-            Err(e) => {
-                problem = Some(e.to_string());
-                break;
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
+    }
+    drop(stdin);
+    let _ = child.wait();
+    if problem.is_none() && answers < turns.len() {
+        problem = Some(format!("the agent answered {answers} of the user's {} messages", turns.len()));
     }
     let mut run = AgentRun { problem, ..AgentRun::default() };
     let text = std::fs::read_to_string(work.join("transcript.jsonl")).unwrap_or_default();
     for event in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         match event["type"].as_str() {
             Some("system") if event["subtype"] == "init" => {
+                run.model = run.model.take().or_else(|| event["model"].as_str().map(str::to_owned));
                 let ours = event["mcp_servers"].as_array().into_iter().flatten().find(|s| s["name"] == "plugin:endeavor:endeavor");
                 let mut problems = isolation_problems(&event);
                 if ours.is_none_or(|s| s["status"] != "connected") {
@@ -376,6 +472,11 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
                 run.final_message = event["result"].as_str().unwrap_or_default().to_owned();
                 run.turns = Some(run.turns.unwrap_or(0) + event["num_turns"].as_u64().unwrap_or(0));
                 run.cost_usd = event["total_cost_usd"].as_f64();
+                for model in event["modelUsage"].as_object().into_iter().flat_map(|m| m.keys()) {
+                    if !run.models_used.contains(model) {
+                        run.models_used.push(model.clone());
+                    }
+                }
                 if event["is_error"] == true && run.problem.is_none() {
                     run.problem = Some(format!("the agent's run ended in an error: {}", event["subtype"]));
                 }
@@ -401,9 +502,20 @@ fn stop_runtime(endeavor: &Path, work: &Path) {
 }
 
 /// A task's line in the summary: pass on the first try, flaky if some attempts failed, failing if all did.
-fn row(id: &str, attempts: &[Value]) -> Value {
+/// A task expected to fail on an open issue is an "expected failure" when it fails, and says the issue may
+/// be fixed when it passes.
+fn row(id: &str, attempts: &[Value], expected: Option<&str>) -> Value {
     let failed = attempts.iter().filter(|a| a["passed"] != true).count();
-    let status = if failed == 0 { "pass" } else if failed == attempts.len() { "failing" } else { "flaky" };
+    let status = match expected {
+        Some(_) if failed > 0 => "expected failure".to_owned(),
+        Some(issue) => format!("pass: {issue} may be fixed"),
+        None if failed == 0 => "pass".to_owned(),
+        None if failed == attempts.len() => "failing".to_owned(),
+        None => "flaky".to_owned(),
+    };
+    let mut models: Vec<String> = attempts.iter().flat_map(|a| a["models_used"].as_array().cloned().unwrap_or_default()).filter_map(|m| m.as_str().map(str::to_owned)).collect();
+    models.sort();
+    models.dedup();
     let failures: Vec<String> = attempts
         .iter()
         .filter(|a| a["passed"] != true)
@@ -414,11 +526,13 @@ fn row(id: &str, attempts: &[Value]) -> Value {
         })
         .collect();
     let first = &attempts[0]["metrics"];
-    json!({ "task": id, "status": status, "attempts": attempts.len(), "failed": failed, "failures": failures, "first": first })
+    json!({ "task": id, "status": status, "expected_to_fail": expected, "attempts": attempts.len(), "failed": failed, "failures": failures, "first": first, "models": models })
 }
 
 fn summary_md(summary: &Value) -> String {
-    let mut md = format!("# Smoke run at {}\n\nAgent: {}\n\n| Task | Status | Failed attempts | Tool calls | Tool errors | Time | Cost |\n|---|---|---|---|---|---|---|\n", summary["commit"].as_str().unwrap_or("?"), summary["agent"].as_str().unwrap_or("?"));
+    let models: Vec<&str> = summary["models"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let models = if models.is_empty() { "unknown".to_owned() } else { models.join(", ") };
+    let mut md = format!("# Smoke run at {}\n\nAgent: {}\n\nModels: {models}\n\n| Task | Status | Failed attempts | Tool calls | Tool errors | Time | Cost |\n|---|---|---|---|---|---|---|\n", summary["commit"].as_str().unwrap_or("?"), summary["agent"].as_str().unwrap_or("?"));
     for r in summary["tasks"].as_array().into_iter().flatten() {
         let m = &r["first"];
         md += &format!(
@@ -482,4 +596,21 @@ fn utc_stamp() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02}T{:02}{:02}Z", rest / 3600, rest % 3600 / 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_task_expected_to_fail_doesnt_fail_the_run_and_says_when_it_passes() {
+        let passed = json!({ "passed": true, "metrics": {}, "models_used": ["m"] });
+        let failed = json!({ "passed": false, "metrics": {}, "models_used": ["m", "n"] });
+        assert_eq!(row("N1", std::slice::from_ref(&passed), None)["status"], "pass");
+        assert_eq!(row("N1", &[failed.clone(), passed.clone()], None)["status"], "flaky");
+        assert_eq!(row("N1", &[failed.clone(), failed.clone()], None)["status"], "failing");
+        assert_eq!(row("N9", std::slice::from_ref(&failed), Some("#58"))["status"], "expected failure");
+        assert_eq!(row("N9", &[passed], Some("#58"))["status"], "pass: #58 may be fixed");
+        assert_eq!(row("N1", &[failed], None)["models"], json!(["m", "n"]));
+    }
 }

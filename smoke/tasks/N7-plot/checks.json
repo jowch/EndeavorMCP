@@ -4,6 +4,7 @@
     { "check": "notebooks", "count": 1 },
     { "check": "no_errored_cells" },
     { "check": "called_after_last_run", "tool": "view_cell_output" },
+    { "check": "called", "tool": "view_cell_output", "ok": true },
     { "check": "reproducible" }
   ]
 }

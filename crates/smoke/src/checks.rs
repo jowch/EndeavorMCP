@@ -48,11 +48,13 @@ fn describe(kind: &str, spec: &Value) -> String {
 fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
     let str_list = |key: &str| -> Vec<String> { spec[key].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_owned).collect() };
     match kind {
-        // A tool was called between `min` (default 1) and `max` (default any) times.
+        // A tool was called between `min` (default 1) and `max` (default any)
+        // times; with `ok`, counting only the calls that succeeded.
         "called" => {
             let tool = spec["tool"].as_str().unwrap_or_default();
+            let ok = spec["ok"] == true;
             // A call the runtime turned away while Julia started is the agent waiting as told, not a second call.
-            let n = ev.calls.iter().filter(|c| c.tool == tool && !while_starting(c)).count() as u64;
+            let n = ev.calls.iter().filter(|c| c.tool == tool && !while_starting(c) && !(ok && c.is_error)).count() as u64;
             let (min, max) = (spec["min"].as_u64().unwrap_or(1), spec["max"].as_u64().unwrap_or(u64::MAX));
             if (min..=max).contains(&n) { Ok(format!("{n} calls")) } else { Err(format!("{n} calls")) }
         }
@@ -187,9 +189,11 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             };
             if ev.calls[at + 1..].iter().any(|c| runs(c) && !c.is_error) { Ok(format!("{} calls later", ev.calls.len() - at - 1)) } else { Err(format!("nothing ran after {}", ev.calls[at].tool)) }
         }
-        // Run again from its file in a fresh runtime, each notebook gives what
-        // the agent left: no cell's output or error depends on a deleted
-        // cell, an order that held by chance, or state from an earlier run.
+        // Run again from its file in a fresh runtime and a fresh copy of the
+        // project folder, each notebook gives what the agent left. Pluto's
+        // reactivity already drops what a deleted cell defined; what this
+        // catches is what lives outside the notebook's memory: a file a cell
+        // wrote that a deleted cell made, and the code and order as saved.
         // Cells still running when the agent ended, and pictures, aren't compared.
         "reproducible" => {
             let rerun = match ev.rerun {

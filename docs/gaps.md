@@ -666,12 +666,16 @@ not supported. These gaps stay open.
   to write (#26). In its first runs, Claude asked to "open old.jl and tell me
   what it computes" read the file with its own `Read` and never called
   `open_notebook`, though the skill says to open a notebook the user names
-  (#52; the task now says the user wants to see it). And when a new notebook
-  used a package the depot hadn't installed yet (DataFrames), Claude polled
-  `read_cell` about ten times while the cells sat queued, then ended its turn
-  saying the install was still going. That is honest, but the user gets no
-  result; seen twice, both on a cold depot. Nothing in the replies says
-  packages are installing, so it looks like a hang (#58).
+  (#52; the task now says the user wants to see it).
+- [P1] **A first package install looks like a hang** (#58). When a new
+  notebook uses a package the depot hasn't installed yet (DataFrames, Plots),
+  Pluto installs it before any cell runs, which takes minutes. Meanwhile
+  `read_cell` shows every cell as queued, not running, with no output, and
+  nothing in any reply says packages are installing. In the smoke suite
+  Claude polled about ten times in under a minute, then ended its turn
+  guessing that an install was under way; the user got no result. A new
+  user hits this on their first notebook. The smoke suite's N9 runs on an
+  empty depot and is expected to fail until this is fixed.
 - [P2] **A tool call during a start ends after 45 seconds with `isError`
   true.** The text says Julia is starting and to call the tool again. Codex
   shows it as a failed call, as the trial saw. The 45 seconds are chosen to

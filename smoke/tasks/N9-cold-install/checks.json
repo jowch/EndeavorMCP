@@ -1,0 +1,9 @@
+{
+  "about": "A first notebook on a machine that has never installed anything: an empty depot, so Pluto and DataFrames install while the agent works. Tags: first run, package install. Fails today: while packages install, the cells only read as queued and the agent gives up (#58).",
+  "expected_to_fail": "#58",
+  "checks": [
+    { "check": "notebooks", "count": 1 },
+    { "check": "no_errored_cells" },
+    { "check": "output_contains", "texts": ["74.08", "4.97"] }
+  ]
+}

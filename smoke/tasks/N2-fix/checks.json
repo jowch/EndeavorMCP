@@ -5,6 +5,7 @@
     { "check": "notebooks", "count": 1 },
     { "check": "no_errored_cells" },
     { "check": "output_contains", "texts": ["average is 4.0"] },
+    { "check": "code_contains", "texts": ["sum(data)"] },
     { "check": "called", "tool": "submit_changes", "max": 2, "soft": true },
     { "check": "reproducible" }
   ]
