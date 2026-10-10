@@ -1,5 +1,5 @@
-//! The proxy's log: one JSON object per line, `{"pid": ..., "t": Unix seconds, "dir": "in"|"out", "msg": ...}`,
-//! "in" from the agent and "out" from the server. A line that isn't JSON is kept as a string.
+//! The proxy's log: one JSON object per line, `{"pid": ..., "t": Unix seconds, "dir": "in"|"out"|"inject", "msg": ...}`,
+//! "in" from the agent, "out" from the server, and "inject" a step the second person took (inject.rs). A line that isn't JSON is kept as a string.
 //! `pid` is the proxy's: an agent that restarts its server starts a second proxy on the
 //! same log, whose request ids start over.
 
@@ -71,4 +71,10 @@ pub fn calls(path: &Path) -> Vec<Call> {
         }
     }
     calls.into_iter().map(|(_, c)| c).collect()
+}
+
+/// The second person's steps, in order: `{tool, args, ok, reply}`.
+pub fn injections(path: &Path) -> Vec<Value> {
+    let Ok(file) = File::open(path) else { return Vec::new() };
+    BufReader::new(file).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str::<Value>(&l).ok()).filter(|e| e["dir"] == "inject").map(|e| e["msg"].clone()).collect()
 }

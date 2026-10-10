@@ -11,6 +11,7 @@
       ] },
       { "check": "final_message_contains_any", "texts": ["still running", "still be running", "is running", "not finished", "hasn't finished"] }
     ] },
-    { "check": "output_contains", "texts": ["5050"], "soft": true }
+    { "check": "output_contains", "texts": ["5050"], "soft": true },
+    { "check": "reproducible" }
   ]
 }

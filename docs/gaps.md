@@ -660,12 +660,22 @@ not supported. These gaps stay open.
   the machine tools through `add_machine`, `needs_install`, `use_machine` and
   switching back. Still untested: the new text against the old (the trial in
   the skills audit) and whether a current model needs any rule that was cut.
-  Since 2026-10-10 the smoke suite ([smoke.md](smoke.md)) repeats three tasks
-  with Claude Code (a new notebook, safe preview, a 70 s run); the rest of its
-  tasks are still to write (#26). In its first runs, Claude asked to "open
-  old.jl and tell me what it computes" read the file with its own `Read` and
-  never called `open_notebook`, though the skill says to open a notebook the
-  user names. Seen once; the task now says the user wants to see it.
+  Since 2026-10-10 the smoke suite ([smoke.md](smoke.md)) repeats eight
+  notebook tasks with Claude Code, among them a `stale_read`, a `run_conflict`
+  and a second notebook asked for in one session; the machine tasks are still
+  to write (#26). In its first runs, Claude asked to "open old.jl and tell me
+  what it computes" read the file with its own `Read` and never called
+  `open_notebook`, though the skill says to open a notebook the user names
+  (#52; the task now says the user wants to see it).
+- [P1] **A first package install looks like a hang** (#58). When a new
+  notebook uses a package the depot hasn't installed yet (DataFrames, Plots),
+  Pluto installs it before any cell runs, which takes minutes. Meanwhile
+  `read_cell` shows every cell as queued, not running, with no output, and
+  nothing in any reply says packages are installing. In the smoke suite
+  Claude polled about ten times in under a minute, then ended its turn
+  guessing that an install was under way; the user got no result. A new
+  user hits this on their first notebook. The smoke suite's N9 runs on an
+  empty depot and is expected to fail until this is fixed.
 - [P2] **A tool call during a start ends after 45 seconds with `isError`
   true.** The text says Julia is starting and to call the tool again. Codex
   shows it as a failed call, as the trial saw. The 45 seconds are chosen to

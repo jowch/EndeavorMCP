@@ -16,6 +16,10 @@ pub struct Evidence<'a> {
     /// The agent's own tools it used (for Claude, from its transcript), by name.
     pub agent_tools: &'a [String],
     pub final_message: &'a str,
+    /// The second person's steps (inject.rs).
+    pub injections: &'a [Value],
+    /// The notebooks run again from their files in a fresh runtime, when a check asked for it.
+    pub rerun: Option<&'a Result<Vec<Notebook>, String>>,
 }
 
 pub struct Outcome {
@@ -44,11 +48,13 @@ fn describe(kind: &str, spec: &Value) -> String {
 fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
     let str_list = |key: &str| -> Vec<String> { spec[key].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_owned).collect() };
     match kind {
-        // A tool was called between `min` (default 1) and `max` (default any) times.
+        // A tool was called between `min` (default 1) and `max` (default any)
+        // times; with `ok`, counting only the calls that succeeded.
         "called" => {
             let tool = spec["tool"].as_str().unwrap_or_default();
+            let ok = spec["ok"] == true;
             // A call the runtime turned away while Julia started is the agent waiting as told, not a second call.
-            let n = ev.calls.iter().filter(|c| c.tool == tool && !while_starting(c)).count() as u64;
+            let n = ev.calls.iter().filter(|c| c.tool == tool && !while_starting(c) && !(ok && c.is_error)).count() as u64;
             let (min, max) = (spec["min"].as_u64().unwrap_or(1), spec["max"].as_u64().unwrap_or(u64::MAX));
             if (min..=max).contains(&n) { Ok(format!("{n} calls")) } else { Err(format!("{n} calls")) }
         }
@@ -154,6 +160,78 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 Err(detail)
             }
         }
+        // The second person did everything inject.json says, so the task tested what it is for.
+        "injected" => {
+            let failed: Vec<&Value> = ev.injections.iter().filter(|i| i["ok"] != true).collect();
+            if ev.injections.is_empty() {
+                Err("the moment never came: the agent made no call it waits for".into())
+            } else if let Some(f) = failed.first() {
+                Err(format!("{} failed: {}", f["tool"].as_str().unwrap_or("starting"), clip(&f["reply"].to_string(), 300)))
+            } else {
+                Ok(format!("{} steps", ev.injections.len()))
+            }
+        }
+        // Some cell's code contains every one of `texts`; with `not`, also none of those.
+        "code_contains" => {
+            let (texts, not) = (str_list("texts"), str_list("not"));
+            let found = ev.notebooks.iter().flat_map(|n| &n.cells).any(|c| texts.iter().all(|t| c.code.contains(t.as_str())) && !not.iter().any(|t| c.code.contains(t.as_str())));
+            if found { Ok(String::new()) } else { Err("no cell's code has them".into()) }
+        }
+        // After a reply containing every one of `texts` (an error the agent had
+        // to deal with), a later call ran cells and succeeded.
+        "ran_after_reply" => {
+            let texts = str_list("texts");
+            let Some(at) = ev.calls.iter().position(|c| {
+                let reply = c.reply.to_string();
+                texts.iter().all(|t| reply.contains(t.as_str()))
+            }) else {
+                return Err("no tool reply has them".into());
+            };
+            if ev.calls[at + 1..].iter().any(|c| runs(c) && !c.is_error) { Ok(format!("{} calls later", ev.calls.len() - at - 1)) } else { Err(format!("nothing ran after {}", ev.calls[at].tool)) }
+        }
+        // Run again from its file in a fresh runtime and a fresh copy of the
+        // project folder, each notebook gives what the agent left. Pluto's
+        // reactivity already drops what a deleted cell defined; what this
+        // catches is what lives outside the notebook's memory: a file a cell
+        // wrote that a deleted cell made, and the code and order as saved.
+        // Cells still running when the agent ended, and pictures, aren't compared.
+        "reproducible" => {
+            let rerun = match ev.rerun {
+                None => return Err("the notebooks weren't run again".into()),
+                Some(Err(e)) => return Err(format!("running them again: {e}")),
+                Some(Ok(rerun)) => rerun,
+            };
+            if ev.notebooks.is_empty() {
+                return Err("no notebook to run again".into());
+            }
+            let mut differ = Vec::new();
+            let mut compared = 0;
+            for nb in ev.notebooks {
+                let Some(again) = rerun.iter().find(|r| r.path == nb.path) else {
+                    differ.push(format!("{} wasn't opened again", nb.path));
+                    continue;
+                };
+                for cell in nb.cells.iter().filter(|c| !c.busy && !is_picture(&c.output)) {
+                    compared += 1;
+                    match again.cell(&cell.id) {
+                        None => differ.push(format!("{}: gone", first_line(&cell.code))),
+                        Some(a) if a.errored != cell.errored => differ.push(format!("{}: errored {} then {}", first_line(&cell.code), cell.errored, a.errored)),
+                        Some(a) if a.output.trim_end() != cell.output.trim_end() => {
+                            differ.push(format!("{}: {:?} then {:?}", first_line(&cell.code), clip(&cell.output, 120), clip(&a.output, 120)))
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            if !differ.is_empty() {
+                Err(differ.join("; "))
+            } else if compared == 0 {
+                // Every cell was a picture or still running: the check would pass on nothing.
+                Err("no cell to compare".into())
+            } else {
+                Ok(format!("{compared} cells the same"))
+            }
+        }
         // The agent never used these tools of its own (e.g. writing the notebook's file).
         "agent_tools_not_used" => {
             let tools = str_list("tools");
@@ -162,6 +240,11 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
         }
         _ => Err(format!("unknown check {kind:?}")),
     }
+}
+
+/// An output that is a picture, which a second run needn't draw byte for byte the same.
+fn is_picture(output: &str) -> bool {
+    output.contains("data:image") || output.contains("<img") || output.contains("<svg") || output.len() > 20_000
 }
 
 /// Whether the runtime turned the call away because Julia was still starting.
@@ -262,7 +345,7 @@ mod tests {
     }
 
     fn judge(spec: Value, calls: &[Call]) -> Outcome {
-        run(&spec, &Evidence { calls, notebooks: &[], agent_tools: &[], final_message: "" })
+        run(&spec, &Evidence { calls, notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None })
     }
 
     #[test]
@@ -315,5 +398,43 @@ mod tests {
         waited[0].is_error = true;
         waited[0].reply = json!("Julia is starting on this computer. To wait, call the notebook tool you want again.");
         assert!(judge(json!({ "check": "called", "tool": "new_notebook", "max": 1 }), &waited).passed, "a call turned away while Julia starts isn't counted");
+    }
+
+    fn notebook(cells: &[(&str, &str, bool)]) -> Notebook {
+        let cells = cells.iter().map(|(id, output, busy)| crate::mcp::Cell { id: id.to_string(), code: format!("{id} = 1"), output: output.to_string(), busy: *busy, ..Default::default() }).collect();
+        Notebook { path: "/p/a.jl".into(), execution_allowed: true, cells }
+    }
+
+    #[test]
+    fn a_rerun_must_give_the_same_outputs_except_running_cells_and_pictures() {
+        let left = [notebook(&[("a", "1", false), ("b", "2", false), ("c", "", true), ("d", "<img src=\"data:image/png;base64,AAA\">", false)])];
+        let judge = |rerun: Result<Vec<Notebook>, String>| {
+            let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&rerun) };
+            run(&json!({ "check": "reproducible" }), &ev)
+        };
+        assert!(judge(Ok(vec![notebook(&[("a", "1", false), ("b", "2\n", false), ("c", "3", false), ("d", "<img src=\"data:image/png;base64,BBB\">", false)])])).passed);
+        let changed = judge(Ok(vec![notebook(&[("a", "1", false), ("b", "5", false), ("c", "3", false), ("d", "", false)])]));
+        assert!(!changed.passed && changed.detail.contains("b = 1"), "{}", changed.detail);
+        assert!(!judge(Ok(vec![notebook(&[("a", "1", false)])])).passed, "a cell missing from the rerun fails");
+        assert!(!judge(Err("Julia didn't start".into())).passed);
+        let busy = [notebook(&[("c", "", true)])];
+        let ev = Evidence { calls: &[], notebooks: &busy, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("c", "3", false)])])) };
+        assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "nothing compared fails");
+        let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: None };
+        assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "no rerun at all fails");
+    }
+
+    #[test]
+    fn a_conflict_must_be_followed_by_a_run_that_worked_and_the_second_person_must_have_acted() {
+        let conflict = json!({ "warnings": ["run_conflict::Another Endeavor session changed t. The edit is staged, not run."] });
+        let calls = calls(&[("edit_cell", json!({ "run_after": true }), conflict.clone()), ("read_cell", json!({}), json!({})), ("submit_changes", json!({}), json!({ "execution": { "status": "completed" } }))]);
+        assert!(judge(json!({ "check": "ran_after_reply", "texts": ["run_conflict"] }), &calls).passed);
+        let only_read = calls[..2].to_vec();
+        assert!(!judge(json!({ "check": "ran_after_reply", "texts": ["run_conflict"] }), &only_read).passed);
+
+        let injected = |steps: &[Value]| run(&json!({ "check": "injected" }), &Evidence { calls: &[], notebooks: &[], agent_tools: &[], final_message: "", injections: steps, rerun: None }).passed;
+        assert!(injected(&[json!({ "tool": "read_cell", "ok": true }), json!({ "tool": "edit_cell", "ok": true })]));
+        assert!(!injected(&[json!({ "tool": "read_cell", "ok": true }), json!({ "tool": "edit_cell", "ok": false })]));
+        assert!(!injected(&[]), "a moment that never came fails");
     }
 }
