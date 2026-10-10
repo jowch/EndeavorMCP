@@ -200,7 +200,17 @@ Next:
   it with rig or the system's packages, or to use a cluster's module.
   Ember comes from its r-universe repository (`core::EMBER_REPOSITORY`), which
   builds Ember's latest main: a binary where r-universe has one, else the
-  source package (Linux today, and Apple Silicon until r-universe builds it).
+  source package (Linux today). r-universe has no Apple Silicon build (Ember
+  #66), so Ember's own CI builds one for R release and oldrel on each push to
+  main and publishes it as a one-build repository in a GitHub release per R
+  version (`core::EMBER_MAC_ARM64`, `macos-arm64-r4.6`). An Apple Silicon Mac
+  installs from that first, then from r-universe; an R version with no such
+  release gets r-universe's source. A Mac without the developer tools that has
+  an Ember skips r-universe's source, which it couldn't build: when GitHub
+  can't be reached it keeps its Ember and says nothing. With the tools, it
+  installs r-universe's source build then, and goes back to GitHub's at the
+  next start that reaches it. The downloaded file must have the SHA256 the
+  index lists, or it isn't installed (and isn't counted as a failed build).
   Each time the core starts R, `runtime/r/install.R` installs it, or updates it
   when there's a newer build, into `~/.cache/endeavor/r/ember`
   (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
@@ -227,7 +237,17 @@ Next:
   started ahead in the background. That never downloads Julia; Pluto's
   packages install on the first start in a fresh depot, as before. `e2e_r` runs an R notebook with no Julia.
   The app doesn't pass the flag yet, so its runtimes start Julia at once; its
-  step is an app issue. The interface number is 3.
+  step is an app issue.
+- The app can ask where Julia is (#96): `endeavor/julia_status` answers
+  `not_started`, `starting` (the step in words, such as "Downloading Julia
+  1.12.6… 42%", and `quiet_seconds` since the last sign of progress), `ready`,
+  or `failed` (the error's code and why), and never starts Julia. Reading a
+  failure there leaves it for the agent's next call to hear; the app's Retry
+  is `endeavor/start_julia`, which starts Julia afresh (or ahead, before
+  anything needs it). A start ends: Julia that makes no progress for 30
+  minutes (no new step, nothing new in the runtime's log) is stopped and the
+  start fails, and a download under 1 kB/s for 5 minutes fails and resumes on
+  the next try. The interface number is 5.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds

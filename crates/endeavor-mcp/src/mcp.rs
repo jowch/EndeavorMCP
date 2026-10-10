@@ -65,9 +65,10 @@ pub(crate) fn current_name(name: &str) -> &str {
 }
 
 /// `/call` methods the core answers (core.rs, `julia_call`): Pluto's folder for new notebooks, ending
-/// the runtime, and allowing Endeavor's own Julia to be downloaded when the runtime finds none as Julia
-/// is first needed, or its own R to be installed on a Mac when no R is found.
-const JULIA_CALLS: [&str; 4] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install", "endeavor/allow_r_install"];
+/// the runtime, allowing Endeavor's own Julia to be downloaded when the runtime finds none as Julia
+/// is first needed, or its own R to be installed on a Mac when no R is found, where Julia is, and
+/// starting it now (the app's Retry).
+const JULIA_CALLS: [&str; 6] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install", "endeavor/allow_r_install", "endeavor/julia_status", "endeavor/start_julia"];
 
 /// Whether a runtime offers a tool by this name, to some session, the old name of a renamed tool
 /// included (a past session's calls use it). The machine tools are the front's.
@@ -1103,7 +1104,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (4, "00783e892a3fcb3d"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (5, "00783e892a3fcb3d"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1146,11 +1147,11 @@ mod tests {
         // caught here; that stays the author's to judge.
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
-            "allow_julia_install", "allow_r_install", "answer_run", "file_info", "move_notebook", "new_notebook", "recent_sessions", "restart_notebook", "run_preview", "set_folder",
-            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "stop_notebook", "tool_result",
+            "allow_julia_install", "allow_r_install", "answer_run", "file_info", "julia_status", "move_notebook", "new_notebook", "recent_sessions", "restart_notebook", "run_preview", "set_folder",
+            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (4, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (5, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

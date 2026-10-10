@@ -2,7 +2,11 @@
 # it when a newer build is there. The core runs it each time it starts R for an
 # R notebook, before R's adapter:
 #
-#   Rscript --vanilla runtime/r/install.R <folder> <repository>
+#   Rscript --vanilla runtime/r/install.R <folder> <repository> [<mac-arm64>]
+#
+# <mac-arm64> is where Ember's CI publishes its Apple Silicon Mac builds, one
+# repository per R version (<mac-arm64>/macos-arm64-r4.6): r-universe has none
+# (Ember #66). On an Apple Silicon Mac they come first, then r-universe.
 #
 # <folder> holds one library per Ember build, named by the first 12 characters
 # of the SHA256 the repository lists for the file (r-universe's PACKAGES has no
@@ -40,29 +44,44 @@ installed <- function(build) nzchar(build) && dir.exists(file.path(folder, build
 state <- read_state()
 failed <- strsplit(state$Failed, " ", fixed = TRUE)[[1]]
 
-# The newest build: a binary where r-universe has one for this platform and R,
-# else the source package. NULL when ember isn't listed, NA when the repository
-# didn't answer.
+# The newest build, from the first of these places that lists one: Ember's own
+# Apple Silicon build, a binary where r-universe has one for this platform and
+# R, else the source package. Its row of the index, which the download uses
+# too, so it gets the build chosen here even if the index changes meanwhile.
+# NULL when ember isn't listed (or a repository didn't answer, which R only
+# warns about), NA when R couldn't ask.
 options(timeout = 20)
-newest <- function(type) tryCatch({
-  listed <- suppressWarnings(available.packages(repos = universe, type = type, fields = "SHA256"))
-  if ("ember" %in% rownames(listed)) listed["ember", ]
+newest <- function(where) tryCatch({
+  listed <- suppressWarnings(available.packages(contriburl = where$contriburl, type = where$type, fields = "SHA256"))
+  if ("ember" %in% rownames(listed)) listed["ember", , drop = FALSE]
 }, error = function(e) {
   message(conditionMessage(e))
   NA
 })
-type <- .Platform$pkgType
-build <- if (type != "source") newest(type)
-if (is.null(build)) {
-  type <- "source"
-  build <- newest(type)
+binary <- .Platform$pkgType
+places <- list(list(contriburl = contrib.url(universe, "source"), type = "source"))
+if (binary != "source") places <- c(list(list(contriburl = contrib.url(universe, binary), type = binary)), places)
+if (length(args) > 2 && nzchar(args[[3]]) && binary != "source" && startsWith(R.version$platform, "aarch64-apple-darwin")) {
+  version <- paste(R.version$major, sub("\\..*", "", R.version$minor), sep = ".")
+  places <- c(list(list(contriburl = paste0(args[[3]], "/macos-arm64-r", version), type = binary)), places)
+  # Without the developer tools, r-universe's source can't be built here. When
+  # Ember's own build can't be reached and an Ember is installed, trying it
+  # would only fail and say the newest Ember didn't work, so keep the installed one.
+  tools_here <- suppressWarnings(system2("xcode-select", "-p", stdout = FALSE, stderr = FALSE)) == 0
+  if (installed(state$Current) && !tools_here) places <- Filter(function(where) where$type != "source", places)
 }
-if (!is.character(build)) {
+for (where in places) {
+  listed <- newest(where)
+  if (!is.null(listed)) break
+}
+type <- where$type
+build <- if (is.matrix(listed)) listed[1, ]
+if (is.null(build)) {
   if (installed(state$Current)) {
-    message("Couldn't reach Ember's repository (", universe, "); R notebooks use the installed Ember, ", state$Current, ".")
+    message("Couldn't reach Ember's repositories, or they list no Ember for this R; R notebooks use the installed Ember, ", state$Current, ".")
     quit(status = 0)
   }
-  message("Couldn't reach Ember's repository (", universe, ") to install Ember for R notebooks.")
+  message("Couldn't reach Ember's repositories (", universe, ") to install Ember for R notebooks.")
   quit(status = 1)
 }
 sha <- if (is.na(build[["SHA256"]])) build[["Version"]] else build[["SHA256"]]
@@ -118,11 +137,20 @@ dir.create(part)
 # Downloaded first, so a download that fails isn't counted against the build.
 downloads <- tempfile("ember")
 dir.create(downloads)
-file <- tryCatch(download.packages("ember", downloads, repos = universe, type = type, quiet = TRUE)[1, 2], error = function(e) {
+file <- tryCatch(download.packages("ember", downloads, available = listed, contriburl = where$contriburl, type = type, quiet = TRUE)[1, 2], error = function(e) {
   message(conditionMessage(e))
   NA
 })
-if (is.na(file)) fail(paste("Couldn't download Ember", name, "from", universe), blame = FALSE)
+if (is.na(file)) fail(paste("Couldn't download Ember", name, "from", where$contriburl), blame = FALSE)
+# The file is the build the index lists, not one cut short or changed on the
+# way. tools::sha256sum came with R 4.5; before it, coreutils' sha256sum.
+sha256_of <- function(file) {
+  if (exists("sha256sum", asNamespace("tools"))) return(unname(tools::sha256sum(file)))
+  if (!nzchar(Sys.which("sha256sum"))) return(NA)
+  sub(" .*", "", system2("sha256sum", shQuote(file), stdout = TRUE)[[1]])
+}
+got <- if (!is.na(build[["SHA256"]])) sha256_of(file) else NA
+if (!is.na(got) && got != build[["SHA256"]]) fail(paste0("The download of Ember ", name, " from ", where$contriburl, " isn't the file its index lists (SHA256 ", got, ")"), blame = FALSE)
 install.packages(file, lib = part, repos = NULL, type = type)
 loaded <- tryCatch({
   loadNamespace("ember", lib.loc = c(part, .libPaths()))

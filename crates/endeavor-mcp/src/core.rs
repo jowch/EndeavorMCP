@@ -50,7 +50,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 4;
+pub const INTERFACE: u32 = 5;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -364,6 +364,8 @@ enum Phase {
 
 struct JuliaNow {
     phase: Phase,
+    /// While starting: the last sign of progress, a new step or new lines in the runtime's log.
+    moved: std::time::Instant,
     /// Why the last start failed has been said.
     said: bool,
     /// How Julia ended, if the one started last did.
@@ -413,7 +415,7 @@ impl JuliaStarter {
             #[cfg(unix)]
             mask: None,
             spawn: Spawner::new(),
-            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, said: false, exited: None }),
+            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), said: false, exited: None }),
             changed: std::sync::Condvar::new(),
             pid: 0.into(),
             stopping: false.into(),
@@ -432,6 +434,7 @@ impl JuliaStarter {
             return;
         }
         now.phase = Phase::Starting("Julia is starting".into());
+        now.moved = std::time::Instant::now();
         now.exited = None;
         drop(now);
         let served = served.clone();
@@ -508,9 +511,47 @@ impl JuliaStarter {
     }
 
     fn step(&self, words: String) {
-        if let Phase::Starting(step) = &mut self.now.lock().unwrap().phase {
+        let mut now = self.now.lock().unwrap();
+        if let Phase::Starting(step) = &mut now.phase
+            && *step != words
+        {
             *step = words;
+            now.moved = std::time::Instant::now();
         }
+    }
+
+    /// The start made progress without a new step: new lines in the runtime's log.
+    fn moved(&self) {
+        self.now.lock().unwrap().moved = std::time::Instant::now();
+    }
+
+    /// Where Julia is, for the app (`endeavor/julia_status`), without starting it: `not_started`,
+    /// `starting` with the step in words and how many seconds since the last sign of progress, `ready`,
+    /// or `failed` with the error's code and why. Reading a failure here doesn't count as saying it: the
+    /// agent's next call that needs Julia still hears why. The app's Retry is `start_now`.
+    fn status(&self) -> Value {
+        let now = self.now.lock().unwrap();
+        match &now.phase {
+            Phase::Idle => json!({ "state": "not_started" }),
+            Phase::Starting(step) => json!({ "state": "starting", "step": step, "quiet_seconds": now.moved.elapsed().as_secs() }),
+            Phase::Ready => json!({ "state": "ready" }),
+            Phase::Failed(why) => {
+                let (code, message) = why.split_once("::").unwrap_or(("julia_failed", why.as_str()));
+                json!({ "state": "failed", "code": code, "message": message })
+            }
+        }
+    }
+
+    /// Start Julia now, for the app (`endeavor/start_julia`): its Retry after a failure, which then counts
+    /// as said, or a start before anything needs Julia. Nothing changes while Julia runs or is starting.
+    fn start_now(&self, served: &Arc<Served>) {
+        {
+            let mut now = self.now.lock().unwrap();
+            if matches!(now.phase, Phase::Failed(_)) {
+                now.said = true;
+            }
+        }
+        self.begin(served, false);
     }
 
     /// Find Julia, start it, and wait until its bridge answers; then have Pluto suggest the notebooks' folder.
@@ -545,7 +586,11 @@ impl JuliaStarter {
             }
         }
         let mut child = self.spawn.spawn(command).map_err(|e| format!("julia_failed::Couldn't start {julia}: {e}"))?;
-        self.pid.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
+        let pid = child.id() as i32;
+        // To end it if it stalls, once the watcher below has it.
+        #[cfg(windows)]
+        let started = crate::winproc::start_time(std::os::windows::io::AsRawHandle::as_raw_handle(&child));
+        self.pid.store(pid, std::sync::atomic::Ordering::SeqCst);
         // A stop that came before the pid was stored found nothing to end.
         if self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
             let _ = child.kill();
@@ -563,12 +608,39 @@ impl JuliaStarter {
             }
             julia.changed.notify_all();
         });
+        let mut logged = file_size(&self.log);
         let ready = loop {
             if let Some(status) = self.exited() {
                 return Err(format!("julia_failed::Julia stopped while starting ({status}). The runtime's log ({}) says why.", self.log.display()));
             }
             if let Some(ready) = julia_ready(&self.state, &self.token) {
                 break ready;
+            }
+            let size = file_size(&self.log);
+            if size != logged {
+                logged = size;
+                self.moved();
+            }
+            let stalled = self.now.lock().unwrap().moved.elapsed();
+            if stalled >= julia_stall() {
+                // It may be stuck on anything (a lock, a network share, a hung precompile): end it, so the
+                // next call that needs Julia starts it afresh.
+                // Through the pid the watcher clears once it has reaped Julia, so a pid reused since isn't hit.
+                let pid = self.pid.load(std::sync::atomic::Ordering::SeqCst);
+                #[cfg(unix)]
+                if pid > 0 {
+                    // SAFETY: plain syscall, on the Julia this start began, which hasn't been reaped.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+                #[cfg(windows)]
+                if let Some(process) = crate::winproc::Process::open(pid, started) {
+                    process.terminate();
+                }
+                return Err(format!(
+                    "julia_failed::Julia made no progress for {} minutes while starting (no new step, nothing new in the runtime's log), so it was stopped. The runtime's log ({}) shows where it stopped. Tell the user; trying again starts Julia afresh, so ask them before trying again.",
+                    stalled.as_secs() / 60,
+                    self.log.display()
+                ));
             }
             std::thread::sleep(Duration::from_millis(100));
         };
@@ -594,6 +666,22 @@ impl JuliaStarter {
     }
 }
 
+/// How long Julia may start with no sign of progress (a new step, or new lines in the runtime's log)
+/// before the start fails and Julia is ended. A first start installs and compiles Pluto's packages for
+/// minutes, writing a line to the log as each package finishes. The longest quiet stretch is compiling
+/// Pluto itself: 75 s on a Linux cloud machine with Julia 1.12.6 (2026-10-10). 30 minutes leaves room
+/// for a machine twenty times slower (antivirus scanning each file on Windows, say).
+/// ENDEAVOR_TEST_JULIA_STALL_SECS sets it in debug builds.
+fn julia_stall() -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_JULIA_STALL_SECS").ok()?.parse().ok()).flatten();
+    test.map_or(Duration::from_secs(30 * 60), Duration::from_secs)
+}
+
+/// The size of a file, 0 when there is none.
+fn file_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |m| m.len())
+}
+
 /// Where R's adapter writes its state for the core, in the state folder.
 const R_STATE: &str = "r.json";
 
@@ -607,6 +695,10 @@ fn ember_secret() -> Result<String, String> {
 /// Ember's r-universe repository, which builds Ember's latest main. R notebooks install Ember from
 /// it, and update it when R starts (`runtime/r/install.R`).
 pub const EMBER_REPOSITORY: &str = "https://jowch.r-universe.dev";
+
+/// Where Ember's CI publishes its Apple Silicon Mac builds, one release per R version: r-universe has
+/// none (Ember #66). `install.R` installs from them first on an Apple Silicon Mac.
+pub const EMBER_MAC_ARM64: &str = "https://github.com/jowch/Ember/releases/download";
 
 /// How long the call that starts R waits for the check for a newer Ember, or its install, before
 /// answering `r_installing`: as long as Julia's start.
@@ -699,6 +791,8 @@ struct RStarter {
     ember: PathBuf,
     /// `EMBER_REPOSITORY`, or in a debug build `ENDEAVOR_TEST_EMBER_REPOSITORY`.
     repository: String,
+    /// `EMBER_MAC_ARM64`, or nothing with a test repository, which is then the only one.
+    mac_arm64: String,
     install: Arc<std::sync::Mutex<Install>>,
     /// Whether Endeavor's own R may be installed (`--install-r`, or `endeavor/allow_r_install` later),
     /// and where installing it is.
@@ -717,6 +811,7 @@ struct RStarter {
 
 impl RStarter {
     fn new(args: &Args, token: &str, allow_own: Arc<std::sync::atomic::AtomicBool>) -> RStarter {
+        let test_repository = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_EMBER_REPOSITORY").ok()).flatten();
         RStarter {
             allow_own,
             offer_own: args.own_r,
@@ -725,7 +820,8 @@ impl RStarter {
             r: args.r.clone(),
             library: args.r_library.clone(),
             ember: crate::paths::Env::here().ember_folder(),
-            repository: cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_EMBER_REPOSITORY").ok()).flatten().unwrap_or_else(|| EMBER_REPOSITORY.into()),
+            repository: test_repository.clone().unwrap_or_else(|| EMBER_REPOSITORY.into()),
+            mac_arm64: if test_repository.is_some() { String::new() } else { EMBER_MAC_ARM64.into() },
             install: Arc::new(std::sync::Mutex::new(Install::Idle)),
             adapter: args.runtime.join("r").join("adapter.R"),
             state: args.state_dir.join(R_STATE),
@@ -917,7 +1013,7 @@ impl RStarter {
         }
         drop(install);
         let install_r = self.adapter.with_file_name("install.R");
-        let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, folder, Path::new(&self.repository)]);
+        let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, folder, Path::new(&self.repository), Path::new(&self.mac_arm64)]);
         command.stdin(Stdio::null());
         let (state, r) = (self.install.clone(), self.r.clone());
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1144,7 +1240,13 @@ impl Served {
     /// One of the app's calls about Julia (`mcp::JULIA_CALLS`), which the core answers here.
     fn julia_call(self: &Arc<Self>, method: &str, body: &[u8]) -> String {
         let message: Value = serde_json::from_slice(body).unwrap_or_default();
+        let mut result = json!({});
         match method {
+            "endeavor/julia_status" => result = self.julia.status(),
+            "endeavor/start_julia" => {
+                self.julia.start_now(self);
+                result = self.julia.status();
+            }
             "endeavor/set_folder" => {
                 let folder = message["params"]["path"].as_str().unwrap_or_default().to_owned();
                 *self.app_folder.lock().unwrap() = Some(folder.clone());
@@ -1165,7 +1267,7 @@ impl Served {
             "endeavor/allow_r_install" => self.allow_r_install.store(true, std::sync::atomic::Ordering::SeqCst),
             _ => {}
         }
-        json!({ "jsonrpc": "2.0", "id": message["id"], "result": {} }).to_string()
+        json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }).to_string()
     }
 }
 
