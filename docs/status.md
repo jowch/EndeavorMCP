@@ -200,7 +200,12 @@ Next:
   it with rig or the system's packages, or to use a cluster's module.
   Ember comes from its r-universe repository (`core::EMBER_REPOSITORY`), which
   builds Ember's latest main: a binary where r-universe has one, else the
-  source package (Linux today, and Apple Silicon until r-universe builds it).
+  source package (Linux today). r-universe has no Apple Silicon build (Ember
+  #66), so Ember's own CI builds one for R release and oldrel on each push to
+  main and publishes it as a one-build repository in a GitHub release per R
+  version (`core::EMBER_MAC_ARM64`, `macos-arm64-r4.6`). An Apple Silicon Mac
+  installs from that first, then from r-universe; an R version with no such
+  release gets r-universe's source.
   Each time the core starts R, `runtime/r/install.R` installs it, or updates it
   when there's a newer build, into `~/.cache/endeavor/r/ember`
   (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
