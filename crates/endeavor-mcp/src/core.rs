@@ -56,8 +56,8 @@ struct Args {
     julia: String,
     runtime: PathBuf,
     depot: String,
-    /// R's `Rscript`, for R notebooks, and the R library Ember is installed in (none: R's own).
-    r: String,
+    /// The R for R notebooks, and the R library Ember is installed in (none: Endeavor's own).
+    r: crate::r::Source,
     r_library: Option<String>,
 }
 
@@ -71,7 +71,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--julia" => julia = Some(value?),
             "--runtime" => runtime = Some(PathBuf::from(value?)),
             "--depot" => depot = Some(value?),
-            "--r" => r = Some(value?),
+            "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
+            "--r" | "--r-shell" => r = Some(crate::r::Source::from_flag(arg, value?)),
             "--r-library" => r_library = Some(value?),
             _ => return Err(format!("unknown argument {arg}")),
         }
@@ -81,7 +82,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         julia: julia.ok_or("--julia is required")?,
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
-        r: r.unwrap_or_else(|| "Rscript".into()),
+        r: r.unwrap_or_default(),
         r_library,
     })
 }
@@ -243,6 +244,9 @@ const R_STATE: &str = "r.json";
 /// from source the first time one is opened (`runtime/r/install.R`).
 pub const EMBER_COMMIT: &str = "0176bea6c969d3e6a9dd1d825f9672d62b1959d2";
 
+/// Why R didn't start when its shell line ended well.
+const ENDED_EARLY: &str = "The shell line for R ended without starting R. A line that ends in a comment (#) hides what comes after it.";
+
 /// Where installing Ember is.
 enum Install {
     Idle,
@@ -253,7 +257,7 @@ enum Install {
 /// Starts R's adapter (`runtime/r/adapter.R`), with Ember in it, the first time an R notebook is
 /// opened, and stops it when the core ends.
 struct RStarter {
-    rscript: String,
+    r: crate::r::Source,
     /// The core's `--r-library`, which has Ember; else Endeavor's own, installed when first needed.
     library: Option<String>,
     own_library: PathBuf,
@@ -276,7 +280,7 @@ impl RStarter {
             }
         });
         RStarter {
-            rscript: args.r.clone(),
+            r: args.r.clone(),
             library: args.r_library.clone(),
             own_library: crate::paths::Env::here().r_library(EMBER_COMMIT),
             install: Arc::new(std::sync::Mutex::new(Install::Idle)),
@@ -304,8 +308,8 @@ impl RStarter {
             }
         };
         let _ = std::fs::remove_file(&self.state);
-        let mut command = Command::new(&self.rscript);
-        command.arg("--vanilla").arg(&self.adapter).env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", &library).stdin(Stdio::null());
+        let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
+        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", &library).stdin(Stdio::null());
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
         unsafe {
@@ -316,10 +320,16 @@ impl RStarter {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.spawn.lock().unwrap().send((command, tx)).map_err(|e| e.to_string())?;
-        let mut child = rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("r_not_found::Couldn't start R ({}): {e}", self.rscript))?;
+        let mut child = rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("r_not_found::Couldn't start R ({}): {e}", self.r.describe()))?;
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let state = loop {
             if let Ok(Some(status)) = child.try_wait() {
+                if self.r.not_found(status) {
+                    return Err(format!("r_not_found::Couldn't find R: no {}", self.r.describe()));
+                }
+                if self.r.ended_early(status) {
+                    return Err(format!("r_failed::{}", ENDED_EARLY));
+                }
                 return Err(format!("r_failed::R stopped while starting ({status}); the runtime's log says why"));
             }
             if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
@@ -357,14 +367,17 @@ impl RStarter {
                 return why;
             }
             Install::Idle => {
-                let mut command = Command::new(&self.rscript);
-                command.arg("--vanilla").arg(self.adapter.with_file_name("install.R")).arg(&self.own_library).arg(EMBER_COMMIT).stdin(Stdio::null());
-                let (state, rscript) = (self.install.clone(), self.rscript.clone());
+                let install_r = self.adapter.with_file_name("install.R");
+                let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, &self.own_library, Path::new(EMBER_COMMIT)]);
+                command.stdin(Stdio::null());
+                let (state, r) = (self.install.clone(), self.r.clone());
                 std::thread::spawn(move || {
                     let done = match command.status() {
                         Ok(status) if status.success() => Install::Idle,
+                        Ok(status) if r.not_found(status) => Install::Failed(format!("r_not_found::Couldn't find R: no {}", r.describe())),
+                        Ok(status) if r.ended_early(status) => Install::Failed(format!("r_failed::{}", ENDED_EARLY)),
                         Ok(_) => Install::Failed("r_failed::Couldn't install Ember for R notebooks; the runtime's log says why".into()),
-                        Err(e) => Install::Failed(format!("r_not_found::Couldn't start R ({rscript}): {e}")),
+                        Err(e) => Install::Failed(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
                     };
                     *state.lock().unwrap() = done;
                 });
@@ -671,14 +684,14 @@ fn serve_client(client: TcpStream, served: &Served) -> io::Result<()> {
                     None => {
                         request.set_target("/call");
                         request.replace("Host", &format!("127.0.0.1:{julia}"));
-                        forward(request, Some(&body), &mut reader, julia, &|_| {})?
+                        forward(request, Some(&body), &mut reader, julia, "Julia", &|_| {})?
                     }
                 }
             }
             (Route::Pluto, _) => {
                 request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Cookie"));
                 request.headers.push(("Cookie".into(), format!("secret={}", pluto.secret)));
-                forward(request, None, &mut reader, pluto.port, &|response| {
+                forward(request, None, &mut reader, pluto.port, "Julia", &|response| {
                     response.headers.retain(|(name, value)| !(name.eq_ignore_ascii_case("Set-Cookie") && value.trim_start().starts_with("secret=")));
                 })?
             }
@@ -697,7 +710,7 @@ fn serve_client(client: TcpStream, served: &Served) -> io::Result<()> {
                         // browser's: Ember refuses a WebSocket whose Origin isn't its Host.
                         request.set_target(&with_secret(&target, &ember.secret));
                         request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Cookie"));
-                        forward(request, None, &mut reader, ember.port, &|response| {
+                        forward(request, None, &mut reader, ember.port, "R", &|response| {
                             response.headers.retain(|(name, value)| !(name.eq_ignore_ascii_case("Set-Cookie") && value.trim_start().starts_with("ember_secret")));
                         })?
                     }
@@ -908,15 +921,15 @@ pub(crate) fn same(given: &str, expected: &str) -> bool {
     given.len() == expected.len() && given.bytes().zip(expected.bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 
-/// Pass one request to the server at `port` (Pluto, or Julia's bridge) on a
+/// Pass one request to the server at `port` (Pluto, Julia's bridge or Ember), which runs in `language`, on a
 /// connection of its own, its body from `client` or already read, and the
 /// response back as it comes, through `edit`. Whether the client connection
 /// can carry another request.
-fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<TcpStream>, port: u16, edit: &dyn Fn(&mut Head)) -> io::Result<bool> {
+fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<TcpStream>, port: u16, language: &str, edit: &dyn Fn(&mut Head)) -> io::Result<bool> {
     let upstream = match TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)) {
         Ok(upstream) => upstream,
         Err(_) => {
-            refuse(client.get_mut(), "502 Bad Gateway", "Julia isn't answering")?;
+            refuse(client.get_mut(), "502 Bad Gateway", &format!("{language} isn't answering"))?;
             return Ok(false);
         }
     };

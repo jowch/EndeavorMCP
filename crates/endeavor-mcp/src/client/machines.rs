@@ -69,6 +69,9 @@ pub struct Server {
     /// A julia path, or a shell line such as `module load julia`; unset looks
     /// on the login shell's PATH, then downloads Endeavor's own Julia.
     pub julia: Option<String>,
+    /// An Rscript path, or a shell line such as `module load R`, for R notebooks;
+    /// unset looks on the login shell's PATH. Endeavor doesn't download R.
+    pub r: Option<String>,
     pub idle_stop: Option<IdleStop>,
     /// Set for a cluster: Julia runs in a Slurm job.
     pub cluster: Option<Cluster>,
@@ -116,9 +119,9 @@ impl Server {
     }
 
     /// Whether a connection made from `other` is the one this record asks for: the same address,
-    /// Julia and launcher. The rest of the record (names, job defaults, partitions) doesn't change a connection.
+    /// Julia, R and launcher. The rest of the record (names, job defaults, partitions) doesn't change a connection.
     pub fn same_connection(&self, other: &Server) -> bool {
-        self.id == other.id && self.ssh_host == other.ssh_host && self.port == other.port && self.julia == other.julia && self.cluster.is_some() == other.cluster.is_some()
+        self.id == other.id && self.ssh_host == other.ssh_host && self.port == other.port && self.julia == other.julia && self.r == other.r && self.cluster.is_some() == other.cluster.is_some()
     }
 
     /// The name the agent knows the machine by.
@@ -173,6 +176,17 @@ impl Server {
             None => ["--julia".into(), "auto".into()],
             Some(path) if is_path(path) => ["--julia".into(), path.into()],
             Some(line) => ["--julia-shell".into(), line.replace('\n', "; ")],
+        }
+    }
+
+    /// The helper's R arguments for this server, read as `julia_args` reads Julia's: a path
+    /// to an Rscript, or to the R beside one, is used as is; anything else is a shell line.
+    pub fn r_args(&self) -> [String; 2] {
+        let is_path = |r: &str| (r.starts_with('/') || r.starts_with("~/")) && r.rsplit('/').next().is_some_and(|name| name == "R" || name.starts_with("Rscript"));
+        match self.r.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+            None => ["--r".into(), "auto".into()],
+            Some(path) if is_path(path) => ["--r".into(), path.into()],
+            Some(line) => ["--r-shell".into(), line.replace('\n', "; ")],
         }
     }
 }

@@ -279,11 +279,13 @@ fn submit_job(args: &Args, mux: &Arc<Mux>, request: &JobRequest, flags: Vec<Stri
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     let build = args.build.as_deref().map_or(String::new(), |build| format!(" --build {}", quote(build)));
     let exit_idle = if args.exit_idle { " --exit-idle" } else { "" };
+    let [r_flag, r] = args.r.args();
     let script = format!(
-        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {} --runtime {} --depot {}{build}{exit_idle}\n",
+        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {} {r_flag} {} --runtime {} --depot {}{build}{exit_idle}\n",
         quote(&exe.display().to_string()),
         quote(&dir.display().to_string()),
         quote(julia),
+        quote(&r),
         quote(&args.runtime.display().to_string()),
         quote(&depot),
     );
@@ -732,7 +734,14 @@ pub fn node_start_main(argv: &[String]) -> ! {
         std::process::exit(1);
     };
     let token = std::fs::read_to_string(dir.join("token")).unwrap_or_else(|e| fail(format!("Couldn't read the token in {}: {e}", dir.display())));
+    // Neither flag: the login shell's.
+    let r = match (flag(argv, "--r"), flag(argv, "--r-shell")) {
+        (_, Some(line)) => crate::r::Source::Shell(line),
+        (Some(value), None) => crate::r::Source::from_flag("--r", value),
+        (None, None) => crate::r::Source::Auto,
+    };
     let mut command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm", flag(argv, "--build").as_deref()).unwrap_or_else(|e| fail(e));
+    command.args(r.args());
     if argv.iter().any(|a| a == "--exit-idle") {
         command.env("ENDEAVOR_EXIT_IDLE", "1");
     }
