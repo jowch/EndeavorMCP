@@ -226,9 +226,17 @@ cap_text <- function(text) {
 
 # Ember's error as the tools show it, in Pluto's shape ({kind, msg}); "error"
 # (R's own) is Pluto's "runtime".
+# A package the code doesn't name: Ember's fix is to add it to the header's
+# [extra_packages], which no tool does and an agent mustn't do by editing the
+# file. Naming it in the cell does the same through the tools, so that is the
+# fix the agent hears; Ember's page keeps its own wording.
 structure_error <- function(e) {
   d <- list(kind = if (identical(e$kind, "error")) "runtime" else e$kind, msg = e$message %||% "")
-  if (length(e$fixes) > 0) d$fixes <- I(e$fixes)
+  fixes <- e$fixes
+  if (identical(e$kind, "missing_package") && length(e$names) == 1 && any(grepl("[extra_packages]", fixes, fixed = TRUE))) {
+    fixes <- sprintf("Add `requireNamespace(\"%s\")` as the first line of this cell and run it", e$names)
+  }
+  if (length(fixes) > 0) d$fixes <- I(fixes)
   if (length(e$names) > 0) d$names <- I(e$names)
   if (length(e$cells) > 0) d$cells <- I(e$cells)
   if (!is.null(e$line)) d$line <- e$line

@@ -10,6 +10,7 @@
 //! ~/.cache/endeavor/r/ember, which needs Ember's r-universe repository, and CRAN for any package R lacks
 //! (a debug build installs from `ENDEAVOR_TEST_EMBER_REPOSITORY` instead when it's set). A second test
 //! runs `runtime/r/install.R` against stand-in builds: an update, a build that doesn't load, and offline.
+//! A third runs `runtime/r/test/unit.R`, the adapter's pure functions on hand-made values.
 //!
 //!     cargo test -p endeavor-mcp --test e2e_r -- --ignored --nocapture
 
@@ -351,6 +352,19 @@ fn stand_in_repository(repository: &Path, sha: &str, broken: bool) {
     let contrib = fresh(repository.join("src/contrib"));
     assert!(Command::new("R").args(["CMD", "build", "--no-manual"]).arg(&source).current_dir(&contrib).stdout(Stdio::null()).status().unwrap().success());
     assert!(Command::new("Rscript").args(["-e", "tools::write_PACKAGES('.', fields = 'SHA256')"]).current_dir(&contrib).status().unwrap().success());
+}
+
+/// The adapter's pure functions (the install status, the errors' fixes), checked by
+/// `runtime/r/test/unit.R` on hand-made values: no Ember, no server.
+#[test]
+#[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
+fn the_adapters_pure_functions() {
+    if !Command::new("Rscript").arg("--version").stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
+        eprintln!("SKIPPED: no Rscript on the PATH.");
+        return;
+    }
+    let out = Command::new("Rscript").args(["--vanilla", concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/r/test/unit.R")]).output().unwrap();
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
 }
 
 #[test]
