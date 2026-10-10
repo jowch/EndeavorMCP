@@ -917,6 +917,10 @@ Ember support is being built (status.md); these are its known limits so far.
 - **P3: a new R setting waits for the runtime's next start.** The core is
   given its R when it starts, and R itself starts with the first R notebook.
   A runtime already running keeps the R it was given; nothing says so.
+- **P3: Julia's login shell can't be csh or tcsh.** `julia.rs` asks the
+  login shell with `-lc`, which tcsh refuses. With `--julia auto` that falls
+  back to Endeavor's own Julia; with `--julia-shell` it fails. R's setting
+  handles these shells (`r.rs`); Julia's could do the same.
 - **P3: R from a shell line on Slurm is untried on a real cluster.** The job
   runs the line on the node when the first R notebook opens; only a fake
   `module` has been tried (`e2e_r`).

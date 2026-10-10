@@ -1391,7 +1391,7 @@ fn an_r_shell_line_reaches_the_job_script_word_for_word() {
     let line = r#"module load R && export R_CHECK="a b $HOME" X='it''s' `echo tick`"#;
     let mut command = slurm.command(&julia, 100);
     command.arg("--state-dir").arg(&dir).args(["--r-shell", line]);
-    let mut helper = Helper::spawn(command);
+    let helper = Helper::spawn(command);
     helper.hello();
     helper.request_start(small_job(), true);
     assert!(matches!(helper.after_progress(), ToApp::Found { .. }));
