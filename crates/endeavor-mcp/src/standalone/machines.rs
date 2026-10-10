@@ -1359,14 +1359,19 @@ impl Relay {
         if let Some(job) = job_json(&reached.status) {
             result["job"] = job;
         }
-        let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Julia started there" };
+        let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Endeavor started there" };
+        // Julia starts with the first Julia notebook (`open_session`), not here.
+        let julia = match test_var("ENDEAVOR_TEST_JULIA_AT_START") {
+            None => " Julia starts the first time a Julia notebook is made or opened there; the first time can take a few minutes, and the call says `julia_starting` until it's ready.",
+            Some(_) => "",
+        };
         let notes = match self.machine_other_build(&target, runtime, server.cluster.is_some()) {
             Some(other) => format!("{notes} {other}"),
             None => notes,
         };
         let ends = job_json(&reached.status).and_then(|j| j["ends_in_minutes"].as_u64()).map(|m| format!(" The job ends in {}.", wire::slurm::duration_text(m as u32))).unwrap_or_default();
         result["message"] = format!(
-            "{on} (node {}). When you make or open a notebook there, it usually opens in the user's browser (`opened_in_browser` says); give the user its `browser_url` too.{ends}{} This session has no notebook on {name} yet, unless it is still in one it made there that is open (`list_notebooks` shows `this_session`): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
+            "{on} (node {}).{julia} When you make or open a notebook there, it usually opens in the user's browser (`opened_in_browser` says); give the user its `browser_url` too.{ends}{} This session has no notebook on {name} yet, unless it is still in one it made there that is open (`list_notebooks` shows `this_session`): create one with `new_notebook` or open one with `open_notebook`; paths and files are {name}'s.{notes}",
             runtime.node,
             reach_text(server, runtime)
         )
