@@ -155,6 +155,9 @@ pub(crate) fn without_token(url: &str) -> String {
     if rest.is_empty() { path.to_owned() } else { format!("{path}?{}", rest.join("&")) }
 }
 
+/// What the core does with a session's folder and kind (`Bridge::on_folder`).
+pub type OnFolder = Box<dyn Fn(&str, &str) + Send + Sync>;
+
 /// What every client connection shares.
 pub struct Bridge {
     pub julia: Arc<Julia>,
@@ -172,6 +175,9 @@ pub struct Bridge {
     shell_env: Vec<(&'static str, Option<String>)>,
     /// Set when the runtime runs without the app.
     pub standalone: Option<Standalone>,
+    /// Told each folder a session is given, with the session's `kind` if the caller said it
+    /// (`julia`, `r` or `unknown`): the core warms Julia for a Julia session's folder.
+    pub on_folder: std::sync::OnceLock<OnFolder>,
 }
 
 /// Who sent a message: the agent session's key and the server it works on,
@@ -242,6 +248,7 @@ impl Bridge {
             results: Results::default(),
             shell_env,
             standalone: None,
+            on_folder: std::sync::OnceLock::new(),
         }
     }
 
@@ -328,7 +335,11 @@ impl Bridge {
                 } else if folder.is_empty() {
                     folders.remove(&owner);
                 } else {
-                    folders.insert(owner, Some(folder));
+                    folders.insert(owner, Some(folder.clone()));
+                    drop(folders);
+                    if let Some(told) = self.on_folder.get() {
+                        told(&folder, params["kind"].as_str().unwrap_or("unknown"));
+                    }
                 }
             }
             "endeavor/tool_result" => {

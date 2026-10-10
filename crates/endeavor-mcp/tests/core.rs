@@ -1791,3 +1791,76 @@ fn two_julia_notebooks_opened_at_once_start_one_julia() {
     });
     assert_eq!(julia_pids(&dir).len(), 1, "one Julia for both");
 }
+
+/// A session's folder, as the app or a front gives it.
+fn give_folder(core: &Core, owner: &str, folder: &Path) {
+    give_folder_of(core, owner, folder, None);
+}
+
+/// With the session's kind, when the caller knows it.
+fn give_folder_of(core: &Core, owner: &str, folder: &Path, kind: Option<&str>) {
+    let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": { "owner": owner, "folder": folder.display().to_string(), "kind": kind } });
+    app_call(core, &body.to_string());
+}
+
+#[test]
+fn a_folder_with_julia_notebooks_starts_julia_ahead_and_one_with_only_r_notebooks_doesnt() {
+    let dir = state_dir("core-warm");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    let core = Core::start_when_needed(&dir, &julia);
+    let r_only = temp_folder("core-warm-r");
+    std::fs::write(r_only.join("growth.R"), "### An Ember notebook ###\n").unwrap();
+    std::fs::write(r_only.join("helpers.jl"), "f(x) = x + 1\n").unwrap();
+    give_folder(&core, "s1", &r_only);
+    let julia_folder = temp_folder("core-warm-julia");
+    std::fs::create_dir_all(julia_folder.join("analysis")).unwrap();
+    std::fs::write(julia_folder.join("analysis/a.jl"), "### A Pluto.jl notebook ###\n").unwrap();
+    give_folder_of(&core, "s2", &julia_folder, Some("r"));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(julia_pids(&dir).is_empty() && !dir.join("julia.json").exists(), "R notebooks and a plain .jl file aren't Julia notebooks, and an R session's folder isn't looked at");
+
+    give_folder(&core, "s2", &julia_folder);
+    wait_for("Julia to start ahead", || julia_pids(&dir).len() == 1);
+    wait_for("Julia to be ready", || tool_call(&core, "list_notebooks", serde_json::json!({})) == serde_json::json!([]) && dir.join("julia.json").exists());
+    give_folder(&core, "s3", &julia_folder);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(julia_pids(&dir).len(), 1, "one Julia");
+}
+
+#[test]
+fn a_julia_that_would_need_downloading_isnt_started_ahead() {
+    let dir = state_dir("core-warm-download");
+    // No julia on the login shell's PATH and none of Endeavor's own: only a download would give one.
+    let shell = dir.join("no-julia-shell");
+    std::fs::write(&shell, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = temp_folder("core-warm-download-home");
+    let (shell, home) = (shell.display().to_string(), home.display().to_string());
+    let env = [("SHELL", shell.as_str()), ("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str())];
+    let core = Core::try_start_with(&dir, &env, &[std::ffi::OsStr::new("--julia"), std::ffi::OsStr::new("auto"), std::ffi::OsStr::new("--julia-when-needed")]).unwrap();
+    let folder = temp_folder("core-warm-download-notebooks");
+    let path = folder.join("a.jl");
+    std::fs::write(&path, "### A Pluto.jl notebook ###\n").unwrap();
+    give_folder(&core, "s1", &folder);
+    std::thread::sleep(Duration::from_millis(1000));
+    assert!(julia_pids(&dir).is_empty(), "nothing started");
+    assert!(std::fs::read_dir(&home).unwrap().next().is_none(), "nothing downloaded");
+    // The first call that needs Julia looks again and says what's missing, as without the warm-up.
+    let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
+    assert_eq!(opened["error"], "julia_not_found", "{opened}");
+}
+
+#[test]
+fn a_session_said_to_be_julias_starts_julia_ahead_whatever_its_folder_has() {
+    let dir = state_dir("core-warm-said");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    let core = Core::start_when_needed(&dir, &julia);
+    let empty = temp_folder("core-warm-said-empty");
+    give_folder_of(&core, "s1", &empty, Some("unknown"));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(julia_pids(&dir).is_empty(), "an unknown session's empty folder starts nothing");
+    give_folder_of(&core, "s1", &empty, Some("julia"));
+    wait_for("Julia to start ahead", || julia_pids(&dir).len() == 1);
+}

@@ -151,7 +151,9 @@ Claude Code:
 It also prints a Codex, a Gemini CLI and a generic JSON configuration with
 the same URL and header.
 
-`serve` starts Julia when an agent opens a Julia notebook, not before. Until
+`serve` starts Julia when an agent opens a Julia notebook, not before, unless
+the folder already has Julia notebooks: then it starts Julia in the background
+right away, so the first notebook doesn't wait. Until
 then the link shows a page that says Julia isn't running, with a button that
 starts it. While Julia starts, the page says so and reloads itself.
 
@@ -228,9 +230,12 @@ folder. The port stays the same only if you fix it with `--port`.
 
 When the agent runs on the same machine as Julia, it can start Endeavor
 itself with `endeavor mcp`, which speaks MCP over stdin and stdout.
-`mcp` relays the agent's messages to Julia. It starts Julia at the first tool
-call that needs it (or uses the one already running from the state folder), so
-a session that never uses a notebook starts nothing. Julia keeps running
+`mcp` relays the agent's messages to Julia. It starts Endeavor at the first
+tool call (or uses the one already running from the state folder), so a session
+that never uses a notebook starts nothing. Julia starts with the first Julia
+notebook, or right away, in the background, if the folder has Pluto notebooks
+within three folders' depth: an agent started in such a folder starts Julia
+even if it never opens a notebook. Julia keeps running
 after the agent exits, so the next session finds the notebook still open. It
 stops itself once no notebook has been open for the `--idle-stop` time, and
 `endeavor stop` stops it at once.
