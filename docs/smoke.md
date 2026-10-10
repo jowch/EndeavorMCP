@@ -116,6 +116,7 @@ something subtle, make it soft.
 | `N1-new` | a small simulation shown as a table, in a new notebook | `new_notebook`, read, stage, run; no edits to the file |
 | `N3-preview` | open a notebook from disk and say what it computes | safe preview: nothing runs, and the agent says so |
 | `N4-long-run` | a cell that takes 70 s | `execution.still_running`: the cell isn't run again, and a result reported came from the notebook |
+| `N9-first-package` | a DataFrame (DataFrames named) in a new notebook | a first package install: the agent waits through it and reports the table (#58). It tests the wait only on a depot without DataFrames, such as a fresh `--depot` |
 
 ## Other agents
 

@@ -202,7 +202,8 @@ function package_step(nb)
     lines = filter(l -> !isempty(l) && !all(==('='), l), strip.(split(log, '\n')))
     Dict{String,Any}(
         "step"      => step,
-        "packages"  => copy(nb.nbpkg_busy_packages),
+        # Pluto lists its own log, `nbpkg_sync`, with the packages.
+        "packages"  => filter(!=("nbpkg_sync"), nb.nbpkg_busy_packages),
         "seconds"   => round(Int, time() - pkg.started_at),
         "last_line" => isempty(lines) ? nothing : first(String(last(lines)), 300),
     )
