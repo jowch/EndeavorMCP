@@ -197,7 +197,7 @@ Next:
   `R_LIBS_USER` and its own Ember library inside that folder, and is on no PATH.
   Its fonts cache is inside that folder too. In the app, whose agents have no
   `use_machine`, `r_not_found` tells the agent to have the user install it from
-  Settings instead; the app does that with `r::install_own` (and `own_offered`,
+  the notebook pane's Install R or Settings instead; the app does that with `r::install_own` (and `own_offered`,
   `own_installed`, `remove_own`), as it does Julia with `julia`'s. On Linux and servers Endeavor installs no R; `r_not_found` says to install
   it with rig or the system's packages, or to use a cluster's module.
   Ember comes from its r-universe repository (`core::EMBER_REPOSITORY`), which

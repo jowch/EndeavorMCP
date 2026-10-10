@@ -709,11 +709,11 @@ const KEPT_PREVIOUS: i32 = 3;
 
 /// The answer that offers Endeavor's own R, `item`, when no R is found on the user's Mac. Through
 /// `endeavor mcp` the agent installs it with `use_machine` once the user agrees; the app's agents
-/// have no `use_machine`, so there the user installs it in Settings.
+/// have no `use_machine`, so there the user installs it from the notebook pane or Settings.
 fn own_r_offer(item: &wire::Item, in_app: bool) -> String {
     if in_app {
         format!(
-            "r_not_found::No R was found on this computer. Endeavor can install its own R: {item}. Tell the user they can install it in the app's Settings, under Notebooks, then R. Once it's installed, open the notebook again."
+            "r_not_found::No R was found on this computer. Endeavor can install its own R if the user agrees: {item}. Tell the user to click Install R in the notebook pane, or Install in the app's Settings under Notebooks, then R. Once it's installed, open the notebook again."
         )
     } else {
         format!(
@@ -959,7 +959,7 @@ impl RStarter {
     /// When `--r auto` finds no R on a Mac, Endeavor's own: nothing when R is there, else why R
     /// notebooks can't open yet. Without the user's yes, the answer asks for it; with it, R is
     /// installed in the background (a minute or two), and the call that starts that returns at once.
-    /// In the app (`in_app`), whose agents have no `use_machine`, the user installs it from Settings.
+    /// In the app (`in_app`), whose agents have no `use_machine`, the user installs it from the app.
     fn own_r(&self, in_app: bool) -> Result<(), String> {
         use std::sync::atomic::Ordering::SeqCst;
         let Some(item) = self.r.own_item().filter(|_| self.offer_own) else { return Ok(()) };
@@ -1729,7 +1729,7 @@ mod tests {
         let standalone = own_r_offer(&item, false);
         assert!(standalone.starts_with("r_not_found::") && standalone.contains("`use_machine`") && standalone.contains("R 4.6.1 (about 165 MB"), "{standalone}");
         let app = own_r_offer(&item, true);
-        assert!(app.starts_with("r_not_found::") && app.contains("Settings, under Notebooks, then R") && !app.contains("use_machine"), "{app}");
+        assert!(app.starts_with("r_not_found::") && app.contains("Install R in the notebook pane") && app.contains("Settings under Notebooks, then R") && !app.contains("use_machine"), "{app}");
     }
 
     #[test]
