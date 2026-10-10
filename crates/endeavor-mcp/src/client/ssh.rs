@@ -248,9 +248,9 @@ pub fn no_helper(os: &str, arch: &str) -> String {
 /// unless the client ends it first. Then it becomes the helper. The values come
 /// over stdin and not in the script, so no path can break it; the line is
 /// written with `printf %s`, which reads no escapes, and the ids are checked to
-/// be digits. `exit_idle` adds the helper's `--exit-idle`; being a fixed word, it
-/// is in the script and not in the lines it reads.
-pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
+/// be digits. `exit_idle` adds the helper's `--exit-idle`, and `own_with_client` its
+/// `--own-with-client`; being fixed words, they are in the script and not in the lines it reads.
+pub fn bootstrap_script(version: &str, exit_idle: bool, own_with_client: bool) -> String {
     [
         &format!("v={version}"),
         r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln && read -r rf && read -r rv || exit 1"#,
@@ -268,7 +268,11 @@ pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
         &format!(r#"if [ "$s" = need ]; then {PICK_STATE_DIR_SH}; for po in "$c"/*/endeavor; do pq=${{po%/endeavor}}; case "$pq" in "$d") ;; *) case "${{pq##*/}}" in *.part.*) ;; *) if [ -x "$po" ] && [ -f "$pq/runtime/boot.jl" ]; then u=older; fi;; esac;; esac; done; for pf in runtime.json job.json; do pj=$(cat "$pd/$pf" 2>/dev/null); if [ "$ln" = slurm ]; then case "$pj" in *job?:?[0-9]*) pk=${{pj#*job?:}}; pk=$(printf %s "$pk" | tr ",}}" "  " | cut -d" " -f1); pk=${{pk#?}}; pk=${{pk%?}}; if [ "$r" = none ] && num "$pk"; then if command -v squeue >/dev/null 2>&1 && pl=$(squeue -h -t PENDING,RUNNING,CONFIGURING -o %i -u "$(id -un)" 2>/dev/null); then if printf %s "$pl" | grep -qx "$pk"; then r=job:$pk; fi; else r=job-recorded:$pk; fi; fi;; esac; else case "$pj" in *pid?:[0-9]*) pk=${{pj#*pid?:}}; pk=$(printf %s "$pk" | tr ",}}" "  " | cut -d" " -f1); if num "$pk" && kill -0 "$pk" 2>/dev/null; then if pa=$(ps -p "$pk" -o args= 2>/dev/null) && [ -n "$pa" ]; then case "$pa" in *core*--state-dir*) r=process:$pk;; esac; else r=process-recorded:$pk; fi; fi;; esac; fi; done; fi"#),
         r#"if [ "$s" = need ]; then printf %s "ENDEAVOR $(uname -s) $(uname -m) need $r $u $d"; else printf %s "ENDEAVOR $(uname -s) $(uname -m) have"; fi; echo"#,
         r#"if [ "$s" = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; printf %s "Endeavor: installing into $d failed" >&2; echo >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
-        &format!(r#"exec "$d/endeavor" connect "$@" {}--launcher "$ln" "$jf" "$jv" "$rf" "$rv" --runtime "$d/runtime" --depot "$dp" --build "$v""#, if exit_idle { "--exit-idle " } else { "" }),
+        &format!(
+            r#"exec "$d/endeavor" connect "$@" {}{}--launcher "$ln" "$jf" "$jv" "$rf" "$rv" --runtime "$d/runtime" --depot "$dp" --build "$v""#,
+            if exit_idle { "--exit-idle " } else { "" },
+            if own_with_client { "--own-with-client " } else { "" }
+        ),
     ]
     .join("; ")
 }
@@ -493,10 +497,17 @@ pub struct ConnectError {
 /// starts later, when the channel is asked to (`start`). A failure says whether
 /// retrying could help.
 pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
+    connect_as(server, transport, options, false, cancel, on)
+}
+
+/// `connect`; with `own_with_client`, a runtime this connection starts is stopped if the connection
+/// ends without a Stop or Detach, while it starts or after (`endeavor connect --own-with-client`).
+#[allow(clippy::result_large_err)] // as `connect`'s, which callers already take
+fn connect_as(server: &Server, transport: &Transport, options: &Options, own_with_client: bool, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
     let wrong = |message: String| ConnectError { message, retry: false, needs: None };
     let preamble = preamble(server, options).map_err(wrong)?;
     let version = crate::embedded::BUILD_VERSION;
-    let mut command = transport.command(&bootstrap_script(version, options.exit_idle), &options.auth).map_err(wrong)?;
+    let mut command = transport.command(&bootstrap_script(version, options.exit_idle, own_with_client), &options.auth).map_err(wrong)?;
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -620,9 +631,10 @@ pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions
 /// then stop it (or leave it running if it already was). On a cluster, only
 /// ask Slurm about itself: starting Julia there means a job. What the start needs
 /// installed is installed only if `options.allow_install`; else the test fails
-/// naming it.
+/// naming it. A cancel ends ssh, and the helper then stops the runtime this test
+/// was starting; one that was already running or starting for someone else is left.
 pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(), String> {
-    let (channel, hello) = connect(server, transport, options, cancel, on).map_err(|e| e.message)?;
+    let (channel, hello) = connect_as(server, transport, options, true, cancel, on).map_err(|e| e.message)?;
     if hello.launcher.map_or(server.cluster.is_some(), |l| l == Launcher::Slurm) {
         let reply = channel.files(wire::files::Request::Slurm);
         channel.detach();

@@ -76,7 +76,7 @@ use wire::slurm::JobRequest;
 use runtime::{Ended, Hooks, Looked, Outcome, Up, Waiting, Want};
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
+const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client | --own-with-client] [--any-node] [--exit-idle] [--build BUILD]
                         (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster;
                          auto is slurm where Slurm's sinfo is, else process)
        endeavor relay --state-dir DIR
@@ -98,6 +98,9 @@ struct Args {
     launcher: Launcher,
     /// Stop the runtime when the app goes away without saying Stop or Detach.
     quit_with_client: bool,
+    /// The same, but only for a runtime this connection started: one it attached to, or another
+    /// connection's start it waited for, is left running. A cluster job still waiting is left too.
+    own_with_client: bool,
     /// The state folder belongs to this one machine, so a different node name
     /// only means the machine was renamed.
     any_node: bool,
@@ -299,7 +302,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         return Err("expected the `connect` command".into());
     }
     let (mut state_dir, mut julia, mut runtime, mut depot, mut r) = (None, None::<julia::Source>, None, None, None);
-    let (mut quit_with_client, mut any_node, mut launcher, mut build, mut exit_idle) = (false, false, Launcher::Process, None, false);
+    let (mut quit_with_client, mut own_with_client, mut any_node, mut launcher, mut build, mut exit_idle) = (false, false, false, Launcher::Process, None, false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -320,6 +323,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
                 }
             }
             "--quit-with-client" => quit_with_client = true,
+            "--own-with-client" => own_with_client = true,
             "--any-node" => any_node = true,
             "--exit-idle" => exit_idle = true,
             "--build" => build = Some(value()?),
@@ -337,6 +341,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         depot: depot.ok_or("--depot is required")?,
         launcher,
         quit_with_client,
+        own_with_client,
         any_node,
         build,
         exit_idle,
@@ -420,7 +425,7 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                 };
                 answer_stops(mux, &mut inbox, id, force, &stopped);
             }
-            Event::Eof if args.quit_with_client => {
+            Event::Eof if args.quit_with_client || (args.own_with_client && attached.as_ref().is_some_and(|a| !a.reattached)) => {
                 if let Some(runtime) = attached.take()
                     && let Err(failed) = runtime.stop(args, &routes, &mut inbox, standalone::start_lock_limit())
                 {
@@ -726,7 +731,8 @@ impl<'a> Client<'a> {
 
     /// Hear the client for up to `wait`. Detach and the end of input exit, leaving a runtime that is
     /// starting to finish by itself; but the end of input stops it where `--quit-with-client` says the
-    /// runtime goes with the client. A `Stop` ends the start. A `StartRuntime` is refused. False: the start is over.
+    /// runtime goes with the client, or `--own-with-client` says so and this connection began the start.
+    /// A `Stop` ends the start. A `StartRuntime` is refused. False: the start is over.
     fn hear(&mut self, wait: Duration, waiting: Waiting) -> bool {
         match self.inbox.hear_while_starting(self.mux, wait) {
             Heard::Stop(id, force) => {
@@ -738,6 +744,8 @@ impl<'a> Client<'a> {
                 std::process::exit(0)
             }
             Heard::Eof if self.args.quit_with_client && waiting != Waiting::Lock => return false,
+            // `await_runtime` stops the runtime this start began.
+            Heard::Eof if self.args.own_with_client && waiting == Waiting::Ready => return false,
             Heard::Eof => std::process::exit(0),
             Heard::Quiet | Heard::Event => {}
         }
@@ -1665,6 +1673,8 @@ mod tests {
         let a = args("connect --state-dir /s --julia /j --runtime /r --depot /d: --quit-with-client").unwrap();
         assert_eq!((a.state_dir, a.julia, a.depot.as_str()), (PathBuf::from("/s"), julia::Source::Path("/j".into()), "/d:"));
         assert!(a.quit_with_client && !a.any_node && a.launcher == Launcher::Process);
+        assert!(!a.own_with_client);
+        assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --own-with-client").unwrap().own_with_client);
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().julia, julia::Source::Auto);
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().r, r::Source::Auto);
         assert_eq!(args("connect --state-dir /s --julia auto --r /opt/R/bin/Rscript --runtime /r --depot /d").unwrap().r, r::Source::Path("/opt/R/bin/Rscript".into()));

@@ -433,12 +433,93 @@ fn cancelling_a_test_while_its_start_waits_ends_it_at_once() {
 }
 
 #[test]
+fn cancelling_a_test_while_julia_boots_stops_the_runtime_it_was_starting() {
+    let (place, core) = cancel_while_booting("cancel-test-boot", true);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while running(core) {
+        assert!(std::time::Instant::now() < deadline, "the core the test was starting is still running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!place.state.join("runtime.json").exists());
+    no_helper_left(&place.state);
+}
+
+#[test]
+fn a_start_outlives_a_connection_that_ends_while_julia_boots_when_it_is_not_a_test() {
+    let (place, core) = cancel_while_booting("cancel-start-boot", false);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // The core has the state folder in its arguments too.
+    while helper_pids(&place.state) != [core] {
+        assert!(std::time::Instant::now() < deadline, "the helper is still running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(running(core), "the start goes on, as a session's does when the app quits");
+    // SAFETY: plain syscall.
+    unsafe { libc::kill(core, libc::SIGTERM) };
+}
+
+/// A `test` (`as_test`), or a `connect` and `start` as a session makes them, cancelled while Julia boots on a
+/// server reached through a stand-in for ssh. The core that was starting, and the place.
+fn cancel_while_booting(name: &str, as_test: bool) -> (Place, i32) {
+    let place = Place::new(name);
+    // A Julia that boots until it is stopped.
+    let julia = place.home.join("julia");
+    std::fs::write(&julia, "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'julia version 1.12.0'; exit 0; }\necho booting\nexec sleep 600\n").unwrap();
+    std::fs::set_permissions(&julia, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let server = Server { julia: Some(julia.display().to_string()), ..Default::default() };
+    let cancel = Arc::new(Cancel::default());
+    let (seen, on) = events();
+    let (done_tx, done) = mpsc::channel();
+    std::thread::spawn({
+        // As over ssh, ending the connection ends only this side, and the server's side hears its input end:
+        // `sh` is made to start the helper in a session of its own, out of reach of the cancel's kill, and to
+        // talk to it through two `cat`s, which stand in for ssh and are killed.
+        let (cancel, options) = (cancel.clone(), place.options());
+        let ssh = r#"sh() { cat | setsid /bin/sh "$@" 2>/dev/null | cat; }"#;
+        let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string())], ask: Some(ssh.into()) };
+        move || {
+            let result = if as_test {
+                endeavor_mcp::client::test(&server, &transport, &options, &cancel, &on)
+            } else {
+                connect(&server, &transport, &options, &cancel, &on).map_err(|e| e.message).and_then(|(channel, _)| {
+                    let started = start(&channel, &Listener::start("test").unwrap(), &StartOptions { install: true, ..StartOptions::default() }, &on, |_| {});
+                    started.map(|_| ()).map_err(|_| "Cancelled.".to_owned())
+                })
+            };
+            done_tx.send(result).unwrap()
+        }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !seen.lock().unwrap().iter().any(|e| matches!(e, Event::Progress(line) if line == "booting")) {
+        assert!(std::time::Instant::now() < deadline, "Julia never began booting: {:?}", seen.lock().unwrap());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let core = Command::new("pgrep").arg("-f").arg("--").arg(format!("core --state-dir {}", place.state.display())).output().unwrap();
+    let core: i32 = String::from_utf8_lossy(&core.stdout).trim().parse().expect("one core");
+    cancel.cancel();
+    assert_eq!(done.recv_timeout(Duration::from_secs(10)).expect("it returns"), Err("Cancelled.".to_owned()));
+    (place, core)
+}
+
+#[test]
 fn a_line_that_is_not_utf8_on_ssh_stderr_does_not_hide_the_reason_after_it() {
     let place = Place::new("stderr-latin1");
     let ask = r"printf 'caf\351 banner\n' >&2; echo 'jc@lab: Permission denied (publickey).' >&2; exit 255";
     let transport = Transport::Shell { env: Vec::new(), ask: Some(ask.into()) };
     let err = connect(&Server::default(), &transport, &place.options(), &Cancel::default(), &|_| {}).map_err(|e| e.message).err().expect("refused");
     assert!(err.contains("refused the sign-in") && err.contains("ssh-add"), "{err}");
+}
+
+/// Whether `pid` runs: a zombie doesn't, as for the runtime (`unixproc::start_time`), since this container's PID 1
+/// may not reap the core once it is reparented there.
+fn running(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return false;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    !stat.rfind(')').and_then(|end| stat[end + 1..].split_whitespace().next()).is_some_and(|state| state == "Z" || state == "X")
 }
 
 /// Everything under `dir`, as paths.

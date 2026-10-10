@@ -237,7 +237,7 @@ mod tests {
         use std::process::Command;
         let uname = Command::new("uname").arg("-n").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&uname.stdout).trim_end(), crate::hostname(), "gethostname and `uname -n` name the same host");
-        assert!(crate::client::bootstrap_script("v1", false).contains(PICK_STATE_DIR_SH), "the script holds the shell text that is tested");
+        assert!(crate::client::bootstrap_script("v1", false, false).contains(PICK_STATE_DIR_SH), "the script holds the shell text that is tested");
         let path = std::env::var("PATH").unwrap();
         let pick = |st: &str, xdg: Option<&str>, launcher: &str| {
             let mut command = Command::new("sh");

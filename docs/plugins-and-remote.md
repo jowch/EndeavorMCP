@@ -477,6 +477,14 @@ own Stop or Detach. Not built: the app only detaches when it quits (there
 is no list of other sessions to decide by); the idle limit ends its
 notebooks.
 
+**Cancelling a test.** The app's Test connection (`client::test`) starts its
+helper with `--own-with-client`: when the helper's input ends without a Stop
+or Detach, which is what cancelling the test does by ending ssh, it stops a
+runtime this connection started, whether Julia is still starting or ready. A
+runtime it found running, or another connection's start it waited for, is
+left. Without it, a test cancelled while Julia started left Julia running on
+the server with nothing using it.
+
 **The package folder locally.** On servers the app and `serve` already use
 the same one. On your own computer they differ (the app's is in its data
 folder). A shared runtime uses the folder of whichever client started it, so

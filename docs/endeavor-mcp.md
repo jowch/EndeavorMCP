@@ -191,8 +191,8 @@ no usable record but `starting.lock` held waits for that runtime, and looks agai
 when the lock comes free (the record is written first, so "free and no record"
 means that start died; it then starts its own, unless the start was stopped, and
 then it is told so). A client that waits never stops the start of another
-process: an unforced `Stop` to the helper, Ctrl-C in `serve`, the end of input and
-`--quit-with-client` end only a start this process spawned. A stop
+process: an unforced `Stop` to the helper, Ctrl-C in `serve`, the end of input,
+`--quit-with-client` and `--own-with-client` end only a start this process spawned. A stop
 (`endeavor stop`, `stop_machine` for this computer, the helper's Stop for a
 runtime it is not attached to) that finds no record and `starting.lock` held
 stops nothing, and says Julia is still starting. `endeavor stop --force`, and
