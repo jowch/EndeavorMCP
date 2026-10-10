@@ -247,7 +247,7 @@ fn serve_and_mcp_without_the_app() {
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": cell, "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": cell }));
         assert_eq!((&read["output"], &read["errored"]), (&json!("42"), &json!(false)), "{read}");
-        let status = agent.ok("pluto_session_status", json!({}));
+        let status = agent.ok("session_status", json!({}));
         assert_eq!(status["browser_url"], json!(format!("http://localhost:{port}/")), "{status}");
         assert_eq!(agent.this_session(), vec![("analysis.jl".to_owned(), true)], "the notebook it made is this session's");
         notebook

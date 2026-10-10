@@ -204,7 +204,7 @@ package `endeavor-mcp`; it was `endeavor-remote` until the rename.
   `runtime.json` says `no_folder`. It works in that folder, gives it to Pluto's page (`endeavor/set_folder`), uses
   it for any session the app gave no folder, records it in `runtime.json`,
   adds `browser_url` to `new_notebook`, `open_notebook` and
-  `pluto_session_status`, and adds to its MCP instructions what differs
+  `session_status`, and adds to its MCP instructions what differs
   without the app (`guide::STANDALONE`). `open_notebook` now resolves a
   relative path against the session's folder, in the app too.
 - **No holds.** Policies come only from the app's `endeavor/set_policy`; a
