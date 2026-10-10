@@ -58,7 +58,7 @@ fn stop_from_another_terminal_ends_serve_without_an_error() {
     assert_eq!(record["exits_when_idle"], false, "serve runs until it is stopped");
 
     let stop = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--state-dir").arg(&dir).output().unwrap();
-    assert_eq!(String::from_utf8(stop.stdout).unwrap(), format!("Stopped Julia (pid {core}).\n"));
+    assert_eq!(String::from_utf8(stop.stdout).unwrap(), format!("Stopped Endeavor (pid {core}).\n"));
     assert_eq!(ended(serve), (Some(0), "Endeavor was stopped with `endeavor stop`.".to_owned()));
 }
 

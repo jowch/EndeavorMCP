@@ -42,11 +42,11 @@ mod status;
 mod target;
 
 
-const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Julia here and print how to connect (Ctrl-C stops it)
+const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Endeavor here and print how to connect (Ctrl-C stops it)
        endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
-       endeavor stop [--force]    stop the Julia that serve or mcp started; --force cancels a start under way
+       endeavor stop [--force]    stop what serve or mcp started; --force cancels a start under way
        endeavor status [--json]   show what Endeavor has on this computer; changes nothing
-       endeavor open              open the notebooks of the Julia that serve or mcp started in your browser
+       endeavor open              open the notebooks that serve or mcp started in your browser
 
 options:
   --folder DIR         where new notebooks go (default: the current folder)
@@ -392,15 +392,15 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         Outcome::Failed(message) => Err(message),
         Outcome::Died { status, log_tail } => {
             let tail = log_tail[log_tail.len().saturating_sub(8)..].join("\n");
-            Err(format!("Julia stopped while starting ({status}). The end of {}:\n{tail}", options.state_dir.join("runtime.log").display()))
+            Err(format!("Endeavor stopped while starting ({status}). The end of {}:\n{tail}", options.state_dir.join("runtime.log").display()))
         }
-        Outcome::Cancelled => Err("Stopped before Julia was ready.".into()),
-        Outcome::NothingRunning => Err("No Julia is running.".into()),
+        Outcome::Cancelled => Err("Stopped before Endeavor was ready.".into()),
+        Outcome::NothingRunning => Err("Endeavor isn't running.".into()),
     }
 }
 
 /// Why a runtime from a build before one port per runtime can't be used here.
-const OLDER_RUNTIME_HERE: &str = "The Julia running here was started by an older version of Endeavor. Stop it with `endeavor stop`, then try again.";
+const OLDER_RUNTIME_HERE: &str = "The Endeavor running here was started by an older version. Stop it with `endeavor stop`, then try again.";
 
 /// The core's environment for a standalone runtime (see `core::main`).
 fn core_env(options: &Options, exit_idle: bool) -> Vec<(&'static str, Option<String>)> {
@@ -451,7 +451,7 @@ fn lock_limit(var: &str, default_secs: u64) -> Duration {
 
 /// What to say when `start_lock_limit` passes.
 pub(crate) fn start_lock_gave_up(dir: &Path) -> String {
-    format!("Gave up waiting for another process that is starting Julia in {}. If none is, delete {} and try again.", dir.display(), dir.join("start.lock").display())
+    format!("Gave up waiting for another process that is starting Endeavor in {}. If none is, delete {} and try again.", dir.display(), dir.join("start.lock").display())
 }
 
 /// What `wait_for_start_lock` gave up on.
@@ -495,7 +495,7 @@ pub(crate) fn stop_lock(dir: &Path) -> Result<std::fs::File, String> {
 /// What to say when a stop gave up waiting for the start lock.
 pub(crate) fn stop_lock_gave_up(dir: &Path) -> String {
     format!(
-        "Julia was not stopped: another process has held the start lock in {} for too long. Julia is still running. Try again, or delete {} if nothing is starting Julia.",
+        "Endeavor was not stopped: another process has held the start lock in {} for too long. Endeavor is still running. Try again, or delete {} if nothing is starting Endeavor.",
         dir.display(),
         dir.join("start.lock").display()
     )
@@ -587,7 +587,7 @@ pub(crate) fn other_build_than(dir: &Path, this: &str, interface: Option<u32>) -
     };
     let version = crate::which_version(state["interface"].as_u64().and_then(|n| u32::try_from(n).ok()), interface);
     Some(format!(
-        "The Julia running from {} was started by {version} version of endeavor ({which}; this is build {this}). It keeps working as it was started. To use this version, run `endeavor stop`, then start it again.",
+        "The Endeavor running from {} was started by {version} version of endeavor ({which}; this is build {this}). It keeps working as it was started. To use this version, run `endeavor stop`, then start it again.",
         dir.display()
     ))
 }
@@ -644,7 +644,7 @@ fn catch_stop_signals() {
     }
     // SAFETY: a handler that only touches atomics and sleeps, for the life of the process.
     if unsafe { SetConsoleCtrlHandler(Some(on_console_event), 1) } == 0 {
-        eprintln!("endeavor: couldn't take Ctrl-C ({}); `endeavor stop` stops Julia", io::Error::last_os_error());
+        eprintln!("endeavor: couldn't take Ctrl-C ({}); `endeavor stop` stops it", io::Error::last_os_error());
     }
 }
 
@@ -725,13 +725,13 @@ fn stop(dir: &Path, force: bool) -> ! {
     let _starting = stop_lock(dir).unwrap_or_else(|why| failed(why));
     let (events, _) = mpsc::channel();
     match runtime::end(dir, false, stopped::How::Stop, force, &events) {
-        Ended::NotRunning => println!("No Julia is running from {}.", dir.display()),
-        Ended::Elsewhere(node) => failed(format!("The Julia recorded in {} runs on {node}, not here ({}). Stop it there.", dir.display(), crate::hostname())),
-        Ended::Alive(pid) => failed(format!("Julia (pid {pid}) is still running.")),
-        Ended::Starting => failed(format!("Julia is still starting in {}. `endeavor stop --force` cancels the start.", dir.display())),
+        Ended::NotRunning => println!("Endeavor isn't running from {}.", dir.display()),
+        Ended::Elsewhere(node) => failed(format!("The Endeavor recorded in {} runs on {node}, not here ({}). Stop it there.", dir.display(), crate::hostname())),
+        Ended::Alive(pid) => failed(format!("Endeavor (pid {pid}) is still running.")),
+        Ended::Starting => failed(format!("Endeavor is still starting in {}. `endeavor stop --force` cancels the start.", dir.display())),
         Ended::Unidentified => failed(runtime::START_UNIDENTIFIED.into()),
-        Ended::Cancelled(pid) => println!("Cancelled the start of Julia (pid {pid})."),
-        Ended::Stopped(pid) => println!("Stopped Julia (pid {pid})."),
+        Ended::Cancelled(pid) => println!("Cancelled the start of Endeavor (pid {pid})."),
+        Ended::Stopped(pid) => println!("Stopped Endeavor (pid {pid})."),
     }
     std::process::exit(0)
 }
@@ -757,10 +757,10 @@ fn open(dir: &Path) -> ! {
                 failed("No browser could be opened here. Run `endeavor open` in your own terminal: the link it prints holds the notebooks' key, so it isn't printed anywhere else.".into());
             }
         }
-        Looked::OtherNode(state) => failed(format!("The Julia recorded in {} runs on {}, not here ({}). Run `endeavor open` there.", dir.display(), state.node, crate::hostname())),
-        Looked::Silent(_) => failed("Julia is running but not answering. Try again in a moment.".into()),
-        Looked::Older(_) => failed(format!("The Julia running from {} was started by an older Endeavor, which has no page for a browser. `endeavor stop` stops it.", dir.display())),
-        Looked::NotRunning | Looked::Dead(_) => failed(format!("No Julia is running from {}.", dir.display())),
+        Looked::OtherNode(state) => failed(format!("The Endeavor recorded in {} runs on {}, not here ({}). Run `endeavor open` there.", dir.display(), state.node, crate::hostname())),
+        Looked::Silent(_) => failed("Endeavor is running but not answering. Try again in a moment.".into()),
+        Looked::Older(_) => failed(format!("The Endeavor running from {} was started by an older version, which has no page for a browser. `endeavor stop` stops it.", dir.display())),
+        Looked::NotRunning | Looked::Dead(_) => failed(format!("Endeavor isn't running from {}.", dir.display())),
     }
     std::process::exit(0)
 }
@@ -971,7 +971,7 @@ impl Relay {
                 Err(Sent::NotConnected(e)) if attempt == 0 => {
                     eprintln!("endeavor: the runtime isn't answering ({e}); looking for it again");
                 }
-                Err(Sent::NotConnected(e) | Sent::Failed(e)) => return failed(format!("Endeavor's Julia didn't answer: {e}")),
+                Err(Sent::NotConnected(e) | Sent::Failed(e)) => return failed(format!("Endeavor's runtime didn't answer: {e}")),
             }
         }
     }

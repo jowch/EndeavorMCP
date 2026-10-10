@@ -540,7 +540,7 @@ fn a_stop_during_a_start_whose_client_has_gone_stops_nothing_and_says_it_is_stil
     // The lock the stop needs is held for a moment only, and the stop waits for it a while.
     let held = hold_start_lock(&dir);
     let refused = endeavor(&dir, &["stop"]).env("ENDEAVOR_STOP_LOCK_SECS", "1").output().unwrap();
-    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("Julia was not stopped"), "{refused:?}");
+    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("Endeavor was not stopped"), "{refused:?}");
     drop(held);
 
     let refused = endeavor(&dir, &["stop"]).output().unwrap();
@@ -560,7 +560,7 @@ fn a_stop_during_a_start_whose_client_has_gone_stops_nothing_and_says_it_is_stil
     let ToApp::Ready { pid, reattached, .. } = after_start(&other) else { panic!("expected Ready") };
     assert_eq!((pid as i32, reattached), (core, true));
     let stopped = endeavor(&dir, &["stop"]).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&stopped.stdout), format!("Stopped Julia (pid {core}).\n"));
+    assert_eq!(String::from_utf8_lossy(&stopped.stdout), format!("Stopped Endeavor (pid {core}).\n"));
     common::wait_for("the core to end", || !common::pid_alive(core));
     other.stdin.0.lock().unwrap().take();
     other.exits();
@@ -600,7 +600,7 @@ fn a_forced_stop_cancels_a_start_that_is_under_way_and_leaves_nothing_of_it() {
     drop(held);
     let cancel = endeavor(&dir, &["stop", "--force"]).output().unwrap();
     assert!(cancel.status.success(), "{cancel:?}");
-    assert_eq!(String::from_utf8_lossy(&cancel.stdout), format!("Cancelled the start of Julia (pid {core}).\n"));
+    assert_eq!(String::from_utf8_lossy(&cancel.stdout), format!("Cancelled the start of Endeavor (pid {core}).\n"));
 
     common::wait_for("the core and Julia to end", || !common::pid_alive(core) && !common::pid_alive(julia_pid));
     common::wait_for("the lock to be let go", || start_lock_free(&dir));
@@ -622,9 +622,9 @@ fn a_forced_stop_cancels_a_start_that_is_under_way_and_leaves_nothing_of_it() {
     let ToApp::Ready { pid, reattached, .. } = after_start(&next) else { panic!("expected Ready") };
     assert!(!reattached && pid as i32 != core);
     let again = endeavor(&dir, &["stop", "--force"]).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&again.stdout), format!("Stopped Julia (pid {pid}).\n"), "a runtime that is up is stopped as usual");
+    assert_eq!(String::from_utf8_lossy(&again.stdout), format!("Stopped Endeavor (pid {pid}).\n"), "a runtime that is up is stopped as usual");
     let none = endeavor(&dir, &["stop", "--force"]).output().unwrap();
-    assert!(none.status.success() && String::from_utf8_lossy(&none.stdout).starts_with("No Julia is running"), "{none:?}");
+    assert!(none.status.success() && String::from_utf8_lossy(&none.stdout).starts_with("Endeavor isn't running"), "{none:?}");
     next.stdin.0.lock().unwrap().take();
     next.exits();
 }
@@ -778,7 +778,7 @@ fn a_runtime_that_is_silent_for_a_while_is_waited_for_and_used_and_none_is_start
     helper.hello();
     helper.request_start(None, true);
     let ToApp::Progress { line } = helper.next() else { panic!("expected Progress") };
-    assert_eq!(line, format!("Julia here (pid {}) isn't answering; asking it again for up to 20 seconds.", runtime.pid));
+    assert_eq!(line, format!("Endeavor here (pid {}) isn't answering; asking it again for up to 20 seconds.", runtime.pid));
     let ToApp::Ready { pid, reattached, .. } = after_start(&helper) else { panic!("expected Ready") };
     assert_eq!((pid, reattached), (runtime.pid, true));
     assert!(cores.pids().is_empty() && runtime.alive());
@@ -813,7 +813,7 @@ fn a_runtime_that_stays_silent_is_neither_stopped_nor_replaced_and_every_client_
     record_port(&dir, closed);
     let julia = fake_julia(&dir);
     let wait = ("ENDEAVOR_TEST_SILENT_WAIT_SECS", "2");
-    let said = format!("Julia here (pid {}) is running but hasn't answered for 2 seconds, so no second one was started beside it.", runtime.pid);
+    let said = format!("Endeavor here (pid {}) is running but hasn't answered for 2 seconds, so no second one was started beside it.", runtime.pid);
 
     let helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[wait]);
     helper.hello();
@@ -866,7 +866,7 @@ fn a_recorded_pid_that_started_at_another_time_is_stale_and_a_stop_leaves_the_pr
     let status: serde_json::Value = serde_json::from_slice(&endeavor(&dir, &["status", "--json"]).output().unwrap().stdout).unwrap();
     assert_eq!((status["runtime"]["state"].clone(), status["runtime"]["answers"].clone()), (serde_json::json!("stale"), serde_json::Value::Null), "{status}");
     let stop = endeavor(&dir, &["stop", "--force"]).output().unwrap();
-    assert!(stop.status.success() && String::from_utf8_lossy(&stop.stdout).starts_with("No Julia is running"), "{stop:?}");
+    assert!(stop.status.success() && String::from_utf8_lossy(&stop.stdout).starts_with("Endeavor isn't running"), "{stop:?}");
     assert!(runtime.alive(), "the process was not signalled, and its port was not asked to shut down");
     assert!(!dir.join("runtime.json").exists() && !dir.join("stopped").exists());
 }
@@ -987,7 +987,7 @@ fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_
     // SAFETY: plain syscall, on the `serve` this test started.
     unsafe { libc::kill(serve.id() as i32, libc::SIGINT) };
     let (code, said) = ended(serve);
-    assert!(code == Some(1) && said.trim_end().ends_with("endeavor: Stopped before Julia was ready."), "{code:?} {said}");
+    assert!(code == Some(1) && said.trim_end().ends_with("endeavor: Stopped before Endeavor was ready."), "{code:?} {said}");
     assert!(common::pid_alive(core) && cores.pids() == [core], "the start went on");
 
     // Two more wait, and both get that core.
@@ -1634,7 +1634,7 @@ fn a_job_that_ends_before_julia_is_ready_says_why() {
     slurm.set("sacct", "FAILED");
     slurm.set("state", "FAILED");
     let ToApp::StartFailed { message, .. } = helper.after_progress() else { panic!("expected StartFailed") };
-    assert_eq!(message, "Its Slurm job failed. Julia wasn't ready yet. Its last output: ERROR: out of disk quota");
+    assert_eq!(message, "Its Slurm job failed. Endeavor wasn't ready yet. Its last output: ERROR: out of disk quota");
 }
 
 #[test]
@@ -2120,7 +2120,7 @@ fn a_runtime_this_helper_may_not_stop_is_not_stopped_and_the_client_is_told() {
     let stop = helper.request_stop();
     let ToApp::NotStopped { id, message } = helper.next() else { panic!("expected NotStopped") };
     assert_eq!(id, stop);
-    assert!(message.starts_with("Julia was not stopped.") && message.contains("some-other-node"), "{message}");
+    assert!(message.starts_with("Endeavor was not stopped.") && message.contains("some-other-node"), "{message}");
     assert!(runtime.alive() && dir.join("runtime.json").exists());
     helper.stdin.0.lock().unwrap().take();
     helper.exits();

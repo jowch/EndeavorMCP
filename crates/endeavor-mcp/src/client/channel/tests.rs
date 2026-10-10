@@ -246,7 +246,7 @@ fn a_start_that_a_stop_cut_short_ends_with_its_own_answer() {
     let starting = helper.starting(&Listener::start("lab").unwrap(), |_| {});
     let [start] = helper.starts_sent(1)[..] else { panic!() };
     helper.tell(&ToApp::StartCancelled { id: start });
-    assert_eq!(starting.join().unwrap().unwrap_err(), "Julia was stopped while it started.");
+    assert_eq!(starting.join().unwrap().unwrap_err(), "Endeavor was stopped while it started.");
 }
 
 #[test]
@@ -279,7 +279,7 @@ fn a_second_start_while_one_waits_fails_at_once_and_leaves_the_first_alone() {
     let [one] = helper.starts_sent(1)[..] else { panic!() };
     let began = Instant::now();
     let second = helper.channel.start_runtime(&listener, &StartOptions::default(), &mut |_| {}, |_| {});
-    assert_eq!(second.unwrap_err(), StartError::Failed("Julia is already starting.".into()));
+    assert_eq!(second.unwrap_err(), StartError::Failed("Endeavor is already starting.".into()));
     assert!(began.elapsed() < Duration::from_millis(500));
     assert_eq!(helper.requests().iter().filter(|request| matches!(request, ToHelper::StartRuntime { .. })).count(), 1, "nothing was sent for it");
 
@@ -427,7 +427,7 @@ fn a_quit_that_stops_ends_a_start_under_way() {
     assert_ne!(start, stop);
     helper.tell(&ToApp::StartCancelled { id: start });
     helper.tell(&ToApp::Stopped { id: stop });
-    assert_eq!(starting.join().unwrap().unwrap_err(), "Julia was stopped while it started.");
+    assert_eq!(starting.join().unwrap().unwrap_err(), "Endeavor was stopped while it started.");
 }
 
 #[test]
@@ -439,7 +439,7 @@ fn a_stop_from_another_thread_ends_a_start_under_way() {
     let [stop] = helper.stops_sent(1)[..] else { panic!() };
     helper.tell(&ToApp::StartCancelled { id: start });
     helper.tell(&ToApp::Stopped { id: stop });
-    assert_eq!(starting.join().unwrap().unwrap_err(), "Julia was stopped while it started.");
+    assert_eq!(starting.join().unwrap().unwrap_err(), "Endeavor was stopped while it started.");
     stopping.join().unwrap().unwrap();
 }
 

@@ -38,7 +38,7 @@ fn a_machine_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
     assert!(said.starts_with("Endeavor is connecting to lab. Last step: Connecting to lab") && said.contains("call the notebook tool you want again") && said.contains("don't call it repeatedly") && said.contains("`use_machine` again"), "{said}");
 
     let said = not_ready_message("lab", &reached(Outcome::StillWorking("Found Julia 1.12.0".into()), status(State::Starting { queue: None })));
-    assert!(said.contains("Julia is starting on lab") && said.contains("Last step: Found Julia 1.12.0") && said.contains("each call waits up to 45 seconds") && !said.contains("how far it got"), "{said}");
+    assert!(said.contains("Endeavor is starting on lab") && said.contains("Last step: Found Julia 1.12.0") && said.contains("each call waits up to 45 seconds") && !said.contains("how far it got"), "{said}");
 
     let job = Some(JobInfo { id: "4242".into(), ..Default::default() });
     let queued = Outcome::Queued { job: job.clone(), queue: QueueInfo { state: "PENDING".into(), reason: "Priority".into() } };
@@ -46,18 +46,18 @@ fn a_machine_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
     assert_eq!(said, "The Slurm job 4242 on hpc is waiting in the queue: other jobs are ahead of it. Tell the user. To wait, call the notebook tool you want again: each call waits up to 45 seconds. `session_status` answers at once and only shows the job's state, so don't call it repeatedly. A queued job can wait minutes or hours: after a few tries, stop and let the user say when to check again.");
     let running = Outcome::Queued { job, queue: QueueInfo { state: "RUNNING".into(), reason: "n123".into() } };
     let said = not_ready_message("hpc", &reached(running, status(State::Starting { queue: Some(QueueInfo { state: "RUNNING".into(), reason: "n123".into() }) })));
-    assert!(said.contains("running on node n123, and Julia is starting there") && said.contains("call the notebook tool you want again") && !said.contains("minutes or hours"), "{said}");
+    assert!(said.contains("running on node n123, and Endeavor is starting there") && said.contains("call the notebook tool you want again") && !said.contains("minutes or hours"), "{said}");
     // The status's `queue` names the node of a job that runs, not as its reason.
     let queue = queue_json(&status(State::Starting { queue: Some(QueueInfo { state: "RUNNING".into(), reason: "n123".into() }) })).unwrap();
-    assert_eq!(queue, json!({ "state": "RUNNING", "node": "n123", "reason_text": "running on node n123, and Julia is starting there" }));
+    assert_eq!(queue, json!({ "state": "RUNNING", "node": "n123", "reason_text": "running on node n123, and Endeavor is starting there" }));
     let queue = queue_json(&status(State::Queued(QueueInfo { state: "PENDING".into(), reason: "BeginTime".into() }))).unwrap();
     assert_eq!(queue, json!({ "state": "PENDING", "reason": "BeginTime", "reason_text": "its start time is in the future" }));
 
     let said = not_ready_message("lab", &reached(Outcome::Failed("lab refused the sign-in.".into()), status(State::Failed("lab refused the sign-in.".into()))));
-    assert!(said.starts_with("Julia on lab isn't available: lab refused the sign-in.") && said.contains("`use_machine` with machine \"lab\""), "{said}");
+    assert!(said.starts_with("Endeavor on lab isn't available: lab refused the sign-in.") && said.contains("`use_machine` with machine \"lab\""), "{said}");
 
     let said = not_ready_message("lab", &reached(Outcome::NothingRunning, status(State::NothingRunning)));
-    assert!(said.contains("Julia isn't running on lab") && said.contains("`use_machine`"), "{said}");
+    assert!(said.contains("Endeavor isn't running on lab") && said.contains("`use_machine`"), "{said}");
 }
 
 #[test]
@@ -259,7 +259,7 @@ fn stopping_without_force_a_start_that_is_under_way_names_what_would_be_cancelle
     assert_eq!((said["stopped"].clone(), said["job"]["id"].clone(), said["state"].clone()), (json!(false), json!("4242"), json!("queued")));
     assert!(message.contains("the Slurm job 4242 on hpc is pending (other jobs are ahead of it)") && message.contains("can't see which other sessions are waiting") && message.contains("force true"), "{message}");
     let said = waiting_result("lab", &status(State::Starting { queue: None }));
-    assert!(said["message"].as_str().unwrap().contains("Julia is starting on lab") && said["job"].is_null(), "{said}");
+    assert!(said["message"].as_str().unwrap().contains("Endeavor is starting on lab") && said["job"].is_null(), "{said}");
 }
 
 #[test]
@@ -473,7 +473,7 @@ fn this_computer_is_called_this_computer_in_what_an_agent_reads() {
     }
     assert!(said[1].contains("`use_machine` with machine \"local\""), "the argument is still local: {}", said[1]);
     let waiting = &said[3];
-    assert!(waiting.contains("Julia is starting on this computer") && waiting.contains("Stopping cancels it") && waiting.contains("force true"), "a start there is cancelled by a forced stop: {waiting}");
+    assert!(waiting.contains("Endeavor is starting on this computer") && waiting.contains("Stopping cancels it") && waiting.contains("force true"), "a start there is cancelled by a forced stop: {waiting}");
     let on_machine = waiting_result("lab", &status(State::Starting { queue: None }))["message"].as_str().unwrap().to_owned();
     assert!(on_machine.contains("Stopping cancels it") && on_machine.contains("force true"), "{on_machine}");
     assert_eq!(waiting.replace("this computer", "lab"), on_machine, "this computer and a machine are told the same");

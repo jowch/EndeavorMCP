@@ -34,7 +34,7 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
 ## Read, stage, run, check
 
 1. **Read.** An edit is accepted only for a cell you have read as it is now. `read_required` and `stale_read` mean read it and try again; `stale_read` means someone changed it since, so see what they did before you overwrite it. `read_notebook_code` reads every cell it returns, but leaves prose cells out unless `include_markdown=true`. `add_cell` needs a read of the cell it goes after. A cell you just added or edited counts as read.
-2. **Stage.** `edit_cell`, `edit_cells` and `add_cell` change code without running it. Staged cells are listed in `pending_run`, and `read_cell` shows them `stale`: the output is from the old code.
+2. **Stage.** `edit_cell`, `edit_cells` and `add_cell` change code without running it. Staged cells are listed in `pending_run`, and `read_cell` shows them `stale`: the output is from the old code. Each `add_cell` puts its cell directly after `after_cell_id`, so two cells added after the same cell end up in reverse order. To add several in order, add them one at a time, each after the `cell_id` the previous call returned.
 3. **Run once.** `submit_changes` runs everything staged, with dependents. Run once per batch of edits, not per edit, so expensive cells downstream run once. Don't end a turn with cells staged unless the user asked for that, declined the run, or the notebook is in safe preview. If cells stay staged, tell the user which ones haven't run, since the notebook shows output that doesn't match their code.
 4. **Check.**
    - Pass `wait_for_completion=true` when you will read the result next. Without it the run returns at once: do other work, then read the cells until `running` and `queued` are false.

@@ -97,7 +97,7 @@ pub(crate) fn ask_again(dir: &Path, any_node: bool, since: Instant, limit: Durat
 /// Why no runtime is started beside one that is alive and doesn't answer.
 pub(crate) fn silent_text(pid: i32) -> String {
     format!(
-        "Julia here (pid {pid}) is running but hasn't answered for {} seconds, so no second one was started beside it. It may be busy, for example out of memory, or stuck. Stopping it (`endeavor stop`, or Stop in the Endeavor app) lets a new one start, and ends what it holds in memory.",
+        "Endeavor here (pid {pid}) is running but hasn't answered for {} seconds, so no second one was started beside it. It may be busy, for example out of memory, or stuck. Stopping it (`endeavor stop`, or Stop in the Endeavor app) lets a new one start, and ends what it holds in memory.",
         silent_wait().as_secs()
     )
 }
@@ -105,7 +105,7 @@ pub(crate) fn silent_text(pid: i32) -> String {
 /// Why the runtime recorded in a state folder is not used.
 pub(crate) fn other_node_text(node: &str) -> String {
     let here = crate::hostname();
-    format!("Julia for this folder is running on {node}, and this is {here}. Connect to {node} to use it, or stop it there.")
+    format!("Endeavor for this folder is running on {node}, and this is {here}. Connect to {node} to use it, or stop it there.")
 }
 
 /// What the callers of `find_or_start` give it.
@@ -207,7 +207,7 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             // Never a second runtime beside one that is alive: both would open the same notebooks.
             Looked::Silent(state) if !starting && !want.attach_only => {
                 drop(lock);
-                hooks.progress(format!("Julia here (pid {}) isn't answering; asking it again for up to {} seconds.", state.pid, silent_wait().as_secs()));
+                hooks.progress(format!("Endeavor here (pid {}) isn't answering; asking it again for up to {} seconds.", state.pid, silent_wait().as_secs()));
                 match ask_again(dir, want.args.any_node, looked_at, silent_wait(), &mut || hooks.wait(POLL, Waiting::Silent)) {
                     None => return Outcome::Cancelled,
                     Some(Looked::Silent(state)) => return Outcome::Failed(silent_text(state.pid)),
@@ -217,7 +217,7 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             }
             // Its core was killed: what it started may still run, and open the same notebooks as the new one.
             Looked::Dead(state) if !starting && !want.attach_only && crate::stop_workers(state.pid, state.started, state.boot.as_deref()) => {
-                hooks.progress(format!("Stopped what the last Julia here left running when it ended (pid {}).", state.pid));
+                hooks.progress(format!("Stopped what the last Endeavor here left running when it ended (pid {}).", state.pid));
             }
             _ => {}
         }
@@ -443,7 +443,7 @@ fn await_core_lock(dir: &Path, runtime: &Runtime) -> Result<(), Outcome> {
         }
         if Instant::now() > until {
             runtime.stop(None);
-            return Err(Outcome::Failed(format!("Julia didn't start: the runtime (pid {}) did not take its lock in time. Its log is {}.", runtime.pid, dir.join("runtime.log").display())));
+            return Err(Outcome::Failed(format!("Endeavor didn't start: the runtime (pid {}) did not take its lock in time. Its log is {}.", runtime.pid, dir.join("runtime.log").display())));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -487,7 +487,7 @@ fn await_runtime(dir: &Path, any_node: bool, own: Option<&Runtime>, hooks: &mut 
         if !held {
             // A start that was stopped is not started again for whoever waited for it.
             break Err(match core.and_then(|pid| stopped::why(dir, stopped::Of::Runtime(pid))) {
-                Some(how) => Waited::Out(Outcome::Failed(format!("Julia was stopped while it was starting. {}", crate::stopped_text(how)))),
+                Some(how) => Waited::Out(Outcome::Failed(format!("Endeavor was stopped while it was starting. {}", crate::stopped_text(how)))),
                 None => Waited::Gone,
             });
         }
@@ -522,13 +522,13 @@ pub(crate) enum Ended {
 }
 
 /// What a helper's stop says when a runtime is starting and its `Stop` was not forced.
-pub(crate) const STILL_STARTING: &str = "Julia was not stopped: it is still starting. Try again once it is up, or force the stop to cancel the start.";
+pub(crate) const STILL_STARTING: &str = "Endeavor was not stopped: it is still starting. Try again once it is up, or force the stop to cancel the start.";
 
 /// What a stop here says when a runtime is starting and `force` was not given.
-pub(crate) const STILL_STARTING_FORCE: &str = "Julia was not stopped: it is still starting. A stop with `force` cancels the start.";
+pub(crate) const STILL_STARTING_FORCE: &str = "Endeavor was not stopped: it is still starting. A stop with `force` cancels the start.";
 
 /// What a forced stop says when the process that is starting Julia can't be told.
-pub(crate) const START_UNIDENTIFIED: &str = "Julia is starting, but Endeavor can't tell which process is starting it, so nothing was stopped. Try again in a moment. If this goes on, find the process with `ps` and end it.";
+pub(crate) const START_UNIDENTIFIED: &str = "Endeavor is starting, but it can't tell which process is starting it, so nothing was stopped. Try again in a moment. If this goes on, find the process with `ps` and end it.";
 
 /// End the runtime in `dir`, leaving a note of `how` for the clients still attached, and the record of one
 /// whose process is gone removed. A runtime that is alive and not answering is stopped as well. The

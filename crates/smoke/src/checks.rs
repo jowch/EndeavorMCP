@@ -434,7 +434,7 @@ mod tests {
 
         let mut waited = calls.clone();
         waited[0].is_error = true;
-        waited[0].reply = json!("Julia is starting on this computer. To wait, call the notebook tool you want again.");
+        waited[0].reply = json!("Endeavor is starting on this computer. To wait, call the notebook tool you want again.");
         assert!(judge(json!({ "check": "called", "tool": "new_notebook", "max": 1 }), &waited).passed, "a call turned away while Julia starts isn't counted");
         waited[0].reply = json!({ "error": "julia_starting", "message": "Julia 1.12.6 is starting and loading Pluto." });
         assert!(judge(json!({ "check": "called", "tool": "new_notebook", "max": 1 }), &waited).passed, "nor one the core turned away while Julia starts on first need");

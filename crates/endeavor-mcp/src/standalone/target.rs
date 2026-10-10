@@ -182,7 +182,7 @@ impl Local {
         if idle {
             let which = crate::which_build(state.build.as_deref());
             builds.stopped_one = true;
-            eprintln!("endeavor: Julia here (pid {}) was started by {which}, and no notebook is open in it; stopping it so that this build ({this}) starts its own", runtime.pid);
+            eprintln!("endeavor: the runtime here (pid {}) was started by {which}, and no notebook is open in it; stopping it so that this build ({this}) starts its own", runtime.pid);
             match self.stop(false) {
                 Ok(()) => return OtherBuild::Stopped,
                 Err(e) => eprintln!("endeavor: {e}"),
@@ -229,13 +229,13 @@ impl Local {
         }
         match looked {
             // A start another process has under way is a start under way, not nothing.
-            Looked::NotRunning | Looked::Dead(_) | Looked::Silent(_) if starting => Outcome::StillWorking("Another process is starting Julia".into()),
+            Looked::NotRunning | Looked::Dead(_) | Looked::Silent(_) if starting => Outcome::StillWorking("Another process is starting Endeavor".into()),
             Looked::NotRunning | Looked::Dead(_) => Outcome::NothingRunning,
             Looked::Running(state, port) => Outcome::Ready(announce(&self.options, &state, port, false)),
             Looked::OtherNode(state) => Outcome::Failed(runtime::other_node_text(&state.node)),
             Looked::Older(_) => Outcome::Failed(super::OLDER_RUNTIME_HERE.into()),
             Looked::Silent(state) if looked_at.elapsed() >= runtime::silent_wait() => Outcome::Failed(runtime::silent_text(state.pid)),
-            Looked::Silent(state) => Outcome::Failed(format!("Julia on this computer (pid {}) is running but isn't answering. Try again in a moment.", state.pid)),
+            Looked::Silent(state) => Outcome::Failed(format!("Endeavor on this computer (pid {}) is running but isn't answering. Try again in a moment.", state.pid)),
         }
     }
 
@@ -363,8 +363,8 @@ impl Provider for Local {
         let cancelled = matches!(ended, Ended::Cancelled(_));
         match ended {
             Ended::Stopped(_) | Ended::NotRunning | Ended::Cancelled(_) => {}
-            Ended::Alive(pid) => return Err(format!("Julia (pid {pid}) is still running after the stop.")),
-            Ended::Elsewhere(node) => return Err(format!("The Julia recorded here runs on {node}, not on this computer.")),
+            Ended::Alive(pid) => return Err(format!("Endeavor (pid {pid}) is still running after the stop.")),
+            Ended::Elsewhere(node) => return Err(format!("The Endeavor recorded here runs on {node}, not on this computer.")),
             Ended::Starting => return Err(runtime::STILL_STARTING_FORCE.into()),
             Ended::Unidentified => return Err(runtime::START_UNIDENTIFIED.into()),
         }

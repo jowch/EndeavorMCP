@@ -385,7 +385,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, 
                         Err(e) => {
                             scancel(job);
                             forget(dir, job);
-                            break Err(Unstarted::Failed(format!("Julia started on {} (job {job}), but Endeavor couldn't reach it there, so the job was cancelled. {e}", state.node)));
+                            break Err(Unstarted::Failed(format!("Endeavor started on {} (job {job}), but couldn't be reached there, so the job was cancelled. {e}", state.node)));
                         }
                     }
                 }
@@ -399,7 +399,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, 
                 let tail = log_tail(&dir.join("runtime.log"));
                 let said = tail.iter().rev().find(|l| !l.trim().is_empty()).map(|l| format!(" Its last output: {}", l.trim())).unwrap_or_default();
                 forget(dir, job);
-                break Err(Unstarted::Failed(format!("{reason} Julia wasn't ready yet.{said}")));
+                break Err(Unstarted::Failed(format!("{reason} Endeavor wasn't ready yet.{said}")));
             }
         }
     };
@@ -685,7 +685,7 @@ pub fn relay_main(argv: &[String]) -> ! {
     let home = wire::files::home().display().to_string();
     let _ = mux.send(&ToApp::Hello { protocol: wire::PROTOCOL, version: env!("CARGO_PKG_VERSION").into(), node: hostname(), home, slurm: false, uploads: false, launcher: String::new() }.frame());
     let runtime::Looked::Running(state, port) = runtime::look(&dir, false, true) else {
-        let _ = mux.send(&ToApp::StartFailed { id: 0, message: format!("Julia isn't running on {}.", hostname()) }.frame());
+        let _ = mux.send(&ToApp::StartFailed { id: 0, message: format!("Endeavor isn't running on {}.", hostname()) }.frame());
         std::process::exit(1);
     };
     let runtime = Runtime::recorded(&state, &dir, &events);

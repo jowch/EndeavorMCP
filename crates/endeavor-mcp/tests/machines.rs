@@ -344,7 +344,7 @@ fn add_machine_reports_and_saves_a_cluster_and_list_machines_connects_to_nothing
     assert_eq!(added["home"], place.dir.join("home").display().to_string());
     assert_eq!(added["slurm"], true);
     assert_eq!(added["partitions"], json!([{ "name": "shared", "default": true, "max_hours": 8.0, "cpus": 10, "memory_gb": 7 }]));
-    assert!(added["message"].as_str().unwrap().contains("It has Slurm, and Julia runs in Slurm jobs there. Partitions: shared (default) (up to 8 h, 10 CPUs and 7 GB a node)"), "{}", added["message"]);
+    assert!(added["message"].as_str().unwrap().contains("It has Slurm, and notebooks run in Slurm jobs there. Partitions: shared (default) (up to 8 h, 10 CPUs and 7 GB a node)"), "{}", added["message"]);
     assert!(added["message"].as_str().unwrap().contains("call `add_machine` again with slurm false"), "the other way is offered: {}", added["message"]);
     assert_eq!((added["cluster"].clone(), added["runs_in"].clone()), (json!(true), json!("slurm_jobs")));
 
@@ -402,7 +402,7 @@ fn a_new_machine_with_slurm_tools_is_added_as_a_plain_server_when_slurm_is_false
     let added = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "slurm": false }));
     assert_eq!((added["slurm"].clone(), added["cluster"].clone(), added["runs_in"].clone(), added["updated"].clone()), (json!(true), json!(false), json!("directly"), json!(false)), "{added}");
     let message = added["message"].as_str().unwrap();
-    assert!(message.contains("It has Slurm, but Julia runs on it directly and not in a job, as asked") && message.contains("`add_machine` again with slurm true"), "{message}");
+    assert!(message.contains("It has Slurm, but notebooks run on it directly and not in a job, as asked") && message.contains("`add_machine` again with slurm true"), "{message}");
     assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "saved as a plain server");
     let helpers = place.helpers();
 
@@ -416,7 +416,7 @@ fn a_new_machine_with_slurm_tools_is_added_as_a_plain_server_when_slurm_is_false
     let again = front.ok("add_machine", json!({ "host": "lab" }));
     assert_eq!(again["cluster"], false, "{again}");
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "slurm": true }));
-    assert!(failed && text(&said).contains("Julia is running, or starting, on lab") && text(&said).contains("`stop_machine`"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor is running, or starting, on lab") && text(&said).contains("`stop_machine`"), "{said}");
     assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "unchanged");
     assert_eq!(front.ok("list_notebooks", json!({})), json!([]), "and the session still works");
 
@@ -531,7 +531,7 @@ fn settings_that_changed_under_a_runtime_in_use_are_refused_in_plain_words() {
     assert_eq!(used["state"], "ready");
     let helpers = place.helpers();
     let (failed, said) = front.call("add_machine", json!({ "host": "labb", "name": "lab", "julia": place.julia.display().to_string() }));
-    assert!(failed && text(&said).contains("changed while Julia is in use") && text(&said).contains("stop_machine"), "{said}");
+    assert!(failed && text(&said).contains("changed while Endeavor is in use") && text(&said).contains("stop_machine"), "{said}");
     assert!(!text(&said).contains("link"), "{said}");
     assert_eq!(place.helpers(), helpers, "the connection stays");
     assert_eq!(place.machines().find_by_name("lab").unwrap().unwrap().ssh_host, "lab");
@@ -981,12 +981,12 @@ fn a_notebook_call_while_the_runtime_is_still_starting_returns_the_status_within
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
     assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
     assert_eq!((used["state"].as_str(), used["ready"].clone()), (Some("starting"), json!(false)), "{used}");
-    assert!(used["message"].as_str().unwrap().contains("Julia is starting on lab") && used["message"].as_str().unwrap().contains("`session_status`"), "{used}");
+    assert!(used["message"].as_str().unwrap().contains("Endeavor is starting on lab") && used["message"].as_str().unwrap().contains("`session_status`"), "{used}");
 
     let started = Instant::now();
     let (failed, said) = front.call("list_notebooks", json!({}));
     assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
-    assert!(failed && text(&said).contains("Julia is starting on lab"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor is starting on lab"), "{said}");
     let status = front.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["state"].as_str(), status["ready"].clone()), (Some("lab"), Some("starting"), json!(false)), "{status}");
     assert!(status["step"].is_string());
@@ -994,7 +994,7 @@ fn a_notebook_call_while_the_runtime_is_still_starting_returns_the_status_within
     // Julia is on its way, so it is not stopped without the user's word: others may be waiting for it.
     let refused = front.ok("stop_machine", json!({ "machine": "lab" }));
     assert_eq!((refused["stopped"].clone(), refused["state"].clone()), (json!(false), json!("starting")), "{refused}");
-    assert!(refused["message"].as_str().unwrap().contains("Julia is starting on lab") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
+    assert!(refused["message"].as_str().unwrap().contains("Endeavor is starting on lab") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
     assert_eq!(front.ok("session_status", json!({}))["state"], "starting", "nothing was cancelled");
 
     std::fs::remove_file(place.state.join("hold")).unwrap();
@@ -1074,7 +1074,7 @@ fn stop_machine_works_on_this_computer_with_the_same_check() {
     assert_eq!(stopped["stopped"], true, "{stopped}");
     wait_for("the local runtime to end", || !pid_alive(local));
     let (failed, said) = front.call("list_notebooks", json!({}));
-    assert!(failed && text(&said).contains("Julia on this computer was stopped") && text(&said).contains("`use_machine` with machine \"local\""), "{said}");
+    assert!(failed && text(&said).contains("Endeavor on this computer was stopped") && text(&said).contains("`use_machine` with machine \"local\""), "{said}");
     let status = front.ok("session_status", json!({}));
     assert_eq!((status["state"].as_str(), status["machine"].as_str()), (Some("stopped"), Some("local")), "{status}");
     assert!(place.local_runtime().is_none() || !pid_alive(place.local_runtime().unwrap()), "not started again by the call");
@@ -1171,14 +1171,14 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
     third.initialize();
     let used = third.ok("use_machine", json!({ "machine": "lab" }));
     let message = used["message"].as_str().unwrap();
-    assert!(message.contains("Note: Julia on lab was started by an older version of Endeavor, and it keeps running as it is.") && message.contains("`stop_machine` with machine \"lab\""), "{used}");
+    assert!(message.contains("Note: Endeavor on lab was started by an older version, and it keeps running as it is.") && message.contains("`stop_machine` with machine \"lab\""), "{used}");
     assert!(!message.contains(ANOTHER_BUILD), "no build keys in what the agent passes on: {used}");
     let (_, said) = third.contents("list_notebooks", json!({}));
     assert_eq!(said.len(), 1, "said once: {said:?}");
     // The status says it every time, for an agent that no longer has the notice, with the build in a field of its own.
     let status = third.ok("session_status", json!({}));
     let other = status["other_version"].as_str().unwrap_or_default();
-    assert!(other.starts_with("Julia on lab was started by an older version of Endeavor") && !other.contains(ANOTHER_BUILD), "{status}");
+    assert!(other.starts_with("Endeavor on lab was started by an older version") && !other.contains(ANOTHER_BUILD), "{status}");
     assert_eq!((status["runtime_build"].as_str(), status["machine"].as_str()), (Some(ANOTHER_BUILD), Some("lab")), "{status}");
     // One whose interface is above this build's is a newer version.
     third.finish();
@@ -1188,7 +1188,7 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
     let mut third = place.front();
     third.initialize();
     let used = third.ok("use_machine", json!({ "machine": "lab" }));
-    assert!(used["message"].as_str().unwrap().contains("Julia on lab was started by a newer version of Endeavor"), "{used}");
+    assert!(used["message"].as_str().unwrap().contains("Endeavor on lab was started by a newer version"), "{used}");
     assert_eq!(place.runtime(), Some(runtime), "kept");
     third.finish();
 }
@@ -1541,14 +1541,14 @@ fn a_runtime_of_another_build_with_a_notebook_open_is_kept_and_the_agent_is_told
     let (failed, said) = second.contents("list_notebooks", json!({}));
     assert!(!failed && said[0][0]["path"] == path.as_str(), "{said:?}");
     let notice = said[1].as_str().unwrap_or_default();
-    assert!(notice.starts_with("Note: Julia on this computer was started by an older version of Endeavor, and it keeps running as it is. It has 1 notebook open. Some notebook tools"), "{notice}");
+    assert!(notice.starts_with("Note: Endeavor on this computer was started by an older version, and it keeps running as it is. It has 1 notebook open. Some notebook tools"), "{notice}");
     assert!(notice.contains("`stop_machine` with machine \"local\"; then `use_machine` with machine \"local\" starts this version."), "{notice}");
     assert!(!notice.contains(ANOTHER_BUILD), "{notice}");
     second.ok("open_notebook", json!({ "path": path }));
     let (_, again) = second.contents("list_notebooks", json!({}));
     assert_eq!(again.len(), 1, "said once: {again:?}");
     let status = second.ok("session_status", json!({}));
-    assert!(status["other_version"].as_str().is_some_and(|t| t.starts_with("Julia on this computer was started by an older version")), "{status}");
+    assert!(status["other_version"].as_str().is_some_and(|t| t.starts_with("Endeavor on this computer was started by an older version")), "{status}");
     assert_eq!(status["runtime_build"].as_str(), Some(ANOTHER_BUILD), "{status}");
     assert_eq!(place.local_runtime(), Some(runtime), "kept");
     second.finish();
@@ -1661,7 +1661,7 @@ fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call
     let started = Instant::now();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
     assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
-    assert!(failed && text(&said).contains("Julia is starting on this computer") && text(&said).contains("`session_status`"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor is starting on this computer") && text(&said).contains("`session_status`"), "{said}");
     assert!(place.local_runtime().is_none());
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1670,7 +1670,7 @@ fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call
         if !failed {
             break;
         }
-        assert!(text(&said).contains("Julia is starting on this computer"), "{said}");
+        assert!(text(&said).contains("Endeavor is starting on this computer"), "{said}");
         assert!(Instant::now() < deadline, "{said}");
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -1700,7 +1700,7 @@ fn stopping_this_computer_waits_for_a_start_under_way_and_leaves_the_note_of_a_s
 
     let held = hold_start_lock(&place.local_state);
     let (failed, said) = front.call("stop_machine", json!({ "machine": "local", "force": true }));
-    assert!(failed && text(&said).contains("Julia was not stopped") && text(&said).contains("start lock"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor was not stopped") && text(&said).contains("start lock"), "{said}");
     assert!(pid_alive(runtime));
     drop(held);
     let stopped = front.ok("stop_machine", json!({ "machine": "local", "force": true }));
@@ -1720,7 +1720,7 @@ fn a_forced_stop_cancels_a_start_another_process_began_and_the_next_call_starts_
     let mut first = start_front(&place, &short);
     first.initialize();
     let (failed, said) = first.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     let started = core_of(&place);
     let julia = common::julia_pids(&place.local_state);
     assert_eq!((started.len(), julia.len()), (1, 1), "{started:?} {julia:?}");
@@ -1770,7 +1770,7 @@ fn a_forced_stop_cancels_the_start_this_session_began_and_it_is_not_left_as_a_fa
     let mut front = start_front(&place, &[("ENDEAVOR_START_WAIT_SECS", "2")]);
     front.initialize();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     let started = core_of(&place);
     assert_eq!(started.len(), 1, "{started:?}");
 
@@ -1805,7 +1805,7 @@ fn a_forced_stop_after_a_failed_start_here_reaches_a_start_another_process_has_u
     let mut front = start_front(&place, &short);
     front.initialize();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     // Its start fails: the core is killed under it.
     let first = core_of(&place);
     assert_eq!(first.len(), 1, "{first:?}");
@@ -1819,7 +1819,7 @@ fn a_forced_stop_after_a_failed_start_here_reaches_a_start_another_process_has_u
     let mut other = start_front(&place, &short);
     other.initialize();
     let (failed, said) = other.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     let second = core_of(&place);
     assert_eq!(second.len(), 1, "{second:?}");
     assert_ne!(second, first);
@@ -1840,7 +1840,7 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     let mut first = start_front(&place, &short);
     first.initialize();
     let (failed, said) = first.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     let started = core_of(&place);
     assert_eq!(started.len(), 1, "{started:?}");
     first.finish();
@@ -1853,10 +1853,10 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     assert_eq!((status["state"].as_str(), status["ready"].clone()), (Some("starting"), json!(false)), "another process's start is a start: {status}");
     let refused = second.ok("stop_machine", json!({ "machine": "local" }));
     let said = refused["message"].as_str().unwrap();
-    assert!(refused["stopped"] == false && refused["state"] == "starting" && said.contains("Julia is starting on this computer") && said.contains("Stopping cancels it") && said.contains("force true"), "{refused}");
+    assert!(refused["stopped"] == false && refused["state"] == "starting" && said.contains("Endeavor is starting on this computer") && said.contains("Stopping cancels it") && said.contains("force true"), "{refused}");
     assert_eq!(core_of(&place), started, "a stop without force leaves another process's start alone");
     let (failed, said) = second.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Julia is starting on this computer"), "{said}");
+    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     assert_eq!(core_of(&place), started, "no second runtime was started");
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1865,7 +1865,7 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
         if !failed {
             break;
         }
-        assert!(text(&said).contains("Julia is starting on this computer"), "{said}");
+        assert!(text(&said).contains("Endeavor is starting on this computer"), "{said}");
         assert!(Instant::now() < deadline, "{said}");
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -2395,7 +2395,7 @@ fn a_runtime_in_use_through_settings_that_changed_can_still_be_stopped_from_this
     record.julia = Some(link.display().to_string());
     place.machines().save(record).unwrap();
     let (failed, said) = front.call("use_machine", json!({ "machine": "lab" }));
-    assert!(failed && text(&said).contains("changed while Julia is in use") && text(&said).contains("stop_machine"), "{said}");
+    assert!(failed && text(&said).contains("changed while Endeavor is in use") && text(&said).contains("stop_machine"), "{said}");
     assert!(pid_alive(runtime));
     let stopped = front.ok("stop_machine", json!({ "machine": "lab" }));
     assert_eq!(stopped["stopped"], true, "{stopped}");

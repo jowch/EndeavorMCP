@@ -182,8 +182,8 @@ Next:
   shows Ember's own `stale` and `not_run` (every cell after a restart), and a
   warning in a cell's output starts with `Warning:`. The skills route R
   notebooks to `reference/ember.md`, and smoke task R1 runs one through a
-  real agent. R notebooks still need Julia: the core starts it first
-  (#76). R is what
+  real agent. R notebooks don't need Julia: a core started with
+  `--julia-when-needed` runs them with no Julia (#81, #87). R is what
   `--r` or
   `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names,
   else Endeavor's own R once it's installed, else the login shell's `Rscript`.

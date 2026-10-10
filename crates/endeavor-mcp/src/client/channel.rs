@@ -98,7 +98,7 @@ impl StartError {
     pub fn message(self) -> String {
         match self {
             StartError::NeedsInstall(items) => format!("{} Installing wasn't allowed, and an agreement to it (`StartOptions::install`) is for one start only.", wire::needs_text(&items, "that machine")),
-            StartError::NotRunning => "No Julia is running there.".to_owned(),
+            StartError::NotRunning => "Endeavor isn't running there.".to_owned(),
             StartError::Failed(message) => message,
         }
     }
@@ -370,7 +370,7 @@ impl Channel {
         let failed = StartError::Failed;
         // A second start would take the first one's progress and its watcher.
         if self.starting.swap(true, Ordering::SeqCst) {
-            return Err(failed("Julia is already starting.".into()));
+            return Err(failed("Endeavor is already starting.".into()));
         }
         let _starting = Starting(&self.starting);
         let id = self.request_id();
@@ -400,11 +400,11 @@ impl Channel {
                 Ok(ToApp::NeedsInstall { items, .. }) => return Err(StartError::NeedsInstall(items)),
                 Ok(ToApp::StartDied { status, log_tail, .. }) => {
                     let how = died_reason(&status, &[]);
-                    return Err(failed(format!("Julia stopped before Pluto was ready. {how}{}{}", if how.is_empty() { "" } else { " " }, diagnose(&log_tail))));
+                    return Err(failed(format!("Endeavor stopped before it was ready. {how}{}{}", if how.is_empty() { "" } else { " " }, diagnose(&log_tail))));
                 }
-                Ok(ToApp::StartCancelled { .. }) => return Err(failed("Julia was stopped while it started.".into())),
+                Ok(ToApp::StartCancelled { .. }) => return Err(failed("Endeavor was stopped while it started.".into())),
                 Ok(ToApp::NotRunning { .. }) => return Err(StartError::NotRunning),
-                Ok(ToApp::Replaced) => return Err(failed("Another connection took Julia over while it was starting.".into())),
+                Ok(ToApp::Replaced) => return Err(failed("Another connection took Endeavor over while it was starting.".into())),
                 Ok(_) => {}
                 Err(_) => return Err(failed(CLOSED.into())),
             }
