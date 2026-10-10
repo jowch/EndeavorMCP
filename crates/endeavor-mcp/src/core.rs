@@ -854,6 +854,8 @@ impl RStarter {
         if cfg!(windows) {
             return Err("unsupported::R notebooks don't work on Windows yet".into());
         }
+        // Not standalone means the app's: own R is offered only with `--own-r`, on this computer, where a
+        // `serve` or `mcp` runtime is always standalone (`standalone::core_env`); a server's never gets it.
         self.own_r(served.bridge.standalone.is_none())?;
         let folder = &self.ember_folder();
         if let Some(library) = &self.library {
