@@ -17,10 +17,10 @@ use serde_json::{Value, json};
 
 use crate::checks::{self, Evidence};
 
-/// How long one agent run may take before it is ended.
 /// The model the agent runs (`--model`), if not its default.
 static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// How long one agent run may take before it is ended.
 const AGENT_LIMIT: Duration = Duration::from_secs(20 * 60);
 
 /// The built-in tools the agent has.
