@@ -1,0 +1,13 @@
+[package]
+name = "endeavor-smoke"
+version.workspace = true
+edition = "2024"
+publish = false
+
+# The agent smoke suite (docs/smoke.md): not part of the release.
+[[bin]]
+name = "endeavor-smoke"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
