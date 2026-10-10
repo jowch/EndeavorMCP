@@ -50,7 +50,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 3;
+pub const INTERFACE: u32 = 4;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -71,15 +71,21 @@ struct Args {
     /// The R for R notebooks, and the R library Ember is installed in (none: Endeavor's own).
     r: crate::r::Source,
     r_library: Option<String>,
+    /// `--own-r`: the core is on the user's own computer, where it may offer Endeavor's own R on a Mac
+    /// when none is found; `--install-r`: it may install it without asking again.
+    own_r: bool,
+    install_r: bool,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut args = argv.iter();
     let (mut state_dir, mut julia, mut runtime, mut depot, mut r, mut r_library) = (None, None, None, None, None, None);
-    let (mut install_julia, mut julia_when_needed) = (false, false);
+    let (mut install_julia, mut julia_when_needed, mut own_r, mut install_r) = (false, false, false, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--install-julia" => install_julia = true,
+            "--own-r" => own_r = true,
+            "--install-r" => install_r = true,
             "--julia-when-needed" => julia_when_needed = true,
             _ => {
                 let value = args.next().cloned().ok_or(format!("{arg} needs a value"));
@@ -107,6 +113,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         depot: depot.ok_or("--depot is required")?,
         r: r.unwrap_or_default(),
         r_library,
+        own_r,
+        install_r,
     })
 }
 
@@ -185,10 +193,11 @@ pub fn main(argv: &[String]) -> ! {
     }
     Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
     let not_let_in = not_let_in(&open_command(&args.state_dir));
-    let served = Arc::new(Served { bridge, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops });
+    let allow_r_install = Arc::new(std::sync::atomic::AtomicBool::new(args.install_r));
+    let served = Arc::new(Served { bridge, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
-    let r = Arc::new(RStarter::new(&args, &token_for_r));
+    let r = Arc::new(RStarter::new(&args, &token_for_r, allow_r_install));
     let starting = (r.clone(), served.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend| match backend {
         Backend::Ember => starting.0.start(&starting.1),
@@ -606,6 +615,26 @@ const EMBER_WAIT: Duration = JULIA_WAIT;
 /// What `install.R` exits with when Ember's newest build failed and the one before it is used.
 const KEPT_PREVIOUS: i32 = 3;
 
+/// Why R wasn't found, and what the user can do about it: Endeavor installs its own R only on a Mac.
+fn r_not_found(r: &crate::r::Source) -> String {
+    format!(
+        "r_not_found::Couldn't find R: no {}. R notebooks need R with the tools to build R packages. The user can install it with rig (https://github.com/r-lib/rig) or the system's packages; on a cluster, they can set this machine's R to a shell line such as `module load R`.",
+        r.describe()
+    )
+}
+
+/// Whether this computer can build R packages from source: on a Mac, whether its developer tools are
+/// installed (asked without running `cc`, which on a Mac without them opens an installer), elsewhere
+/// whether `cc` and `make` are on the PATH.
+fn has_compiler() -> bool {
+    let quiet = |command: &mut Command| command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    if cfg!(target_os = "macos") {
+        quiet(Command::new("xcode-select").arg("-p"))
+    } else {
+        quiet(Command::new("sh").args(["-c", "command -v cc && command -v make"]))
+    }
+}
+
 /// Why R didn't start when its shell line ended well.
 const ENDED_EARLY: &str = "The shell line for R ended without starting R. A line that ends in a comment (#) hides what comes after it.";
 
@@ -618,6 +647,8 @@ enum Install {
     Running,
     /// Done while no call waited for it: what the next call says.
     Done(Result<bool, String>),
+    /// Endeavor's own R didn't install: said once, and the next call tries again.
+    Failed(String),
 }
 
 /// The Ember builds in Endeavor's own folder (`ember.dcf`, which `install.R` writes): the one in use,
@@ -669,6 +700,14 @@ struct RStarter {
     /// `EMBER_REPOSITORY`, or in a debug build `ENDEAVOR_TEST_EMBER_REPOSITORY`.
     repository: String,
     install: Arc<std::sync::Mutex<Install>>,
+    /// Whether Endeavor's own R may be installed (`--install-r`, or `endeavor/allow_r_install` later),
+    /// and where installing it is.
+    allow_own: Arc<std::sync::atomic::AtomicBool>,
+    own_install: Arc<std::sync::Mutex<Install>>,
+    /// Whether Endeavor's own R may be offered here (`--own-r`): only on the user's own computer.
+    offer_own: bool,
+    /// Whether the login shell's R was found once: it isn't looked for again.
+    shell_has_r: std::sync::atomic::AtomicBool,
     adapter: PathBuf,
     state: PathBuf,
     token: String,
@@ -677,8 +716,12 @@ struct RStarter {
 }
 
 impl RStarter {
-    fn new(args: &Args, token: &str) -> RStarter {
+    fn new(args: &Args, token: &str, allow_own: Arc<std::sync::atomic::AtomicBool>) -> RStarter {
         RStarter {
+            allow_own,
+            offer_own: args.own_r,
+            own_install: Arc::new(std::sync::Mutex::new(Install::Idle)),
+            shell_has_r: false.into(),
             r: args.r.clone(),
             library: args.r_library.clone(),
             ember: crate::paths::Env::here().ember_folder(),
@@ -700,40 +743,42 @@ impl RStarter {
         if cfg!(windows) {
             return Err("unsupported::R notebooks don't work on Windows yet".into());
         }
+        self.own_r()?;
+        let folder = &self.ember_folder();
         if let Some(library) = &self.library {
             return self.launch(served, library);
         }
-        match self.update() {
+        match self.update(folder) {
             Ok(true) => self.tell_previous(served),
             Ok(false) => {}
             // install.R failed in a way it didn't plan for: the installed Ember still works.
-            Err(why) if why.starts_with(INSTALL_FAILED) && EmberBuilds::read(&self.ember).installed(&self.ember) => {
+            Err(why) if why.starts_with(INSTALL_FAILED_START) && EmberBuilds::read(folder).installed(folder) => {
                 eprintln!("endeavor core: couldn't check for a newer Ember; starting R with the installed one");
             }
             Err(why) => return Err(why),
         }
-        let mut builds = EmberBuilds::read(&self.ember);
-        if !builds.installed(&self.ember) {
+        let mut builds = EmberBuilds::read(folder);
+        if !builds.installed(folder) {
             return Err(INSTALL_FAILED.into());
         }
-        match self.launch(served, &EmberBuilds::libraries(&self.ember, &builds.current)) {
+        match self.launch(served, &EmberBuilds::libraries(folder, &builds.current)) {
             Err(why) if why.starts_with(STOPPED_STARTING) && !builds.previous.is_empty() => {
                 eprintln!("endeavor core: R's adapter didn't start with Ember {}; starting it with Ember {}", builds.current, builds.previous);
                 // Read again: another runtime's install may have changed it while R started.
-                let latest = EmberBuilds::read(&self.ember);
-                if latest.current != builds.current && latest.installed(&self.ember) {
+                let latest = EmberBuilds::read(folder);
+                if latest.current != builds.current && latest.installed(folder) {
                     // It installed a newer build: start with that, and leave the record to it.
-                    return self.launch(served, &EmberBuilds::libraries(&self.ember, &latest.current));
+                    return self.launch(served, &EmberBuilds::libraries(folder, &latest.current));
                 }
                 builds = latest;
                 let failed = builds.current.clone();
                 builds.fall_back();
-                if let Err(e) = builds.write(&self.ember) {
+                if let Err(e) = builds.write(folder) {
                     eprintln!("endeavor core: couldn't record that Ember failed: {e}");
                 }
                 // Dated from now for install.R's cleanup, which waits a week: another runtime may have it loaded.
-                let _ = std::fs::File::open(self.ember.join(&failed)).and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
-                let started = self.launch(served, &EmberBuilds::libraries(&self.ember, &builds.current))?;
+                let _ = std::fs::File::open(folder.join(&failed)).and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
+                let started = self.launch(served, &EmberBuilds::libraries(folder, &builds.current))?;
                 self.tell_previous(served);
                 Ok(started)
             }
@@ -764,7 +809,7 @@ impl RStarter {
         let state = loop {
             if let Ok(Some(status)) = child.try_wait() {
                 if self.r.not_found(status) {
-                    return Err(format!("r_not_found::Couldn't find R: no {}", self.r.describe()));
+                    return Err(r_not_found(&self.r));
                 }
                 if self.r.ended_early(status) {
                     return Err(format!("r_failed::{}", ENDED_EARLY));
@@ -791,13 +836,67 @@ impl RStarter {
         Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone())))
     }
 
+    /// The folder Endeavor installs Ember in: one for Endeavor's own R, which is kept apart from the
+    /// user's R, and one for any other.
+    fn ember_folder(&self) -> PathBuf {
+        match self.r.own() {
+            Some(own) => own.join("ember"),
+            None => self.ember.clone(),
+        }
+    }
+
+    /// When `--r auto` finds no R on a Mac, Endeavor's own: nothing when R is there, else why R
+    /// notebooks can't open yet. Without the user's yes, the answer asks for it; with it, R is
+    /// installed in the background (a minute or two), and the call that starts that returns at once.
+    fn own_r(&self) -> Result<(), String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let Some(item) = self.r.own_item().filter(|_| self.offer_own) else { return Ok(()) };
+        if self.shell_has_r.load(SeqCst) {
+            return Ok(());
+        }
+        let mut probe = self.r.command(&[Path::new("--version")]);
+        if probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| !self.r.not_found(status)) {
+            self.shell_has_r.store(true, SeqCst);
+            return Ok(());
+        }
+        let mut install = self.own_install.lock().unwrap();
+        match std::mem::replace(&mut *install, Install::Running) {
+            Install::Running => {}
+            // Said once; the next call tries again.
+            Install::Failed(why) => {
+                *install = Install::Idle;
+                return Err(why);
+            }
+            Install::Idle | Install::Done(_) if !self.allow_own.load(SeqCst) => {
+                *install = Install::Idle;
+                return Err(format!(
+                    "r_not_found::No R was found here, and Endeavor may install its own R only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then open the notebook again."
+                ));
+            }
+            Install::Idle | Install::Done(_) => {
+                let state = self.own_install.clone();
+                std::thread::spawn(move || {
+                    let done = match crate::r::install_own(&mut |line| eprintln!("{line}")) {
+                        Ok(()) => Install::Idle,
+                        Err(why) => {
+                            eprintln!("endeavor core: {why}");
+                            Install::Failed(format!("r_failed::{why}"))
+                        }
+                    };
+                    *state.lock().unwrap() = done;
+                });
+            }
+        }
+        Err(format!("r_installing::Installing Endeavor's own R {}, which takes a minute or two. Try again in a minute.", crate::r::OWN_VERSION))
+    }
+
     /// Install Ember into Endeavor's own folder, or update it if r-universe has a newer build
     /// (`install.R`), waiting a little for it: true when the newest build failed and the one
     /// before it is used. Installing the first time takes minutes (packages build from source),
     /// longer than an agent's call may wait, so then the call answers `r_installing` and the
     /// install goes on. An update that takes longer goes on too, and R starts with the Ember
     /// installed; the next start uses the new one.
-    fn update(&self) -> Result<bool, String> {
+    fn update(&self, folder: &Path) -> Result<bool, String> {
         let installing = |updating: bool| {
             if updating {
                 eprintln!("endeavor core: still updating Ember; starting R with the installed one");
@@ -805,7 +904,7 @@ impl RStarter {
             }
             Err("r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Try again in a minute.".to_owned())
         };
-        let updating = EmberBuilds::read(&self.ember).installed(&self.ember);
+        let updating = EmberBuilds::read(folder).installed(folder);
         let mut install = self.install.lock().unwrap();
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => return installing(updating),
@@ -814,11 +913,11 @@ impl RStarter {
                 *install = Install::Idle;
                 return done;
             }
-            Install::Idle => {}
+            Install::Idle | Install::Failed(_) => {}
         }
         drop(install);
         let install_r = self.adapter.with_file_name("install.R");
-        let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, &self.ember, Path::new(&self.repository)]);
+        let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, folder, Path::new(&self.repository)]);
         command.stdin(Stdio::null());
         let (state, r) = (self.install.clone(), self.r.clone());
         let (tx, rx) = std::sync::mpsc::channel();
@@ -826,8 +925,9 @@ impl RStarter {
             let done = match command.status() {
                 Ok(status) if status.success() => Ok(false),
                 Ok(status) if status.code() == Some(KEPT_PREVIOUS) => Ok(true),
-                Ok(status) if r.not_found(status) => Err(format!("r_not_found::Couldn't find R: no {}", r.describe())),
+                Ok(status) if r.not_found(status) => Err(r_not_found(&r)),
                 Ok(status) if r.ended_early(status) => Err(format!("r_failed::{}", ENDED_EARLY)),
+                Ok(_) if !has_compiler() => Err(NO_COMPILER.into()),
                 Ok(_) => Err(INSTALL_FAILED.into()),
                 Err(e) => Err(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
             };
@@ -852,8 +952,14 @@ impl RStarter {
     }
 }
 
+/// How the errors that say Ember didn't install begin.
+const INSTALL_FAILED_START: &str = "r_failed::Couldn't install Ember";
+
 /// Why R notebooks have no Ember.
 const INSTALL_FAILED: &str = "r_failed::Couldn't install Ember for R notebooks; the runtime's log says why";
+
+/// Why R notebooks have no Ember, when there's no compiler to build it.
+const NO_COMPILER: &str = "r_failed::Couldn't install Ember for R notebooks: it has to be built on this computer, and there is no compiler here to build it. The runtime's log has the details.";
 
 /// How the error that R stopped while its adapter started begins.
 const STOPPED_STARTING: &str = "r_failed::R stopped while starting";
@@ -1014,6 +1120,8 @@ struct Served {
     stops: std::sync::mpsc::Sender<Stop>,
     /// Ember's, while it runs, for `/ember/`.
     ember: std::sync::Mutex<Option<Page>>,
+    /// Whether Endeavor's own R may be installed (`RStarter::allow_own`).
+    allow_r_install: Arc<std::sync::atomic::AtomicBool>,
     /// The cookie that lets a browser into Pluto's page (`cookie_name`).
     cookie: String,
     /// What a browser that hasn't been let in sees (`not_let_in`).
@@ -1054,6 +1162,7 @@ impl Served {
                 });
             }
             "endeavor/allow_julia_install" => self.julia.install.store(true, std::sync::atomic::Ordering::SeqCst),
+            "endeavor/allow_r_install" => self.allow_r_install.store(true, std::sync::atomic::Ordering::SeqCst),
             _ => {}
         }
         json!({ "jsonrpc": "2.0", "id": message["id"], "result": {} }).to_string()
@@ -1636,7 +1745,7 @@ mod tests {
         let (stops, _) = std::sync::mpsc::channel();
         let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
         let julia = JuliaStarter::new(&parse_args(&argv).unwrap(), TOKEN, "process", stops.clone());
-        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(TOKEN), not_let_in: String::new(), julia, app_folder: Default::default(), stops })
+        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(TOKEN), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default() })
     }
 
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.

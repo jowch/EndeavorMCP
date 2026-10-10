@@ -183,15 +183,27 @@ Next:
   warning in a cell's output starts with `Warning:`. The skills route R
   notebooks to `reference/ember.md`, and smoke task R1 runs one through a
   real agent. R notebooks still need Julia: the core starts it first
-  (#76). R is the login shell's `Rscript`, or what
+  (#76). R is what
   `--r` or
-  `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names.
+  `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names,
+  else Endeavor's own R once it's installed, else the login shell's `Rscript`.
+  On the user's own Mac (a core started with `--own-r`: `serve`, `mcp`, and
+  the app's local runtime; never a server) with no R, the open answers
+  `r_not_found` offering Endeavor's own R 4.6.1 (`r::install_own`, #85). A Mac
+  that has R uses it. With the user's yes (`use_machine` for `local` with
+  `install: true`, which calls `endeavor/allow_r_install`, or the core's
+  `--install-r`) the core downloads CRAN's installer, checks its SHA-256, and
+  unpacks it into `~/.cache/endeavor/R-4.6.1` without running it, the way rig's
+  user mode does but without editing shell startup files. It runs with its own
+  `R_LIBS_USER` and its own Ember library inside that folder, and is on no PATH.
+  Its fonts cache is inside that folder too. On Linux and servers Endeavor installs no R; `r_not_found` says to install
+  it with rig or the system's packages, or to use a cluster's module.
   Ember comes from its r-universe repository (`core::EMBER_REPOSITORY`), which
   builds Ember's latest main: a binary where r-universe has one, else the
   source package (Linux today, and Apple Silicon until r-universe builds it).
   Each time the core starts R, `runtime/r/install.R` installs it, or updates it
   when there's a newer build, into `~/.cache/endeavor/r/ember`
-  (`$SCRATCH/endeavor/r/ember` on clusters): one library per build, named by
+  (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
   the SHA256 of its file, and one with any package Ember needs that R lacks or can't load.
   The call waits up to 30 seconds for that. The first install then returns
   `r_installing` until it's done; an update goes on while R starts with the
