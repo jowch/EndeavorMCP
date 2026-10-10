@@ -136,16 +136,15 @@ impl Env {
         }
     }
 
-    /// The R library Ember at `commit` is installed in for R notebooks, with the
-    /// packages it needs that R didn't have: beside the depot.
-    pub fn r_library(&self, commit: &str) -> PathBuf {
-        let short = &commit[..commit.len().min(12)];
+    /// Where Ember is installed for R notebooks, one library per build, with the
+    /// packages it needs that R didn't have (`runtime/r/install.R`): beside the depot.
+    pub fn ember_folder(&self) -> PathBuf {
         if cfg!(windows) {
-            return self.local.join("r").join(short);
+            return self.local.join("r").join("ember");
         }
         match &self.scratch {
-            Some(scratch) => Path::new(scratch).join("endeavor/r").join(short),
-            None => self.server_root().join("r").join(short),
+            Some(scratch) => Path::new(scratch).join("endeavor/r/ember"),
+            None => self.server_root().join("r").join("ember"),
         }
     }
 

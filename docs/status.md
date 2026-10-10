@@ -198,10 +198,21 @@ Next:
   `R_LIBS_USER` and its own Ember library inside that folder, and is on no PATH.
   Its fonts cache is inside that folder too. On Linux and servers Endeavor installs no R; `r_not_found` says to install
   it with rig or the system's packages, or to use a cluster's module.
-  The first R notebook installs Ember at the commit the core pins
-  (`core::EMBER_COMMIT`) into `~/.cache/endeavor/r/<commit>` (`$SCRATCH/endeavor/r`
-  on clusters), with any package it needs that R lacks; the open returns
-  `r_installing` until that's done. The app passes a server's and Settings'
+  Ember comes from its r-universe repository (`core::EMBER_REPOSITORY`), which
+  builds Ember's latest main: a binary where r-universe has one, else the
+  source package (Linux today, and Apple Silicon until r-universe builds it).
+  Each time the core starts R, `runtime/r/install.R` installs it, or updates it
+  when there's a newer build, into `~/.cache/endeavor/r/ember`
+  (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
+  the SHA256 of its file, and one with any package Ember needs that R lacks or can't load.
+  The call waits up to 30 seconds for that. The first install then returns
+  `r_installing` until it's done; an update goes on while R starts with the
+  installed Ember. Offline, R starts with the installed Ember. A build that fails to
+  install or load, or that R's adapter doesn't start with, isn't tried again;
+  R starts with the build before it, and the agent gets an `ember_previous`
+  warning. A `--r-library` is used as it is, never updated. The E2E workflow's
+  R job runs every day against a fresh install of Ember's latest build and fails
+  on a fallback (#82). The app passes a server's and Settings'
   `r` through, with no field to set them yet. The engine
   name a client asks a runtime for (`wire::ENGINE_PLUTO`, a string) is still
   a string; it becomes `Backend` later.

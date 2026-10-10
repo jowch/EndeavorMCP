@@ -200,9 +200,15 @@ and R. An agent opens an Ember notebook, which starts R's adapter; it reads,
 edits and runs a cell, and the browser link reaches Ember's page at
 `/ember/`. Ctrl-C ends R's adapter with the core. R comes from a `--r-shell` line that puts a wrapper
 `Rscript` on the PATH, and the test checks the line ran. It prints `SKIPPED`
-and passes without Julia or without `Rscript` on the PATH. The first run installs Ember at its pinned commit into
-`~/.cache/endeavor/r`, as a user's first R notebook does. The `E2E` workflow
-runs it too, in a job of its own with R from Ubuntu's packages.
+and passes without Julia or without `Rscript` on the PATH. The first run installs Ember's latest build from
+its r-universe repository into `~/.cache/endeavor/r/ember`, as a user's first R notebook does; later runs
+update it when there's a newer build. A debug build installs from `ENDEAVOR_TEST_EMBER_REPOSITORY`
+instead when it's set: a CRAN-like folder (`file://...`) made with `R CMD build` and
+`tools::write_PACKAGES(fields = "SHA256")` (with a `SHA256` field in its DESCRIPTION). A second test in the file runs `runtime/r/install.R`
+against stand-in builds: the first install, an update that keeps the build before, a build that
+doesn't load, and no network. The `E2E` workflow runs both, in a job of its own with R from Ubuntu's
+packages, and runs that job every day too, so a change on Ember's main that breaks the adapter
+shows up there.
 
 ```sh
 cargo test -p endeavor-mcp --test e2e_r -- --ignored --nocapture

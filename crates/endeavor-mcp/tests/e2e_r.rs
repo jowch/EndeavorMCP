@@ -6,8 +6,10 @@
 //! Julia is given as a path that doesn't exist, so the test fails if anything
 //! tries to start it: an R user needs no Julia.
 //!
-//! Ignored by default, like e2e_julia; R is `Rscript` on the PATH. The first run installs Ember at its pinned commit into
-//! ~/.cache/endeavor/r, which needs CRAN and GitHub for any package R lacks:
+//! Ignored by default, like e2e_julia; R is `Rscript` on the PATH. The first run installs Ember's latest build into
+//! ~/.cache/endeavor/r/ember, which needs Ember's r-universe repository, and CRAN for any package R lacks
+//! (a debug build installs from `ENDEAVOR_TEST_EMBER_REPOSITORY` instead when it's set). A second test
+//! runs `runtime/r/install.R` against stand-in builds: an update, a build that doesn't load, and offline.
 //!
 //!     cargo test -p endeavor-mcp --test e2e_r -- --ignored --nocapture
 
@@ -232,6 +234,8 @@ fn an_r_notebook_through_the_runtime() {
             assert!(opened["error"] == "r_installing" && Instant::now() < deadline, "{opened}");
             std::thread::sleep(Duration::from_secs(5));
         };
+        // A warning here is `ember_previous`: Ember's newest build didn't work, which the daily run is for.
+        assert_eq!(opened.get("warnings"), None, "{opened}");
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("growth.R").display().to_string()), &json!(false)), "{opened}");
         assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}")));
@@ -282,7 +286,7 @@ fn an_r_notebook_through_the_runtime() {
         let mut agent = Agent::new(port, &token);
         agent.initialize();
         let made = agent.ok("new_notebook", json!({ "path": "fresh.R" }));
-        assert!(folder.join("fresh.R").exists() && made["created"] == true, "{made}");
+        assert!(folder.join("fresh.R").exists() && made["created"] == true && made.get("warnings").is_none(), "{made}");
         assert!(wire::backend::Backend::of_file(&folder.join("fresh.R")) == Some(wire::backend::Backend::Ember), "an Ember file");
         let (id, cell) = (made["notebook_id"].as_str().unwrap(), made["cell_ids"][0].as_str().unwrap());
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "warning(\"careful\")\n7", "run_after": true }));
@@ -313,6 +317,12 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(read["code"], "x <- 41", "Ember saved the edit: {read}");
     });
 
+    step("Ember's newest build installed and loaded: none failed", || {
+        let builds = PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/endeavor/r/ember/ember.dcf");
+        let builds = std::fs::read_to_string(&builds).unwrap();
+        assert!(builds.lines().any(|line| line.trim_end() == "Failed:"), "{builds}");
+    });
+
     step("nothing started Julia", || {
         assert!(!state.join("julia.json").exists(), "Julia's state file is there");
         assert!(!work.join("cache/endeavor").read_dir().into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with("julia")), "a Julia was downloaded");
@@ -326,6 +336,68 @@ fn an_r_notebook_through_the_runtime() {
         assert!(serve.wait().unwrap().success());
         common::wait_for("R's adapter to end", || !common::pid_alive(r_pid as i32));
         assert!(!state.join("r.json").exists());
+    });
+}
+
+/// A repository like Ember's r-universe one, with one build of a stand-in `ember` whose file
+/// has SHA256 `sha`; a broken build doesn't load.
+fn stand_in_repository(repository: &Path, sha: &str, broken: bool) {
+    let source = fresh(repository.with_extension("source")).join("ember");
+    std::fs::create_dir_all(source.join("R")).unwrap();
+    std::fs::write(source.join("DESCRIPTION"), format!("Package: ember\nVersion: 0.0.0.9000\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\nImports: jsonlite\nSHA256: {sha}\nRemoteSha: {sha}\n")).unwrap();
+    let on_load = if broken { ".onLoad <- function(...) stop(\"a broken build\")\n" } else { "" };
+    std::fs::write(source.join("R/build.R"), format!("build <- function() \"{sha}\"\n{on_load}")).unwrap();
+    std::fs::write(source.join("NAMESPACE"), "export(build)\n").unwrap();
+    let contrib = fresh(repository.join("src/contrib"));
+    assert!(Command::new("R").args(["CMD", "build", "--no-manual"]).arg(&source).current_dir(&contrib).stdout(Stdio::null()).status().unwrap().success());
+    assert!(Command::new("Rscript").args(["-e", "tools::write_PACKAGES('.', fields = 'SHA256')"]).current_dir(&contrib).status().unwrap().success());
+}
+
+#[test]
+#[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
+fn ember_updates_from_its_repository_and_keeps_the_build_before() {
+    if !Command::new("Rscript").arg("--version").stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
+        eprintln!("SKIPPED: no Rscript on the PATH.");
+        return;
+    }
+    let work = fresh(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-r-update"));
+    let (repository, folder) = (work.join("repository"), work.join("ember"));
+    let url = format!("file://{}", repository.display());
+    let install = |url: &str| {
+        let status = Command::new("Rscript").args(["--vanilla", concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/r/install.R")]).arg(&folder).arg(url).status().unwrap();
+        // As R writes it: an empty field has no space after its colon.
+        let state = std::fs::read_to_string(folder.join("ember.dcf")).unwrap_or_default();
+        (status.code(), state.lines().map(str::trim_end).collect::<Vec<_>>().join(" | "))
+    };
+    let build = |name: &str| {
+        let out = Command::new("Rscript").args(["-e", "cat(ember::build())"]).env("R_LIBS", format!("{}:{}", folder.join(name).display(), folder.join("deps").display())).output().unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    step("offline with nothing installed: no Ember", || {
+        assert_eq!(install("https://nowhere.invalid").0, Some(1));
+    });
+    step("the first install", || {
+        stand_in_repository(&repository, "aaaaaaaaaaaaaaaa", false);
+        assert_eq!(install(&url), (Some(0), "Current: aaaaaaaaaaaa | Previous: | Failed:".into()));
+        assert_eq!(build("aaaaaaaaaaaa"), "aaaaaaaaaaaaaaaa");
+    });
+    step("the newest already: nothing changes", || {
+        assert_eq!(install(&url).1, "Current: aaaaaaaaaaaa | Previous: | Failed:");
+    });
+    step("a newer build, and the one before is kept", || {
+        stand_in_repository(&repository, "bbbbbbbbbbbbbbbb", false);
+        assert_eq!(install(&url), (Some(0), "Current: bbbbbbbbbbbb | Previous: aaaaaaaaaaaa | Failed:".into()));
+        assert_eq!(build("bbbbbbbbbbbb"), "bbbbbbbbbbbbbbbb");
+    });
+    step("a build that doesn't load: the installed one stays, and the broken one isn't tried again", || {
+        stand_in_repository(&repository, "cccccccccccccccc", true);
+        assert_eq!(install(&url), (Some(3), "Current: bbbbbbbbbbbb | Previous: aaaaaaaaaaaa | Failed: cccccccccccc".into()));
+        assert!(!folder.join("cccccccccccc").exists());
+        assert_eq!(install(&url).0, Some(0));
+    });
+    step("offline: the installed Ember", || {
+        assert_eq!(install("https://nowhere.invalid"), (Some(0), "Current: bbbbbbbbbbbb | Previous: aaaaaaaaaaaa | Failed: cccccccccccc".into()));
     });
 }
 

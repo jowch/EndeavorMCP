@@ -959,8 +959,12 @@ impl Call<'_> {
             "notebook_id": opened["notebook_id"], "path": opened["path"], "execution_allowed": run, "ran": run,
             "process_status": opened["process_status"],
         });
+        let mut warnings = self.nbs.take_notices();
         if run {
-            result["warnings"] = json!(["async_execution::open queued non-blocking notebook run; poll read_cell for completion"]);
+            warnings.push("async_execution::open queued non-blocking notebook run; poll read_cell for completion".into());
+        }
+        if !warnings.is_empty() {
+            result["warnings"] = json!(warnings);
         }
         self.nbs.opened_by(self.owner, opened["path"].as_str().unwrap_or_default());
         Ok(result)
@@ -1027,10 +1031,15 @@ impl Call<'_> {
             cell_ids.push(cell_id);
         }
         self.nbs.opened_by(self.owner, made["path"].as_str().unwrap_or_default());
-        Ok(json!({
+        let mut result = json!({
             "notebook_id": id, "path": made["path"], "execution_allowed": true, "ran": true,
             "process_status": made["process_status"], "cell_ids": cell_ids, "created": true,
-        }))
+        });
+        let warnings = self.nbs.take_notices();
+        if !warnings.is_empty() {
+            result["warnings"] = json!(warnings);
+        }
+        Ok(result)
     }
 
     fn allow_execution(&self) -> Result<Value, String> {
