@@ -308,8 +308,10 @@ impl RStarter {
             }
         };
         let _ = std::fs::remove_file(&self.state);
+        // Ember's page secret is the core's to make: R is handed it, not asked for it.
+        let secret = crate::random_hex::<32>().map_err(|e| format!("r_failed::{e}"))?;
         let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
-        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", &library).stdin(Stdio::null());
+        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", &library).stdin(Stdio::null());
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
         unsafe {
@@ -344,7 +346,6 @@ impl RStarter {
         };
         let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("r_failed::R's state has no {key}: {state}"));
         let (bridge, ember) = (port("bridge_port")?, port("ember_port")?);
-        let secret = state["ember_secret"].as_str().ok_or("r_failed::R's state has no ember_secret")?.to_owned();
         *served.ember.lock().unwrap() = Some(Page { port: ember, secret });
         if let Some(mut old) = self.child.lock().unwrap().replace(child) {
             let _ = old.kill();

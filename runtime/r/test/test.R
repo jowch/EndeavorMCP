@@ -22,10 +22,11 @@ dir.create(dir)
 dir <- normalizePath(dir)
 state_file <- file.path(dir, "state.json")
 token <- paste(sample(c(letters, 0:9), 40, replace = TRUE), collapse = "")
+ember_secret <- paste(sample(c(letters, 0:9), 64, replace = TRUE), collapse = "")
 
 proc <- process$new(
   file.path(R.home("bin"), "Rscript"), c("--vanilla", adapter),
-  env = c("current", ENDEAVOR_TOKEN = token, ENDEAVOR_R_STATE = state_file,
+  env = c("current", ENDEAVOR_TOKEN = token, ENDEAVOR_EMBER_SECRET = ember_secret, ENDEAVOR_R_STATE = state_file,
           R_USER_CACHE_DIR = file.path(dir, "cache"), R_USER_DATA_DIR = file.path(dir, "data"),
           R_LIBS = paste(.libPaths(), collapse = .Platform$path.sep)),
   wd = dir, stdout = file.path(dir, "adapter.log"), stderr = "2>&1", cleanup = TRUE)
@@ -50,8 +51,8 @@ if (!file.exists(state_file)) {
   stop("the adapter never wrote its state file")
 }
 st <- fromJSON(state_file)
-check("state file has pid, bridge_port, ember_port, ember_secret",
-      all(c("pid", "bridge_port", "ember_port", "ember_secret") %in% names(st)) && st$pid == proc$get_pid())
+check("state file has pid, bridge_port, ember_port, and not Ember's secret",
+      all(c("pid", "bridge_port", "ember_port") %in% names(st)) && !("ember_secret" %in% names(st)) && st$pid == proc$get_pid())
 base <- sprintf("http://127.0.0.1:%d", st$bridge_port)
 
 http <- function(method, path, body = NULL, auth = TRUE, timeout = 90) {

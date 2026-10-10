@@ -245,7 +245,8 @@ fn an_r_notebook_through_the_runtime() {
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("growth.R").display().to_string()), &json!(false)), "{opened}");
         assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}")));
-        assert!(state.join("r.json").exists(), "R's adapter wrote its state");
+        let r_state = std::fs::read_to_string(state.join("r.json")).expect("R's adapter wrote its state");
+        assert!(!r_state.contains("ember_secret"), "the core made Ember's secret and R doesn't write it back: {r_state}");
         let ran = std::fs::read_to_string(&ran).unwrap_or_default();
         assert!(!ran.is_empty() && ran.lines().all(|l| l == "by-the-line"), "R ran from --r-shell's line, with what it set: {ran:?}");
         let listed = agent.ok("list_notebooks", json!({}));

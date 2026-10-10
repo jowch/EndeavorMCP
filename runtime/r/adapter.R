@@ -40,6 +40,10 @@ suppressPackageStartupMessages({
 
 TOKEN <- Sys.getenv("ENDEAVOR_TOKEN")
 STATE_FILE <- Sys.getenv("ENDEAVOR_R_STATE")
+# Ember's page secret, made by the core, which already knows it: it isn't written back. Not left in the
+# environment, which the notebooks' R processes would inherit.
+EMBER_SECRET <- Sys.getenv("ENDEAVOR_EMBER_SECRET")
+Sys.unsetenv("ENDEAVOR_EMBER_SECRET")
 NOTES_KEPT <- 1000L
 POLL_HOLD <- 25
 TEXT_MAX <- 16000L
@@ -678,22 +682,22 @@ start_bridge <- function() {
 }
 
 # Written whole or not at all: the caller polls for the file.
-write_state <- function(secret) {
+write_state <- function() {
   if (!nzchar(STATE_FILE)) return(invisible(NULL))
   tmp <- paste0(STATE_FILE, ".tmp", Sys.getpid())
   writeLines(to_json(list(pid = Sys.getpid(), bridge_port = A$bridge_port,
-                          ember_port = A$server$port, ember_secret = secret)), tmp)
+                          ember_port = A$server$port)), tmp)
   if (!file.rename(tmp, STATE_FILE)) stop("couldn't write ", STATE_FILE)
   invisible(NULL)
 }
 
 main <- function() {
   if (!nzchar(TOKEN)) stop("ENDEAVOR_TOKEN is not set")
-  secret <- ember:::random_secret(32)
-  serve(port = 0L, secret = secret, on_ready = function(server) {
+  if (!nzchar(EMBER_SECRET)) stop("ENDEAVOR_EMBER_SECRET is not set")
+  serve(port = 0L, secret = EMBER_SECRET, on_ready = function(server) {
     A$server <- server
     start_bridge()
-    write_state(secret)
+    write_state()
   })
 }
 
