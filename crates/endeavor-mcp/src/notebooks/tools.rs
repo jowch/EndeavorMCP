@@ -994,12 +994,20 @@ impl Call<'_> {
 
     fn new_notebook(&self, folder: &Folder) -> Result<Value, String> {
         let params = match self.args.get("path").filter(|p| !p.is_null()) {
-            None => match folder {
-                Folder::Unknown => return Err(super::folder_unknown()),
-                // Pluto's own naming, like "Create a new notebook", in the session's folder.
-                Folder::In(folder) if std::path::Path::new(folder).is_dir() => json!({ "folder": folder }),
-                _ => json!({}),
-            },
+            None => {
+                let mut params = match folder {
+                    Folder::Unknown => return Err(super::folder_unknown()),
+                    // The engine's own naming, like Pluto's "Create a new notebook", in the session's folder.
+                    Folder::In(folder) if std::path::Path::new(folder).is_dir() => json!({ "folder": folder }),
+                    _ => json!({}),
+                };
+                // In the session's kind, when its client said it.
+                if let Some(kind @ wire::backend::Backend::Ember) = self.nbs.kind(self.owner) {
+                    r_notebooks("This session's notebooks are R notebooks")?;
+                    params["engine"] = json!(kind);
+                }
+                params
+            }
             Some(Value::String(requested)) => {
                 let path = absolute_path(&super::requested_path(requested, folder)?)?;
                 match super::engines::of_path(&path) {

@@ -234,7 +234,8 @@ Next:
   pass the flag; on Slurm the login node still finds or downloads Julia, as
   before, and only starting it waits. A session whose folder has Pluto
   notebooks, or whose caller says it is a Julia session (`kind`), gets Julia
-  started ahead in the background. That never downloads Julia; Pluto's
+  started ahead in the background. A session said to be R's never does, and
+  its `new_notebook` without a path makes an R notebook (#86; interface 6). That never downloads Julia; Pluto's
   packages install on the first start in a fresh depot, as before. `e2e_r` runs an R notebook with no Julia.
   The app doesn't pass the flag yet, so its runtimes start Julia at once; its
   step is an app issue.

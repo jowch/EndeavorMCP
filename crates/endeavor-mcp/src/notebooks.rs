@@ -281,6 +281,9 @@ pub struct Notebooks {
     pub exits_when_idle: bool,
     /// Runs waiting for the user's answer.
     pub asks: Asks,
+    /// Each agent session's notebook kind, when its client said it (`endeavor/set_session_folder`'s
+    /// `kind`): the engine of a `new_notebook` without a path. Pluto's for a session with none.
+    kinds: Mutex<HashMap<String, Backend>>,
 }
 
 /// One notebook as the engine's `snapshot` reports it.
@@ -515,6 +518,7 @@ impl Notebooks {
             events: Mutex::default(),
             build: OnceLock::new(),
             exits_when_idle: false,
+            kinds: Mutex::default(),
         }
     }
 
@@ -696,8 +700,7 @@ impl Notebooks {
     /// One call to the engine's adapter: its result, or the error it raised.
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         if matches!(method, "open" | "new") {
-            // A new notebook without a path is Pluto's.
-            self.start_engine(params["path"].as_str().map_or(Backend::Pluto, engines::of_path))?;
+            self.start_engine(engines::of_params(&params))?;
         }
         let message = json!({ "method": method, "params": params });
         let reply = self.engines.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;
@@ -888,6 +891,21 @@ impl Notebooks {
             state.bindings.insert(owner.to_owned(), canonical_path(path).unwrap_or_else(|_| path.to_owned()));
             state.record_bound(owner, now);
         }
+    }
+
+    /// Session `owner`'s notebook kind: the engine its new notebooks without a path are made in.
+    /// None forgets it, and they are Pluto's again.
+    pub fn set_kind(&self, owner: &str, kind: Option<Backend>) {
+        let mut kinds = self.kinds.lock().unwrap();
+        match kind {
+            Some(kind) => kinds.insert(owner.to_owned(), kind),
+            None => kinds.remove(owner),
+        };
+    }
+
+    /// Session `owner`'s notebook kind, if its client said it.
+    pub fn kind(&self, owner: &str) -> Option<Backend> {
+        self.kinds.lock().unwrap().get(owner).copied()
     }
 
     /// A session makes a tool call.

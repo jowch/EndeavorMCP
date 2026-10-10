@@ -1821,6 +1821,10 @@ fn a_folder_with_julia_notebooks_starts_julia_ahead_and_one_with_only_r_notebook
     assert!(julia_pids(&dir).is_empty() && !dir.join("julia.json").exists(), "R notebooks and a plain .jl file aren't Julia notebooks, and an R session's folder isn't looked at");
 
     give_folder(&core, "s2", &julia_folder);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(julia_pids(&dir).is_empty(), "a later call that leaves the kind out keeps it");
+
+    give_folder_of(&core, "s2", &julia_folder, Some("unknown"));
     wait_for("Julia to start ahead", || julia_pids(&dir).len() == 1);
     wait_for("Julia to be ready", || tool_call(&core, "list_notebooks", serde_json::json!({})) == serde_json::json!([]) && dir.join("julia.json").exists());
     give_folder(&core, "s3", &julia_folder);

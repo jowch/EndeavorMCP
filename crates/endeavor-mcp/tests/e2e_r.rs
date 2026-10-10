@@ -296,6 +296,18 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["output"].as_str().unwrap().starts_with("Warning: careful"), "{read}");
     });
 
+    step("in a session said to be R's, new_notebook without a path makes an R notebook", || {
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let owner = agent.session.clone().unwrap();
+        app_call_with(port, &token, "endeavor/set_session_folder", json!({ "owner": owner, "folder": folder.display().to_string(), "kind": "r" }));
+        let made = agent.ok("new_notebook", json!({}));
+        let path = PathBuf::from(made["path"].as_str().unwrap());
+        assert_eq!((path.parent(), path.extension().and_then(|e| e.to_str())), (Some(folder.as_path()), Some("R")), "{made}");
+        assert!(wire::backend::Backend::of_file(&path) == Some(wire::backend::Backend::Ember), "an Ember file");
+        assert!(made["browser_url"].as_str().unwrap().contains("/ember/edit?id="), "{made}");
+    });
+
     step("the browser link reaches Ember's page through the port", || {
         let (status, head, _) = get(port, &format!("/ember/edit?id={notebook}&token={token}"), "");
         assert_eq!(status, "HTTP/1.1 303 See Other", "{head}");
@@ -432,7 +444,12 @@ fn ember_updates_from_its_repository_and_keeps_the_build_before() {
 /// What a call to the core's `/endeavor/call` answers, as the app and `use_machine` make them.
 #[cfg(target_os = "macos")]
 fn app_call(port: u16, token: &str, method: &str) -> Value {
-    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method }).to_string();
+    app_call_with(port, token, method, json!({}))
+}
+
+/// The same, with `params`.
+fn app_call_with(port: u16, token: &str, method: &str, params: Value) -> Value {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string();
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(socket, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut reply = String::new();
