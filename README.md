@@ -15,6 +15,19 @@ claude plugin install endeavor@endeavor
 
 Then start Claude Code in your project folder. New notebooks go there.
 
+Claude Code doesn't update a plugin from this marketplace on its own. Turn
+that on in `/plugin`, under Marketplaces, with "Enable auto-update", or update
+by hand:
+
+```
+claude plugin marketplace update endeavor
+claude plugin update endeavor@endeavor
+```
+
+The plugin pins one build of the `endeavor` program, and old builds are
+removed from the release after a few days. A plugin that is behind says so
+when it can't get its build: update it then.
+
 **Codex:**
 
 ```

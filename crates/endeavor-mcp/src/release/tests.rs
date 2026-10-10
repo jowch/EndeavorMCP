@@ -126,9 +126,13 @@ fn a_release_without_the_helper_says_so() {
     // In the checksum file, but the file isn't there.
     let error = fetch_helper("linux", "x86_64", Some(KEY), &url, &cache).unwrap_err();
     assert!(error.starts_with("Couldn't get the helper for linux x86_64 servers from the release: Couldn't download file://"), "{error}");
-    // No checksum file for this key.
+    // No checksum file for this key, and no LATEST.
     let error = fetch_helper("linux", "aarch64", Some("ffffffffffff"), &url, &cache).unwrap_err();
     assert!(error.starts_with("Couldn't get the helper for linux aarch64 servers from the release: Couldn't download file://"), "{error}");
+    // No checksum file for this key, and LATEST names another: it was removed.
+    std::fs::write(dir.join("release").join("LATEST"), format!("{KEY}\n")).unwrap();
+    let error = fetch_helper("linux", "aarch64", Some("ffffffffffff"), &url, &cache).unwrap_err();
+    assert_eq!(error, "Build ffffffffffff of endeavor is old and was removed from the release, so it can't get the helper for linux aarch64 servers. Update endeavor: update the plugin, or run `endeavor update` if you installed it with the install script.");
     assert!(files(&cache).iter().all(|f| !f.ends_with("endeavor") && !f.contains(".part")), "{:?}", files(&cache));
     let _ = std::fs::remove_dir_all(&dir);
 }

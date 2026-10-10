@@ -1,7 +1,6 @@
 {
   "name": "endeavor",
   "description": "Live Pluto (Julia) notebooks your agent edits and runs, which you watch in a browser.",
-  "version": "0.1.0",
   "homepage": "https://github.com/jowch/EndeavorMCP",
   "license": "MIT",
   "author": {

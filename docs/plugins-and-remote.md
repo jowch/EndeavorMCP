@@ -867,10 +867,12 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
   leaves at most a temporary folder in `<bin>`, never a partial binary. The
   next start downloads again and removes temporary folders older than an hour.
 - **Failure** is non-zero with a last line starting `endeavor:`. A pinned
-  build that the release doesn't hold yet (the release answers `LATEST` but
-  has no `endeavor-<key>.sha256`; `install.sh` exits 3) fails with "still
-  being published", since the Helpers workflow publishes a change to `main`
-  a few minutes after the push. No older build is run in its place.
+  build that the release doesn't hold (the release answers `LATEST` but has
+  no `endeavor-<key>.sha256`; `install.sh` exits 3) fails saying to reconnect
+  in a few minutes if the plugin was just updated, since the Helpers workflow
+  publishes a change to `main` a few minutes after the push, and otherwise to
+  update the plugin, since old builds are removed (`prune-helpers.sh`). No
+  older build is run in its place.
 - `--fetch-only` only gets the binary. Claude Code's `SessionStart` hook
   (matcher `startup`, so not on resume, clear or compact) runs it in the
   background so the download is usually done before the server starts.

@@ -192,5 +192,5 @@ if have; then
   run "$@"
 fi
 # install.sh exits 3 when the release is reachable but doesn't hold the pinned build.
-[ "$status" -ne 3 ] || fail "build $key is still being published. Reconnect in a few minutes."
+[ "$status" -ne 3 ] || fail "the release doesn't hold build $key. If the plugin was just updated, reconnect in a few minutes. Otherwise this build is old and was removed: update the plugin (in Claude Code, \`claude plugin marketplace update endeavor\` and then \`claude plugin update endeavor@endeavor\`)."
 fail "couldn't get endeavor${key:+ (build $key)}. The reason is above. $manual"

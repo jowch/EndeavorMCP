@@ -197,10 +197,12 @@ fi
 
 name=endeavor-$key-$platform$suffix
 if ! fetch "$release/endeavor-$key.sha256" "$tmp/sums"; then
-  # A build from main is published a few minutes after the push. Exit 3 tells
-  # the launcher that the release answered but doesn't hold this build yet.
+  # Exit 3 tells the launcher that the release answered but doesn't hold this
+  # build: either it is newer than the release (a build from main is published
+  # a few minutes after the push) or it is old and was removed
+  # (prune-helpers.sh).
   if [ -z "$newest" ] && fetch "$release/LATEST" >/dev/null 2>&1; then
-    echo "install.sh: the release doesn't hold build $key yet." >&2
+    echo "install.sh: the release doesn't hold build $key. A new build appears a few minutes after it is pushed; an old one may have been removed." >&2
     exit 3
   fi
   fail "couldn't download $release/endeavor-$key.sha256."
