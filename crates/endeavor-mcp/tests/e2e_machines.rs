@@ -107,6 +107,7 @@ fn the_machine_tools_over_real_ssh() {
         .env("XDG_CACHE_HOME", work.join("cache"))
         .env("ENDEAVOR_TEST_ROOT", &root)
         .env("ENDEAVOR_TEST_STATE", &state)
+        .env("ENDEAVOR_TEST_BROWSER", work.join("opened.txt"))
         .env("ENDEAVOR_TEST_DEPOT", &depot_path)
         .env("ENDEAVOR_START_WAIT_SECS", "45")
         .current_dir(&project);
@@ -145,7 +146,7 @@ fn the_machine_tools_over_real_ssh() {
     };
     eprintln!("[{:?}] use_machine ready on {}", started.elapsed(), used["node"]);
     let page = used["browser_url"].as_str().unwrap().to_owned();
-    let (port, token) = page.strip_prefix("http://localhost:").unwrap().split_once("/?token=").map(|(p, t)| (p.parse::<u16>().unwrap(), t.to_owned())).unwrap();
+    let port: u16 = page.strip_prefix("http://localhost:").and_then(|rest| rest.strip_suffix('/')).unwrap_or_else(|| panic!("a page without the token: {page}")).parse().unwrap();
     assert_eq!(used["folder"], folder);
     let remote_port = std::fs::read_to_string(state.join("runtime.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()).expect("the runtime's port in its record");
     assert_eq!(used["remote_port"], remote_port, "{used}");
@@ -157,7 +158,9 @@ fn the_machine_tools_over_real_ssh() {
     let created = front.ok("new_notebook", json!({ "path": "analysis.jl" }));
     let notebook = created["notebook_id"].as_str().expect("a notebook").to_owned();
     assert_eq!(created["path"], notebooks.join("analysis.jl").display().to_string(), "the notebook is in the session's folder on the machine: {created}");
-    assert_eq!(created["browser_url"], json!(format!("http://localhost:{port}/edit?id={notebook}&token={token}")), "{created}");
+    assert_eq!((&created["browser_url"], &created["opened_in_browser"]), (&json!(format!("http://localhost:{port}/edit?id={notebook}")), &json!(true)), "{created}");
+    let opened = std::fs::read_to_string(work.join("opened.txt")).unwrap();
+    let token = opened.lines().last().and_then(|line| line.strip_prefix(&format!("http://localhost:{port}/edit?id={notebook}&token="))).unwrap_or_else(|| panic!("the browser got the link with the token: {opened}")).to_owned();
     let order = front.ok("get_cell_order", json!({ "notebook_id": notebook }));
     let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
     let added = front.ok("add_cell", json!({ "notebook_id": notebook, "code": "x = 21 * 2", "after_cell_id": last }));

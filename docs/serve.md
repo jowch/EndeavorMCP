@@ -168,6 +168,8 @@ status` shows what is running and where.
 | `--port PORT` | The port on `127.0.0.1`. Fix it so your `ssh -L` line stays the same | A free port |
 | `--julia PATH` | The `julia` to use, or `auto` | `auto`: your login shell's `julia` (on Windows, the first `julia.exe` on the PATH), else Endeavor's own download (not on Windows) |
 | `--julia-shell LINE` | A shell line that puts `julia` on the `PATH`, such as `'module load julia/1.12'` | |
+| `--r PATH` | The `Rscript` for R notebooks (not open to agents yet), or `auto`. Endeavor doesn't download R | `auto`: your login shell's `Rscript` |
+| `--r-shell LINE` | A shell line that puts `Rscript` on the `PATH`, such as `'module load R/4.4'`. It runs each time R starts, so what else it sets up (libraries, a compiler) is there too | |
 | `--depot DEPOT` | `JULIA_DEPOT_PATH` for the runtime | `~/.cache/endeavor/depot:`, or `$SCRATCH/endeavor/depot:` when `$SCRATCH` is set |
 | `--idle-stop HOURS` | Stop a notebook nobody has used for this long. `0` never stops one | `48` |
 | `--host-tools` | Give every agent session `list_folder`, `read_file` and `run_shell` on this machine (`serve` only) | Off |
@@ -263,10 +265,11 @@ Without the plugin, the agent gets a `notebook_guide` tool that serves
 the same skills, and the server's instructions tell it to read the guide
 first.
 
-`mcp` writes its progress and the browser link to stderr, which agents keep
-in their MCP logs. The agent also gets the link: `new_notebook`,
-`open_notebook` and `pluto_session_status` return `browser_url`, and the
-server's instructions tell the agent to give it to you.
+`mcp` writes its progress to stderr, which agents keep in their MCP logs, and
+never the token. When the agent makes or opens a notebook, `mcp` opens it in
+your browser itself. The agent gets the address without the token
+(`browser_url`), and `opened_in_browser` tells it whether the notebook was
+opened for you.
 
 ## Watch the notebook in a browser
 
@@ -274,8 +277,16 @@ Open the link `serve` printed. The link sets a cookie for this runtime and
 reloads the page without the token. You get Pluto's own page, where you can
 read, edit and run cells too.
 
-Each notebook has its own link, `http://localhost:PORT/edit?id=<notebook id>&token=…`.
-The agent's `browser_url` is that link.
+Each notebook has its own address, `http://localhost:PORT/edit?id=<notebook id>`.
+The agent's `browser_url` is that address. It has no token, so it opens only in a
+browser that has the cookie already. A browser without it gets a page that says
+how to get in.
+
+`endeavor open` lets a browser in to the runtime running from the state
+folder: it opens the start page in your browser, or prints the link with the
+token when the computer shows no browser (over ssh, say). It prints the link
+only to a terminal, so an agent that runs it in its shell doesn't get the
+token. It takes `--state-dir` like `stop`.
 
 If you forward a different local port than the runtime's, change the port in
 the link.
@@ -347,6 +358,11 @@ recent notebook starts it and runs it.
   as the bearer header or as the browser cookie.
 - The browser cookie opens only Pluto's page. The MCP endpoint (`/mcp`) takes
   only the header, so code in a notebook's output can't call the agent's tools.
+- Tool results never hold the token. Agents have quoted links in their replies,
+  their clients keep transcripts, and one agent used the token to call Pluto
+  directly, past the notebook tools. An agent that can run shell commands as you
+  can still read the token file; your agent's own permission prompts are what
+  stop that.
 - The token file, `runtime.json` and `runtime.log` are readable only by you.
 - To change the token, stop the runtime, delete `token` in the state folder,
   and start it again.

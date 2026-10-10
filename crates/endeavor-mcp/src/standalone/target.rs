@@ -271,9 +271,10 @@ pub(super) fn other_build_notice(name: &str, id: &str, interface: Option<u32>, o
 }
 
 /// A runtime that was found or started, as the session uses it. The user is told on stderr where the
-/// notebooks are, and when another build started it.
+/// notebooks are, and when another build started it. Not with the token: agents' clients keep stderr in
+/// their logs.
 fn announce(options: &Options, state: &crate::State, port: u16, started: bool) -> RuntimeInfo {
-    eprintln!("Endeavor's notebooks: http://localhost:{port}/?token={}", state.token);
+    eprintln!("Endeavor's notebooks: http://localhost:{port}/ (`endeavor open` lets a browser in)");
     if let Some(message) = (!started).then(|| super::other_build(&options.state_dir)).flatten() {
         eprintln!("endeavor: {message}");
     }

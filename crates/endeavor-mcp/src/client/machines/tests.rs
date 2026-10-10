@@ -15,6 +15,18 @@ fn reads_the_ssh_host_field() {
 }
 
 #[test]
+fn r_setting_becomes_helper_arguments() {
+    let with = |r: Option<&str>| Server { r: r.map(String::from), ..Default::default() }.r_args();
+    assert_eq!(with(None), ["--r", "auto"]);
+    assert_eq!(with(Some(" ")), ["--r", "auto"]);
+    assert_eq!(with(Some("/opt/R/4.4.1/bin/Rscript")), ["--r", "/opt/R/4.4.1/bin/Rscript"]);
+    assert_eq!(with(Some("/opt/R/4.4.1/bin/R")), ["--r", "/opt/R/4.4.1/bin/R"]);
+    assert_eq!(with(Some("~/R/bin/Rscript")), ["--r", "~/R/bin/Rscript"]);
+    assert_eq!(with(Some("module load R/4.4")), ["--r-shell", "module load R/4.4"]);
+    assert_eq!(with(Some("/opt/lmod/setup.sh && module load R")), ["--r-shell", "/opt/lmod/setup.sh && module load R"]);
+}
+
+#[test]
 fn julia_setting_becomes_helper_arguments() {
     let with = |j: Option<&str>| Server { julia: j.map(String::from), ..Default::default() }.julia_args();
     assert_eq!(with(None), ["--julia", "auto"]);
@@ -40,7 +52,7 @@ fn a_cluster_is_connected_for_slurm_jobs() {
 
 #[test]
 fn a_server_reads_and_writes_the_apps_json() {
-    let saved = r#"{"id":"a","name":"lab-server","ssh_host":"lab","port":2222,"julia":null,"idle_stop":"week","cluster":null}"#;
+    let saved = r#"{"id":"a","name":"lab-server","ssh_host":"lab","port":2222,"julia":null,"r":null,"idle_stop":"week","cluster":null}"#;
     let server: Server = serde_json::from_str(saved).unwrap();
     assert_eq!((server.idle_stop, server.port), (Some(IdleStop::Week), Some(2222)));
     assert_eq!(serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&server).unwrap()).unwrap(), serde_json::from_str::<serde_json::Value>(saved).unwrap());

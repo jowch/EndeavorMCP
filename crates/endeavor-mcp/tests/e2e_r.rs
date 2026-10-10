@@ -198,7 +198,15 @@ fn an_r_notebook_through_the_runtime() {
     )
     .unwrap();
 
-    let mut serve = command(&["serve", "--folder", folder.to_str().unwrap()], &work, &julia, &depot)
+    // R comes from a shell line, as `module load R` would give it: the line puts a folder on the PATH whose
+    // Rscript says it ran and then runs R's own.
+    let real = String::from_utf8(Command::new("sh").args(["-c", "command -v Rscript"]).output().unwrap().stdout).unwrap().trim().to_owned();
+    let module = fresh(work.join("module r"));
+    let ran = module.join("ran");
+    std::fs::write(module.join("Rscript"), format!("#!/bin/sh\necho \"$LOADED\" >> '{}'\nexec '{real}' \"$@\"\n", ran.display())).unwrap();
+    std::fs::set_permissions(module.join("Rscript"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let line = format!("export PATH=\"{}:$PATH\" LOADED=by-the-line; echo the line ran", module.display());
+    let mut serve = command(&["serve", "--folder", folder.to_str().unwrap(), "--r-shell", &line], &work, &julia, &depot)
         .env("ENDEAVOR_TEST_R_NOTEBOOKS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -236,8 +244,10 @@ fn an_r_notebook_through_the_runtime() {
         };
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("growth.R").display().to_string()), &json!(false)), "{opened}");
-        assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}&token={token}")));
+        assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}")));
         assert!(state.join("r.json").exists(), "R's adapter wrote its state");
+        let ran = std::fs::read_to_string(&ran).unwrap_or_default();
+        assert!(!ran.is_empty() && ran.lines().all(|l| l == "by-the-line"), "R ran from --r-shell's line, with what it set: {ran:?}");
         let listed = agent.ok("list_notebooks", json!({}));
         assert_eq!(listed.as_array().unwrap().iter().map(|nb| nb["notebook_id"].clone()).collect::<Vec<_>>(), [json!(notebook)], "{listed}");
         notebook
