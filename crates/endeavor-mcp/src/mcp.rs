@@ -330,6 +330,19 @@ impl Bridge {
             }
             "endeavor/set_session_folder" => {
                 let (owner, folder) = (text("owner", ""), params.get("folder").filter(|f| !f.is_null()).map_or(String::new(), julia_string));
+                // The session's kind: kept until said again, so a later call that leaves it out keeps it.
+                let kind = match params["kind"].as_str() {
+                    Some(said) => {
+                        let kind = match said {
+                            "julia" => Some(wire::backend::Backend::Pluto),
+                            "r" => Some(wire::backend::Backend::Ember),
+                            _ => None,
+                        };
+                        self.notebooks.set_kind(&owner, kind);
+                        kind
+                    }
+                    None => self.notebooks.kind(&owner),
+                };
                 let mut folders = self.folders.lock().unwrap();
                 if params["no_folder"] == true {
                     folders.insert(owner, None);
@@ -339,7 +352,7 @@ impl Bridge {
                     folders.insert(owner, Some(folder.clone()));
                     drop(folders);
                     if let Some(told) = self.on_folder.get() {
-                        told(&folder, params["kind"].as_str().unwrap_or("unknown"));
+                        told(&folder, kind.map_or("unknown", |kind| if kind == wire::backend::Backend::Ember { "r" } else { "julia" }));
                     }
                 }
             }
@@ -555,7 +568,11 @@ impl Bridge {
         // A caller is the app's when the runtime isn't standalone and the caller isn't `endeavor mcp`'s front,
         // whether here (`front`) or on a server, where the front's calls carry a browser port and the app's don't.
         let from_app = self.standalone.is_none() && !caller.front && caller.browser_port.is_none();
-        let r_path = arguments.get("path").and_then(Value::as_str).is_some_and(|path| notebooks::backend_of_path(path) == wire::backend::Backend::Ember);
+        let r_path = match arguments.get("path").filter(|path| !path.is_null()) {
+            Some(path) => path.as_str().is_some_and(|path| notebooks::backend_of_path(path) == wire::backend::Backend::Ember),
+            // A new notebook without a path is of the session's kind.
+            None => tool == "new_notebook" && self.notebooks.kind(&caller.owner) == Some(wire::backend::Backend::Ember),
+        };
         if from_app && matches!(tool, "new_notebook" | "open_notebook") && r_path {
             return Some("ArgumentError: unsupported::R notebooks don't open in the Endeavor app yet. Tell the user, and offer a Julia notebook (.jl) instead.".into());
         }
@@ -1104,7 +1121,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (5, "00783e892a3fcb3d"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (6, "00783e892a3fcb3d"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1151,7 +1168,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (5, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (6, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

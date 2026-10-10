@@ -1965,3 +1965,33 @@ fn new_notebook_takes_an_r_path_only_where_r_notebooks_open() {
         assert!(other.contains("invalid_path::Notebook path must end in .jl (Julia) or .R (R): "), "{other}");
     }
 }
+
+#[test]
+fn a_new_notebook_without_a_path_is_of_the_sessions_kind() {
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.notebooks.set_kind("r-session", Some(Backend::Ember));
+    s.notebooks.set_kind("julia-session", Some(Backend::Pluto));
+    let made = s.call("r-session", "new_notebook", json!({}));
+    if cfg!(windows) {
+        let refused = made.unwrap_err();
+        assert!(refused.contains("unsupported::") && refused.contains("R notebooks don't run on Windows yet"), "{refused}");
+    } else {
+        made.unwrap();
+        assert_eq!(*ember.calls.lock().unwrap(), ["new"], "R's engine made it");
+    }
+    assert!(!s.engine.calls.lock().unwrap().contains(&"new".to_owned()), "not Pluto's");
+    s.call("julia-session", "new_notebook", json!({})).unwrap();
+    s.call("unsaid", "new_notebook", json!({})).unwrap();
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|call| *call == "new").count(), 2, "a Julia session's, and one whose kind wasn't said, are Pluto's");
+    // A path still decides, whatever the session's kind.
+    s.notebooks.bind("r-session", "");
+    s.call("r-session", "new_notebook", json!({ "path": format!("{}{SEP}endeavor-kind-test.jl", std::env::temp_dir().to_string_lossy().trim_end_matches(SEP)) })).unwrap();
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|call| *call == "new").count(), 3);
+    // Forgotten, the session's new notebooks are Pluto's again.
+    s.notebooks.set_kind("r-session", None);
+    s.notebooks.bind("r-session", "");
+    s.call("r-session", "new_notebook", json!({})).unwrap();
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|call| *call == "new").count(), 4);
+}
