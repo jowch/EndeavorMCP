@@ -214,12 +214,14 @@ Users report a problem with the agent on the issue form "The agent did
 something wrong" (`.github/ISSUE_TEMPLATE/agent-problem.yml`). It asks for
 the agent and its version, the model if known, Endeavor's version, where the
 notebook ran, the prompt, what went wrong, any error code in the tool
-results, the agent's last message and `endeavor status`.
+results, the agent's last message and `endeavor status`, and tells people
+to take out secrets, folder paths and server names first.
 
 1. **Find the task.** The error code, or what the agent did, points to one:
 
    | In the report | Task |
    |---|---|
+   | `already_open`, "it couldn't fix the error in my open notebook" | N2 |
    | `stale_read` | N5 |
    | `run_conflict` | N6 |
    | `one_notebook`, a second notebook | N8 |
@@ -231,10 +233,12 @@ results, the agent's last message and `endeavor status`.
    | a first package install that looked stuck | N9 |
 
 2. **Find whose problem it is.** Run that task with Claude at the reporter's
-   build, then on `main`. The build in `endeavor --version` is a hash of
-   the source, not a commit: finding theirs means building commits from
-   around when they installed until one gives the same build. Often `main`
-   alone settles it. If it fails with Claude too, the bug is ours: fix it, and the task
+   build, then on `main`. A `Release:` line in their `endeavor status` means
+   a released build: `scripts/helpers.sh --key` at a commit prints that key,
+   so finding the commit needs no build. A local build has no such line, and
+   its build in `endeavor --version` is a hash of the source, not a commit:
+   finding it means building commits until one matches. Often `main` alone
+   settles it. If it fails with Claude too, the bug is ours: fix it, and the task
    now guards it. If it passes with Claude and the reporter used another
    agent, that agent reads our text differently: tune the skill text with the
    reporter's help, and keep Claude passing. If it passes everywhere, it

@@ -6,7 +6,7 @@ body:
       value: |
         Thanks for reporting this. We use it to find the smoke-suite task that should catch the problem, or to write a new one.
 
-        Before you paste anything, take out what you don't want public: passwords, tokens (a notebook link's `?token=` part), server names, user names and data.
+        Before you paste anything, take out what you don't want public: passwords, the value after `token=` or `secret=` in any link or log line, server names, user names, folder paths and data.
   - type: dropdown
     id: agent
     attributes:
@@ -21,14 +21,21 @@ body:
   - type: input
     id: agent-version
     attributes:
-      label: Agent version and model
-      description: "For example `claude --version` and the model it used, if you know it."
-      placeholder: "Claude Code 2.1.296, model unknown"
+      label: Agent version
+      description: "For example the output of `claude --version` or `codex --version`."
+      placeholder: "2.1.296 (Claude Code)"
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: "The model that answered, as your agent names it. Claude Code and Codex show it with `/status`; other agents show it in their model picker. Write \"don't know\" only if none of these shows it."
+    validations:
+      required: true
   - type: input
     id: endeavor-version
     attributes:
       label: Endeavor version
-      description: "The first line of `endeavor --version`, or the app's version."
+      description: "The first line of `endeavor --version`. In the app, the version and build in the About Endeavor window."
       placeholder: "endeavor 0.1.0 (build 0.1.0-...)"
     validations:
       required: true
@@ -64,11 +71,9 @@ body:
         - label: "`stale_read`: a cell changed since the agent read it"
         - label: "`run_conflict`: someone else changed a cell before the agent's run"
         - label: "`one_notebook`: the session already has a notebook"
-        - label: "`read_required`: the agent edited a cell it hadn't read"
-        - label: "`not_staged` or `placement_required`"
         - label: "`still_running`: a cell was still running when the tool returned"
         - label: "`needs_install`: a server needed Endeavor or Julia installed"
-        - label: "Another code (say which in the next box)"
+        - label: "Another code (say which under What went wrong)"
   - type: textarea
     id: last-message
     attributes:
@@ -78,7 +83,7 @@ body:
     id: status
     attributes:
       label: endeavor status
-      description: "The output of `endeavor status`. If the runtime was running, also the last lines of the `runtime.log` it names."
+      description: "The output of `endeavor status`, and if the runtime was running, the last lines of the `runtime.log` it names. Both show your folders and your servers' names: replace your user name in paths with `~` and server names with `server1`, `server2`. The log has Pluto's link: cut the value after `secret=`."
       render: text
   - type: textarea
     id: notebook
