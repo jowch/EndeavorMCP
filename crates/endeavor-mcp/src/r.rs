@@ -124,8 +124,7 @@ impl Source {
     /// Endeavor's own R, which may be installed here, when this is `--r auto`, it isn't installed yet,
     /// and this is a Mac with an installer for its kind of processor: what installing it means.
     pub fn own_item(&self) -> Option<wire::Item> {
-        let mac = cfg!(target_os = "macos");
-        (matches!(self, Source::Auto) && own_rscript().is_none()).then(|| own_item_for(mac, &crate::julia::uname("-m"), &crate::paths::Env::here())).flatten()
+        (matches!(self, Source::Auto) && own_rscript().is_none()).then(|| own_item_for(macos_version(), &crate::julia::uname("-m"), &crate::paths::Env::here())).flatten()
     }
 
     /// Whether `status` is a shell's that ended well without starting R: a shell line
@@ -153,18 +152,20 @@ fn rscript_at(path: &str) -> String {
     }
 }
 
-/// Endeavor's own R, pinned like its Julia: CRAN's installer for each kind of Mac, with its SHA-256
-/// and size. The arm64 build needs macOS 14 or newer, the Intel one macOS 11.
+/// Endeavor's own R, pinned like its Julia: CRAN's installer for each kind of Mac, with the oldest
+/// macOS it runs on, its SHA-256 and size.
 pub const OWN_VERSION: &str = "4.6.1";
-const INSTALLERS: [(&str, &str, &str, u64); 2] = [
+const INSTALLERS: [(&str, u32, &str, &str, u64); 2] = [
     (
         "arm64",
+        14,
         "https://cloud.r-project.org/bin/macosx/sonoma-arm64/base/R-4.6.1-arm64.pkg",
         "67f6eea4ced4ce48f0a0d4fa3a1cac43d1859a05a88993ee3dff7c52e7edbc4b",
         105_066_342,
     ),
     (
         "x86_64",
+        11,
         "https://cloud.r-project.org/bin/macosx/big-sur-x86_64/base/R-4.6.1-x86_64.pkg",
         "612bb00cb4c627721d6d80b0f5224227c0fcdefb4a5b6c917511480361c16571",
         108_253_722,
@@ -194,9 +195,10 @@ fn own_rscript() -> Option<PathBuf> {
     Some(own_dir(&env).join("bin").join("Rscript")).filter(|rscript| rscript.is_file())
 }
 
-/// What installing Endeavor's own R means on a Mac (`mac`) with the processor `arch` (`uname -m`).
-fn own_item_for(mac: bool, arch: &str, env: &crate::paths::Env) -> Option<wire::Item> {
-    if !mac || env.home.as_os_str().is_empty() || !INSTALLERS.iter().any(|i| i.0 == arch) {
+/// What installing Endeavor's own R means on macOS `macos` (its major version; `None` when this
+/// isn't a Mac) with the processor `arch` (`uname -m`).
+fn own_item_for(macos: Option<u32>, arch: &str, env: &crate::paths::Env) -> Option<wire::Item> {
+    if env.home.as_os_str().is_empty() || !INSTALLERS.iter().any(|i| i.0 == arch && macos.is_some_and(|v| v >= i.1)) {
         return None;
     }
     Some(wire::Item { kind: wire::KIND_RUNTIME.into(), name: format!("R {OWN_VERSION}"), size_mb: Some(INSTALLED_MB), place: Some(own_dir(env).display().to_string()) })
@@ -208,13 +210,13 @@ fn own_item_for(mac: bool, arch: &str, env: &crate::paths::Env) -> Option<wire::
 pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<(), String> {
     let env = crate::paths::Env::here();
     let arch = crate::julia::uname("-m");
-    if own_item_for(cfg!(target_os = "macos"), &arch, &env).is_none() {
-        return Err(format!("Endeavor installs its own R only on a Mac, and has no R for {arch} here."));
+    if own_item_for(macos_version(), &arch, &env).is_none() {
+        return Err(format!("Endeavor installs its own R only on a Mac, and has no R {OWN_VERSION} for this one ({arch})."));
     }
     if own_rscript().is_some() {
         return Ok(());
     }
-    let &(_, url, sha256, size) = INSTALLERS.iter().find(|i| i.0 == arch).expect("own_item_for checked it");
+    let &(_, _, url, sha256, size) = INSTALLERS.iter().find(|i| i.0 == arch).expect("own_item_for checked it");
     let (root, dir, name) = (env.server_root(), own_dir(&env), format!("R {OWN_VERSION}"));
     std::fs::create_dir_all(&root).map_err(|e| format!("Couldn't create {}: {e}", root.display()))?;
     let part = root.join(format!("R-{OWN_VERSION}-{arch}.pkg.part"));
@@ -239,6 +241,15 @@ pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<(), String> {
     progress(format!("Setting up fonts for {name}…"));
     let _ = Command::new(dir.join("bin").join("fc-cache")).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     Ok(())
+}
+
+/// macOS's major version (`sw_vers`), on a Mac.
+fn macos_version() -> Option<u32> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let output = Command::new("sw_vers").arg("-productVersion").stdin(Stdio::null()).output().ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().split('.').next()?.parse().ok()
 }
 
 /// Expand the installer into `staging` and unpack its R framework: R's own folder (`Resources`).
@@ -433,11 +444,12 @@ mod tests {
     #[test]
     fn own_r_is_offered_only_on_a_mac_it_has_an_installer_for() {
         let env = crate::paths::Env::from_vars(&|name| (name == "HOME").then(|| "/Users/ada".into()));
-        let item = own_item_for(true, "arm64", &env).unwrap();
+        let item = own_item_for(Some(14), "arm64", &env).unwrap();
         assert_eq!(item.to_string(), format!("R {OWN_VERSION} (about {INSTALLED_MB} MB, into /Users/ada/.cache/endeavor/R-{OWN_VERSION})"));
-        assert!(own_item_for(true, "x86_64", &env).is_some());
-        assert_eq!(own_item_for(false, "arm64", &env), None);
-        assert_eq!(own_item_for(true, "ppc", &env), None);
+        assert!(own_item_for(Some(11), "x86_64", &env).is_some());
+        assert_eq!(own_item_for(Some(13), "arm64", &env), None, "CRAN's arm64 R needs macOS 14");
+        assert_eq!(own_item_for(None, "arm64", &env), None, "not a Mac");
+        assert_eq!(own_item_for(Some(15), "ppc", &env), None);
         assert_eq!(Source::Shell("module load R".into()).own_item(), None);
         assert_eq!(Source::Path("/opt/R/bin/Rscript".into()).own_item(), None);
     }
