@@ -78,7 +78,7 @@ impl Notebooks {
             "find_symbol_references" => t.find_symbol("references"),
             "validate_cell" => t.validate_cell(),
             "search_code" => t.search_code(),
-            "pluto_session_status" => self.session_status(),
+            "session_status" => self.session_status(),
             "open_notebook" => t.open_notebook(folder),
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),

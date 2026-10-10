@@ -43,7 +43,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 1;
+pub const INTERFACE: u32 = 2;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";

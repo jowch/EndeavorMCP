@@ -188,10 +188,10 @@ fn the_machine_tools_over_real_slurm() {
     assert!(matches!(used["state"].as_str(), Some("queued" | "starting" | "ready")), "{used}");
     let mut seen = vec![format!("use_machine: {}", used["state"])];
     let status = loop {
-        let status = one.ok("pluto_session_status", json!({}));
+        let status = one.ok("session_status", json!({}));
         let note = format!("{} / {} / {}", status["state"], status["queue"], status["message"]);
         if seen.last() != Some(&note) {
-            eprintln!("[{:?}] pluto_session_status: {status}", started.elapsed());
+            eprintln!("[{:?}] session_status: {status}", started.elapsed());
             seen.push(note);
         }
         if status.get("browser_url").is_some() {
@@ -257,7 +257,7 @@ fn the_machine_tools_over_real_slurm() {
     let up = |front: &mut Front| {
         let deadline = Instant::now() + Duration::from_secs(180);
         loop {
-            let status = front.ok("pluto_session_status", json!({}));
+            let status = front.ok("session_status", json!({}));
             if status.get("browser_url").is_some() {
                 return status;
             }
@@ -269,7 +269,7 @@ fn the_machine_tools_over_real_slurm() {
     // A second session in the project attaches to the same job with no `use_machine`, and sees the first one's notebook.
     let mut two = front();
     let attached = up(&mut two);
-    eprintln!("[{:?}] second front's pluto_session_status: {attached}", started.elapsed());
+    eprintln!("[{:?}] second front's session_status: {attached}", started.elapsed());
     assert_eq!((attached["machine"].as_str(), attached["job"]["id"].as_str(), attached["job"]["node"].as_str()), (Some("e2e-slurm"), Some(job.as_str()), Some(node)), "{attached}");
     assert!(attached["job"]["ends_in_minutes"].as_u64().is_some_and(|m| (10..=15).contains(&m)), "the job's end is known to a front that attached to a running job: {attached}");
     let seen_by_two = two.ok("list_notebooks", json!({}));
@@ -335,7 +335,7 @@ fn the_machine_tools_over_real_slurm() {
 }
 
 /// A job held in the queue (`--begin=now+90`, reason BeginTime) gives a real queue on a cluster whose queue is
-/// empty: what `use_machine` and `pluto_session_status` say while it waits, also from a session that attaches
+/// empty: what `use_machine` and `session_status` say while it waits, also from a session that attaches
 /// to the queued job afterwards, then while it starts. A forced stop ends it. Same setup as above, in
 /// `target/tmp/e2e-machines-slurm-held`.
 #[test]
@@ -407,8 +407,8 @@ fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_
     jobs.lock().unwrap().push(job.clone());
     assert_eq!((used["state"].as_str(), used["ready"].clone(), used["queue"]["state"].as_str(), used["queue"]["reason"].as_str()), (Some("queued"), json!(false), Some("PENDING"), Some("BeginTime")), "{used}");
     assert!(used["queue"]["reason_text"].as_str().is_some_and(|t| !t.is_empty()) && !used["message"].as_str().unwrap_or_default().is_empty(), "{used}");
-    let status = one.ok("pluto_session_status", json!({}));
-    eprintln!("[{:?}] pluto_session_status while held: {status}", started.elapsed());
+    let status = one.ok("session_status", json!({}));
+    eprintln!("[{:?}] session_status while held: {status}", started.elapsed());
     assert_eq!((status["state"].as_str(), status["job"]["id"].as_str(), status["queue"]["reason"].as_str()), (Some("queued"), Some(job.as_str()), Some("BeginTime")), "{status}");
     one.finish();
     assert_eq!(listed(&job).len(), 1, "the job waits on after the session is gone");
@@ -417,14 +417,14 @@ fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_
     let mut two = front();
     let deadline = Instant::now() + Duration::from_secs(60);
     let attached = loop {
-        let status = two.ok("pluto_session_status", json!({}));
+        let status = two.ok("session_status", json!({}));
         if status["state"] == "queued" {
             break status;
         }
         assert!(matches!(status["state"].as_str(), Some("connecting" | "connected" | "starting")) && Instant::now() < deadline, "{status}");
         std::thread::sleep(Duration::from_millis(500));
     };
-    eprintln!("[{:?}] pluto_session_status after attaching: {attached}", started.elapsed());
+    eprintln!("[{:?}] session_status after attaching: {attached}", started.elapsed());
     assert_eq!((attached["machine"].as_str(), attached["job"]["id"].as_str(), attached["queue"]["reason"].as_str()), (Some("e2e-held"), Some(job.as_str()), Some("BeginTime")), "{attached}");
     let again = two.ok("use_machine", json!({ "machine": "e2e-held" }));
     eprintln!("[{:?}] use_machine after attaching: {again}", started.elapsed());
@@ -433,10 +433,10 @@ fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_
     // Its time comes: starting, then ready, with the id throughout.
     let mut seen = Vec::new();
     let ready = loop {
-        let status = two.ok("pluto_session_status", json!({}));
+        let status = two.ok("session_status", json!({}));
         let note = format!("{} / {}", status["state"], status["queue"]);
         if seen.last() != Some(&note) {
-            eprintln!("[{:?}] pluto_session_status: {status}", started.elapsed());
+            eprintln!("[{:?}] session_status: {status}", started.elapsed());
             seen.push(note);
         }
         assert_eq!(status["job"]["id"].as_str(), Some(job.as_str()), "{status}");

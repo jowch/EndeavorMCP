@@ -298,7 +298,7 @@ tests save their machines. It covers:
   once.
 - A call while the runtime is held starting returns the status within the limit.
 - A cluster: no job is submitted without resources, with them the queue state
-  and reason show in `pluto_session_status`, then the job's node and end
+  and reason show in `session_status`, then the job's node and end
   time; a remembered cluster with no job submits nothing; `stop_machine`
   cancels the job.
 - `stop_machine` says another session was active, stops with `force`,

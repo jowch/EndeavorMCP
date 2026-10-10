@@ -1216,7 +1216,7 @@ fn a_core_whose_fixed_port_is_taken_exits_at_once() {
 #[test]
 fn the_runtime_says_whether_it_ends_when_idle_and_what_idle_limit_it_has() {
     let status = |core: &Core| -> serde_json::Value {
-        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "pluto_session_status", "arguments": {} } });
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "session_status", "arguments": {} } });
         let reply: serde_json::Value = serde_json::from_str(&mcp(core, &message.to_string(), &[]).1).unwrap();
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
     };
@@ -1246,7 +1246,7 @@ fn results_carry_a_browser_url_on_the_port_a_caller_names() {
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
     let status = |caller: &[(&str, &str)]| -> serde_json::Value {
-        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "pluto_session_status", "arguments": {} } });
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "session_status", "arguments": {} } });
         let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), caller).1).unwrap();
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{reply}"))).unwrap()
     };
@@ -1263,13 +1263,31 @@ fn results_carry_a_browser_url_on_the_port_a_caller_names() {
     let core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_FOLDER", folder.to_str().unwrap())]);
     let own = core.port;
     let status = |caller: &[(&str, &str)]| -> serde_json::Value {
-        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "pluto_session_status", "arguments": {} } });
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "session_status", "arguments": {} } });
         let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), caller).1).unwrap();
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
     };
     assert_eq!(status(&[])["browser_url"], format!("http://localhost:{own}/"));
     assert_eq!(status(&[("X-Endeavor-Browser-Port", "45678")])["browser_url"], "http://localhost:45678/", "the caller's port wins");
     assert_eq!(status(&[("X-Endeavor-Browser-Port", "0")])["browser_url"], format!("http://localhost:{own}/"), "a bad one is ignored");
+}
+
+#[test]
+fn a_renamed_tool_still_answers_to_its_old_name_but_is_listed_once() {
+    let dir = state_dir("core-renamed-tool");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let ask = |method: &str, params: serde_json::Value| -> serde_json::Value {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+        serde_json::from_str::<serde_json::Value>(&mcp(&core, &message.to_string(), &[]).1).unwrap()["result"].clone()
+    };
+    let names: Vec<String> = ask("tools/list", serde_json::json!({}))["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
+    assert!(names.contains(&"session_status".to_owned()) && !names.iter().any(|n| n.contains("pluto")), "{names:?}");
+    let old = ask("tools/call", serde_json::json!({ "name": "pluto_session_status", "arguments": {} }));
+    assert_eq!(old["isError"], false, "{old}");
+    let said: serde_json::Value = serde_json::from_str(old["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(said.get("idle_stop_hours").is_some(), "the old name runs the same tool: {said}");
+    assert!(endeavor_mcp::is_tool("pluto_session_status") && endeavor_mcp::is_tool("session_status"), "a past session's calls by the old name are still notebook tools");
 }
 
 #[test]

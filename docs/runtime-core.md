@@ -101,7 +101,7 @@ Core → engine:
 | `move(nid, path)` | the file moved to `path` (checked by the core), and its new path |
 | `render_png(nid, cell)` | base64 PNG or none, and the output's MIME type |
 | `validate(nid, cell, code)` | parse errors |
-| `status()` | the engine's own status (`pluto_session_status`) |
+| `status()` | the engine's own status (`session_status`) |
 
 Engine → core, as notifications, each naming its notebook:
 
