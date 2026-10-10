@@ -1,8 +1,8 @@
 #!/bin/bash
 # Provisions a Claude Code cloud VM (Ubuntu 24.04, x86_64, root) for work on
 # Endeavor and EndeavorMCP: the Linux libraries the app builds against, Xvfb
-# to run it without a display, Julia for the notebook runtime, and marimo for
-# the planned Python backend. How it is used, and the network hosts it
+# to run it without a display, Julia for the notebook runtime, R for R
+# notebooks, and marimo for the planned Python backend. How it is used, and the network hosts it
 # needs: https://github.com/jowch/Endeavor/blob/main/docs/cloud.md
 #
 # Safe to run more than once: each step checks first. It never fails the
@@ -10,7 +10,7 @@
 # Keep it under about five minutes, or the environment's cache isn't kept.
 #
 # --no-gui skips the app's Linux libraries and Xvfb (EndeavorMCP needs only
-# Julia and marimo). EndeavorMCP keeps a copy of this file; change both.
+# Julia, R and marimo). EndeavorMCP keeps a copy of this file; change both.
 set -uo pipefail
 GUI=1
 [ "${1:-}" = --no-gui ] && GUI=0
@@ -43,6 +43,13 @@ APT_PACKAGES=(
   libjavascriptcoregtk-4.1-dev libxdo-dev mesa-vulkan-drivers
   xvfb openbox imagemagick xdotool jq
 )
+# R from Ubuntu's archive, with the packages Ember needs that Ubuntu has
+# (runtime/r/install.R in EndeavorMCP builds the rest, RcppMsgPack, from CRAN).
+R_PACKAGES=(
+  r-base-core build-essential r-cran-bh r-cran-commonmark r-cran-curl r-cran-httpuv
+  r-cran-jsonlite r-cran-later r-cran-processx r-cran-promises r-cran-renv
+)
+[ $GUI = 1 ] && APT_PACKAGES+=("${R_PACKAGES[@]}") || APT_PACKAGES=("${R_PACKAGES[@]}")
 
 apt_packages() {
   local missing=()
@@ -53,7 +60,7 @@ apt_packages() {
   say "installing ${#missing[@]} apt packages"
   $SUDO apt-get update -q >/dev/null &&
     DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -q --no-install-recommends "${missing[@]}" >/dev/null ||
-    say "apt-get failed; the app won't build on Linux until it succeeds"
+    say "apt-get failed; the app won't build on Linux, nor R notebooks run, until it succeeds"
 }
 
 julia_toolchain() {
@@ -98,7 +105,7 @@ rust_components() {
 }
 
 # Independent, so in parallel: the cache is only kept under about five minutes.
-[ $GUI = 1 ] && apt_packages &
+apt_packages &
 julia_toolchain &
 marimo_toolchain &
 rust_components &

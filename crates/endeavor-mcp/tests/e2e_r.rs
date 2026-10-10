@@ -1,9 +1,7 @@
 //! An R notebook end to end, with real R and no Julia: `endeavor serve`, then
 //! an agent opens an Ember notebook, which starts R's adapter with Ember in it;
 //! it reads, edits and runs a cell, and the browser reaches Ember's page at
-//! `/ember/` through the runtime's port. R notebooks aren't open to agents yet
-//! (their tools and skills come later), so the test lets them in with
-//! ENDEAVOR_TEST_R_NOTEBOOKS.
+//! `/ember/` through the runtime's port.
 //!
 //! Julia is given as a path that doesn't exist, so the test fails if anything
 //! tries to start it: an R user needs no Julia.
@@ -200,7 +198,6 @@ fn an_r_notebook_through_the_runtime() {
     std::fs::set_permissions(module.join("Rscript"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let line = format!("export PATH=\"{}:$PATH\" LOADED=by-the-line; echo the line ran", module.display());
     let mut serve = command(&["serve", "--folder", folder.to_str().unwrap(), "--r-shell", &line], &work, &julia, &depot)
-        .env("ENDEAVOR_TEST_R_NOTEBOOKS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -238,7 +235,8 @@ fn an_r_notebook_through_the_runtime() {
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("growth.R").display().to_string()), &json!(false)), "{opened}");
         assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}")));
-        assert!(state.join("r.json").exists(), "R's adapter wrote its state");
+        let r_state = std::fs::read_to_string(state.join("r.json")).expect("R's adapter wrote its state");
+        assert!(!r_state.contains("ember_secret"), "the core made Ember's secret and R doesn't write it back: {r_state}");
         let ran = std::fs::read_to_string(&ran).unwrap_or_default();
         assert!(!ran.is_empty() && ran.lines().all(|l| l == "by-the-line"), "R ran from --r-shell's line, with what it set: {ran:?}");
         let listed = agent.ok("list_notebooks", json!({}));

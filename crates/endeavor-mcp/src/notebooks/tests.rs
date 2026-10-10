@@ -1180,8 +1180,13 @@ fn opening_and_making_notebooks() {
     assert_eq!(s.call("", "open_notebook", json!({ "path": path, "run_notebook": "yes" })), Err("TypeError: non-boolean (String) used in boolean context".into()));
     let ember = format!("{dir}{SEP}growth.R");
     std::fs::write(&ember, "### An Ember notebook ###\n# /// environment\n# ///\n").unwrap();
-    let why = if cfg!(windows) { "R notebooks don't run on Windows yet" } else { "R notebooks can't be opened here yet" };
-    assert_eq!(s.call("", "open_notebook", json!({ "path": ember })), Err(format!("ArgumentError: unsupported::'{ember}' is an Ember notebook (R). {why}")));
+    let opened = s.call("", "open_notebook", json!({ "path": ember }));
+    if cfg!(windows) {
+        assert_eq!(opened, Err(format!("ArgumentError: unsupported::'{ember}' is an Ember notebook (R). R notebooks don't run on Windows yet; they need macOS or Linux")));
+    } else {
+        // On macOS and Linux it goes to the R engine, which this test's runtime hasn't.
+        assert_eq!(opened, Err("unsupported::R notebooks aren't running in this runtime".into()));
+    }
 
     let made = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}.{SEP}fresh.jl") })).unwrap();
     assert_eq!((&made["path"], &made["created"], &made["ran"]), (&json!(format!("{dir}{SEP}fresh.jl")), &json!(true), &json!(true)));
@@ -1307,7 +1312,7 @@ fn one_notebook_per_session() {
         refusal,
         format!(
             "ArgumentError: one_notebook::This session works on one notebook, {first_nb}, so it can't open {second_nb}. \
-             You can still read other notebooks as plain .jl files. To work on another notebook, suggest the user start a new session with it."
+             You can still read other notebooks as plain files. To work on another notebook, suggest the user start a new session with it."
         )
     );
     assert!(s.call("a", "new_notebook", json!({})).unwrap_err().contains("so it can't create another notebook."));
@@ -1339,7 +1344,7 @@ fn one_notebook_per_session() {
         s.call("a", "run_all_cells", json!({ "notebook_id": second_id })).unwrap_err(),
         format!(
             "ArgumentError: one_notebook::This session works on one notebook, {first_nb}, so it can't change or run {second_nb}. \
-             You can still read other notebooks as plain .jl files. To work on another notebook, suggest the user start a new session with it."
+             You can still read other notebooks as plain files. To work on another notebook, suggest the user start a new session with it."
         )
     );
     assert_eq!(refused(s.call("a", "read_notebook_code", json!({ "notebook_id": second_id }))), None);
@@ -1930,9 +1935,14 @@ fn what_the_engine_knows_of_a_cell_shows_in_read_cell() {
 fn new_notebook_takes_an_r_path_only_where_r_notebooks_open() {
     let s = setup();
     let dir = std::env::temp_dir().to_string_lossy().trim_end_matches(SEP).to_owned();
-    let refused = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}endeavor-new-r-test.R") })).unwrap_err();
-    let why = if cfg!(windows) { "R notebooks don't run on Windows yet" } else { "R notebooks can't be opened here yet" };
-    assert!(refused.contains("unsupported::") && refused.contains(why), "{refused}");
+    let made = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}endeavor-new-r-test.R") }));
     let other = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}notes.txt") })).unwrap_err();
-    assert!(other.contains("invalid_path::Notebook path must end in .jl: "), "R isn't offered while R notebooks can't open: {other}");
+    if cfg!(windows) {
+        let refused = made.unwrap_err();
+        assert!(refused.contains("unsupported::") && refused.contains("R notebooks don't run on Windows yet"), "{refused}");
+        assert!(other.contains("invalid_path::Notebook path must end in .jl: "), "R isn't offered where R notebooks can't open: {other}");
+    } else {
+        assert_eq!(made, Err("unsupported::R notebooks aren't running in this runtime".into()), "it goes to the R engine, which this test's runtime hasn't");
+        assert!(other.contains("invalid_path::Notebook path must end in .jl (Julia) or .R (R): "), "{other}");
+    }
 }

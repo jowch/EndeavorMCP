@@ -199,7 +199,7 @@ fn serve_and_mcp_without_the_app() {
         .unwrap();
     let out = lines(serve.stdout.take().unwrap());
     let err = lines(serve.stderr.take().unwrap());
-    let printed = step("serve starts Julia and prints how to connect", || {
+    let printed = step("serve prints how to connect, before Julia starts", || {
         let mut printed = Vec::new();
         loop {
             match out.recv_timeout(Duration::from_secs(900)) {
@@ -236,7 +236,16 @@ fn serve_and_mcp_without_the_app() {
     });
 
     let notebook = step("new notebook in serve's folder, run a cell, read its output", || {
-        let created = agent.ok("new_notebook", json!({ "path": "analysis.jl" }));
+        // Julia starts with the first Julia notebook; until it's ready the call says so.
+        assert!(!state.join("julia.json").exists(), "Julia started before a Julia notebook was wanted");
+        let started = Instant::now();
+        let created = loop {
+            match agent.call("new_notebook", json!({ "path": "analysis.jl" })) {
+                (true, result) if result["error"] == "julia_starting" && started.elapsed() < Duration::from_secs(900) => std::thread::sleep(Duration::from_secs(2)),
+                (false, result) => break result,
+                (true, result) => panic!("new_notebook: {result}"),
+            }
+        };
         let notebook = created["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!(created["path"], json!(folder.join("analysis.jl").display().to_string()), "{created}");
         assert_eq!(created["browser_url"], json!(format!("http://localhost:{port}/edit?id={notebook}")), "no token: the agent is never given it");
@@ -407,8 +416,8 @@ fn serve_and_mcp_without_the_app() {
 }
 
 fn said_standalone() -> &'static str {
-    "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
-the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
+    "These tools edit and run live notebooks, in Julia (Pluto) or R (Ember), without the Endeavor app: \
+the user watches them in a web browser, on the notebook's own page, and there is no notebook pane next to this chat. \
 `new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. \
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts. \

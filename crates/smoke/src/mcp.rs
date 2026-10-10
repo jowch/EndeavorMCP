@@ -61,6 +61,11 @@ impl Session {
                 if text.to_lowercase().contains("starting") && began.elapsed() < Duration::from_secs(600) {
                     continue;
                 }
+                // Ember's first install, for an R notebook, takes minutes.
+                if text.contains("r_installing") && began.elapsed() < Duration::from_secs(1200) {
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
                 return Err(format!("{name}: {text}"));
             }
             return serde_json::from_str(&text).map_err(|e| format!("{name}: {e}: {text}"));

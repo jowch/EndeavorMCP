@@ -552,6 +552,13 @@ impl JuliaStarter {
 /// Where R's adapter writes its state for the core, in the state folder.
 const R_STATE: &str = "r.json";
 
+/// Ember's page secret, which is the core's to make: R is handed it, not asked for it. It goes into
+/// page URLs and a cookie, so it is hex; and it is 32 random bytes, more than Ember's own
+/// `random_secret(32)` (32 letters and digits, about 190 bits).
+fn ember_secret() -> Result<String, String> {
+    crate::random_hex::<32>()
+}
+
 /// The Ember commit R notebooks use (https://github.com/jowch/Ember), installed
 /// from source the first time one is opened (`runtime/r/install.R`).
 pub const EMBER_COMMIT: &str = "0176bea6c969d3e6a9dd1d825f9672d62b1959d2";
@@ -612,8 +619,9 @@ impl RStarter {
             }
         };
         let _ = std::fs::remove_file(&self.state);
+        let secret = ember_secret().map_err(|e| format!("r_failed::{e}"))?;
         let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
-        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", &library).stdin(Stdio::null());
+        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", &library).stdin(Stdio::null());
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
         unsafe {
@@ -646,7 +654,6 @@ impl RStarter {
         };
         let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("r_failed::R's state has no {key}: {state}"));
         let (bridge, ember) = (port("bridge_port")?, port("ember_port")?);
-        let secret = state["ember_secret"].as_str().ok_or("r_failed::R's state has no ember_secret")?.to_owned();
         *served.ember.lock().unwrap() = Some(Page { port: ember, secret });
         if let Some(mut old) = self.child.lock().unwrap().replace(child) {
             let _ = old.kill();
@@ -1304,6 +1311,14 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embers_secret_is_url_safe_and_32_random_bytes() {
+        let (a, b) = (ember_secret().unwrap(), ember_secret().unwrap());
+        assert_eq!(a.len(), 64, "32 bytes as hex: {a}");
+        assert!(a.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)), "lower-case hex only: {a}");
+        assert_ne!(a, b, "a new one each time");
+    }
 
     #[test]
     fn connections_are_served_after_an_accept_that_failed() {

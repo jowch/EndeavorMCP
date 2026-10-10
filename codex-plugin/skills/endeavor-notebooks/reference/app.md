@@ -2,7 +2,7 @@
 
 Read this only when you work inside the Endeavor app. Nothing here applies to an agent that reaches the notebooks from its own client.
 
-The user sees the notebook in a pane next to the chat. `new_notebook` and `open_notebook` switch the pane to that notebook, so there is no address to give and nothing to tell the user to open, unless a result carries `browser_url`: then give it to the user.
+The user sees the notebook in a pane next to the chat. The pane shows Julia notebooks only, so make and open `.jl` notebooks here; if the user asks for R, tell them R notebooks don't open in the app yet. `new_notebook` and `open_notebook` switch the pane to that notebook, so there is no address to give and nothing to tell the user to open, unless a result carries `browser_url`: then give it to the user.
 
 ## Which notebook and cells a prompt means
 

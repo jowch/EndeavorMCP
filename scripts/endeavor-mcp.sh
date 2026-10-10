@@ -192,5 +192,18 @@ if have; then
   run "$@"
 fi
 # install.sh exits 3 when the release is reachable but doesn't hold the pinned build.
-[ "$status" -ne 3 ] || fail "build $key is still being published. Reconnect in a few minutes."
+if [ "$status" -eq 3 ]; then
+  # Each agent's copy of the plugin has its own manifest beside launch/.
+  root=$(dirname "$here")
+  if [ -d "$root/.claude-plugin" ]; then
+    update="In Claude Code, run \`claude plugin marketplace update endeavor\` and then \`claude plugin update endeavor@endeavor\`."
+  elif [ -f "$root/mcp_config.json" ]; then
+    update="Install it again with \`agy plugin install https://github.com/jowch/EndeavorMCP/tree/main/antigravity-plugin\`."
+  elif [ -f "$root/mcp.json" ]; then
+    update="In Codex, run \`codex plugin marketplace upgrade endeavor\`, then start Codex again."
+  else
+    update="Update it the way you installed it."
+  fi
+  fail "the release doesn't hold build $key for this computer. If the plugin was just updated, reconnect in a few minutes. Otherwise this build is old and was removed: update the plugin. $update"
+fi
 fail "couldn't get endeavor${key:+ (build $key)}. The reason is above. $manual"

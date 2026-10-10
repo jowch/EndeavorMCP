@@ -212,6 +212,39 @@ fn a_pinned_key_is_fetched_whatever_latest_says_and_never_replaced() {
 }
 
 #[test]
+fn a_pinned_build_the_release_doesnt_hold_says_to_wait_or_update() {
+    let place = Place::new("removed");
+    place.release(KEY);
+    place.pin(OTHER);
+    let last = || place.launch(&[]).stderr.lines().last().unwrap().to_owned();
+    let said = last();
+    assert!(said.starts_with(&format!("endeavor: the release doesn't hold build {OTHER} for this computer. If the plugin was just updated, reconnect in a few minutes. Otherwise this build is old and was removed: update the plugin.")), "{said}");
+    assert!(said.ends_with("Update it the way you installed it."), "{said}");
+    // Each agent's copy says how to update in that agent, told apart by its manifest.
+    std::fs::write(place.dir.join("plugin/mcp.json"), "{}").unwrap();
+    assert!(last().ends_with("In Codex, run `codex plugin marketplace upgrade endeavor`, then start Codex again."));
+    std::fs::write(place.dir.join("plugin/mcp_config.json"), "{}").unwrap();
+    assert!(last().contains("`agy plugin install "));
+    std::fs::create_dir(place.dir.join("plugin/.claude-plugin")).unwrap();
+    assert!(last().ends_with("In Claude Code, run `claude plugin marketplace update endeavor` and then `claude plugin update endeavor@endeavor`."));
+}
+
+#[test]
+fn a_pinned_build_whose_binary_was_removed_says_to_wait_or_update_too() {
+    // prune-helpers.sh keeps a build's checksum file and Linux files after its
+    // macOS and Windows files are gone.
+    let place = Place::new("binary-removed");
+    place.release(KEY);
+    place.publish(OTHER, &platform(), "", BIN, &sha(BIN));
+    std::fs::remove_file(place.dir.join(format!("release/endeavor-{OTHER}-{}", platform()))).unwrap();
+    place.pin(OTHER);
+    let run = place.launch(&[]);
+    assert!(!run.ok && run.stdout.is_empty());
+    let last = run.stderr.lines().last().unwrap();
+    assert!(last.starts_with(&format!("endeavor: the release doesn't hold build {OTHER}")) && last.contains("update the plugin"), "{}", run.stderr);
+}
+
+#[test]
 fn unpinned_it_runs_the_newest_it_has_and_fetch_only_looks_for_a_newer_one() {
     let place = Place::new("newest");
     place.release(KEY);
@@ -348,7 +381,7 @@ fn install_sh_takes_a_key_and_with_quiet_writes_nothing_to_stdout() {
     let bad = place.install(&["--key", "../x"]);
     assert!(!bad.ok && bad.stderr.contains("isn't a build's key"), "{}", bad.stderr);
     let unknown = place.install(&["--key", "ffffffffffff", "--dir", dir.to_str().unwrap()]);
-    assert!(!unknown.ok && unknown.stderr.contains("doesn't hold build ffffffffffff yet"), "{}", unknown.stderr);
+    assert!(!unknown.ok && unknown.stderr.contains("doesn't hold build ffffffffffff for ") && unknown.stderr.contains("A new build appears"), "{}", unknown.stderr);
 }
 
 #[test]

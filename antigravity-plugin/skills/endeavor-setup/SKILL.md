@@ -1,7 +1,7 @@
 ---
 name: endeavor-setup
 description: >-
-  Use when the user asks for notebook work (Pluto or Julia notebooks) and
+  Use when the user asks for notebook work (Julia or R notebooks) and
   Endeavor's notebook tools (`new_notebook`, `open_notebook`, ...) aren't in
   your tool list, or when the endeavor MCP server failed to start or isn't
   connected.
@@ -26,4 +26,4 @@ In the Endeavor app, the app runs the server, not a plugin. There, tell the user
 
    It downloads the build the plugin asks for into the folder the plugin's server starts from. Then ask the user to reconnect again.
 
-Don't edit the plugin's files or the agent's settings to get past this, and don't work around it with your own `julia` or Pluto: without the server there are no notebook tools.
+Don't edit the plugin's files or the agent's settings to get past this, and don't work around it with your own `julia`, Pluto, R or Ember: without the server there are no notebook tools.

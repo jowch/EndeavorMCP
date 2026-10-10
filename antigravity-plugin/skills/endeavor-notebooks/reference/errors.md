@@ -15,7 +15,7 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `notebook_not_found`, `cell_not_found` | The id is wrong, or the notebook was closed or the cell deleted | `list_notebooks`, or read the notebook again |
 | `file_exists` | `new_notebook` on a path that exists | `open_notebook` it, or pick another name |
 | `file_not_found` | `open_notebook` on a path with no file | Check the path; a relative path starts in the session's folder |
-| `invalid_path` | `open_notebook` had a null path or one that isn't a string; `new_notebook` had a path that doesn't end in `.jl` or whose folder doesn't exist; or the server was not told the project folder and the path is relative (or `new_notebook` had none) | Fix the path; if the server was not told the project folder, give an absolute path |
+| `invalid_path` | `open_notebook` had a null path or one that isn't a string; `new_notebook` had a path that doesn't end in `.jl` or `.R`, or whose folder doesn't exist; or the server was not told the project folder and the path is relative (or `new_notebook` had none) | Fix the path; if the server was not told the project folder, give an absolute path |
 | `execution_not_gated` | `allow_execution` on a notebook that isn't in safe preview | Nothing to do; it can already run |
 | `invalid_keep` | `keep_notebook_alive` without `keep` as true or false | Pass `keep` |
 | `no_image` | The output has no image form, the cell errored, or the notebook isn't running code and the output isn't already an image | `read_cell` |
@@ -25,12 +25,15 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `not_found` | `list_folder`, `read_file` or `run_shell` named a folder or file that isn't there | Check the path |
 | `not_a_file`, `not_a_folder` | `read_file` was given a folder, or `list_folder` a file | Use the other tool |
 | `unsupported` | `run_shell` on a Windows server | Don't use it there |
-| `unsupported` | `open_notebook` on an Ember (R) notebook, which can't be opened yet | Tell the user R notebooks aren't supported yet |
+| `unsupported` | An R notebook (`.R`) on Windows, in the Endeavor app, or in a runtime without R notebooks | Tell the user R notebooks don't run there yet; offer a Julia notebook |
+| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing Ember, which takes a few minutes | Tell the user, then make the same call again in a minute |
+| `r_not_found` | No R was found: `Rscript` isn't on the PATH, or the R set for this machine isn't there | Tell the user R notebooks need R installed; nothing else to try |
+| `r_failed` | R started but Ember didn't: it couldn't install, or it stopped | Tell the user what the message says; the runtime's log has the rest |
 | `risky_source` | The notebook came from a remote source, so only the user can allow it to run | Ask the user to run it from the notebook |
-| `julia_starting` | Julia starts the first time a Julia notebook is opened or made, which can take minutes the first time | Tell the user Julia is starting, wait a minute, then call again |
+| `julia_starting` | Julia starts the first time a Julia notebook is opened or made, which can take minutes the first time | Tell the user, then make the same call again in a minute |
 | `julia_not_found` | No Julia was found, and Endeavor may download one only if the user agrees | Ask the user, as the message says; don't pass `install: true` without their yes |
 | `julia_failed` | Julia stopped while it was starting | Tell the user; the message names the log that says why. Calling again tries once more |
-| `pluto_not_running` | The notebook server isn't up yet | Tell the user; `session_status` shows its state |
+| `pluto_not_running` | Julia's notebook server isn't up yet | Tell the user; `session_status` shows its state |
 
 `not_approved`, `waiting_for_user`, `cancelled`, `no_app`, `older_runtime` and `plan_mode` come from the Endeavor app: see [app.md](app.md).
 
