@@ -1049,11 +1049,14 @@ fn an_agent_in_the_app_gets_no_r_notebooks() {
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
     let call = |id: u32, name: &str, path: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"path":"{path}"}}}}}}"#);
-    let why = "R notebooks don't open in the Endeavor app yet; make a Julia notebook (.jl) here";
+    let why = "R notebooks don't open in the Endeavor app yet. Tell the user, and offer a Julia notebook (.jl) instead.";
     let seven = [("X-Endeavor-Session", "7")];
     assert_eq!(mcp(&core, &call(1, "new_notebook", "/tmp/growth.R"), &seven).1, tool_error(1, "unsupported", why));
     assert_eq!(mcp(&core, &call(2, "open_notebook", "/tmp/growth.r"), &seven).1, tool_error(2, "unsupported", why));
     assert!(!mcp(&core, &call(3, "open_notebook", "/tmp/nope.jl"), &seven).1.contains("unsupported"), "Julia notebooks open");
+    // `endeavor mcp`'s front on a server sends a browser port, which the app never does: its R notebooks open.
+    let front = [("X-Endeavor-Session", "8"), ("X-Endeavor-Host", "gpu-box"), ("X-Endeavor-Browser-Port", "4321")];
+    assert!(!mcp(&core, &call(4, "open_notebook", "/tmp/growth.R"), &front).1.contains("Endeavor app"), "a server's runtime serves R to the front");
 }
 
 #[test]

@@ -10,6 +10,9 @@
 //! when it shuts down, except its entry in `idle_stopped`.
 
 mod engines;
+
+/// The engine a notebook at `path` belongs to, by its name alone.
+pub(crate) use engines::of_path as backend_of_path;
 mod r;
 mod tools;
 

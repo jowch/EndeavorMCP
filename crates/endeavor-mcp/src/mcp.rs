@@ -538,8 +538,12 @@ impl Bridge {
             return Some(host_tool_refusal(tool));
         }
         // ponytail: the app's pane shows only Pluto's page, so its agents get no R notebooks until it shows Ember's.
-        if self.standalone.is_none() && !caller.front && matches!(tool, "new_notebook" | "open_notebook") && arguments.get("path").and_then(Value::as_str).is_some_and(is_r_path) {
-            return Some("ArgumentError: unsupported::R notebooks don't open in the Endeavor app yet; make a Julia notebook (.jl) here".into());
+        // A caller is the app's when the runtime isn't standalone and the caller isn't `endeavor mcp`'s front,
+        // whether here (`front`) or on a server, where the front's calls carry a browser port and the app's don't.
+        let from_app = self.standalone.is_none() && !caller.front && caller.browser_port.is_none();
+        let r_path = arguments.get("path").and_then(Value::as_str).is_some_and(|path| notebooks::backend_of_path(path) == wire::backend::Backend::Ember);
+        if from_app && matches!(tool, "new_notebook" | "open_notebook") && r_path {
+            return Some("ArgumentError: unsupported::R notebooks don't open in the Endeavor app yet. Tell the user, and offer a Julia notebook (.jl) instead.".into());
         }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
         if plan && (WRITE_TOOLS.contains(&tool) || runs_code(tool, arguments)) {
@@ -550,11 +554,6 @@ impl Bridge {
         }
         None
     }
-}
-
-/// Whether a notebook path names an R notebook (`.R`), by its name alone.
-fn is_r_path(path: &str) -> bool {
-    std::path::Path::new(path).extension().is_some_and(|e| e == "R" || e == "r")
 }
 
 /// How long into a call it waits for the user's answer: what is left of the 60 seconds agents give a
