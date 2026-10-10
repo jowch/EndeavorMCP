@@ -670,7 +670,8 @@ not supported. These gaps stay open.
   used a package the depot hadn't installed yet (DataFrames), Claude polled
   `read_cell` about ten times while the cells sat queued, then ended its turn
   saying the install was still going. That is honest, but the user gets no
-  result; seen twice, both on a cold depot.
+  result; seen twice, both on a cold depot. Nothing in the replies says
+  packages are installing, so it looks like a hang (#58).
 - [P2] **A tool call during a start ends after 45 seconds with `isError`
   true.** The text says Julia is starting and to call the tool again. Codex
   shows it as a failed call, as the trial saw. The 45 seconds are chosen to
