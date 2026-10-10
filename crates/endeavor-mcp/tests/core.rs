@@ -1901,13 +1901,36 @@ fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fail
     });
     assert_eq!(failed["code"], "julia_failed", "{failed}");
     assert!(failed["message"].as_str().unwrap().contains("no progress"), "{failed}");
+    assert!(failed["message"].as_str().unwrap().contains("ask them before trying again"), "{failed}");
     let stalled = julia_pids(&dir)[0];
     // SAFETY: plain syscall; the core reaps its Julia, so a gone pid is not a zombie.
     wait_for("the stalled Julia to end", || unsafe { libc::kill(stalled, 0) } != 0);
 
-    // The failure was read, so the next page starts Julia afresh, and this time it gets ready.
+    // The app reading the failure doesn't use it up: the agent's next call still hears why, and starts nothing.
+    let folder = temp_folder("core-julia-status-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path }));
+    assert!(opened["error"] == "julia_failed" && opened["message"].as_str().unwrap().contains("no progress"), "{opened}");
+    assert_eq!(julia_pids(&dir).len(), 1, "no second Julia yet");
+
+    // The app's Retry starts Julia afresh at once, and this time it gets ready.
     std::fs::remove_file(dir.join("hold")).unwrap();
-    start();
+    let retried: serde_json::Value = serde_json::from_str(&app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/start_julia"}"#)).unwrap();
+    assert_eq!(retried["result"]["state"], "starting", "{retried}");
     wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
     assert_eq!(julia_pids(&dir).len(), 2, "a second Julia");
+}
+
+#[test]
+fn the_app_can_start_julia_before_anything_needs_it() {
+    let dir = state_dir("core-julia-start-now");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    let core = Core::start_when_needed(&dir, &julia);
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/start_julia"}"#);
+    wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/start_julia"}"#);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(julia_pids(&dir).len(), 1, "a running Julia isn't started again");
 }

@@ -527,21 +527,31 @@ impl JuliaStarter {
 
     /// Where Julia is, for the app (`endeavor/julia_status`), without starting it: `not_started`,
     /// `starting` with the step in words and how many seconds since the last sign of progress, `ready`,
-    /// or `failed` with the error's code and why. A failure read here counts as said, so the next call
-    /// that needs Julia tries again (the app's Retry).
+    /// or `failed` with the error's code and why. Reading a failure here doesn't count as saying it: the
+    /// agent's next call that needs Julia still hears why. The app's Retry is `start_now`.
     fn status(&self) -> Value {
-        let mut now = self.now.lock().unwrap();
+        let now = self.now.lock().unwrap();
         match &now.phase {
             Phase::Idle => json!({ "state": "not_started" }),
             Phase::Starting(step) => json!({ "state": "starting", "step": step, "quiet_seconds": now.moved.elapsed().as_secs() }),
             Phase::Ready => json!({ "state": "ready" }),
             Phase::Failed(why) => {
                 let (code, message) = why.split_once("::").unwrap_or(("julia_failed", why.as_str()));
-                let status = json!({ "state": "failed", "code": code, "message": message });
-                now.said = true;
-                status
+                json!({ "state": "failed", "code": code, "message": message })
             }
         }
+    }
+
+    /// Start Julia now, for the app (`endeavor/start_julia`): its Retry after a failure, which then counts
+    /// as said, or a start before anything needs Julia. Nothing changes while Julia runs or is starting.
+    fn start_now(&self, served: &Arc<Served>) {
+        {
+            let mut now = self.now.lock().unwrap();
+            if matches!(now.phase, Phase::Failed(_)) {
+                now.said = true;
+            }
+        }
+        self.begin(served, false);
     }
 
     /// Find Julia, start it, and wait until its bridge answers; then have Pluto suggest the notebooks' folder.
@@ -615,17 +625,19 @@ impl JuliaStarter {
             if stalled >= julia_stall() {
                 // It may be stuck on anything (a lock, a network share, a hung precompile): end it, so the
                 // next call that needs Julia starts it afresh.
+                // Through the pid the watcher clears once it has reaped Julia, so a pid reused since isn't hit.
+                let pid = self.pid.load(std::sync::atomic::Ordering::SeqCst);
                 #[cfg(unix)]
-                // SAFETY: plain syscall, on the Julia this start began, whose pid the watcher hasn't cleared.
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL)
-                };
+                if pid > 0 {
+                    // SAFETY: plain syscall, on the Julia this start began, which hasn't been reaped.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
                 #[cfg(windows)]
                 if let Some(process) = crate::winproc::Process::open(pid, started) {
                     process.terminate();
                 }
                 return Err(format!(
-                    "julia_failed::Julia made no progress for {} minutes while starting (no new step, nothing new in the runtime's log), so it was stopped. The runtime's log ({}) shows where it stopped. Trying again starts it afresh.",
+                    "julia_failed::Julia made no progress for {} minutes while starting (no new step, nothing new in the runtime's log), so it was stopped. The runtime's log ({}) shows where it stopped. Tell the user; trying again starts Julia afresh, so ask them before trying again.",
                     stalled.as_secs() / 60,
                     self.log.display()
                 ));
@@ -656,10 +668,13 @@ impl JuliaStarter {
 
 /// How long Julia may start with no sign of progress (a new step, or new lines in the runtime's log)
 /// before the start fails and Julia is ended. A first start installs and compiles Pluto's packages for
-/// minutes, but writes to the log as it goes. ENDEAVOR_TEST_JULIA_STALL_SECS sets it in debug builds.
+/// minutes, writing a line to the log as each package finishes. The longest quiet stretch is compiling
+/// Pluto itself: 75 s on a Linux cloud machine with Julia 1.12.6 (2026-10-10). 30 minutes leaves room
+/// for a machine twenty times slower (antivirus scanning each file on Windows, say).
+/// ENDEAVOR_TEST_JULIA_STALL_SECS sets it in debug builds.
 fn julia_stall() -> Duration {
     let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_JULIA_STALL_SECS").ok()?.parse().ok()).flatten();
-    test.map_or(Duration::from_secs(15 * 60), Duration::from_secs)
+    test.map_or(Duration::from_secs(30 * 60), Duration::from_secs)
 }
 
 /// The size of a file, 0 when there is none.
@@ -1220,6 +1235,10 @@ impl Served {
         let mut result = json!({});
         match method {
             "endeavor/julia_status" => result = self.julia.status(),
+            "endeavor/start_julia" => {
+                self.julia.start_now(self);
+                result = self.julia.status();
+            }
             "endeavor/set_folder" => {
                 let folder = message["params"]["path"].as_str().unwrap_or_default().to_owned();
                 *self.app_folder.lock().unwrap() = Some(folder.clone());

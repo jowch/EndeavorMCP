@@ -231,9 +231,10 @@ Next:
 - The app can ask where Julia is (#96): `endeavor/julia_status` answers
   `not_started`, `starting` (the step in words, such as "Downloading Julia
   1.12.6… 42%", and `quiet_seconds` since the last sign of progress), `ready`,
-  or `failed` (the error's code and why), and never starts Julia. A failure
-  read there counts as said, so the app's Retry (opening the notebook again)
-  starts Julia afresh. A start ends: Julia that makes no progress for 15
+  or `failed` (the error's code and why), and never starts Julia. Reading a
+  failure there leaves it for the agent's next call to hear; the app's Retry
+  is `endeavor/start_julia`, which starts Julia afresh (or ahead, before
+  anything needs it). A start ends: Julia that makes no progress for 30
   minutes (no new step, nothing new in the runtime's log) is stopped and the
   start fails, and a download under 1 kB/s for 5 minutes fails and resumes on
   the next try. The interface number is 5.
