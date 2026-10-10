@@ -26,7 +26,7 @@ Looking at a machine installs nothing. When a tool returns `needs_install`, noth
 - `kind` `runtime`: Julia, which Endeavor would download because none was found.
 - On `use_machine`, one yes covers everything that call needs, including Julia if none is found once Endeavor's program is there. A yes given to `add_machine` covers Endeavor's program only.
 
-Only after the user agrees to what the result names, call the same tool again with the same arguments and `install: true`. It covers that call only: ask again each time. Never set `install` on a first call, and never to get past an error. The user may instead tell you where Julia is: `add_machine` with `julia` set to its path, or to a shell line such as `module load julia`. A notebook tool called on a remembered machine never installs; it says what is missing.
+Only after the user agrees to what the result names, call the same tool again with the same arguments and `install: true`. It covers that call only: ask again each time. Never set `install` on a first call, and never to get past an error. The user may instead tell you where Julia is: `add_machine` with `julia` set to its path, or to a shell line such as `module load julia`. A notebook tool called on a remembered machine never installs; it says what is missing. Outside Slurm jobs, Julia is looked for only when the first Julia notebook is opened or made, so that call can return `julia_not_found` instead of `use_machine` asking: ask the user the same way, and only if they agree call `use_machine` again with `install: true`, then open the notebook again.
 
 ## The first time
 

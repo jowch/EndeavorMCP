@@ -239,10 +239,16 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             Ok(dir) => dir,
             Err(e) => return Outcome::Failed(e),
         };
-        let julia = match find_julia(&want.args.julia, want.engine, want.install, hooks) {
-            Ok(julia) => julia,
-            Err(outcome) => return outcome,
+        // Found here unless the core finds it when it's first needed.
+        let found = match want.args.julia_when_needed {
+            true if want.engine != wire::ENGINE_PLUTO => return Outcome::Failed(unknown_engine(want.engine)),
+            true => None,
+            false => match find_julia(&want.args.julia, want.engine, want.install, hooks) {
+                Ok(julia) => Some(julia),
+                Err(outcome) => return outcome,
+            },
         };
+        let julia = crate::julia_flags(want.args, found.as_deref(), want.install);
         let token = match crate::token(dir) {
             Ok(token) => token,
             Err(e) => return Outcome::Failed(e),
@@ -274,7 +280,7 @@ fn up(want: &Want, state: State, port: u16, started: Option<Runtime>) -> Up {
 /// Find Julia for the notebook system `engine`, or with `install` get it. The path of the julia that runs it.
 pub(crate) fn find_julia(source: &julia::Source, engine: &str, install: bool, hooks: &mut dyn Hooks) -> Result<String, Outcome> {
     if engine != wire::ENGINE_PLUTO {
-        return Err(Outcome::Failed(format!("Endeavor doesn't know a notebook system called \"{engine}\".")));
+        return Err(Outcome::Failed(unknown_engine(engine)));
     }
     match julia::find(source, install, &mut |line| hooks.progress(line)) {
         Ok((path, version)) => {
@@ -284,6 +290,10 @@ pub(crate) fn find_julia(source: &julia::Source, engine: &str, install: bool, ho
         Err(julia::Failure::Missing(item)) => Err(Outcome::NeedsInstall(vec![item])),
         Err(julia::Failure::Failed(message)) => Err(Outcome::Failed(message)),
     }
+}
+
+fn unknown_engine(engine: &str) -> String {
+    format!("Endeavor doesn't know a notebook system called \"{engine}\".")
 }
 
 /// `DIR/starting.lock`, opened (it is made if there is none) and not yet held.

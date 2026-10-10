@@ -230,7 +230,20 @@ fn start_front(place: &Place, more: &[(&str, &str)]) -> Front {
 }
 
 /// A front with `folder_args` (`--folder DIR` or `--no-folder`), whose working folder is the project.
+/// Its runtime on this computer starts Julia as it starts, so that its stand-in Pluto, with the
+/// notebooks a test gives it, answers from the first call, and a slow Julia is a slow start.
 fn spawn_front(place: &Place, folder_args: &[&str], more: &[(&str, &str)]) -> Front {
+    let mut command = julia_when_needed_front(place, folder_args, more);
+    command.env("ENDEAVOR_TEST_JULIA_AT_START", "1");
+    Front::spawn(command)
+}
+
+/// A front whose runtime on this computer starts Julia only when something needs it, as a real one does.
+fn lazy_front(place: &Place, more: &[(&str, &str)]) -> Front {
+    Front::spawn(julia_when_needed_front(place, &["--folder", &place.project.display().to_string()], more))
+}
+
+fn julia_when_needed_front(place: &Place, folder_args: &[&str], more: &[(&str, &str)]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command
         .args(["mcp", "--skills", "plugin"])
@@ -245,7 +258,7 @@ fn spawn_front(place: &Place, folder_args: &[&str], more: &[(&str, &str)]) -> Fr
         .envs(place.env.iter().map(|(k, v)| (k, v)))
         .envs(more.iter().copied())
         .current_dir(&place.project);
-    Front::spawn(command)
+    command
 }
 
 /// One request to `port`: the status code and the body.
@@ -1611,6 +1624,23 @@ fn a_notebook_call_waits_for_a_silent_local_runtime_then_says_it_is_stuck_and_st
 }
 
 #[test]
+fn the_local_runtime_starts_julia_only_for_a_julia_notebook() {
+    let place = Place::new("lazy-julia");
+    let mut front = lazy_front(&place, &[]);
+    front.initialize();
+    assert_eq!(front.ok("use_machine", json!({ "machine": "local" }))["state"], "ready");
+    assert_eq!(front.ok("list_notebooks", json!({})), json!([]));
+    assert!(place.local_runtime().is_some_and(pid_alive), "the runtime runs");
+    assert!(common::julia_pids(&place.local_state).is_empty(), "and Julia doesn't, with nothing that needs it");
+    let path = place.project.join("first.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let (_, said) = front.call("open_notebook", json!({ "path": path }));
+    assert!(!text(&said).contains("julia_starting"), "the call waited for Julia: {said}");
+    assert_eq!(common::julia_pids(&place.local_state).len(), 1, "a Julia notebook started it: {said}");
+    front.finish();
+}
+
+#[test]
 fn use_machine_local_starts_the_local_runtime() {
     let place = Place::new("lazy-use-local");
     let mut front = place.front();
@@ -1894,7 +1924,7 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
         .arg("--julia")
         .arg(&place.julia)
         .args(["--runtime", "/nonexistent", "--depot", "/nonexistent", "--exit-idle"])
-        .env("FAKE_JOB", "42")
+        .env("SLURM_JOB_ID", "42")
         .current_dir(&place.dir)
         .process_group(0)
         .spawn()

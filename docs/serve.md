@@ -12,7 +12,8 @@ installed that, delete it once `endeavor` is on your `PATH`.
 
 You need Julia 1.11 or newer, or nothing: when no `julia` is on your login
 shell's `PATH`, Endeavor downloads its own pinned Julia (1.12.6) into
-`~/.cache/endeavor/` the first time.
+`~/.cache/endeavor/` the first time a Julia notebook is opened. If you only use
+R notebooks, Endeavor never needs Julia.
 
 On Linux and macOS:
 
@@ -150,11 +151,16 @@ Claude Code:
 It also prints a Codex, a Gemini CLI and a generic JSON configuration with
 the same URL and header.
 
-To stop Julia, press Ctrl-C in that terminal. `serve` also stops Julia when
-it gets SIGTERM or SIGHUP, such as when the terminal closes or a Slurm job
-ends. On Windows, closing the console window stops Julia too.
+`serve` starts Julia when you open the link or an agent opens a Julia notebook,
+not before. Until it is ready, the link shows a page that says Julia is
+starting and reloads itself.
 
-If Julia is already running from the same state folder, `serve` uses it
+To stop Endeavor, press Ctrl-C in that terminal. That stops Julia and R too.
+`serve` also stops when it gets SIGTERM or SIGHUP, such as when the terminal
+closes or a Slurm job ends. On Windows, closing the console window stops it
+too.
+
+If Endeavor is already running from the same state folder, `serve` uses it
 instead of starting another, prints the same details, and leaves it running
 when you press Ctrl-C. Stop that runtime with `endeavor stop`. `endeavor
 status` shows what is running and where.

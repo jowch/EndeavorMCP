@@ -203,7 +203,7 @@ fn serve_and_mcp_without_the_app() {
         let mut printed = Vec::new();
         loop {
             match out.recv_timeout(Duration::from_secs(900)) {
-                Ok(line) if line == "Press Ctrl-C to stop Julia." => break printed,
+                Ok(line) if line == "Press Ctrl-C to stop Endeavor." => break printed,
                 Ok(line) => printed.push(line),
                 Err(_) => panic!("serve printed {printed:?}; its log:\n{}", err.try_iter().collect::<Vec<_>>().join("\n")),
             }
@@ -318,7 +318,7 @@ fn serve_and_mcp_without_the_app() {
         let status = serve.wait().unwrap();
         assert!(status.success(), "{status}");
         let said: Vec<String> = err.try_iter().collect();
-        assert!(said.ends_with(&["Stopping Julia…".to_owned(), "Stopped.".to_owned()]), "{said:?}");
+        assert!(said.ends_with(&["Stopping Endeavor…".to_owned(), "Stopped.".to_owned()]), "{said:?}");
         assert!(!pid_alive(core), "the core is gone");
         // Julia and its workers: nothing of the group runs (what is left may be zombies).
         assert!(!group_alive(core), "Julia's process group is gone");

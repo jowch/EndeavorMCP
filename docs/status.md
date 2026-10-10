@@ -191,4 +191,13 @@ Next:
   `r` through, with no field to set them yet. The engine
   name a client asks a runtime for (`wire::ENGINE_PLUTO`, a string) is still
   a string; it becomes `Backend` later.
+- Julia starts only when it's needed (#76). With `--julia-when-needed` the
+  core writes `runtime.json` and answers at once, finds Julia itself (and
+  downloads it only with `--install-julia`) the first time a Julia notebook is
+  opened or made or Pluto's page is asked for, and answers
+  `julia_starting` while Julia starts. The plugin's `serve`, `mcp` and machines
+  pass the flag; on Slurm the login node still finds or downloads Julia, as
+  before, and only starting it waits. `e2e_r` runs an R notebook with no Julia.
+  The app doesn't pass the flag yet, so its runtimes start Julia at once; its
+  step is an app issue. The interface number is 3.
 - marimo after Ember.

@@ -57,15 +57,6 @@ impl Head {
         self.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
 
-    /// Replace the value of `name` where it appears.
-    pub fn replace(&mut self, name: &str, value: &str) {
-        for (n, v) in &mut self.headers {
-            if n.eq_ignore_ascii_case(name) {
-                *v = value.to_owned();
-            }
-        }
-    }
-
     pub fn method(&self) -> &str {
         self.line.split(' ').next().unwrap_or_default()
     }

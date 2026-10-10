@@ -48,9 +48,13 @@ app ── ssh/stdio frames ── endeavor ── core (Rust, the runtime's one
 
 - The core may be a subcommand of the helper (`endeavor core`), so
   there is still one binary to ship and pin per host.
-- Adapters are to start lazily, when a notebook of their kind is opened, as
-  [marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md) proposes. A user who only uses R never
-  downloads Julia.
+- Adapters start lazily, when a notebook of their kind is opened, as
+  [marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md) proposes. Julia does too when the core is
+  started with `--julia-when-needed` (the plugin, its machines and `serve`):
+  it starts on the first Julia notebook opened or made, or when a browser asks
+  for Pluto's page. A user who only uses R never finds, downloads or starts
+  Julia. The app starts the core without the flag for now, so Julia starts
+  with the core, as before.
 - Each relayed connection goes to the core's one port. The core passes
   `/mcp` and `/endeavor/…` to itself and every other path to Pluto's private
   port, adding Pluto's secret. With more than one engine, each later engine
@@ -62,7 +66,7 @@ app ── ssh/stdio frames ── endeavor ── core (Rust, the runtime's one
   names (by its extension), or else to Pluto's; `snapshot` and `status` of
   every notebook ask each running engine and put the notebooks together, each
   with its own engine's `seq`. Each engine's notifications are followed on
-  their own. Pluto's adapter starts with the core; R's (`runtime/r/adapter.R`,
+  their own. Pluto's adapter starts with the core, or on first need (above); R's (`runtime/r/adapter.R`,
   Ember in its own R process) starts the first time an R notebook is opened or
   made. httpuv can't stream a response, so R's notifications come by
   long-polling `GET /notifications?after=<seq>`, which the core turns back

@@ -103,10 +103,11 @@ On Linux and macOS, a plugin needs nothing else. The first start:
 
 - Downloads the `endeavor` program, about 5 MB, into
   `~/.local/share/endeavor/bin/`.
-- Downloads its own Julia into `~/.cache/endeavor/` if it finds no `julia`
-  (Julia 1.11 or newer works if you have it).
-- Installs Julia packages when the first notebook starts. That takes a few
-  minutes.
+- Starts Julia only when the first Julia notebook is opened or made. Then it
+  downloads its own Julia into `~/.cache/endeavor/` if it finds no `julia`
+  (Julia 1.11 or newer works if you have it), and installs Julia's packages.
+  That takes a few minutes the first time. Someone who only opens R notebooks
+  never needs Julia.
 
 If the notebook tools do not appear, the download may have outlasted the
 agent's start limit. Reconnect the MCP server (`/mcp` in Claude Code, or the

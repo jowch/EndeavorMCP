@@ -495,10 +495,11 @@ impl Graph {
 }
 
 impl Notebooks {
-    pub fn new(upstream: Arc<dyn Upstream>, clock: Box<dyn Fn() -> f64 + Send + Sync>) -> Notebooks {
+    /// With Pluto's engine (`pluto`) if Julia runs already; else it joins when Julia starts.
+    pub fn new(pluto: Option<Arc<dyn Upstream>>, clock: Box<dyn Fn() -> f64 + Send + Sync>) -> Notebooks {
         Notebooks {
             asks: Asks::new(clock()),
-            engines: Arc::new(Engines::new(upstream)),
+            engines: Arc::new(Engines::new(pluto)),
             notify: OnceLock::new(),
             starter: OnceLock::new(),
             starting: Mutex::default(),
@@ -530,10 +531,12 @@ impl Notebooks {
         });
     }
 
-    /// Another engine, once it runs: calls for its notebooks go to it, and its notifications are followed.
+    /// An engine, once it runs: calls for its notebooks go to it, and its notifications are followed.
+    /// Nothing if it's there already.
     pub fn add_engine(&self, backend: Backend, upstream: Arc<dyn Upstream>) {
-        self.engines.add(backend, upstream.clone());
-        if let Some(tx) = self.notify.get() {
+        if self.engines.add(backend, upstream.clone())
+            && let Some(tx) = self.notify.get()
+        {
             self.follow(backend, upstream, tx.clone());
         }
     }
@@ -543,9 +546,13 @@ impl Notebooks {
         self.engines.backend_of(id)
     }
 
-    /// Start `backend`'s engine unless it runs.
+    /// Start `backend`'s engine unless it runs. Julia keeps its own start in order (core.rs), and can
+    /// take minutes; the other engines' starts are taken one at a time here.
     fn start_engine(&self, backend: Backend) -> Result<(), String> {
-        let _starting = self.starting.lock().unwrap();
+        if self.engines.has(backend) {
+            return Ok(());
+        }
+        let _starting = (backend != Backend::Pluto).then(|| self.starting.lock().unwrap());
         if self.engines.has(backend) {
             return Ok(());
         }
@@ -672,10 +679,9 @@ impl Notebooks {
 
     /// One call to the engine's adapter: its result, or the error it raised.
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
-        if matches!(method, "open" | "new")
-            && let Some(backend) = params["path"].as_str().map(engines::of_path).filter(|b| *b != Backend::Pluto)
-        {
-            self.start_engine(backend)?;
+        if matches!(method, "open" | "new") {
+            // A new notebook without a path is Pluto's.
+            self.start_engine(params["path"].as_str().map_or(Backend::Pluto, engines::of_path))?;
         }
         let message = json!({ "method": method, "params": params });
         let reply = self.engines.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;

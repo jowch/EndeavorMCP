@@ -328,7 +328,7 @@ fn helpers_asked_to_start_at_once_start_one_runtime_that_serve_then_finds() {
     let said = ended(serve);
     assert_eq!(said.0, Some(0));
     assert!(said.1.contains(&format!("already running from {}", dir.display())), "{}", said.1);
-    assert!(said.1.ends_with("Julia was stopped from another connection.\n"), "{}", said.1);
+    assert!(said.1.ends_with("Endeavor was stopped from another connection.\n"), "{}", said.1);
     for helper in [&mut first, &mut second] {
         helper.stdin.0.lock().unwrap().take();
         helper.exits();
@@ -348,7 +348,7 @@ fn helpers_asked_to_start_at_once_start_one_runtime_that_serve_then_finds() {
     assert_eq!(status, "It was stopped with `endeavor stop`.");
     let said = ended(serve);
     assert_eq!(said.0, Some(0));
-    assert!(said.1.ends_with("Julia was stopped with `endeavor stop`.\n"), "{}", said.1);
+    assert!(said.1.ends_with("Endeavor was stopped with `endeavor stop`.\n"), "{}", said.1);
     again.stdin.0.lock().unwrap().take();
     again.exits();
 }
@@ -969,7 +969,7 @@ fn serve_in(dir: &Path) -> Child {
         .unwrap();
     let mut out = BufReader::new(serve.stdout.take().unwrap());
     let mut line = String::new();
-    while !line.starts_with("Ctrl-C leaves this Julia running") {
+    while !line.starts_with("Ctrl-C leaves Endeavor running") {
         line.clear();
         if out.read_line(&mut line).unwrap() == 0 {
             let _ = serve.kill();
@@ -1224,13 +1224,15 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
     assert_eq!(ps("ppid", julia), core.to_string(), "Julia is the core's child");
     assert_eq!((ps("pgid", julia), ps("pgid", core)), (core.to_string(), core.to_string()), "one process group, the core's");
 
-    // Both go to the core: the call on to Julia's bridge, the WebSocket to Pluto.
+    // Both go to the core: the folder on to Julia's bridge, the WebSocket to Pluto.
     let mut call = helper.connect();
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_folder","params":{"path":"/n"}}"#;
     write!(call, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut reply = String::new();
     call.read_to_string(&mut reply).unwrap();
-    assert!(reply.starts_with("HTTP/1.1 200") && reply.contains(r#""said":"POST /call HTTP/1.0""#), "{reply}");
+    assert!(reply.starts_with("HTTP/1.1 200") && reply.contains(r#""result":{}"#), "{reply}");
+    let folder_given = |seen: &common::Seen| seen.line.starts_with("POST /call") && String::from_utf8_lossy(&seen.body).contains(r#""path":"/n""#);
+    common::wait_for("Julia's bridge to get the folder", || bridge.seen().iter().any(folder_given));
     let mut pluto = websocket(&helper);
     pluto.write_all(b"to Pluto").unwrap();
     let mut back = [0; 8];

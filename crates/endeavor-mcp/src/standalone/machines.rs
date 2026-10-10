@@ -56,7 +56,7 @@ fn test_var(name: &str) -> Option<std::ffi::OsString> {
 /// computer through `sh`, as `Transport::Shell` does, so no sshd is needed; `ENDEAVOR_TEST_ROOT`,
 /// `ENDEAVOR_TEST_STATE` and `ENDEAVOR_TEST_DEPOT` set `Options::root`, `state` and `depot`, which otherwise
 /// are the machine's own default folders (`{id}` in them is the machine's id, so that two machines don't
-/// share a runtime); `ENDEAVOR_TEST_ASK` is a command that runs in the shell before each connect
+/// share a runtime); `ENDEAVOR_TEST_JULIA_AT_START` starts Julia with the runtime; `ENDEAVOR_TEST_ASK` is a command that runs in the shell before each connect
 /// (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
 fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>) -> Result<Session, String> {
     let id = server.id.clone();
@@ -74,6 +74,9 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>)
     }
     (config.root, config.state, config.depot, config.allow_install) = (var("ENDEAVOR_TEST_ROOT"), var("ENDEAVOR_TEST_STATE"), var("ENDEAVOR_TEST_DEPOT"), allow_install);
     config.launcher = launcher;
+    // An agent that only opens R notebooks there never needs Julia. A debug build's tests of a start
+    // that waits for Julia turn it off (as `Options::julia_when_needed`).
+    config.julia_when_needed = test_var("ENDEAVOR_TEST_JULIA_AT_START").is_none();
     config.messages = Messages {
         restart_failed: |name| format!("Julia on {name} couldn't start. Call use_machine to try again."),
         restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {}", install_text(name, &InstallInfo { items: items.to_vec(), helper: None }, "use_machine")),
@@ -1268,6 +1271,15 @@ impl Relay {
             }
         };
         let reached = Reached { outcome, status: provider.status() };
+        // A runtime that runs already was started without leave to download Julia, which it asks for
+        // only when a Julia notebook first needs it: the user's yes reaches it now.
+        if install
+            && !local
+            && let (Outcome::Ready(_), Some(runtime)) = (&reached.outcome, reached.status.state.runtime())
+            && let Err(e) = crate::bridge_rpc(runtime.port, &runtime.token, "endeavor/allow_julia_install", json!({}))
+        {
+            notes.push(format!("Couldn't pass the user's leave to download Julia on to {name} ({e}); calling use_machine again with `install: true` tries again."));
+        }
         match &reached.outcome {
             Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, info, "use_machine")),
             Outcome::Failed(_) => return Err(format!("{}{}", not_ready_message(&name, &reached), notes.iter().map(|n| format!(" {n}")).collect::<String>())),
