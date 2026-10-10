@@ -385,7 +385,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, 
                         Err(e) => {
                             scancel(job);
                             forget(dir, job);
-                            break Err(Unstarted::Failed(format!("Julia started on {} (job {job}), but Endeavor couldn't reach it there, so the job was cancelled. {e}", state.node)));
+                            break Err(Unstarted::Failed(format!("Endeavor started on {} (job {job}), but couldn't be reached there, so the job was cancelled. {e}", state.node)));
                         }
                     }
                 }
@@ -399,7 +399,7 @@ fn wait(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, 
                 let tail = log_tail(&dir.join("runtime.log"));
                 let said = tail.iter().rev().find(|l| !l.trim().is_empty()).map(|l| format!(" Its last output: {}", l.trim())).unwrap_or_default();
                 forget(dir, job);
-                break Err(Unstarted::Failed(format!("{reason} Julia wasn't ready yet.{said}")));
+                break Err(Unstarted::Failed(format!("{reason} Endeavor wasn't ready yet.{said}")));
             }
         }
     };

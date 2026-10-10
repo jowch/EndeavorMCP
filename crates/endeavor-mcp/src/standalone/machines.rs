@@ -1152,14 +1152,14 @@ impl Relay {
             message.push_str("It has no Slurm, so notebooks run there directly. ");
         }
         if hello.found.is_empty() {
-            message.push_str("Endeavor looks for Julia when it first starts a runtime there. ");
+            message.push_str("Endeavor looks for Julia there when a Julia notebook first needs it; R notebooks don't need it. ");
         }
         for found in &hello.found {
             message.push_str(&format!("{} {} is at {}. ", found.name, found.version, found.path));
         }
         message.push_str(&format!("The machine is saved as \"{}\". ", record.name));
         message.push_str(if record.cluster.is_some() && slurm != Some(true) {
-            "Unless the user already said Julia should run in Slurm jobs here, tell them it will and check they agree before calling `use_machine`."
+            "Unless the user already said notebooks should run in Slurm jobs here, tell them it will and check they agree before calling `use_machine`."
         } else {
             "Call `use_machine` to work on it."
         });

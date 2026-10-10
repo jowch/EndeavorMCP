@@ -392,15 +392,15 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         Outcome::Failed(message) => Err(message),
         Outcome::Died { status, log_tail } => {
             let tail = log_tail[log_tail.len().saturating_sub(8)..].join("\n");
-            Err(format!("Julia stopped while starting ({status}). The end of {}:\n{tail}", options.state_dir.join("runtime.log").display()))
+            Err(format!("Endeavor stopped while starting ({status}). The end of {}:\n{tail}", options.state_dir.join("runtime.log").display()))
         }
-        Outcome::Cancelled => Err("Stopped before Julia was ready.".into()),
+        Outcome::Cancelled => Err("Stopped before Endeavor was ready.".into()),
         Outcome::NothingRunning => Err("Endeavor isn't running.".into()),
     }
 }
 
 /// Why a runtime from a build before one port per runtime can't be used here.
-const OLDER_RUNTIME_HERE: &str = "The Endeavor running here was started by an older version of Endeavor. Stop it with `endeavor stop`, then try again.";
+const OLDER_RUNTIME_HERE: &str = "The Endeavor running here was started by an older version. Stop it with `endeavor stop`, then try again.";
 
 /// The core's environment for a standalone runtime (see `core::main`).
 fn core_env(options: &Options, exit_idle: bool) -> Vec<(&'static str, Option<String>)> {
@@ -971,7 +971,7 @@ impl Relay {
                 Err(Sent::NotConnected(e)) if attempt == 0 => {
                     eprintln!("endeavor: the runtime isn't answering ({e}); looking for it again");
                 }
-                Err(Sent::NotConnected(e) | Sent::Failed(e)) => return failed(format!("Endeavor's Julia didn't answer: {e}")),
+                Err(Sent::NotConnected(e) | Sent::Failed(e)) => return failed(format!("Endeavor's runtime didn't answer: {e}")),
             }
         }
     }

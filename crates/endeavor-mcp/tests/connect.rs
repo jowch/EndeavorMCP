@@ -987,7 +987,7 @@ fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_
     // SAFETY: plain syscall, on the `serve` this test started.
     unsafe { libc::kill(serve.id() as i32, libc::SIGINT) };
     let (code, said) = ended(serve);
-    assert!(code == Some(1) && said.trim_end().ends_with("endeavor: Stopped before Julia was ready."), "{code:?} {said}");
+    assert!(code == Some(1) && said.trim_end().ends_with("endeavor: Stopped before Endeavor was ready."), "{code:?} {said}");
     assert!(common::pid_alive(core) && cores.pids() == [core], "the start went on");
 
     // Two more wait, and both get that core.
@@ -1634,7 +1634,7 @@ fn a_job_that_ends_before_julia_is_ready_says_why() {
     slurm.set("sacct", "FAILED");
     slurm.set("state", "FAILED");
     let ToApp::StartFailed { message, .. } = helper.after_progress() else { panic!("expected StartFailed") };
-    assert_eq!(message, "Its Slurm job failed. Julia wasn't ready yet. Its last output: ERROR: out of disk quota");
+    assert_eq!(message, "Its Slurm job failed. Endeavor wasn't ready yet. Its last output: ERROR: out of disk quota");
 }
 
 #[test]
@@ -2120,7 +2120,7 @@ fn a_runtime_this_helper_may_not_stop_is_not_stopped_and_the_client_is_told() {
     let stop = helper.request_stop();
     let ToApp::NotStopped { id, message } = helper.next() else { panic!("expected NotStopped") };
     assert_eq!(id, stop);
-    assert!(message.starts_with("Julia was not stopped.") && message.contains("some-other-node"), "{message}");
+    assert!(message.starts_with("Endeavor was not stopped.") && message.contains("some-other-node"), "{message}");
     assert!(runtime.alive() && dir.join("runtime.json").exists());
     helper.stdin.0.lock().unwrap().take();
     helper.exits();

@@ -334,7 +334,7 @@ impl Call<'_> {
         if reply.get("exited").is_some() {
             let graph = self.nbs.graph(&nb.id, GraphQuery::default()).ok();
             let cell = ids("exited").first().map(|id| graph.and_then(|g| g.name(id)).unwrap_or_else(|| id.clone()));
-            return Err(argument_error(&format!("process_exited::{}", exited_message(cell.as_deref()))));
+            return Err(argument_error(&format!("process_exited::{}", exited_message(super::engines::language(super::engines::of_path(&nb.path)), cell.as_deref()))));
         }
         let mut warnings = Vec::new();
         let mut going = Vec::new();
@@ -1124,12 +1124,12 @@ fn installing_message(nb: &Snapshot) -> String {
     }
 }
 
-/// What Claude hears when a notebook's own Julia ends during a run it waits
-/// for, in the words of the app's crash page.
-fn exited_message(cell: Option<&str>) -> String {
+/// What Claude hears when a notebook's own process (`language`'s, Julia or R) ends during a run it
+/// waits for, in the words of the app's crash page.
+fn exited_message(language: &str, cell: Option<&str>) -> String {
     let stopped = match cell {
-        Some(cell) => format!("Julia stopped unexpectedly while running `{cell}`."),
-        None => "Julia stopped unexpectedly.".to_owned(),
+        Some(cell) => format!("{language} stopped unexpectedly while running `{cell}`."),
+        None => format!("{language} stopped unexpectedly."),
     };
     format!("{stopped} The notebook file is saved; its outputs are gone until the cells run again.")
 }

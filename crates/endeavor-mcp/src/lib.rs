@@ -581,7 +581,7 @@ impl Attached {
 }
 
 /// Why a stop that left the process alive is refused.
-const STILL_RUNNING: &str = "Julia was not stopped: it is still running.";
+const STILL_RUNNING: &str = "Endeavor was not stopped: it is still running.";
 
 /// Stop `runtime`, leaving a note for the other clients of how it was stopped
 /// (see `stopped`), and taking the note back if it is still alive. Whether it
@@ -636,7 +636,7 @@ impl Inbox {
         };
         match event {
             Event::App(ToHelper::StartRuntime { id, .. }) => {
-                let _ = mux.send(&ToApp::StartFailed { id, message: "Julia is already starting.".into() }.frame());
+                let _ = mux.send(&ToApp::StartFailed { id, message: "Endeavor is already starting.".into() }.frame());
                 Heard::Quiet
             }
             Event::App(ToHelper::Stop { id, force }) => Heard::Stop(id, force),
@@ -857,7 +857,7 @@ fn stop_recorded(args: &Args, inbox: &mut Inbox, events: &Sender<Event>, force: 
     match args.launcher {
         Launcher::Process => match runtime::end(dir, args.any_node, stopped::How::Connection, force, events) {
             Ended::NotRunning | Ended::Stopped(_) | Ended::Cancelled(_) => {}
-            Ended::Elsewhere(node) => return Err(format!("Julia was not stopped. {}", runtime::other_node_text(&node))),
+            Ended::Elsewhere(node) => return Err(format!("Endeavor was not stopped. {}", runtime::other_node_text(&node))),
             Ended::Alive(_) => return Err(STILL_RUNNING.into()),
             Ended::Starting => return Err(runtime::STILL_STARTING.into()),
             Ended::Unidentified => return Err(runtime::START_UNIDENTIFIED.into()),

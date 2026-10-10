@@ -656,7 +656,7 @@ pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &
     let answered = bridge_ping(listener.port(), &runtime.token);
     let stopped = if runtime.reattached { Ok(()) } else { channel.stop() };
     channel.detach();
-    answered.map_err(|e| format!("Julia started on {}, but it didn't answer through Endeavor's connection ({e}).", runtime.node))?;
+    answered.map_err(|e| format!("Endeavor started on {}, but it didn't answer through Endeavor's connection ({e}).", runtime.node))?;
     stopped?;
     on(Event::Finished { stopped: !runtime.reattached });
     Ok(())
