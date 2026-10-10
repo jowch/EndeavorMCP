@@ -232,7 +232,11 @@ structure_error <- function(e) {
 # The output as text: what the cell printed, then its value's print form.
 # Plots aren't text; like Pluto's, their text points at view_cell_output.
 output_text <- function(view) {
-  parts <- vapply(view$console, function(item) item$text %||% "", character(1))
+  # A warning reads as R prints one, so it isn't taken for the cell's own output.
+  parts <- vapply(view$console, function(item) {
+    text <- item$text %||% ""
+    if (identical(item$kind, "warning") && !grepl("^Warning( message)?:", text)) paste0("Warning: ", text) else text
+  }, character(1))
   out <- view$output
   if (!is.null(out)) {
     parts <- c(parts, if (out$mime %in% c("image/png", "image/svg+xml")) {
@@ -258,7 +262,11 @@ snapshot_cell <- function(v) {
     output = "",
     # Ember has no boilerplate cells to hide.
     hidden = FALSE,
-    markdown = !identical(v$kind, "code"))
+    markdown = !identical(v$kind, "code"),
+    # Ember knows these itself: a result made before an ancestor last ran, and a
+    # cell that hasn't run since the notebook started (a restart leaves all so).
+    stale = isTRUE(v$stale),
+    not_run = identical(v$status, "not_run") && identical(v$kind, "code"))
   if (errored) {
     e <- if (length(v$errors) > 0) v$errors[[1]] else list(kind = "interrupted", message = "The run was interrupted.")
     d$error <- structure_error(e)

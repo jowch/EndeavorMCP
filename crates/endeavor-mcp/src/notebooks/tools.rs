@@ -532,13 +532,16 @@ impl Call<'_> {
     /// A cell as `read_cell` shows it.
     fn cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
         let cell = &nb.cells[id];
-        let stale = self.pending_run(nb).iter().any(|p| p == id);
+        let stale = cell.stale || self.pending_run(nb).iter().any(|p| p == id);
         let mut out = json!({
             "cell_id": id, "code": cell.code, "output": cell.output, "errored": cell.errored,
             "running": cell.running, "queued": cell.queued, "code_folded": cell.folded, "stale": stale,
         });
         if let Some(error) = &cell.error {
             out["error"] = error.clone();
+        }
+        if cell.not_run {
+            out["not_run"] = json!(true);
         }
         let Value::Object(out) = out else { unreachable!() };
         out
@@ -846,7 +849,7 @@ impl Call<'_> {
             self.record_read(&nb.id, id, &nb.cells[id].code);
         }
         let pending = self.pending_run(&nb);
-        let stale: Vec<&String> = nb.order.iter().filter(|id| pending.contains(id)).collect();
+        let stale: Vec<&String> = nb.order.iter().filter(|id| pending.contains(id) || nb.cells[*id].stale).collect();
         let mut result = json!({
             "notebook_id": nb.id,
             "path": nb.path,
@@ -942,10 +945,8 @@ impl Call<'_> {
         if !std::path::Path::new(path).exists() {
             return Err(argument_error(&format!("file_not_found::No file at '{path}'")));
         }
-        // ENDEAVOR_TEST_R_NOTEBOOKS (a debug build only): the R tests open them before the tools and skills are ready for R.
-        let r_notebooks = cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_R_NOTEBOOKS").is_some();
-        if !r_notebooks && wire::backend::Backend::of_file(std::path::Path::new(path)) == Some(wire::backend::Backend::Ember) {
-            return Err(argument_error(&format!("unsupported::'{path}' is an Ember notebook (R). R notebooks can't be opened here yet")));
+        if wire::backend::Backend::of_file(std::path::Path::new(path)) == Some(wire::backend::Backend::Ember) {
+            r_notebooks(&format!("'{path}' is an Ember notebook (R)"))?;
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
@@ -997,8 +998,13 @@ impl Call<'_> {
             },
             Some(Value::String(requested)) => {
                 let path = absolute_path(&super::requested_path(requested, folder)?)?;
-                if !path.ends_with(".jl") {
-                    return Err(argument_error(&format!("invalid_path::Notebook path must end in .jl: '{path}'")));
+                match super::engines::of_path(&path) {
+                    wire::backend::Backend::Ember => r_notebooks(&format!("'{path}' would be an R notebook"))?,
+                    _ if !path.ends_with(".jl") => {
+                        let ends = if r_notebooks("").is_ok() { ".jl (Julia) or .R (R)" } else { ".jl" };
+                        return Err(argument_error(&format!("invalid_path::Notebook path must end in {ends}: '{path}'")));
+                    }
+                    _ => {}
                 }
                 if std::path::Path::new(&path).exists() {
                     return Err(argument_error(&format!("file_exists::'{path}' already exists; use open_notebook to load it")));
@@ -1142,6 +1148,18 @@ fn julia_iterate(value: &Value) -> Result<Vec<Value>, String> {
 /// its error's kind, as for every adapter error (`ArgumentError: kind::message`).
 pub(super) fn already_open(error: &str) -> bool {
     error.strip_prefix("ArgumentError: ").is_some_and(|rest| rest.starts_with("notebook_already_open::"))
+}
+
+/// Whether R notebooks can open here: not on Windows (Ember doesn't run there yet), and only in
+/// tests until their tools and skills are ready (ENDEAVOR_TEST_R_NOTEBOOKS, a debug build only).
+fn r_notebooks(what: &str) -> Result<(), String> {
+    if cfg!(windows) {
+        return Err(argument_error(&format!("unsupported::{what}. R notebooks don't run on Windows yet")));
+    }
+    if !(cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_R_NOTEBOOKS").is_some()) {
+        return Err(argument_error(&format!("unsupported::{what}. R notebooks can't be opened here yet")));
+    }
+    Ok(())
 }
 
 pub fn argument_error(message: &str) -> String {

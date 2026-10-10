@@ -194,7 +194,7 @@ fn an_r_notebook_through_the_runtime() {
     let mut cleanup = Cleanup { state: state.clone(), children: Vec::new() };
     std::fs::write(
         folder.join("growth.R"),
-        format!("### An Ember notebook ###\n# /// environment\n# ///\n\n# %% id={A}\nx <- 20\n\n# %% id={B}\ny <- x + 1\n\n# /// cell order\n# {A}\n# {B}\n# ///\n"),
+        format!("### An Ember notebook ###\n# /// environment\n# on_cell_change = \"lazy\"\n# ///\n\n# %% id={A}\nx <- 20\n\n# %% id={B}\ny <- x + 1\n\n# /// cell order\n# {A}\n# {B}\n# ///\n"),
     )
     .unwrap();
 
@@ -266,6 +266,38 @@ fn an_r_notebook_through_the_runtime() {
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
         assert_eq!(read["errored"], false, "{read}");
         assert!(read["output"].as_str().unwrap().contains("42"), "{read}");
+    });
+
+    step("an ancestor run alone leaves its dependent's result stale", || {
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 50" }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
+        // growth.R is in Ember's lazy mode, so a run leaves its dependents stale; in autorun Ember would
+        // rerun B on its own and the flag would clear a moment later. B still shows its result from x = 41.
+        assert!(read["stale"] == true && read["output"].as_str().unwrap().contains("42"), "{read}");
+        let code = agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
+        assert_eq!(code["stale_cell_ids"], json!([B]), "{code}");
+        // Back as it was, run, for the steps after.
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
+        assert!(read["stale"] == false && read["output"].as_str().unwrap().contains("42"), "{read}");
+    });
+
+    step("new_notebook makes an R notebook from an .R path; a warning reads as one", || {
+        // A session works on one notebook, so another session makes this one.
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let made = agent.ok("new_notebook", json!({ "path": "fresh.R" }));
+        assert!(folder.join("fresh.R").exists() && made["created"] == true, "{made}");
+        assert!(wire::backend::Backend::of_file(&folder.join("fresh.R")) == Some(wire::backend::Backend::Ember), "an Ember file");
+        let (id, cell) = (made["notebook_id"].as_str().unwrap(), made["cell_ids"][0].as_str().unwrap());
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "warning(\"careful\")\n7", "run_after": true }));
+        common::wait_for("the new cell to run", || agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }))["output"].as_str().is_some_and(|o| o.contains("7")));
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+        assert!(read["output"].as_str().unwrap().starts_with("Warning: careful"), "{read}");
     });
 
     step("the browser link reaches Ember's page through the port", || {
