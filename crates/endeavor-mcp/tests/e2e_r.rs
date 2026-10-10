@@ -341,8 +341,8 @@ fn app_call(port: u16, token: &str, method: &str) -> Value {
 }
 
 /// On a Mac with no R, opening an R notebook offers Endeavor's own R and installs nothing; after the
-/// user's yes it installs R from CRAN into Endeavor's folder, and the notebook runs on that R, with its
-/// own package library. No shell startup file is written or changed, here or in the real home folder.
+/// user's yes it installs R from CRAN into Endeavor's folder, and the notebook runs on that R, loading
+/// nothing from the user's R library. No shell startup file is written or changed, here or in the real home folder.
 ///
 /// It runs with a scratch home folder and a login shell whose PATH has no R, so the R the Mac has, if
 /// any, isn't found. It downloads R (about 105 MB) and installs Ember, which needs a compiler:
@@ -368,7 +368,11 @@ fn endeavors_own_r_on_a_mac() {
     let folder = fresh(work.join("project"));
     let home = fresh(work.join("home"));
     let mut cleanup = Cleanup { state: state.clone(), children: Vec::new() };
-    std::fs::write(folder.join("which.R"), format!("### An Ember notebook ###\n\n# %% id={A}\npaste(R.version$major, R.version$minor, Sys.getenv(\"R_LIBS_USER\"))\n\n# /// cell order\n# {A}\n# ///\n")).unwrap();
+    // Which R runs the cell, and whether any library it loads from is the user's own R's. (Ember gives each
+    // notebook a library of its own, so that is what R_LIBS_USER is inside the cell.)
+    let users_library = real_home.join("Library/R");
+    let cell = format!("paste(R.version$major, R.version$minor, R.home(), any(startsWith(.libPaths(), \"{}\")))", users_library.display());
+    std::fs::write(folder.join("which.R"), format!("### An Ember notebook ###\n\n# %% id={A}\n{cell}\n\n# /// cell order\n# {A}\n# ///\n")).unwrap();
     // A login shell whose PATH has no R.
     let shell = work.join("shell without r");
     std::fs::write(&shell, "#!/bin/sh\nshift\nPATH=/usr/bin:/bin exec /bin/sh -c \"$1\"\n").unwrap();
@@ -420,12 +424,12 @@ fn endeavors_own_r_on_a_mac() {
         }
     });
 
-    step("the notebook runs on Endeavor's R, with its own package library", || {
+    step("the notebook runs on Endeavor's R, and loads nothing from the user's R library", || {
         agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
         let output = read["output"].as_str().unwrap_or_default();
-        assert!(read["errored"] == false && output.contains("4 6.1") && output.contains(&own.join("user-library").display().to_string()), "{read}");
+        assert!(read["errored"] == false && output.contains(&format!("4 6.1 {} FALSE", own.display())), "{read}");
     });
 
     step("no shell startup file was written or changed", || {

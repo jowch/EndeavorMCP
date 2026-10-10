@@ -95,10 +95,12 @@ impl Source {
                 command.args(args);
                 command
             }
-            // Its packages go in its own library, never in the user's R library.
+            // Its packages go in its own library, never in the user's R library, and the user's R
+            // settings (~/.Renviron, ~/.Rprofile, R_LIBS) don't point it at another R's.
             Source::Auto if let Some(rscript) = own_rscript() => {
+                let own = own_dir(&crate::paths::Env::here());
                 let mut command = Command::new(&rscript);
-                command.args(args).env("R_LIBS_USER", own_dir(&crate::paths::Env::here()).join(USER_LIBRARY));
+                command.args(args).env("R_LIBS_USER", own.join(USER_LIBRARY)).env("R_ENVIRON_USER", own.join("user-Renviron")).env("R_PROFILE_USER", own.join("user-Rprofile")).env_remove("R_LIBS");
                 command
             }
             Source::Auto if cfg!(windows) => {

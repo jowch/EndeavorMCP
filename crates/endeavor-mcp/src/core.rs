@@ -71,17 +71,20 @@ struct Args {
     /// The R for R notebooks, and the R library Ember is installed in (none: Endeavor's own).
     r: crate::r::Source,
     r_library: Option<String>,
-    /// `--install-r`: Endeavor's own R may be installed on a Mac when none is found.
+    /// `--own-r`: the core is on the user's own computer, where it may offer Endeavor's own R on a Mac
+    /// when none is found; `--install-r`: it may install it without asking again.
+    own_r: bool,
     install_r: bool,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut args = argv.iter();
     let (mut state_dir, mut julia, mut runtime, mut depot, mut r, mut r_library) = (None, None, None, None, None, None);
-    let (mut install_julia, mut julia_when_needed, mut install_r) = (false, false, false);
+    let (mut install_julia, mut julia_when_needed, mut own_r, mut install_r) = (false, false, false, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--install-julia" => install_julia = true,
+            "--own-r" => own_r = true,
             "--install-r" => install_r = true,
             "--julia-when-needed" => julia_when_needed = true,
             _ => {
@@ -110,6 +113,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         depot: depot.ok_or("--depot is required")?,
         r: r.unwrap_or_default(),
         r_library,
+        own_r,
         install_r,
     })
 }
@@ -622,6 +626,8 @@ struct RStarter {
     /// and where installing it is.
     allow_own: Arc<std::sync::atomic::AtomicBool>,
     own_install: Arc<std::sync::Mutex<Install>>,
+    /// Whether Endeavor's own R may be offered here (`--own-r`): only on the user's own computer.
+    offer_own: bool,
     /// Whether the login shell's R was found once: it isn't looked for again.
     shell_has_r: std::sync::atomic::AtomicBool,
     adapter: PathBuf,
@@ -635,6 +641,7 @@ impl RStarter {
     fn new(args: &Args, token: &str, allow_own: Arc<std::sync::atomic::AtomicBool>) -> RStarter {
         RStarter {
             allow_own,
+            offer_own: args.own_r,
             own_install: Arc::new(std::sync::Mutex::new(Install::Idle)),
             shell_has_r: false.into(),
             r: args.r.clone(),
@@ -724,7 +731,7 @@ impl RStarter {
     /// installed in the background (a minute or two), and the call that starts that returns at once.
     fn own_r(&self) -> Result<(), String> {
         use std::sync::atomic::Ordering::SeqCst;
-        let Some(item) = self.r.own_item() else { return Ok(()) };
+        let Some(item) = self.r.own_item().filter(|_| self.offer_own) else { return Ok(()) };
         if self.shell_has_r.load(SeqCst) {
             return Ok(());
         }
@@ -744,7 +751,7 @@ impl RStarter {
             Install::Idle if !self.allow_own.load(SeqCst) => {
                 *install = Install::Idle;
                 return Err(format!(
-                    "r_not_found::No R was found here, and Endeavor may install its own R only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` for the machine the notebook is on (`local` for this computer) with `install: true`, then open the notebook again."
+                    "r_not_found::No R was found here, and Endeavor may install its own R only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then open the notebook again."
                 ));
             }
             Install::Idle => {

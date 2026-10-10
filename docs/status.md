@@ -187,14 +187,16 @@ Next:
   `--r` or
   `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names,
   else Endeavor's own R once it's installed, else the login shell's `Rscript`.
-  On a Mac with no R, the open answers `r_not_found` offering Endeavor's own
-  R 4.6.1 (`r::install_own`, #85): with the user's yes (`use_machine` with
+  On the user's own Mac (a core started with `--own-r`: `serve`, `mcp`, and
+  the app's local runtime; never a server) with no R, the open answers
+  `r_not_found` offering Endeavor's own R 4.6.1 (`r::install_own`, #85). A Mac
+  that has R uses it. With the user's yes (`use_machine` for `local` with
   `install: true`, which calls `endeavor/allow_r_install`, or the core's
   `--install-r`) the core downloads CRAN's installer, checks its SHA-256, and
   unpacks it into `~/.cache/endeavor/R-4.6.1` without running it, the way rig's
   user mode does but without editing shell startup files. It runs with its own
   `R_LIBS_USER` and its own Ember library inside that folder, and is on no PATH.
-  On Linux and servers Endeavor installs no R; `r_not_found` says to install
+  Its fonts cache is inside that folder too. On Linux and servers Endeavor installs no R; `r_not_found` says to install
   it with rig or the system's packages, or to use a cluster's module.
   The first R notebook installs Ember at the commit the core pins
   (`core::EMBER_COMMIT`) into `~/.cache/endeavor/r/<commit>` (`$SCRATCH/endeavor/r`

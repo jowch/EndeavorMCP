@@ -342,6 +342,8 @@ fn runtime_args(options: &Options, exit_idle: bool) -> Args {
         julia: options.julia.clone(),
         julia_when_needed: options.julia_when_needed,
         r: options.r.clone(),
+        // `serve` and `mcp` run on the user's own computer.
+        own_r: true,
         runtime: PathBuf::new(),
         depot: options.depot.clone(),
         launcher: Launcher::Process,
