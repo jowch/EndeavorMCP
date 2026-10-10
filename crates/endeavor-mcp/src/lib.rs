@@ -20,7 +20,8 @@ mod guard;
 mod guide;
 mod host_tools;
 mod http;
-mod julia;
+pub mod julia;
+mod juliaup;
 mod r;
 mod mcp;
 mod notebooks;
@@ -76,12 +77,12 @@ use wire::slurm::JobRequest;
 use runtime::{Ended, Hooks, Looked, Outcome, Up, Waiting, Want};
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client | --own-with-client] [--any-node] [--exit-idle] [--build BUILD]
+const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto|own | --julia-shell LINE) [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client | --own-with-client] [--any-node] [--exit-idle] [--build BUILD]
                         (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster;
                          auto is slurm where Slurm's sinfo is, else process)
        endeavor relay --state-dir DIR
        endeavor node-start --state-dir DIR --julia JULIA [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
-       endeavor core --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) [--install-julia] [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] [--own-r [--install-r]] --runtime RUNTIME_DIR --depot DEPOT
+       endeavor core --state-dir DIR (--julia JULIA|auto|own | --julia-shell LINE) [--install-julia] [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] [--own-r [--install-r]] --runtime RUNTIME_DIR --depot DEPOT
        endeavor askpass PROMPT
        endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)
        endeavor update                      replace this binary with the newest build (Linux, macOS, Windows)
@@ -317,7 +318,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         match arg.as_str() {
             "--state-dir" => state_dir = Some(PathBuf::from(value()?)),
             "--julia" | "--julia-shell" if julia.is_some() => return Err("give one of --julia and --julia-shell".into()),
-            "--julia" => julia = Some(value().map(|v| if v == "auto" { julia::Source::Auto } else { julia::Source::Path(v) })?),
+            "--julia" => julia = Some(value().map(julia::Source::from_value)?),
             "--julia-shell" => julia = Some(julia::Source::Shell(value()?)),
             "--julia-when-needed" => julia_when_needed = true,
             "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
@@ -1346,6 +1347,7 @@ fn julia_flags(args: &Args, found: Option<&str>, install: bool) -> Vec<String> {
         (Some(path), _) => vec!["--julia".into(), path.into()],
         (None, julia::Source::Path(path)) => vec!["--julia".into(), path.clone()],
         (None, julia::Source::Auto) => vec!["--julia".into(), "auto".into()],
+        (None, julia::Source::Own) => vec!["--julia".into(), "own".into()],
         (None, julia::Source::Shell(line)) => vec!["--julia-shell".into(), line.clone()],
     };
     if found.is_none() && install {
