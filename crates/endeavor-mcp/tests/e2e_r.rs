@@ -339,18 +339,24 @@ fn an_r_notebook_through_the_runtime() {
     });
 }
 
-/// A repository like Ember's r-universe one, with one build of a stand-in `ember` whose file
-/// has SHA256 `sha`; a broken build doesn't load.
-fn stand_in_repository(repository: &Path, sha: &str, broken: bool) {
+/// A repository like Ember's r-universe one, with one build of a stand-in `ember` whose
+/// `ember::build()` says `label`; a broken build doesn't load. The index lists the file's SHA256, or
+/// `listed` instead when given. The name install.R gives the build: the first 12 characters of the
+/// listed SHA256.
+fn stand_in_repository(repository: &Path, label: &str, broken: bool, listed: Option<&str>) -> String {
     let source = fresh(repository.with_extension("source")).join("ember");
     std::fs::create_dir_all(source.join("R")).unwrap();
-    std::fs::write(source.join("DESCRIPTION"), format!("Package: ember\nVersion: 0.0.0.9000\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\nImports: jsonlite\nSHA256: {sha}\nRemoteSha: {sha}\n")).unwrap();
+    std::fs::write(source.join("DESCRIPTION"), format!("Package: ember\nVersion: 0.0.0.9000\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\nImports: jsonlite\nRemoteSha: {label}\n")).unwrap();
     let on_load = if broken { ".onLoad <- function(...) stop(\"a broken build\")\n" } else { "" };
-    std::fs::write(source.join("R/build.R"), format!("build <- function() \"{sha}\"\n{on_load}")).unwrap();
+    std::fs::write(source.join("R/build.R"), format!("build <- function() \"{label}\"\n{on_load}")).unwrap();
     std::fs::write(source.join("NAMESPACE"), "export(build)\n").unwrap();
     let contrib = fresh(repository.join("src/contrib"));
     assert!(Command::new("R").args(["CMD", "build", "--no-manual"]).arg(&source).current_dir(&contrib).stdout(Stdio::null()).status().unwrap().success());
-    assert!(Command::new("Rscript").args(["-e", "tools::write_PACKAGES('.', fields = 'SHA256')"]).current_dir(&contrib).status().unwrap().success());
+    let file = std::fs::read(contrib.join("ember_0.0.0.9000.tar.gz")).unwrap();
+    let sha = listed.map_or_else(|| <sha2::Sha256 as sha2::Digest>::digest(&file).iter().map(|b| format!("{b:02x}")).collect(), str::to_owned);
+    let index = format!("tools::write_PACKAGES('.'); p <- read.dcf('PACKAGES'); p <- cbind(p, SHA256 = '{sha}'); write.dcf(p, 'PACKAGES'); g <- gzfile('PACKAGES.gz', 'wt'); write.dcf(p, g); close(g); unlink('PACKAGES.rds')");
+    assert!(Command::new("Rscript").args(["-e", &index]).current_dir(&contrib).status().unwrap().success());
+    sha[..12].to_owned()
 }
 
 #[test]
@@ -377,27 +383,35 @@ fn ember_updates_from_its_repository_and_keeps_the_build_before() {
     step("offline with nothing installed: no Ember", || {
         assert_eq!(install("https://nowhere.invalid").0, Some(1));
     });
-    step("the first install", || {
-        stand_in_repository(&repository, "aaaaaaaaaaaaaaaa", false);
-        assert_eq!(install(&url), (Some(0), "Current: aaaaaaaaaaaa | Previous: | Failed:".into()));
-        assert_eq!(build("aaaaaaaaaaaa"), "aaaaaaaaaaaaaaaa");
+    let a = step("the first install", || {
+        let a = stand_in_repository(&repository, "a", false, None);
+        assert_eq!(install(&url), (Some(0), format!("Current: {a} | Previous: | Failed:")));
+        assert_eq!(build(&a), "a");
+        a
     });
     step("the newest already: nothing changes", || {
-        assert_eq!(install(&url).1, "Current: aaaaaaaaaaaa | Previous: | Failed:");
+        assert_eq!(install(&url).1, format!("Current: {a} | Previous: | Failed:"));
     });
-    step("a newer build, and the one before is kept", || {
-        stand_in_repository(&repository, "bbbbbbbbbbbbbbbb", false);
-        assert_eq!(install(&url), (Some(0), "Current: bbbbbbbbbbbb | Previous: aaaaaaaaaaaa | Failed:".into()));
-        assert_eq!(build("bbbbbbbbbbbb"), "bbbbbbbbbbbbbbbb");
+    let b = step("a newer build, and the one before is kept", || {
+        let b = stand_in_repository(&repository, "b", false, None);
+        assert_eq!(install(&url), (Some(0), format!("Current: {b} | Previous: {a} | Failed:")));
+        assert_eq!(build(&b), "b");
+        b
     });
-    step("a build that doesn't load: the installed one stays, and the broken one isn't tried again", || {
-        stand_in_repository(&repository, "cccccccccccccccc", true);
-        assert_eq!(install(&url), (Some(3), "Current: bbbbbbbbbbbb | Previous: aaaaaaaaaaaa | Failed: cccccccccccc".into()));
-        assert!(!folder.join("cccccccccccc").exists());
+    let c = step("a build that doesn't load: the installed one stays, and the broken one isn't tried again", || {
+        let c = stand_in_repository(&repository, "c", true, None);
+        assert_eq!(install(&url), (Some(3), format!("Current: {b} | Previous: {a} | Failed: {c}")));
+        assert!(!folder.join(&c).exists());
         assert_eq!(install(&url).0, Some(0));
+        c
+    });
+    step("a download that isn't the file the index lists: the installed one stays, and the build isn't blamed", || {
+        let d = stand_in_repository(&repository, "d", false, Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"));
+        assert_eq!(install(&url), (Some(0), format!("Current: {b} | Previous: {a} | Failed: {c}")));
+        assert!(!folder.join(&d).exists());
     });
     step("offline: the installed Ember", || {
-        assert_eq!(install("https://nowhere.invalid"), (Some(0), "Current: bbbbbbbbbbbb | Previous: aaaaaaaaaaaa | Failed: cccccccccccc".into()));
+        assert_eq!(install("https://nowhere.invalid"), (Some(0), format!("Current: {b} | Previous: {a} | Failed: {c}")));
     });
 }
 

@@ -204,9 +204,10 @@ and passes without Julia or without `Rscript` on the PATH. The first run install
 its r-universe repository into `~/.cache/endeavor/r/ember`, as a user's first R notebook does; later runs
 update it when there's a newer build. A debug build installs from `ENDEAVOR_TEST_EMBER_REPOSITORY`
 instead when it's set: a CRAN-like folder (`file://...`) made with `R CMD build` and
-`tools::write_PACKAGES(fields = "SHA256")` (with a `SHA256` field in its DESCRIPTION). A second test in the file runs `runtime/r/install.R`
+`tools::write_PACKAGES`, with a `SHA256` field added to `PACKAGES` holding the file's SHA256
+(install.R checks the download against it). A second test in the file runs `runtime/r/install.R`
 against stand-in builds: the first install, an update that keeps the build before, a build that
-doesn't load, and no network. The `E2E` workflow runs both, in a job of its own with R from Ubuntu's
+doesn't load, a download that isn't the file the index lists, and no network. The `E2E` workflow runs both, in a job of its own with R from Ubuntu's
 packages, and runs that job every day too, so a change on Ember's main that breaks the adapter
 shows up there.
 
