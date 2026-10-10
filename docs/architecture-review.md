@@ -9,6 +9,9 @@ independent review by a separate agent that had not worked on the branch and
 was told that proposing removals was welcome. The first part is the view of
 the session that built it._
 
+_The `gaps.md` it cites has since been removed; known gaps are now
+[GitHub issues](https://github.com/jowch/EndeavorMCP/issues)._
+
 ## Decided
 
 2026-10-06: go with the recommendations below.
