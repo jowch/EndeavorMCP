@@ -134,6 +134,11 @@ struct NotebookState {
 }
 
 impl NotebookState {
+    /// Whether a session read or changed one of its cells after the state's `seq` was `since`.
+    fn touched_after(&self, since: u64) -> bool {
+        self.reads.values().map(|(_, seq)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
+    }
+
     /// Code that changed without the agent's tools writing it was changed by
     /// the user. Code the engine read (at `seq`) before the agent's last edit
     /// of the cell says nothing new.
@@ -704,10 +709,13 @@ impl Notebooks {
     /// `version`: a hash of the code, so the app sees each edit. `name`: what
     /// the cell defines, as of its last run (null if nothing).
     fn compose(&self) -> Result<String, String> {
+        // The snapshots are taken before the state is locked, so a notebook made meanwhile is missing from them,
+        // though a tool may already have recorded reads of it (new_notebook does). Its state stays.
+        let since = self.state.lock().unwrap().seq;
         let snapshots = self.snapshots()?;
         let graphs = snapshots.iter().map(|nb| Ok((nb.id.clone(), self.graph(&nb.id, GraphQuery::default())?))).collect::<Result<HashMap<_, _>, String>>()?;
         let mut state = self.state.lock().unwrap();
-        state.notebooks.retain(|id, _| snapshots.iter().any(|nb| nb.id == *id));
+        state.notebooks.retain(|id, notebook| snapshots.iter().any(|nb| nb.id == *id) || notebook.touched_after(since));
         let mut list = Vec::new();
         let mut cells = Map::new();
         for nb in &snapshots {

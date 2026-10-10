@@ -235,7 +235,7 @@ output_text <- function(view) {
   # A warning reads as R prints one, so it isn't taken for the cell's own output.
   parts <- vapply(view$console, function(item) {
     text <- item$text %||% ""
-    if (identical(item$kind, "warning") && !grepl("^Warning", text)) paste0("Warning: ", text) else text
+    if (identical(item$kind, "warning") && !grepl("^Warning( message)?:", text)) paste0("Warning: ", text) else text
   }, character(1))
   out <- view$output
   if (!is.null(out)) {

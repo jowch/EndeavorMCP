@@ -273,10 +273,16 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 50" }));
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
-        // Ember runs only the cell asked for; had it run B as well, B would show 51.
-        assert!(read["stale"] == true || read["output"].as_str().unwrap().contains("51"), "{read}");
+        // Ember runs only the cell asked for, so B still shows its result from x = 41.
+        assert!(read["stale"] == true && read["output"].as_str().unwrap().contains("42"), "{read}");
+        let code = agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
+        assert_eq!(code["stale_cell_ids"], json!([B]), "{code}");
+        // Back as it was, run, for the steps after.
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
+        assert!(read["stale"] == false && read["output"].as_str().unwrap().contains("42"), "{read}");
     });
 
     step("new_notebook makes an R notebook from an .R path; a warning reads as one", || {

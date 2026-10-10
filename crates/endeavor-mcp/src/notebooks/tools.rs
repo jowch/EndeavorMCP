@@ -812,7 +812,7 @@ impl Call<'_> {
             self.record_read(&nb.id, id, &nb.cells[id].code);
         }
         let pending = self.pending_run(&nb);
-        let stale: Vec<&String> = nb.order.iter().filter(|id| pending.contains(id)).collect();
+        let stale: Vec<&String> = nb.order.iter().filter(|id| pending.contains(id) || nb.cells[*id].stale).collect();
         let mut result = json!({
             "notebook_id": nb.id,
             "path": nb.path,
@@ -964,7 +964,7 @@ impl Call<'_> {
                 match super::engines::of_path(&path) {
                     wire::backend::Backend::Ember => r_notebooks(&format!("'{path}' would be an R notebook"))?,
                     _ if !path.ends_with(".jl") => {
-                        let ends = if cfg!(windows) { ".jl" } else { ".jl (Julia) or .R (R)" };
+                        let ends = if r_notebooks("").is_ok() { ".jl (Julia) or .R (R)" } else { ".jl" };
                         return Err(argument_error(&format!("invalid_path::Notebook path must end in {ends}: '{path}'")));
                     }
                     _ => {}
