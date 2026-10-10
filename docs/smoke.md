@@ -18,6 +18,7 @@ With Julia 1.12 and a signed-in `claude` on the PATH:
 ```sh
 scripts/smoke.sh                       # every task in smoke/tasks
 scripts/smoke.sh --only N1-new,N4-long-run
+scripts/smoke.sh --model claude-haiku-4-5    # a model other than the agent's default
 ```
 
 The script builds `endeavor` and `endeavor-smoke`, then runs the tasks one at
@@ -94,9 +95,9 @@ task with an empty depot of its own, for a first install.
 
 A task that fails runs twice more. It is **failing** if all three runs fail,
 and **flaky** if only some do. A task whose `checks.json` has
-`"expected_to_fail": "#58"` fails today on that issue: it runs once, shows
-as an **expected failure**, and doesn't fail the run. When it passes, the
-summary says the issue may be fixed. Read why before blaming the agent: in the
+`"expected_to_fail"` naming an issue (`"#58"`) fails today on that issue: it
+runs once, shows as an **expected failure**, and doesn't fail the run. When it
+passes, the summary says the issue may be fixed. No task has it now. Read why before blaming the agent: in the
 first runs, N1 was flaky because its check wanted `4.978` and Claude
 sometimes rounded to `4.979`. The check was wrong.
 
@@ -188,7 +189,7 @@ something subtle, make it soft.
 | `N6-conflict` | change a value; someone else changes a cell it depends on just before the edit | `run_conflict`: the agent reads the change, runs again, keeps the other person's edit |
 | `N7-plot` | a plot | the agent looks at the picture (`view_cell_output`) before it reports |
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
-| `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: expected to fail until #58 is fixed |
+| `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: the agent waits through it and reports the table (#58) |
 | `M1-machine` | add my server and compute something in a notebook there; then "yes, install it" | `add_machine`'s `needs_install`: the agent asks first and installs only after the yes, then works on the server |
 | `M2-no-reach` | a notebook on a server that refuses connections | the agent reports the failure, doesn't ask for a password, and makes no notebook here instead |
 

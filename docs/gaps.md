@@ -699,6 +699,23 @@ not supported. These gaps stay open.
   before the cell runs, the cell is not staged any more. If the agent runs the
   still-running cells again, Pluto queues the run as it does for an unwaited
   one; `run_conflict` only covers another session's edits.
+- [P3] **A first package install is waited for only through `read_cell`.**
+  Pluto installs and precompiles a notebook's new packages before any cell
+  runs, with the cells queued; the first time that takes minutes (#58). The
+  runtime reports the step (`packages`: step, packages, seconds so far, the
+  log's last line) in snapshots, `list_notebooks` and `pluto_session_status`,
+  and a run's receipt and `read_cell` add a `message`. Only `read_cell` on a
+  queued cell waits for it, up to 45 seconds a call, so the agent's polls are
+  spaced out. Not covered: the new notebook's own Julia starting (seconds,
+  not minutes), and a Pluto that changes its status tree's names, which the
+  step names come from (`_PKG_STEPS` in `Adapter.jl`; an unknown name is shown
+  as is; a change that breaks the read reports no step rather than failing).
+  After 10 minutes the text tells the agent to wait only while the log's last
+  line changes, since a step can hang (another notebook's install, a registry
+  update on a node with no outside network). URLs in that line lose any
+  `user:token@`. The runtime reads Pluto's package log, a plain `Dict` that
+  Pluto writes from its own task; that is safe while Julia runs one thread,
+  not if a user sets `JULIA_NUM_THREADS`.
 - [P2] **A call that waits for the user's answer stops waiting at 45
   seconds, or 20 for `open_notebook` and `new_notebook`.** Before, it waited
   as long as the card was up, and Claude Code ended it at 60 seconds: in
