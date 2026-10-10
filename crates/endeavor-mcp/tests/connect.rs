@@ -497,6 +497,15 @@ fn the_end_of_input_stops_only_a_start_of_its_own_with_own_with_client() {
     common::wait_for("the core to end", || !common::pid_alive(core));
     assert!(!dir.join("runtime.json").exists());
     first.stdin.0.lock().unwrap().take();
+
+    // A core that starts Julia only when needed is ready at once, and goes the same way.
+    let mut lazy = Helper::start(&dir, &["--julia-when-needed", "--own-with-client"]);
+    assert!(matches!(lazy.start_runtime(), ToApp::Ready { reattached: false, .. }));
+    let core = cores.pids()[0];
+    lazy.stdin.0.lock().unwrap().take();
+    lazy.exits();
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    assert!(!dir.join("runtime.json").exists());
 }
 
 /// `dir` with a fake Julia that is held back, and the guard that ends the cores started in it.

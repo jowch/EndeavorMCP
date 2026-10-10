@@ -473,10 +473,11 @@ fn cancel_while_booting(name: &str, as_test: bool) -> (Place, i32) {
     let (done_tx, done) = mpsc::channel();
     std::thread::spawn({
         // As over ssh, ending the connection ends only this side, and the server's side hears its input end:
-        // `sh` is made to start the helper in a session of its own, out of reach of the cancel's kill, and to
-        // talk to it through two `cat`s, which stand in for ssh and are killed.
+        // `sh` is made to start the helper in a session of its own (perl's setsid: macOS has no `setsid`
+        // command), out of reach of the cancel's kill, and to talk to it through two `cat`s, which stand in for
+        // ssh and are killed.
         let (cancel, options) = (cancel.clone(), place.options());
-        let ssh = r#"sh() { cat | setsid /bin/sh "$@" 2>/dev/null | cat; }"#;
+        let ssh = r#"sh() { cat | perl -e 'use POSIX; POSIX::setsid(); exec @ARGV' /bin/sh "$@" 2>/dev/null | cat; }"#;
         let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string())], ask: Some(ssh.into()) };
         move || {
             let result = if as_test {
@@ -511,8 +512,8 @@ fn a_line_that_is_not_utf8_on_ssh_stderr_does_not_hide_the_reason_after_it() {
     assert!(err.contains("refused the sign-in") && err.contains("ssh-add"), "{err}");
 }
 
-/// Whether `pid` runs: a zombie doesn't, as for the runtime (`unixproc::start_time`), since this container's PID 1
-/// may not reap the core once it is reparented there.
+/// Whether `pid` runs: a zombie doesn't, as for the runtime (`unixproc::start_time`), since a container's PID 1
+/// may not reap the core once it is reparented there. Without `/proc` (macOS, where launchd reaps) it is `kill -0`.
 fn running(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     if unsafe { libc::kill(pid, 0) } != 0 {

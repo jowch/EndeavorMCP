@@ -103,7 +103,8 @@ struct Args {
     /// Stop the runtime when the app goes away without saying Stop or Detach.
     quit_with_client: bool,
     /// The same, but only for a runtime this connection started: one it attached to, or another
-    /// connection's start it waited for, is left running. A cluster job still waiting is left too.
+    /// connection's start it waited for, is left running. Only for the process launcher: a cluster's
+    /// job is left, since a running job another helper submitted also attaches as not reattached.
     own_with_client: bool,
     /// The state folder belongs to this one machine, so a different node name
     /// only means the machine was renamed.
@@ -327,6 +328,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
                     other => return Err(format!("unknown launcher {other}")),
                 }
             }
+            "--quit-with-client" | "--own-with-client" if quit_with_client || own_with_client => return Err("give one of --quit-with-client and --own-with-client".into()),
             "--quit-with-client" => quit_with_client = true,
             "--own-with-client" => own_with_client = true,
             "--any-node" => any_node = true,
@@ -431,7 +433,7 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                 };
                 answer_stops(mux, &mut inbox, id, force, &stopped);
             }
-            Event::Eof if args.quit_with_client || (args.own_with_client && attached.as_ref().is_some_and(|a| !a.reattached)) => {
+            Event::Eof if args.quit_with_client || (args.own_with_client && args.launcher == Launcher::Process && attached.as_ref().is_some_and(|a| !a.reattached)) => {
                 if let Some(runtime) = attached.take()
                     && let Err(failed) = runtime.stop(args, &routes, &mut inbox, standalone::start_lock_limit())
                 {
@@ -1700,6 +1702,7 @@ mod tests {
         assert!(a.quit_with_client && !a.any_node && a.launcher == Launcher::Process);
         assert!(!a.own_with_client);
         assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --own-with-client").unwrap().own_with_client);
+        assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --own-with-client --quit-with-client").is_err());
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().julia, julia::Source::Auto);
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().r, r::Source::Auto);
         assert_eq!(args("connect --state-dir /s --julia auto --r /opt/R/bin/Rscript --runtime /r --depot /d").unwrap().r, r::Source::Path("/opt/R/bin/Rscript".into()));
