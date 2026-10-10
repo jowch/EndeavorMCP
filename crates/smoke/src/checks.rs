@@ -287,7 +287,7 @@ fn is_picture(output: &str) -> bool {
 
 /// Whether the runtime turned the call away because Julia was still starting.
 fn while_starting(call: &Call) -> bool {
-    call.is_error && call.reply.as_str().is_some_and(|t| t.contains("is starting"))
+    call.is_error && (call.reply.as_str().is_some_and(|t| t.contains("is starting")) || call.reply["error"] == "julia_starting")
 }
 
 /// Whether a call runs cells (each tool's own default for its run argument).
@@ -436,6 +436,8 @@ mod tests {
         waited[0].is_error = true;
         waited[0].reply = json!("Julia is starting on this computer. To wait, call the notebook tool you want again.");
         assert!(judge(json!({ "check": "called", "tool": "new_notebook", "max": 1 }), &waited).passed, "a call turned away while Julia starts isn't counted");
+        waited[0].reply = json!({ "error": "julia_starting", "message": "Julia 1.12.6 is starting and loading Pluto." });
+        assert!(judge(json!({ "check": "called", "tool": "new_notebook", "max": 1 }), &waited).passed, "nor one the core turned away while Julia starts on first need");
     }
 
     fn notebook(cells: &[(&str, &str, bool)]) -> Notebook {

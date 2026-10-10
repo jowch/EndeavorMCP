@@ -199,11 +199,11 @@ fn serve_and_mcp_without_the_app() {
         .unwrap();
     let out = lines(serve.stdout.take().unwrap());
     let err = lines(serve.stderr.take().unwrap());
-    let printed = step("serve starts Julia and prints how to connect", || {
+    let printed = step("serve prints how to connect, before Julia starts", || {
         let mut printed = Vec::new();
         loop {
             match out.recv_timeout(Duration::from_secs(900)) {
-                Ok(line) if line == "Press Ctrl-C to stop Julia." => break printed,
+                Ok(line) if line == "Press Ctrl-C to stop Endeavor." => break printed,
                 Ok(line) => printed.push(line),
                 Err(_) => panic!("serve printed {printed:?}; its log:\n{}", err.try_iter().collect::<Vec<_>>().join("\n")),
             }
@@ -236,7 +236,16 @@ fn serve_and_mcp_without_the_app() {
     });
 
     let notebook = step("new notebook in serve's folder, run a cell, read its output", || {
-        let created = agent.ok("new_notebook", json!({ "path": "analysis.jl" }));
+        // Julia starts with the first Julia notebook; until it's ready the call says so.
+        assert!(!state.join("julia.json").exists(), "Julia started before a Julia notebook was wanted");
+        let started = Instant::now();
+        let created = loop {
+            match agent.call("new_notebook", json!({ "path": "analysis.jl" })) {
+                (true, result) if result["error"] == "julia_starting" && started.elapsed() < Duration::from_secs(900) => std::thread::sleep(Duration::from_secs(2)),
+                (false, result) => break result,
+                (true, result) => panic!("new_notebook: {result}"),
+            }
+        };
         let notebook = created["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!(created["path"], json!(folder.join("analysis.jl").display().to_string()), "{created}");
         assert_eq!(created["browser_url"], json!(format!("http://localhost:{port}/edit?id={notebook}")), "no token: the agent is never given it");
@@ -318,7 +327,7 @@ fn serve_and_mcp_without_the_app() {
         let status = serve.wait().unwrap();
         assert!(status.success(), "{status}");
         let said: Vec<String> = err.try_iter().collect();
-        assert!(said.ends_with(&["Stopping Julia…".to_owned(), "Stopped.".to_owned()]), "{said:?}");
+        assert!(said.ends_with(&["Stopping Endeavor…".to_owned(), "Stopped.".to_owned()]), "{said:?}");
         assert!(!pid_alive(core), "the core is gone");
         // Julia and its workers: nothing of the group runs (what is left may be zombies).
         assert!(!group_alive(core), "Julia's process group is gone");

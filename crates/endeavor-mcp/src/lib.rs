@@ -76,12 +76,12 @@ use wire::slurm::JobRequest;
 use runtime::{Ended, Hooks, Looked, Outcome, Up, Waiting, Want};
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
+const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto | --julia-shell LINE) [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client] [--any-node] [--exit-idle] [--build BUILD]
                         (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster;
                          auto is slurm where Slurm's sinfo is, else process)
        endeavor relay --state-dir DIR
-       endeavor node-start --state-dir DIR --julia JULIA [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
-       endeavor core --state-dir DIR --julia JULIA [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT
+       endeavor node-start --state-dir DIR --julia JULIA [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
+       endeavor core --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) [--install-julia] [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT
        endeavor askpass PROMPT
        endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)
        endeavor update                      replace this binary with the newest build (Linux, macOS, Windows)
@@ -91,6 +91,10 @@ const LOG_TAIL: usize = 40;
 struct Args {
     state_dir: PathBuf,
     julia: julia::Source,
+    /// `--julia-when-needed`: Julia isn't looked for before the runtime starts, and starts the first
+    /// time something needs it (see `core`). On a cluster it is still found on the login node, where
+    /// there is internet for a download, and only its start waits.
+    julia_when_needed: bool,
     /// The R for R notebooks, which the core looks for when one is first opened.
     r: r::Source,
     runtime: PathBuf,
@@ -299,7 +303,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         return Err("expected the `connect` command".into());
     }
     let (mut state_dir, mut julia, mut runtime, mut depot, mut r) = (None, None::<julia::Source>, None, None, None);
-    let (mut quit_with_client, mut any_node, mut launcher, mut build, mut exit_idle) = (false, false, Launcher::Process, None, false);
+    let (mut quit_with_client, mut any_node, mut launcher, mut build, mut exit_idle, mut julia_when_needed) = (false, false, Launcher::Process, None, false, false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -307,6 +311,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             "--julia" | "--julia-shell" if julia.is_some() => return Err("give one of --julia and --julia-shell".into()),
             "--julia" => julia = Some(value().map(|v| if v == "auto" { julia::Source::Auto } else { julia::Source::Path(v) })?),
             "--julia-shell" => julia = Some(julia::Source::Shell(value()?)),
+            "--julia-when-needed" => julia_when_needed = true,
             "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
             "--r" | "--r-shell" => r = Some(r::Source::from_flag(&arg, value()?)),
             "--runtime" => runtime = Some(PathBuf::from(value()?)),
@@ -332,6 +337,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             Launcher::Slurm => paths::Env::here().cluster_state_dir(),
         }),
         julia: julia.ok_or("--julia or --julia-shell is required")?,
+        julia_when_needed,
         r: r.unwrap_or_default(),
         runtime: runtime.ok_or("--runtime is required")?,
         depot: depot.ok_or("--depot is required")?,
@@ -1317,8 +1323,27 @@ pub(crate) fn random_hex<const N: usize>() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// `endeavor core`, which starts `julia boot.jl` (see core). Callers add the R flags (`r::Source::args`).
-fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str, build: Option<&str>) -> Result<Command, String> {
+/// The core's Julia flags (see core): the julia `found`, or with none found, where to find it and
+/// whether Endeavor's own may be downloaded (`install`); and whether Julia waits until it's needed.
+fn julia_flags(args: &Args, found: Option<&str>, install: bool) -> Vec<String> {
+    let mut flags: Vec<String> = match (found, &args.julia) {
+        (Some(path), _) => vec!["--julia".into(), path.into()],
+        (None, julia::Source::Path(path)) => vec!["--julia".into(), path.clone()],
+        (None, julia::Source::Auto) => vec!["--julia".into(), "auto".into()],
+        (None, julia::Source::Shell(line)) => vec!["--julia-shell".into(), line.clone()],
+    };
+    if found.is_none() && install {
+        flags.push("--install-julia".into());
+    }
+    if args.julia_when_needed {
+        flags.push("--julia-when-needed".into());
+    }
+    flags
+}
+
+/// `endeavor core`, which starts `julia boot.jl` (see core) with the `julia` flags (`julia_flags`).
+/// Callers add the R flags (`r::Source::args`).
+fn runtime_command(julia: &[String], runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str, build: Option<&str>) -> Result<Command, String> {
     let _ = std::fs::remove_file(state_dir.join("runtime.json"));
     let mut command = Command::new(this_program()?);
     // `ps` shows `endeavor core` (`endeavor --helper core` from the app), not the binary's path.
@@ -1329,7 +1354,7 @@ fn runtime_command(julia: &str, runtime: &Path, depot: &str, token: &str, state_
         .arg("core")
         .arg("--state-dir")
         .arg(state_dir)
-        .args(["--julia", julia])
+        .args(julia)
         .arg("--runtime")
         .arg(runtime)
         .args(["--depot", depot])
@@ -1395,7 +1420,7 @@ fn open_log(path: &Path) -> Result<(File, File), String> {
 /// Start the runtime detached from us (its own session, no terminal, stdin from
 /// /dev/null), logging to `runtime.log`.
 #[cfg(unix)]
-fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child, String> {
+fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<Child, String> {
     let dir = &args.state_dir;
     let (log, stderr) = open_log(&dir.join("runtime.log"))?;
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
@@ -1420,7 +1445,7 @@ fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child,
 /// then puts itself in a Job Object that takes Julia and its workers along
 /// when it ends (see core).
 #[cfg(windows)]
-fn start(args: &Args, runtime: &Path, julia: &str, token: &str) -> Result<Child, String> {
+fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<Child, String> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};

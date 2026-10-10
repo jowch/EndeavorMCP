@@ -64,9 +64,10 @@ pub(crate) fn current_name(name: &str) -> &str {
     RENAMED_TOOLS.iter().find(|(old, _)| *old == name).map_or(name, |(_, now)| now)
 }
 
-/// `/call` methods Julia still answers: Pluto's folder for new notebooks, and
-/// ending the process.
-const JULIA_CALLS: [&str; 2] = ["endeavor/set_folder", "endeavor/shutdown"];
+/// `/call` methods about Julia, which the core answers (core.rs, `julia_call`): Pluto's folder for new
+/// notebooks, ending the runtime, and allowing Endeavor's own Julia to be downloaded when the runtime
+/// finds none as Julia is first needed.
+const JULIA_CALLS: [&str; 3] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install"];
 
 /// Whether a runtime offers a tool by this name, to some session, the old name of a renamed tool
 /// included (a past session's calls use it). The machine tools are the front's.
@@ -232,7 +233,8 @@ impl Bridge {
         let julia = Arc::new(Julia::new(token.clone()));
         let clock = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
         Bridge {
-            notebooks: Arc::new(Notebooks::new(julia.clone(), Box::new(clock))),
+            // Pluto's engine joins once Julia is ready (core.rs).
+            notebooks: Arc::new(Notebooks::new(None, Box::new(clock))),
             julia,
             token,
             policies: Mutex::default(),
@@ -255,8 +257,8 @@ impl Bridge {
         }
     }
 
-    /// The reply to one of the app's `/call`s, if the core answers it; `None`
-    /// passes it to Julia's `/call`. Only the app calls this route, so its
+    /// The reply to one of the app's `/call`s, if the bridge answers it; `None`
+    /// for the calls about Julia (`JULIA_CALLS`). Only the app calls this route, so its
     /// tool calls have no caller.
     pub fn app_call(&self, raw: &[u8]) -> Option<String> {
         let message = serde_json::from_slice::<Value>(raw).ok().filter(Value::is_object)?;
@@ -1090,7 +1092,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (2, "00783e892a3fcb3d"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (3, "00783e892a3fcb3d"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1133,11 +1135,11 @@ mod tests {
         // caught here; that stays the author's to judge.
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
-            "answer_run", "file_info", "move_notebook", "new_notebook", "recent_sessions", "restart_notebook", "run_preview", "set_folder",
+            "allow_julia_install", "answer_run", "file_info", "move_notebook", "new_notebook", "recent_sessions", "restart_notebook", "run_preview", "set_folder",
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "stop_notebook", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (2, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (3, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

@@ -332,7 +332,7 @@ fn setup() -> Setup {
     let clock = Arc::new(Mutex::new(1.0e6));
     let engine = Arc::new(Engine { clock: clock.clone(), ..Default::default() });
     let now = clock.clone();
-    let notebooks = Arc::new(Notebooks::new(engine.clone(), Box::new(move || *now.lock().unwrap())));
+    let notebooks = Arc::new(Notebooks::new(Some(engine.clone()), Box::new(move || *now.lock().unwrap())));
     Setup { engine, notebooks, clock }
 }
 

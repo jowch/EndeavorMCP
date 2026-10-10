@@ -61,7 +61,7 @@ echo "$@" > "{dir}/julia.args"
 echo $$ >> "{dir}/julia.pids"
 echo "booting"
 while [ -e "{dir}/hold" ]; do sleep 0.1; done
-printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"token":"%s","pluto_secret":"{PLUTO_SECRET}","job":"%s"}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$ENDEAVOR_TOKEN" "$FAKE_JOB" > "$ENDEAVOR_STATE.tmp"
+printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"token":"%s","pluto_secret":"{PLUTO_SECRET}","job":"%s"}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$ENDEAVOR_TOKEN" "$SLURM_JOB_ID" > "$ENDEAVOR_STATE.tmp"
 mv "$ENDEAVOR_STATE.tmp" "$ENDEAVOR_STATE"
 exec sleep 600
 "#,

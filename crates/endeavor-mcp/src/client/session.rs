@@ -290,6 +290,9 @@ pub struct Config {
     /// A runtime this session starts ends itself once no notebook has been open for the idle limit
     /// (`Options::exit_idle`); true by default.
     pub exit_idle: bool,
+    /// The runtime this session starts finds and starts Julia only when something needs it
+    /// (`Options::julia_when_needed`); false by default.
+    pub julia_when_needed: bool,
     /// Hears the session's events. The default writes each `Trouble` to stderr and drops the steps.
     pub on_event: OnEvent,
 }
@@ -303,7 +306,7 @@ impl Config {
                 eprintln!("{text}");
             }
         });
-        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper), launcher: None, auth: Auth::Batch, exit_idle: true, on_event }
+        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper), launcher: None, auth: Auth::Batch, exit_idle: true, julia_when_needed: false, on_event }
     }
 }
 
@@ -1115,7 +1118,7 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
     let config = &shared.config;
     let allowed = shared.allow_install.load(Ordering::SeqCst);
     let launcher = shared.inner().settled.or(config.launcher);
-    let options = Options { auth: config.auth.clone(), root: config.root.clone(), state: config.state.clone(), depot: config.depot.clone(), exit_idle: config.exit_idle, allow_install: allowed, helper: &*config.helper, launcher };
+    let options = Options { auth: config.auth.clone(), root: config.root.clone(), state: config.state.clone(), depot: config.depot.clone(), exit_idle: config.exit_idle, julia_when_needed: config.julia_when_needed, allow_install: allowed, helper: &*config.helper, launcher };
     let cancel = Arc::new(Cancel::default());
     *shared.cancel.lock().unwrap() = cancel.clone();
     if shared.leaving.load(Ordering::SeqCst) {
