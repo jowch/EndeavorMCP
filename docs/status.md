@@ -160,8 +160,16 @@ Next:
   `wire` knows its files (`Backend::Ember`: `.R` with Ember's first line, a
   page at `/ember/edit`, a preview of the first cells), the folder scan the
   app asks for still lists only Pluto's, and `open_notebook` refuses an Ember
-  file as `unsupported`. Next: the core running one adapter per engine, then
-  the R adapter. The engine name a client asks a runtime for
-  (`wire::ENGINE_PLUTO`, a string) becomes `Backend` with the first of those,
-  where the core starts engines.
+  file as `unsupported`. The core routes calls to more than one engine and
+  serves `/ember/`. R's adapter (`runtime/r/adapter.R`) is built: the core
+  starts it, with Ember in it, the first time an R notebook is opened, and
+  follows its notifications by long-polling. Only tests open R notebooks so
+  far (`ENDEAVOR_TEST_R_NOTEBOOKS`); the agent's tools and skills for R come
+  after the agent-loop eval. R is `Rscript` on the PATH (or the core's `--r`).
+  The first R notebook installs Ember at the commit the core pins
+  (`core::EMBER_COMMIT`) into `~/.cache/endeavor/r/<commit>` (`$SCRATCH/endeavor/r`
+  on clusters), with any package it needs that R lacks; the open returns
+  `r_installing` until that's done. Letting serve, mcp and the app say where R
+  is (`--r`, `--r-shell`) is next. The engine name a client asks a runtime for
+  (`wire::ENGINE_PLUTO`, a string) becomes `Backend` with those.
 - marimo after Ember.

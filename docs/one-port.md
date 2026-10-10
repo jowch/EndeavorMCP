@@ -40,10 +40,12 @@ and asks for a restart of Julia.
 | `/mcp` | the core's MCP endpoint | bearer token header |
 | `/endeavor/events`, `/endeavor/call` (JSON-RPC: `endeavor/set_policy`, `endeavor/answer_run`, …, `ping`, `tools/call`) | the core; the calls Julia answers (`endeavor/set_folder`, `endeavor/shutdown`) go on to Julia's `/call` | bearer token header |
 | any other `/endeavor/…` | `404` | bearer token header |
+| `/ember/…` (bare `/ember` redirects to `/ember/`) | Ember's private port without the prefix, with Ember's secret added to the query (its WebSocket takes it nowhere else) and the browser's `Host` kept (Ember refuses a WebSocket whose `Origin` isn't its `Host`); `503` while Ember isn't running | token header, or the cookie |
 | everything else (`/`, `/edit`, `/open`, `/static`, Pluto's WebSocket, …) | Pluto's private port, unchanged | token header, or the cookie |
 
 Later engines get a prefix each (`/marimo/…`, `/ember/…`); Pluto stays at
-`/` so it needs no base URL.
+`/` so it needs no base URL. Nothing starts Ember yet; its route is ready for
+the R adapter.
 
 **One token.** The core makes it and accepts it two ways:
 - as `Authorization: Bearer …`, from agents and the app;

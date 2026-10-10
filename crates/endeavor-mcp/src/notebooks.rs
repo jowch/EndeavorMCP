@@ -9,6 +9,8 @@
 //! fresh snapshot each time it tells the app anything. A notebook's state goes
 //! when it shuts down, except its entry in `idle_stopped`.
 
+mod engines;
+mod r;
 mod tools;
 
 use std::collections::{HashMap, HashSet};
@@ -26,7 +28,10 @@ use crate::host_tools::home;
 use crate::host_tools::normpath;
 use crate::http::{self, Head};
 use crate::mcp::{WRITE_TOOLS, julia_string, to_json};
+use wire::backend::Backend;
 
+pub use engines::Engines;
+pub use r::R;
 pub use tools::{Reply, WAIT_SECONDS};
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
@@ -47,6 +52,9 @@ pub trait Upstream: Send + Sync {
     /// The engine's notification stream, from its start.
     fn notifications(&self) -> io::Result<Box<dyn BufRead + Send>>;
 }
+
+/// Starts an engine's adapter: what answers for it once it's up, or why it couldn't start.
+pub type Starter = Box<dyn Fn(Backend) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
 
 /// Julia's bridge, once it answers.
 pub struct Julia {
@@ -245,7 +253,13 @@ struct Events {
 }
 
 pub struct Notebooks {
-    upstream: Arc<dyn Upstream>,
+    engines: Arc<Engines>,
+    /// Where each engine's notifications go, once `start` has run.
+    notify: OnceLock<Sender<Value>>,
+    /// Starts an engine other than Pluto's, the first time one of its notebooks is opened or made (the core sets it).
+    pub starter: OnceLock<Starter>,
+    /// Held while an engine starts, so it starts once.
+    starting: Mutex<()>,
     clock: Box<dyn Fn() -> f64 + Send + Sync>,
     state: Mutex<State>,
     /// Held while reading the engine's state and telling the app, so events go out in order.
@@ -459,7 +473,10 @@ impl Notebooks {
     pub fn new(upstream: Arc<dyn Upstream>, clock: Box<dyn Fn() -> f64 + Send + Sync>) -> Notebooks {
         Notebooks {
             asks: Asks::new(clock()),
-            upstream,
+            engines: Arc::new(Engines::new(upstream)),
+            notify: OnceLock::new(),
+            starter: OnceLock::new(),
+            starting: Mutex::default(),
             clock,
             state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
             publishing: Mutex::default(),
@@ -472,21 +489,10 @@ impl Notebooks {
     /// Follow the engine's notifications and check for idle notebooks, once it answers.
     pub fn start(self: &Arc<Self>) {
         let (tx, rx) = mpsc::channel();
-        let notebooks = self.clone();
-        std::thread::spawn(move || {
-            loop {
-                if let Ok(stream) = notebooks.upstream.notifications() {
-                    // What changed while no stream was open.
-                    let _ = tx.send(json!({ "method": "resync" }));
-                    for line in stream.lines().map_while(Result::ok) {
-                        if let Some(message) = line.strip_prefix("data: ").and_then(|m| serde_json::from_str(m).ok()) {
-                            let _ = tx.send(message);
-                        }
-                    }
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        });
+        for (backend, upstream) in self.engines.parts() {
+            self.follow(backend, upstream, tx.clone());
+        }
+        let _ = self.notify.set(tx);
         let notebooks = self.clone();
         std::thread::spawn(move || notebooks.handle_notifications(rx));
         let every = idle_check();
@@ -495,6 +501,71 @@ impl Notebooks {
             loop {
                 std::thread::sleep(every);
                 notebooks.stop_idle();
+            }
+        });
+    }
+
+    /// Another engine, once it runs: calls for its notebooks go to it, and its notifications are followed.
+    pub fn add_engine(&self, backend: Backend, upstream: Arc<dyn Upstream>) {
+        self.engines.add(backend, upstream.clone());
+        if let Some(tx) = self.notify.get() {
+            self.follow(backend, upstream, tx.clone());
+        }
+    }
+
+    /// The engine notebook `id` is open in.
+    pub fn backend_of(&self, id: &str) -> Backend {
+        self.engines.backend_of(id)
+    }
+
+    /// Start `backend`'s engine unless it runs.
+    fn start_engine(&self, backend: Backend) -> Result<(), String> {
+        let _starting = self.starting.lock().unwrap();
+        if self.engines.has(backend) {
+            return Ok(());
+        }
+        let Some(starter) = self.starter.get() else { return Ok(()) };
+        let upstream = starter(backend)?;
+        self.add_engine(backend, upstream);
+        Ok(())
+    }
+
+    /// Pass one engine's notifications on to `tx`, from each (re)connection of its stream on.
+    fn follow(&self, backend: Backend, upstream: Arc<dyn Upstream>, tx: Sender<Value>) {
+        let engines = self.engines.clone();
+        std::thread::spawn(move || {
+            // Until another engine than Pluto's is dropped or replaced: a new one has its own follower.
+            while engines.is_current(backend, &upstream) {
+                let stream = match upstream.notifications() {
+                    Ok(stream) => stream,
+                    Err(_) if backend != Backend::Pluto && let Err(e) = upstream.adapter(br#"{"method":"status","params":{}}"#) => {
+                        // Not answering at all: its notebooks went with it.
+                        eprintln!("{} notebooks' engine stopped answering ({e})", engines::language(backend));
+                        engines.drop_engine(backend, &upstream);
+                        let _ = tx.send(json!({ "method": "resync" }));
+                        return;
+                    }
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                };
+                {
+                    // What changed while no stream was open.
+                    let _ = tx.send(json!({ "method": "resync" }));
+                    for line in stream.lines().map_while(Result::ok) {
+                        if let Some(message) = line.strip_prefix("data: ").and_then(|m| serde_json::from_str::<Value>(m).ok()) {
+                            let id = message["params"]["notebook_id"].as_str().unwrap_or_default();
+                            match message["method"].as_str() {
+                                Some("notebook_opened") => engines.learn(id, backend),
+                                Some("notebook_shut_down") => engines.forget(id),
+                                _ => {}
+                            }
+                            let _ = tx.send(message);
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(1));
             }
         });
     }
@@ -576,8 +647,13 @@ impl Notebooks {
 
     /// One call to the engine's adapter: its result, or the error it raised.
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        if matches!(method, "open" | "new")
+            && let Some(backend) = params["path"].as_str().map(engines::of_path).filter(|b| *b != Backend::Pluto)
+        {
+            self.start_engine(backend)?;
+        }
         let message = json!({ "method": method, "params": params });
-        let reply = self.upstream.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;
+        let reply = self.engines.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;
         let mut reply: Value = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
         match reply.get("error") {
             Some(error) => Err(julia_string(error)),
@@ -588,7 +664,7 @@ impl Notebooks {
     /// Every open notebook, in the engine's order.
     fn snapshots(&self) -> Result<Vec<Snapshot>, String> {
         let all = self.call("snapshot", json!({}))?;
-        let parse = |nb: &Value| Snapshot::parse(nb).map(|nb| Snapshot { seq: all["seq"].as_u64(), ..nb }).ok_or_else(|| format!("bad snapshot {nb}"));
+        let parse = |nb: &Value| Snapshot::parse(nb).map(|nb| Snapshot { seq: nb.seq.or(all["seq"].as_u64()), ..nb }).ok_or_else(|| format!("bad snapshot {nb}"));
         all["notebooks"].as_array().ok_or("snapshot has no notebooks")?.iter().map(parse).collect()
     }
 
@@ -986,8 +1062,13 @@ impl Notebooks {
     pub fn move_notebook(&self, notebook_id: &str, path: &str) -> Result<Value, String> {
         let nb = self.snapshot(notebook_id)?;
         let target = absolute_path(path)?;
-        if !target.ends_with(".jl") {
-            return Err(format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{target}'"));
+        // A notebook keeps its engine: a Julia notebook's name ends in .jl, an R notebook's in .R.
+        let (fits, extension) = match self.backend_of(&nb.id) {
+            Backend::Pluto => (target.ends_with(".jl"), ".jl"),
+            Backend::Ember => (engines::of_path(&target) == Backend::Ember, ".R"),
+        };
+        if !fits {
+            return Err(format!("ArgumentError: invalid_path::Notebook path must end in {extension}: '{target}'"));
         }
         if std::path::Path::new(&target).exists() {
             return Err(format!("ArgumentError: file_exists::'{target}' already exists"));
@@ -1044,8 +1125,9 @@ pub fn file_info(path: &str) -> Result<Value, String> {
 }
 
 /// FNV-1a: the app only compares versions with each other.
+/// Of the code as the engine keeps it: Ember drops trailing blank lines and turns CRLF into LF.
 fn hash(code: &str) -> u64 {
-    code.bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+    code.trim_end().bytes().filter(|&b| b != b'\r').fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
 
 /// A UUID in its only form Julia parses (36 characters, hex and hyphens), lowercased.

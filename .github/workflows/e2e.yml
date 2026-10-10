@@ -1,7 +1,8 @@
-# The tests against real Julia (e2e_julia, e2e_serve), which ci.yml skips
-# because they are ignored by default. They take a few minutes once the
-# packages are cached and much longer the first time, so they run in their own
-# workflow: CI's checks don't wait for them. Linux only for now. They run on a
+# The tests against real Julia (e2e_julia, e2e_serve) and real Julia and R
+# (e2e_r), which ci.yml skips because they are ignored by default. They take a
+# few minutes once the packages are cached and much longer the first time, so
+# they run in their own workflow: CI's checks don't wait for them. Linux only
+# for now. They run on a
 # PR or push that changes what goes into the binary (the crates, the runtime,
 # the skills it embeds, the Cargo files), and on request (docs/testing.md).
 # Because of those path filters, don't make this check required in branch
@@ -94,3 +95,65 @@ jobs:
             target/tmp/e2e-julia/depot
             target/tmp/e2e-serve/depot
           key: e2e-depots-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml') }}-${{ github.run_id }}
+
+  r:
+    name: e2e r
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12.6'
+      # R and most of Ember's packages from Ubuntu's archive. The first R
+      # notebook builds what's missing (RcppMsgPack) and Ember itself from
+      # source, as it would for a user.
+      - name: R
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends r-base-core r-base-dev r-cran-commonmark r-cran-httpuv r-cran-jsonlite r-cran-later r-cran-processx r-cran-promises r-cran-renv
+      - name: Ember's commit
+        id: ember
+        run: |
+          echo "commit=$(sed -n 's/^pub const EMBER_COMMIT: &str = "\([0-9a-f]*\)";/\1/p' crates/endeavor-mcp/src/core.rs)" >> "$GITHUB_OUTPUT"
+      # The Julia depot, and the library Ember installs into (paths.rs r_library).
+      # A library is only there when its install finished, so a restored one is whole.
+      - name: Restore depot and Ember
+        id: restore-r
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/tmp/e2e-r/depot
+            ~/.cache/endeavor/r
+          key: e2e-r-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml', 'runtime/r/install.R') }}-ember-${{ steps.ember.outputs.commit }}-${{ github.run_id }}
+          restore-keys: e2e-r-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml', 'runtime/r/install.R') }}-ember-${{ steps.ember.outputs.commit }}-
+      # As for Julia's: a passing run marks what it restored or installed complete.
+      - name: Check depot
+        id: depot-r
+        run: |
+          if [ -f target/tmp/e2e-r/depot/.e2e-complete ]; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build
+        run: cargo build --locked -p endeavor-mcp --tests
+      - name: Test
+        run: |
+          set -o pipefail
+          export ENDEAVOR_E2E_JULIA="$(command -v julia)"
+          cargo test --locked -p endeavor-mcp --test e2e_r -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/e2e_r.log"
+          if grep -q 'SKIPPED:' "$RUNNER_TEMP/e2e_r.log"; then
+            echo "::error::e2e_r was skipped"
+            exit 1
+          fi
+          touch target/tmp/e2e-r/depot/.e2e-complete
+      # Only a passing run saves, so the Ember library saved is one that worked.
+      - name: Save depot and Ember
+        if: success() && steps.depot-r.outputs.complete != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/tmp/e2e-r/depot
+            ~/.cache/endeavor/r
+          key: e2e-r-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml', 'runtime/r/install.R') }}-ember-${{ steps.ember.outputs.commit }}-${{ github.run_id }}

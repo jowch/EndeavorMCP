@@ -136,6 +136,19 @@ impl Env {
         }
     }
 
+    /// The R library Ember at `commit` is installed in for R notebooks, with the
+    /// packages it needs that R didn't have: beside the depot.
+    pub fn r_library(&self, commit: &str) -> PathBuf {
+        let short = &commit[..commit.len().min(12)];
+        if cfg!(windows) {
+            return self.local.join("r").join(short);
+        }
+        match &self.scratch {
+            Some(scratch) => Path::new(scratch).join("endeavor/r").join(short),
+            None => self.server_root().join("r").join(short),
+        }
+    }
+
     /// What the app and the bootstrap script install into on a server or this
     /// computer: `~/.cache/endeavor`. It ignores `XDG_CACHE_HOME`, since the app
     /// installs to the same folder.
