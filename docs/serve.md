@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/inst
 ```
 
 On Windows, in PowerShell (this script has never been run, see
-[gaps.md](gaps.md)):
+[#17](https://github.com/jowch/EndeavorMCP/issues/17)):
 
 ```
 irm https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.ps1 | iex
@@ -98,7 +98,7 @@ already have the newest build, it says so. It needs curl or wget, and write
 access to the binary's folder. On Windows the running `endeavor.exe` can't be
 overwritten, so the old one is renamed `endeavor.exe.old`, and the next
 update removes it. It has not been run on macOS or Windows
-([gaps.md](gaps.md)).
+([#17](https://github.com/jowch/EndeavorMCP/issues/17)).
 
 Other installs update the way they were installed:
 
@@ -198,7 +198,7 @@ often share one home folder.
 
 Run the agent where it can reach `localhost:PORT`: on the same machine, or on
 your computer after you forward the port. No real agent client has been tried
-against `serve` over HTTP yet ([gaps.md](gaps.md)), and the Codex and Gemini
+against `serve` over HTTP yet, and the Codex and Gemini
 lines below come from those tools' documentation. (Codex was tried with the
 stdio form, below.)
 

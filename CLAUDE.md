@@ -19,7 +19,8 @@ the standalone `endeavor serve` / `endeavor mcp`, and the Slurm relay.
 - `plugin/skills/`: the skills. `claude-plugin/`, `codex-plugin/` and
   `antigravity-plugin/` hold copies; `scripts/plugins.sh sync` refreshes them.
 - `docs/`: start with `runtime-core.md` (architecture), `status.md` (where
-  things stand), `gaps.md` (known gaps, kept accurate), `testing.md`.
+  things stand), `testing.md`. Known gaps are tracked as GitHub issues, with a
+  priority label (P1, P2, P3).
 
 ## Build, test, lint
 
@@ -77,5 +78,6 @@ including the network hosts Julia needs, are in Endeavor's `docs/cloud.md`.
 
 Commit subjects name the area and say what changed in plain words
 ("The start lock and recorded pids: fixes from the review"). Docs are written
-in plain, short sentences for someone who wasn't there; keep `gaps.md` and
-`status.md` true when a change affects them.
+in plain, short sentences for someone who wasn't there; keep `status.md`
+true when a change affects it, and open, update or close the GitHub issue
+for a gap the change finds or fixes.
