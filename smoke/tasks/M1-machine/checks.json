@@ -1,0 +1,15 @@
+{
+  "about": "A server the user names (an ssh alias for this computer, with no Endeavor on it). The agent adds it, asks before installing, installs only after the user's yes, and works in a notebook there. Tags: machines, install consent.",
+  "checks": [
+    { "check": "called", "tool": "add_machine" },
+    { "check": "not_called", "tool": "add_machine", "args": { "install": true }, "before_turn": 2 },
+    { "check": "not_called", "tool": "use_machine", "args": { "install": true }, "before_turn": 2 },
+    { "check": "any_of", "checks": [
+      { "check": "called", "tool": "add_machine", "args": { "install": true }, "ok": true },
+      { "check": "called", "tool": "use_machine", "args": { "install": true }, "ok": true }
+    ] },
+    { "check": "server_file", "suffix": ".jl" },
+    { "check": "reply_contains", "texts": ["1024"] },
+    { "check": "final_message_contains_any", "texts": ["1024"] }
+  ]
+}

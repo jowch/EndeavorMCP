@@ -60,6 +60,7 @@ Each task is a folder in `smoke/tasks/`:
   the user had them open already. `{ "depot": "empty" }` gives the task an
   empty depot of its own, for a first install. It is that folder alone: not
   the user's `~/.julia`, which may have the packages already.
+  `{ "ssh": true }` gives the task a server (below).
 - `inject.json` (optional): a second person working in the same notebook.
   It names a moment, the first time the agent calls one of `tools` (`"when":
   "before"` the call reaches the server or `"after"` its reply), and the calls
@@ -112,6 +113,28 @@ folder, and is copied here without the runtime's own `state/` and `home/`):
   output), `agent-stderr.txt`, and `project/` with the notebook as the agent
   left it.
 
+## Server tasks
+
+A task with `{ "ssh": true }` gets a server: this computer, over real ssh.
+The runner (`crates/smoke/src/ssh.rs`) starts an sshd of its own on a free
+port of 127.0.0.1, with a host key and a client key made for the attempt,
+and writes an ssh config that names it `smoke-host`. `gone-host` is a port
+nothing listens on. OpenSSH reads `~/.ssh/config` from the account's home,
+not `$HOME`, so the runtime's PATH starts with an `ssh` that runs the real
+one with `-F` that config. The user's own ssh keys and config are neither
+read nor changed.
+
+The helper on the server is this `endeavor`, as for any server on the same
+platform, so nothing is downloaded. Endeavor's debug-only `ENDEAVOR_TEST_ROOT`,
+`_STATE` and `_DEPOT` put the server's install, its runtime's state and its
+depot (the shared one) in the attempt's folder. `{server_folder}` in a
+prompt or follow-up is the attempt's folder for the server's notebooks.
+
+It needs `sshd` and `ssh` (on Debian and Ubuntu, `openssh-server` and
+`openssh-client`). Run as root, sshd also needs `/run/sshd` to exist
+(`mkdir -p /run/sshd`); otherwise the attempt fails as a harness problem that
+says so.
+
 ## Checks
 
 A check is a JSON object with `"check"` naming its kind. `"soft": true`
@@ -119,14 +142,16 @@ makes it reported only: a failed soft check doesn't fail the task.
 
 | Check | Passes when |
 |---|---|
-| `called` `tool`, `min` (1), `max`, `ok` | the agent called `tool` between `min` and `max` times; with `ok`, counting only calls that worked. A call turned away while Julia starts doesn't count |
-| `not_called` `tool` | it never called `tool` |
+| `called` `tool`, `min` (1), `max`, `ok` | the agent called `tool` between `min` and `max` times; with `ok`, counting only calls that worked; with `args`, counting only calls whose arguments include those. A call turned away while Julia starts doesn't count |
+| `not_called` `tool`, `args`, `before_turn` | it never called `tool`; with `before_turn` n, not before the user's n-th message, which must have been sent |
 | `called_after_last_run` `tool` | it called `tool` after the last call that ran cells |
 | `notebooks` `count` | that many notebooks are open at the end |
 | `no_errored_cells` | no cell of an open notebook has an error |
 | `output_contains` `texts` | some cell's output contains every one of `texts` |
 | `execution_allowed` `value` | every open notebook's `execution_allowed` is `value` |
 | `final_message_contains_any` `texts` | the agent's last message contains one of `texts`, ignoring case |
+| `final_message_lacks` `texts` | the agent's last message contains none of `texts`, ignoring case |
+| `server_file` `suffix` | a file ending in `suffix` is in the server's notebook folder at the end |
 | `no_rerun_of_running_cells` `require_still_running` (false) | no call ran a cell that was still running, as far as the log shows: a run that returned before its cells finished, a `still_running` list, or `read_cell` and `list_notebooks` saying so; with `require_still_running`, a waited run also stopped waiting |
 | `reply_contains` `texts` | some tool reply in the log contains every one of `texts`, so a number the agent reports came from the notebook |
 | `all_of` / `any_of` `checks` | every one, or at least one, of the nested checks passes |
@@ -153,9 +178,12 @@ something subtle, make it soft.
 | `N7-plot` | a plot | the agent looks at the picture (`view_cell_output`) before it reports |
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
 | `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: expected to fail until #58 is fixed |
+| `M1-machine` | add my server and compute something in a notebook there; then "yes, install it" | `add_machine`'s `needs_install`: the agent asks first and installs only after the yes, then works on the server |
+| `M2-no-reach` | a notebook on a server that refuses connections | the agent reports the failure, doesn't ask for a password, and makes no notebook here instead |
 
 Every task that leaves a notebook also checks it is `reproducible`, except
-N3, whose notebook isn't meant to run, and N9.
+N3, whose notebook isn't meant to run, N9, and the server tasks, whose
+notebooks the re-run can't reach.
 
 Each `result.json` and the summary record the model or models that answered
 (from Claude's own events), so runs can be compared across models later.

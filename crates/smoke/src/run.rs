@@ -115,9 +115,21 @@ pub fn runtime_args(work: &Path) -> Vec<String> {
     args
 }
 
-/// The runtime's own folders, inside the task's.
+/// The runtime's own folders, inside the task's. A server task's (ssh.rs) also
+/// gets a home folder whose ssh config names its servers, an `ssh` first on
+/// the PATH that reads that config, and its server's install, state and depot folders.
 pub fn runtime_env(work: &Path) -> Vec<(String, PathBuf)> {
-    ["XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME"].iter().map(|k| (k.to_string(), work.join("home").join(k.to_lowercase()))).collect()
+    let mut env: Vec<(String, PathBuf)> = ["XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME"].iter().map(|k| (k.to_string(), work.join("home").join(k.to_lowercase()))).collect();
+    let settings: Value = std::fs::read_to_string(work.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if settings["ssh"] == true {
+        let f = crate::ssh::Folders::of(work);
+        env.extend([("HOME".to_owned(), f.home), ("ENDEAVOR_TEST_ROOT".to_owned(), f.root), ("ENDEAVOR_TEST_STATE".to_owned(), f.state)]);
+        env.push(("ENDEAVOR_TEST_DEPOT".to_owned(), PathBuf::from(settings["depot"].as_str().unwrap_or_default())));
+        let outer = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::iter::once(f.bin).chain(std::env::split_paths(&outer));
+        env.push(("PATH".to_owned(), PathBuf::from(std::env::join_paths(path).unwrap())));
+    }
+    env
 }
 
 pub fn main(args: &[String]) -> i32 {
@@ -176,7 +188,7 @@ pub fn main(args: &[String]) -> i32 {
             let kept = out.join(&id).join(format!("attempt-{n}"));
             let _ = std::fs::remove_dir_all(&kept);
             std::fs::create_dir_all(&kept).unwrap();
-            copy_dir(&work, &kept, &["state", "home", "rerun", "depot"]);
+            copy_dir(&work, &kept, &["state", "home", "rerun", "depot", "ssh-home", "server", "ssh"]);
             let _ = std::fs::remove_dir_all(&work);
             let passed = result["passed"] == true;
             attempts.push(result);
@@ -242,14 +254,31 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     // folder alone, with no trailing ":", which would add Julia's defaults and so the user's ~/.julia,
     // where the packages may well be installed. Julia's own libraries are precompiled again into it.
     let depot = if setup["depot"] == "empty" { work.join("depot").display().to_string() } else { depot.to_owned() };
-    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "depot": depot }).to_string()).unwrap();
+    let ssh = setup["ssh"] == true;
+    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "depot": depot, "ssh": ssh }).to_string()).unwrap();
     if task.join("inject.json").is_file() {
         std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();
     }
     let mut turns = vec![std::fs::read_to_string(task.join("prompt.md")).unwrap().trim().to_owned()];
     turns.extend(std::fs::read_to_string(task.join("followup.md")).ok().map(|t| t.trim().to_owned()));
+    // `{server_folder}` in a message is the folder on the server task's server where a notebook may go.
+    let server_folder = crate::ssh::Folders::of(work).remote;
+    for turn in &mut turns {
+        *turn = turn.replace("{server_folder}", &server_folder.display().to_string());
+    }
     let specs: Value = std::fs::read_to_string(task.join("checks.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({ "checks": [] }));
     let mut problems: Vec<String> = Vec::new();
+    let server = if ssh {
+        match crate::ssh::start(work) {
+            Ok(server) => Some(server),
+            Err(e) => {
+                problems.push(format!("starting the ssh server: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // The notebooks the task starts with open, as a person working in them left them.
     let opens: Vec<&str> = setup["open"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -267,6 +296,13 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     let injections = crate::log::injections(&work.join("mcp.jsonl"));
     let read = crate::mcp::Session::start(endeavor, work, &project).and_then(|mut s| crate::mcp::notebooks(&mut s));
     stop_runtime(endeavor, work);
+    let server_files = if ssh { files_under(&server_folder) } else { Vec::new() };
+    if ssh {
+        // The runtime the helper started on the server, then the server.
+        stop_state(endeavor, work, &crate::ssh::Folders::of(work).state);
+        drop(server);
+    }
+    let turns_at = crate::log::turns(&work.join("mcp.jsonl"));
 
     let (notebooks, read_error) = match read {
         Ok(n) => (n, None),
@@ -274,7 +310,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     };
     let wants_rerun = specs["checks"].as_array().into_iter().flatten().any(|c| c["check"] == "reproducible");
     let rerun = (wants_rerun && read_error.is_none()).then(|| rerun(&notebooks, task, work, &project, endeavor));
-    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref() };
+    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref(), turns: &turns_at, server_files: &server_files };
     let outcomes: Vec<checks::Outcome> = specs["checks"].as_array().into_iter().flatten().map(|spec| checks::run(spec, &ev)).collect();
     if let Some(e) = &agent.problem {
         problems.push(e.clone());
@@ -396,7 +432,12 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
         Err(e) => return AgentRun { problem: Some(format!("can't start claude: {e}")), ..AgentRun::default() },
     };
     use std::io::{BufRead, Write};
-    let say = |stdin: &mut std::process::ChildStdin, turn: &str| writeln!(stdin, "{}", json!({ "type": "user", "message": { "role": "user", "content": turn } }));
+    // Each message sent is also logged, so a check can tell what the agent did before the user said something.
+    let log = std::sync::Mutex::new(crate::log::Log::create(&work.join("mcp.jsonl")));
+    let say = |stdin: &mut std::process::ChildStdin, turn: &str| {
+        log.lock().unwrap().write("user", &json!(turn).to_string());
+        writeln!(stdin, "{}", json!({ "type": "user", "message": { "role": "user", "content": turn } }))
+    };
     let mut stdin = child.stdin.take();
     let mut sent = 0;
     if let Some(stdin) = stdin.as_mut() {
@@ -490,9 +531,14 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
 }
 
 fn stop_runtime(endeavor: &Path, work: &Path) {
+    stop_state(endeavor, work, &work.join("state"));
+}
+
+/// Stop the runtime whose state folder is `state`.
+fn stop_state(endeavor: &Path, work: &Path, state: &Path) {
     let stop = |force: bool| {
         let mut c = Command::new(endeavor);
-        c.arg("stop").args(["--state-dir".to_owned(), work.join("state").display().to_string()]).envs(runtime_env(work)).stdout(Stdio::null()).stderr(Stdio::null());
+        c.arg("stop").args(["--state-dir".to_owned(), state.display().to_string()]).envs(runtime_env(work)).stdout(Stdio::null()).stderr(Stdio::null());
         if force {
             c.arg("--force");
         }
@@ -565,6 +611,23 @@ fn claude_version() -> String {
 
 fn git(repo: &Path, args: &[&str]) -> String {
     Command::new("git").args(args).current_dir(repo).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".into())
+}
+
+/// The files under a folder, as paths relative to it.
+fn files_under(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_owned()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if entry.path().is_dir() {
+                stack.push(entry.path());
+            } else if let Ok(rel) = entry.path().strip_prefix(dir) {
+                out.push(rel.display().to_string());
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Copy a folder's contents, leaving out the top-level entries named in `skip`.
