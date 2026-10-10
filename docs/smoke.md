@@ -18,6 +18,7 @@ With Julia 1.12 and a signed-in `claude` on the PATH:
 ```sh
 scripts/smoke.sh                       # every task in smoke/tasks
 scripts/smoke.sh --only N1-new,N4-long-run
+scripts/smoke.sh --model claude-haiku-4-5    # a model other than the agent's default
 ```
 
 The script builds `endeavor` and `endeavor-smoke`, then runs the tasks one at

@@ -18,6 +18,9 @@ use serde_json::{Value, json};
 use crate::checks::{self, Evidence};
 
 /// How long one agent run may take before it is ended.
+/// The model the agent runs (`--model`), if not its default.
+static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 const AGENT_LIMIT: Duration = Duration::from_secs(20 * 60);
 
 /// The built-in tools the agent has.
@@ -86,6 +89,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--julia" => o.julia = value()?,
             "--depot" => o.depot = Some(value()?),
             "--retries" => o.retries = value()?.parse().map_err(|e| format!("--retries: {e}"))?,
+            "--model" => MODEL.set(value()?).map_err(|_| "--model given twice".to_owned())?,
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
@@ -254,6 +258,7 @@ fn run_claude(prompt: &str, work: &Path, project: &Path, endeavor: &Path, exe: &
         .args(["--allowedTools", &format!("{OUR_SERVER},{}", BUILT_IN_TOOLS.join(","))])
         // Only the project's settings: the user's own plugins, servers and hooks stay out of the run.
         .args(["--setting-sources", "project,local"])
+        .args(MODEL.get().map(|m| ["--model", m.as_str()]).into_iter().flatten())
         .current_dir(project)
         .env_clear()
         .envs(agent_env())
@@ -378,6 +383,7 @@ fn summary_md(summary: &Value) -> String {
 
 fn claude_version() -> String {
     Command::new("claude").arg("--version").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).filter(|v| !v.is_empty()).map_or("Claude Code (version unknown)".into(), |v| format!("claude {v}"))
+        + &MODEL.get().map(|m| format!(", model {m}")).unwrap_or_default()
 }
 
 fn git(repo: &Path, args: &[&str]) -> String {
