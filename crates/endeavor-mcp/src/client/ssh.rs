@@ -232,9 +232,9 @@ pub fn no_helper(os: &str, arch: &str) -> String {
 /// (sh, bash, zsh, fish or csh) gets it inside single quotes, so it holds no
 /// quote, backslash, `!` or newline.
 ///
-/// It reads six lines (the install root, the state folder, the depot, the
-/// helper's Julia flag and its value, and its launcher; see `Options` for the
-/// empty ones), settles a launcher of `auto` (`PICK_LAUNCHER_SH`), and prints `ENDEAVOR <os> <arch> have`, or when this build's
+/// It reads eight lines (the install root, the state folder, the depot, the
+/// helper's Julia flag and its value, its launcher, and its R flag and value;
+/// see `Options` for the empty ones), settles a launcher of `auto` (`PICK_LAUNCHER_SH`), and prints `ENDEAVOR <os> <arch> have`, or when this build's
 /// helper isn't installed `ENDEAVOR <os> <arch> need <seen> <older|first> <folder>`,
 /// the folder being the rest of the line:
 /// `seen` is `none`, or for a runtime recorded in the state folder the helper
@@ -253,7 +253,7 @@ pub fn no_helper(os: &str, arch: &str) -> String {
 pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
     [
         &format!("v={version}"),
-        r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln || exit 1"#,
+        r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln && read -r rf && read -r rv || exit 1"#,
         PICK_LAUNCHER_SH,
         r#"case "$rt" in [~]|[~]/*) rt="$HOME${rt#?}";; esac"#,
         r#"case "$st" in [~]|[~]/*) st="$HOME${st#?}";; esac"#,
@@ -268,7 +268,7 @@ pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
         &format!(r#"if [ "$s" = need ]; then {PICK_STATE_DIR_SH}; for po in "$c"/*/endeavor; do pq=${{po%/endeavor}}; case "$pq" in "$d") ;; *) case "${{pq##*/}}" in *.part.*) ;; *) if [ -x "$po" ] && [ -f "$pq/runtime/boot.jl" ]; then u=older; fi;; esac;; esac; done; for pf in runtime.json job.json; do pj=$(cat "$pd/$pf" 2>/dev/null); if [ "$ln" = slurm ]; then case "$pj" in *job?:?[0-9]*) pk=${{pj#*job?:}}; pk=$(printf %s "$pk" | tr ",}}" "  " | cut -d" " -f1); pk=${{pk#?}}; pk=${{pk%?}}; if [ "$r" = none ] && num "$pk"; then if command -v squeue >/dev/null 2>&1 && pl=$(squeue -h -t PENDING,RUNNING,CONFIGURING -o %i -u "$(id -un)" 2>/dev/null); then if printf %s "$pl" | grep -qx "$pk"; then r=job:$pk; fi; else r=job-recorded:$pk; fi; fi;; esac; else case "$pj" in *pid?:[0-9]*) pk=${{pj#*pid?:}}; pk=$(printf %s "$pk" | tr ",}}" "  " | cut -d" " -f1); if num "$pk" && kill -0 "$pk" 2>/dev/null; then if pa=$(ps -p "$pk" -o args= 2>/dev/null) && [ -n "$pa" ]; then case "$pa" in *core*--state-dir*) r=process:$pk;; esac; else r=process-recorded:$pk; fi; fi;; esac; fi; done; fi"#),
         r#"if [ "$s" = need ]; then printf %s "ENDEAVOR $(uname -s) $(uname -m) need $r $u $d"; else printf %s "ENDEAVOR $(uname -s) $(uname -m) have"; fi; echo"#,
         r#"if [ "$s" = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; printf %s "Endeavor: installing into $d failed" >&2; echo >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
-        &format!(r#"exec "$d/endeavor" connect "$@" {}--launcher "$ln" "$jf" "$jv" --runtime "$d/runtime" --depot "$dp" --build "$v""#, if exit_idle { "--exit-idle " } else { "" }),
+        &format!(r#"exec "$d/endeavor" connect "$@" {}--launcher "$ln" "$jf" "$jv" "$rf" "$rv" --runtime "$d/runtime" --depot "$dp" --build "$v""#, if exit_idle { "--exit-idle " } else { "" }),
     ]
     .join("; ")
 }
@@ -278,11 +278,21 @@ pub fn bootstrap_script(version: &str, exit_idle: bool) -> String {
 /// `process`, as the helper itself would settle it. The helper is then started with the settled one.
 pub(crate) const PICK_LAUNCHER_SH: &str = r#"if [ "$ln" = auto ]; then ln=process; pp="$PATH:/usr/bin:/usr/local/bin:/opt/slurm/bin"; while [ -n "$pp" ]; do pb=${pp%%:*}; if [ -n "$pb" ] && [ -f "$pb/sinfo" ]; then ln=slurm; fi; case "$pp" in *:*) pp=${pp#*:};; *) pp=;; esac; done; fi"#;
 
-/// The six lines the script reads first.
+/// The eight lines the script reads first.
 fn preamble(server: &Server, options: &Options) -> Result<Vec<u8>, String> {
     let [flag, value] = server.julia_args();
+    let [r_flag, r_value] = server.r_args();
     let launcher = options.launcher.unwrap_or_else(|| server.launcher()).word().to_owned();
-    let lines = [("install folder", &options.root), ("state folder", &options.state), ("depot", &options.depot), ("Julia setting", &flag), ("Julia setting", &value), ("launcher", &launcher)];
+    let lines = [
+        ("install folder", &options.root),
+        ("state folder", &options.state),
+        ("depot", &options.depot),
+        ("Julia setting", &flag),
+        ("Julia setting", &value),
+        ("launcher", &launcher),
+        ("R setting", &r_flag),
+        ("R setting", &r_value),
+    ];
     for (what, line) in lines {
         if line.contains('\n') {
             return Err(format!("The {what} can't hold a line break."));

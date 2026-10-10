@@ -516,7 +516,11 @@ not supported. These gaps stay open.
   the `taskkill` cancel path have not run. A real ssh from Windows to a Linux
   server was run once by hand ([Releases and plugins](#releases-and-plugins)).
   Windows has no Julia download: with no `julia.exe` on the PATH, Endeavor
-  says to install juliaup, and with one too old, it says so.
+  says to install juliaup, and with one too old, it says so. With juliaup the
+  core starts the `julia.exe` in that Julia's own `Sys.BINDIR`, not juliaup's
+  launcher: started through the Store app's alias, the launcher and Julia ran
+  outside the core's job and outlived it (issue #55). Host names recorded by
+  the runtime are compared without case on Windows (issue #54).
 - [P2] **No integration test runs on Windows.** Every file in
   `crates/endeavor-mcp/tests/` but `version.rs` is `#![cfg(unix)]`, so on
   Windows `cargo test` runs only the unit tests: none of connect, session,
@@ -937,9 +941,20 @@ Ember support is being built (status.md); these are its known limits so far.
   Ember file unless a debug build has `ENDEAVOR_TEST_R_NOTEBOOKS`, and
   `new_notebook` makes only `.jl` files. The tool descriptions and skills
   don't cover R yet; they come after the agent-loop eval.
-- **P2: R is only found on the PATH.** The core runs `Rscript` from the PATH
-  (or `--r`, which nothing passes yet). serve, mcp, the app and machines.json
-  can't name another R or a shell setup (`module load R`) yet.
+- **P2: the app can't say which R yet.** serve, mcp, `connect`, Slurm jobs
+  and a machine's `r` in machines.json pass `--r` or `--r-shell` to the core,
+  which otherwise uses the login shell's `Rscript`. The app's Settings and
+  server dialog don't have the field yet.
+- **P3: a new R setting waits for the runtime's next start.** The core is
+  given its R when it starts, and R itself starts with the first R notebook.
+  A runtime already running keeps the R it was given; nothing says so.
+- **P3: Julia's login shell can't be csh or tcsh.** `julia.rs` asks the
+  login shell with `-lc`, which tcsh refuses. With `--julia auto` that falls
+  back to Endeavor's own Julia; with `--julia-shell` it fails. R's setting
+  handles these shells (`r.rs`); Julia's could do the same.
+- **P3: R from a shell line on Slurm is untried on a real cluster.** The job
+  runs the line on the node when the first R notebook opens; only a fake
+  `module` has been tried (`e2e_r`).
 - **P2: Ember installs from source.** The first R notebook builds Ember, and
   any of its packages R lacks, which needs a C compiler and CRAN and GitHub
   (codeload.github.com). Tried only where R already had Ember's packages.

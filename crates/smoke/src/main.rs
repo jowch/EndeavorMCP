@@ -10,6 +10,7 @@ mod log;
 mod mcp;
 mod proxy;
 mod run;
+mod ssh;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

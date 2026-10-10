@@ -81,6 +81,11 @@ impl Failure {
 /// The julia binary and its version ("1.12.6"). `progress` hears about a
 /// download, which only happens when `download` is true.
 pub fn find(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> Result<(String, String), Failure> {
+    let (path, version) = found(source, download, progress)?;
+    Ok((real_julia(path), version))
+}
+
+fn found(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> Result<(String, String), Failure> {
     match source {
         Source::Path(path) => {
             let path = expand_home(path);
@@ -135,6 +140,43 @@ fn path_julia() -> Option<String> {
 #[cfg(windows)]
 fn julia_in(path: &std::ffi::OsStr) -> Option<String> {
     std::env::split_paths(path).map(|dir| dir.join("julia.exe")).find(|exe| exe.is_file()).map(|exe| exe.display().to_string())
+}
+
+/// juliaup's `julia.exe` (the Store app's alias, or juliaup's own launcher)
+/// only starts the real one. Started through the alias, that launcher and the
+/// Julia under it run outside the core's job, so ending the core left Julia
+/// running (EndeavorMCP #55). Start the `julia.exe` in that Julia's own
+/// `Sys.BINDIR` instead. A julia.exe with Julia's library beside it is the
+/// real one already, and isn't asked. If asking fails, the path as found.
+#[cfg(windows)]
+fn real_julia(julia: String) -> String {
+    if Path::new(&julia).parent().is_some_and(|dir| dir.join("libjulia.dll").is_file()) {
+        return julia;
+    }
+    let mut command = Command::new(&julia);
+    crate::client::no_window(&mut command);
+    let output = command.args(["--startup-file=no", "--history-file=no", "-e", "print(Sys.BINDIR)"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    let Ok(output) = output else { return julia };
+    if !output.status.success() {
+        return julia;
+    }
+    match bindir_julia(&String::from_utf8_lossy(&output.stdout)) {
+        Some(exe) if exe.is_file() => exe.display().to_string(),
+        _ => julia,
+    }
+}
+
+#[cfg(unix)]
+fn real_julia(julia: String) -> String {
+    julia
+}
+
+/// The julia.exe in the `Sys.BINDIR` Julia printed (the last line: a startup
+/// message may come first).
+#[cfg_attr(unix, allow(dead_code))]
+fn bindir_julia(printed: &str) -> Option<std::path::PathBuf> {
+    let bindir = printed.lines().map(str::trim).rfind(|l| !l.is_empty())?;
+    Some(Path::new(bindir).join("julia.exe"))
 }
 
 /// The last absolute path a login shell prints for `script` (profiles can
@@ -298,6 +340,14 @@ mod tests {
     }
 
     /// The cloud VMs' setup script installs this Julia and the pinned Rust too (Endeavor's docs/cloud.md).
+    #[test]
+    fn juliaups_launcher_gives_way_to_the_julia_exe_in_its_bindir() {
+        let bindir = r"C:\Users\someone\.julia\juliaup\julia-1.12.6+0.x64.w64.mingw32\bin";
+        assert_eq!(bindir_julia(bindir), Some(Path::new(bindir).join("julia.exe")));
+        assert_eq!(bindir_julia(&format!("a startup message\n{bindir}\r\n")), Some(Path::new(bindir).join("julia.exe")));
+        assert_eq!(bindir_julia(" \n"), None);
+    }
+
     #[test]
     fn the_cloud_setup_script_pins_the_same_julia() {
         let script = include_str!("../../../scripts/cloud-setup.sh");
