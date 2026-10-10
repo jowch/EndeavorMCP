@@ -183,9 +183,19 @@ Next:
   warning in a cell's output starts with `Warning:`. The skills route R
   notebooks to `reference/ember.md`, and smoke task R1 runs one through a
   real agent. R notebooks still need Julia: the core starts it first
-  (#76). R is the login shell's `Rscript`, or what
+  (#76). R is what
   `--r` or
-  `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names.
+  `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names,
+  else Endeavor's own R once it's installed, else the login shell's `Rscript`.
+  On a Mac with no R, the open answers `r_not_found` offering Endeavor's own
+  R 4.6.1 (`r::install_own`, #85): with the user's yes (`use_machine` with
+  `install: true`, which calls `endeavor/allow_r_install`, or the core's
+  `--install-r`) the core downloads CRAN's installer, checks its SHA-256, and
+  unpacks it into `~/.cache/endeavor/R-4.6.1` without running it, the way rig's
+  user mode does but without editing shell startup files. It runs with its own
+  `R_LIBS_USER` and its own Ember library inside that folder, and is on no PATH.
+  On Linux and servers Endeavor installs no R; `r_not_found` says to install
+  it with rig or the system's packages, or to use a cluster's module.
   The first R notebook installs Ember at the commit the core pins
   (`core::EMBER_COMMIT`) into `~/.cache/endeavor/r/<commit>` (`$SCRATCH/endeavor/r`
   on clusters), with any package it needs that R lacks; the open returns

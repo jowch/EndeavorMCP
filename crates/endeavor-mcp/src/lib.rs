@@ -81,7 +81,7 @@ const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|au
                          auto is slurm where Slurm's sinfo is, else process)
        endeavor relay --state-dir DIR
        endeavor node-start --state-dir DIR --julia JULIA [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
-       endeavor core --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) [--install-julia] [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT
+       endeavor core --state-dir DIR (--julia JULIA|auto | --julia-shell LINE) [--install-julia] [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] [--install-r] --runtime RUNTIME_DIR --depot DEPOT
        endeavor askpass PROMPT
        endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)
        endeavor update                      replace this binary with the newest build (Linux, macOS, Windows)

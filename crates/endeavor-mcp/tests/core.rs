@@ -216,6 +216,10 @@ fn answers_julias_calls_itself_and_hands_the_folder_to_julia() {
     write!(socket, "{:x}\r\n{}\r\n0\r\n\r\n", allow.len() - 20, &allow[20..]).unwrap();
     let reply: serde_json::Value = serde_json::from_str(&response(&mut reader).2).unwrap();
     assert_eq!(reply["id"], 8);
+    let allow = r#"{"jsonrpc":"2.0","id":9,"method":"endeavor/allow_r_install"}"#;
+    write!(socket, "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{allow}", allow.len()).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&response(&mut reader).2).unwrap(), serde_json::json!({ "jsonrpc": "2.0", "id": 9, "result": {} }));
+    assert!(!bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("allow_")), "the core answers these itself");
 
     // The same connection carries the next request.
     write!(socket, "GET /endeavor/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();

@@ -211,7 +211,7 @@ fn parse_version(text: &str) -> Option<(u32, u32)> {
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
-fn uname(flag: &str) -> String {
+pub(crate) fn uname(flag: &str) -> String {
     Command::new("uname").arg(flag).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default()
 }
 
@@ -254,38 +254,10 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
     std::fs::create_dir_all(cache).map_err(|e| format!("Couldn't create {}: {e}", cache.display()))?;
     let top = format!("julia-{JULIA_VERSION}");
     let part = cache.join(format!("{top}.tar.gz.part"));
-    let mut download = if has("curl") {
-        Command::new("curl").args(["-fsSL", "--retry", "3", "-C", "-", "-o"]).arg(&part).arg(url).stderr(Stdio::piped()).spawn()
-    } else if has("wget") {
-        Command::new("wget").args(["-q", "-c", "-O"]).arg(&part).arg(url).stderr(Stdio::piped()).spawn()
-    } else {
+    if !has("curl") && !has("wget") {
         return Err("No julia on this machine's PATH, and neither curl nor wget to download one. Set How to get Julia for this server.".into());
     }
-    .map_err(|e| format!("Couldn't start the Julia download: {e}"))?;
-    let mut shown = u64::MAX;
-    let status = loop {
-        if let Some(status) = download.try_wait().map_err(|e| e.to_string())? {
-            break status;
-        }
-        let percent = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0) * 100 / size;
-        if percent != shown {
-            shown = percent;
-            progress(format!("Downloading Julia {JULIA_VERSION}… {percent}%"));
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    };
-    if !status.success() {
-        let mut err = String::new();
-        let _ = std::io::Read::read_to_string(&mut download.stderr.take().unwrap(), &mut err);
-        return Err(format!("Couldn't download Julia {JULIA_VERSION} on the server ({}). It resumes on the next try.", err.trim()));
-    }
-
-    progress(format!("Checking Julia {JULIA_VERSION}…"));
-    let got = sha256_of(&part)?;
-    if got != sha256 {
-        let _ = std::fs::remove_file(&part);
-        return Err(format!("The Julia {JULIA_VERSION} download was corrupt or tampered with (SHA-256 {got}); it was deleted."));
-    }
+    download(&part, url, sha256, size, &format!("Julia {JULIA_VERSION}"), progress)?;
     progress(format!("Unpacking Julia {JULIA_VERSION}…"));
     // Unpacked beside the target, then renamed, so a half-unpacked Julia is never used.
     let staging = cache.join(format!("{top}.unpacking"));
@@ -298,6 +270,43 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
     std::fs::rename(staging.join(&top), dir).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&staging);
     let _ = std::fs::remove_file(&part);
+    Ok(())
+}
+
+/// Download `url` into `part`, resuming what an earlier try left, and check it is the `size` bytes
+/// with SHA-256 `sha256`; `name` is what a person calls it ("Julia 1.12.6"). A corrupt download is deleted.
+pub(crate) fn download(part: &Path, url: &str, sha256: &str, size: u64, name: &str, progress: &mut dyn FnMut(String)) -> Result<(), String> {
+    let mut download = if has("curl") {
+        Command::new("curl").args(["-fsSL", "--retry", "3", "-C", "-", "-o"]).arg(part).arg(url).stderr(Stdio::piped()).spawn()
+    } else if has("wget") {
+        Command::new("wget").args(["-q", "-c", "-O"]).arg(part).arg(url).stderr(Stdio::piped()).spawn()
+    } else {
+        return Err(format!("Couldn't download {name}: there is neither curl nor wget."));
+    }
+    .map_err(|e| format!("Couldn't start the download of {name}: {e}"))?;
+    let mut shown = u64::MAX;
+    let status = loop {
+        if let Some(status) = download.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        let percent = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0) * 100 / size;
+        if percent != shown {
+            shown = percent;
+            progress(format!("Downloading {name}… {percent}%"));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    if !status.success() {
+        let mut err = String::new();
+        let _ = std::io::Read::read_to_string(&mut download.stderr.take().unwrap(), &mut err);
+        return Err(format!("Couldn't download {name} ({}). It resumes on the next try.", err.trim()));
+    }
+    progress(format!("Checking {name}…"));
+    let got = sha256_of(part)?;
+    if got != sha256 {
+        let _ = std::fs::remove_file(part);
+        return Err(format!("The {name} download was corrupt or tampered with (SHA-256 {got}); it was deleted."));
+    }
     Ok(())
 }
 

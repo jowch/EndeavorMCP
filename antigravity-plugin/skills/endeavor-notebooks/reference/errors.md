@@ -26,8 +26,8 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `not_a_file`, `not_a_folder` | `read_file` was given a folder, or `list_folder` a file | Use the other tool |
 | `unsupported` | `run_shell` on a Windows server | Don't use it there |
 | `unsupported` | An R notebook (`.R`) on Windows, in the Endeavor app, or in a runtime without R notebooks | Tell the user R notebooks don't run there yet; offer a Julia notebook |
-| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing Ember, which takes a few minutes | Tell the user, then make the same call again in a minute |
-| `r_not_found` | No R was found: `Rscript` isn't on the PATH, or the R set for this machine isn't there | Tell the user R notebooks need R installed; nothing else to try |
+| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on a Mac, after the user agreed) or Ember, which takes a few minutes | Tell the user, then make the same call again in a minute |
+| `r_not_found` | No R was found: `Rscript` isn't on the PATH, or the R set for this machine isn't there. On a Mac, the message offers Endeavor's own R | If it offers Endeavor's own R, ask the user, as the message says; don't pass `install: true` without their yes. Otherwise tell the user how to get R, as the message says |
 | `r_failed` | R started but Ember didn't: it couldn't install, or it stopped | Tell the user what the message says; the runtime's log has the rest |
 | `risky_source` | The notebook came from a remote source, so only the user can allow it to run | Ask the user to run it from the notebook |
 | `julia_starting` | Julia starts the first time a Julia notebook is opened or made, which can take minutes the first time | Tell the user, then make the same call again in a minute |
