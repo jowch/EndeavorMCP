@@ -251,9 +251,10 @@ pub fn no_helper(os: &str, arch: &str) -> String {
 /// unless the client ends it first. Then it becomes the helper. The values come
 /// over stdin and not in the script, so no path can break it; the line is
 /// written with `printf %s`, which reads no escapes, and the ids are checked to
-/// be digits. `exit_idle` adds the helper's `--exit-idle`, and `julia_when_needed` its
-/// `--julia-when-needed`; being fixed words, they are in the script and not in the lines it reads.
-pub fn bootstrap_script(version: &str, exit_idle: bool, julia_when_needed: bool) -> String {
+/// be digits. `exit_idle` adds the helper's `--exit-idle`, `julia_when_needed` its `--julia-when-needed`,
+/// and `own_with_client` its `--own-with-client`; being fixed words, they are in the script and not in the
+/// lines it reads.
+pub fn bootstrap_script(version: &str, exit_idle: bool, julia_when_needed: bool, own_with_client: bool) -> String {
     [
         &format!("v={version}"),
         r#"read -r rt && read -r st && read -r dp && read -r jf && read -r jv && read -r ln && read -r rf && read -r rv || exit 1"#,
@@ -272,9 +273,10 @@ pub fn bootstrap_script(version: &str, exit_idle: bool, julia_when_needed: bool)
         r#"if [ "$s" = need ]; then printf %s "ENDEAVOR $(uname -s) $(uname -m) need $r $u $d"; else printf %s "ENDEAVOR $(uname -s) $(uname -m) have"; fi; echo"#,
         r#"if [ "$s" = need ]; then read -r n || exit 1; t="$d.part.$$"; rm -rf "$t"; mkdir -p "$t" && head -c "$n" | (cd "$t" && tar xf -) || { rm -rf "$t"; printf %s "Endeavor: installing into $d failed" >&2; echo >&2; exit 1; }; rm -rf "$d"; mv "$t" "$d"; fi"#,
         &format!(
-            r#"exec "$d/endeavor" connect "$@" {}{}--launcher "$ln" "$jf" "$jv" "$rf" "$rv" --runtime "$d/runtime" --depot "$dp" --build "$v""#,
+            r#"exec "$d/endeavor" connect "$@" {}{}{}--launcher "$ln" "$jf" "$jv" "$rf" "$rv" --runtime "$d/runtime" --depot "$dp" --build "$v""#,
             if exit_idle { "--exit-idle " } else { "" },
-            if julia_when_needed { "--julia-when-needed " } else { "" }
+            if julia_when_needed { "--julia-when-needed " } else { "" },
+            if own_with_client { "--own-with-client " } else { "" }
         ),
     ]
     .join("; ")
@@ -500,10 +502,17 @@ pub struct ConnectError {
 /// starts later, when the channel is asked to (`start`). A failure says whether
 /// retrying could help.
 pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
+    connect_as(server, transport, options, false, cancel, on)
+}
+
+/// `connect`; with `own_with_client`, a runtime this connection starts is stopped if the connection
+/// ends without a Stop or Detach, while it starts or after (`endeavor connect --own-with-client`).
+#[allow(clippy::result_large_err)] // as `connect`'s, which callers already take
+fn connect_as(server: &Server, transport: &Transport, options: &Options, own_with_client: bool, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
     let wrong = |message: String| ConnectError { message, retry: false, needs: None };
     let preamble = preamble(server, options).map_err(wrong)?;
     let version = crate::embedded::BUILD_VERSION;
-    let mut command = transport.command(&bootstrap_script(version, options.exit_idle, options.julia_when_needed), &options.auth).map_err(wrong)?;
+    let mut command = transport.command(&bootstrap_script(version, options.exit_idle, options.julia_when_needed, own_with_client), &options.auth).map_err(wrong)?;
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -627,9 +636,10 @@ pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions
 /// then stop it (or leave it running if it already was). On a cluster, only
 /// ask Slurm about itself: starting Julia there means a job. What the start needs
 /// installed is installed only if `options.allow_install`; else the test fails
-/// naming it.
+/// naming it. A cancel ends ssh, and the helper then stops the runtime this test
+/// was starting; one that was already running or starting for someone else is left.
 pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(), String> {
-    let (channel, hello) = connect(server, transport, options, cancel, on).map_err(|e| e.message)?;
+    let (channel, hello) = connect_as(server, transport, options, true, cancel, on).map_err(|e| e.message)?;
     if hello.launcher.map_or(server.cluster.is_some(), |l| l == Launcher::Slurm) {
         let reply = channel.files(wire::files::Request::Slurm);
         channel.detach();
