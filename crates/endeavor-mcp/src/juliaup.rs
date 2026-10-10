@@ -3,8 +3,10 @@
 //! version as a channel (`juliaup add 1.12.6`) rather than download a second Julia
 //! of its own, so the person keeps one Julia manager, and `juliaup update` can't
 //! move notebooks off the tested version. The person's default and other channels
-//! stay as they were. On Windows, where juliaup is the only way Endeavor gets
-//! Julia, it installs juliaup for this account first when there is none (no admin).
+//! stay as they were, except on a juliaup with no channels yet (one Endeavor just
+//! installed, say), where juliaup makes the first channel added its default. On
+//! Windows, where juliaup is the only way Endeavor gets Julia, it installs juliaup
+//! for this account first when there is none (no admin).
 //!
 //! juliaup is asked through `juliaup` itself, never through its `julia` launcher:
 //! on a juliaup with no setup yet, the launcher first downloads the latest Julia
@@ -68,21 +70,34 @@ fn exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
-/// The `julia` juliaup's channel `version` runs, if it has that channel.
-pub fn channel_julia(juliaup: &Path, version: &str) -> Option<PathBuf> {
-    let listed = run(Command::new(juliaup).args(["api", "getconfig1"]), LIST_LIMIT, &mut |_| {}).ok()?;
-    channel_file(&listed, version).filter(|julia| julia.is_file())
+/// One of juliaup's channels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Channel {
+    /// The real `julia` it runs.
+    pub julia: PathBuf,
+    /// It is juliaup's default, which juliaup won't remove.
+    pub default: bool,
 }
 
-/// Add the channel `version` to juliaup, which downloads that Julia, and give its
-/// `julia`. `progress` hears how long it has taken so far.
-pub fn add(juliaup: &Path, version: &str, progress: &mut dyn FnMut(String)) -> Result<PathBuf, String> {
+/// juliaup's channels as `juliaup api getconfig1` lists them, or None when juliaup couldn't say.
+pub fn listing(juliaup: &Path) -> Option<String> {
+    run(Command::new(juliaup).args(["api", "getconfig1"]), LIST_LIMIT, &mut |_| {}).ok()
+}
+
+/// juliaup's channel `version`, if it has it and its `julia` is there.
+pub fn channel_julia(juliaup: &Path, version: &str) -> Option<Channel> {
+    channel(&listing(juliaup)?, version).filter(|channel| channel.julia.is_file())
+}
+
+/// Add the channel `version` to juliaup, which downloads that Julia. `progress` hears how long it
+/// has taken so far. juliaup counts adding a channel it already has as done.
+pub fn add(juliaup: &Path, version: &str, progress: &mut dyn FnMut(String)) -> Result<Channel, String> {
     let what = format!("Downloading Julia {version} with juliaup");
     progress(format!("{what}…"));
     let added = run(Command::new(juliaup).args(["add", version]), ADD_LIMIT, &mut |waited| progress(format!("{what}… {} so far", minutes(waited))));
-    channel_julia(juliaup, version).ok_or_else(|| {
-        let why = added.err().map(|e| format!(" ({e})")).unwrap_or_default();
-        format!("juliaup couldn't install Julia {version}{why}. Check the internet connection, then try again.")
+    channel_julia(juliaup, version).ok_or_else(|| match added {
+        Err(why) => format!("juliaup couldn't install Julia {version} ({why})."),
+        Ok(_) => format!("juliaup said it installed Julia {version}, but doesn't list it."),
     })
 }
 
@@ -216,12 +231,14 @@ fn minutes(time: Duration) -> String {
     }
 }
 
-/// The `File` of the channel named `version` in `juliaup api getconfig1`'s
-/// JSON (`DefaultChannel` and `OtherChannels`): that channel's real julia.
-fn channel_file(listed: &str, version: &str) -> Option<PathBuf> {
+/// The channel named `version` in `juliaup api getconfig1`'s JSON (`DefaultChannel` and
+/// `OtherChannels`): its `File`, that channel's real julia, and whether it is the default.
+pub fn channel(listed: &str, version: &str) -> Option<Channel> {
     let config: serde_json::Value = serde_json::from_str(listed.trim()).ok()?;
-    let others = config["OtherChannels"].as_array().into_iter().flatten();
-    std::iter::once(&config["DefaultChannel"]).chain(others).find(|c| c["Name"] == version).and_then(|c| c["File"].as_str()).map(PathBuf::from)
+    let default = std::iter::once((&config["DefaultChannel"], true));
+    let others = config["OtherChannels"].as_array().into_iter().flatten().map(|c| (c, false));
+    let (found, default) = default.chain(others).find(|(c, _)| c["Name"] == version)?;
+    Some(Channel { julia: PathBuf::from(found["File"].as_str()?), default })
 }
 
 #[cfg(test)]
@@ -236,11 +253,12 @@ mod tests {
             "OtherChannels": [{ "Name": "1.12.6", "File": file, "Args": [], "Version": "1.12.6", "Arch": "x64" }],
         })
         .to_string();
-        assert_eq!(channel_file(&listed, "1.12.6"), Some(PathBuf::from(file)));
-        assert_eq!(channel_file(&listed, "1.12.5"), None);
+        let julia = |default| Some(Channel { julia: PathBuf::from(file), default });
+        assert_eq!(channel(&listed, "1.12.6"), julia(false));
+        assert_eq!(channel(&listed, "1.12.5"), None);
         let as_default = serde_json::json!({ "DefaultChannel": { "Name": "1.12.6", "File": file }, "OtherChannels": [] }).to_string();
-        assert_eq!(channel_file(&as_default, "1.12.6"), Some(PathBuf::from(file)));
-        assert_eq!(channel_file(r#"{"DefaultChannel":null,"OtherChannels":[]}"#, "1.12.6"), None, "a juliaup with no channels yet");
-        assert_eq!(channel_file("not json", "1.12.6"), None);
+        assert_eq!(channel(&as_default, "1.12.6"), julia(true));
+        assert_eq!(channel(r#"{"DefaultChannel":null,"OtherChannels":[]}"#, "1.12.6"), None, "a juliaup with no channels yet");
+        assert_eq!(channel("not json", "1.12.6"), None);
     }
 }

@@ -237,7 +237,11 @@ Next:
   juliaup's App Installer file), so `--julia auto` with no `julia.exe` on the
   PATH now offers that download too. `julia::own_installed`, `install_own` and
   `remove_own` are public for the app's Settings; removing takes away the
-  download, and juliaup's channel only if Endeavor added it. `tests/own_julia.rs`
-  covers both routes with real downloads (ignored by default); run on Linux
-  only so far.
+  download, and juliaup's channel only if Endeavor added it (decided before
+  adding, from juliaup's own list). On a juliaup with no channels, Endeavor's
+  becomes juliaup's default, which juliaup won't remove; `OwnFrom::Juliaup`
+  says so (`default`) and removing explains what to do. On Linux and macOS a
+  failed `juliaup add` falls back to the checked download. `tests/own_julia.rs`
+  covers these with real downloads (ignored by default); run on Linux only so
+  far.
 - marimo after Ember.

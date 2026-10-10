@@ -19,6 +19,8 @@ const MIN_JULIA: (u32, u32) = (1, 11);
 /// Endeavor's own Julia, the tested version, pinned with the official tarballs'
 /// SHA-256 and size (bump all with the app's own in src/runtime.rs).
 pub const JULIA_VERSION: &str = "1.12.6";
+/// About how much Julia's Windows download is (its x64 zip), for the consent question there.
+const WINDOWS_SIZE: u64 = 300_000_000;
 const TARBALLS: [(&str, &str, &str, &str, u64); 4] = [
     (
         "Linux",
@@ -255,7 +257,9 @@ pub enum OwnFrom {
     Download,
     /// It is juliaup's channel for the pinned version. `added`: Endeavor added the channel, so
     /// removing it is Endeavor's to do; otherwise the person added it, and it stays theirs.
-    Juliaup { added: bool },
+    /// `default`: it is juliaup's default (as the first channel of a juliaup that had none), which
+    /// juliaup won't remove, so `remove_own` says what to do instead.
+    Juliaup { added: bool, default: bool },
 }
 
 /// Endeavor's own Julia if it is installed; nothing is downloaded. Asks juliaup, if there is one,
@@ -264,8 +268,8 @@ pub fn own_installed() -> Option<OwnJulia> {
     if let Some(julia) = downloaded().filter(|julia| julia.exists()) {
         return Some(OwnJulia { julia, from: OwnFrom::Download });
     }
-    let julia = crate::juliaup::channel_julia(&crate::juliaup::find()?, JULIA_VERSION)?;
-    Some(OwnJulia { julia, from: OwnFrom::Juliaup { added: added_mark().is_some_and(|mark| mark.exists()) } })
+    let channel = crate::juliaup::channel_julia(&crate::juliaup::find()?, JULIA_VERSION)?;
+    Some(OwnJulia { julia: channel.julia, from: OwnFrom::Juliaup { added: marked(), default: channel.default } })
 }
 
 /// Install Endeavor's own Julia unless it is installed: with juliaup when the computer has it (on
@@ -280,20 +284,37 @@ pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String>
         #[cfg(windows)]
         None => crate::juliaup::install(progress)?,
         #[cfg(unix)]
-        None => {
-            let dir = download_dir().ok_or("HOME isn't set")?;
-            let (url, sha256, size) = tarball()?;
-            install(dir.parent().unwrap(), &dir, url, sha256, size, progress)?;
-            return Ok(OwnJulia { julia: dir.join("bin").join("julia"), from: OwnFrom::Download });
-        }
+        None => return download_own(progress),
     };
-    let julia = crate::juliaup::add(&juliaup, JULIA_VERSION, progress)?;
-    // Only reached when juliaup had no such channel: Endeavor added it.
-    if let Some(mark) = added_mark() {
+    // Endeavor adds the channel only if juliaup said it has none. When juliaup can't say, the channel
+    // may already be the person's (and juliaup counts adding it again as done), so it isn't marked ours.
+    let ours = crate::juliaup::listing(&juliaup).is_some_and(|listed| crate::juliaup::channel(&listed, JULIA_VERSION).is_none());
+    let channel = match crate::juliaup::add(&juliaup, JULIA_VERSION, progress) {
+        Ok(channel) => channel,
+        // Elsewhere there is the checked download, so a juliaup that fails (a locked config, an old
+        // juliaup, a mirror that's down) costs a second Julia rather than none.
+        #[cfg(unix)]
+        Err(why) => {
+            progress(format!("{why} Downloading Endeavor's own Julia {JULIA_VERSION} instead."));
+            return download_own(progress);
+        }
+        #[cfg(windows)]
+        Err(why) => return Err(why),
+    };
+    if ours && let Some(mark) = added_mark() {
         let _ = std::fs::create_dir_all(mark.parent().unwrap());
         let _ = std::fs::write(&mark, "Endeavor added juliaup's channel for this Julia, and removes it when asked to remove its Julia.\n");
     }
-    Ok(OwnJulia { julia, from: OwnFrom::Juliaup { added: true } })
+    Ok(OwnJulia { julia: channel.julia, from: OwnFrom::Juliaup { added: marked(), default: channel.default } })
+}
+
+/// Download Endeavor's own Julia into its cache folder.
+#[cfg(unix)]
+fn download_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String> {
+    let dir = download_dir().ok_or("HOME isn't set")?;
+    let (url, sha256, size) = tarball()?;
+    install(dir.parent().unwrap(), &dir, url, sha256, size, progress)?;
+    Ok(OwnJulia { julia: dir.join("bin").join("julia"), from: OwnFrom::Download })
 }
 
 /// Remove Endeavor's own Julia: the one it downloaded, and juliaup's channel if Endeavor added it.
@@ -304,14 +325,26 @@ pub fn remove_own() -> Result<(), String> {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Couldn't remove {}: {e}", dir.display()))?;
     }
     if let Some(mark) = added_mark().filter(|mark| mark.exists()) {
-        if let Some(juliaup) = crate::juliaup::find()
-            && crate::juliaup::channel_julia(&juliaup, JULIA_VERSION).is_some()
-        {
-            crate::juliaup::remove(&juliaup, JULIA_VERSION)?;
+        if let Some(juliaup) = crate::juliaup::find() {
+            let listed = crate::juliaup::listing(&juliaup)
+                .ok_or(format!("juliaup didn't say which Julia versions it has, so Endeavor's Julia {JULIA_VERSION} wasn't removed. Try again."))?;
+            if let Some(channel) = crate::juliaup::channel(&listed, JULIA_VERSION) {
+                if channel.default {
+                    return Err(format!(
+                        "juliaup uses Julia {JULIA_VERSION} as its default, so it stays. To remove it, make another Julia juliaup's default first (`juliaup add release`, then `juliaup default release`), then remove it again."
+                    ));
+                }
+                crate::juliaup::remove(&juliaup, JULIA_VERSION)?;
+            }
         }
         let _ = std::fs::remove_file(mark);
     }
     Ok(())
+}
+
+/// Whether Endeavor added juliaup's channel for its Julia.
+fn marked() -> bool {
+    added_mark().is_some_and(|mark| mark.exists())
 }
 
 /// The `julia` Endeavor downloads into its cache folder.
@@ -366,7 +399,7 @@ fn own_item() -> Result<wire::Item, String> {
         return Ok(item(format!("Julia {JULIA_VERSION}, added to juliaup"), tarball().ok().map(|t| t.2), None));
     }
     if cfg!(windows) {
-        return Ok(item(format!("juliaup and Julia {JULIA_VERSION}"), None, None));
+        return Ok(item(format!("juliaup (Julia's installer, from the Microsoft Store) and Julia {JULIA_VERSION} through it"), Some(WINDOWS_SIZE), None));
     }
     let dir = download_dir().ok_or("HOME isn't set")?;
     Ok(item(format!("Julia {JULIA_VERSION}"), Some(tarball()?.2), Some(dir)))
