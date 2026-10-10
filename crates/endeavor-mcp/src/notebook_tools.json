@@ -9,7 +9,7 @@
     "name": "list_notebooks"
   },
   {
-    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run). Counts as the read an edit needs. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`. While the notebook installs the packages its cells need, a queued cell's read waits for that, up to 45 seconds, and then has `packages` (the step, the packages, how long so far, and the last line of the package log) and a `message`.",
+    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run; in an R notebook also a result made before a cell it depends on last ran). An R notebook's cell that hasn't run since the notebook opened or restarted has `not_run`. Counts as the read an edit needs. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`. While a Julia notebook installs the packages its cells need, a queued cell's read waits for that, up to 45 seconds, and then has `packages` (the step, the packages, how long so far, and the last line of the package log) and a `message`.",
     "inputSchema": {
       "properties": {
         "cell_id": {
@@ -510,7 +510,7 @@
     "inputSchema": {
       "properties": {
         "path": {
-          "description": "Where to create it, ending in `.jl`; a relative path is inside the session's folder. The file must not exist yet and its folder must. Default: a generated name in the session's folder.",
+          "description": "Where to create it, ending in `.jl` for a Julia notebook or `.R` for an R notebook (not on Windows); a relative path is inside the session's folder. The file must not exist yet and its folder must. Default: a Julia notebook with a generated name in the session's folder.",
           "type": "string"
         }
       },

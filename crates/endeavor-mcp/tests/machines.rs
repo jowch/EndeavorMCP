@@ -2494,7 +2494,7 @@ fn a_front_without_a_folder_refuses_relative_paths_before_it_starts_a_runtime_or
     let tools = front.request("tools/list", json!({}));
     let described = |name: &str| tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["inputSchema"]["properties"]["path"]["description"].as_str().unwrap().to_owned();
     assert!(described("open_notebook").starts_with("The notebook file, as an absolute path: this server was not told the project folder."), "{}", described("open_notebook"));
-    assert!(described("new_notebook").starts_with("Where to create it: an absolute path ending in `.jl`."), "{}", described("new_notebook"));
+    assert!(described("new_notebook").starts_with("Where to create it: an absolute path ending in `.jl` for a Julia notebook"), "{}", described("new_notebook"));
 
     // The status names no project folder.
     let status = front.ok("session_status", json!({}));

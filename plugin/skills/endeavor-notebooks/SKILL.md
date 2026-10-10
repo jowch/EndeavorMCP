@@ -5,7 +5,7 @@ description: >-
   (`new_notebook`, `open_notebook`, `read_cell`, `edit_cell`,
   `submit_changes`, ...): creating or opening a notebook; adding, editing,
   deleting, folding or running cells; reading results and checking plots;
-  widgets and data analysis in a Pluto (Julia) notebook; working in a notebook
+  widgets and data analysis in a Julia (Pluto) or R (Ember) notebook; working in a notebook
   another agent has open; or a notebook tool refusing a call. Read it before
   the first notebook tool call of a session. Not for Jupyter `.ipynb` files.
 ---
@@ -18,7 +18,7 @@ The notebook is reactive. Running a cell also runs every cell that depends on it
 
 ## Before the first cell
 
-- **Engine.** Each engine limits what one cell may hold, and code that would be fine in a script fails. Read the engine's reference before you write a cell. Pluto (Julia, `.jl`): [reference/pluto.md](reference/pluto.md).
+- **Engine.** The file's ending names the language: `.jl` is a Julia notebook (Pluto), `.R` an R notebook (Ember). Each engine limits what one cell may hold, and code that would be fine in a script fails. Read the engine's reference before you write a cell. Julia: [reference/pluto.md](reference/pluto.md). R: [reference/ember.md](reference/ember.md).
 - **Host.** You are in the Endeavor app unless the server's instructions say the notebooks run without it. In the app, read [reference/app.md](reference/app.md): prompts name the notebook, and the user approves runs. Without the app, skip it. Either way, when `new_notebook` or `open_notebook` returns `browser_url`, give it to the user so they can watch. If the result has `opened_in_browser` true, the notebook should already be open in their browser: say so, and give the address in case it isn't.
 - **Paths.** If a tool says the server was not told the project folder, give absolute paths: your working folder plus the file name.
 - **On a server.** When the notebook runs on a server, its files are there. Use `list_folder`, `read_file` and `run_shell` for them; your own file tools see the user's computer, and may find a copy of the project there and show no error.
@@ -27,7 +27,7 @@ The notebook is reactive. Running a cell also runs every cell that depends on it
 
 A session works in one notebook: the first it creates or opens. `list_notebooks` marks it `this_session`.
 
-- No notebook yet and the user wants notebook work: call `new_notebook` with a short descriptive file name. Don't ask the user to make one. Its empty first cell is in `cell_ids` and counts as read, so edit that cell first.
+- No notebook yet and the user wants notebook work: call `new_notebook` with a short descriptive file name, ending in `.jl` for Julia or `.R` for R. Make an R notebook when the user asks for R or their project is in R; otherwise Julia. R notebooks don't run on Windows or in the Endeavor app yet: there, tell the user and offer Julia. Don't ask the user to make one. Its empty first cell is in `cell_ids` and counts as read, so edit that cell first.
 - The user names an existing notebook: `open_notebook`. If it is unclear which file they mean, ask; don't search for one to open. If the notebook is already open, the session joins it as it is and nothing runs (`already_open`). That is also how a second agent shares your notebook: give it the path.
 - After that, any call that opens, creates, changes or runs another notebook fails with `one_notebook`. A new step of the analysis is a new section in this notebook. If the user wants to work in another notebook, they start a new session.
 
@@ -40,7 +40,7 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
    - Pass `wait_for_completion=true` when you will read the result next. Without it the run returns at once: do other work, then read the cells until `running` and `queued` are false.
    - A waited run waits at most 45 seconds from the start of the call. If the run is still going then, the call returns normally with the cells still running in `execution.still_running` and a `message` (`execution.status` is `running`, or `errored` if a cell already failed). The run continues and its cells are no longer in `pending_run`: read them later with `read_cell` or `list_notebooks`, and do not run them again.
    - A waited run that ended lists, under `outputs.changed`, the cells you ran and any upstream cells that had never run, leaving out cells with no output. It does not cover dependents, and `completed` only means those cells did not error. Read the dependents you care about.
-   - The first time a notebook uses a package (`using DataFrames`), Julia installs and precompiles it before any cell runs, and every cell stays `queued`. That can take several minutes. Results then have `packages` and a `message` saying so. Tell the user it is installing, then call `read_cell` on a queued cell to wait: while packages install, each call waits up to 45 seconds. Don't run the cells again meanwhile. If the message says it is taking longer than usual, tell the user and follow the message: keep waiting only while the last line of the package log changes.
+   - The first time a notebook uses a package (`using DataFrames` in Julia, `library(dplyr)` in R), it is installed before the cells that need it run, and they stay `queued`. That can take several minutes. Tell the user it is installing, then call `read_cell` on a queued cell to wait. Don't run the cells again meanwhile. In a Julia notebook every cell waits, results have `packages` and a `message` saying so, and while packages install each `read_cell` waits up to 45 seconds. If the message says it is taking longer than usual, tell the user and follow the message: keep waiting only while the last line of the package log changes.
    - Look at `errored`, `error` and the output before you report.
 
 `delete_cell`, `move_cell` and `fold_cell` are not staged. Deleting reruns the cell's dependents and can't be undone.

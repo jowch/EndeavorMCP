@@ -8,9 +8,10 @@ use serde_json::{Value, json};
 pub const TOOL: &str = "notebook_guide";
 
 /// Each skill file by its path under `plugin/skills`.
-const FILES: [(&str, &str); 6] = [
+const FILES: [(&str, &str); 7] = [
     (NOTEBOOKS, include_str!("../../../plugin/skills/endeavor-notebooks/SKILL.md")),
     (PLUTO, include_str!("../../../plugin/skills/endeavor-notebooks/reference/pluto.md")),
+    ("endeavor-notebooks/reference/ember.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/ember.md")),
     ("endeavor-notebooks/reference/app.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/app.md")),
     ("endeavor-notebooks/reference/errors.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/errors.md")),
     ("endeavor-machines/SKILL.md", include_str!("../../../plugin/skills/endeavor-machines/SKILL.md")),
@@ -20,12 +21,12 @@ const FILES: [(&str, &str); 6] = [
 /// The skill the guide is, when asked for no topic.
 const NOTEBOOKS: &str = "endeavor-notebooks/SKILL.md";
 
-/// The engine reference the guide includes while Pluto is the only engine.
+/// The engine reference the guide includes: Julia's, the default engine; R's is a topic.
 const PLUTO: &str = "endeavor-notebooks/reference/pluto.md";
 
 /// Points an agent without the plugin's skills to the guide.
 const READ_GUIDE: &str = "Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
-how to find this session's notebook, the read-edit-run loop, and the rules for a Pluto cell.";
+how to find this session's notebook, the read-edit-run loop, and the rules for a cell.";
 
 /// Where the guide keeps what only the app needs, for an agent in the app without the skills.
 const APP_GUIDE: &str = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
@@ -36,8 +37,8 @@ const APP: &str = "These tools edit and run a live Pluto (Julia) notebook that t
 /// What a runtime without the app (`endeavor serve` or `mcp`) tells every
 /// agent: the skill keeps what holds only in the app apart, and this says
 /// which side the agent is on.
-pub const STANDALONE: &str = "These tools edit and run live Pluto (Julia) notebooks without the Endeavor app: \
-the user watches them in a web browser, on Pluto's own page, and there is no notebook pane next to this chat. \
+pub const STANDALONE: &str = "These tools edit and run live notebooks, in Julia (Pluto) or R (Ember), without the Endeavor app: \
+the user watches them in a web browser, on the notebook's own page, and there is no notebook pane next to this chat. \
 `new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. \
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts.";
@@ -97,14 +98,15 @@ pub fn read(arguments: &Value) -> Result<String, String> {
     }
 }
 
-/// The notebook skill and the Pluto reference, and how to ask for what they and the machine tools point to.
+/// The notebook skill and the Julia reference, and how to ask for what they and the machine tools point to.
 fn whole() -> String {
     let file = |wanted: &str| {
         let (path, text) = FILES.iter().find(|(p, _)| *p == wanted).expect("the file is in FILES");
         served(path, text)
     };
     format!(
-        "This guide is the notebook skill followed by the Pluto reference (`endeavor-notebooks/reference/pluto.md`), so where the skill says to read that reference, it is below: don't ask for it again. \
+        "This guide is the notebook skill followed by the reference for Julia notebooks (`endeavor-notebooks/reference/pluto.md`), so where the skill says to read that reference, it is below: don't ask for it again. \
+         For an R notebook, read the topic `endeavor-notebooks/reference/ember.md` before its first cell. \
          Other links to .md paths in this guide are further topics: call `notebook_guide` with `topic` set to the path when the guide says to read one.\n\n\
          {}\n---\n\n\
          {}\n---\n\n\
@@ -187,11 +189,11 @@ mod tests {
         let guide = read(&json!({})).unwrap();
         assert!(guide.contains("\n# Working in a live notebook\n"), "{guide}");
         assert!(!guide.contains("\nname: endeavor-"), "front matter left in");
-        for topic in ["pluto", "app", "errors"] {
+        for topic in ["pluto", "ember", "app", "errors"] {
             assert!(guide.contains(&format!("[reference/{topic}.md](endeavor-notebooks/reference/{topic}.md)")), "{topic}");
         }
         assert!(guide.contains("\n# Pluto notebooks (Julia)\n"), "the guide holds the cell rules");
-        assert!(!guide.contains("# In the Endeavor app") && !guide.contains("# Error codes"), "other references are read when asked for");
+        assert!(!guide.contains("# In the Endeavor app") && !guide.contains("# Error codes") && !guide.contains("# Ember notebooks (R)"), "other references are read when asked for");
         for link in guide.split("](").skip(1).filter_map(|l| l.split_once(')')).map(|(t, _)| t).filter(|t| !t.contains("://")) {
             assert!(read(&json!({ "topic": link })).is_ok(), "the guide links to {link}, which isn't a topic");
         }

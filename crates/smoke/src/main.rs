@@ -1,7 +1,7 @@
 //! The agent smoke suite: fixed notebook tasks run through a real agent, judged
 //! from the MCP traffic and the notebooks the agent leaves (docs/smoke.md).
 //!
-//!     endeavor-smoke run [--only N1,N4] [--out DIR] [--julia PATH] [--depot DEPOT] [--retries N] [--model MODEL]
+//!     endeavor-smoke run [--only N1,N4] [--out DIR] [--julia PATH] [--r PATH] [--skip-r] [--depot DEPOT] [--retries N] [--model MODEL]
 //!     endeavor-smoke mcp ARGS...    the recording proxy, started by the plugin as ENDEAVOR_BIN
 
 mod checks;
@@ -18,7 +18,7 @@ fn main() {
         Some("mcp") => proxy::main(&args[1..]),
         Some("run") => run::main(&args[1..]),
         _ => {
-            eprintln!("usage: endeavor-smoke run [--only IDS] [--out DIR] [--julia PATH] [--depot DEPOT] [--retries N] [--model MODEL]\n       endeavor-smoke mcp ARGS...   (the recording proxy; the runner sets it up)");
+            eprintln!("usage: endeavor-smoke run [--only IDS] [--out DIR] [--julia PATH] [--r PATH] [--skip-r] [--depot DEPOT] [--retries N] [--model MODEL]\n       endeavor-smoke mcp ARGS...   (the recording proxy; the runner sets it up)");
             2
         }
     };

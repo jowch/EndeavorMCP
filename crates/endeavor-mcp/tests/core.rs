@@ -412,7 +412,7 @@ fn an_agent_without_the_session_header_is_told_apart_by_its_mcp_session_id() {
     assert_eq!(
         refused["message"],
         format!(
-            "This session works on one notebook, {a}, so it can't open {b}. You can still read other notebooks as plain .jl files. \
+            "This session works on one notebook, {a}, so it can't open {b}. You can still read other notebooks as plain files. \
              To work on another notebook, suggest the user start a new session with it.\n\
              See `notebook_guide` for how to use these tools."
         )
@@ -1041,6 +1041,22 @@ fn in_manual_an_edit_waits_for_the_users_answer() {
     // Plan refuses edits rather than holding them.
     policy("plan", true);
     assert_eq!(text(&mcp(&core, &edit(8), &caller).1)["error"], "plan_mode");
+}
+
+#[test]
+fn an_agent_in_the_app_gets_no_r_notebooks() {
+    let dir = state_dir("core-app-r");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let call = |id: u32, name: &str, path: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"path":"{path}"}}}}}}"#);
+    let why = "R notebooks don't open in the Endeavor app yet. Tell the user, and offer a Julia notebook (.jl) instead.";
+    let seven = [("X-Endeavor-Session", "7")];
+    assert_eq!(mcp(&core, &call(1, "new_notebook", "/tmp/growth.R"), &seven).1, tool_error(1, "unsupported", why));
+    assert_eq!(mcp(&core, &call(2, "open_notebook", "/tmp/growth.r"), &seven).1, tool_error(2, "unsupported", why));
+    assert!(!mcp(&core, &call(3, "open_notebook", "/tmp/nope.jl"), &seven).1.contains("unsupported"), "Julia notebooks open");
+    // `endeavor mcp`'s front on a server sends a browser port, which the app never does: its R notebooks open.
+    let front = [("X-Endeavor-Session", "8"), ("X-Endeavor-Host", "gpu-box"), ("X-Endeavor-Browser-Port", "4321")];
+    assert!(!mcp(&core, &call(4, "open_notebook", "/tmp/growth.R"), &front).1.contains("Endeavor app"), "a server's runtime serves R to the front");
 }
 
 #[test]
