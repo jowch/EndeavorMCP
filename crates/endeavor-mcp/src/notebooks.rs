@@ -748,7 +748,8 @@ impl Notebooks {
     /// The engine's `method` on a background thread, waited for up to `wait`, with the params it
     /// was made with (`open_waited`). When the wait runs out, the call answers `notebook_opening`
     /// with `taking` and goes on; the same call again, with the same `key`, waits for it and gets
-    /// its result, kept for `OPENING_KEPT`.
+    /// its result and its params (an earlier call's, which may differ from this one's), kept for
+    /// `OPENING_KEPT`.
     fn waited(&self, method: &str, params: Value, key: String, wait: Duration, taking: &str) -> Result<(Value, Value), String> {
         let began = Instant::now();
         let opening = {
