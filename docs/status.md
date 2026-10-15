@@ -244,7 +244,10 @@ Next:
   an open that takes longer goes on, the call answers `notebook_opening`, and the same
   call again gets its result (#16). `allow_execution` is waited the same way: leaving
   safe preview starts a new Julia process, which with packages to install can take
-  longer than a call (#128). A cold first open still compiles for about 20 s:
+  longer than a call (#128). `run_shell` too: a command still running when the call
+  has waited returns `still_running` with its output so far and goes on, up to its
+  `timeout_seconds`; the same call again waits for it, without asking the user again,
+  and gets its result (#16). A cold first open still compiles for about 20 s:
   there is no precompile workload yet.
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
