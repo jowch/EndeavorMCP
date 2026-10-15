@@ -152,6 +152,12 @@ impl Engine {
         if matches!(method, "open" | "new")
             && let Some(release) = self.hold_open.lock().unwrap().take()
         {
+            // As the runtime does, a new notebook's file is saved before the slow open.
+            if method == "new"
+                && let Some(path) = params["path"].as_str()
+            {
+                std::fs::write(path, "").unwrap();
+            }
             let _ = release.recv();
         }
         let now = *self.clock.lock().unwrap();
@@ -1193,9 +1199,19 @@ fn an_open_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_resul
     let made = make(Instant::now()).unwrap();
     assert_eq!((&made["path"], &made["created"]), (&json!(path), &json!(true)), "{made}");
     assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "new").count(), 1, "made once");
-    // Its result was collected: a third call is a new call (on disk it would find the file there).
-    make(Instant::now()).unwrap();
-    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "new").count(), 2);
+    // Its result was collected: a third call is a new call, and the file is there.
+    assert!(make(Instant::now()).unwrap_err().contains("file_exists::"));
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "new").count(), 1);
+
+    // An open made again with another `run_notebook` gets the open under way, and says how it was made.
+    let other = format!("{dir}{SEP}nb0.jl");
+    let (release, held) = mpsc::channel();
+    *s.engine.hold_open.lock().unwrap() = Some(held);
+    let open = |run: bool, began| s.notebooks.tool("a2", "open_notebook", &json!({ "path": other, "run_notebook": run }), &Folder::Process, began).map(tool_json);
+    assert!(open(false, late).unwrap_err().starts_with("notebook_opening::Opening"));
+    release.send(()).unwrap();
+    let opened = open(true, Instant::now()).unwrap();
+    assert_eq!((&opened["ran"], &opened["execution_allowed"], opened.get("warnings")), (&json!(false), &json!(false), None), "{opened}");
 }
 
 #[test]

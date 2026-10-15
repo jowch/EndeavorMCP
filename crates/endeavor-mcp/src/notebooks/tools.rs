@@ -951,8 +951,9 @@ impl Call<'_> {
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
         let key = format!("open {}", canonical_path(path).unwrap_or_else(|_| path.clone()));
-        let opened = match self.nbs.open_waited("open", json!({ "path": path, "run": run }), key, self.run_wait(), &format!("Opening '{path}'")) {
-            Ok(opened) => opened,
+        // A call made again while an open is under way gets that open, run as that one asked.
+        let (opened, run) = match self.nbs.open_waited("open", json!({ "path": path, "run": run }), key, self.run_wait(), &format!("Opening '{path}'")) {
+            Ok((opened, params)) => (opened, params["run"] == true),
             Err(error) if already_open(&error) => return self.join(path).unwrap_or(Err(error)),
             Err(error) => return Err(error),
         };
@@ -1019,11 +1020,13 @@ impl Call<'_> {
                     }
                     _ => {}
                 }
-                if std::path::Path::new(&path).exists() {
+                // The engine saves the file before it opens it, so a creation still under way has made it already.
+                let held = self.nbs.opening(&format!("new {path}"));
+                if !held && std::path::Path::new(&path).exists() {
                     return Err(argument_error(&format!("file_exists::'{path}' already exists; use open_notebook to load it")));
                 }
                 let dir = super::parent_dir(&path);
-                if !std::path::Path::new(&dir).is_dir() {
+                if !held && !std::path::Path::new(&dir).is_dir() {
                     return Err(argument_error(&format!("invalid_path::Directory does not exist: '{dir}'")));
                 }
                 json!({ "path": path })
@@ -1035,7 +1038,7 @@ impl Call<'_> {
             Some(path) => (format!("new {path}"), format!("Creating '{path}'")),
             None => (format!("new in {} for {}", params["folder"].as_str().unwrap_or_default(), self.owner), "Creating the notebook".to_owned()),
         };
-        let made = self.nbs.open_waited("new", params, key, self.run_wait(), &doing)?;
+        let (made, _) = self.nbs.open_waited("new", params, key, self.run_wait(), &doing)?;
         let id = made["notebook_id"].as_str().unwrap_or_default();
         let mut cell_ids = Vec::new();
         // The caller knows these cells are empty; without a read first, the first edit would be refused.

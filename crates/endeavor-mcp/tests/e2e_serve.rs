@@ -399,11 +399,19 @@ fn serve_and_mcp_without_the_app() {
             .unwrap();
         let replies = lines(mcp.stdout.take().unwrap());
         let mut stdin = mcp.stdin.take().unwrap();
-        writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "new_notebook", "arguments": { "path": "b.jl" } } })).unwrap();
-        let reply: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(120)).unwrap()).unwrap();
-        let created: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        // Julia starts again for it, so its first notebook may still be opening when the call ends: the same call again gets it.
+        let mut id = 0;
+        let (reply, created) = loop {
+            id += 1;
+            writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "new_notebook", "arguments": { "path": "b.jl" } } })).unwrap();
+            let reply: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(120)).unwrap()).unwrap();
+            let created: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+            if !(reply["result"]["isError"] == false && matches!(created["error"].as_str(), Some("julia_starting" | "notebook_opening")) && id < 20) {
+                break (reply, created);
+            }
+        };
         assert_eq!(created["path"], json!(other.join("b.jl").display().to_string()), "{reply}");
-        writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } })).unwrap();
+        writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": id + 1, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } })).unwrap();
         let reply: Value = serde_json::from_str(&replies.recv_timeout(Duration::from_secs(120)).unwrap()).unwrap();
         let listed: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         let marked: Vec<(&str, &Value)> = listed.as_array().unwrap().iter().map(|nb| (nb["path"].as_str().unwrap(), &nb["this_session"])).collect();

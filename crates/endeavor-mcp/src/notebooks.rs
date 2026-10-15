@@ -257,9 +257,9 @@ impl State {
 }
 
 /// A notebook's open or creation in its engine, which goes on after the call that asked for it
-/// stopped waiting: its result, and when it came, once it has.
-#[derive(Default)]
+/// stopped waiting: what it was asked with, and its result and when it came, once it has.
 struct Opening {
+    params: Value,
     done: Mutex<Option<(Result<Value, String>, Instant)>>,
     came: Condvar,
 }
@@ -725,19 +725,27 @@ impl Notebooks {
         adapter_call(&self.engines, &json!({ "method": method, "params": params }))
     }
 
-    /// The engine's `open` or `new` (`method`), starting the engine first, waited for up to `wait`.
-    /// The first notebook in a new Julia process compiles for a while, so with Julia's start the
-    /// call could outlast what an agent's call waits. Then the open goes on, and the call answers
-    /// `notebook_opening` (`doing` says what); the same call again, with the same `key`, waits for
-    /// that open and gets its result, which is kept for `OPENING_KEPT`.
-    fn open_waited(&self, method: &str, params: Value, key: String, wait: Duration, doing: &str) -> Result<Value, String> {
+    /// Whether an open or creation for `key` is under way or kept (`open_waited`).
+    fn opening(&self, key: &str) -> bool {
+        self.openings.lock().unwrap().get(key).is_some_and(|opening| opening.done.lock().unwrap().as_ref().is_none_or(|(_, at)| at.elapsed() < OPENING_KEPT))
+    }
+
+    /// The engine's `open` or `new` (`method`), starting the engine first, waited for up to `wait`,
+    /// with the params it was made with. The first notebook in a new Julia process compiles for a
+    /// while, so with Julia's start the call could outlast what an agent's call waits. Then the open
+    /// goes on, and the call answers `notebook_opening` (`doing` says what); the same call again, with
+    /// the same `key`, waits for that open and gets its result and its params (an earlier call's,
+    /// which may differ from this one's), kept for `OPENING_KEPT`. If no call comes again, the open
+    /// still ends in the engine, but no session is recorded as having opened it; a later
+    /// `open_notebook` joins it as already open.
+    fn open_waited(&self, method: &str, params: Value, key: String, wait: Duration, doing: &str) -> Result<(Value, Value), String> {
         let began = Instant::now();
         self.start_engine(engines::of_params(&params), wait)?;
         let opening = {
             let mut openings = self.openings.lock().unwrap();
             openings.retain(|_, opening| opening.done.lock().unwrap().as_ref().is_none_or(|(_, at)| at.elapsed() < OPENING_KEPT));
             let opening = openings.entry(key.clone()).or_insert_with(|| {
-                let opening = Arc::new(Opening::default());
+                let opening = Arc::new(Opening { params: params.clone(), done: Mutex::default(), came: Condvar::new() });
                 let (engines, message, done) = (self.engines.clone(), json!({ "method": method, "params": params }), opening.clone());
                 std::thread::spawn(move || {
                     let result = adapter_call(&engines, &message);
@@ -758,7 +766,7 @@ impl Notebooks {
                 if openings.get(&key).is_some_and(|kept| Arc::ptr_eq(kept, &opening)) {
                     openings.remove(&key);
                 }
-                return result;
+                return result.map(|result| (result, opening.params.clone()));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
