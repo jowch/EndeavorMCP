@@ -856,7 +856,7 @@ impl Relay {
         )
     }
 
-    /// The reply to a call that couldn't go to a runtime.
+    /// The reply to a call that couldn't go to a runtime: an error, except while it is on its way.
     pub(super) fn unready(&self, message: &Value, tool: Option<&str>, unready: NotReady) {
         let Some(id) = message.get("id").filter(|id| !id.is_null()) else { return };
         let answer = |result: Value| to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": text_result(&to_json(&result)) }));
@@ -869,6 +869,10 @@ impl Relay {
                     result["state"] = "stopped".into();
                 }
                 answer(result)
+            }
+            // Starting, connecting or queued: nothing failed, and the agent waits by calling again.
+            (_, Some(reached)) if message["method"] == "tools/call" && matches!(reached.outcome, Outcome::StillWorking(_) | Outcome::Queued { .. }) => {
+                to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": text_result(&unready.message) }))
             }
             _ => tool_failure(id, message, &unready.message),
         };

@@ -202,9 +202,9 @@ pub fn main(argv: &[String]) -> ! {
     pass_on_stop_signals(stop_signals, served.clone());
     let r = Arc::new(RStarter::new(&args, &engine_token, allow_r_install));
     let starting = (r.clone(), served.clone());
-    let _ = served.bridge.notebooks.starter.set(Box::new(move |backend| match backend {
+    let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, wait| match backend {
         Backend::Ember => starting.0.start(&starting.1),
-        Backend::Pluto => starting.1.julia.wait(&starting.1, JULIA_WAIT).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
+        Backend::Pluto => starting.1.julia.wait(&starting.1, wait.min(JULIA_WAIT)).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait. Set before
     // the first connection: the front that started the core sends its folder as soon as it can.
@@ -258,7 +258,8 @@ pub fn main(argv: &[String]) -> ! {
 }
 
 /// How long a call that needs Julia waits for it to start before it's told Julia is still starting:
-/// well within the 45 s an agent's call waits.
+/// well within the 45 s an agent's call waits, and less if the call already waited (for the user's
+/// answer, say), so that the notebook's open has some of the 45 s too.
 const JULIA_WAIT: Duration = Duration::from_secs(30);
 
 /// What ends the core.

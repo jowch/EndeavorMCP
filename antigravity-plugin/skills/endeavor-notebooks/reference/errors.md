@@ -2,6 +2,18 @@
 
 Read this when a notebook tool returns a code the skill's main text doesn't explain. A failed call returns `{"error": code, "message": ...}`. A call that worked can carry `warnings`, each written `code::text`; `allow_execution` puts them under `run_warnings`.
 
+## Still starting
+
+These come back the same way, but nothing failed and the call is not marked an error: something is still starting. Tell the user, then make the same call again. Don't look for a fix or try another way meanwhile.
+
+| `error` | Meaning | Do |
+|---|---|---|
+| `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take several minutes | Make the same call again in a minute |
+| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Make the same call again in a minute |
+| `notebook_opening` | `open_notebook` or `new_notebook` took longer than one call waits, often the first notebook in a new Julia process. The open goes on | Make the same call again, with the same arguments, to get its result |
+
+On a machine, a call made while Endeavor starts there, or while its Slurm job is queued, says so in plain text; it is not an error either. See the machines skill.
+
 ## Errors
 
 | `error` | Meaning | Do |
@@ -26,11 +38,9 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 | `not_a_file`, `not_a_folder` | `read_file` was given a folder, or `list_folder` a file | Use the other tool |
 | `unsupported` | `run_shell` on a Windows server | Don't use it there |
 | `unsupported` | An R notebook (`.R`) on Windows, or in a runtime without R notebooks | Tell the user R notebooks don't run there yet; offer a Julia notebook |
-| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Tell the user, then make the same call again in a minute |
 | `r_not_found` | No R was found: `Rscript` isn't on the PATH, or the R set for this machine isn't there. On the user's own Mac, the message offers Endeavor's own R | If it offers Endeavor's own R, do what the message says: through `use_machine`, ask the user and don't pass `install: true` without their yes; in the Endeavor app, tell the user where to install it, as the message says. Otherwise tell the user how to get R, as the message says |
 | `r_failed` | R started but Ember didn't: it couldn't install, or it stopped | Tell the user what the message says; the runtime's log has the rest |
 | `risky_source` | The notebook came from a remote source, so only the user can allow it to run | Ask the user to run it from the notebook |
-| `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take several minutes | Tell the user, then make the same call again in a minute |
 | `julia_not_found` | A Julia notebook was opened or made and no Julia was found. Endeavor may download one only if the user agrees | Ask the user, as the message says; don't pass `install: true` without their yes |
 | `julia_failed` | Julia couldn't start: the Julia or shell line set for it doesn't work, or it stopped while starting | Tell the user what the message says. On a machine, they can set Julia's path with `add_machine`. Calling again tries once more |
 | `julia_failed`, "made no progress" | Julia's start made no progress for 30 minutes, so Endeavor stopped it | Tell the user what the message says, and ask them before calling again: trying again starts Julia from the beginning |

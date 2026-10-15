@@ -57,15 +57,18 @@ impl Session {
         loop {
             let msg = self.request("tools/call", json!({ "name": name, "arguments": arguments }))?;
             let text = msg["result"]["content"][0]["text"].as_str().unwrap_or_default().to_owned();
-            if msg["result"]["isError"] == true {
-                if text.to_lowercase().contains("starting") && began.elapsed() < Duration::from_secs(600) {
-                    continue;
-                }
-                // Ember's first install, for an R notebook, takes minutes.
-                if text.contains("r_installing") && began.elapsed() < Duration::from_secs(1200) {
-                    std::thread::sleep(Duration::from_secs(5));
-                    continue;
-                }
+            // Still starting is a normal result (Julia, a notebook's open, a machine's runtime), or an error from an older runtime.
+            let code = serde_json::from_str::<Value>(&text).ok().and_then(|reply| reply["error"].as_str().map(str::to_owned)).unwrap_or_default();
+            // Ember's first install, for an R notebook, takes minutes.
+            if code == "r_installing" && began.elapsed() < Duration::from_secs(1200) {
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+            let starting = matches!(code.as_str(), "julia_starting" | "notebook_opening") || (code.is_empty() && text.to_lowercase().contains("starting"));
+            if starting && began.elapsed() < Duration::from_secs(600) {
+                continue;
+            }
+            if msg["result"]["isError"] == true || !code.is_empty() {
                 return Err(format!("{name}: {text}"));
             }
             return serde_json::from_str(&text).map_err(|e| format!("{name}: {e}: {text}"));
