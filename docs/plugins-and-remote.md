@@ -724,7 +724,9 @@ needs a new job, the result says so and the agent asks you.
 `open_notebook` joins a notebook that is already open. `list_notebooks` and
 `session_status` gain the machine, the job and its end time.
 
-`list_folder`, `read_file` and `run_shell` run on the server. The runtime
+`list_folder`, `read_file` and `run_shell` run on the server. A command
+that outlasts the call goes on, up to its `timeout_seconds`, and the same call
+again waits for it and gets its result. The runtime
 lists and allows them only for a session that names its server, so the
 front lists them always and they refuse on this computer, as built. Results
 are in [endeavor-mcp.md](endeavor-mcp.md#the-machine-tools).

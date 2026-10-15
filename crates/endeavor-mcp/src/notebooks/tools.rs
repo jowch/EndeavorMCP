@@ -25,7 +25,7 @@ pub(super) const TIMEOUT_SECONDS: f64 = 60.0;
 /// user's own run of the same cells (`ran_after_user`) comes out of it.
 pub const WAIT_SECONDS: f64 = 45.0;
 /// The least a run is waited for, however much of `WAIT_SECONDS` went before.
-const WAIT_FLOOR_SECONDS: f64 = 5.0;
+pub const WAIT_FLOOR_SECONDS: f64 = 5.0;
 /// Claude accepts images up to about 5 MB; plots are typically tens of KB.
 const MAX_IMAGE_BYTES: usize = 4_000_000;
 /// How long a package step can take before the agent is told it is taking

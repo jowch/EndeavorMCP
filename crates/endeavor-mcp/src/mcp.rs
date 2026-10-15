@@ -452,12 +452,17 @@ impl Bridge {
             };
         }
         if host_tools::NAMES.contains(&name) {
-            if let Err(result) = self.ask_first(call, name, &arguments) {
-                return result;
-            }
             let folder = self.folder(&caller.owner);
             let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
-            return match host_tools::call(name, &arguments, &host_tools::Shell { folder: folder.dir(), env: &env }) {
+            let shell = host_tools::Shell { folder: folder.dir(), env: &env, wait: Duration::ZERO };
+            // The same command again only waits for the one already started: the user was asked once.
+            if !host_tools::started(name, &arguments, &shell)
+                && let Err(result) = self.ask_first(call, name, &arguments)
+            {
+                return result;
+            }
+            let shell = host_tools::Shell { wait: shell_wait(call.began), ..shell };
+            return match host_tools::call(name, &arguments, &shell) {
                 Ok(result) => text(&result),
                 Err(error) => tool_error(&error, false),
             };
@@ -585,6 +590,16 @@ fn ask_wait(tool: &str) -> Duration {
         "open_notebook" | "new_notebook" => Duration::from_secs(20),
         _ => Duration::from_secs_f64(notebooks::WAIT_SECONDS),
     }
+}
+
+/// How long `run_shell` waits for its command: what is left of `WAIT_SECONDS`, but at least
+/// `WAIT_FLOOR_SECONDS`, as a notebook run. A debug build reads `ENDEAVOR_TEST_SHELL_WAIT_SECS`.
+fn shell_wait(began: Instant) -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_SHELL_WAIT_SECS").ok()?.parse().ok()).flatten();
+    if let Some(seconds) = test {
+        return Duration::from_secs_f64(seconds);
+    }
+    Duration::from_secs_f64(notebooks::WAIT_SECONDS).saturating_sub(began.elapsed()).max(Duration::from_secs_f64(notebooks::WAIT_FLOOR_SECONDS))
 }
 
 /// Whether a call changes or runs anything, and so takes down the session's asks left up for other

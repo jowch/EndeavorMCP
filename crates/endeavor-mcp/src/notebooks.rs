@@ -33,7 +33,7 @@ use wire::backend::Backend;
 
 pub use engines::Engines;
 pub use r::R;
-pub use tools::{Reply, WAIT_SECONDS};
+pub use tools::{Reply, WAIT_FLOOR_SECONDS, WAIT_SECONDS};
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
 /// How long the result of an open that outlasted its call is kept for the same call made again.

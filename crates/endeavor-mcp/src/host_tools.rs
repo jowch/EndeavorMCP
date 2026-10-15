@@ -17,7 +17,12 @@ use std::os::unix::process::CommandExt;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 #[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
+#[cfg(unix)]
+use std::time::Instant;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -32,6 +37,9 @@ const READ_FILE_MAX_LINE: usize = 2000;
 const SHELL_KEEP_HALF: usize = 15_000;
 #[cfg(unix)]
 const SHELL_DRAIN_GRACE: Duration = Duration::from_secs(2);
+/// How long a finished command's result is kept for the same call made again.
+#[cfg(unix)]
+const SHELL_KEPT: Duration = Duration::from_secs(600);
 
 /// The tools' schemas, for `tools/list`.
 pub fn schemas() -> Vec<Value> {
@@ -62,7 +70,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "run_shell",
-            "description": "Run a shell command on the server this session works on (only for a session on a server), in the user's login shell, with no input. On a Slurm cluster it runs inside the session's job, on the job's node, so only once the job has started. Otherwise it runs on the machine itself, which other people may share: ask the user before a long or heavy command. Don't submit or cancel Slurm jobs with it unless the user asks. The user may be asked to approve each run, so put related steps in one command and don't use it to wait. Returns exit_code, stdout, stderr (long output keeps its start and end) and timed_out. Don't write notebook files with it: the runtime rewrites them; change notebooks with the notebook tools.",
+            "description": "Run a shell command on the server this session works on (only for a session on a server), in the user's login shell, with no input. On a Slurm cluster it runs inside the session's job, on the job's node, so only once the job has started. Otherwise it runs on the machine itself, which other people may share: ask the user before a long or heavy command. Don't submit or cancel Slurm jobs with it unless the user asks. The user may be asked to approve each run, so put related steps in one command and don't use it to wait. Returns exit_code, stdout, stderr (long output keeps its start and end) and timed_out. A command still running when the call has waited about 45 seconds goes on, up to timeout_seconds: the call returns still_running with the output so far, and the same call again (same command, cwd and timeout_seconds) waits for it and gets its result, without asking the user again. Don't write notebook files with it: the runtime rewrites them; change notebooks with the notebook tools.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -83,6 +91,9 @@ pub struct Shell<'a> {
     pub folder: Option<&'a str>,
     /// Set in, or (None) removed from, the command's environment.
     pub env: &'a [(&'a str, Option<&'a str>)],
+    /// How long the call waits for the command: a command that runs longer goes on, and the
+    /// same call again waits for it.
+    pub wait: Duration,
 }
 
 /// Run a host tool. An error is the text Julia showed for its exception, which
@@ -436,8 +447,30 @@ fn run_shell(_args: &Value, _shell: &Shell) -> Result<Value, String> {
     Err(argument_error("unsupported::run_shell runs only on Linux and macOS"))
 }
 
+/// A `run_shell` command and what it has printed so far, by `shell_key`, while it runs and, once
+/// it ends, until the same call collects its result or `SHELL_KEPT` passes.
 #[cfg(unix)]
-fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
+struct Running {
+    began: Instant,
+    cwd: String,
+    state: Mutex<Progress>,
+    came: Condvar,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct Progress {
+    captured: [Captured; 2],
+    /// The result, and when it came.
+    done: Option<(Value, Instant)>,
+}
+
+#[cfg(unix)]
+static RUNNING: LazyLock<Mutex<HashMap<String, Arc<Running>>>> = LazyLock::new(Mutex::default);
+
+/// The folder a `run_shell` call runs in, and the key that makes the same call again find its command.
+#[cfg(unix)]
+fn shell_key(args: &Value, shell: &Shell) -> Result<(String, String, Duration), String> {
     let command = string_arg(args, "command")?;
     if command.trim().is_empty() {
         return Err(argument_error("invalid_argument::command is empty"));
@@ -447,13 +480,90 @@ fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
         None => shell.folder.map(str::to_owned),
     };
     let cwd = host_path(cwd.as_deref())?;
-    if !std::fs::metadata(&cwd).is_ok_and(|m| m.is_dir()) {
-        return Err(argument_error(&format!("not_found::No folder at {cwd}")));
-    }
     let timeout = Duration::from_secs(int_arg(args, "timeout_seconds", 120)?.clamp(1, 600) as u64);
+    Ok((format!("{cwd}\n{}\n{command}", timeout.as_secs()), cwd, timeout))
+}
 
+/// Whether `run_shell` with these arguments is a command already started, still running or with
+/// its result kept: the same call again only waits for it, so the user isn't asked again.
+#[cfg(unix)]
+pub fn started(name: &str, args: &Value, shell: &Shell) -> bool {
+    name == "run_shell" && shell_key(args, shell).is_ok_and(|(key, _, _)| running(&key).is_some())
+}
+
+#[cfg(windows)]
+pub fn started(_name: &str, _args: &Value, _shell: &Shell) -> bool {
+    false
+}
+
+/// The command started under `key`, forgetting results kept too long.
+#[cfg(unix)]
+fn running(key: &str) -> Option<Arc<Running>> {
+    let mut all = RUNNING.lock().unwrap();
+    forget_old(&mut all);
+    all.get(key).cloned()
+}
+
+#[cfg(unix)]
+fn forget_old(all: &mut HashMap<String, Arc<Running>>) {
+    all.retain(|_, r| r.state.lock().unwrap().done.as_ref().is_none_or(|(_, at)| at.elapsed() < SHELL_KEPT));
+}
+
+#[cfg(unix)]
+fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
+    let (key, cwd, timeout) = shell_key(args, shell)?;
+    let running = {
+        // Held while it starts, so the same call made twice at once starts one command.
+        let mut all = RUNNING.lock().unwrap();
+        forget_old(&mut all);
+        match all.get(&key) {
+            Some(running) => running.clone(),
+            None => {
+                if !std::fs::metadata(&cwd).is_ok_and(|m| m.is_dir()) {
+                    return Err(argument_error(&format!("not_found::No folder at {cwd}")));
+                }
+                let running = start_shell(string_arg(args, "command")?, &cwd, timeout, shell)?;
+                all.insert(key.clone(), running.clone());
+                running
+            }
+        }
+    };
+    let deadline = Instant::now() + shell.wait;
+    let mut state = running.state.lock().unwrap();
+    loop {
+        if let Some((result, _)) = &state.done {
+            let result = result.clone();
+            drop(state);
+            let mut all = RUNNING.lock().unwrap();
+            if all.get(&key).is_some_and(|kept| Arc::ptr_eq(kept, &running)) {
+                all.remove(&key);
+            }
+            return Ok(result);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            let seconds = running.began.elapsed().as_secs();
+            return Ok(json!({
+                "still_running": true,
+                "seconds": seconds,
+                "stdout": state.captured[0].text(),
+                "stderr": state.captured[1].text(),
+                "cwd": running.cwd,
+                "message": format!(
+                    "The command is still running ({seconds} s so far) and goes on, up to {} s. Its output so far is above. Make the same call again to wait for it and get its result.",
+                    timeout.as_secs()
+                ),
+            }));
+        }
+        state = running.came.wait_timeout(state, left).unwrap().0;
+    }
+}
+
+/// Start `command` in `cwd`, and a thread that reads its output until it ends or `timeout` kills it.
+#[cfg(unix)]
+fn start_shell(command: &str, cwd: &str, timeout: Duration, shell: &Shell) -> Result<Arc<Running>, String> {
     let mut command = shell_command(command);
-    command.current_dir(&cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (name, value) in shell.env {
         match value {
             Some(value) => command.env(name, value),
@@ -468,10 +578,34 @@ fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
             Ok(())
         });
     }
-    let mut child = command.spawn().map_err(|e| format!("IOError: could not spawn {}: {e}", julia_repr(&cwd)))?;
+    let mut child = command.spawn().map_err(|e| format!("IOError: could not spawn {}: {e}", julia_repr(cwd)))?;
+    let running = Arc::new(Running { began: Instant::now(), cwd: cwd.to_owned(), state: Mutex::default(), came: Condvar::new() });
+    let shared = running.clone();
+    std::thread::spawn(move || {
+        let result = watch_shell(&mut child, timeout, &shared);
+        let mut state = shared.state.lock().unwrap();
+        let result = result.map_or_else(
+            |e| json!({ "error": "io_error", "message": e }),
+            |(code, timed_out)| json!({
+                "exit_code": code,
+                "stdout": state.captured[0].text(),
+                "stderr": state.captured[1].text(),
+                "timed_out": timed_out,
+                "cwd": shared.cwd,
+            }),
+        );
+        state.done = Some((result, Instant::now()));
+        shared.came.notify_all();
+    });
+    Ok(running)
+}
+
+/// Read a command's output into `running` until it has exited and its pipes are done (or the
+/// grace after its exit is over), killing it at `timeout`: its exit code, and whether it timed out.
+#[cfg(unix)]
+fn watch_shell(child: &mut std::process::Child, timeout: Duration, running: &Running) -> Result<(Option<i32>, bool), String> {
     let pid = child.id() as i32;
     let mut pipes = [child.stdout.take().map(|p| Box::new(p) as Box<dyn ReadFd>), child.stderr.take().map(|p| Box::new(p) as Box<dyn ReadFd>)];
-    let mut captured = [Captured::default(), Captured::default()];
     let deadline = Instant::now() + timeout;
     let (mut status, mut drained_by, mut timed_out) = (None, None, false);
     loop {
@@ -490,16 +624,9 @@ fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
         if status.is_some() && (!open || drained_by.is_some_and(|by| Instant::now() >= by)) {
             break;
         }
-        read_ready(&mut pipes, &mut captured, Duration::from_millis(50));
+        read_ready(&mut pipes, &mut running.state.lock().unwrap().captured, Duration::from_millis(50));
     }
-    let status = status.expect("the loop ends once the command has exited");
-    Ok(json!({
-        "exit_code": status.code(),
-        "stdout": captured[0].text(),
-        "stderr": captured[1].text(),
-        "timed_out": timed_out,
-        "cwd": cwd,
-    }))
+    Ok((status.expect("the loop ends once the command has exited").code(), timed_out))
 }
 
 #[cfg(unix)]

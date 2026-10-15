@@ -1484,6 +1484,51 @@ fn run_shell_runs_in_the_login_shell_and_keeps_to_its_limits() {
 }
 
 #[test]
+fn a_command_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_result() {
+    let dir = state_dir("core-host-shell-long");
+    let bridge = FakeBridge::start(&dir);
+    let home = temp_folder("core-host-shell-long-home");
+    let core = Core::start_with_env(&dir, &bridge, &[("HOME", home.to_str().unwrap()), ("ENDEAVOR_TEST_SHELL_WAIT_SECS", "1")]);
+    let mut server = OnServer { core: &core, next: 0 };
+    let policy = |policy: &str, asks: bool| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"7","policy":"{policy}","asks":{asks}}}}}"#));
+    let slow = serde_json::json!({ "command": "echo first; sleep 3; echo last" });
+
+    // The call returns what the command printed so far; the command goes on.
+    policy("auto", true);
+    let started = std::time::Instant::now();
+    let first = server.call("7", "run_shell", slow.clone()).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    assert_eq!((&first["still_running"], &first["stdout"], &first["cwd"]), (&serde_json::json!(true), &serde_json::json!("first\n"), &serde_json::json!(home)));
+    assert!(first["message"].as_str().unwrap().contains("Make the same call again"), "{first}");
+
+    // A different command isn't the same call: it runs on its own.
+    assert_eq!(server.call("7", "run_shell", serde_json::json!({ "command": "echo other" })).unwrap()["stdout"], "other\n");
+
+    // The same call again waits for it, without asking the user again (no app is following to ask),
+    // and gets its whole result.
+    policy("ask", true);
+    let mut result = server.call("7", "run_shell", slow.clone()).unwrap();
+    while result["still_running"] == true {
+        result = server.call("7", "run_shell", slow.clone()).unwrap();
+    }
+    assert_eq!(result, serde_json::json!({ "exit_code": 0, "stdout": "first\nlast\n", "stderr": "", "timed_out": false, "cwd": home }));
+    assert!(started.elapsed() >= Duration::from_secs(3), "{:?}", started.elapsed());
+
+    // Collected, it's gone: the same command again is a new run, and asks.
+    assert_eq!(server.call("7", "run_shell", slow.clone()).unwrap_err()["error"], "no_app");
+
+    // A command still running at its timeout is killed then, as before.
+    policy("auto", true);
+    let timing_out = serde_json::json!({ "command": "echo a; sleep 30", "timeout_seconds": 2 });
+    assert_eq!(server.call("7", "run_shell", timing_out.clone()).unwrap()["still_running"], true);
+    let mut result = server.call("7", "run_shell", timing_out.clone()).unwrap();
+    while result["still_running"] == true {
+        result = server.call("7", "run_shell", timing_out.clone()).unwrap();
+    }
+    assert_eq!((&result["exit_code"], &result["timed_out"], &result["stdout"]), (&serde_json::Value::Null, &serde_json::json!(true), &serde_json::json!("a\n")));
+}
+
+#[test]
 fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
     let dir = state_dir("core-refuse");
     let bridge = FakeBridge::start(&dir);
