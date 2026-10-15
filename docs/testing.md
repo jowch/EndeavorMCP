@@ -26,7 +26,9 @@ ENDEAVOR_BIN=$PWD/target/debug/endeavor claude --plugin-dir claude-plugin
 The launcher then runs `$ENDEAVOR_BIN mcp ...` and fetches nothing. Run
 `scripts/plugins.sh sync` first if `scripts/` or `plugin/skills/` changed;
 `scripts/plugins.sh check` (which CI runs) fails when a plugin folder's copy
-differs.
+differs, or when `scripts/release-key` isn't this commit's build. After
+committing a change under `crates/`, `runtime/` or `plugin/`, run
+`scripts/plugins.sh repin` and commit what it changes.
 
 ### A first run on another computer (a Mac)
 
