@@ -57,6 +57,8 @@ struct FakeNotebook {
     broken: bool,
     /// The package step under way, as the runtime's `package_step` reports it.
     packages: Option<Value>,
+    /// Out of safe preview, its new process still starting (`starting` in Pluto).
+    starting: bool,
 }
 
 #[derive(Default)]
@@ -76,14 +78,17 @@ struct Engine {
     made: Mutex<u32>,
     /// The `timeout` of each waited `run`.
     waits: Mutex<Vec<f64>>,
-    /// The next `open` or `new` waits here before it answers, like a cold first open compiling.
+    /// The next `open`, `new` or `allow_execution` waits here before it answers, like a cold
+    /// first open compiling; while an `allow_execution` waits, so does a `snapshot`, as the
+    /// runtime answers nothing else while it starts the notebook.
     hold_open: Mutex<Option<Receiver<()>>>,
+    starting: Mutex<()>,
 }
 
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -104,7 +109,7 @@ impl Engine {
         }
         json!({
             "notebook_id": nb.id, "path": nb.path,
-            "process_status": if nb.safe_preview { "waiting_for_permission" } else if nb.exited.is_some() { "no_process" } else { "ready" },
+            "process_status": if nb.safe_preview { "waiting_for_permission" } else if nb.exited.is_some() { "no_process" } else if nb.starting { "starting" } else { "ready" },
             "execution_allowed": !nb.safe_preview && nb.exited.is_none(), "safe_preview": nb.safe_preview, "exited": nb.exited,
             "packages": nb.packages,
             "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
@@ -149,7 +154,7 @@ impl Engine {
             started.send(()).unwrap();
             release.recv().unwrap();
         }
-        if matches!(method, "open" | "new")
+        if matches!(method, "open" | "new" | "allow_execution")
             && let Some(release) = self.hold_open.lock().unwrap().take()
         {
             // As the runtime does, a new notebook's file is saved before the slow open.
@@ -158,7 +163,11 @@ impl Engine {
             {
                 std::fs::write(path, "").unwrap();
             }
+            let _busy = (method == "allow_execution").then(|| self.starting.lock().unwrap());
             let _ = release.recv();
+        }
+        if method == "snapshot" {
+            drop(self.starting.lock().unwrap());
         }
         let now = *self.clock.lock().unwrap();
         let mut notebooks = self.notebooks.lock().unwrap();
@@ -177,7 +186,7 @@ impl Engine {
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
                 let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed }));
             }
             _ => {}
@@ -306,10 +315,14 @@ impl Engine {
                 Ok(reply)
             }
             "allow_execution" => {
+                if nb.starting {
+                    return Err("ArgumentError: execution_not_gated::Notebook is not in safe preview (process_status=starting)".into());
+                }
                 if !nb.safe_preview {
                     return Ok(json!({ "already_allowed": true, "ran": false, "process_status": "ready" }));
                 }
                 nb.safe_preview = false;
+                nb.starting = params["run"] == true;
                 Ok(json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } }))
             }
             "render_text" => Ok(json!({ "text": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("table") } { json!("n\tmean\n3\t2.5") } else { Value::Null } })),
@@ -1212,6 +1225,36 @@ fn an_open_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_resul
     release.send(()).unwrap();
     let opened = open(true, Instant::now()).unwrap();
     assert_eq!((&opened["ran"], &opened["execution_allowed"], opened.get("warnings")), (&json!(false), &json!(false), None), "{opened}");
+}
+
+#[test]
+fn leaving_safe_preview_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_result() {
+    let s = setup();
+    let dir = temp_notebooks("slow-allow", 1)[0].rsplit_once(SEP).unwrap().0.to_owned();
+    let id = s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}nb0.jl") })).unwrap()["notebook_id"].clone();
+    let (release, held) = mpsc::channel();
+    *s.engine.hold_open.lock().unwrap() = Some(held);
+    let late = Instant::now() - Duration::from_secs(60);
+    let allow = |began| s.notebooks.tool("a", "allow_execution", &json!({ "notebook_id": id }), &Folder::Process, began).map(tool_json);
+    let started = Instant::now();
+    let said = allow(late).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(said.starts_with("notebook_opening::Starting the notebook is taking longer than one call waits"), "{said}");
+    assert_eq!(crate::mcp::tool_error(&said, false)["isError"], false, "still starting is not a failure");
+    // The same call again while it starts, when the engine reads nothing: it waits for the start, not the read.
+    let started = Instant::now();
+    assert!(allow(late).unwrap_err().starts_with("notebook_opening::"));
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+
+    // It went on; the same call again gets its result, not "already allowed".
+    release.send(()).unwrap();
+    let allowed = allow(Instant::now()).unwrap();
+    assert_eq!((&allowed["already_allowed"], &allowed["ran"], &allowed["execution_allowed"]), (&json!(false), &json!(true), &json!(true)), "{allowed}");
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "allow_execution").count(), 1, "allowed once");
+    // Its result was collected and the notebook is still starting: already allowed, not "not in safe preview".
+    let again = allow(Instant::now()).unwrap();
+    assert_eq!((&again["already_allowed"], &again["ran"], &again["process_status"]), (&json!(true), &json!(false), &json!("starting")), "{again}");
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "allow_execution").count(), 1, "the engine isn't asked again");
 }
 
 #[test]

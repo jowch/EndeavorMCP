@@ -741,6 +741,17 @@ impl Notebooks {
     fn open_waited(&self, method: &str, params: Value, key: String, wait: Duration, doing: &str) -> Result<(Value, Value), String> {
         let began = Instant::now();
         self.start_engine(engines::of_params(&params), wait)?;
+        let why = "the first notebook in a new Julia process takes a while to compile";
+        self.waited(method, params, key, (began + wait).saturating_duration_since(Instant::now()), &format!("{doing} is taking longer than one call waits: {why}"))
+    }
+
+    /// The engine's `method` on a background thread, waited for up to `wait`, with the params it
+    /// was made with (`open_waited`). When the wait runs out, the call answers `notebook_opening`
+    /// with `taking` and goes on; the same call again, with the same `key`, waits for it and gets
+    /// its result and its params (an earlier call's, which may differ from this one's), kept for
+    /// `OPENING_KEPT`.
+    fn waited(&self, method: &str, params: Value, key: String, wait: Duration, taking: &str) -> Result<(Value, Value), String> {
+        let began = Instant::now();
         let opening = {
             let mut openings = self.openings.lock().unwrap();
             openings.retain(|_, opening| opening.done.lock().unwrap().as_ref().is_none_or(|(_, at)| at.elapsed() < OPENING_KEPT));
@@ -770,9 +781,7 @@ impl Notebooks {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Err(format!(
-                    "notebook_opening::{doing} is taking longer than one call waits: the first notebook in a new Julia process takes a while to compile. It goes on by itself. Make the same call again to wait for it."
-                ));
+                return Err(format!("notebook_opening::{taking}. It goes on by itself. Make the same call again to wait for it."));
             }
             done = opening.came.wait_timeout(done, left).unwrap().0;
         }

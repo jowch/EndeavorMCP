@@ -1066,16 +1066,34 @@ impl Call<'_> {
         if !self.args["notebook_id"].is_string() {
             return Err(argument_error(&format!("invalid_notebook_id::Invalid notebook ID: '{}'", julia_string(&self.args["notebook_id"]))));
         }
-        let nb = self.notebook()?;
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(true));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
-        let allowed = self.nbs.call("allow_execution", json!({ "notebook_id": nb.id, "run": run, "timeout": TIMEOUT_SECONDS }))?;
+        // Leaving safe preview starts a new Julia process for the notebook, which can outlast the
+        // call; a call made again while it is under way gets its result. While it starts the
+        // runtime answers nothing else, so that call waits for it without reading the notebook.
+        let shown = julia_string(&self.args["notebook_id"]);
+        let id = uuid_value(&self.args["notebook_id"]).ok_or_else(|| argument_error(&format!("invalid_notebook_id::Invalid notebook ID: '{shown}'")))?;
+        let key = format!("allow {id}");
+        if !self.nbs.opening(&key) {
+            let nb = self.notebook()?;
+            // Already out of safe preview, perhaps still starting from an earlier call whose result
+            // was collected: the engine would refuse it as not in safe preview.
+            if nb.execution_allowed {
+                return Ok(json!({
+                    "notebook_id": nb.id, "execution_allowed": true, "already_allowed": true, "ran": false, "process_status": nb.process_status,
+                }));
+            }
+        }
+        let params = json!({ "notebook_id": id, "run": run, "timeout": TIMEOUT_SECONDS });
+        let why = "a new Julia process starts for it, and its packages may need installing";
+        let (allowed, _) = self.nbs.waited("allow_execution", params, key, self.run_wait(), &format!("Starting the notebook is taking longer than one call waits: {why}"))?;
         let ran = allowed["ran"] == true;
         let mut result = json!({
-            "notebook_id": nb.id, "execution_allowed": true, "already_allowed": allowed["already_allowed"], "ran": ran,
+            "notebook_id": id, "execution_allowed": true, "already_allowed": allowed["already_allowed"], "ran": ran,
             "process_status": allowed["process_status"],
         });
         if ran {
+            let nb = self.notebook()?;
             self.nbs.with_state(&nb.id, |state| state.prune(&nb));
             result["run_warnings"] = json!(["async_execution::allow_execution queued non-blocking notebook run; poll read_cell for completion"]);
         }

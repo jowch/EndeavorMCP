@@ -10,7 +10,7 @@ These come back the same way, but nothing failed and the call is not marked an e
 |---|---|---|
 | `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take several minutes | Make the same call again in a minute |
 | `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Make the same call again in a minute |
-| `notebook_opening` | `open_notebook` or `new_notebook` took longer than one call waits, often the first notebook in a new Julia process. The open goes on | Make the same call again, with the same arguments, to get its result |
+| `notebook_opening` | `open_notebook`, `new_notebook` or `allow_execution` took longer than one call waits: often the first notebook in a new Julia process, or a notebook leaving safe preview whose packages need installing. It goes on | Make the same call again, with the same arguments, to get its result |
 
 On a machine, a call made while Endeavor starts there, or while its Slurm job is queued, says so in plain text; it is not an error either. See the machines skill.
 
