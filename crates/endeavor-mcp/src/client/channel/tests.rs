@@ -158,7 +158,7 @@ fn ready(id: u32) -> ToApp {
 }
 
 fn ready_with(id: u32, token: &str) -> ToApp {
-    ToApp::Ready { id, launcher: "process".into(), node: "n".into(), pid: 1, token: token.into(), reattached: false, job: None, port: Some(4000), build: None, interface: None }
+    ToApp::Ready { id, launcher: "process".into(), node: "n".into(), pid: 1, token: token.into(), page_token: None, reattached: false, job: None, port: Some(4000), build: None, interface: None }
 }
 
 #[test]
@@ -171,8 +171,8 @@ fn a_ready_that_says_neither_build_nor_interface_attaches_a_runtime_that_runs_no
         let helper = Scripted::new();
         let starting = helper.starting(&listener, |_| {});
         let id = *helper.starts_sent(1).last().unwrap();
-        let ToApp::Ready { id, launcher, node, pid, token, reattached, job, port, .. } = ready(id) else { unreachable!() };
-        helper.tell(&ToApp::Ready { id, launcher, node, pid, token, reattached, job, port, build: build.clone(), interface });
+        let ToApp::Ready { id, launcher, node, pid, token, page_token, reattached, job, port, .. } = ready(id) else { unreachable!() };
+        helper.tell(&ToApp::Ready { id, launcher, node, pid, token, page_token, reattached, job, port, build: build.clone(), interface });
         starting.join().unwrap().expect("ready");
         assert_eq!(listener.asks(), Some(true), "{build:?} {interface:?}");
     }
@@ -210,6 +210,21 @@ fn a_forced_stop_says_so_and_an_unforced_one_reads_as_before() {
     stopping.join().unwrap().expect("stopped");
     let stops: Vec<bool> = helper.requests().iter().filter_map(|request| if let ToHelper::Stop { force, .. } = request { Some(*force) } else { None }).collect();
     assert_eq!(stops, [true, false]);
+}
+
+#[test]
+fn the_start_page_carries_the_pages_token_and_an_older_runtimes_the_bearer_token() {
+    for (page_token, carried) in [(Some("p".to_owned()), "p"), (None, "t")] {
+        let helper = Scripted::new();
+        let listener = Listener::start("lab").unwrap();
+        let starting = helper.starting(&listener, |_| {});
+        let [start] = helper.starts_sent(1)[..] else { panic!() };
+        let ToApp::Ready { id, launcher, node, pid, token, reattached, job, port, build, interface, .. } = ready(start) else { unreachable!() };
+        helper.tell(&ToApp::Ready { id, launcher, node, pid, token, page_token: page_token.clone(), reattached, job, port, build, interface });
+        let runtime = starting.join().unwrap().expect("ready");
+        assert_eq!((runtime.token.as_str(), runtime.page_token.as_str()), ("t", carried), "{page_token:?}");
+        assert!(runtime.page_url.ends_with(&format!("/?token={carried}")), "{}", runtime.page_url);
+    }
 }
 
 #[test]

@@ -313,7 +313,7 @@ fn a_runtime_in_a_slurm_job() {
         assert!(!runtime.reattached, "no runtime was running in {}", state.display());
         assert_eq!(runtime.job.as_ref().map(|j| j.id.as_str()), Some(jobs[0].as_str()), "the runtime says which job it's in");
         assert_eq!(runtime.mcp_url, format!("http://127.0.0.1:{}/mcp", runtime.port));
-        assert!(runtime.page_url.contains(&runtime.token) && runtime.token.len() >= 32);
+        assert!(runtime.page_url.contains(&runtime.page_token) && runtime.page_token.len() >= 32 && runtime.page_token != runtime.token);
         let events = first.all();
         let at = |f: &dyn Fn(&Event) -> bool| events.iter().position(f).unwrap_or_else(|| panic!("no such event in {events:?}"));
         assert!(at(&|e| matches!(e, Event::Submitted { .. })) < at(&|e| matches!(e, Event::Started { .. })));

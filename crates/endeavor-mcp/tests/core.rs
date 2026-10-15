@@ -53,6 +53,7 @@ impl Core {
     }
 
     fn try_start_with(dir: &Path, env: &[(&str, &str)], julia_args: &[&std::ffi::OsStr]) -> Result<Core, ExitStatus> {
+        std::fs::write(dir.join("page_token"), PAGES).unwrap();
         let mut process = Command::new(env!("CARGO_BIN_EXE_endeavor"))
             .envs(env.iter().copied())
             .arg("core")
@@ -173,7 +174,8 @@ fn starts_julia_and_writes_its_own_runtime_json() {
     assert!(core.port != bridge.port && core.port != bridge.pluto_port, "the core's own port");
     let mut keys: Vec<&str> = state.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort();
-    assert_eq!(keys, ["boot", "build", "exits_when_idle", "interface", "job", "launcher", "node", "pid", "port", "started", "token"], "nothing of Pluto's");
+    assert_eq!(keys, ["boot", "build", "exits_when_idle", "interface", "job", "launcher", "node", "page_token", "pid", "port", "started", "token"], "nothing of Pluto's");
+    assert_eq!(state["page_token"].as_str(), Some(PAGES), "the pages' token, kept in the state folder");
     assert_eq!(state["exits_when_idle"], false, "started without ENDEAVOR_EXIT_IDLE");
     assert_eq!((state["token"].as_str(), state["launcher"].as_str()), (Some(TOKEN), Some("process")));
     assert_eq!(state["build"].as_str(), Some("1.0.0-abc"), "the build it was started from");
@@ -188,7 +190,10 @@ fn starts_julia_and_writes_its_own_runtime_json() {
     assert!(ports.len() == 2 && ports[0] != ports[1] && !ports.contains(&core.port), "{ports:?}");
 
     let ping = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1" && String::from_utf8_lossy(&s.body).contains("\"ping\"")).expect("checked Julia's bridge answers");
-    assert!(ping.header("Authorization").is_some_and(|a| a.starts_with("Bearer ")));
+    let engine = engine_token(&dir);
+    assert!(engine.len() == 64 && engine != TOKEN && engine != PAGES, "Julia gets a key of its own: {engine}");
+    assert_eq!(ping.header("Authorization"), Some(format!("Bearer {engine}").as_str()));
+    assert!(!std::fs::read_to_string(dir.join("runtime.json")).unwrap().contains(&engine), "the engines' key isn't recorded");
 }
 
 #[test]
@@ -205,7 +210,7 @@ fn answers_julias_calls_itself_and_hands_the_folder_to_julia() {
     assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap(), serde_json::json!({ "jsonrpc": "2.0", "id": 7, "result": {} }));
     let seen = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1" && String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")).expect("Julia's `/call`");
     assert_eq!(seen.header("Host"), Some(format!("127.0.0.1:{}", bridge.port).as_str()));
-    assert_eq!(seen.header("Authorization"), Some(format!("Bearer {TOKEN}").as_str()));
+    assert_eq!(seen.header("Authorization"), Some(format!("Bearer {}", engine_token(&dir)).as_str()), "the engines' key, not the bearer token");
     assert!(String::from_utf8_lossy(&seen.body).contains(r#""path":"/n""#));
 
     // A chunked call, which the core reads whole to see its method.
@@ -225,6 +230,8 @@ fn answers_julias_calls_itself_and_hands_the_folder_to_julia() {
     write!(socket, "GET /endeavor/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     assert_eq!(response(&mut reader).0, "HTTP/1.1 404 Not Found");
     write!(socket, "GET /edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    assert_eq!(response(&mut reader).0, "HTTP/1.1 401 Unauthorized", "the bearer token doesn't open Pluto's pages");
+    write!(socket, "GET /edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\n\r\n").unwrap();
     assert_eq!(response(&mut reader).2, "Pluto: GET /edit?id=1 HTTP/1.1");
 
     // HTTP/1.0, as the helper's own calls are.
@@ -245,7 +252,7 @@ fn passes_request_bodies_intact() {
     let body: Vec<u8> = (0..1_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
-    write!(socket, "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+    write!(socket, "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
     socket.write_all(&body).unwrap();
     let mut status = String::new();
     reader.read_line(&mut status).unwrap();
@@ -262,7 +269,7 @@ fn passes_request_bodies_intact() {
     assert_eq!((seen.header("Cookie"), seen.header("Authorization")), (Some("secret=s3cret"), None), "Pluto gets its secret, not the token");
 
     // A chunked body, sent in pieces.
-    write!(socket, "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+    write!(socket, "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
     socket.write_all(b"6\r\nhello \r\n").unwrap();
     std::thread::sleep(Duration::from_millis(50));
     socket.write_all(b"5\r\nworld\r\n0\r\n\r\n").unwrap();
@@ -276,7 +283,7 @@ fn streams_events_as_written_and_closes_with_either_side() {
     let core = Core::start(&dir, &bridge);
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
-    write!(socket, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    write!(socket, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\n\r\n").unwrap();
     bridge.event("first");
     assert!(read_until(&mut reader, "data: first").starts_with("HTTP/1.1 200 OK\r\n"));
     bridge.event("second");
@@ -289,7 +296,7 @@ fn streams_events_as_written_and_closes_with_either_side() {
     // Julia's end closing mid-stream closes the client's.
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
-    write!(socket, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    write!(socket, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\n\r\n").unwrap();
     bridge.event("third");
     read_until(&mut reader, "data: third");
     bridge.drop_events();
@@ -1514,7 +1521,7 @@ fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     write!(socket, "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
     assert_eq!(response(&mut reader).0, "HTTP/1.1 401 Unauthorized");
-    write!(socket, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}\r\n").unwrap();
+    write!(socket, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\n\r\n").unwrap();
     assert_eq!(response(&mut reader).2, "Pluto: GET / HTTP/1.1");
 }
 
@@ -1529,12 +1536,12 @@ fn a_browser_gets_in_with_its_link_and_then_reaches_only_plutos_page() {
         response(&mut BufReader::new(socket))
     };
     let host = format!("Host: 127.0.0.1:{}\r\n", core.port);
-    let (status, headers, _) = ask(&format!("GET /edit?id=n1&token={TOKEN} HTTP/1.1\r\n{host}\r\n"));
+    let (status, headers, _) = ask(&format!("GET /edit?id=n1&token={PAGES} HTTP/1.1\r\n{host}\r\n"));
     assert_eq!(status, "HTTP/1.1 303 See Other");
     let header = |name: &str| headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
     assert_eq!(header("location"), Some("/edit?id=n1"), "the same page, without the token");
     let set = header("set-cookie").unwrap();
-    assert!(set.ends_with(&format!("={TOKEN}; Path=/; HttpOnly; SameSite=Strict")), "{set}");
+    assert!(set.ends_with(&format!("={PAGES}; Path=/; HttpOnly; SameSite=Strict")), "{set}");
     let cookie = format!("Cookie: {}\r\n", set.split(';').next().unwrap());
     assert!(bridge.pluto_seen().is_empty(), "the visit with the token never reached Pluto");
 
@@ -1555,10 +1562,11 @@ fn a_browser_gets_in_with_its_link_and_then_reaches_only_plutos_page() {
     let origin = format!("Origin: http://127.0.0.1:{}\r\n", core.port + 1);
     assert_eq!(ask(&format!("GET /edit?id=n1 HTTP/1.1\r\n{host}{origin}{cookie}\r\n")), refused("403 Forbidden", "browser_origin_refused"), "another runtime's page");
     assert_eq!(ask(&format!("GET /?token=nope HTTP/1.1\r\n{host}\r\n")), refused("401 Unauthorized", "unauthorized"));
+    assert_eq!(ask(&format!("GET /?token={TOKEN} HTTP/1.1\r\n{host}\r\n")), refused("401 Unauthorized", "unauthorized"), "the bearer token doesn't let a browser in");
     // A browser opening a page without the cookie, as from the link in a tool result, is told how to get in.
     for page in ["Sec-Fetch-Dest: document\r\n", "Accept: text/html,application/xhtml+xml\r\n"] {
         let (status, body) = ask(&format!("GET /edit?id=n1 HTTP/1.1\r\n{host}{page}\r\n"));
-        assert!(status == "HTTP/1.1 401 Unauthorized" && body.contains("endeavor open") && !body.contains(TOKEN), "{page}: {status} {body}");
+        assert!(status == "HTTP/1.1 401 Unauthorized" && body.contains("endeavor open") && !body.contains(TOKEN) && !body.contains(PAGES), "{page}: {status} {body}");
     }
     let script = ask(&format!("GET /editor.js HTTP/1.1\r\n{host}Sec-Fetch-Dest: script\r\nAccept: text/html\r\n\r\n"));
     assert_eq!(script, refused("401 Unauthorized", "unauthorized"), "only a page gets the page");
@@ -1574,7 +1582,7 @@ fn passes_a_websocket_through_both_ways_until_either_side_closes() {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let (_, headers, _) = {
         let mut visit = core.connect();
-        write!(visit, "GET /?token={TOKEN} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", core.port).unwrap();
+        write!(visit, "GET /?token={PAGES} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", core.port).unwrap();
         response(&mut BufReader::new(visit))
     };
     let cookie = headers.iter().find(|(n, _)| n == "set-cookie").unwrap().1.split(';').next().unwrap().to_owned();
@@ -1683,7 +1691,7 @@ fn a_core_started_when_needed_starts_julia_for_a_julia_notebook_and_not_before()
 
     // The runtime's own link, which an R user opens too, says Julia isn't running and starts nothing.
     let mut page = core.connect();
-    write!(page, "GET / HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
+    write!(page, "GET / HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {PAGES}\r\n\r\n", core.port).unwrap();
     let mut said = String::new();
     page.read_to_string(&mut said).unwrap();
     assert!(said.starts_with("HTTP/1.1 200") && said.contains("Julia isn't running") && said.contains("href=\"/?start-julia\""), "{said}");
@@ -1692,20 +1700,20 @@ fn a_core_started_when_needed_starts_julia_for_a_julia_notebook_and_not_before()
 
     // Any other page of Pluto's starts Julia and is told it's starting; Julia then joins.
     let mut page = core.connect();
-    write!(page, "GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
+    write!(page, "GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {PAGES}\r\n\r\n", core.port).unwrap();
     let mut said = String::new();
     page.read_to_string(&mut said).unwrap();
     assert!(said.starts_with("HTTP/1.1 503") && said.contains("Julia is starting"), "{said}");
     wait_for("Julia to start", || julia_pids(&dir).len() == 1);
     let mut script = core.connect();
-    write!(script, "GET /static/x.js HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
+    write!(script, "GET /static/x.js HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {PAGES}\r\n\r\n", core.port).unwrap();
     let mut said = String::new();
     script.read_to_string(&mut said).unwrap();
     assert!(said.starts_with("HTTP/1.1 503") && !said.contains("<html"), "only a page gets the page: {said}");
     std::fs::remove_file(dir.join("hold")).unwrap();
     wait_for("Pluto's page", || {
         let mut page = core.connect();
-        write!(page, "GET /edit?id=1 HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+        write!(page, "GET /edit?id=1 HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\n\r\n").unwrap();
         let mut said = String::new();
         let _ = page.read_to_string(&mut said);
         said.contains("Pluto: GET /edit?id=1")
@@ -1891,7 +1899,7 @@ fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fail
     // A page of Pluto's starts Julia. Held, the stand-in says nothing more, as a hung start would.
     let start = || {
         let mut page = core.connect();
-        write!(page, "GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {TOKEN}\r\n\r\n", core.port).unwrap();
+        write!(page, "GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {PAGES}\r\n\r\n", core.port).unwrap();
         let _ = page.read_to_string(&mut String::new());
     };
     start();

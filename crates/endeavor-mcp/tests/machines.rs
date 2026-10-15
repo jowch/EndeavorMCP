@@ -2592,11 +2592,13 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     let again = front.ok("open_notebook", json!({ "path": path }));
     assert_eq!(again["opened_in_browser"], true, "it was opened a moment ago: {again}");
     let lines: Vec<String> = std::fs::read_to_string(&opened).unwrap().lines().map(str::to_owned).collect();
-    assert_eq!(lines, [format!("{page}&token={TOKEN}")], "the browser gets the link that lets it in, and no second tab at once");
+    let pages = read_record(&place.local_state)["page_token"].as_str().unwrap().to_owned();
+    assert_ne!(pages, TOKEN);
+    assert_eq!(lines, [format!("{page}&token={pages}")], "the browser gets the link that lets it in (with the pages' token), and no second tab at once");
     let status = front.ok("session_status", json!({}));
     assert_eq!((status["browser_url"].as_str(), status.get("opened_in_browser")), (Some(format!("http://localhost:{port}/").as_str()), None), "{status}");
     for result in [&first, &again, &status] {
-        assert!(!result.to_string().contains(TOKEN), "{result}");
+        assert!(!result.to_string().contains(TOKEN) && !result.to_string().contains(&pages), "{result}");
     }
     assert!(!front.said().iter().any(|line| line.contains(TOKEN)), "nor what it writes to the agent's MCP log: {:?}", front.said());
 

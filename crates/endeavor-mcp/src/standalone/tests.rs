@@ -104,13 +104,13 @@ fn flags_that_dont_apply_are_refused() {
 
 #[test]
 fn connection_details_on_a_workstation() {
-    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: "/home/ada/project", project: true, login: None });
+    let text = connection_text(&Connection { port: 8456, token: "t0k", page_token: "p4g", node: "lab3", folder: "/home/ada/project", project: true, login: None });
     assert_eq!(
         text,
         r#"Endeavor's notebooks are running on lab3, port 8456. New notebooks go in /home/ada/project.
 
 Open them in a browser:
-    http://localhost:8456/?token=t0k
+    http://localhost:8456/?token=p4g
 
 From another computer, forward the port first:
     ssh -L 8456:localhost:8456 lab3
@@ -133,27 +133,27 @@ Gemini CLI (~/.gemini/settings.json):
 Other agents (JSON):
     {"mcpServers":{"endeavor":{"headers":{"Authorization":"Bearer t0k"},"type":"http","url":"http://localhost:8456/mcp"}}}
 
-The token lets anyone who has it run code as you. Keep it to yourself.
+The link and the header each let anyone who has them run code as you. Keep them to yourself.
 "#
     );
 }
 
 #[test]
 fn a_runtime_without_a_folder_says_so_where_the_folder_would_be() {
-    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: "/home/ada", project: false, login: None });
+    let text = connection_text(&Connection { port: 8456, token: "t0k", page_token: "p4g", node: "lab3", folder: "/home/ada", project: false, login: None });
     assert!(text.starts_with("Endeavor's notebooks are running on lab3, port 8456. This runtime has no project folder: new notebooks without a path go in /home/ada, and agents give absolute paths.\n\nOpen them"), "{text}");
 }
 
 #[test]
 fn on_a_compute_node_the_tunnel_jumps_through_the_login_node() {
-    let text = connection_text(&Connection { port: 8456, token: "t0k", node: "n2cn0216", folder: "/u/ada", project: true, login: Some("login2") });
+    let text = connection_text(&Connection { port: 8456, token: "t0k", page_token: "p4g", node: "n2cn0216", folder: "/u/ada", project: true, login: Some("login2") });
     let forward = "From another computer, forward the port first:
     ssh -J login2 -L 8456:localhost:8456 n2cn0216
 (This is a cluster's compute node: the jump goes through the login node, login2; use the name you ssh to.)
 
 Connect";
     assert!(text.contains(forward), "{text}");
-    let one_machine = connection_text(&Connection { port: 8456, token: "t0k", node: "lab3", folder: "/u/ada", project: true, login: Some("lab3") });
+    let one_machine = connection_text(&Connection { port: 8456, token: "t0k", page_token: "p4g", node: "lab3", folder: "/u/ada", project: true, login: Some("lab3") });
     assert!(one_machine.contains("first:\n    ssh -L 8456:localhost:8456 lab3\n\nConnect"), "a job on the login node itself: {one_machine}");
 }
 

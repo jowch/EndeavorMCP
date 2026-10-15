@@ -38,8 +38,8 @@ suppressPackageStartupMessages({
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
-# The core's bearer token, read once and taken out of the environment, so code a notebook runs can't
-# pick it up and call the core itself (as Julia's boot.jl does for Pluto's processes).
+# The engines' key the core gave this bridge (not the agent's MCP token), read once and taken out of
+# the environment, so code a notebook runs can't pick it up (as Julia's boot.jl does for Pluto's processes).
 TOKEN <- Sys.getenv("ENDEAVOR_TOKEN")
 STATE_FILE <- Sys.getenv("ENDEAVOR_R_STATE")
 Sys.unsetenv(c("ENDEAVOR_TOKEN", "ENDEAVOR_R_STATE"))

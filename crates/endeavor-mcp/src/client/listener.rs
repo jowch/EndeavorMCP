@@ -254,7 +254,7 @@ impl Listener {
         format!("http://127.0.0.1:{}/mcp", self.port)
     }
 
-    /// Pluto's start page: the core trades `token` in the URL for a cookie, and drops it from the URL.
+    /// Pluto's start page: the core trades `token` (the pages' token) in the URL for a cookie, and drops it from the URL.
     pub(super) fn page_url(&self, token: &str) -> String {
         format!("http://127.0.0.1:{}/?token={token}", self.port)
     }

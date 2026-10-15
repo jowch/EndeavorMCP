@@ -163,6 +163,8 @@ struct State {
     /// before one port per runtime, which this helper can stop but not relay to.
     port: Option<u16>,
     token: String,
+    /// The pages' token (`page_token`); none for one from before the pages had their own, which take `token`.
+    page_token: Option<String>,
     /// The Slurm job it runs in.
     job: Option<String>,
     /// The build that started it (`embedded::BUILD_VERSION`); none for one from before builds were recorded.
@@ -530,6 +532,7 @@ impl Attached {
             node: state.node.clone(),
             pid: state.pid as u32,
             token: state.token.clone(),
+            page_token: state.page_token.clone(),
             reattached,
             job: match &self.how {
                 How::Process(..) => None,
@@ -1293,6 +1296,7 @@ fn parse_state(v: &Value) -> Option<State> {
         boot: text("boot"),
         port: v["port"].as_u64().and_then(|p| u16::try_from(p).ok()),
         token: text("token")?,
+        page_token: text("page_token"),
         job: text("job").filter(|j| !j.is_empty()),
         build: text("build"),
         interface: v["interface"].as_u64().and_then(|n| u32::try_from(n).ok()),
@@ -1316,7 +1320,19 @@ fn remove_state(dir: &Path, pid: i32, started: Option<u64>) {
 /// The bridge's bearer token, kept in the state folder so it stays the same
 /// across runtimes (the agent's MCP config carries it).
 fn token(dir: &Path) -> Result<String, String> {
-    let path = dir.join("token");
+    kept_token(dir, "token")
+}
+
+/// The pages' token, which lets a browser or the app into Pluto's and Ember's pages and nothing else.
+/// Apart from the bearer token, which an agent's MCP config carries and which doesn't open the pages.
+/// Kept in the state folder like it, so the pages' link stays the same across runtimes.
+pub(crate) fn page_token(dir: &Path) -> Result<String, String> {
+    kept_token(dir, "page_token")
+}
+
+/// The token in the state folder's file `name`, made when there is none.
+fn kept_token(dir: &Path, name: &str) -> Result<String, String> {
+    let path = dir.join(name);
     if let Ok(token) = std::fs::read_to_string(&path)
         && token.trim().len() == 64
     {

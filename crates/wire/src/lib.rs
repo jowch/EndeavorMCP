@@ -225,8 +225,12 @@ pub enum ToApp {
         /// The machine the runtime runs on.
         node: String,
         pid: u32,
-        /// The runtime's token, for every path on its port.
+        /// The runtime's bearer token, for every path on its port but the pages.
         token: String,
+        /// The token for its pages (Pluto's and Ember's), in the start page's URL; none from a runtime or
+        /// helper from before the pages had their own, whose pages take `token`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_token: Option<String>,
         /// The runtime was already running; this connect didn't start it.
         reattached: bool,
         /// The cluster job it runs in.
@@ -409,6 +413,7 @@ mod tests {
             node: "labbox3".into(),
             pid: 81234,
             token: "t".into(),
+            page_token: Some("p".into()),
             reattached: true,
             job: None,
             port: Some(41234),
@@ -421,7 +426,7 @@ mod tests {
         assert_eq!(value["launcher"], "process");
         assert_eq!(serde_json::from_slice::<ToApp>(&json).unwrap(), ready);
         let older = r#"{"type":"Ready","id":4,"launcher":"process","node":"labbox3","pid":81234,"token":"t","reattached":true}"#;
-        assert!(matches!(serde_json::from_str::<ToApp>(older).unwrap(), ToApp::Ready { port: None, build: None, interface: None, .. }), "a helper that says no port, build or interface still reads");
+        assert!(matches!(serde_json::from_str::<ToApp>(older).unwrap(), ToApp::Ready { port: None, page_token: None, build: None, interface: None, .. }), "a helper that says no port, pages' token, build or interface still reads");
         let files = ToHelper::Files { id: 3, request: files::Request::List { path: "~".into() } };
         let Frame::Control(json) = files.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<ToHelper>(&json).unwrap(), files);

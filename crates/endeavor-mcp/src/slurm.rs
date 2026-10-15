@@ -696,6 +696,7 @@ pub fn relay_main(argv: &[String]) -> ! {
         node: state.node.clone(),
         pid: state.pid as u32,
         token: state.token.clone(),
+        page_token: state.page_token.clone(),
         reattached: true,
         job: None,
         port: Some(port),

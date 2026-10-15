@@ -60,6 +60,7 @@ pub type Starter = Box<dyn Fn(Backend) -> Result<Arc<dyn Upstream>, String> + Se
 /// Julia's bridge, once it answers.
 pub struct Julia {
     pub port: OnceLock<u16>,
+    /// The engines' key the core gave Julia, not the MCP bearer token.
     token: String,
 }
 

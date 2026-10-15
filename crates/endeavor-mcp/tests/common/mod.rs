@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// The pages' token a test core is given (its state folder's `page_token`), which the bearer token `TOKEN` isn't.
+pub const PAGES: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 /// The secret the fake Pluto requires.
 pub const PLUTO_SECRET: &str = "s3cret";
 
@@ -47,7 +49,8 @@ pub fn find_julia() -> Option<(PathBuf, Option<PathBuf>)> {
     path.starts_with('/').then(|| (PathBuf::from(path), None))
 }
 
-/// A julia that says it's 1.12, records its arguments and its pid (a line of `julia.pids` per run), writes
+/// A julia that says it's 1.12, records its arguments, the token it was given (`engine_token`, which
+/// `FakeBridge` then requires) and its pid (a line of `julia.pids` per run), writes
 /// its state for the core naming `bridge`'s ports, and sleeps as its own pid. It waits first while the file
 /// `hold` is in `dir`.
 pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
@@ -58,10 +61,11 @@ pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
         r#"#!/bin/sh
 [ "$1" = --version ] && {{ echo 'julia version 1.12.0'; exit 0; }}
 echo "$@" > "{dir}/julia.args"
+printf '%s' "$ENDEAVOR_TOKEN" > "{dir}/engine_token"
 echo $$ >> "{dir}/julia.pids"
 echo "booting"
 while [ -e "{dir}/hold" ]; do sleep 0.1; done
-printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"token":"%s","pluto_secret":"{PLUTO_SECRET}","job":"%s"}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$ENDEAVOR_TOKEN" "$SLURM_JOB_ID" > "$ENDEAVOR_STATE.tmp"
+printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"pluto_secret":"{PLUTO_SECRET}","job":"%s"}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$SLURM_JOB_ID" > "$ENDEAVOR_STATE.tmp"
 mv "$ENDEAVOR_STATE.tmp" "$ENDEAVOR_STATE"
 exec sleep 600
 "#,
@@ -276,6 +280,12 @@ impl FakeBridge {
     }
 }
 
+/// The token the core gave Julia in `dir` (`serving_julia`): the bridge's key, which is neither the MCP
+/// bearer token nor the pages' token.
+pub fn engine_token(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("engine_token")).unwrap_or_default()
+}
+
 fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let mut socket = socket;
@@ -283,7 +293,7 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
         shared.seen.lock().unwrap().push(seen.clone());
         let http10 = seen.line.ends_with("HTTP/1.0");
         let target = seen.line.split(' ').nth(1).unwrap_or_default().to_owned();
-        let authorized = seen.header("Authorization") == Some(&format!("Bearer {TOKEN}"));
+        let authorized = seen.header("Authorization") == Some(&format!("Bearer {}", engine_token(dir)));
         if target == "/health" {
             let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         } else if !authorized {

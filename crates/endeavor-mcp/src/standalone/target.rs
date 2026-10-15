@@ -278,10 +278,12 @@ fn announce(options: &Options, state: &crate::State, port: u16, started: bool) -
     if let Some(message) = (!started).then(|| super::other_build(&options.state_dir)).flatten() {
         eprintln!("endeavor: {message}");
     }
+    let page_token = state.page_token.as_deref().unwrap_or(&state.token);
     RuntimeInfo {
         port,
         mcp_url: format!("http://127.0.0.1:{port}/mcp"),
-        page_url: format!("http://127.0.0.1:{port}/?token={}", state.token),
+        page_url: format!("http://127.0.0.1:{port}/?token={}", page_token),
+        page_token: page_token.to_owned(),
         token: state.token.clone(),
         node: state.node.clone(),
         pid: state.pid as u32,

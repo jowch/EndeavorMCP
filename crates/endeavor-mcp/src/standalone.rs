@@ -504,7 +504,10 @@ pub(crate) fn stop_lock_gave_up(dir: &Path) -> String {
 /// How to reach a runtime, for `connection_text`.
 pub(crate) struct Connection<'a> {
     pub port: u16,
+    /// The bearer token, for an agent's MCP config.
     pub token: &'a str,
+    /// The pages' token, for the browser's link.
+    pub page_token: &'a str,
     /// This machine, as `ssh` from the user's computer names it (its host name).
     pub node: &'a str,
     /// Where new notebooks without a path go.
@@ -517,7 +520,7 @@ pub(crate) struct Connection<'a> {
 
 /// What `serve` prints once the runtime answers.
 pub(crate) fn connection_text(c: &Connection) -> String {
-    let Connection { port, token, node, folder, project, .. } = c;
+    let Connection { port, token, page_token, node, folder, project, .. } = c;
     let url = format!("http://localhost:{port}/mcp");
     let bearer = format!("Bearer {token}");
     let json = to_json(&json!({ "mcpServers": { "endeavor": { "type": "http", "url": url, "headers": { "Authorization": bearer } } } }));
@@ -530,7 +533,7 @@ pub(crate) fn connection_text(c: &Connection) -> String {
         "Endeavor's notebooks are running on {node}, port {port}. {folder}
 
 Open them in a browser:
-    http://localhost:{port}/?token={token}
+    http://localhost:{port}/?token={page_token}
 
 From another computer, forward the port first:
 {ssh}
@@ -552,7 +555,7 @@ Gemini CLI (~/.gemini/settings.json):
 Other agents (JSON):
     {json}
 
-The token lets anyone who has it run code as you. Keep it to yourself.
+The link and the header each let anyone who has them run code as you. Keep them to yourself.
 ",
         gemini = to_json(&json!({ "mcpServers": { "endeavor": { "httpUrl": url, "headers": { "Authorization": bearer } } } })),
     )
@@ -684,7 +687,7 @@ fn serve(options: Options) -> ! {
     }
     let login = std::env::var("SLURM_SUBMIT_HOST").ok().filter(|_| std::env::var_os("SLURM_JOB_ID").is_some());
     let node = crate::hostname();
-    print!("\n{}", connection_text(&Connection { port: up.port, token: &up.state.token, node: &node, folder: &folder, project, login: login.as_deref() }));
+    print!("\n{}", connection_text(&Connection { port: up.port, token: &up.state.token, page_token: up.state.page_token.as_deref().unwrap_or(&up.state.token), node: &node, folder: &folder, project, login: login.as_deref() }));
     if up.started {
         println!("Press Ctrl-C to stop Endeavor.");
     } else {
@@ -747,7 +750,7 @@ fn open(dir: &Path) -> ! {
     };
     match runtime::look(dir, false, true) {
         Looked::Running(state, port) => {
-            let link = crate::mcp::entry_link(&crate::mcp::browser_link(port, "/"), &state.token);
+            let link = crate::mcp::entry_link(&crate::mcp::browser_link(port, "/"), state.page_token.as_deref().unwrap_or(&state.token));
             use std::io::IsTerminal;
             if browser::open(&link) {
                 println!("Opened Endeavor's notebooks in your browser.");
@@ -991,7 +994,7 @@ impl Relay {
         if matches!(tool, Some("new_notebook" | "open_notebook")) {
             let key = (route.port, fields.get("notebook_id").and_then(Value::as_str).unwrap_or_default().to_owned());
             let just = self.opened.lock().unwrap().get(&key).is_some_and(|at| at.elapsed() < REOPEN_AFTER);
-            let opened = just || browser::open(&crate::mcp::entry_link(&url, &route.token));
+            let opened = just || browser::open(&crate::mcp::entry_link(&url, &route.page_token));
             if opened && !just {
                 self.opened.lock().unwrap().insert(key, Instant::now());
             }
@@ -1094,6 +1097,8 @@ fn one_line(text: &str) -> String {
 pub(crate) struct Route {
     pub port: u16,
     pub token: String,
+    /// The token for the runtime's pages, for the link that lets the user's browser in.
+    pub page_token: String,
     /// The machine's name (`X-Endeavor-Host`). With it the runtime also gets
     /// the connection's port as the browser's (`X-Endeavor-Browser-Port`), which is `port`.
     pub host: Option<String>,

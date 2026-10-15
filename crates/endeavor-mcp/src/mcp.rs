@@ -224,7 +224,8 @@ impl Caller {
 
 impl Bridge {
     /// `depot` is Julia's JULIA_DEPOT_PATH.
-    pub fn new(token: String, depot: &str) -> Bridge {
+    /// `token` is the core's bearer token; `engine_token` the key to Julia's bridge (`Julia`).
+    pub fn new(token: String, engine_token: String, depot: &str) -> Bridge {
         let shell_env = vec![
             ("JULIA_DEPOT_PATH", Some(depot.to_owned())),
             ("ENDEAVOR_TOKEN", None),
@@ -238,7 +239,7 @@ impl Bridge {
             ("ENDEAVOR_IDLE_HOURS", None),
             ("ENDEAVOR_EXIT_IDLE", None),
         ];
-        let julia = Arc::new(Julia::new(token.clone()));
+        let julia = Arc::new(Julia::new(engine_token));
         let clock = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
         Bridge {
             // Pluto's engine joins once Julia is ready (core.rs).
@@ -1110,7 +1111,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (7, "00783e892a3fcb3d"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (8, "00783e892a3fcb3d"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1156,8 +1157,8 @@ mod tests {
             "allow_julia_install", "allow_r_install", "answer_run", "file_info", "julia_status", "move_notebook", "new_notebook", "recent_sessions", "restart_notebook", "run_preview", "set_folder",
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "tool_result",
         ];
-        let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (7, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (8, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]
