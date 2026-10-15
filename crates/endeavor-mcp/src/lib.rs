@@ -22,7 +22,7 @@ mod host_tools;
 mod http;
 pub mod julia;
 mod juliaup;
-mod r;
+pub mod r;
 mod mcp;
 mod notebooks;
 pub mod paths;

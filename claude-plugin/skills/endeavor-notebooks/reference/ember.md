@@ -1,6 +1,6 @@
 # Ember notebooks (R)
 
-Read this when the notebook is an Ember notebook (a `.R` file). It covers what Ember adds to the general rules. R notebooks run on macOS and Linux, not on Windows, and not yet in the Endeavor app. They don't need Julia.
+Read this when the notebook is an Ember notebook (a `.R` file). It covers what Ember adds to the general rules. R notebooks run on macOS and Linux, not on Windows. They don't need Julia.
 
 ## What a cell may hold
 

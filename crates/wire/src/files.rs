@@ -21,8 +21,9 @@ pub enum Request {
     List { path: String },
     /// Every file and folder under `path`, a few levels deep ([`walk`]).
     Files { path: String },
-    /// Pluto notebooks under `path` ([`notebooks::scan`]). Ember's are left
-    /// out until the app can open them.
+    /// Notebooks of every engine under `path` ([`notebooks::scan`]), each
+    /// with its backend. Ember's are listed on Windows too; the app leaves
+    /// them out there, where R notebooks don't run.
     Notebooks { path: String },
     /// The first cells of the notebook at `path`.
     Preview { path: String },
@@ -100,7 +101,7 @@ pub fn answer(request: &Request) -> Reply {
     let result = match request {
         Request::List { path } => list(&expand(path)),
         Request::Files { path } => Ok(Reply::Files { paths: walk(&expand(path), WALK_DEPTH, WALK_LIMIT) }),
-        Request::Notebooks { path } => Ok(Reply::Notebooks { found: notebooks::scan(&expand(path), &[Backend::Pluto]) }),
+        Request::Notebooks { path } => Ok(Reply::Notebooks { found: notebooks::scan(&expand(path), &Backend::ALL) }),
         Request::Preview { path } => notebooks::read_preview(&expand(path)).map(|preview| Reply::Preview { preview }),
         Request::Slurm => crate::slurm::probe().map(|scheduler| Reply::Slurm { scheduler }),
         Request::Runtime => Err("Only the helper knows about its runtime.".into()),

@@ -1047,6 +1047,7 @@ fn answers_file_requests_before_any_runtime() {
     let home = dir.join("home");
     std::fs::create_dir_all(home.join("decay-fits/sub")).unwrap();
     std::fs::write(home.join("decay-fits/fit.jl"), "### A Pluto.jl notebook ###\n\n# ╔═╡ 1a2b3c4d-0000-4000-8000-000000000001\nx = 1\n").unwrap();
+    std::fs::write(home.join("decay-fits/sub/growth.R"), "### An Ember notebook ###\n").unwrap();
     let helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[("HOME", home.to_str().unwrap())]);
     let ToApp::Hello { home: said, .. } = helper.hello() else { unreachable!() };
     assert_eq!(said, home.display().to_string());
@@ -1061,7 +1062,9 @@ fn answers_file_requests_before_any_runtime() {
     assert_eq!(path, home.join("decay-fits").canonicalize().unwrap());
     assert_eq!(entries.iter().map(|e| (e.name.as_str(), e.dir)).collect::<Vec<_>>(), [("sub", true), ("fit.jl", false)]);
     let Reply::Notebooks { found } = ask(2, Request::Notebooks { path: "~/decay-fits".into() }) else { panic!() };
-    assert_eq!(found.len(), 1);
+    let mut kinds: Vec<_> = found.iter().map(|f| f.backend).collect();
+    kinds.sort_by_key(|b| b.name());
+    assert_eq!(kinds, [wire::backend::Backend::Ember, wire::backend::Backend::Pluto], "every engine's notebooks: {found:?}");
     let Reply::Preview { preview } = ask(3, Request::Preview { path: "~/decay-fits/fit.jl".into() }) else { panic!() };
     assert_eq!(preview.cells[0].code, "x = 1");
     assert!(matches!(ask(4, Request::List { path: "~/nope".into() }), Reply::Error { .. }));
