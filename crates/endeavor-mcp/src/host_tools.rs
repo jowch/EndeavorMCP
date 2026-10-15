@@ -642,7 +642,11 @@ fn watch_shell(child: &mut std::process::Child, timeout: Duration, running: &Run
         if status.is_some() && (!open || drained_by.is_some_and(|by| Instant::now() >= by)) {
             break;
         }
-        read_ready(&mut pipes, &mut running.state.lock().unwrap().captured, Duration::from_millis(50));
+        // Locked only to add what was read, never while it waits: the call waiting for the command
+        // needs the lock to answer in time.
+        for (i, bytes) in read_ready(&mut pipes, Duration::from_millis(50)) {
+            running.state.lock().unwrap().captured[i].add(&bytes);
+        }
     }
     Ok((status.expect("the loop ends once the command has exited").code(), timed_out))
 }
@@ -655,15 +659,16 @@ impl<T: Read + AsRawFd> ReadFd for T {}
 /// Wait up to `wait` for output on the open pipes and take what has come;
 /// a pipe at its end is dropped.
 #[cfg(unix)]
-fn read_ready(pipes: &mut [Option<Box<dyn ReadFd>>; 2], captured: &mut [Captured; 2], wait: Duration) {
+fn read_ready(pipes: &mut [Option<Box<dyn ReadFd>>; 2], wait: Duration) -> Vec<(usize, Vec<u8>)> {
     let mut fds: Vec<libc::pollfd> = pipes.iter().flatten().map(|p| libc::pollfd { fd: p.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
     // SAFETY: `fds` holds valid pollfds for pipes we own; with none, poll only waits.
     let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, wait.as_millis() as i32) };
+    let mut read = Vec::new();
     if ready <= 0 {
-        return;
+        return read;
     }
     let mut fds = fds.into_iter();
-    for (pipe, captured) in pipes.iter_mut().zip(captured.iter_mut()) {
+    for (i, pipe) in pipes.iter_mut().enumerate() {
         let Some(reader) = pipe else { continue };
         if fds.next().is_none_or(|fd| fd.revents == 0) {
             continue;
@@ -671,11 +676,12 @@ fn read_ready(pipes: &mut [Option<Box<dyn ReadFd>>; 2], captured: &mut [Captured
         let mut buffer = [0u8; 65536];
         match reader.read(&mut buffer) {
             Ok(0) => *pipe = None,
-            Ok(n) => captured.add(&buffer[..n]),
+            Ok(n) => read.push((i, buffer[..n].to_vec())),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => *pipe = None,
         }
     }
+    read
 }
 
 #[cfg(test)]

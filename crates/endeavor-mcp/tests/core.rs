@@ -1504,8 +1504,8 @@ fn a_command_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_res
     // A different command isn't the same call: it runs on its own.
     assert_eq!(server.call("7", "run_shell", serde_json::json!({ "command": "echo other" })).unwrap()["stdout"], "other\n");
     // Nor is the same command from another session: it runs its own, and gets its own result.
-    let other = server.call("8", "run_shell", slow.clone()).unwrap();
-    assert_eq!((&other["still_running"], &other["seconds"]), (&serde_json::json!(true), &serde_json::json!(1)), "{other}");
+    let other_started = std::time::Instant::now();
+    assert_eq!(server.call("8", "run_shell", slow.clone()).unwrap()["still_running"], true);
 
     // The same call again waits for it, without asking the user again (no app is following to ask),
     // and gets its whole result.
@@ -1521,6 +1521,7 @@ fn a_command_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_res
         result = server.call("8", "run_shell", slow.clone()).unwrap();
     }
     assert_eq!(result["stdout"], "first\nlast\n");
+    assert!(other_started.elapsed() >= Duration::from_secs(3), "its own run, not the first session's: {:?}", other_started.elapsed());
 
     // Collected, it's gone: the same command again is a new run, and asks.
     assert_eq!(server.call("7", "run_shell", slow.clone()).unwrap_err()["error"], "no_app");
