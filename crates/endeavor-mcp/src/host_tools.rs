@@ -91,9 +91,14 @@ pub struct Shell<'a> {
     pub folder: Option<&'a str>,
     /// Set in, or (None) removed from, the command's environment.
     pub env: &'a [(&'a str, Option<&'a str>)],
+    /// The session the call comes from: a command started by one session is never another's.
+    pub owner: &'a str,
     /// How long the call waits for the command: a command that runs longer goes on, and the
     /// same call again waits for it.
     pub wait: Duration,
+    /// The command this call only waits for (from `started`), which the user approved when it
+    /// started. The call then never starts one.
+    pub started: Option<&'a Started>,
 }
 
 /// Run a host tool. An error is the text Julia showed for its exception, which
@@ -481,19 +486,30 @@ fn shell_key(args: &Value, shell: &Shell) -> Result<(String, String, Duration), 
     };
     let cwd = host_path(cwd.as_deref())?;
     let timeout = Duration::from_secs(int_arg(args, "timeout_seconds", 120)?.clamp(1, 600) as u64);
-    Ok((format!("{cwd}\n{}\n{command}", timeout.as_secs()), cwd, timeout))
+    Ok((format!("{}\n{cwd}\n{}\n{command}", shell.owner, timeout.as_secs()), cwd, timeout))
 }
 
-/// Whether `run_shell` with these arguments is a command already started, still running or with
-/// its result kept: the same call again only waits for it, so the user isn't asked again.
+/// A `run_shell` command this session already started.
 #[cfg(unix)]
-pub fn started(name: &str, args: &Value, shell: &Shell) -> bool {
-    name == "run_shell" && shell_key(args, shell).is_ok_and(|(key, _, _)| running(&key).is_some())
+pub struct Started(Arc<Running>);
+#[cfg(windows)]
+pub struct Started;
+
+/// The command `run_shell` with these arguments started for this session, still running or with
+/// its result kept: the same call again only waits for it (`Shell::started`), so the user isn't
+/// asked again.
+#[cfg(unix)]
+pub fn started(name: &str, args: &Value, shell: &Shell) -> Option<Started> {
+    if name != "run_shell" {
+        return None;
+    }
+    let (key, _, _) = shell_key(args, shell).ok()?;
+    running(&key).map(Started)
 }
 
 #[cfg(windows)]
-pub fn started(_name: &str, _args: &Value, _shell: &Shell) -> bool {
-    false
+pub fn started(_name: &str, _args: &Value, _shell: &Shell) -> Option<Started> {
+    None
 }
 
 /// The command started under `key`, forgetting results kept too long.
@@ -512,7 +528,9 @@ fn forget_old(all: &mut HashMap<String, Arc<Running>>) {
 #[cfg(unix)]
 fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
     let (key, cwd, timeout) = shell_key(args, shell)?;
-    let running = {
+    let running = if let Some(Started(running)) = shell.started {
+        running.clone()
+    } else {
         // Held while it starts, so the same call made twice at once starts one command.
         let mut all = RUNNING.lock().unwrap();
         forget_old(&mut all);

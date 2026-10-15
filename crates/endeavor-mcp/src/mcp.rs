@@ -454,14 +454,16 @@ impl Bridge {
         if host_tools::NAMES.contains(&name) {
             let folder = self.folder(&caller.owner);
             let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
-            let shell = host_tools::Shell { folder: folder.dir(), env: &env, wait: Duration::ZERO };
-            // The same command again only waits for the one already started: the user was asked once.
-            if !host_tools::started(name, &arguments, &shell)
+            let shell = host_tools::Shell { folder: folder.dir(), env: &env, owner: &caller.owner, wait: Duration::ZERO, started: None };
+            // The same command again only waits for the one this session already started: the user
+            // was asked once. The call then waits for that one and can't start another.
+            let started = host_tools::started(name, &arguments, &shell);
+            if started.is_none()
                 && let Err(result) = self.ask_first(call, name, &arguments)
             {
                 return result;
             }
-            let shell = host_tools::Shell { wait: shell_wait(call.began), ..shell };
+            let shell = host_tools::Shell { wait: shell_wait(call.began), started: started.as_ref(), ..shell };
             return match host_tools::call(name, &arguments, &shell) {
                 Ok(result) => text(&result),
                 Err(error) => tool_error(&error, false),
