@@ -83,7 +83,7 @@ uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 version = "1.7.0"
 
 [[deps.EndeavorRuntime]]
-deps = ["Base64", "HTTP", "JSON", "Pluto", "UUIDs"]
+deps = ["Base64", "HTTP", "JSON", "Pluto", "PrecompileTools", "UUIDs"]
 path = "EndeavorRuntime"
 uuid = "9c048436-5824-40ce-b1d7-dfbd8086df84"
 version = "0.1.0"

@@ -11,6 +11,7 @@ include("Output.jl")
 include("Adapter.jl")
 include("Lifecycle.jl")
 include("Server.jl")
+include("precompile.jl")
 
 register_http_bridge!(_run_http_mcp_server)
 
