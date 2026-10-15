@@ -149,7 +149,7 @@ impl Engine {
             started.send(()).unwrap();
             release.recv().unwrap();
         }
-        if matches!(method, "open" | "new")
+        if matches!(method, "open" | "new" | "allow_execution")
             && let Some(release) = self.hold_open.lock().unwrap().take()
         {
             // As the runtime does, a new notebook's file is saved before the slow open.
@@ -1212,6 +1212,29 @@ fn an_open_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_resul
     release.send(()).unwrap();
     let opened = open(true, Instant::now()).unwrap();
     assert_eq!((&opened["ran"], &opened["execution_allowed"], opened.get("warnings")), (&json!(false), &json!(false), None), "{opened}");
+}
+
+#[test]
+fn leaving_safe_preview_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_result() {
+    let s = setup();
+    let dir = temp_notebooks("slow-allow", 1)[0].rsplit_once(SEP).unwrap().0.to_owned();
+    let id = s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}nb0.jl") })).unwrap()["notebook_id"].clone();
+    let (release, held) = mpsc::channel();
+    *s.engine.hold_open.lock().unwrap() = Some(held);
+    let late = Instant::now() - Duration::from_secs(60);
+    let allow = |began| s.notebooks.tool("a", "allow_execution", &json!({ "notebook_id": id }), &Folder::Process, began).map(tool_json);
+    let started = Instant::now();
+    let said = allow(late).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(said.starts_with("notebook_opening::Starting the notebook is taking longer than one call waits"), "{said}");
+    assert_eq!(crate::mcp::tool_error(&said, false)["isError"], false, "still starting is not a failure");
+
+    // It went on; the same call again gets its result, not "already allowed".
+    release.send(()).unwrap();
+    let allowed = allow(Instant::now()).unwrap();
+    assert_eq!((&allowed["already_allowed"], &allowed["ran"], &allowed["execution_allowed"]), (&json!(false), &json!(true), &json!(true)), "{allowed}");
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "allow_execution").count(), 1, "allowed once");
+    assert_eq!(allow(Instant::now()).unwrap()["already_allowed"], true);
 }
 
 #[test]

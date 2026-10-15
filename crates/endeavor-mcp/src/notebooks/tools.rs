@@ -1069,7 +1069,11 @@ impl Call<'_> {
         let nb = self.notebook()?;
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(true));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
-        let allowed = self.nbs.call("allow_execution", json!({ "notebook_id": nb.id, "run": run, "timeout": TIMEOUT_SECONDS }))?;
+        // Leaving safe preview starts a new Julia process for the notebook, which can outlast the
+        // call; a call made again while it is under way gets its result.
+        let params = json!({ "notebook_id": nb.id, "run": run, "timeout": TIMEOUT_SECONDS });
+        let why = "a new Julia process starts for it, and its packages may need installing";
+        let (allowed, _) = self.nbs.waited("allow_execution", params, format!("allow {}", nb.id), self.run_wait(), &format!("Starting the notebook is taking longer than one call waits: {why}"))?;
         let ran = allowed["ran"] == true;
         let mut result = json!({
             "notebook_id": nb.id, "execution_allowed": true, "already_allowed": allowed["already_allowed"], "ran": ran,
