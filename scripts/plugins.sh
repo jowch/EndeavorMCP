@@ -9,9 +9,10 @@
 # release-key isn't the build of this commit's helper source
 # (scripts/helpers.sh --key), so that a plugin's skills and binary come from
 # one commit. `repin` writes that build into release-key, then syncs: run it
-# after committing a change to the helper source, and commit what it changes. Each plugin holds the launcher files in launch/ and a copy of the
-# skills, not a link: an agent may not follow a link out of the plugin's
-# folder, and a checkout without symlink support turns a link into a text file.
+# after committing a change to the helper source, and commit what it changes.
+# Each plugin holds the launcher files in launch/ and a copy of the skills,
+# not a link: an agent may not follow a link out of the plugin's folder, and a
+# checkout without symlink support turns a link into a text file.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -28,8 +29,8 @@ esac
 
 if [ "$mode" = repin ]; then
   # The key hashes the committed tree, so uncommitted helper source would pin
-  # a build that doesn't hold it. These are the paths scripts/helpers.sh hashes.
-  if [ -n "$(git status --porcelain -- crates/endeavor-mcp crates/wire plugin runtime rust-toolchain.toml Cargo.lock Cargo.toml)" ]; then
+  # a build that doesn't hold it.
+  if ! sh scripts/helpers.sh --committed; then
     echo "The helper source has uncommitted changes. Commit them, then run: sh scripts/plugins.sh repin" >&2
     exit 1
   fi
