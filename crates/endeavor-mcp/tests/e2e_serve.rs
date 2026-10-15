@@ -243,9 +243,10 @@ fn serve_and_mcp_without_the_app() {
         let started = Instant::now();
         let created = loop {
             match agent.call("new_notebook", json!({ "path": "analysis.jl" })) {
-                (true, result) if result["error"] == "julia_starting" && started.elapsed() < Duration::from_secs(900) => std::thread::sleep(Duration::from_secs(2)),
-                (false, result) => break result,
-                (true, result) => panic!("new_notebook: {result}"),
+                // Still starting, or still opening, is a normal result that says to call again.
+                (false, result) if matches!(result["error"].as_str(), Some("julia_starting" | "notebook_opening")) && started.elapsed() < Duration::from_secs(900) => std::thread::sleep(Duration::from_secs(2)),
+                (false, result) if result.get("error").is_none() => break result,
+                (_, result) => panic!("new_notebook: {result}"),
             }
         };
         let notebook = created["notebook_id"].as_str().unwrap().to_owned();

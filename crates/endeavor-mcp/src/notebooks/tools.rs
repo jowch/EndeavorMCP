@@ -950,7 +950,8 @@ impl Call<'_> {
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
-        let opened = match self.nbs.call("open", json!({ "path": path, "run": run })) {
+        let key = format!("open {}", canonical_path(path).unwrap_or_else(|_| path.clone()));
+        let opened = match self.nbs.open_waited("open", json!({ "path": path, "run": run }), key, self.run_wait(), &format!("Opening '{path}'")) {
             Ok(opened) => opened,
             Err(error) if already_open(&error) => return self.join(path).unwrap_or(Err(error)),
             Err(error) => return Err(error),
@@ -1029,7 +1030,12 @@ impl Call<'_> {
             }
             Some(_) => return Err(argument_error("invalid_path::path must be a string")),
         };
-        let made = self.nbs.call("new", params)?;
+        // A new notebook without a path is the session's one being made, whatever name the engine gives it.
+        let (key, doing) = match params["path"].as_str() {
+            Some(path) => (format!("new {path}"), format!("Creating '{path}'")),
+            None => (format!("new in {} for {}", params["folder"].as_str().unwrap_or_default(), self.owner), "Creating the notebook".to_owned()),
+        };
+        let made = self.nbs.open_waited("new", params, key, self.run_wait(), &doing)?;
         let id = made["notebook_id"].as_str().unwrap_or_default();
         let mut cell_ids = Vec::new();
         // The caller knows these cells are empty; without a read first, the first edit would be refused.

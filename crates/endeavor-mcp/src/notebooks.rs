@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -36,6 +36,8 @@ pub use r::R;
 pub use tools::{Reply, WAIT_SECONDS};
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
+/// How long the result of an open that outlasted its call is kept for the same call made again.
+const OPENING_KEPT: Duration = Duration::from_secs(600);
 
 /// Hours without activity after which a notebook stops, unless the caller sets another.
 pub const IDLE_HOURS: f64 = 48.0;
@@ -54,8 +56,9 @@ pub trait Upstream: Send + Sync {
     fn notifications(&self) -> io::Result<Box<dyn BufRead + Send>>;
 }
 
-/// Starts an engine's adapter: what answers for it once it's up, or why it couldn't start.
-pub type Starter = Box<dyn Fn(Backend) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
+/// Starts an engine's adapter: what answers for it once it's up, or why it couldn't start. The
+/// `Duration` is what is left of the call's wait, which Julia's start waits no longer than.
+pub type Starter = Box<dyn Fn(Backend, Duration) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
 
 /// Julia's bridge, once it answers.
 pub struct Julia {
@@ -253,6 +256,14 @@ impl State {
     }
 }
 
+/// A notebook's open or creation in its engine, which goes on after the call that asked for it
+/// stopped waiting: its result, and when it came, once it has.
+#[derive(Default)]
+struct Opening {
+    done: Mutex<Option<(Result<Value, String>, Instant)>>,
+    came: Condvar,
+}
+
 #[derive(Default)]
 struct Events {
     subscribers: Vec<Sender<String>>,
@@ -283,6 +294,18 @@ pub struct Notebooks {
     /// Each agent session's notebook kind, when its client said it (`endeavor/set_session_folder`'s
     /// `kind`): the engine of a `new_notebook` without a path. Pluto's for a session with none.
     kinds: Mutex<HashMap<String, Backend>>,
+    /// Opens and creations under way or not yet collected, by what they open (`open_waited`).
+    openings: Mutex<HashMap<String, Arc<Opening>>>,
+}
+
+/// One call to the engines' adapter (`message`): its result, or the error it raised.
+fn adapter_call(engines: &Engines, message: &Value) -> Result<Value, String> {
+    let reply = engines.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;
+    let mut reply: Value = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
+    match reply.get("error") {
+        Some(error) => Err(julia_string(error)),
+        None => Ok(reply["result"].take()),
+    }
 }
 
 /// One notebook as the engine's `snapshot` reports it.
@@ -518,6 +541,7 @@ impl Notebooks {
             build: OnceLock::new(),
             exits_when_idle: false,
             kinds: Mutex::default(),
+            openings: Mutex::default(),
         }
     }
 
@@ -567,7 +591,7 @@ impl Notebooks {
 
     /// Start `backend`'s engine unless it runs. Julia keeps its own start in order (core.rs), and can
     /// take minutes; the other engines' starts are taken one at a time here.
-    fn start_engine(&self, backend: Backend) -> Result<(), String> {
+    fn start_engine(&self, backend: Backend, wait: Duration) -> Result<(), String> {
         if self.engines.has(backend) {
             return Ok(());
         }
@@ -576,7 +600,7 @@ impl Notebooks {
             return Ok(());
         }
         let Some(starter) = self.starter.get() else { return Ok(()) };
-        let upstream = starter(backend)?;
+        let upstream = starter(backend, wait)?;
         self.add_engine(backend, upstream);
         Ok(())
     }
@@ -698,15 +722,51 @@ impl Notebooks {
 
     /// One call to the engine's adapter: its result, or the error it raised.
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
-        if matches!(method, "open" | "new") {
-            self.start_engine(engines::of_params(&params))?;
-        }
-        let message = json!({ "method": method, "params": params });
-        let reply = self.engines.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;
-        let mut reply: Value = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
-        match reply.get("error") {
-            Some(error) => Err(julia_string(error)),
-            None => Ok(reply["result"].take()),
+        adapter_call(&self.engines, &json!({ "method": method, "params": params }))
+    }
+
+    /// The engine's `open` or `new` (`method`), starting the engine first, waited for up to `wait`.
+    /// The first notebook in a new Julia process compiles for a while, so with Julia's start the
+    /// call could outlast what an agent's call waits. Then the open goes on, and the call answers
+    /// `notebook_opening` (`doing` says what); the same call again, with the same `key`, waits for
+    /// that open and gets its result, which is kept for `OPENING_KEPT`.
+    fn open_waited(&self, method: &str, params: Value, key: String, wait: Duration, doing: &str) -> Result<Value, String> {
+        let began = Instant::now();
+        self.start_engine(engines::of_params(&params), wait)?;
+        let opening = {
+            let mut openings = self.openings.lock().unwrap();
+            openings.retain(|_, opening| opening.done.lock().unwrap().as_ref().is_none_or(|(_, at)| at.elapsed() < OPENING_KEPT));
+            let opening = openings.entry(key.clone()).or_insert_with(|| {
+                let opening = Arc::new(Opening::default());
+                let (engines, message, done) = (self.engines.clone(), json!({ "method": method, "params": params }), opening.clone());
+                std::thread::spawn(move || {
+                    let result = adapter_call(&engines, &message);
+                    *done.done.lock().unwrap() = Some((result, Instant::now()));
+                    done.came.notify_all();
+                });
+                opening
+            });
+            opening.clone()
+        };
+        let deadline = began + wait;
+        let mut done = opening.done.lock().unwrap();
+        loop {
+            if let Some((result, _)) = done.as_ref() {
+                let result = result.clone();
+                drop(done);
+                let mut openings = self.openings.lock().unwrap();
+                if openings.get(&key).is_some_and(|kept| Arc::ptr_eq(kept, &opening)) {
+                    openings.remove(&key);
+                }
+                return result;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(format!(
+                    "notebook_opening::{doing} is taking longer than one call waits: the first notebook in a new Julia process takes a while to compile. It goes on by itself. Make the same call again to wait for it."
+                ));
+            }
+            done = opening.came.wait_timeout(done, left).unwrap().0;
         }
     }
 

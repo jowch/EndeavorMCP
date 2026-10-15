@@ -935,12 +935,18 @@ const MISUSE_KINDS: [&str; 14] = [
 const ERRORS_TOPIC_KINDS: [&str; 6] = ["invalid_argument", "cell_not_found", "notebook_not_found", "invalid_path", "placement_required", "not_staged"];
 const ERRORS_TOPIC_HINT: &str = "See `notebook_guide` with `topic` set to `endeavor-notebooks/reference/errors.md` for what this error means and what to do.";
 
+/// Kinds that say something is still starting, not that the call failed: Julia, R notebooks' setup,
+/// or a notebook's open that outlasted the call. The agent only waits and makes the same call again,
+/// so the result isn't marked an error; it keeps the `error` code, which clients match on.
+const STARTING_KINDS: [&str; 3] = ["julia_starting", "r_installing", "notebook_opening"];
+
 /// A failed tool call's result, from the text of the error Julia raised:
 /// `ArgumentError: kind::message` names its kind; anything else is a
 /// `tool_error`. `help`: whether to point a misuse kind at `notebook_guide`,
 /// true only when the caller has no other way to learn it (no plugin) and
 /// the call site is a notebook tool's own mistake, not a host tool's or a
-/// refusal that already says what to do instead.
+/// refusal that already says what to do instead. A kind that says something
+/// is still starting is a normal result (`STARTING_KINDS`).
 pub(crate) fn tool_error(raw: &str, help: bool) -> Value {
     let unwrapped = unwrap_key_error(raw);
     let raw = unwrapped.as_deref().unwrap_or(raw);
@@ -959,7 +965,7 @@ pub(crate) fn tool_error(raw: &str, help: bool) -> Value {
         message.to_owned()
     };
     let text = to_json(&json!({ "error": kind, "message": message }));
-    json!({ "content": [{ "type": "text", "text": text }], "isError": true })
+    json!({ "content": [{ "type": "text", "text": text }], "isError": !STARTING_KINDS.contains(&kind) })
 }
 
 /// A notebook or cell not found looks like a native Julia `KeyError`
@@ -1306,6 +1312,13 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         assert_eq!(text("SystemError: opening file \"/x\": Permission denied"), r#"{"error":"tool_error","message":"SystemError: opening file \"/x\": Permission denied"}"#);
         assert_eq!(text("IOError: readdir(\"/a::b\"): denied"), r#"{"error":"readdir(\"/a","message":"b\"): denied"}"#);
         assert_eq!(tool_error("x", false)["isError"], true);
+        // Still starting is not a failure: the agent waits and calls again, and the code stays.
+        let starting = tool_error("julia_starting::Julia 1.12.6 is starting and loading Pluto. Try again in a minute.", false);
+        assert_eq!(starting["isError"], false);
+        assert_eq!(text("julia_starting::Julia is starting"), r#"{"error":"julia_starting","message":"Julia is starting"}"#);
+        assert_eq!(tool_error("r_installing::Installing Ember", false)["isError"], false);
+        assert_eq!(tool_error("notebook_opening::Opening", false)["isError"], false);
+        assert_eq!(tool_error("julia_failed::It stopped", false)["isError"], true);
     }
 
     #[test]

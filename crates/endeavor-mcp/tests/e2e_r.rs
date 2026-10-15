@@ -231,10 +231,11 @@ fn an_r_notebook_through_the_runtime() {
         let deadline = Instant::now() + Duration::from_secs(1200);
         let opened = loop {
             let (failed, opened) = agent.call("open_notebook", json!({ "path": "growth.R" }));
-            if !failed {
+            if !failed && opened.get("error").is_none() {
                 break opened;
             }
-            assert!(opened["error"] == "r_installing" && Instant::now() < deadline, "{opened}");
+            // Still installing is a normal result, not a failure.
+            assert!(!failed && matches!(opened["error"].as_str(), Some("r_installing" | "notebook_opening")) && Instant::now() < deadline, "{opened}");
             std::thread::sleep(Duration::from_secs(5));
         };
         // A warning here is `ember_previous`: Ember's newest build didn't work, which the daily run is for.
@@ -537,10 +538,10 @@ fn endeavors_own_r_on_a_mac() {
         let deadline = Instant::now() + Duration::from_secs(1800);
         loop {
             let (failed, opened) = agent.call("open_notebook", json!({ "path": "which.R" }));
-            if !failed {
+            if !failed && opened.get("error").is_none() {
                 break opened["notebook_id"].as_str().unwrap().to_owned();
             }
-            assert!(opened["error"] == "r_installing" && Instant::now() < deadline, "{opened}; the log:\n{}", err.try_iter().collect::<Vec<_>>().join("\n"));
+            assert!(!failed && matches!(opened["error"].as_str(), Some("r_installing" | "notebook_opening")) && Instant::now() < deadline, "{opened}; the log:\n{}", err.try_iter().collect::<Vec<_>>().join("\n"));
             std::thread::sleep(Duration::from_secs(5));
         }
     });

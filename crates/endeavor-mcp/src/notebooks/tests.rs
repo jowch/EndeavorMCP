@@ -76,6 +76,8 @@ struct Engine {
     made: Mutex<u32>,
     /// The `timeout` of each waited `run`.
     waits: Mutex<Vec<f64>>,
+    /// The next `open` or `new` waits here before it answers, like a cold first open compiling.
+    hold_open: Mutex<Option<Receiver<()>>>,
 }
 
 impl Engine {
@@ -146,6 +148,11 @@ impl Engine {
         {
             started.send(()).unwrap();
             release.recv().unwrap();
+        }
+        if matches!(method, "open" | "new")
+            && let Some(release) = self.hold_open.lock().unwrap().take()
+        {
+            let _ = release.recv();
         }
         let now = *self.clock.lock().unwrap();
         let mut notebooks = self.notebooks.lock().unwrap();
@@ -1163,6 +1170,32 @@ fn a_run_receipt_has_the_text_form_of_rich_outputs() {
     let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
     assert_eq!(ran["outputs"]["changed"], json!([{ "cell_id": X, "output_summary": "ran table", "output_text": "n\tmean\n3\t2.5" }]));
     assert_eq!(super::tools::cut("abcé", 4), "abc\n… (cut; read_cell shows more)");
+}
+
+#[test]
+fn an_open_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_result() {
+    let s = setup();
+    let dir = temp_notebooks("slow-open", 1)[0].rsplit_once(SEP).unwrap().0.to_owned();
+    let path = format!("{dir}{SEP}slow.jl");
+    let (release, held) = mpsc::channel();
+    *s.engine.hold_open.lock().unwrap() = Some(held);
+    // A call that already spent its 45 s (on the user's answer, say) waits only the least a run is waited for.
+    let late = Instant::now() - Duration::from_secs(60);
+    let make = |began| s.notebooks.tool("a", "new_notebook", &json!({ "path": path }), &Folder::Process, began).map(tool_json);
+    let started = Instant::now();
+    let said = make(late).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(said.starts_with(&format!("notebook_opening::Creating '{path}' is taking longer than one call waits")), "{said}");
+    assert_eq!(crate::mcp::tool_error(&said, false)["isError"], false, "still opening is not a failure");
+
+    // The creation went on; the same call again gets it, rather than "already exists".
+    release.send(()).unwrap();
+    let made = make(Instant::now()).unwrap();
+    assert_eq!((&made["path"], &made["created"]), (&json!(path), &json!(true)), "{made}");
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "new").count(), 1, "made once");
+    // Its result was collected: a third call is a new call (on disk it would find the file there).
+    make(Instant::now()).unwrap();
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "new").count(), 2);
 }
 
 #[test]

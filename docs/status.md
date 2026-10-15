@@ -237,11 +237,18 @@ Next:
   `r` through, with no field to set them yet. The engine
   name a client asks a runtime for (`wire::ENGINE_PLUTO`, a string) is still
   a string; it becomes `Backend` later.
+- A tool call that finds something still starting answers as a normal result, not an
+  error, keeping its code (`julia_starting`, `r_installing`, `notebook_opening`), and so
+  does a machine's runtime that is starting or queued (#105). `open_notebook` and
+  `new_notebook` wait at most what is left of the call's 45 s, Julia's start included;
+  an open that takes longer goes on, the call answers `notebook_opening`, and the same
+  call again gets its result (#16). A cold first open still compiles for about 20 s:
+  there is no precompile workload yet.
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is
   opened or made or a page of Pluto's past the runtime's link is asked for, and answers
-  `julia_starting` while Julia starts. The plugin's `serve`, `mcp` and machines
+  `julia_starting` while Julia starts (a normal result, not an error: #105). The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
   before, and only starting it waits. A session whose folder has Pluto
   notebooks, or whose caller says it is a Julia session (`kind`), gets Julia

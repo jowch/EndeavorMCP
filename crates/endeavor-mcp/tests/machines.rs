@@ -985,7 +985,7 @@ fn a_notebook_call_while_the_runtime_is_still_starting_returns_the_status_within
     let started = Instant::now();
     let (failed, said) = front.call("list_notebooks", json!({}));
     assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
-    assert!(failed && text(&said).contains("Endeavor is starting on lab"), "{said}");
+    assert!(!failed && text(&said).contains("Endeavor is starting on lab"), "{said}");
     let status = front.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["state"].as_str(), status["ready"].clone()), (Some("lab"), Some("starting"), json!(false)), "{status}");
     assert!(status["step"].is_string());
@@ -1660,7 +1660,7 @@ fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call
     let started = Instant::now();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
     assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
-    assert!(failed && text(&said).contains("Endeavor is starting on this computer") && text(&said).contains("`session_status`"), "{said}");
+    assert!(!failed && text(&said).contains("Endeavor is starting on this computer") && text(&said).contains("`session_status`"), "{said}");
     assert!(place.local_runtime().is_none());
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1719,7 +1719,7 @@ fn a_forced_stop_cancels_a_start_another_process_began_and_the_next_call_starts_
     let mut first = start_front(&place, &short);
     first.initialize();
     let (failed, said) = first.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
+    assert!(!failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     let started = core_of(&place);
     let julia = common::julia_pids(&place.local_state);
     assert_eq!((started.len(), julia.len()), (1, 1), "{started:?} {julia:?}");
@@ -1769,7 +1769,7 @@ fn a_forced_stop_cancels_the_start_this_session_began_and_it_is_not_left_as_a_fa
     let mut front = start_front(&place, &[("ENDEAVOR_START_WAIT_SECS", "2")]);
     front.initialize();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
+    assert!(!failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     let started = core_of(&place);
     assert_eq!(started.len(), 1, "{started:?}");
 
@@ -1804,7 +1804,7 @@ fn a_forced_stop_after_a_failed_start_here_reaches_a_start_another_process_has_u
     let mut front = start_front(&place, &short);
     front.initialize();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
+    assert!(!failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     // Its start fails: the core is killed under it.
     let first = core_of(&place);
     assert_eq!(first.len(), 1, "{first:?}");
@@ -1818,7 +1818,7 @@ fn a_forced_stop_after_a_failed_start_here_reaches_a_start_another_process_has_u
     let mut other = start_front(&place, &short);
     other.initialize();
     let (failed, said) = other.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
+    assert!(!failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     let second = core_of(&place);
     assert_eq!(second.len(), 1, "{second:?}");
     assert_ne!(second, first);
@@ -1839,7 +1839,7 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     let mut first = start_front(&place, &short);
     first.initialize();
     let (failed, said) = first.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
+    assert!(!failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     let started = core_of(&place);
     assert_eq!(started.len(), 1, "{started:?}");
     first.finish();
@@ -1855,7 +1855,7 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     assert!(refused["stopped"] == false && refused["state"] == "starting" && said.contains("Endeavor is starting on this computer") && said.contains("Stopping cancels it") && said.contains("force true"), "{refused}");
     assert_eq!(core_of(&place), started, "a stop without force leaves another process's start alone");
     let (failed, said) = second.call("open_notebook", json!({ "path": path }));
-    assert!(failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
+    assert!(!failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
     assert_eq!(core_of(&place), started, "no second runtime was started");
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1911,7 +1911,7 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     slurm.set("reason", "Resources");
     wait_for("the queue's new reason", || front.ok("session_status", json!({}))["queue"]["reason"] == "Resources");
     let (failed, said) = front.call("list_notebooks", json!({}));
-    assert!(failed && text(&said).contains("Slurm job 42 on hpc is waiting in the queue"), "{said}");
+    assert!(!failed && text(&said).contains("Slurm job 42 on hpc is waiting in the queue"), "{said}");
 
     // The job runs: its node starts the runtime, and the session gets to it.
     slurm.set("node", &this_host());
