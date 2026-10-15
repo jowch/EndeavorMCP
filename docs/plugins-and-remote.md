@@ -929,8 +929,8 @@ out of the plugin, and a Windows checkout without `core.symlinks` turns a link
 into a text file.
 `release-key` is not in `plugin/`, because that folder is hashed into the
 build's key. The key hashes the committed tree, so after committing a change
-to the helper source, run `scripts/helpers.sh --key > scripts/release-key &&
-sh scripts/plugins.sh sync` and amend the commit; the amend keeps the key.
+to the helper source, run `sh scripts/plugins.sh repin` (it writes the key to
+`scripts/release-key` and syncs) and commit, or amend; the key doesn't change.
 Because the key covers `plugin/`, a matching pin also
 means the binary embeds the skills the plugins ship.
 

@@ -10,6 +10,8 @@
 #   scripts/helpers.sh --fetch-only  keep or download, never build (Endeavor's
 #                                    git hooks run this)
 #   scripts/helpers.sh --key         print the helper source key
+#   scripts/helpers.sh --committed   fail if the helper source has uncommitted
+#                                    changes, which the key wouldn't include
 #
 # Downloads come from the "helpers" release on GitHub, which the Helpers
 # workflow (.github/workflows/helpers.yml) fills for every change to the
@@ -59,14 +61,20 @@ key() {
   } | shasum -a 256 | cut -c1-12
 }
 
+# True if the working tree's helper source differs from what key() hashes.
+dirty() {
+  [ -n "$(git status --porcelain -- $paths Cargo.toml)" ] || [ "$(closure < Cargo.lock)" != "$(git show HEAD:Cargo.lock | closure)" ]
+}
+
 fetch_only=
 case "${1:-}" in
   --key) key; exit 0 ;;
+  --committed) if dirty; then exit 1; else exit 0; fi ;;
   --fetch-only) fetch_only=1 ;;
 esac
 
 key=$(key)
-if [ -n "$(git status --porcelain -- $paths)" ] || [ "$(closure < Cargo.lock)" != "$(git show HEAD:Cargo.lock | closure)" ]; then
+if dirty; then
   key="$key-dirty"
 fi
 
