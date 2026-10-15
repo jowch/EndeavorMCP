@@ -224,7 +224,8 @@ impl Caller {
 
 impl Bridge {
     /// `depot` is Julia's JULIA_DEPOT_PATH.
-    pub fn new(token: String, depot: &str) -> Bridge {
+    /// `token` is the core's bearer token; `engine_token` the key to Julia's bridge (`Julia`).
+    pub fn new(token: String, engine_token: String, depot: &str) -> Bridge {
         let shell_env = vec![
             ("JULIA_DEPOT_PATH", Some(depot.to_owned())),
             ("ENDEAVOR_TOKEN", None),
@@ -238,7 +239,7 @@ impl Bridge {
             ("ENDEAVOR_IDLE_HOURS", None),
             ("ENDEAVOR_EXIT_IDLE", None),
         ];
-        let julia = Arc::new(Julia::new(token.clone()));
+        let julia = Arc::new(Julia::new(engine_token));
         let clock = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
         Bridge {
             // Pluto's engine joins once Julia is ready (core.rs).

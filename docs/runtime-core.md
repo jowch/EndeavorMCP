@@ -85,7 +85,9 @@ app ── ssh/stdio frames ── endeavor ── core (Rust, the runtime's one
 ## The engine interface
 
 Every adapter speaks the same calls and notifications over loopback HTTP on
-its own bridge port, with the bearer token the core gives it: the core
+its own bridge port, with the engines' key the core gives it (made at each
+start, kept in no file, and neither the MCP bearer token nor the pages'
+token, since `/adapter` runs cells without the core's run gate): the core
 `POST`s each call to `/adapter` as `{"method", "params"}` and reads the
 reply's `result` or `error`, and reads notifications from one long-lived
 `GET /notifications` stream, a `data: {"method", "params"}` line each. Not

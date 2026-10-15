@@ -47,7 +47,7 @@ Later engines get a prefix each (`/marimo/…`, `/ember/…`); Pluto stays at
 `/` so it needs no base URL. Nothing starts Ember yet; its route is ready for
 the R adapter.
 
-**Two tokens.** The bearer token opens `/mcp` and `/endeavor/…`, as
+**Three keys.** The bearer token opens `/mcp` and `/endeavor/…`, as
 `Authorization: Bearer …`, from agents and the app. The pages' token opens
 the pages (Pluto's and `/ember/…`) and nothing else, accepted two ways:
 - as `Authorization: Bearer …`, from the app (exports);
@@ -59,8 +59,12 @@ config carries it, and some agents keep that config on disk, so a leaked
 config gives the notebook tools, with the app's run gate, and not Pluto's
 own page, which runs anything. Both tokens live in the state folder
 (`token`, `page_token`), so they stay the same across runtimes, and both are
-in `runtime.json`. An agent that runs shell commands as the user can read
-them either way; the split guards only against a leaked config.
+in `runtime.json`. The third key is the engines': the core makes it at each
+start and hands it only to Julia's and R's bridges (`ENDEAVOR_TOKEN`), whose
+`/adapter` runs cells without the core's run gate. It is in no file, so
+neither a leaked MCP config nor the pages' link reaches the engines. An
+agent that runs shell commands as the user can read the first two either
+way; the split guards against a leaked config.
 
 The cookie opens the pages only, never `/mcp` or `/endeavor/…`.
 Notebook outputs run their own JavaScript on the page's origin. With cookie

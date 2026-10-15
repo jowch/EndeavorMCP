@@ -71,7 +71,9 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   bearer token, which an agent's MCP config carries, opens `/mcp` and
   `/endeavor/…` only; the pages' token (`page_token` in the state folder and
   `runtime.json`, in `Ready` and `page_url`) opens Pluto's and Ember's pages
-  only. A client meeting a runtime from before sends the bearer token to its
+  only. Julia's and R's bridges take a third key the core makes at each start
+  and keeps in no file, so the bearer token can't run cells past the run gate
+  through `/adapter` either. A client meeting a runtime from before sends the bearer token to its
   pages, which that runtime still takes. An older app that attaches to a newer
   runtime gets its pages refused until Julia restarts from the app's build.
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the

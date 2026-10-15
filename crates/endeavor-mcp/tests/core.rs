@@ -190,7 +190,10 @@ fn starts_julia_and_writes_its_own_runtime_json() {
     assert!(ports.len() == 2 && ports[0] != ports[1] && !ports.contains(&core.port), "{ports:?}");
 
     let ping = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1" && String::from_utf8_lossy(&s.body).contains("\"ping\"")).expect("checked Julia's bridge answers");
-    assert!(ping.header("Authorization").is_some_and(|a| a.starts_with("Bearer ")));
+    let engine = engine_token(&dir);
+    assert!(engine.len() == 64 && engine != TOKEN && engine != PAGES, "Julia gets a key of its own: {engine}");
+    assert_eq!(ping.header("Authorization"), Some(format!("Bearer {engine}").as_str()));
+    assert!(!std::fs::read_to_string(dir.join("runtime.json")).unwrap().contains(&engine), "the engines' key isn't recorded");
 }
 
 #[test]
@@ -207,7 +210,7 @@ fn answers_julias_calls_itself_and_hands_the_folder_to_julia() {
     assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap(), serde_json::json!({ "jsonrpc": "2.0", "id": 7, "result": {} }));
     let seen = bridge.seen().into_iter().find(|s| s.line == "POST /call HTTP/1.1" && String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")).expect("Julia's `/call`");
     assert_eq!(seen.header("Host"), Some(format!("127.0.0.1:{}", bridge.port).as_str()));
-    assert_eq!(seen.header("Authorization"), Some(format!("Bearer {TOKEN}").as_str()));
+    assert_eq!(seen.header("Authorization"), Some(format!("Bearer {}", engine_token(&dir)).as_str()), "the engines' key, not the bearer token");
     assert!(String::from_utf8_lossy(&seen.body).contains(r#""path":"/n""#));
 
     // A chunked call, which the core reads whole to see its method.

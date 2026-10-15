@@ -179,11 +179,13 @@ pub fn main(argv: &[String]) -> ! {
     let page_token = crate::page_token(&args.state_dir).unwrap_or_else(|e| fail(e));
     let cookie = cookie_name(&page_token);
     let port = listener.local_addr().unwrap().port();
-    let token_for_r = token.clone();
-    let julia = JuliaStarter::new(&args, &token, &launcher, stops.clone());
+    // The engines' key: Julia's and R's bridges run cells without the core's run gate, so they take neither the
+    // MCP bearer token, which an agent's config carries, nor the pages' token. Made at each start and kept in no file.
+    let engine_token = crate::random_hex::<32>().unwrap_or_else(|e| fail(e));
+    let julia = JuliaStarter::new(&args, &engine_token, &launcher, stops.clone());
     #[cfg(unix)]
     let julia = JuliaStarter { mask: Some(inherited_mask), ..julia };
-    let mut bridge = Bridge::new(token, &args.depot);
+    let mut bridge = Bridge::new(token, engine_token.clone(), &args.depot);
     bridge.standalone = folder.map(|folder| crate::mcp::Standalone { port, folder, no_folder, host: env("ENDEAVOR_HOST_TOOLS") });
     if let Ok(build) = std::env::var("ENDEAVOR_BUILD") {
         let _ = bridge.notebooks.build.set(build);
@@ -198,7 +200,7 @@ pub fn main(argv: &[String]) -> ! {
     let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
-    let r = Arc::new(RStarter::new(&args, &token_for_r, allow_r_install));
+    let r = Arc::new(RStarter::new(&args, &engine_token, allow_r_install));
     let starting = (r.clone(), served.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend| match backend {
         Backend::Ember => starting.0.start(&starting.1),
@@ -383,6 +385,7 @@ struct JuliaStarter {
     when_needed: bool,
     runtime: PathBuf,
     depot: String,
+    /// The engines' key, which Julia's bridge takes: not the MCP bearer token.
     token: String,
     launcher: String,
     /// Where `julia boot.jl` writes its state for the core.
@@ -820,6 +823,7 @@ struct RStarter {
     shell_has_r: std::sync::atomic::AtomicBool,
     adapter: PathBuf,
     state: PathBuf,
+    /// The engines' key, which R's bridge takes: not the MCP bearer token.
     token: String,
     spawn: Spawner,
     child: std::sync::Mutex<Option<std::process::Child>>,
@@ -1249,7 +1253,7 @@ impl Served {
         let julia = &self.julia;
         julia.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
         match self.bridge.julia.port.get() {
-            Some(&port) if julia.pid.load(std::sync::atomic::Ordering::SeqCst) > 0 && bridge_call(port, "/call", &self.bridge.token, "endeavor/shutdown").is_ok() => {}
+            Some(&port) if julia.pid.load(std::sync::atomic::Ordering::SeqCst) > 0 && bridge_call(port, "/call", &self.julia.token, "endeavor/shutdown").is_ok() => {}
             _ => {
                 let _ = self.stops.send(Stop::Shutdown);
             }
@@ -1270,7 +1274,7 @@ impl Served {
                 let folder = message["params"]["path"].as_str().unwrap_or_default().to_owned();
                 *self.app_folder.lock().unwrap() = Some(folder.clone());
                 if let Some(&port) = self.bridge.julia.port.get() {
-                    set_pluto_folder(port, &self.bridge.token, &folder);
+                    set_pluto_folder(port, &self.julia.token, &folder);
                 }
             }
             "endeavor/shutdown" => {
@@ -1891,7 +1895,7 @@ mod tests {
         let (stops, _) = std::sync::mpsc::channel();
         let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
         let julia = JuliaStarter::new(&parse_args(&argv).unwrap(), TOKEN, "process", stops.clone());
-        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default() })
+        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default() })
     }
 
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.
@@ -1938,6 +1942,19 @@ mod tests {
         assert!(!head.contains("Cookie") && !head.contains("Authorization"), "{head}");
         assert!(reply.starts_with("HTTP/1.1 200") && reply.ends_with("hi"), "{reply}");
         assert!(!reply.contains("s3cret") && reply.contains("theme=dark"), "{reply}");
+    }
+
+    #[test]
+    fn the_bearer_token_gets_no_page_through_the_port() {
+        use std::io::Read;
+        let port = serving(Some(1));
+        for target in ["/", "/edit?id=1", "/ember/edit?id=1"] {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(stream, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n").unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            assert!(reply.starts_with("HTTP/1.1 401"), "{target}: {reply}");
+        }
     }
 
     #[test]

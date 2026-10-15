@@ -143,8 +143,8 @@ pub struct RuntimeInfo {
     /// Pluto's start page, with the token that lets a browser in.
     pub page_url: String,
     /// The token for the runtime's pages (`page_url` carries it), which the bearer token doesn't open: for
-    /// the app's own requests to a page, such as an export. Empty from an older client; such a runtime's
-    /// pages take `token`.
+    /// the app's own requests to a page, such as an export. For a runtime from before the pages had their
+    /// own it is the bearer token (the client falls back once, when the helper's `Ready` has none).
     #[serde(default)]
     pub page_token: String,
     pub node: String,
