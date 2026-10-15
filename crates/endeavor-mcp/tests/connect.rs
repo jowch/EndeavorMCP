@@ -147,10 +147,10 @@ impl Helper {
     }
 }
 
-/// A relayed connection to Pluto's WebSocket, switched and ready to echo.
-fn websocket(helper: &Helper) -> TcpStream {
+/// A relayed connection to Pluto's WebSocket, switched and ready to echo, with the pages' token `pages`.
+fn websocket(helper: &Helper, pages: &str) -> TcpStream {
     let mut socket = helper.connect();
-    write!(socket, "GET /channels HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").unwrap();
+    write!(socket, "GET /channels HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {pages}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").unwrap();
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {
         let mut byte = [0];
@@ -189,7 +189,7 @@ fn several_helpers_attach_and_one_stop_ends_the_runtime_for_all() {
     assert_eq!((token.as_str(), reattached), (TOKEN, true));
 
     // Both Pluto's WebSocket and the app's calls go to the runtime's one port.
-    let mut pluto = websocket(&first);
+    let mut pluto = websocket(&first, "p");
     pluto.write_all(b"over the relay").unwrap();
     let mut back = [0; 14];
     pluto.read_exact(&mut back).unwrap();
@@ -1269,8 +1269,11 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
     std::fs::write(dir.join("token"), TOKEN).unwrap();
     let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
     assert!(matches!(helper.start_runtime(), ToApp::Found { .. }));
-    let ToApp::Ready { pid, token, reattached, .. } = helper.after_progress() else { panic!("expected Ready") };
+    let ToApp::Ready { pid, token, page_token, reattached, .. } = helper.after_progress() else { panic!("expected Ready") };
     assert_eq!((token.as_str(), reattached), (TOKEN, false));
+    let pages = page_token.expect("the pages' token");
+    assert!(pages.len() == 64 && pages != TOKEN, "the pages have a token of their own: {pages}");
+    assert_eq!(std::fs::read_to_string(dir.join("page_token")).unwrap(), pages, "kept in the state folder");
     let core = pid as i32;
     let julia = common::read_json(&dir.join("julia.json"))["pid"].as_i64().unwrap() as i32;
     let ps = |field: &str, pid: i32| {
@@ -1290,7 +1293,7 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
     assert!(reply.starts_with("HTTP/1.1 200") && reply.contains(r#""result":{}"#), "{reply}");
     let folder_given = |seen: &common::Seen| seen.line.starts_with("POST /call") && String::from_utf8_lossy(&seen.body).contains(r#""path":"/n""#);
     common::wait_for("Julia's bridge to get the folder", || bridge.seen().iter().any(folder_given));
-    let mut pluto = websocket(&helper);
+    let mut pluto = websocket(&helper, &pages);
     pluto.write_all(b"to Pluto").unwrap();
     let mut back = [0; 8];
     pluto.read_exact(&mut back).unwrap();
@@ -1560,7 +1563,7 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     assert!(!dir.join("job.json").exists(), "a running job's record is runtime.json");
 
     // Streams go through both helpers.
-    let mut pluto = websocket(&helper);
+    let mut pluto = websocket(&helper, "p");
     pluto.write_all(b"via the node").unwrap();
     let mut back = [0; 12];
     pluto.read_exact(&mut back).unwrap();
@@ -1577,7 +1580,7 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     let ToApp::Ready { reattached, job: Some(job), .. } = helper.after_progress() else { panic!("expected Ready") };
     assert!(reattached && job.id == "42");
     assert_eq!(slurm.read("sbatch.args").lines().count(), 1, "no second job");
-    let mut pluto = websocket(&helper);
+    let mut pluto = websocket(&helper, "p");
     pluto.write_all(b"again").unwrap();
     let mut back = [0; 5];
     pluto.read_exact(&mut back).unwrap();

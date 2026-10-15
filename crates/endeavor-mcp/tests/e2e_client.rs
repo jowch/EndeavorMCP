@@ -116,7 +116,7 @@ fn a_runtime_over_real_ssh() {
     assert!(!runtime.reattached, "a runtime was already running in {}", state.display());
     assert_eq!(runtime.port, listener.port());
     assert_eq!(runtime.mcp_url, format!("http://127.0.0.1:{}/mcp", listener.port()));
-    assert!(runtime.page_url.contains(&runtime.token) && runtime.token.len() >= 32);
+    assert!(runtime.page_url.contains(&runtime.page_token) && runtime.page_token.len() >= 32 && runtime.page_token != runtime.token);
 
     let (status, init) = mcp(runtime.port, &runtime.token, &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e-client", "version": "0" } } }));
     assert_eq!(status, "HTTP/1.1 200 OK");

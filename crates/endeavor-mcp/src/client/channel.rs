@@ -28,6 +28,9 @@ pub struct Runtime {
     pub port: u16,
     /// The runtime's token, for the `Authorization: Bearer` header.
     pub token: String,
+    /// The token for its pages, which `page_url` carries; the bearer token for a runtime from before the
+    /// pages had their own.
+    pub page_token: String,
     /// The MCP URL on the listener, the same for the listener's whole life.
     pub mcp_url: String,
     /// Pluto's start page, with the token that lets a browser in.
@@ -381,7 +384,8 @@ impl Channel {
         let runtime = loop {
             match events.recv() {
                 Ok(message @ (ToApp::Progress { .. } | ToApp::Found { .. } | ToApp::Submitted { .. } | ToApp::Queued { .. })) => on_message(message),
-                Ok(ToApp::Ready { node, pid, token, reattached, job, port, build, interface, .. }) => {
+                Ok(ToApp::Ready { node, pid, token, page_token, reattached, job, port, build, interface, .. }) => {
+                    let page_token = page_token.unwrap_or_else(|| token.clone());
                     *self.listener.lock().unwrap() = Some(listener.clone());
                     listener.attach(self.mux.clone(), token.clone(), build.is_some() || interface.is_some());
                     // A helper that ended as this start heard `Ready` may have found no listener to
@@ -393,7 +397,7 @@ impl Channel {
                             listener.forget(&self.mux);
                         }
                     }
-                    break Runtime { port: listener.port(), mcp_url: listener.mcp_url(), page_url: listener.page_url(&token), token, pid, reattached, node, job, remote_port: port, build, interface };
+                    break Runtime { port: listener.port(), mcp_url: listener.mcp_url(), page_url: listener.page_url(&page_token), page_token, token, pid, reattached, node, job, remote_port: port, build, interface };
                 }
                 Ok(ToApp::StartFailed { message, .. } | ToApp::Error { message }) => return Err(failed(message)),
                 Ok(ToApp::NeedsInstall { items, .. }) if items.is_empty() => return Err(failed("The helper says the start needs something installed, but not what.".into())),

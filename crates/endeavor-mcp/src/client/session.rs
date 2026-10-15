@@ -142,6 +142,11 @@ pub struct RuntimeInfo {
     pub mcp_url: String,
     /// Pluto's start page, with the token that lets a browser in.
     pub page_url: String,
+    /// The token for the runtime's pages (`page_url` carries it), which the bearer token doesn't open: for
+    /// the app's own requests to a page, such as an export. Empty from an older client; such a runtime's
+    /// pages take `token`.
+    #[serde(default)]
+    pub page_token: String,
     pub node: String,
     pub pid: u32,
     /// It was running already; this session didn't start it.
@@ -1209,6 +1214,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             token: runtime.token,
                             mcp_url: runtime.mcp_url,
                             page_url: runtime.page_url,
+                            page_token: runtime.page_token,
                             node: runtime.node,
                             pid: runtime.pid,
                             reattached: runtime.reattached,

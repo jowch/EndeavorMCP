@@ -69,15 +69,16 @@ fn julia_dying_ends_serve_with_an_error() {
     let serve = serve(&dir, &bridge);
     assert!(!dir.join("julia.pids").exists(), "serve starts no Julia until something needs it");
     // The page's "Start Julia" link starts it, and is told it's starting.
-    let port = read_json(&dir.join("runtime.json"))["port"].as_u64().unwrap() as u16;
+    let record = read_json(&dir.join("runtime.json"));
+    let (port, pages) = (record["port"].as_u64().unwrap() as u16, record["page_token"].as_str().unwrap().to_owned());
     let mut page = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    std::io::Write::write_all(&mut page, format!("GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAccept: text/html\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").as_bytes()).unwrap();
+    std::io::Write::write_all(&mut page, format!("GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAccept: text/html\r\nAuthorization: Bearer {pages}\r\n\r\n").as_bytes()).unwrap();
     let mut said = String::new();
     std::io::Read::read_to_string(&mut page, &mut said).unwrap();
     assert!(said.starts_with("HTTP/1.1 503") && said.contains("Julia is starting") && said.contains("http-equiv=refresh"), "{said}");
     wait_for("Julia to be ready", || {
         let mut page = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        std::io::Write::write_all(&mut page, format!("GET /edit HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").as_bytes()).unwrap();
+        std::io::Write::write_all(&mut page, format!("GET /edit HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {pages}\r\n\r\n").as_bytes()).unwrap();
         let mut said = String::new();
         let _ = std::io::Read::read_to_string(&mut page, &mut said);
         said.contains("Pluto: GET /edit")

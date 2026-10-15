@@ -50,7 +50,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 7;
+pub const INTERFACE: u32 = 8;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -176,7 +176,8 @@ pub fn main(argv: &[String]) -> ! {
     let _job = crate::winproc::job_ending_with_this_process().unwrap_or_else(|e| fail(format!("Couldn't keep Julia's processes together with this one (Job Object): {e}")));
     let (stops, stopped) = std::sync::mpsc::channel();
 
-    let cookie = cookie_name(&token);
+    let page_token = crate::page_token(&args.state_dir).unwrap_or_else(|e| fail(e));
+    let cookie = cookie_name(&page_token);
     let port = listener.local_addr().unwrap().port();
     let token_for_r = token.clone();
     let julia = JuliaStarter::new(&args, &token, &launcher, stops.clone());
@@ -194,7 +195,7 @@ pub fn main(argv: &[String]) -> ! {
     Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
     let not_let_in = not_let_in(&open_command(&args.state_dir));
     let allow_r_install = Arc::new(std::sync::atomic::AtomicBool::new(args.install_r));
-    let served = Arc::new(Served { bridge, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone() });
+    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
     let r = Arc::new(RStarter::new(&args, &token_for_r, allow_r_install));
@@ -226,7 +227,7 @@ pub fn main(argv: &[String]) -> ! {
             }
         }
     }
-    if let Err(e) = record(&args.state_dir, port, &launcher, &served.bridge) {
+    if let Err(e) = record(&args.state_dir, port, &launcher, &served.bridge, &served.page_token) {
         fail(e);
     }
     // Let go after the record is written: whoever sees the lock free and no record knows the start died.
@@ -270,8 +271,8 @@ enum Stop {
 }
 
 /// Write `runtime.json` for the helper: the core's pid and its one `port`, its launcher, node and
-/// job, and whether it ends itself when idle.
-fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge) -> Result<(), String> {
+/// job, its tokens, and whether it ends itself when idle.
+fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_token: &str) -> Result<(), String> {
     // A Slurm job's id, so a reconnect can find the job with squeue.
     let job = if launcher == "slurm" { std::env::var("SLURM_JOB_ID").unwrap_or_default() } else { String::new() };
     // With the pid, what tells the core from a later process given its pid.
@@ -279,7 +280,7 @@ fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge) -> Resul
     let boot = crate::own_boot();
     let mut state = json!({
         "launcher": launcher, "node": crate::hostname(), "job": job,
-        "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": bridge.token, "exits_when_idle": bridge.notebooks.exits_when_idle,
+        "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": bridge.token, "page_token": page_token, "exits_when_idle": bridge.notebooks.exits_when_idle,
         "interface": INTERFACE,
     });
     if let Some(standalone) = &bridge.standalone {
@@ -1234,6 +1235,8 @@ struct Served {
     ember: std::sync::Mutex<Option<Page>>,
     /// Whether Endeavor's own R may be installed (`RStarter::allow_own`).
     allow_r_install: Arc<std::sync::atomic::AtomicBool>,
+    /// The pages' token (`crate::page_token`): the only key to Pluto's and Ember's pages.
+    page_token: String,
     /// The cookie that lets a browser into Pluto's page (`cookie_name`).
     cookie: String,
     /// What a browser that hasn't been let in sees (`not_let_in`).
@@ -1363,11 +1366,11 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
     let bridge = &served.bridge;
     while let Some(mut request) = Head::read(&mut reader)? {
         let route = Route::of(request.path());
-        let keep_alive = match access(&request, route, &bridge.token, &served.cookie) {
+        let keep_alive = match access(&request, route, &bridge.token, &served.page_token, &served.cookie) {
             Access::Granted => None,
             Access::SetCookie { location } => {
                 http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
-                let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Strict", served.cookie, bridge.token);
+                let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Strict", served.cookie, served.page_token);
                 let close = if request.keeps_alive() { "" } else { "Connection: close\r\n" };
                 write!(client, "HTTP/1.1 303 See Other\r\nLocation: {location}\r\nSet-Cookie: {cookie}\r\nContent-Length: 0\r\n{close}\r\n")?;
                 Some(request.keeps_alive())
@@ -1512,7 +1515,7 @@ pub fn serve_unreachable(client: TcpStream, token: &str, why: &str) -> io::Resul
     if Route::of(request.path()) != Route::Mcp {
         return Ok(());
     }
-    if let Access::Refused(status, error) = access(&request, Route::Mcp, token, "") {
+    if let Access::Refused(status, error) = access(&request, Route::Mcp, token, "", "") {
         let body = json!({ "error": error }).to_string();
         return http::respond(&mut client, status, Some("application/json"), body.as_bytes(), false);
     }
@@ -1533,26 +1536,30 @@ enum Access {
     Refused(&'static str, &'static str),
 }
 
-/// Whether a request may go where `route` sends it, given the runtime's
-/// `token` and the name of its browser `cookie`. Loopback isn't private on a
-/// shared machine, so the token is what keeps other local users out, and a
-/// DNS-rebinding page sends a foreign Host.
+/// Whether a request may go where `route` sends it, given the runtime's bearer
+/// `token`, its pages' token `page_token` and the name of its browser `cookie`.
+/// Loopback isn't private on a shared machine, so the tokens are what keep
+/// other local users out, and a DNS-rebinding page sends a foreign Host.
 ///
 /// Endeavor's own routes are a control API, never a web API: they take the
-/// token only as a bearer header, and any request with an Origin came from a
-/// browser page (MCP clients never send one). Pluto's page also takes the
-/// cookie, as long as the request comes from that page itself: notebook
-/// output runs its own JavaScript there, and must not reach the app's calls
-/// (approving its own runs) or, through the cookie another runtime set on
-/// this loopback address (cookies ignore ports), that runtime's Pluto.
-fn access(request: &Head, route: Route, token: &str, cookie: &str) -> Access {
+/// bearer token only as a header, and any request with an Origin came from a
+/// browser page (MCP clients never send one). The pages (Pluto's and Ember's)
+/// take only the pages' token, as a header (the app's exports), in the URL
+/// (a browser's first visit) or as the cookie, as long as the request comes
+/// from that page itself: notebook output runs its own JavaScript there, and
+/// must not reach the app's calls (approving its own runs) or, through the
+/// cookie another runtime set on this loopback address (cookies ignore ports),
+/// that runtime's Pluto. The bearer token doesn't open them: an agent's MCP
+/// config carries it, and some agents keep that config on disk.
+fn access(request: &Head, route: Route, token: &str, page_token: &str, cookie: &str) -> Access {
     let host = request.header("Host").unwrap_or_default();
     if !loopback_host(host) {
         return Access::Refused("403 Forbidden", "host_not_loopback");
     }
     let origin = request.header("Origin");
-    let bearer = same(request.header("Authorization").unwrap_or_default(), &format!("Bearer {token}"));
+    let authorization = request.header("Authorization").unwrap_or_default();
     if !route.is_page() {
+        let bearer = same(authorization, &format!("Bearer {token}"));
         return match (origin, bearer) {
             (Some(_), _) => Access::Refused("403 Forbidden", "browser_origin_refused"),
             (None, true) => Access::Granted,
@@ -1564,11 +1571,11 @@ fn access(request: &Head, route: Route, token: &str, cookie: &str) -> Access {
     if !from_this_page {
         return Access::Refused("403 Forbidden", "browser_origin_refused");
     }
-    if bearer || has_cookie(request, cookie, token) {
+    if same(authorization, &format!("Bearer {page_token}")) || has_cookie(request, cookie, page_token) {
         return Access::Granted;
     }
     match without_token(request.target()) {
-        (Some(given), location) if same(given, token) => Access::SetCookie { location },
+        (Some(given), location) if same(given, page_token) => Access::SetCookie { location },
         _ => Access::Refused("401 Unauthorized", "unauthorized"),
     }
 }
@@ -1772,10 +1779,12 @@ mod tests {
     }
 
     const TOKEN: &str = "t0k3n";
+    /// The pages' token.
+    const PAGES: &str = "p4g3s";
 
     fn access_to(request: &str) -> Access {
         let request = head(request);
-        access(&request, Route::of(request.path()), TOKEN, "endeavor-abc")
+        access(&request, Route::of(request.path()), TOKEN, PAGES, "endeavor-abc")
     }
 
     #[test]
@@ -1793,14 +1802,23 @@ mod tests {
     }
 
     #[test]
-    fn the_header_opens_every_path_and_the_cookie_only_plutos() {
+    fn the_bearer_token_opens_endeavors_paths_and_the_pages_token_only_the_pages() {
         let bearer = format!("Authorization: Bearer {TOKEN}\r\n");
-        let cookie = format!("Cookie: other=1; endeavor-abc={TOKEN}\r\n");
-        for path in ["/mcp", "/endeavor/call", "/endeavor/events", "/edit?id=1"] {
+        let pages = format!("Authorization: Bearer {PAGES}\r\n");
+        let cookie = format!("Cookie: other=1; endeavor-abc={PAGES}\r\n");
+        let unauthorized = Access::Refused("401 Unauthorized", "unauthorized");
+        for path in ["/mcp", "/endeavor/call", "/endeavor/events"] {
             assert_eq!(access_to(&format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n{bearer}\r\n")), Access::Granted, "{path}");
-            assert_eq!(access_to(&format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")), Access::Refused("401 Unauthorized", "unauthorized"), "{path}");
+            assert_eq!(access_to(&format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n{pages}\r\n")), unauthorized, "{path}");
+            assert_eq!(access_to(&format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")), unauthorized, "{path}");
+        }
+        for path in ["/edit?id=1", "/", "/notebookfile?id=1", "/ember/edit?id=1"] {
+            assert_eq!(access_to(&format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n{pages}\r\n")), Access::Granted, "{path}");
+            assert_eq!(access_to(&format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n{bearer}\r\n")), unauthorized, "the bearer token doesn't open {path}");
+            assert_eq!(access_to(&format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")), unauthorized, "{path}");
         }
         assert_eq!(access_to(&format!("GET /edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n{cookie}\r\n")), Access::Granted);
+        assert_eq!(access_to(&format!("GET /edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1:9\r\nCookie: endeavor-abc={TOKEN}\r\n\r\n")), unauthorized, "a cookie holding the bearer token");
         for path in ["/mcp", "/endeavor/call", "/endeavor/answer_run"] {
             assert_eq!(access_to(&format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n{cookie}\r\n")), Access::Refused("401 Unauthorized", "unauthorized"), "{path}");
             assert_eq!(
@@ -1810,14 +1828,14 @@ mod tests {
             );
         }
         let wrong = |c: &str| access_to(&format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:9\r\nCookie: {c}\r\n\r\n"));
-        assert_eq!(wrong(&format!("endeavor-def={TOKEN}")), Access::Refused("401 Unauthorized", "unauthorized"), "another runtime's cookie");
+        assert_eq!(wrong(&format!("endeavor-def={PAGES}")), Access::Refused("401 Unauthorized", "unauthorized"), "another runtime's cookie");
         assert_eq!(wrong("endeavor-abc=t0k3m"), Access::Refused("401 Unauthorized", "unauthorized"));
-        assert_eq!(wrong(&format!("secret={TOKEN}")), Access::Refused("401 Unauthorized", "unauthorized"));
+        assert_eq!(wrong(&format!("secret={PAGES}")), Access::Refused("401 Unauthorized", "unauthorized"));
     }
 
     #[test]
     fn the_cookie_works_only_from_this_page() {
-        let cookie = format!("Cookie: endeavor-abc={TOKEN}\r\n");
+        let cookie = format!("Cookie: endeavor-abc={PAGES}\r\n");
         let from = |headers: &str| access_to(&format!("GET /channels HTTP/1.1\r\nHost: 127.0.0.1:9\r\n{headers}{cookie}\r\n"));
         assert_eq!(from("Origin: http://127.0.0.1:9\r\nSec-Fetch-Site: same-origin\r\n"), Access::Granted);
         assert_eq!(from("Sec-Fetch-Site: none\r\n"), Access::Granted, "the app loading the page");
@@ -1831,11 +1849,12 @@ mod tests {
     #[test]
     fn the_token_in_a_url_sets_the_cookie_and_leaves_the_url() {
         let visit = |target: &str| access_to(&format!("GET {target} HTTP/1.1\r\nHost: localhost:9\r\n\r\n"));
-        assert_eq!(visit(&format!("/?token={TOKEN}")), Access::SetCookie { location: "/".into() });
-        assert_eq!(visit(&format!("/edit?id=1&token={TOKEN}&x=2")), Access::SetCookie { location: "/edit?id=1&x=2".into() });
+        assert_eq!(visit(&format!("/?token={PAGES}")), Access::SetCookie { location: "/".into() });
+        assert_eq!(visit(&format!("/edit?id=1&token={PAGES}&x=2")), Access::SetCookie { location: "/edit?id=1&x=2".into() });
         assert_eq!(visit("/?token=nope"), Access::Refused("401 Unauthorized", "unauthorized"));
+        assert_eq!(visit(&format!("/?token={TOKEN}")), Access::Refused("401 Unauthorized", "unauthorized"), "the bearer token doesn't let a browser in");
         assert_eq!(
-            access_to(&format!("GET /mcp?token={TOKEN} HTTP/1.1\r\nHost: localhost:9\r\n\r\n")),
+            access_to(&format!("GET /mcp?token={PAGES} HTTP/1.1\r\nHost: localhost:9\r\n\r\n")),
             Access::Refused("401 Unauthorized", "unauthorized"),
             "only Pluto's paths take it"
         );
@@ -1854,11 +1873,11 @@ mod tests {
 
     #[test]
     fn embers_page_takes_the_cookie_as_plutos_does() {
-        let cookie = format!("Cookie: endeavor-abc={TOKEN}\r\n");
+        let cookie = format!("Cookie: endeavor-abc={PAGES}\r\n");
         assert_eq!(access_to(&format!("GET /ember/edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n{cookie}\r\n")), Access::Granted);
         assert_eq!(access_to("GET /ember/edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"), Access::Refused("401 Unauthorized", "unauthorized"));
         assert_eq!(
-            access_to(&format!("GET /ember/edit?id=1&token={TOKEN} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")),
+            access_to(&format!("GET /ember/edit?id=1&token={PAGES} HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")),
             Access::SetCookie { location: "/ember/edit?id=1".into() }
         );
         assert_eq!(
@@ -1872,7 +1891,7 @@ mod tests {
         let (stops, _) = std::sync::mpsc::channel();
         let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
         let julia = JuliaStarter::new(&parse_args(&argv).unwrap(), TOKEN, "process", stops.clone());
-        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(TOKEN), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default() })
+        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default() })
     }
 
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.
@@ -1890,7 +1909,7 @@ mod tests {
     fn get(port: u16, target: &str, headers: &str) -> String {
         use std::io::Read;
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        write!(stream, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n{headers}\r\n").unwrap();
+        write!(stream, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {PAGES}\r\nConnection: close\r\n{headers}\r\n").unwrap();
         let mut reply = String::new();
         stream.read_to_string(&mut reply).unwrap();
         reply

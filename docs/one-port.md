@@ -40,19 +40,29 @@ and asks for a restart of Julia.
 | `/mcp` | the core's MCP endpoint | bearer token header |
 | `/endeavor/events`, `/endeavor/call` (JSON-RPC: `endeavor/set_policy`, `endeavor/answer_run`, …, `ping`, `tools/call`) | the core; the calls Julia answers (`endeavor/set_folder`, `endeavor/shutdown`) go on to Julia's `/call` | bearer token header |
 | any other `/endeavor/…` | `404` | bearer token header |
-| `/ember/…` (bare `/ember` redirects to `/ember/`) | Ember's private port without the prefix, with Ember's secret added to the query (its WebSocket takes it nowhere else) and the browser's `Host` kept (Ember refuses a WebSocket whose `Origin` isn't its `Host`); `503` while Ember isn't running | token header, or the cookie |
-| everything else (`/`, `/edit`, `/open`, `/static`, Pluto's WebSocket, …) | Pluto's private port, unchanged | token header, or the cookie |
+| `/ember/…` (bare `/ember` redirects to `/ember/`) | Ember's private port without the prefix, with Ember's secret added to the query (its WebSocket takes it nowhere else) and the browser's `Host` kept (Ember refuses a WebSocket whose `Origin` isn't its `Host`); `503` while Ember isn't running | pages' token header, or the cookie |
+| everything else (`/`, `/edit`, `/open`, `/static`, Pluto's WebSocket, …) | Pluto's private port, unchanged | pages' token header, or the cookie |
 
 Later engines get a prefix each (`/marimo/…`, `/ember/…`); Pluto stays at
 `/` so it needs no base URL. Nothing starts Ember yet; its route is ready for
 the R adapter.
 
-**One token.** The core makes it and accepts it two ways:
-- as `Authorization: Bearer …`, from agents and the app;
+**Two tokens.** The bearer token opens `/mcp` and `/endeavor/…`, as
+`Authorization: Bearer …`, from agents and the app. The pages' token opens
+the pages (Pluto's and `/ember/…`) and nothing else, accepted two ways:
+- as `Authorization: Bearer …`, from the app (exports);
 - for browsers: `/?token=…` once, which sets an HttpOnly cookie and
   redirects to the page without the token in the URL.
 
-The cookie opens Pluto's paths only, never `/mcp` or `/endeavor/…`.
+The bearer token doesn't open the pages (EndeavorMCP #100): an agent's MCP
+config carries it, and some agents keep that config on disk, so a leaked
+config gives the notebook tools, with the app's run gate, and not Pluto's
+own page, which runs anything. Both tokens live in the state folder
+(`token`, `page_token`), so they stay the same across runtimes, and both are
+in `runtime.json`. An agent that runs shell commands as the user can read
+them either way; the split guards only against a leaked config.
+
+The cookie opens the pages only, never `/mcp` or `/endeavor/…`.
 Notebook outputs run their own JavaScript on the page's origin. With cookie
 access to `/endeavor/answer_run`, a notebook could approve its own held
 runs or change the policy. The page script gets what it needs from the app,
@@ -95,10 +105,10 @@ What came out differently from the design above, or wasn't settled by it:
 - **Paths.** The app's calls stay JSON-RPC methods posted to one path,
   `/endeavor/call`; the event stream is `/endeavor/events`. `/health` is gone
   from the public port (nothing used it); Julia's own bridge still has one.
-- **The cookie.** `?token=` on any of Pluto's paths answers `303 See Other`
+- **The cookie.** `?token=` (the pages' token) on any of Pluto's paths answers `303 See Other`
   to the same URL without `token`, with `Set-Cookie: endeavor-<id>=<token>;
   Path=/; HttpOnly; SameSite=Strict`. `<id>` is the first 12 hex digits of
-  the token's SHA-256, so each runtime has its own cookie: cookies ignore
+  the pages' token's SHA-256, so each runtime has its own cookie: cookies ignore
   ports, so runtimes on 127.0.0.1 (several hosts in the app, several
   forwarded runtimes) share one cookie jar.
 - **The cookie counts only from the page itself.** Since 127.0.0.1 with
@@ -117,7 +127,8 @@ What came out differently from the design above, or wasn't settled by it:
   (`guard.rs`, for a runtime from another build) does the same, and now sees
   every connection, Pluto's included; each request on a connection is still
   checked, and an upgraded connection was checked at its upgrade.
-- **`runtime.json`** is `{launcher, node, pid, started, port, token, job, exits_when_idle, build, interface}`.
+- **`runtime.json`** is `{launcher, node, pid, started, port, token, page_token, job, exits_when_idle, build, interface}`.
+  `page_token` came with interface 8; a record without it is from a core whose pages take `token`.
   `interface` is `core::INTERFACE`, the number for what the core offers its callers; a caller of
   another build uses a runtime with its own number as it is ([endeavor-mcp.md](endeavor-mcp.md)).
   `started` is when the core's process started (a platform's own unit); a pid is
@@ -136,9 +147,9 @@ What came out differently from the design above, or wasn't settled by it:
   one port, so `McpTransport` and the app's `McpServer::Sse` registration
   went with the two ports.
 - **The app.** One listener port per host. The web view loads
-  `http://127.0.0.1:PORT/?token=…` (a notebook's page adds `/edit?id=…`);
+  `http://127.0.0.1:PORT/?token=…` with the pages' token (a notebook's page adds `/edit?id=…`);
   the agent's MCP URL is `http://127.0.0.1:PORT/mcp`; exports go with the
-  bearer header. The URLs and token are the same for a host's next runtime,
+  pages' token as the bearer header. The URLs and token are the same for a host's next runtime,
   so the app tells runtimes apart by the core's pid. While a runtime is
   away, an MCP request is answered as before and anything else is closed.
 

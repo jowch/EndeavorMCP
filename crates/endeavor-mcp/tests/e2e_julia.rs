@@ -57,6 +57,8 @@ fn end_runtime(state: &Path) {
 struct Runtime {
     helper: Helper,
     token: String,
+    /// The pages' token, which the bearer token isn't.
+    pages: String,
     next_id: u64,
     state: PathBuf,
 }
@@ -77,7 +79,10 @@ impl Runtime {
             match self.helper.next_within(Duration::from_secs(900)) {
                 ToApp::Found { .. } => {}
                 ToApp::Progress { line } => log.push(line),
-                ToApp::Ready { token, .. } => return self.token = token,
+                ToApp::Ready { token, page_token, .. } => {
+                    self.pages = page_token.expect("the pages' token");
+                    return self.token = token;
+                }
                 other => panic!("expected Ready, got {other:?}; the log:\n{}", log.join("\n")),
             }
         }
@@ -243,7 +248,7 @@ fn the_runtime_end_to_end() {
     let helper = Helper::spawn(command);
     let ToApp::Hello { uploads, .. } = helper.hello() else { unreachable!() };
     assert!(uploads, "the helper takes uploads");
-    let mut rt = Runtime { helper, token: String::new(), next_id: 0, state: state.clone() };
+    let mut rt = Runtime { helper, token: String::new(), pages: String::new(), next_id: 0, state: state.clone() };
     step("start Julia", || rt.start());
 
     step("MCP handshake", || {
@@ -291,8 +296,9 @@ fn the_runtime_end_to_end() {
     });
 
     step("Pluto's page and WebSocket, as a browser reaches them", || {
-        let token = rt.token.clone();
-        let (status, head, _) = rt.get(&format!("/edit?id={notebook}&token={token}"), "");
+        let (token, pages) = (rt.token.clone(), rt.pages.clone());
+        assert_eq!(rt.get(&format!("/edit?id={notebook}&token={token}"), "").0, "HTTP/1.1 401 Unauthorized", "the bearer token doesn't let a browser in");
+        let (status, head, _) = rt.get(&format!("/edit?id={notebook}&token={pages}"), "");
         assert_eq!(status, "HTTP/1.1 303 See Other", "{head}");
         assert!(head.contains(&format!("\r\nLocation: /edit?id={notebook}\r\n")), "{head}");
         let set = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap_or_else(|| panic!("no cookie: {head}"));

@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// The pages' token a test core is given (its state folder's `page_token`), which the bearer token `TOKEN` isn't.
+pub const PAGES: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 /// The secret the fake Pluto requires.
 pub const PLUTO_SECRET: &str = "s3cret";
 

@@ -67,6 +67,13 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   the app's R notebooks. Error kinds the Pluto adapter returns
   (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
   Pluto's rules and say so.
+- The pages have a token of their own since 2026-10-15 (interface 8, #100). The
+  bearer token, which an agent's MCP config carries, opens `/mcp` and
+  `/endeavor/…` only; the pages' token (`page_token` in the state folder and
+  `runtime.json`, in `Ready` and `page_url`) opens Pluto's and Ember's pages
+  only. A client meeting a runtime from before sends the bearer token to its
+  pages, which that runtime still takes. An older app that attaches to a newer
+  runtime gets its pages refused until Julia restarts from the app's build.
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
   SHA-256 and keeps it (tested against a fake release; the wiring is

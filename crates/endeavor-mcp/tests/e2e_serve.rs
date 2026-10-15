@@ -211,8 +211,10 @@ fn serve_and_mcp_without_the_app() {
     });
     cleanup.children.push(serve);
     let link = printed.iter().find_map(|l| l.trim().strip_prefix("http://localhost:")).filter(|l| l.contains("/?token=")).unwrap();
-    let (port, token) = link.split_once("/?token=").unwrap();
-    let (port, token): (u16, String) = (port.parse().unwrap(), token.to_owned());
+    let (port, pages) = link.split_once("/?token=").unwrap();
+    let (port, pages): (u16, String) = (port.parse().unwrap(), pages.to_owned());
+    let token = printed.iter().find_map(|l| l.trim().strip_prefix("Header: Authorization: Bearer ")).unwrap().to_owned();
+    assert_ne!(token, pages, "the browser's link holds the pages' token, not the agent's");
     let text = printed.join("\n");
     assert!(text.contains(&format!("New notebooks go in {}.", folder.display())), "{text}");
     assert!(text.contains(&format!("claude mcp add --transport http endeavor http://localhost:{port}/mcp --header \"Authorization: Bearer {token}\"")), "{text}");
@@ -287,7 +289,7 @@ fn serve_and_mcp_without_the_app() {
     });
 
     step("the browser link sets the cookie and opens Pluto's page", || {
-        let (status, head, _) = get(port, &format!("/edit?id={notebook}&token={token}"), "");
+        let (status, head, _) = get(port, &format!("/edit?id={notebook}&token={pages}"), "");
         assert_eq!(status, "HTTP/1.1 303 See Other", "{head}");
         let set = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap_or_else(|| panic!("no cookie: {head}"));
         let cookie = format!("Cookie: {}\r\n", set.split(';').next().unwrap());

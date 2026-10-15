@@ -840,7 +840,7 @@ impl Relay {
                 self.update_target(&target.id, |t| t.told = Some(runtime.pid));
             }
         }
-        Route { port: runtime.port, token: runtime.token.clone(), host: target.host() }
+        Route { port: runtime.port, token: runtime.token.clone(), page_token: Some(&runtime.page_token).filter(|t| !t.is_empty()).unwrap_or(&runtime.token).clone(), host: target.host() }
     }
 
     /// For a project's remembered cluster with no job: what to ask the user before submitting one.

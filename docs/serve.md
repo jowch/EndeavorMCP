@@ -134,7 +134,7 @@ everything you need to connect:
 Endeavor's notebooks are running on lab3, port 41873. New notebooks go in /home/ada/project.
 
 Open them in a browser:
-    http://localhost:41873/?token=9780…
+    http://localhost:41873/?token=5c1e…
 
 From another computer, forward the port first:
     ssh -L 41873:localhost:41873 lab3
@@ -362,21 +362,26 @@ recent notebook starts it and runs it.
 
 ## Keep it safe
 
-- The token lets anyone who has it run code as you on that machine. Don't
-  paste it into shared chats or commit agent configs that hold it.
+- There are two keys. The link's opens the notebooks' pages in a browser; the
+  header's lets an agent use the notebook tools. Either lets anyone who has it
+  run code as you on that machine. Don't paste them into shared chats or
+  commit agent configs that hold them.
 - The runtime listens only on `127.0.0.1`. Other users on a shared node can
-  still reach `127.0.0.1`, which is why every request needs the token, either
-  as the bearer header or as the browser cookie.
-- The browser cookie opens only Pluto's page. The MCP endpoint (`/mcp`) takes
-  only the header, so code in a notebook's output can't call the agent's tools.
+  still reach `127.0.0.1`, which is why every request needs a key, either
+  the header or the browser cookie.
+- The browser cookie opens only the pages. The MCP endpoint (`/mcp`) takes
+  only the header's key, so code in a notebook's output can't call the agent's
+  tools. The header's key doesn't open the pages, so an agent config that
+  leaks reaches only the notebook tools, not Pluto's own page.
 - Tool results never hold the token. Agents have quoted links in their replies,
   their clients keep transcripts, and one agent used the token to call Pluto
   directly, past the notebook tools. An agent that can run shell commands as you
   can still read the token file; your agent's own permission prompts are what
   stop that.
-- The token file, `runtime.json` and `runtime.log` are readable only by you.
-- To change the token, stop the runtime, delete `token` in the state folder,
-  and start it again.
+- The key files (`token`, `page_token`), `runtime.json` and `runtime.log` are
+  readable only by you.
+- To change the keys, stop the runtime, delete `token` and `page_token` in the
+  state folder, and start it again.
 
 ## What's different from the app
 
