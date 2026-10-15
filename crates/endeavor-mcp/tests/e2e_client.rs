@@ -26,6 +26,33 @@ use common::find_julia;
 use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Options, Server, StartOptions, Transport, connect, start};
 use serde_json::{Value, json};
 
+/// GET `target` on the listener's port with `token` as the bearer: the status line.
+fn get(port: u16, target: &str, token: &str) -> String {
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(socket, "GET {target} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n").unwrap();
+    let mut reply = Vec::new();
+    let _ = socket.read_to_end(&mut reply);
+    String::from_utf8_lossy(&reply).lines().next().unwrap_or_default().to_owned()
+}
+
+/// Every 64-digit hex word in the text files under `dir` (smaller than 1 MB), with its file.
+fn hex_keys(dir: &Path, keys: &mut Vec<(PathBuf, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if meta.is_dir() {
+            hex_keys(&path, keys);
+        } else if meta.is_file() && meta.len() < 1 << 20 && let Ok(text) = std::fs::read_to_string(&path) {
+            for word in text.split(|c: char| !c.is_ascii_hexdigit()) {
+                if word.len() == 64 {
+                    keys.push((path.clone(), word.to_owned()));
+                }
+            }
+        }
+    }
+}
+
 /// End the runtime recorded in `state`, if one runs: the core, Julia and its
 /// notebook workers are one process group.
 fn end_runtime(state: &Path) {
@@ -130,6 +157,29 @@ fn a_runtime_over_real_ssh() {
     eprintln!("[{:?}] {} tools through the listener", started.elapsed(), names.len());
     let (status, _) = mcp(runtime.port, "wrong", &json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} }));
     assert_eq!(status, "HTTP/1.1 401 Unauthorized", "the token is checked");
+
+    // The MCP token opens neither the pages nor the engines (#100).
+    assert_eq!(get(runtime.port, "/", &runtime.token), "HTTP/1.1 401 Unauthorized", "the MCP token on Pluto's page");
+    assert_eq!(get(runtime.port, "/", &runtime.page_token), "HTTP/1.1 200 OK", "the pages' token on Pluto's page");
+    match std::fs::read_to_string(state.join("julia.json")) {
+        Ok(text) => {
+            let julia: Value = serde_json::from_str(&text).unwrap();
+            let bridge = julia["mcp_port"].as_u64().unwrap() as u16;
+            let mut socket = TcpStream::connect(("127.0.0.1", bridge)).unwrap();
+            let body = r#"{"method":"list","params":{}}"#;
+            write!(socket, "POST /adapter HTTP/1.0\r\nHost: 127.0.0.1:{bridge}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", runtime.token, body.len()).unwrap();
+            let mut reply = String::new();
+            socket.read_to_string(&mut reply).unwrap();
+            assert!(reply.starts_with("HTTP/1.1 401"), "the MCP token on Julia's /adapter: {reply}");
+        }
+        Err(_) => eprintln!("julia.json isn't on this computer ({host} is another machine): /adapter not checked"),
+    }
+    // The state folder, where the runtime writes its records and log (the install folder holds packages' own hashes).
+    let mut keys = Vec::new();
+    hex_keys(&state, &mut keys);
+    for (file, key) in &keys {
+        assert!(*key == runtime.token || *key == runtime.page_token, "{} holds a key that is neither the MCP token nor the pages' token: the engines' key is kept in no file", file.display());
+    }
 
     channel.stop().expect("stop");
     let deadline = Instant::now() + Duration::from_secs(30);
