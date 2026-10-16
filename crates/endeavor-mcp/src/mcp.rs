@@ -404,7 +404,7 @@ impl Bridge {
     }
 
     /// Serve `POST /mcp`. Whether the connection can carry another request.
-    pub fn mcp(&self, request: &Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> io::Result<bool> {
+    pub fn mcp(&self, request: &Head, reader: &mut BufReader<wire::Shared>, client: &mut wire::Shared) -> io::Result<bool> {
         let mut caller = Caller::of(request);
         if caller.host.is_empty()
             && let Some(host) = self.standalone.as_ref().and_then(|s| s.host.clone())
@@ -823,8 +823,8 @@ fn closed(_socket: &TcpStream) -> bool {
 /// Whether the connection can carry another request.
 pub(crate) fn post(
     request: &Head,
-    reader: &mut BufReader<TcpStream>,
-    client: &mut TcpStream,
+    reader: &mut BufReader<wire::Shared>,
+    client: &mut wire::Shared,
     keep_alive: bool,
     issue_session: bool,
     reply: impl FnOnce(&Value, &dyn Fn() -> bool) -> Option<String>,
@@ -838,7 +838,7 @@ pub(crate) fn post(
         http::respond(client, "400 Bad Request", None, br#"{"error":"Invalid JSON"}"#, keep_alive)?;
         return Ok(keep_alive);
     };
-    let held = Held::new(wire::clone_socket(client)?, request, &message, keep_alive);
+    let held = Held::new(client.clone(), request, &message, keep_alive);
     let reply = reply(&message, &|| held.waiting());
     if held.streaming() {
         if let Some(reply) = reply {
@@ -881,7 +881,7 @@ const KEEP_WAITING: Duration = Duration::from_secs(15);
 /// seconds unless `MCP_TOOL_TIMEOUT` or the server's `timeout` says otherwise,
 /// progress or not; so the wait itself ends before that (`Asks::wait`).
 struct Held {
-    socket: TcpStream,
+    socket: wire::Shared,
     /// The client accepts an event stream over HTTP/1.1 (chunked).
     streams: bool,
     keep_alive: bool,
@@ -891,7 +891,7 @@ struct Held {
 }
 
 impl Held {
-    fn new(socket: TcpStream, request: &Head, message: &Value, keep_alive: bool) -> Held {
+    fn new(socket: wire::Shared, request: &Head, message: &Value, keep_alive: bool) -> Held {
         let streams = request.version() == "HTTP/1.1" && request.header("Accept").is_some_and(|accept| accept.contains("text/event-stream"));
         let progress_token = message["params"]["_meta"].get("progressToken").filter(|t| t.is_string() || t.is_number()).cloned();
         Held { socket, streams, keep_alive, progress_token, sent: RefCell::new(None) }

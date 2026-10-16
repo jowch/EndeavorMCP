@@ -375,7 +375,7 @@ fn exchange(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadli
 /// Relay a response body from `upstream` to `client` as it arrives, like
 /// `copy_body`, but give up as soon as the client hangs up: a stream of events
 /// may write nothing for a long time, and the upstream end should close with it.
-pub fn relay_body(upstream: &mut BufReader<TcpStream>, client: &mut TcpStream, framing: &mut Framing) -> io::Result<()> {
+pub fn relay_body(upstream: &mut BufReader<wire::Shared>, client: &mut wire::Shared, framing: &mut Framing) -> io::Result<()> {
     let mut watch_client = true;
     while !framing.done() {
         if upstream.buffer().is_empty() {
@@ -409,11 +409,11 @@ pub fn relay_body(upstream: &mut BufReader<TcpStream>, client: &mut TcpStream, f
 /// another request.
 pub fn relay_response(
     request: &Head,
-    client: &mut BufReader<TcpStream>,
-    upstream: &mut BufReader<TcpStream>,
+    client: &mut BufReader<wire::Shared>,
+    upstream: &mut BufReader<wire::Shared>,
     edit: &dyn Fn(&mut Head),
 ) -> io::Result<bool> {
-    let mut to_client = wire::clone_socket(client.get_ref())?;
+    let mut to_client = client.get_ref().clone();
     let response = loop {
         let mut response = Head::read(upstream)?.ok_or(io::ErrorKind::UnexpectedEof)?;
         edit(&mut response);
@@ -435,13 +435,13 @@ pub fn relay_response(
 /// Copy bytes both ways between a client and an upstream server until either
 /// side closes, then close both: the connection after a `101 Switching
 /// Protocols` (a WebSocket). What either reader already holds goes first.
-pub fn tunnel(client: &mut BufReader<TcpStream>, upstream: &mut BufReader<TcpStream>) -> io::Result<()> {
-    let (mut to_client, mut to_upstream) = (wire::clone_socket(client.get_ref())?, wire::clone_socket(upstream.get_ref())?);
+pub fn tunnel(client: &mut BufReader<wire::Shared>, upstream: &mut BufReader<wire::Shared>) -> io::Result<()> {
+    let (mut to_client, mut to_upstream) = (client.get_ref().clone(), upstream.get_ref().clone());
     to_client.write_all(upstream.buffer())?;
     upstream.consume(upstream.buffer().len());
     to_upstream.write_all(client.buffer())?;
     client.consume(client.buffer().len());
-    let (mut from_client, mut from_upstream) = (wire::clone_socket(client.get_ref())?, wire::clone_socket(upstream.get_ref())?);
+    let (mut from_client, mut from_upstream) = (client.get_ref().clone(), upstream.get_ref().clone());
     let end = |a: &TcpStream, b: &TcpStream| {
         let _ = a.shutdown(std::net::Shutdown::Both);
         let _ = b.shutdown(std::net::Shutdown::Both);

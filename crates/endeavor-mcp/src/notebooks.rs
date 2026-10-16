@@ -956,7 +956,7 @@ impl Notebooks {
 
     /// Serve `GET /events`: the notebooks' state now and after every change,
     /// until the client goes.
-    pub fn stream_events(&self, request: &Head, mut client: TcpStream) -> io::Result<()> {
+    pub fn stream_events(&self, request: &Head, mut client: wire::Shared) -> io::Result<()> {
         let (first, rx) = match self.subscribe() {
             Ok(subscription) => subscription,
             Err(e) => {

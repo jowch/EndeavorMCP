@@ -19,10 +19,10 @@ use crate::mcp::{to_json, tool_error};
 /// other messages) passes through as it is, and the requests after it on the
 /// same connection are checked the same way.
 pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&str, &str, &Value) -> Option<String>) -> io::Result<()> {
-    let mut reader = BufReader::new(wire::clone_socket(&client)?);
-    let mut client = client;
-    let mut from_runtime = BufReader::new(wire::clone_socket(&upstream)?);
-    let mut to_runtime = upstream;
+    let mut client = wire::Shared::new(client);
+    let mut reader = BufReader::new(client.clone());
+    let mut to_runtime = wire::Shared::new(upstream);
+    let mut from_runtime = BufReader::new(to_runtime.clone());
     while let Some(mut request) = Head::read(&mut reader)? {
         if request.method() != "POST" || request.path() != "/mcp" {
             request.write_to(&mut to_runtime)?;

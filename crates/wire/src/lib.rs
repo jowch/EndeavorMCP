@@ -345,33 +345,70 @@ impl ToHelper {
     }
 }
 
-/// A second handle to `socket`, which child processes don't get. On Windows std's `try_clone` makes an
-/// inheritable copy, so a child started while the connection was open (Julia, or `julia --version`
-/// while finding it) kept it open after we closed it: a page waited for its end for as long as Julia
-/// ran, or was reset when a short-lived child ended. The copy is inheritable only for the instant
-/// before its flag is cleared.
-pub fn clone_socket(socket: &std::net::TcpStream) -> io::Result<std::net::TcpStream> {
-    let clone = socket.try_clone()?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawSocket;
-        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
-        // SAFETY: a socket we hold; only its inherit flag changes.
-        if unsafe { SetHandleInformation(clone.as_raw_socket() as _, HANDLE_FLAG_INHERIT, 0) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+/// One connection shared between its reader and writer, or between threads, through one handle. On
+/// Windows std's `try_clone` makes an inheritable copy of a socket, so a child started while the copy
+/// was open (Julia, or `julia --version` while finding it) kept the connection open after we closed
+/// it: a page waited for its end for as long as Julia ran, or was reset when a short-lived child
+/// ended. Sharing the one handle, which std opens non-inheritable, leaves no copy to inherit. The
+/// connection closes when the last share is dropped, as it did with the last copy.
+#[derive(Clone, Debug)]
+pub struct Shared(std::sync::Arc<std::net::TcpStream>);
+
+impl Shared {
+    pub fn new(socket: std::net::TcpStream) -> Shared {
+        Shared(std::sync::Arc::new(socket))
     }
-    Ok(clone)
+}
+
+impl std::ops::Deref for Shared {
+    type Target = std::net::TcpStream;
+
+    fn deref(&self) -> &std::net::TcpStream {
+        &self.0
+    }
+}
+
+impl Read for Shared {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.0).read(buf)
+    }
+}
+
+impl Write for Shared {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self.0).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self.0).flush()
+    }
+}
+
+impl Read for &Shared {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.0).read(buf)
+    }
+}
+
+impl Write for &Shared {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self.0).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self.0).flush()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// See `clone_socket`: closing a connection ends it even while a child started after the clone runs.
+    /// See `Shared`: std's copy of a socket is inheritable, so a connection is shared rather than
+    /// copied, and closing it ends it even while a child started meanwhile runs.
     #[test]
     #[cfg(windows)]
-    fn a_child_started_while_a_cloned_socket_is_open_doesnt_keep_the_connection_open() {
+    fn a_child_started_while_a_shared_connection_is_open_doesnt_keep_it_open() {
         use std::net::{TcpListener, TcpStream};
         use std::os::windows::io::AsRawSocket;
         use std::process::{Command, Stdio};
@@ -385,17 +422,23 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (accepted, _) = listener.accept().unwrap();
-        assert!(inheritable(&accepted.try_clone().unwrap()), "std's try_clone no longer makes an inheritable copy: clone_socket may not be needed");
-        let clone = clone_socket(&accepted).unwrap();
-        assert!(!inheritable(&clone));
+        assert!(inheritable(&accepted.try_clone().unwrap()), "std's try_clone no longer makes an inheritable copy");
+        assert!(!inheritable(&accepted));
+        let shared = Shared::new(accepted);
+        let (mut reader, mut writer) = (shared.clone(), shared);
         let mut child = Command::new("cmd").args(["/C", "ping -n 30 127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-        drop(clone);
-        drop(accepted);
+        writer.write_all(b"x").unwrap();
+        client.write_all(b"y").unwrap();
+        let mut got = [0; 1];
+        reader.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"y");
+        drop((reader, writer));
         client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-        let ended = client.read(&mut [0; 1]);
+        let mut said = Vec::new();
+        let ended = client.read_to_end(&mut said);
         let _ = child.kill();
         let _ = child.wait();
-        assert!(matches!(ended, Ok(0)), "the connection didn't end while the child ran: {ended:?}");
+        assert!(ended.is_ok() && said == b"x", "the connection didn't end while the child ran: {ended:?}, {said:?}");
     }
 
     /// Hands out at most `step` bytes per read, like a pipe under load.
