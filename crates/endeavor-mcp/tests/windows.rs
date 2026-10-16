@@ -64,6 +64,10 @@ impl Drop for Cleanup {
         if !std::thread::panicking() {
             return;
         }
+        // What the runtime was doing, for the failure's report.
+        let log = std::fs::read_to_string(self.dir.join("runtime.log")).unwrap_or_default();
+        let lines: Vec<&str> = log.lines().collect();
+        eprintln!("runtime.log, last lines:\n{}", lines[lines.len().saturating_sub(80)..].join("\n"));
         let _ = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--force").arg("--state-dir").arg(&self.dir).output();
         for pid in &self.pids {
             let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output();

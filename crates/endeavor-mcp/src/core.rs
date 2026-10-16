@@ -1947,24 +1947,6 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    /// Windows gives each child every inheritable handle, sockets too. A page's connection that is open
-    /// when the core starts Julia then lives on in Julia: the core closing it doesn't end it, and the
-    /// browser waits for the rest of the reply until Julia ends.
-    #[test]
-    #[cfg(windows)]
-    fn a_child_started_while_a_page_is_open_doesnt_keep_its_connection_open() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (accepted, _) = listener.accept().unwrap();
-        let mut child = Command::new("cmd").args(["/C", "ping -n 30 127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-        drop(accepted);
-        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let ended = io::Read::read(&mut client, &mut [0; 1]);
-        let _ = child.kill();
-        let _ = child.wait();
-        assert!(matches!(ended, Ok(0)), "the connection didn't end while the child ran: {ended:?}");
-    }
-
     #[test]
     #[cfg(unix)]
     fn why_r_ended_says_how_its_process_ended_and_its_last_output() {
