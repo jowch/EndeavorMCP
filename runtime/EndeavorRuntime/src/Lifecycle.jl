@@ -154,7 +154,11 @@ function interrupt!(session, nb)
         return Dict{String,Any}("interrupted" => false)
     nb.wants_to_interrupt = true
     lock(() -> _INTERRUPTED[nb.notebook_id] = workspace.worker, _NOTIFY_LOCK)
-    Dict{String,Any}("interrupted" => Pluto.WorkspaceManager.interrupt_workspace((session, nb); verbose=false))
+    interrupted = Pluto.WorkspaceManager.interrupt_workspace((session, nb); verbose=false)
+    # Its process lived through it: a later end of it is a crash again.
+    Pluto.Malt.isrunning(workspace.worker) &&
+        lock(() -> get(_INTERRUPTED, nb.notebook_id, nothing) === workspace.worker && delete!(_INTERRUPTED, nb.notebook_id), _NOTIFY_LOCK)
+    Dict{String,Any}("interrupted" => interrupted)
 end
 
 "The cells that were running when the notebook's process ended by itself; nothing while it has one."

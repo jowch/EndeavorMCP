@@ -136,8 +136,8 @@ struct NotebookState {
     reads: HashMap<(String, String), (String, u64)>,
     /// Which session last changed each cell through the tools, and when.
     changes: HashMap<String, Change>,
-    /// The cells each session's runs started, until a Stop finds them done
-    /// (`stop_for`): what that session's Stop interrupts.
+    /// The cells each session's runs started that haven't finished (a waited run's
+    /// unfinished cells, until `run_finished`): what that session's Stop interrupts.
     started: HashMap<String, HashSet<String>>,
 }
 
@@ -717,11 +717,15 @@ impl Notebooks {
                 }
                 true
             }
-            // The cells a run the tools didn't wait for finished: no longer pending.
+            // The cells a run the tools didn't wait for finished: no longer pending, and no
+            // longer a session's run that its Stop interrupts.
             "run_finished" => {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
                     for cell in params["cells"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                         notebook.pending.remove(cell);
+                        for started in notebook.started.values_mut() {
+                            started.remove(cell);
+                        }
                     }
                 }
                 true

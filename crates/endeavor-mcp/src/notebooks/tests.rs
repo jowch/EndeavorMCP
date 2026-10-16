@@ -2144,4 +2144,19 @@ fn a_stop_interrupts_the_sessions_own_run() {
     running(true);
     s.notebooks.stop_for("7", NB, false);
     assert_eq!(interrupts(), 2, "and it is forgotten then: this run isn't the session's");
+
+    // A run that ended with no Stop between: a later run of the same cell (the user's, or a
+    // reactive one) isn't the session's.
+    running(false);
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "the user's later run of a cell the session ran");
+    // Nor is a waited run that finished within the wait.
+    running(false);
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "a waited run that finished");
 }
