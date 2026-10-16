@@ -169,6 +169,28 @@ fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
 const A: &str = "0b7d0000-0000-4000-8000-000000000001";
 const B: &str = "0b7d0000-0000-4000-8000-000000000002";
 
+/// The app's `/endeavor/events` stream.
+fn events(port: u16, token: &str) -> BufReader<TcpStream> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    write!(stream, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n").unwrap();
+    BufReader::new(stream)
+}
+
+/// The first event on `events` that `done` holds for.
+fn next_event(events: &mut BufReader<TcpStream>, done: impl Fn(&Value) -> bool) -> Value {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(events.read_line(&mut line).unwrap() > 0, "the events stream ended");
+        if let Some(event) = line.trim_end().strip_prefix("data: ").and_then(|data| serde_json::from_str::<Value>(data).ok())
+            && done(&event)
+        {
+            return event;
+        }
+    }
+}
+
 #[test]
 #[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
 fn an_r_notebook_through_the_runtime() {
@@ -323,14 +345,25 @@ fn an_r_notebook_through_the_runtime() {
         assert!(get(port, &format!("/ember/edit?id={notebook}"), "").0.starts_with("HTTP/1.1 401"));
     });
 
-    step("when R ends, its notebook goes, and opening it again starts R again", || {
+    step("when R ends, its notebook goes, saying why, and opening it again starts R again", || {
         let r_pid = std::fs::read_to_string(state.join("r.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["pid"].as_i64()).unwrap();
+        let growth = folder.join("growth.R").display().to_string();
+        let mut stream = events(port, &token);
         // SAFETY: plain syscall.
         unsafe { libc::kill(r_pid as i32, libc::SIGKILL) };
         common::wait_for("R's notebook to leave the list", || agent.ok("list_notebooks", json!({})) == json!([]));
+        // The agent, on its next call on the notebook, and the app hear that R ended, and why.
+        let (failed, read) = agent.call("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
+        let message = read["message"].as_str().unwrap_or_default();
+        assert!(failed && read["error"] == "notebook_closed" && message.starts_with(&format!("{growth} closed because R ended (signal: 9")), "{read}");
+        let ended = next_event(&mut stream, |event| event["engine_ended"].as_array().is_some_and(|ended| !ended.is_empty()));
+        let entry = ended["engine_ended"].as_array().unwrap().iter().find(|e| e["path"] == growth.as_str()).unwrap_or_else(|| panic!("{ended}"));
+        assert_eq!((&entry["language"], entry["why"].as_str().is_some_and(|why| why.starts_with("signal: 9"))), (&json!("R"), true), "{entry}");
         let opened = agent.ok("open_notebook", json!({ "path": "growth.R" }));
         let read = agent.ok("read_cell", json!({ "notebook_id": opened["notebook_id"], "cell_id": A }));
         assert_eq!(read["code"], "x <- 41", "Ember saved the edit: {read}");
+        let now = next_event(&mut events(port, &token), |_| true);
+        assert!(!now["engine_ended"].as_array().unwrap().iter().any(|e| e["path"] == growth.as_str()), "opened again: {now}");
     });
 
     step("Ember's newest build installed and loaded: none failed", || {

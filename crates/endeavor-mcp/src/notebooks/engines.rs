@@ -20,12 +20,26 @@ pub struct Engines {
     parts: Mutex<Vec<(Backend, Arc<dyn Upstream>)>>,
     /// The engine each notebook it has seen is open in.
     ids: Mutex<HashMap<String, Backend>>,
+    /// Each notebook's path, as its engine last said (`snapshot`, `status`, `open`, `new`).
+    paths: Mutex<HashMap<String, String>>,
+    /// Notebooks that were open in an engine (not Pluto's) that ended, until they're opened again.
+    closed: Mutex<Vec<Closed>>,
+}
+
+/// A notebook that closed because its engine ended (`Engines::drop_engine`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Closed {
+    pub id: String,
+    pub path: String,
+    pub language: &'static str,
+    /// Why the engine ended, as far as the core can tell.
+    pub why: String,
 }
 
 impl Engines {
     /// The engines, starting with Pluto's if it runs.
     pub fn new(pluto: Option<Arc<dyn Upstream>>) -> Engines {
-        Engines { parts: Mutex::new(pluto.map(|pluto| (Backend::Pluto, pluto)).into_iter().collect()), ids: Mutex::default() }
+        Engines { parts: Mutex::new(pluto.map(|pluto| (Backend::Pluto, pluto)).into_iter().collect()), ids: Mutex::default(), paths: Mutex::default(), closed: Mutex::default() }
     }
 
     /// An engine, once it runs, in the place of one it replaces. False if it's there already: the
@@ -66,6 +80,24 @@ impl Engines {
 
     pub fn forget(&self, id: &str) {
         self.ids.lock().unwrap().remove(id);
+        self.paths.lock().unwrap().remove(id);
+    }
+
+    /// Notebook `id` is at `path`.
+    fn learn_path(&self, id: &str, path: Option<&str>) {
+        if let Some(path) = path.filter(|path| !id.is_empty() && !path.is_empty()) {
+            self.paths.lock().unwrap().insert(id.to_owned(), path.to_owned());
+        }
+    }
+
+    /// The notebooks that closed because their engine ended, oldest first.
+    pub fn closed(&self) -> Vec<Closed> {
+        self.closed.lock().unwrap().clone()
+    }
+
+    /// A notebook at `path` (`same` tells two paths apart) opened again: it's no longer closed.
+    pub fn reopened(&self, same: impl Fn(&str) -> bool) {
+        self.closed.lock().unwrap().retain(|closed| !same(&closed.path));
     }
 
     /// Whether `upstream` is still `backend`'s engine: not dropped or replaced.
@@ -75,16 +107,35 @@ impl Engines {
 
     /// `upstream`, another engine than Pluto's, stopped answering: its
     /// notebooks are gone with it, and the next notebook opened in it starts
-    /// it again. Nothing if it was already replaced.
+    /// it again. They're kept as `closed`, with why it ended, until each is
+    /// opened again. Nothing if it was already replaced.
     pub fn drop_engine(&self, backend: Backend, upstream: &Arc<dyn Upstream>) {
         if backend == Backend::Pluto {
             return;
         }
-        let mut parts = self.parts.lock().unwrap();
-        let before = parts.len();
-        parts.retain(|(b, u)| !(*b == backend && Arc::ptr_eq(u, upstream)));
-        if parts.len() != before {
-            self.ids.lock().unwrap().retain(|_, b| *b != backend);
+        {
+            let mut parts = self.parts.lock().unwrap();
+            let before = parts.len();
+            parts.retain(|(b, u)| !(*b == backend && Arc::ptr_eq(u, upstream)));
+            if parts.len() == before {
+                return;
+            }
+        }
+        let gone: Vec<String> = {
+            let mut ids = self.ids.lock().unwrap();
+            let gone = ids.iter().filter(|(_, b)| **b == backend).map(|(id, _)| id.clone()).collect();
+            ids.retain(|_, b| *b != backend);
+            gone
+        };
+        let why = upstream.why_ended().unwrap_or_else(|| format!("{} stopped answering", language(backend)));
+        eprintln!("┌ Warning: {} notebooks' engine ended: {why}", language(backend));
+        let mut paths = self.paths.lock().unwrap();
+        let mut closed = self.closed.lock().unwrap();
+        for id in gone {
+            if let Some(path) = paths.remove(&id) {
+                closed.retain(|c| c.path != path);
+                closed.push(Closed { id, path, language: language(backend), why: why.clone() });
+            }
         }
     }
 
@@ -99,12 +150,18 @@ impl Engines {
             ("open" | "new", _) => {
                 let backend = of_params(params);
                 let reply = self.on(backend, raw)?;
-                if let Some(id) = result(&reply).and_then(|r| r["notebook_id"].as_str().map(str::to_owned)) {
-                    self.learn(&id, backend);
+                if let Some(made) = result(&reply)
+                    && let Some(id) = made["notebook_id"].as_str()
+                {
+                    self.learn(id, backend);
+                    self.learn_path(id, made["path"].as_str());
                 }
                 Ok(reply)
             }
             (_, Some(id)) => {
+                if let Some(closed) = self.closed.lock().unwrap().iter().find(|closed| closed.id == id) {
+                    return Ok(json!({ "error": closed_error(closed) }).to_string());
+                }
                 // An id no running engine reported: not open, rather than "Julia isn't running".
                 if !self.ids.lock().unwrap().contains_key(id) && !self.has(Backend::Pluto) {
                     let error = format!("notebook_not_found::No notebook with id '{id}' is open. Run list_notebooks to see what's open.");
@@ -168,6 +225,7 @@ impl Engines {
             };
             for nb in &mut notebooks {
                 self.learn(nb["notebook_id"].as_str().unwrap_or_default(), backend);
+                self.learn_path(nb["notebook_id"].as_str().unwrap_or_default(), nb["path"].as_str());
                 if method == "snapshot" && nb.get("seq").is_none() {
                     nb["seq"] = seq.clone();
                 }
@@ -206,6 +264,15 @@ pub fn of_params(params: &Value) -> Backend {
     }
 }
 
+/// What a call on a notebook that closed with its engine answers.
+pub fn closed_error(closed: &Closed) -> String {
+    let language = closed.language;
+    format!(
+        "notebook_closed::{} closed because {language} ended ({}). The file is saved. open_notebook opens it again and starts {language} again; what its cells made is gone until they run again.",
+        closed.path, closed.why
+    )
+}
+
 pub fn language(backend: Backend) -> &'static str {
     match backend {
         Backend::Pluto => "Julia",
@@ -233,6 +300,7 @@ mod tests {
         seq: u64,
         asked: Mutex<Vec<String>>,
         down: bool,
+        why: Option<String>,
     }
 
     impl Upstream for Fake {
@@ -254,6 +322,10 @@ mod tests {
 
         fn notifications(&self) -> io::Result<Box<dyn BufRead + Send>> {
             Err(io::ErrorKind::NotConnected.into())
+        }
+
+        fn why_ended(&self) -> Option<String> {
+            self.why.clone()
         }
     }
 
@@ -369,6 +441,36 @@ mod tests {
         assert!(engines.is_current(Backend::Ember, &again), "dropping the old one again leaves the new one");
         engines.drop_engine(Backend::Pluto, &(pluto as Arc<dyn Upstream>));
         assert!(engines.has(Backend::Pluto), "Pluto's is never dropped");
+    }
+
+    #[test]
+    fn notebooks_that_closed_with_their_engine_say_why_until_opened_again() {
+        let pluto = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "p1", "path": "/a/p.jl" })], seq: 7, ..Default::default() });
+        let notebooks = vec![json!({ "notebook_id": "e1", "path": "/a/e1.R" }), json!({ "notebook_id": "e2", "path": "/a/e2.R" })];
+        let ember: Arc<dyn Upstream> = Arc::new(Fake { notebooks, seq: 3, why: Some("signal: 9 (SIGKILL)".into()), ..Default::default() });
+        let engines = Engines::new(Some(pluto.clone()));
+        engines.add(Backend::Ember, ember.clone());
+        call(&engines, "snapshot", json!({}));
+        assert!(engines.closed().is_empty());
+        engines.drop_engine(Backend::Ember, &ember);
+        let closed = |id: &str, path: &str| Closed { id: id.into(), path: path.into(), language: "R", why: "signal: 9 (SIGKILL)".into() };
+        let mut list = engines.closed();
+        list.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(list, [closed("e1", "/a/e1.R"), closed("e2", "/a/e2.R")], "Julia's notebook isn't one");
+        asked(&pluto);
+        let error = call(&engines, "run", json!({ "notebook_id": "e1" }))["error"].as_str().unwrap().to_owned();
+        assert!(error.starts_with("notebook_closed::/a/e1.R closed because R ended (signal: 9 (SIGKILL))."), "{error}");
+        assert!(asked(&pluto).is_empty(), "not sent to Pluto as an unknown id");
+        engines.reopened(|path| path == "/a/e1.R");
+        assert_eq!(engines.closed(), [closed("e2", "/a/e2.R")], "opened again");
+        engines.drop_engine(Backend::Ember, &ember);
+        assert_eq!(engines.closed().len(), 1, "dropping it again adds nothing");
+        // An engine that can't say why.
+        let quiet: Arc<dyn Upstream> = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "e3", "path": "/a/e3.R" })], ..Default::default() });
+        engines.add(Backend::Ember, quiet.clone());
+        call(&engines, "snapshot", json!({}));
+        engines.drop_engine(Backend::Ember, &quiet);
+        assert_eq!(engines.closed().last().unwrap().why, "R stopped answering");
     }
 
     struct Failing;

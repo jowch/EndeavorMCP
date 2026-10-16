@@ -16,14 +16,23 @@ use crate::http::{self, Head};
 /// How long the adapter holds a poll with nothing to say, and how much longer we wait for it.
 const POLL: Duration = Duration::from_secs(25 + 15);
 
+/// Why R ended, asked once R stops answering (`Upstream::why_ended`).
+pub type WhyEnded = Box<dyn Fn() -> Option<String> + Send + Sync>;
+
 pub struct R {
     port: u16,
     token: String,
+    why_ended: Option<WhyEnded>,
 }
 
 impl R {
     pub fn new(port: u16, token: String) -> R {
-        R { port, token }
+        R { port, token, why_ended: None }
+    }
+
+    /// One that can say why R ended.
+    pub fn telling(self, why_ended: WhyEnded) -> R {
+        R { why_ended: Some(why_ended), ..self }
     }
 }
 
@@ -43,6 +52,10 @@ impl Upstream for R {
         let reply: Value = serde_json::from_str(&self.adapter(json!({ "method": "status", "params": {} }).to_string().as_bytes())?)?;
         let after = reply["result"]["seq"].as_u64().ok_or_else(|| io::Error::other(format!("R's status has no seq: {reply}")))?;
         Ok(Box::new(BufReader::new(Polls { port: self.port, token: self.token.clone(), after, lines: Vec::new(), at: 0 })))
+    }
+
+    fn why_ended(&self) -> Option<String> {
+        self.why_ended.as_ref().and_then(|why| why())
     }
 }
 

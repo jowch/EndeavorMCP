@@ -95,11 +95,17 @@ stdio: an engine's stdout and stderr are the runtime log, which Pluto,
 packages and notebook code all print to, so a stdio protocol would need a
 pipe of its own, and every adapter already serves HTTP (the engine's UI). The core opens the
 stream once the engine answers and reopens it if it drops, rereading every
-notebook when it does. The core keeps one `AdapterProcess` per engine kind;
+notebook when it does. An engine other than Pluto's that stops answering
+(R's) is dropped, and the next R notebook opened starts it again. Its
+notebooks are kept as closed, with why it ended, until each opens again: how
+its process ended and the last lines it wrote to stderr, which the core
+passes on to the runtime log and keeps. A call that names one of them answers
+`notebook_closed` with that reason, and `/endeavor/events` lists them under
+`engine_ended` (`{path, language, why}`). The core keeps one `AdapterProcess` per engine kind;
 what differs per kind (launch command, detection, page adapter, skills) is
 the small `Backend` enum in `crates/wire/src/backend.rs`.
 
-Nothing calls `interrupt` yet.
+The core calls `interrupt` for the user's Stop (see the Stop bullet below).
 
 Core → engine:
 

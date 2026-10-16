@@ -188,7 +188,11 @@ Next:
   its notifications by long-polling. The core makes Ember's page secret and
   hands it to R. `new_notebook` makes one from an `.R` path, `read_cell`
   shows Ember's own `stale` and `not_run` (every cell after a restart), and a
-  warning in a cell's output starts with `Warning:`. The skills route R
+  warning in a cell's output starts with `Warning:`. When R ends, its
+  notebooks close with it: the agent's next call on one answers
+  `notebook_closed` with why (how R's process ended and its last error), and
+  `/endeavor/events` lists them under `engine_ended` until each opens again
+  (#101). The skills route R
   notebooks to `reference/ember.md`, and smoke task R1 runs one through a
   real agent. R notebooks don't need Julia: a core started with
   `--julia-when-needed` runs them with no Julia (#81, #87). R is what

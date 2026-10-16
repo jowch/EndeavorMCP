@@ -33,6 +33,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `no_image` | The output has no image form, the cell errored, or the notebook isn't running code and the output isn't already an image or HTML that holds one | `read_cell` |
 | `image_too_large` | The image is over about 4 MB | Make the figure smaller (fewer points, lower resolution), then look again |
 | `process_exited` | The notebook's process stopped while running a cell. The file is saved; outputs are gone until cells run again | Tell the user before running the same cell again |
+| `notebook_closed` | R ended, and the R notebooks open in it closed with it. The message says why. The file is saved; what its cells made is gone until they run again | Tell the user R ended and why. `open_notebook` opens it again and starts R; ask the user before running its cells again |
 | `host_tools` | `list_folder`, `read_file` or `run_shell` in a session that isn't on a server | Use your own file and shell tools |
 | `not_found` | `list_folder`, `read_file` or `run_shell` named a folder or file that isn't there | Check the path |
 | `not_a_file`, `not_a_folder` | `read_file` was given a folder, or `list_folder` a file | Use the other tool |
