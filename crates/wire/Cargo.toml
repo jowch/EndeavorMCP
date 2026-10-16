@@ -12,3 +12,5 @@ sha2 = "0.10"
 [target.'cfg(windows)'.dependencies]
 # Paths as Julia's realpath gives them, without std's \\?\ prefix.
 dunce = "1"
+# A socket's second handle that child processes don't get (`clone_socket`).
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }

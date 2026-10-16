@@ -413,7 +413,7 @@ pub fn relay_response(
     upstream: &mut BufReader<TcpStream>,
     edit: &dyn Fn(&mut Head),
 ) -> io::Result<bool> {
-    let mut to_client = client.get_ref().try_clone()?;
+    let mut to_client = wire::clone_socket(client.get_ref())?;
     let response = loop {
         let mut response = Head::read(upstream)?.ok_or(io::ErrorKind::UnexpectedEof)?;
         edit(&mut response);
@@ -436,12 +436,12 @@ pub fn relay_response(
 /// side closes, then close both: the connection after a `101 Switching
 /// Protocols` (a WebSocket). What either reader already holds goes first.
 pub fn tunnel(client: &mut BufReader<TcpStream>, upstream: &mut BufReader<TcpStream>) -> io::Result<()> {
-    let (mut to_client, mut to_upstream) = (client.get_ref().try_clone()?, upstream.get_ref().try_clone()?);
+    let (mut to_client, mut to_upstream) = (wire::clone_socket(client.get_ref())?, wire::clone_socket(upstream.get_ref())?);
     to_client.write_all(upstream.buffer())?;
     upstream.consume(upstream.buffer().len());
     to_upstream.write_all(client.buffer())?;
     client.consume(client.buffer().len());
-    let (mut from_client, mut from_upstream) = (client.get_ref().try_clone()?, upstream.get_ref().try_clone()?);
+    let (mut from_client, mut from_upstream) = (wire::clone_socket(client.get_ref())?, wire::clone_socket(upstream.get_ref())?);
     let end = |a: &TcpStream, b: &TcpStream| {
         let _ = a.shutdown(std::net::Shutdown::Both);
         let _ = b.shutdown(std::net::Shutdown::Both);

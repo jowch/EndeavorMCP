@@ -345,9 +345,58 @@ impl ToHelper {
     }
 }
 
+/// A second handle to `socket`, which child processes don't get. On Windows std's `try_clone` makes an
+/// inheritable copy, so a child started while the connection was open (Julia, or `julia --version`
+/// while finding it) kept it open after we closed it: a page waited for its end for as long as Julia
+/// ran, or was reset when a short-lived child ended. The copy is inheritable only for the instant
+/// before its flag is cleared.
+pub fn clone_socket(socket: &std::net::TcpStream) -> io::Result<std::net::TcpStream> {
+    let clone = socket.try_clone()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+        // SAFETY: a socket we hold; only its inherit flag changes.
+        if unsafe { SetHandleInformation(clone.as_raw_socket() as _, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(clone)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// See `clone_socket`: closing a connection ends it even while a child started after the clone runs.
+    #[test]
+    #[cfg(windows)]
+    fn a_child_started_while_a_cloned_socket_is_open_doesnt_keep_the_connection_open() {
+        use std::net::{TcpListener, TcpStream};
+        use std::os::windows::io::AsRawSocket;
+        use std::process::{Command, Stdio};
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
+        let inheritable = |socket: &TcpStream| {
+            let mut flags = 0;
+            // SAFETY: a socket we hold; reads its flags.
+            unsafe { GetHandleInformation(socket.as_raw_socket() as _, &mut flags) };
+            flags & HANDLE_FLAG_INHERIT != 0
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        assert!(inheritable(&accepted.try_clone().unwrap()), "std's try_clone no longer makes an inheritable copy: clone_socket may not be needed");
+        let clone = clone_socket(&accepted).unwrap();
+        assert!(!inheritable(&clone));
+        let mut child = Command::new("cmd").args(["/C", "ping -n 30 127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        drop(clone);
+        drop(accepted);
+        client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let ended = client.read(&mut [0; 1]);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(matches!(ended, Ok(0)), "the connection didn't end while the child ran: {ended:?}");
+    }
 
     /// Hands out at most `step` bytes per read, like a pipe under load.
     struct Trickle<'a> {

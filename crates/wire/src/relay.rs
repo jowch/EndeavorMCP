@@ -134,7 +134,7 @@ impl Mux {
     }
 
     fn spawn(self: &Arc<Self>, id: u32, socket: TcpStream, queue: Arc<Queue>) -> io::Result<()> {
-        let clones = socket.try_clone().and_then(|a| Ok((a, socket.try_clone()?)));
+        let clones = crate::clone_socket(&socket).and_then(|a| Ok((a, crate::clone_socket(&socket)?)));
         let (reader, stopper) = match clones {
             Ok(clones) => clones,
             Err(e) => {

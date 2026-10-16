@@ -838,7 +838,7 @@ pub(crate) fn post(
         http::respond(client, "400 Bad Request", None, br#"{"error":"Invalid JSON"}"#, keep_alive)?;
         return Ok(keep_alive);
     };
-    let held = Held::new(client.try_clone()?, request, &message, keep_alive);
+    let held = Held::new(wire::clone_socket(client)?, request, &message, keep_alive);
     let reply = reply(&message, &|| held.waiting());
     if held.streaming() {
         if let Some(reply) = reply {
