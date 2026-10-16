@@ -1115,6 +1115,38 @@ fn a_waited_submit_with_nothing_staged_waits_for_the_sessions_run() {
 }
 
 #[test]
+fn a_waited_submit_with_nothing_staged_says_how_the_cells_that_ran_meanwhile_went() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    let submit = || super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, Instant::now()).unwrap());
+    // `y`, the dependent of the session's run, ends while the call waits: it errored, and so the run did (#171).
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let ends = |errored: bool| {
+        std::thread::sleep(Duration::from_millis(700));
+        let now = *s.clock.lock().unwrap() + 1.0;
+        s.engine.with(NB, |nb| {
+            let y = &mut nb.cells[1];
+            (y.running, y.errored, y.last_run) = (false, errored, now);
+            y.output = if errored { "boom".into() } else { "ran".into() };
+        });
+    };
+    let receipt = std::thread::scope(|scope| {
+        scope.spawn(|| ends(true));
+        submit()
+    });
+    assert_eq!((&receipt["execution"]["status"], &receipt["affected_cells"]), (&json!("errored"), &json!([Y])), "{receipt}");
+    assert_eq!(receipt["outputs"]["changed"][0]["cell_id"], Y, "{receipt}");
+    assert_eq!(receipt["execution"].get("still_running"), None, "{receipt}");
+    // And when it ends well, "completed", naming it.
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let receipt = std::thread::scope(|scope| {
+        scope.spawn(|| ends(false));
+        submit()
+    });
+    assert_eq!((&receipt["execution"]["status"], &receipt["affected_cells"]), (&json!("completed"), &json!([Y])), "{receipt}");
+}
+
+#[test]
 fn a_waited_run_that_outlasts_the_cap_during_an_install_keeps_its_still_running_list() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
