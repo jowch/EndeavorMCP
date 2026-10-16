@@ -296,7 +296,9 @@ Next:
   once with "Access is denied", and a retry after clearing juliaup's folder
   worked; a retry in the same folder hasn't been seen yet). If that fails too,
   Linux and macOS fall back to the checked download, and on Windows the error
-  says trying again may work. `tests/own_julia.rs`
+  says trying again may work. The error names the step juliaup says failed,
+  and the runtime's log has all of juliaup's error (#135: on Windows it's the
+  move of the unpacked files, which juliaup doesn't retry). `tests/own_julia.rs`
   covers these with real downloads (ignored by default); run on Linux only so
   far.
 - marimo after Ember.
