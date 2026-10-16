@@ -390,6 +390,21 @@ fn the_runtime_end_to_end() {
         rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": dependent }));
         rt.call("endeavor/set_policy", json!({ "owner": "1", "policy": "ask" })).unwrap();
         rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": dependent, "wait_for_completion": true }));
+
+        // The app's Restore: the turn's edit and added cell put back, all or nothing.
+        rt.ok(MAC, "edit_cell", json!({ "notebook_id": notebook, "cell_id": dependent, "code": "y = x + 2" }));
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "w = y", "after_cell_id": dependent }));
+        let w = added["cell_id"].as_str().unwrap().to_owned();
+        let cells = json!([{ "cell_id": dependent, "expected": "y = x + 1", "code": "y = 0" }, { "cell_id": w, "expected": "w = y", "code": null }]);
+        let refused = rt.call("endeavor/restore_cells", json!({ "notebook_id": notebook, "cells": cells })).unwrap();
+        assert_eq!(refused, json!({ "restored": [], "changed": [dependent] }), "y isn't as the turn left it");
+        let cells = json!([{ "cell_id": dependent, "expected": "y = x + 2", "code": "y = x + 1" }, { "cell_id": w, "expected": "w = y", "code": null }]);
+        let restored = rt.call("endeavor/restore_cells", json!({ "notebook_id": notebook, "cells": cells })).unwrap();
+        assert_eq!(restored, json!({ "restored": [dependent, w], "changed": [] }));
+        let order = rt.ok(MAC, "get_cell_order", json!({ "notebook_id": notebook }));
+        assert!(!order.to_string().contains(&w), "w is gone: {order}");
+        let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": dependent }));
+        assert_eq!(read["code"], "y = x + 1", "{read}");
     });
 
     step("uploads: a same-name file is reused or numbered", || {
