@@ -485,6 +485,15 @@ runtime it found running, or another connection's start it waited for, is
 left. Without it, a test cancelled while Julia started left Julia running on
 the server with nothing using it.
 
+Some ssh servers kill the remote command when the client goes, instead of
+ending its input, and a killed helper can't stop anything. So on Unix the
+helper also gives a core it starts with `--own-with-client` one end of a
+pipe (`core --lifeline FD`). The helper writes one byte to it once the app
+has the runtime, or when the app detaches. If the pipe ends before that byte,
+however the helper ended, SIGKILL included, the core sends SIGTERM to its
+own process group (itself, Julia and Julia's children), as the helper's own
+cancel would, and SIGKILL ten seconds later (#95).
+
 **The package folder locally.** On servers the app and `serve` already use
 the same one. On your own computer they differ (the app's is in its data
 folder). A shared runtime uses the folder of whichever client started it, so

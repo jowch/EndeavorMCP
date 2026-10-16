@@ -508,6 +508,45 @@ fn the_end_of_input_stops_only_a_start_of_its_own_with_own_with_client() {
     assert!(!dir.join("runtime.json").exists());
 }
 
+/// A helper with `--own-with-client` that is killed outright, as some ssh servers do when the client goes,
+/// can't stop the start it began; the core then stops it itself (#95). One the app already has, or that the
+/// app detached from while it started, is left.
+#[cfg(unix)]
+#[test]
+fn a_start_of_its_own_ends_when_its_helper_is_killed_before_the_app_has_it() {
+    let (dir, cores, julia) = held_dir("start-own-killed");
+    let mut own = held_start(&dir, &julia, &["--own-with-client"]);
+    let core = cores.pids()[0];
+    own.process.kill().unwrap();
+    own.process.wait().unwrap();
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    assert!(!dir.join("runtime.json").exists());
+    assert!(std::fs::read_to_string(dir.join("runtime.log")).unwrap().contains("the connection that started Endeavor ended while it started"));
+
+    let mut detached = held_start(&dir, &julia, &["--own-with-client"]);
+    let core = cores.pids()[0];
+    detached.send(ToHelper::Detach);
+    detached.exits();
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    common::wait_for("the runtime to be recorded", || dir.join("runtime.json").exists());
+    assert!(common::pid_alive(core), "a start the app detached from goes on");
+    let mut stopper = Helper::start(&dir, &[]);
+    stopper.hello();
+    let stop = stopper.request_stop();
+    assert_eq!(stopper.next(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    stopper.stdin.0.lock().unwrap().take();
+    stopper.exits();
+
+    let mut ready = held_start(&dir, &julia, &["--own-with-client"]);
+    assert!(matches!(after_start(&ready), ToApp::Ready { reattached: false, .. }));
+    let core = cores.pids()[0];
+    ready.process.kill().unwrap();
+    ready.process.wait().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(common::pid_alive(core) && dir.join("runtime.json").exists(), "a runtime the app has is left");
+}
+
 /// `dir` with a fake Julia that is held back, and the guard that ends the cores started in it.
 fn held_dir(name: &str) -> (PathBuf, Cores, PathBuf) {
     let dir = state_dir(name);
