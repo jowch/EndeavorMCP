@@ -50,7 +50,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 9;
+pub const INTERFACE: u32 = 10;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -208,13 +208,14 @@ pub fn main(argv: &[String]) -> ! {
     Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
     let not_let_in = not_let_in(&open_command(&args.state_dir));
     let allow_r_install = Arc::new(std::sync::atomic::AtomicBool::new(args.install_r));
-    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone() });
+    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
     let r = Arc::new(RStarter::new(&args, &engine_token, allow_r_install));
+    let _ = served.r.set(r.clone());
     let starting = (r.clone(), served.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, wait| match backend {
-        Backend::Ember => starting.0.start(&starting.1),
+        Backend::Ember => starting.0.start_noting(&starting.1),
         Backend::Pluto => starting.1.julia.wait(&starting.1, wait.min(JULIA_WAIT)).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait. Set before
@@ -774,6 +775,47 @@ enum Install {
     Failed(String),
 }
 
+/// What `r_status` reads: whether R's adapter runs, the installs of Endeavor's own R and of Ember,
+/// whether Ember is installed, whether the adapter is starting, and why the last start failed.
+struct RNow<'a> {
+    running: bool,
+    own: &'a Install,
+    ember: &'a Install,
+    ember_installed: bool,
+    launching: bool,
+    failed: Option<&'a str>,
+}
+
+/// Where R notebooks' setup is (`endeavor/r_status`): `ready` while R's adapter runs (with `updating`
+/// while a newer Ember installs for the next start), `starting` with the step in words (installing
+/// Endeavor's own R, installing or updating Ember, starting R), `failed` with the error's code and why
+/// (until the next start), else `not_started`. An install that finished after the call that started it
+/// stopped waiting reads `not_started` until the next call starts R (#148).
+fn r_status(now: &RNow) -> Value {
+    let failed = |why: &str| {
+        let (code, message) = why.split_once("::").unwrap_or(("r_failed", why));
+        json!({ "state": "failed", "code": code, "message": message })
+    };
+    let ember_running = matches!(now.ember, Install::Running);
+    if now.running {
+        return if ember_running { json!({ "state": "ready", "updating": true }) } else { json!({ "state": "ready" }) };
+    }
+    if matches!(now.own, Install::Running) {
+        return json!({ "state": "starting", "step": format!("Installing Endeavor's own R {}", crate::r::OWN_VERSION) });
+    }
+    if ember_running {
+        return json!({ "state": "starting", "step": if now.ember_installed { "Updating Ember" } else { "Installing Ember for R notebooks" } });
+    }
+    if now.launching {
+        return json!({ "state": "starting", "step": "Starting R" });
+    }
+    match (now.own, now.ember, now.failed) {
+        (Install::Failed(why), ..) | (_, Install::Done(Err(why)), _) => failed(why),
+        (.., Some(why)) => failed(why),
+        _ => json!({ "state": "not_started" }),
+    }
+}
+
 /// The Ember builds in Endeavor's own folder (`ember.dcf`, which `install.R` writes): the one in use,
 /// the one before it, and the ones that failed here.
 #[derive(Debug, Default, PartialEq)]
@@ -897,6 +939,10 @@ struct RStarter {
     token: String,
     spawn: Spawner,
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    /// Whether R's adapter is starting (`launch`), for `status`.
+    launching: std::sync::atomic::AtomicBool,
+    /// Why the last start failed, until the next one (`start_noting`), for `status`.
+    failed: std::sync::Mutex<Option<String>>,
 }
 
 impl RStarter {
@@ -918,7 +964,39 @@ impl RStarter {
             token: token.to_owned(),
             spawn: Spawner::new(),
             child: Arc::default(),
+            launching: false.into(),
+            failed: Default::default(),
         }
+    }
+
+    /// Where R notebooks' setup is, for the app (`endeavor/r_status`), without starting anything (see
+    /// `r_status`). Whoever waits for it, the agent included.
+    fn status(&self) -> Value {
+        let running = self.child.lock().unwrap().as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+        let folder = self.ember_folder();
+        let own = self.own_install.lock().unwrap();
+        let ember = self.install.lock().unwrap();
+        let failed = self.failed.lock().unwrap();
+        r_status(&RNow {
+            running,
+            own: &own,
+            ember: &ember,
+            ember_installed: EmberBuilds::read(&folder).installed(&folder),
+            launching: self.launching.load(std::sync::atomic::Ordering::SeqCst),
+            failed: failed.as_deref(),
+        })
+    }
+
+    /// `start`, keeping why it failed for `status` until the next start. Still installing isn't a failure.
+    fn start_noting(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+        *self.failed.lock().unwrap() = None;
+        let started = self.start(served);
+        if let Err(why) = &started
+            && !why.starts_with("r_installing::")
+        {
+            *self.failed.lock().unwrap() = Some(why.clone());
+        }
+        started
     }
 
     /// Start the adapter and wait until it's up: what answers for R, and Ember's page on `/ember/`.
@@ -980,6 +1058,13 @@ impl RStarter {
     }
 
     fn launch(&self, served: &Served, library: &str) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+        self.launching.store(true, std::sync::atomic::Ordering::SeqCst);
+        let launched = self.launch_adapter(served, library);
+        self.launching.store(false, std::sync::atomic::Ordering::SeqCst);
+        launched
+    }
+
+    fn launch_adapter(&self, served: &Served, library: &str) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("r_failed::{e}"))?;
         let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
@@ -1356,6 +1441,8 @@ struct Served {
     ember: std::sync::Mutex<Option<Page>>,
     /// Whether Endeavor's own R may be installed (`RStarter::allow_own`).
     allow_r_install: Arc<std::sync::atomic::AtomicBool>,
+    /// R notebooks' starter, for `endeavor/r_status`: set once, as the core starts.
+    r: OnceLock<Arc<RStarter>>,
     /// The pages' token (`crate::page_token`): the only key to Pluto's and Ember's pages.
     page_token: String,
     /// The cookie that lets a browser into Pluto's page (`cookie_name`).
@@ -1383,6 +1470,7 @@ impl Served {
         let mut result = json!({});
         match method {
             "endeavor/julia_status" => result = self.julia.status(),
+            "endeavor/r_status" => result = self.r.get().map_or_else(|| json!({ "state": "not_started" }), |r| r.status()),
             "endeavor/start_julia" => {
                 self.julia.start_now(self);
                 result = self.julia.status();
@@ -1892,6 +1980,26 @@ mod tests {
     }
 
     #[test]
+    fn r_status_says_each_step_and_ready_wins_over_an_update() {
+        let (idle, running, done_ok, done_err) = (Install::Idle, Install::Running, Install::Done(Ok(false)), Install::Done(Err("r_failed::Couldn't install Ember".into())));
+        let own_failed = Install::Failed("r_failed::Couldn't install R: no network".into());
+        let now = |running_r, own, ember, ember_installed, launching, failed| r_status(&RNow { running: running_r, own, ember, ember_installed, launching, failed });
+        let step = |s: &str| json!({ "state": "starting", "step": s });
+        assert_eq!(now(false, &idle, &idle, false, false, None), json!({ "state": "not_started" }));
+        assert_eq!(now(false, &running, &idle, false, false, None), step(&format!("Installing Endeavor's own R {}", crate::r::OWN_VERSION)));
+        assert_eq!(now(false, &idle, &running, false, false, None), step("Installing Ember for R notebooks"));
+        assert_eq!(now(false, &idle, &running, true, false, None), step("Updating Ember"));
+        assert_eq!(now(false, &idle, &idle, true, true, None), step("Starting R"));
+        assert_eq!(now(true, &idle, &idle, true, false, None), json!({ "state": "ready" }));
+        assert_eq!(now(true, &idle, &running, true, false, None), json!({ "state": "ready", "updating": true }), "R runs while a newer Ember installs");
+        assert_eq!(now(false, &own_failed, &idle, false, false, None), json!({ "state": "failed", "code": "r_failed", "message": "Couldn't install R: no network" }));
+        assert_eq!(now(false, &idle, &done_err, false, false, None), json!({ "state": "failed", "code": "r_failed", "message": "Couldn't install Ember" }));
+        assert_eq!(now(false, &idle, &idle, false, false, Some("r_not_found::Couldn't find R")), json!({ "state": "failed", "code": "r_not_found", "message": "Couldn't find R" }));
+        assert_eq!(now(true, &idle, &idle, true, false, Some("r_failed::old")), json!({ "state": "ready" }), "a running R outranks an old failure");
+        assert_eq!(now(false, &idle, &done_ok, true, false, None), json!({ "state": "not_started" }), "installed while no call waited (#148)");
+    }
+
+    #[test]
     fn ember_builds_read_what_install_r_writes_and_fall_back_to_the_one_before() {
         let folder = std::env::temp_dir().join(format!("endeavor-ember-builds-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
@@ -2041,7 +2149,7 @@ mod tests {
         let (stops, _) = std::sync::mpsc::channel();
         let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
         let julia = JuliaStarter::new(&parse_args(&argv).unwrap(), TOKEN, "process", stops.clone());
-        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default() })
+        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default(), r: OnceLock::new() })
     }
 
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.

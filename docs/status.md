@@ -68,7 +68,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
   Pluto's rules and say so.
 - The app can put back what an agent's turn changed since 2026-10-16
-  (interface 9, Endeavor #79): `endeavor/restore_cells` sets the turn's edited
+  (interface 10, Endeavor #79): `endeavor/restore_cells` sets the turn's edited
   cells back to their earlier code and deletes the cells it added, all or
   nothing, and only if every cell still has the code the turn left. Nothing
   runs; the code is the user's, a cell whose code isn't what last ran shows
@@ -293,6 +293,14 @@ Next:
   minutes (no new step, nothing new in the runtime's log) is stopped and the
   start fails, and a download under 1 kB/s for 5 minutes fails and resumes on
   the next try. The interface number is 5.
+- The app can ask where R notebooks' setup is (Endeavor #93): `endeavor/r_status`
+  answers `starting` with the step in words ("Installing Endeavor's own R …",
+  "Installing Ember for R notebooks", "Updating Ember", "Starting R"),
+  `ready` while R runs (with `updating` while a newer Ember installs for the
+  next start), `failed` with the error's code and why (until the next start),
+  or `not_started`, whoever is waiting, the agent included. It starts nothing.
+  After a first install that finished with no call waiting it reads
+  `not_started` until the agent's next call (#148). The interface number is 9.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds

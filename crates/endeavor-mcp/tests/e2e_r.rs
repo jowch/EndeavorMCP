@@ -250,16 +250,26 @@ fn an_r_notebook_through_the_runtime() {
 
     let notebook = step("opening an R notebook starts R and Ember, in safe preview", || {
         // The first time, Ember installs in the background into a library of Endeavor's own.
+        assert_eq!(app_call(port, &token, "endeavor/r_status")["result"], json!({ "state": "not_started" }), "asking starts nothing");
         let deadline = Instant::now() + Duration::from_secs(1200);
         let opened = loop {
             let (failed, opened) = agent.call("open_notebook", json!({ "path": "growth.R" }));
             if !failed && opened.get("error").is_none() {
                 break opened;
             }
-            // Still installing is a normal result, not a failure.
+            // Still installing is a normal result, not a failure. The app sees the same step, whoever waits.
             assert!(!failed && matches!(opened["error"].as_str(), Some("r_installing" | "notebook_opening")) && Instant::now() < deadline, "{opened}");
+            let status = app_call(port, &token, "endeavor/r_status")["result"].clone();
+            // It may have moved on since the call answered: R started, or the install finished with no
+            // call waiting, which reads `not_started` until the next call (#148).
+            if opened["error"] == "r_installing" {
+                let step = status["step"].as_str().unwrap_or_default();
+                let starting = status["state"] == "starting" && ["Installing Ember for R notebooks", "Starting R"].contains(&step);
+                assert!(starting || status["state"] == "ready" || status["state"] == "not_started", "{status} while {opened}");
+            }
             std::thread::sleep(Duration::from_secs(5));
         };
+        assert_eq!(app_call(port, &token, "endeavor/r_status")["result"], json!({ "state": "ready" }));
         // A warning here is `ember_previous`: Ember's newest build didn't work, which the daily run is for.
         assert_eq!(opened.get("warnings"), None, "{opened}");
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
@@ -505,7 +515,6 @@ fn ember_updates_from_its_repository_and_keeps_the_build_before() {
 }
 
 /// What a call to the core's `/endeavor/call` answers, as the app and `use_machine` make them.
-#[cfg(target_os = "macos")]
 fn app_call(port: u16, token: &str, method: &str) -> Value {
     app_call_with(port, token, method, json!({}))
 }
