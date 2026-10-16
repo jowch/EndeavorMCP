@@ -60,6 +60,8 @@ end
 mv(tmp, state; force=true)
 atexit(() -> rm(state; force=true))
 @info "Runtime ready" pluto_port mcp_port
-warm || EndeavorRuntime.warm_up_later()
+# Not in a Slurm job: there the warm-up's Julia and notebook worker would share the job's
+# memory limit with the user's notebooks, and running out could end one of theirs.
+warm || launcher == "slurm" || EndeavorRuntime.warm_up_later()
 
 wait(Condition())

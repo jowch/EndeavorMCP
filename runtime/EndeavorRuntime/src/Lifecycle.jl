@@ -341,7 +341,24 @@ function _warm_command(pkg::Base.PkgId, project::AbstractString)
     addenv(cmd, "JULIA_LOAD_PATH" => join(["@", "@stdlib"], Sys.iswindows() ? ';' : ':'))
 end
 
-"Precompile `pkg` in the background once the runtime has been quiet for `quiet` seconds. The task."
+# A precompile writes its image to temporary files (`jl_…`) in the package's cache folder and
+# renames them when it's done, so one that was ended leaves them behind, tens of MB each. An
+# hour old means no precompile is still writing them.
+function _sweep_warm_temps(pkg::Base.PkgId)
+    dir = Base.compilecache_dir(pkg)
+    isdir(dir) || return
+    for name in readdir(dir)
+        path = joinpath(dir, name)
+        startswith(name, "jl_") && isfile(path) && time() - mtime(path) > 3600 && rm(path; force=true)
+    end
+end
+
+"""
+Precompile `pkg` in the background once the runtime has been quiet for `quiet` seconds. The task.
+The quiet starts when the runtime is ready, so where the app starts Julia ahead the warm-up can
+run while the user is still choosing what to do, and a notebook opened then shares the computer
+with it.
+"""
 function warm_up_later(pkg::Base.PkgId=WARM; project::AbstractString=dirname(Base.active_project()), quiet::Real=30.0, every::Real=5.0)
     errormonitor(@async begin
         quiet_since = time()
@@ -349,6 +366,7 @@ function warm_up_later(pkg::Base.PkgId=WARM; project::AbstractString=dirname(Bas
             sleep(every)
             _runtime_busy(standalone_session()) && (quiet_since = time())
         end
+        _sweep_warm_temps(pkg)
         @info "Precompiling $(pkg.name) in the background, for faster notebook opens from the next start"
         out = IOBuffer()
         began = time()
