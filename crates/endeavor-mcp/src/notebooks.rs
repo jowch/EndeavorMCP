@@ -1233,6 +1233,18 @@ impl Notebooks {
         self.interrupt(notebook_id, owner);
     }
 
+    /// The notebooks where runs `owner` started may still be going (`stop_for` checks): what the
+    /// app's Stop for that session looks at (`endeavor/stop_session`).
+    pub fn session_runs(&self, owner: &str) -> Vec<String> {
+        if owner.is_empty() {
+            return Vec::new();
+        }
+        let state = self.state.lock().unwrap();
+        let mut ids: Vec<String> = state.notebooks.iter().filter(|(_, nb)| nb.started.get(owner).is_some_and(|cells| !cells.is_empty())).map(|(id, _)| id.clone()).collect();
+        ids.sort();
+        ids
+    }
+
     /// Interrupt `notebook_id`'s run, as Pluto's own Stop does, for `owner`'s cancelled call: the
     /// cells end interrupted. A cell that doesn't stop (one long `sleep`) ends the notebook's
     /// process, as with Pluto's Stop, and the notebook waits for a restart.

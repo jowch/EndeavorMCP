@@ -193,7 +193,11 @@ and 3), and for the app:
   running code or a run the same session started there is still going. The
   cells end interrupted; a run only the user or another session started is
   left alone. A Stop while no call is under way (the agent was writing) sends
-  the runtime nothing, so a run started without waiting goes on (#140). The
+  the runtime nothing from the agent, so the app also sends
+  `endeavor/stop_session` `{owner}` on Stop: it interrupts the session's runs
+  that are still going, by the same rule, and answers at once with the
+  notebooks it looks at. A core from before it answers that the method is
+  unknown, and its runs go on, as they did. The
   interrupt lands 2 s or more after Stop: Pluto first waits 2 s for the run to
   end by itself. As with Pluto's Stop, a cell that starts in that time (one
   queued behind the session's) is the one interrupted. A cell that doesn't stop for

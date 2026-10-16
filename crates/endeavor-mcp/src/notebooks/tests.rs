@@ -2160,3 +2160,16 @@ fn a_stop_interrupts_the_sessions_own_run() {
     s.notebooks.stop_for("7", NB, false);
     assert_eq!(interrupts(), 2, "a waited run that finished");
 }
+
+#[test]
+fn the_apps_stop_looks_at_the_notebooks_with_the_sessions_runs() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
+    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new());
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!(s.notebooks.session_runs("7"), [NB]);
+    assert_eq!(s.notebooks.session_runs("8"), Vec::<String>::new(), "another session's");
+    assert_eq!(s.notebooks.session_runs(""), Vec::<String>::new(), "no session");
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
+    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new(), "the run ended");
+}
