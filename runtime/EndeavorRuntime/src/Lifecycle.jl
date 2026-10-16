@@ -349,7 +349,11 @@ function _sweep_warm_temps(pkg::Base.PkgId)
     isdir(dir) || return
     for name in readdir(dir)
         path = joinpath(dir, name)
-        startswith(name, "jl_") && isfile(path) && time() - mtime(path) > 3600 && rm(path; force=true)
+        # One that can't be removed (held by antivirus on Windows, say) is left for next time.
+        try
+            startswith(name, "jl_") && isfile(path) && time() - mtime(path) > 3600 && rm(path; force=true)
+        catch
+        end
     end
 end
 
