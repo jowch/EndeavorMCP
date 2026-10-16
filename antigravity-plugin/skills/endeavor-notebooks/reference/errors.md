@@ -4,12 +4,12 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 
 ## Still starting
 
-These come back the same way, but nothing failed and the call is not marked an error: something is still starting. Tell the user, then make the same call again. Don't look for a fix or try another way meanwhile.
+These come back the same way, but nothing failed and the call is not marked an error: something is still starting. Tell the user, then make the same call again right away: each call waits up to 30 seconds, so calling again is how you wait. Keep calling until the message says otherwise. Don't look for a fix or try another way meanwhile.
 
 | `error` | Meaning | Do |
 |---|---|---|
-| `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take several minutes | Make the same call again in a minute |
-| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Make the same call again in a minute |
+| `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take 10 minutes; the message says how long so far | Make the same call again |
+| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Make the same call again |
 | `notebook_opening` | `open_notebook`, `new_notebook` or `allow_execution` took longer than one call waits: often the first notebook in a new Julia process, or a notebook leaving safe preview whose packages need installing. It goes on | Make the same call again, with the same arguments, to get its result |
 
 On a machine, a call made while Endeavor starts there, or while its Slurm job is queued, says so in plain text; it is not an error either. See the machines skill.

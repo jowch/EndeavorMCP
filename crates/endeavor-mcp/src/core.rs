@@ -269,6 +269,27 @@ pub fn main(argv: &[String]) -> ! {
     }
 }
 
+/// What a call hears while Julia starts: the step, how long so far, and to call again now, since
+/// each call is the wait (an agent told to try again "in a minute" with no way to pause gave up
+/// after a dozen tries, #153). After `START_QUIET_SECONDS` with no sign of progress, to tell the
+/// user and stop.
+fn starting_message(step: &str, so_far: Duration, quiet: Duration) -> String {
+    let words = |d: Duration| if d.as_secs() >= 90 { format!("about {} minutes", (d.as_secs() + 30) / 60) } else { format!("{} seconds", d.as_secs()) };
+    let what = format!("julia_starting::{step} ({} so far).", words(so_far));
+    if quiet.as_secs() >= START_QUIET_SECONDS {
+        return format!("{what} Nothing has moved for {}, which is longer than a start takes. Tell the user it may be stuck, and stop calling.", words(quiet));
+    }
+    format!(
+        "{what} The first start on a computer gets Julia and installs Pluto's packages, which can take 10 minutes or more; later starts take seconds. \
+         Tell the user once, then make the same call again right away: each call waits up to {} seconds for the start, so don't pause between calls.",
+        JULIA_WAIT.as_secs()
+    )
+}
+
+/// How long a start can go with no new step and no new line in the runtime's log before the agent
+/// is told it may be stuck: a long precompile prints nothing for a few minutes.
+const START_QUIET_SECONDS: u64 = 600;
+
 /// How long a call that needs Julia waits for it to start before it's told Julia is still starting:
 /// well within the 45 s an agent's call waits, and less if the call already waited (for the user's
 /// answer, say), so that the notebook's open has some of the 45 s too.
@@ -388,6 +409,8 @@ struct JuliaNow {
     phase: Phase,
     /// While starting: the last sign of progress, a new step or new lines in the runtime's log.
     moved: std::time::Instant,
+    /// When the start began.
+    began: std::time::Instant,
     /// Why the last start failed has been said.
     said: bool,
     /// How Julia ended, if the one started last did.
@@ -438,7 +461,7 @@ impl JuliaStarter {
             #[cfg(unix)]
             mask: None,
             spawn: Spawner::new(),
-            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), said: false, exited: None }),
+            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), began: std::time::Instant::now(), said: false, exited: None }),
             changed: std::sync::Condvar::new(),
             pid: 0.into(),
             stopping: false.into(),
@@ -458,6 +481,7 @@ impl JuliaStarter {
         }
         now.phase = Phase::Starting("Julia is starting".into());
         now.moved = std::time::Instant::now();
+        now.began = now.moved;
         now.exited = None;
         drop(now);
         let served = served.clone();
@@ -516,7 +540,7 @@ impl JuliaStarter {
                 }
                 Phase::Idle => return Err("julia_failed::The runtime is stopping.".into()),
                 Phase::Starting(step) if left.is_zero() => {
-                    return Err(format!("julia_starting::{step}. The first start can take several minutes (Julia, then Pluto's packages). Try again in a minute."));
+                    return Err(starting_message(step, now.began.elapsed(), now.moved.elapsed()));
                 }
                 Phase::Starting(_) => now = self.changed.wait_timeout(now, left).unwrap().0,
             }
@@ -1184,7 +1208,7 @@ impl RStarter {
                 });
             }
         }
-        Err(format!("r_installing::Installing Endeavor's own R {}, which takes a minute or two. Try again in a minute.", crate::r::OWN_VERSION))
+        Err(format!("r_installing::Installing Endeavor's own R {}, which takes a minute or two. Make the same call again right away: each call waits up to {} seconds.", crate::r::OWN_VERSION, EMBER_WAIT.as_secs()))
     }
 
     /// Install Ember into Endeavor's own folder, or update it if r-universe has a newer build
@@ -1199,7 +1223,7 @@ impl RStarter {
                 eprintln!("endeavor core: still updating Ember; starting R with the installed one");
                 return Ok(false);
             }
-            Err("r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Try again in a minute.".to_owned())
+            Err(format!("r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Make the same call again right away: each call waits up to {} seconds.", EMBER_WAIT.as_secs()))
         };
         let updating = EmberBuilds::read(folder).installed(folder);
         let mut install = self.install.lock().unwrap();
@@ -1946,6 +1970,18 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_julia_start_says_how_long_so_far_and_to_call_again_now() {
+        let said = starting_message("Julia 1.12.6 is starting and loading Pluto", Duration::from_secs(250), Duration::from_secs(20));
+        for part in ["julia_starting::Julia 1.12.6 is starting and loading Pluto (about 4 minutes so far).", "10 minutes", "right away", "waits up to 30 seconds", "don't pause"] {
+            assert!(said.contains(part), "{part}: {said}");
+        }
+        assert!(!said.contains("in a minute"), "{said}");
+        assert!(starting_message("Julia is starting", Duration::from_secs(40), Duration::ZERO).contains("(40 seconds so far)"));
+        let stuck = starting_message("Julia is starting", Duration::from_secs(900), Duration::from_secs(600));
+        assert!(stuck.contains("Nothing has moved for about 10 minutes") && stuck.contains("stop calling"), "{stuck}");
+    }
 
     #[test]
     #[cfg(unix)]
