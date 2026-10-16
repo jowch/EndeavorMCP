@@ -1595,8 +1595,8 @@ impl Route {
 /// One client's requests in turn, until either side closes.
 fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
     let _ = client.set_nodelay(true);
-    let mut reader = BufReader::new(client.try_clone()?);
-    let mut client = client;
+    let mut client = wire::Shared::new(client);
+    let mut reader = BufReader::new(client.clone());
     let bridge = &served.bridge;
     while let Some(mut request) = Head::read(&mut reader)? {
         let route = Route::of(request.path());
@@ -1743,8 +1743,8 @@ fn julia_starting_page(why: String) -> String {
 /// up on the server for good: a tool call fails with `why`, and the rest is
 /// answered as the core would. Any other request is closed unanswered.
 pub fn serve_unreachable(client: TcpStream, token: &str, why: &str) -> io::Result<()> {
-    let mut reader = BufReader::new(client.try_clone()?);
-    let mut client = client;
+    let mut client = wire::Shared::new(client);
+    let mut reader = BufReader::new(client.clone());
     let Some(request) = Head::read(&mut reader)? else { return Ok(()) };
     if Route::of(request.path()) != Route::Mcp {
         return Ok(());
@@ -1931,7 +1931,7 @@ pub(crate) fn same(given: &str, expected: &str) -> bool {
 /// connection of its own, its body from `client` or already read, and the
 /// response back as it comes, through `edit`. Whether the client connection
 /// can carry another request.
-fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<TcpStream>, port: u16, language: &str, edit: &dyn Fn(&mut Head)) -> io::Result<bool> {
+fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<wire::Shared>, port: u16, language: &str, edit: &dyn Fn(&mut Head)) -> io::Result<bool> {
     let upstream = match TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)) {
         Ok(upstream) => upstream,
         Err(_) => {
@@ -1940,7 +1940,8 @@ fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<TcpStream>
         }
     };
     let _ = upstream.set_nodelay(true);
-    let mut to_upstream = upstream.try_clone()?;
+    let upstream = wire::Shared::new(upstream);
+    let mut to_upstream = upstream.clone();
     let mut request = request;
     match body {
         None => {
@@ -1957,7 +1958,7 @@ fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<TcpStream>
     http::relay_response(&request, client, &mut BufReader::new(upstream), edit)
 }
 
-fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
+fn refuse(client: &mut impl Write, status: &str, why: &str) -> io::Result<()> {
     let body = json!({ "error": why }).to_string();
     write!(client, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
 }

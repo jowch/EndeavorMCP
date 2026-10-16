@@ -134,14 +134,8 @@ impl Mux {
     }
 
     fn spawn(self: &Arc<Self>, id: u32, socket: TcpStream, queue: Arc<Queue>) -> io::Result<()> {
-        let clones = socket.try_clone().and_then(|a| Ok((a, socket.try_clone()?)));
-        let (reader, stopper) = match clones {
-            Ok(clones) => clones,
-            Err(e) => {
-                self.closed_here(id, false);
-                return Err(e);
-            }
-        };
+        let socket = crate::Shared::new(socket);
+        let (reader, stopper) = (socket.clone(), socket.clone());
         queue.state.lock().unwrap().socket = Some(stopper);
         let mux = self.clone();
         std::thread::spawn(move || mux.write_socket(id, socket, &queue));
@@ -150,7 +144,7 @@ impl Mux {
         Ok(())
     }
 
-    fn write_socket(&self, id: u32, mut socket: TcpStream, queue: &Queue) {
+    fn write_socket(&self, id: u32, mut socket: crate::Shared, queue: &Queue) {
         while let Some(chunk) = queue.pop() {
             if socket.write_all(&chunk).is_err() {
                 self.closed_here(id, false);
@@ -161,7 +155,7 @@ impl Mux {
         let _ = socket.shutdown(Shutdown::Both);
     }
 
-    fn read_socket(&self, id: u32, mut socket: TcpStream) {
+    fn read_socket(&self, id: u32, mut socket: crate::Shared) {
         let mut buf = vec![0; CHUNK];
         loop {
             let n = match socket.read(&mut buf) {
@@ -225,7 +219,7 @@ struct QueueState {
     bytes: usize,
     end: Option<End>,
     /// For an abort to unblock a writer stuck on a socket that stopped reading.
-    socket: Option<TcpStream>,
+    socket: Option<crate::Shared>,
 }
 
 impl Queue {
