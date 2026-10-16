@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 use super::{Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, uuid_value};
 use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
+use wire::backend::Backend;
 
 /// How long the app's report of a user's run counts. (Also sent as the
 /// `timeout` of runs the engine is not asked to wait for, which it ignores.)
@@ -31,8 +32,10 @@ const MAX_IMAGE_BYTES: usize = 4_000_000;
 /// How long a package step can take before the agent is told it is taking
 /// longer than usual and to stop waiting unless the package log moves.
 const INSTALL_USUAL_SECONDS: u64 = 600;
-/// How `read_notebook_code` starts each cell, as Pluto's file does.
+/// How `read_notebook_code` starts each cell of a Pluto notebook, as Pluto's file does.
 const CELL_MARKER: &str = "# ╔═╡ ";
+/// And of an Ember notebook, as an Ember `.R` file does.
+const EMBER_CELL_MARKER: &str = "# %% id=";
 /// What `open_notebook` says about a notebook in safe preview, so the agent passes it on.
 pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has run, so its cells have no outputs yet. Tell the user that when you describe it. It runs only once the user allows it.";
 /// How much of each output's text a change's receipt carries; `read_cell` has
@@ -648,8 +651,15 @@ impl Call<'_> {
         let code = self.arg("code")?;
         self.require_fresh_read(&nb, &cell)?;
         let run_after = bool_arg(self.args, "run_after", false)?;
+        let folded = match self.args.get("folded") {
+            None | Some(Value::Null) => None,
+            Some(Value::Bool(folded)) => Some(*folded),
+            Some(_) => return Err(argument_error("invalid_argument::folded must be a boolean")),
+        };
         let before = nb.cells[&cell].code.clone();
-        let applied = self.apply(&nb.id, vec![json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": before })])?;
+        let mut ops = vec![json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": before })];
+        ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
+        let applied = self.apply(&nb.id, ops)?;
         let code = code.as_str().unwrap_or_default();
         self.edited(&nb.id, &applied, &cell, &before, code);
         let ran = self.run_or_stage(&nb, &cell, run_after)?;
@@ -865,6 +875,9 @@ impl Call<'_> {
             Some("execution") => self.nbs.graph(&nb.id, GraphQuery::default())?.order,
             _ => return Err(argument_error(&format!("invalid_order::order must be 'execution' or 'visual', got '{}'", julia_string(&order)))),
         };
+        // An Ember file's text cells are already `#'` comments, so they need no `# md:`.
+        let ember = self.nbs.backend_of(&nb.id) == Backend::Ember;
+        let marker = if ember { EMBER_CELL_MARKER } else { CELL_MARKER };
         let mut ids = Vec::new();
         let mut blocks = Vec::new();
         let mut left_out = 0;
@@ -877,14 +890,14 @@ impl Call<'_> {
                 left_out += 1;
                 continue;
             }
-            let body = if cell.markdown {
+            let body = if cell.markdown && !ember {
                 format!("# md:\n{}", cell.code)
             } else if julia_strip(&cell.code).is_empty() {
                 "# (empty)".to_owned()
             } else {
                 cell.code.clone()
             };
-            blocks.push(format!("{CELL_MARKER}{id}\n{body}"));
+            blocks.push(format!("{marker}{id}\n{body}"));
             ids.push(id);
         }
         for id in &ids {

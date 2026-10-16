@@ -224,6 +224,19 @@ check("cell_state from the edit is numbered below apply's seq",
                  function(n) n$seq < applied$seq, logical(1))))
 check("topology_changed and file_saved", all(c("topology_changed", "file_saved") %in% methods_of(ns)))
 
+# edit_cell with `folded`: set_code and fold in one batch, a code cell and a text one.
+invisible(result("apply", list(notebook_id = nid, ops = list(
+  list(op = "set_code", cell_id = ids[3], code = "#' # Title", expected = "y * 3"),
+  list(op = "fold", cell_id = ids[3], folded = FALSE)))))
+cell <- cell_of(result("snapshot", list(notebook_id = nid)), ids[3])
+check("apply: set_code to a text cell and unfold it", identical(cell$code, "#' # Title") && !isTRUE(cell$folded))
+invisible(result("apply", list(notebook_id = nid, ops = list(
+  list(op = "set_code", cell_id = ids[3], code = "y * 3", expected = "#' # Title"),
+  list(op = "fold", cell_id = ids[3], folded = TRUE)))))
+cell <- cell_of(result("snapshot", list(notebook_id = nid)), ids[3])
+check("apply: set_code and fold a code cell", identical(cell$code, "y * 3") && isTRUE(cell$folded))
+invisible(result("apply", list(notebook_id = nid, ops = list(list(op = "fold", cell_id = ids[3], folded = FALSE)))))
+
 # ---- run without waiting: execution_done, run_finished ----
 
 after_edit <- result("status")$seq
