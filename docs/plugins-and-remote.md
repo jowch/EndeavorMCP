@@ -903,7 +903,12 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
   (matcher `startup`, so not on resume, clear or compact) runs it in the
   background so the download is usually done before the server starts.
 - Without `curl`, `install.sh` uses `wget` under `timeout`, or under a
-  watchdog of its own, so a download over 15 minutes is given up on.
+  watchdog of its own, so a download over 15 minutes is given up on. curl
+  follows a redirect only to https. wget can't be told to, so it prints the
+  headers and a download that went through a redirect to anything else is
+  thrown away. The same goes for the helper fetched for a server and for
+  `endeavor update`. PowerShell 5.1's `install.ps1` has no such check yet
+  (#98).
 - `ENDEAVOR_BIN` names a binary to run instead (`docs/testing.md`).
 - `endeavor update` leaves a binary in `<bin>` (or `bin-from/…`) alone and
   says the plugin manages it, and how to fetch the newest now.
@@ -1074,6 +1079,9 @@ agents).
   against a damaged download and not a tampered release. The same holds for
   the install scripts and `endeavor update`. The app sends its bundled helper
   unchecked.
+- A Helpers run whose macOS or Windows build failed keeps the checksums an
+  earlier run of the same key published for them, since those builds stay in
+  the release.
 
 ## Open
 

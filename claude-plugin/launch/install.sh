@@ -142,8 +142,9 @@ limited() {
 
 # fetch URL [FILE]: the body to FILE, or to stdout. A connection that doesn't
 # open in 15 s is given up on, and so is a file that takes over 15 minutes
-# (a build is about 5 MB). curl follows a redirect only to https; wget has no
-# such limit.
+# (a build is about 5 MB). A redirect is followed only to https: curl refuses
+# any other, and wget, which has no such switch, prints the headers (-S) so a
+# download that went through one is thrown away.
 fetch() {
   if command -v curl >/dev/null 2>&1; then
     if [ $# -ge 2 ]; then
@@ -152,10 +153,40 @@ fetch() {
       curl -fsSL --retry 2 --connect-timeout 15 --max-time 60 --proto-redir =https "$1"
     fi
   elif command -v wget >/dev/null 2>&1; then
-    if [ $# -ge 2 ]; then limited 900 wget -q --tries=3 --connect-timeout=15 --timeout=60 -O "$2" "$1"; else limited 60 wget -q --tries=3 --connect-timeout=15 --timeout=60 -O - "$1"; fi
+    got=0
+    if [ $# -ge 2 ]; then
+      limited 900 wget -q -S --tries=3 --connect-timeout=15 --timeout=60 -O "$2" "$1" 2>"$tmp/wget.headers" || got=$?
+    else
+      limited 60 wget -q -S --tries=3 --connect-timeout=15 --timeout=60 -O - "$1" 2>"$tmp/wget.headers" || got=$?
+    fi
+    if away=$(redirect_not_https "$1" <"$tmp/wget.headers"); then
+      [ $# -lt 2 ] || rm -f "$2"
+      echo "install.sh: $1 was redirected to $away, which isn't https, so the download was thrown away." >&2
+      return 1
+    fi
+    return "$got"
   else
     fail "this needs curl or wget, and neither is on the PATH."
   fi
+}
+
+# redirect_not_https URL <HEADERS: prints the first redirect in wget's -S
+# headers for URL that went somewhere other than https, and fails if there is
+# none. A relative one keeps the scheme of the address it came from.
+redirect_not_https() {
+  awk -v url="$1" '
+    BEGIN { https = (tolower(substr(url, 1, 8)) == "https://"); found = 0 }
+    {
+      line = $0
+      sub(/^[ \t]+/, "", line)
+      if (tolower(substr(line, 1, 9)) != "location:") next
+      to = substr(line, 10)
+      sub(/^[ \t]+/, "", to)
+      sub(/[ \t\r]+$/, "", to)
+      if (to ~ /^[A-Za-z][A-Za-z0-9+.-]*:/) https = (tolower(substr(to, 1, 8)) == "https://")
+      if (!https) { print to; found = 1; exit }
+    }
+    END { exit !found }'
 }
 
 sha256() {

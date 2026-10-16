@@ -247,3 +247,20 @@ fn the_folders_of_other_keys_are_removed_when_a_helper_is_fetched_or_reused() {
     assert!(older.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_wget_redirect_away_from_https_is_found_in_its_headers() {
+    let headers = |hops: &[&str]| hops.iter().map(|to| format!("  HTTP/1.1 302 Found\n  Server: x\n  Location: {to}\n")).collect::<String>() + "  HTTP/1.1 200 OK\n  Content-Length: 2\n";
+    let github = "https://github.com/jowch/EndeavorMCP/releases/download/helpers/LATEST";
+    assert_eq!(redirect_not_https(github, &headers(&[])), None);
+    assert_eq!(redirect_not_https(github, &headers(&["https://release-assets.githubusercontent.com/x?sig=1"])), None);
+    assert_eq!(redirect_not_https(github, &headers(&["/jowch/other", "//cdn.example/x"])), None);
+    assert_eq!(redirect_not_https(github, &headers(&["http://cdn.example/x"])).as_deref(), Some("http://cdn.example/x"));
+    assert_eq!(redirect_not_https(github, &headers(&["HTTPS://a.example/1", "http://b.example/2", "https://c.example/3"])).as_deref(), Some("http://b.example/2"));
+    assert_eq!(redirect_not_https(github, "  HTTP/1.1 301\n  location:   ftp://a.example/x  \n").as_deref(), Some("ftp://a.example/x"));
+    // From plain http, as curl's --proto-redir =https, a relative redirect stays http and is refused too.
+    assert_eq!(redirect_not_https("http://127.0.0.1:9/x", &headers(&["/y"])).as_deref(), Some("/y"));
+    assert_eq!(redirect_not_https("http://127.0.0.1:9/x", &headers(&["https://a.example/y", "/z"])), None);
+    // A header named like it, or a body line, isn't a redirect.
+    assert_eq!(redirect_not_https(github, "  Content-Location: http://a.example/x\n  X-Location: http://b\n"), None);
+}

@@ -812,3 +812,30 @@ fn wget_runs_under_timeout_when_there_is_one() {
     let log = std::fs::read_to_string(place.dir.join("fake/timeout.log")).unwrap();
     assert!(log.lines().all(|l| l.starts_with("900 wget") || l.starts_with("60 wget")) && log.contains("900 wget"), "{log}");
 }
+
+#[test]
+fn under_wget_a_download_redirected_away_from_https_is_thrown_away() {
+    let place = Place::new("wgetredirect");
+    place.release(KEY);
+    let path = place.path_without(&["curl", "wget"]);
+    let dir = place.dir.join("bin");
+    let exe = dir.join(if cfg!(windows) { "endeavor.exe" } else { "endeavor" });
+    // A wget that serves file:// URLs, and prints headers (its -S) saying the binary came through a redirect to `to`.
+    let fake = |to: &str| {
+        let _ = std::fs::remove_file(place.dir.join("fake/wget"));
+        place.fake(
+            "wget",
+            &format!("#!/bin/sh\nwhile [ $# -gt 1 ]; do case $1 in -O) out=$2; shift;; esac; shift; done\nurl=$1\ncase $url in *endeavor-{KEY}-*) printf '  HTTP/1.1 302 Found\\n  Location: {to}\\n  HTTP/1.1 200 OK\\n' >&2;; esac\nif [ \"$out\" = - ]; then cat \"${{url#file://}}\"; else cp \"${{url#file://}}\" \"$out\"; fi\n"),
+        );
+    };
+    fake("http://mirror.example/endeavor");
+    let out = place.command("install.sh", &["--key", KEY, "--dir", dir.to_str().unwrap()], &place.url()).env("PATH", &path).stdin(Stdio::null()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && stderr.contains("was redirected to http://mirror.example/endeavor, which isn't https"), "{stderr}");
+    assert!(!exe.exists());
+    assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "the download was left behind");
+    fake("https://release-assets.example/endeavor?sig=1");
+    let out = place.command("install.sh", &["--key", KEY, "--dir", dir.to_str().unwrap()], &place.url()).env("PATH", &path).stdin(Stdio::null()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(exe.exists());
+}
