@@ -32,7 +32,7 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
 const APP_GUIDE: &str = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
 
 /// What a runtime with the app tells an agent without the skills.
-const APP: &str = "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat.";
+const APP: &str = "These tools edit and run a live notebook, in Julia (Pluto) or R (Ember), that the user sees in Endeavor, next to this chat.";
 
 /// What a runtime without the app (`endeavor serve` or `mcp`) tells every
 /// agent: the skill keeps what holds only in the app apart, and this says
