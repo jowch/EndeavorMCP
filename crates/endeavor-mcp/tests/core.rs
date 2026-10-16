@@ -2006,13 +2006,17 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
     std::fs::write(dir.join("hold"), "").unwrap();
     let julia = serving_julia(&dir, &bridge);
     let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed")];
-    let core = Core::try_start_with(&dir, &[("ENDEAVOR_TEST_JULIA_WAIT_SECS", "1")], &args).unwrap();
+    // Long enough for a Stop to come while a call waits for Julia.
+    let core = Core::try_start_with(&dir, &[("ENDEAVOR_TEST_JULIA_WAIT_SECS", "3")], &args).unwrap();
     let folder = temp_folder("core-julia-asks-notebooks");
     let path = folder.join("a.jl").display().to_string();
     let other = folder.join("b.jl").display().to_string();
-    for owner in ["7", "8"] {
-        app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"{owner}","policy":"ask","asks":true,"edits":true}}}}"#));
-    }
+    let policy = |owner: &str, policy: &str, edits: bool| {
+        app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"{owner}","policy":"{policy}","asks":true,"edits":{edits}}}}}"#));
+    };
+    // Manual.
+    policy("7", "ask", true);
+    policy("8", "ask", true);
     let call = |owner: &str, name: &str, arguments: serde_json::Value| {
         let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
         let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), &[("X-Endeavor-Session", owner)]).1).unwrap();
@@ -2065,14 +2069,38 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
         assert_eq!(create("7")["error"], "julia_starting");
         assert_eq!(asked(), ["7 new_notebook", "8 new_notebook", "7 new_notebook", "7 new_notebook"]);
 
+        // A yes is the user's, on a card, in the mode it was asked in. A creation that ran in Auto
+        // without one asks once the user switches to Manual; an allowed one asks after any switch.
+        policy("7", "auto", false);
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 4, "Auto doesn't ask");
+        policy("7", "ask", true);
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 5, "no yes was given");
+        policy("7", "ask", true);
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 6, "the mode was set again");
+
+        // The user's Stop while the allowed call waits for Julia: the same call again asks.
+        policy("7", "ask", true);
+        let waiting = scope.spawn(|| create("7"));
+        wait_for("the card to be answered", || asked().len() == 7);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!waiting.is_finished(), "still waiting for Julia");
+        let stop = serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 3 } });
+        mcp(&core, &stop.to_string(), &[("X-Endeavor-Session", "7")]);
+        assert_eq!(waiting.join().unwrap()["error"], "julia_starting");
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 8, "stopped, the yes went with the call");
+
         // Once Julia is ready the call goes through, and it was the last one the yes covered.
         std::fs::remove_file(dir.join("hold")).unwrap();
         wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
         let created = create("7");
         assert_ne!(created["error"], "julia_starting", "{created}");
-        assert_eq!(asked().len(), 4, "the call Julia held needed no new card");
+        assert_eq!(asked().len(), 8, "the call Julia held needed no new card");
         create("7");
-        assert_eq!(asked().len(), 5, "a new call is a new question");
+        assert_eq!(asked().len(), 9, "a new call is a new question");
         events.shutdown(std::net::Shutdown::Both).unwrap();
     });
 }
