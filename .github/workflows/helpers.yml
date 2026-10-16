@@ -24,6 +24,7 @@ on:
       - Cargo.toml
       - rust-toolchain.toml
       - .github/workflows/helpers.yml
+      - scripts/publish-helpers.sh
       - scripts/helpers.sh
   workflow_dispatch:
 
