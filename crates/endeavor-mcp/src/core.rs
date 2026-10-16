@@ -1013,8 +1013,20 @@ impl RStarter {
             let _ = old.wait();
         }
         let why_ended = move || {
+            let by = std::time::Instant::now() + Duration::from_secs(1);
             let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
-            let status = children.lock().unwrap().as_mut().filter(|child| child.id() == pid).and_then(|child| child.try_wait().ok().flatten());
+            // A killed process can close its stderr a moment before it can be reaped, so its exit is
+            // waited for, within the same second.
+            let status = loop {
+                let mut children = children.lock().unwrap();
+                let Some(child) = children.as_mut().filter(|child| child.id() == pid) else { break None };
+                let status = child.try_wait().ok().flatten();
+                if status.is_some() || std::time::Instant::now() >= by {
+                    break status;
+                }
+                drop(children);
+                std::thread::sleep(Duration::from_millis(20));
+            };
             Some(why_r_ended(status, &said))
         };
         Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
