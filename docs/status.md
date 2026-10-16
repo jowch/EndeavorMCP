@@ -193,8 +193,10 @@ Next:
   it, with Ember in it, the first time an R notebook is opened, and follows
   its notifications by long-polling. The core makes Ember's page secret and
   hands it to R. `new_notebook` makes one from an `.R` path, `read_cell`
-  shows Ember's own `stale` and `not_run` (every cell after a restart), and a
-  warning in a cell's output starts with `Warning:`. When R ends, its
+  shows Ember's own `stale` and `not_run` (every cell after a restart), a
+  warning in a cell's output starts with `Warning:`, and `read_notebook_code`
+  marks cells as an Ember file does (`# %% id=`). `edit_cell` can fold the
+  cell it edits, in either engine (#162; the interface number is 10). When R ends, its
   notebooks close with it: the agent's next call on one answers
   `notebook_closed` with why (how R's process ended and its last error), and
   `/endeavor/events` lists them under `engine_ended` until each opens again
