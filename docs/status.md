@@ -305,6 +305,15 @@ Next:
   or `not_started`, whoever is waiting, the agent included. It starts nothing.
   After a first install that finished with no call waiting it reads
   `not_started` until the agent's next call (#148). The interface number is 9.
+- An agent can stop a run with `interrupt_notebook` (#161; interface 11), as the
+  notebook's Stop button does. Before it, an agent asked to "stop if it takes too long"
+  had no way to, and its edits queued behind the run. It asks nothing in any mode and
+  plan mode refuses it. In R, a cell in compiled code that ignores SIGINT is reported
+  `still_running`, and only the page's restart ends it. Until then no R cell stopped
+  for an interrupt at all, from the page either: R's adapter inherited the core's
+  signal mask, which blocks SIGINT, SIGTERM and SIGHUP for the core's own thread, and
+  passed it to Ember's workers. R now starts with the mask the core was started with,
+  as Julia does.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds

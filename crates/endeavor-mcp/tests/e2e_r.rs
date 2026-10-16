@@ -317,6 +317,22 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["stale"] == false && read["output"].as_str().unwrap().contains("42"), "{read}");
     });
 
+    step("interrupt_notebook stops a slow cell and its queued dependent doesn't run (#161)", || {
+        agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
+        let slow = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow <- { Sys.sleep(600); 1 }", "after_cell_id": B }))["cell_id"].clone();
+        let after = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow + 1", "after_cell_id": slow }))["cell_id"].clone();
+        agent.ok("submit_changes", json!({ "notebook_id": notebook }));
+        common::wait_for("the slow cell to start", || agent.ok("list_notebooks", json!({}))[0]["running"].as_array().is_some_and(|r| r.contains(&slow)));
+        let stopped = agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        assert_eq!((&stopped["interrupted"], &stopped["stopped"], &stopped["dropped"], &stopped["still_running"]), (&json!(true), &json!([slow]), &json!([after]), &json!([])), "{stopped}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
+        assert!(read["errored"] == true && read["running"] == false, "{read}");
+        let again = agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        assert_eq!(again["interrupted"], false, "{again}");
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": after }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
+    });
+
     step("new_notebook makes an R notebook from an .R path; a warning reads as one", || {
         // A session works on one notebook, so another session makes this one.
         let mut agent = Agent::new(port, &token);
