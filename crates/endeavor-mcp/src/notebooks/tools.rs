@@ -484,7 +484,9 @@ impl Call<'_> {
         let pending = self.pending_run(&nb);
         // The notebook's order isn't in it: two lists of every cell's id grow
         // with the notebook and come back on every change, and an agent that
-        // needs an order asks for it (`get_cell_order`, `get_execution_order`).
+        // needs an order asks for it (`get_cell_order`, `get_execution_order`;
+        // cells that can't run, in a cycle or defining a name twice, show
+        // their error in `read_cell`).
         let receipt = json!({
             "applied": true,
             "mutation": mutation,
@@ -547,9 +549,8 @@ impl Call<'_> {
         out
     }
 
-    /// The cell an edit or a new cell changed, as `read_cell` shows it
-    /// without its code: the agent sent that code, and gets it back from
-    /// `read_cell`.
+    /// The cell an edit changed, as `read_cell` shows it without its code:
+    /// the agent sent that code, and gets it back from `read_cell`.
     fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
         let mut out = self.cell_json(nb, id);
         out.remove("code");
@@ -704,7 +705,9 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, "", &code);
         let ran = self.run_or_stage(&added, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), ran, None)?;
-        receipt.extend(self.changed_cell_json(&after, &cell));
+        // With its code: the app learns a new cell's code from this reply
+        // (Endeavor's `CellCodes::observe`), since the call had no id for it.
+        receipt.extend(self.cell_json(&after, &cell));
         Ok(Value::Object(receipt))
     }
 

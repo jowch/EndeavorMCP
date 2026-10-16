@@ -737,7 +737,7 @@ fn adding_moving_folding_and_deleting_cells() {
     let add = |args: Value| s.call("", "add_cell", args);
     let first = add(json!({ "notebook_id": NB, "code": "a = 1" })).unwrap();
     let a = first["cell_id"].as_str().unwrap().to_owned();
-    assert_eq!((&first["code_folded"], &first["pending_run"]), (&json!(false), &json!([a])));
+    assert_eq!((&first["code"], &first["code_folded"], &first["pending_run"]), (&json!("a = 1"), &json!(false), &json!([a])), "a new cell's reply has its code, for the app");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": "" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": a, "folded": "yes" })), "invalid_argument");
@@ -746,7 +746,7 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!((&b["code_folded"], &b["execution"]["status"]), (&json!(true), &json!("staged")));
     let b = b["cell_id"].as_str().unwrap().to_owned();
     let c = add(json!({ "notebook_id": NB, "code": 42, "after_cell_id": a, "run_after": true })).unwrap();
-    assert_eq!((&c["affected_cells"], &c["execution"]["status"]), (&json!([c["cell_id"]]), &json!("running")));
+    assert_eq!((&c["code"], &c["affected_cells"], &c["execution"]["status"]), (&json!("42"), &json!([c["cell_id"]]), &json!("running")));
     let c = c["cell_id"].as_str().unwrap().to_owned();
     assert_eq!(s.engine.code(NB, &c), "42");
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone(), b.clone()]);
