@@ -216,7 +216,7 @@ pub fn main(argv: &[String]) -> ! {
     let starting = (r.clone(), served.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, wait| match backend {
         Backend::Ember => starting.0.start_noting(&starting.1),
-        Backend::Pluto => starting.1.julia.wait(&starting.1, wait.min(JULIA_WAIT)).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
+        Backend::Pluto => starting.1.julia.wait(&starting.1, wait.min(julia_wait())).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait. Set before
     // the first connection: the front that started the core sends its folder as soon as it can.
@@ -272,7 +272,13 @@ pub fn main(argv: &[String]) -> ! {
 /// How long a call that needs Julia waits for it to start before it's told Julia is still starting:
 /// well within the 45 s an agent's call waits, and less if the call already waited (for the user's
 /// answer, say), so that the notebook's open has some of the 45 s too.
+/// ENDEAVOR_TEST_JULIA_WAIT_SECS sets it in debug builds.
 const JULIA_WAIT: Duration = Duration::from_secs(30);
+
+fn julia_wait() -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_JULIA_WAIT_SECS").ok()?.parse().ok()).flatten();
+    test.map_or(JULIA_WAIT, Duration::from_secs)
+}
 
 /// What ends the core.
 enum Stop {

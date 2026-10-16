@@ -1999,6 +1999,113 @@ fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fail
 }
 
 #[test]
+fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
+    require_debug_build();
+    let dir = state_dir("core-julia-asks");
+    let bridge = FakeBridge::start(&dir);
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let julia = serving_julia(&dir, &bridge);
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed")];
+    // Long enough for a Stop to come while a call waits for Julia.
+    let core = Core::try_start_with(&dir, &[("ENDEAVOR_TEST_JULIA_WAIT_SECS", "3")], &args).unwrap();
+    let folder = temp_folder("core-julia-asks-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    let other = folder.join("b.jl").display().to_string();
+    let policy = |owner: &str, policy: &str, edits: bool| {
+        app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"{owner}","policy":"{policy}","asks":true,"edits":{edits}}}}}"#));
+    };
+    // Manual.
+    policy("7", "ask", true);
+    policy("8", "ask", true);
+    let call = |owner: &str, name: &str, arguments: serde_json::Value| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), &[("X-Endeavor-Session", owner)]).1).unwrap();
+        serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let create = |owner: &str| call(owner, "new_notebook", serde_json::json!({ "path": path }));
+
+    // The app answers every card with Allow, and counts them.
+    let mut events = core.connect();
+    events.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    let mut reader = BufReader::new(events.try_clone().unwrap());
+    write!(events, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    event_where(&mut reader, |_| true);
+    let cards = std::sync::Mutex::new(Vec::<(String, String)>::new());
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut line = String::new();
+            // Until the app goes.
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                let Some(data) = line.strip_prefix("data: ") else {
+                    line.clear();
+                    continue;
+                };
+                let event: serde_json::Value = serde_json::from_str(data.trim_end()).unwrap();
+                line.clear();
+                for ask in event["asks"].as_array().into_iter().flatten() {
+                    let mut cards = cards.lock().unwrap();
+                    let id = ask["id"].to_string();
+                    if !cards.iter().any(|(seen, _)| *seen == id) {
+                        cards.push((id.clone(), format!("{} {}", ask["owner"].as_str().unwrap(), ask["tool"].as_str().unwrap())));
+                        app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"endeavor/answer_run","params":{{"id":{id},"allow":true,"user_ran":[]}}}}"#));
+                    }
+                }
+            }
+        });
+        let asked = || cards.lock().unwrap().iter().map(|(_, what)| what.clone()).collect::<Vec<_>>();
+
+        // Julia is downloading: the allowed creation is told Julia is starting, and the agent makes it
+        // again, as agents do, until Julia is ready. The user said yes once.
+        for _ in 0..4 {
+            let created = create("7");
+            assert_eq!(created["error"], "julia_starting", "{created}");
+        }
+        assert_eq!(asked(), ["7 new_notebook"], "one card for the four calls");
+
+        // The yes was this session's, for this call: another session's same call asks, and so does
+        // this one's once it has moved on to something else.
+        assert_eq!(create("8")["error"], "julia_starting");
+        assert_eq!(call("7", "new_notebook", serde_json::json!({ "path": other }))["error"], "julia_starting");
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked(), ["7 new_notebook", "8 new_notebook", "7 new_notebook", "7 new_notebook"]);
+
+        // A yes is the user's, on a card, in the mode it was asked in. A creation that ran in Auto
+        // without one asks once the user switches to Manual; an allowed one asks after any switch.
+        policy("7", "auto", false);
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 4, "Auto doesn't ask");
+        policy("7", "ask", true);
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 5, "no yes was given");
+        policy("7", "ask", true);
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 6, "the mode was set again");
+
+        // The user's Stop while the allowed call waits for Julia: the same call again asks.
+        policy("7", "ask", true);
+        let waiting = scope.spawn(|| create("7"));
+        wait_for("the card to be answered", || asked().len() == 7);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!waiting.is_finished(), "still waiting for Julia");
+        let stop = serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 3 } });
+        mcp(&core, &stop.to_string(), &[("X-Endeavor-Session", "7")]);
+        assert_eq!(waiting.join().unwrap()["error"], "julia_starting");
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 8, "stopped, the yes went with the call");
+
+        // Once Julia is ready the call goes through, and it was the last one the yes covered.
+        std::fs::remove_file(dir.join("hold")).unwrap();
+        wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
+        let created = create("7");
+        assert_ne!(created["error"], "julia_starting", "{created}");
+        assert_eq!(asked().len(), 8, "the call Julia held needed no new card");
+        create("7");
+        assert_eq!(asked().len(), 9, "a new call is a new question");
+        events.shutdown(std::net::Shutdown::Both).unwrap();
+    });
+}
+
+#[test]
 fn the_app_can_start_julia_before_anything_needs_it() {
     let dir = state_dir("core-julia-start-now");
     let bridge = FakeBridge::start(&dir);
