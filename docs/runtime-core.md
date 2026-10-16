@@ -97,7 +97,9 @@ pipe of its own, and every adapter already serves HTTP (the engine's UI). The co
 stream once the engine answers and reopens it if it drops, rereading every
 notebook when it does. An engine other than Pluto's that stops answering
 (R's) is dropped, and the next R notebook opened starts it again. Its
-notebooks are kept as closed, with why it ended, until each opens again: how
+notebooks are kept as closed, with why it ended, until R reports one open
+again (an open's reply, or a snapshot that lists it) or the app's
+`stop_notebook` dismisses it: how
 its process ended and the last lines it wrote to stderr, which the core
 passes on to the runtime log and keeps. A call that names one of them answers
 `notebook_closed` with that reason, and `/endeavor/events` lists them under

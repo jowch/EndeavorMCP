@@ -83,10 +83,13 @@ impl Engines {
         self.paths.lock().unwrap().remove(id);
     }
 
-    /// Notebook `id` is at `path`.
+    /// Notebook `id` is at `path`, as an engine that runs says: if it closed with an engine
+    /// before, it's open again. Said by each `open`, `new` and `snapshot` reply, which a
+    /// notification stream that skipped the engine's `notebook_opened` can't lose.
     fn learn_path(&self, id: &str, path: Option<&str>) {
         if let Some(path) = path.filter(|path| !id.is_empty() && !path.is_empty()) {
             self.paths.lock().unwrap().insert(id.to_owned(), path.to_owned());
+            self.reopened(|closed| same_path(closed, path));
         }
     }
 
@@ -95,9 +98,13 @@ impl Engines {
         self.closed.lock().unwrap().clone()
     }
 
-    /// A notebook at `path` (`same` tells two paths apart) opened again: it's no longer closed.
-    pub fn reopened(&self, same: impl Fn(&str) -> bool) {
-        self.closed.lock().unwrap().retain(|closed| !same(&closed.path));
+    /// The notebook that closed at a path `same` picks opened again, or the user let it go: it's
+    /// no longer closed. Whether there was one.
+    pub fn reopened(&self, same: impl Fn(&str) -> bool) -> bool {
+        let mut closed = self.closed.lock().unwrap();
+        let before = closed.len();
+        closed.retain(|closed| !same(&closed.path));
+        closed.len() != before
     }
 
     /// Whether `upstream` is still `backend`'s engine: not dropped or replaced.
@@ -262,6 +269,11 @@ pub fn of_params(params: &Value) -> Backend {
         Some(path) => of_path(path),
         None => serde_json::from_value(params["engine"].clone()).unwrap_or(Backend::Pluto),
     }
+}
+
+/// Whether two paths name the same file.
+pub fn same_path(a: &str, b: &str) -> bool {
+    a == b || matches!((super::canonical_path(a), super::canonical_path(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// What a call on a notebook that closed with its engine answers.
@@ -461,10 +473,19 @@ mod tests {
         let error = call(&engines, "run", json!({ "notebook_id": "e1" }))["error"].as_str().unwrap().to_owned();
         assert!(error.starts_with("notebook_closed::/a/e1.R closed because R ended (signal: 9 (SIGKILL))."), "{error}");
         assert!(asked(&pluto).is_empty(), "not sent to Pluto as an unknown id");
-        engines.reopened(|path| path == "/a/e1.R");
+        assert!(engines.reopened(|path| path == "/a/e1.R"));
         assert_eq!(engines.closed(), [closed("e2", "/a/e2.R")], "opened again");
         engines.drop_engine(Backend::Ember, &ember);
         assert_eq!(engines.closed().len(), 1, "dropping it again adds nothing");
+        // R started again lists it, though its stream never said it opened.
+        let again: Arc<dyn Upstream> = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "e9", "path": "/a/e2.R" })], ..Default::default() });
+        engines.add(Backend::Ember, again.clone());
+        call(&engines, "snapshot", json!({}));
+        assert!(engines.closed().is_empty(), "the snapshot says it's open");
+        engines.drop_engine(Backend::Ember, &again);
+        engines.add(Backend::Ember, Arc::new(Fake::default()));
+        call(&engines, "open", json!({ "path": "/a/e2.R", "run": false }));
+        assert!(engines.closed().is_empty(), "and so does an open's reply");
         // An engine that can't say why.
         let quiet: Arc<dyn Upstream> = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "e3", "path": "/a/e3.R" })], ..Default::default() });
         engines.add(Backend::Ember, quiet.clone());

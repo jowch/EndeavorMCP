@@ -857,7 +857,7 @@ fn why_r_ended(status: Option<std::process::ExitStatus>, said: &[String]) -> Str
     if last.chars().count() > LONGEST {
         last = format!("…{}", last.chars().rev().take(LONGEST).collect::<Vec<_>>().into_iter().rev().collect::<String>());
     }
-    format!("{how}; it last said: {last}")
+    format!("{how}; R's last output: {last}")
 }
 
 /// Starts R's adapter (`runtime/r/adapter.R`), with Ember in it, the first time an R notebook is
@@ -1800,20 +1800,36 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     #[cfg(unix)]
-    fn why_r_ended_says_how_its_process_ended_and_its_last_error() {
+    fn why_r_ended_says_how_its_process_ended_and_its_last_output() {
         use std::os::unix::process::ExitStatusExt;
         let said = |lines: &[&str]| lines.iter().map(|line| line.to_string()).collect::<Vec<_>>();
         assert_eq!(why_r_ended(None, &[]), "it stopped answering");
         assert_eq!(why_r_ended(Some(ExitStatus::from_raw(9)), &[]), "signal: 9 (SIGKILL)");
         let error = said(&["Listening on 127.0.0.1", "Error in loadNamespace(x) : there is no package called 'ember'", "Calls: loadNamespace -> withRestarts", "Execution halted"]);
-        assert_eq!(why_r_ended(Some(ExitStatus::from_raw(1 << 8)), &error), "exit status: 1; it last said: Error in loadNamespace(x) : there is no package called 'ember' Calls: loadNamespace -> withRestarts Execution halted");
+        assert_eq!(why_r_ended(Some(ExitStatus::from_raw(1 << 8)), &error), "exit status: 1; R's last output: Error in loadNamespace(x) : there is no package called 'ember' Calls: loadNamespace -> withRestarts Execution halted");
         let long = why_r_ended(None, &said(&[&"x".repeat(1000)]));
         assert!(long.ends_with(&format!("…{}", "x".repeat(300))), "the end is kept: {long}");
     }
-    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn a_processs_stderr_is_kept_to_its_last_lines_once_it_ends() {
+        let mut child = Command::new("sh")
+            .args(["-c", "i=0; while [ $i -lt 30 ]; do echo \"line $i\" >&2; i=$((i+1)); done; printf '\\n  \\377 not utf-8\\nError: boom\\n' >&2; exit 3"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let words = pass_on_stderr(child.stderr.take().unwrap());
+        let status = child.wait().unwrap();
+        let said = words.after_end(Duration::from_secs(10));
+        assert_eq!(said.len(), 20, "the last 20 lines: {said:?}");
+        assert_eq!(said[said.len() - 2..], ["\u{FFFD} not utf-8", "Error: boom"], "blank lines are left out, and bytes that aren't UTF-8 don't stop it");
+        assert_eq!(why_r_ended(Some(status), &said), "exit status: 3; R's last output: line 29 \u{FFFD} not utf-8 Error: boom");
+    }
 
     #[test]
     fn own_r_is_offered_through_use_machine_or_the_apps_settings() {

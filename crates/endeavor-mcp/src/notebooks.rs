@@ -1231,11 +1231,17 @@ impl Notebooks {
 
     /// `endeavor/stop_notebook`: shut down the open notebook at `path` (the
     /// app's "Stop notebook"). `safe_preview` says whether it was still in safe
-    /// preview, so the app can reopen it the same way.
+    /// preview, so the app can reopen it the same way. A notebook at `path` that
+    /// closed when its engine ended leaves `engine_ended`.
     pub fn stop_notebook(&self, path: &str) -> Result<Value, String> {
         let target = canonical_path(path)?;
         let snapshots = self.snapshots()?;
         let Some(nb) = snapshots.iter().find(|nb| canonical_path(&nb.path).is_ok_and(|p| p == target)) else {
+            // One that closed when its engine ended: the user lets it go.
+            if self.engines.reopened(|closed| engines::same_path(closed, &target)) {
+                self.publish();
+                return Ok(json!({ "stopped": true, "safe_preview": false }));
+            }
             return Ok(json!({ "stopped": false }));
         };
         let safe_preview = self.shutdown(&nb.id)?;

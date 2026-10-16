@@ -192,7 +192,7 @@ Next:
   notebooks close with it: the agent's next call on one answers
   `notebook_closed` with why (how R's process ended and its last error), and
   `/endeavor/events` lists them under `engine_ended` until each opens again
-  (#101). The skills route R
+  or the app's Stop notebook dismisses it (#101). The skills route R
   notebooks to `reference/ember.md`, and smoke task R1 runs one through a
   real agent. R notebooks don't need Julia: a core started with
   `--julia-when-needed` runs them with no Julia (#81, #87). R is what

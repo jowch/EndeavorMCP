@@ -363,7 +363,15 @@ fn an_r_notebook_through_the_runtime() {
         let read = agent.ok("read_cell", json!({ "notebook_id": opened["notebook_id"], "cell_id": A }));
         assert_eq!(read["code"], "x <- 41", "Ember saved the edit: {read}");
         let now = next_event(&mut events(port, &token), |_| true);
-        assert!(!now["engine_ended"].as_array().unwrap().iter().any(|e| e["path"] == growth.as_str()), "opened again: {now}");
+        let left: Vec<&str> = now["engine_ended"].as_array().unwrap().iter().filter_map(|e| e["path"].as_str()).collect();
+        assert!(!left.contains(&growth.as_str()), "opened again: {now}");
+        // The app's Stop notebook on one the user leaves closed lets it go.
+        assert!(!left.is_empty(), "the other R notebooks closed too: {now}");
+        for path in left {
+            assert_eq!(app_call_with(port, &token, "endeavor/stop_notebook", json!({ "path": path }))["result"]["stopped"], true);
+        }
+        let now = next_event(&mut events(port, &token), |_| true);
+        assert_eq!(now["engine_ended"], json!([]), "{now}");
     });
 
     step("Ember's newest build installed and loaded: none failed", || {
