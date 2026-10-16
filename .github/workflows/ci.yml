@@ -43,7 +43,7 @@ jobs:
       - name: Windows tests, 25 times
         if: runner.os == 'Windows'
         shell: bash
-        run: for i in $(seq 25); do echo "run $i"; cargo test --locked -p endeavor-mcp --test windows -q || exit 1; done
+        run: cargo test --locked -p endeavor-mcp --lib a_child_started -- --nocapture && for i in $(seq 25); do echo "run $i"; cargo test --locked -p endeavor-mcp --test windows -q || exit 1; done
 
   # The runtime package's own tests (runtime/EndeavorRuntime/test). The runtime
   # runs only on Linux and macOS servers, so there is no Windows job.

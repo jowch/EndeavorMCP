@@ -1510,12 +1510,26 @@ impl Served {
 fn accept(listener: TcpListener, served: Arc<Served>) {
     std::thread::spawn(move || {
         each_connection(listener.incoming(), |client| {
+            #[cfg(windows)]
+            not_inherited(&client);
             let served = served.clone();
             std::thread::spawn(move || {
                 let _ = serve_client(client, &served);
             });
         })
     });
+}
+
+/// Windows gives each child every inheritable handle. A connection that was open when the core
+/// started a child (Julia, or `julia --version` while finding it) lived on in that child: closing it
+/// didn't end it, so a page waited for the end of its reply until the child ended, or was reset when
+/// a short-lived one did. A connection accepted in the instant before this runs can still be.
+#[cfg(windows)]
+fn not_inherited(client: &TcpStream) {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    // SAFETY: a socket we hold; only its inherit flag changes.
+    unsafe { SetHandleInformation(client.as_raw_socket() as _, HANDLE_FLAG_INHERIT, 0) };
 }
 
 /// Give `serve` each connection `incoming` accepts, for as long as the port is open. A failed accept (a
@@ -1946,6 +1960,33 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// See `not_inherited`.
+    #[test]
+    #[cfg(windows)]
+    fn a_child_started_while_a_connection_is_open_doesnt_keep_it_open() {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
+        let inheritable = |socket: &TcpStream| {
+            let mut flags = 0;
+            // SAFETY: a socket we hold; reads its flags.
+            unsafe { GetHandleInformation(socket.as_raw_socket() as _, &mut flags) };
+            flags & HANDLE_FLAG_INHERIT != 0
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        eprintln!("an accepted socket is inheritable: {}", inheritable(&accepted));
+        not_inherited(&accepted);
+        assert!(!inheritable(&accepted));
+        let mut child = Command::new("cmd").args(["/C", "ping -n 30 127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        drop(accepted);
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let ended = io::Read::read(&mut client, &mut [0; 1]);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(matches!(ended, Ok(0)), "the connection didn't end while the child ran: {ended:?}");
+    }
 
     #[test]
     #[cfg(unix)]
