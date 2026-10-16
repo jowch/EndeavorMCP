@@ -368,6 +368,20 @@ impl Bridge {
                 return Some(answer(self.notebooks.run_preview(&text("tool", ""), &arguments)));
             }
             "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", "")))),
+            // The user pressed Stop in the app, which the runtime hears of no other way when no call is
+            // under way: interrupt the session's runs that are still going. Answered at once with the
+            // notebooks it looks at (each may turn out to have nothing going), since Pluto's interrupt
+            // can take seconds; each on its own thread, so one that ends its process doesn't hold up
+            // the next.
+            "endeavor/stop_session" => {
+                let owner = text("owner", "");
+                let stopping = self.notebooks.session_runs(&owner);
+                for notebook in stopping.clone() {
+                    let (notebooks, owner) = (self.notebooks.clone(), owner.clone());
+                    std::thread::spawn(move || notebooks.stop_for(&owner, &notebook, false));
+                }
+                return Some(answer(Ok(json!({ "notebooks": stopping }))));
+            }
             "endeavor/move_notebook" => return Some(answer(self.notebooks.move_notebook(&text("notebook_id", ""), &text("path", "")))),
             "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
             "endeavor/new_notebook" => {
@@ -1195,7 +1209,7 @@ mod tests {
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
             "allow_julia_install", "allow_r_install", "answer_run", "file_info", "julia_status", "move_notebook", "new_notebook", "recent_sessions", "restart_notebook", "run_preview", "set_folder",
-            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "tool_result",
+            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
         assert_eq!((crate::core::INTERFACE, calls, record_fields()), (8, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");

@@ -14,7 +14,7 @@ mod engines;
 mod r;
 mod tools;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -136,10 +136,23 @@ struct NotebookState {
     reads: HashMap<(String, String), (String, u64)>,
     /// Which session last changed each cell through the tools, and when.
     changes: HashMap<String, Change>,
-    /// The cells each session's runs started that haven't finished (a waited run's
-    /// unfinished cells, until `run_finished`): what that session's Stop interrupts.
-    started: HashMap<String, HashSet<String>>,
+    /// The runs sessions started that haven't ended (`run_finished`), each with its cells that
+    /// hadn't finished when the tool answered: what that session's Stop interrupts.
+    started: Vec<Started>,
+    /// Runs whose `run_finished` came before the tool that started them recorded them (a quick
+    /// run), so they aren't recorded after; the latest `ENDED_KEPT`.
+    ended: VecDeque<String>,
 }
+
+/// A run a session started (`NotebookState::started`). `run` is the engine's id for it; an
+/// engine that gives none says only which cells finished, and its cells count until then.
+struct Started {
+    owner: String,
+    run: Option<String>,
+    cells: HashSet<String>,
+}
+
+const ENDED_KEPT: usize = 64;
 
 impl NotebookState {
     /// Whether a session read or changed one of its cells after the state's `seq` was `since`.
@@ -717,16 +730,40 @@ impl Notebooks {
                 }
                 true
             }
-            // The cells a run the tools didn't wait for finished: no longer pending, and no
-            // longer a session's run that its Stop interrupts.
+            // A run the tools didn't wait for ended: the cells it finished are no longer
+            // pending, and none of its cells is a session's run that its Stop interrupts, even
+            // one that a later run (a restart's) queued again before it ended.
             "run_finished" => {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
-                    for cell in params["cells"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                        notebook.pending.remove(cell);
-                        for started in notebook.started.values_mut() {
-                            started.remove(cell);
+                    let finished: Vec<&str> = params["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    for cell in &finished {
+                        notebook.pending.remove(*cell);
+                    }
+                    match params["run"].as_str() {
+                        Some(run) => {
+                            let before = notebook.started.len();
+                            notebook.started.retain(|started| started.run.as_deref() != Some(run));
+                            if notebook.started.len() == before {
+                                notebook.ended.push_back(run.to_owned());
+                                if notebook.ended.len() > ENDED_KEPT {
+                                    notebook.ended.pop_front();
+                                }
+                            }
+                        }
+                        None => {
+                            for started in &mut notebook.started {
+                                started.cells.retain(|cell| !finished.contains(&cell.as_str()));
+                            }
+                            notebook.started.retain(|started| !started.cells.is_empty());
                         }
                     }
+                }
+                true
+            }
+            // Its process ended: no run started before goes on.
+            "process_exited" => {
+                if let Some(notebook) = state.notebooks.get_mut(&id) {
+                    notebook.started.clear();
                 }
                 true
             }
@@ -742,7 +779,7 @@ impl Notebooks {
                 }
                 true
             }
-            "topology_changed" | "process_exited" | "resync" => true,
+            "topology_changed" | "resync" => true,
             _ => false,
         }
     }
@@ -1218,19 +1255,34 @@ impl Notebooks {
     /// reading the cell). A run only the user or another session started is left alone.
     pub fn stop_for(&self, owner: &str, notebook_id: &str, runs_code: bool) {
         if !runs_code {
-            let started = self.with_state(notebook_id, |state| state.started.get(owner).cloned().unwrap_or_default());
-            if started.is_empty() {
+            if !self.with_state(notebook_id, |state| state.started.iter().any(|started| started.owner == owner)) {
                 return;
             }
             let Ok(nb) = self.snapshot(notebook_id) else { return };
-            let going: HashSet<String> = started.into_iter().filter(|id| nb.cells.get(id).is_some_and(|c| c.running || c.queued)).collect();
-            if going.is_empty() {
-                self.with_state(notebook_id, |state| state.started.remove(owner));
+            let going = self.with_state(notebook_id, |state| {
+                for started in state.started.iter_mut().filter(|started| started.owner == owner) {
+                    started.cells.retain(|id| nb.cells.get(id).is_some_and(|c| c.running || c.queued));
+                }
+                state.started.retain(|started| !started.cells.is_empty());
+                state.started.iter().any(|started| started.owner == owner)
+            });
+            if !going {
                 return;
             }
-            self.with_state(notebook_id, |state| state.started.insert(owner.to_owned(), going));
         }
         self.interrupt(notebook_id, owner);
+    }
+
+    /// The notebooks where runs `owner` started may still be going (`stop_for` checks): what the
+    /// app's Stop for that session looks at (`endeavor/stop_session`).
+    pub fn session_runs(&self, owner: &str) -> Vec<String> {
+        if owner.is_empty() {
+            return Vec::new();
+        }
+        let state = self.state.lock().unwrap();
+        let mut ids: Vec<String> = state.notebooks.iter().filter(|(_, nb)| nb.started.iter().any(|started| started.owner == owner)).map(|(id, _)| id.clone()).collect();
+        ids.sort();
+        ids
     }
 
     /// Interrupt `notebook_id`'s run, as Pluto's own Stop does, for `owner`'s cancelled call: the
@@ -1268,6 +1320,8 @@ impl Notebooks {
     /// the same cells, so the core keeps all it knows of it; its pending cells
     /// stop being pending as they run.
     pub fn restart(&self, notebook_id: &str) -> Result<Value, String> {
+        // The runs sessions started end with the old process; the restart's run is no session's.
+        self.with_state(notebook_id, |state| state.started.clear());
         let result = self.call("restart", json!({ "notebook_id": notebook_id, "timeout": tools::TIMEOUT_SECONDS }))?;
         self.publish();
         Ok(result)

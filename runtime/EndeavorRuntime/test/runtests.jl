@@ -551,9 +551,9 @@ end
             @test result("run", Dict("notebook_id" => nid, "cells" => [Y, z], "wait" => true, "timeout" => 60)) ==
                   Dict("accepted" => true, "process_status" => "ready", "completed" => [Y, z], "timed_out" => [])
             @test nb.cells_dict[UUID(z)].output.body == "49"
-            @test result("run", Dict("notebook_id" => nid, "cells" => [X], "wait" => false, "timeout" => 60)) ==
-                  Dict("accepted" => true, "process_status" => "ready")
-            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [X])
+            started = result("run", Dict("notebook_id" => nid, "cells" => [X], "wait" => false, "timeout" => 60))
+            @test started == Dict("accepted" => true, "process_status" => "ready", "run" => started["run"])
+            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "run" => started["run"], "cells" => [X])
 
             # A waited run that outlasts `timeout` returns when it passes, with the cell that
             # finished and the dependent still running. The run goes on, watched: a
@@ -561,15 +561,16 @@ end
             gate = joinpath(mktempdir(), "release")
             insert(code, index) = only(result("apply", ops(Dict("op" => "insert", "code" => code, "folded" => false, "index" => index)))["inserted"])
             w, slow = insert("w = 5", 3), insert("slow = (while !isfile($(repr(gate))); sleep(0.05); end; w)", 4)
+            local capped
             try
                 capped = result("run", Dict("notebook_id" => nid, "cells" => [w], "wait" => true, "timeout" => 8))
-                @test capped == Dict("accepted" => true, "process_status" => "ready", "completed" => [w], "timed_out" => [slow])
+                @test capped == Dict("accepted" => true, "process_status" => "ready", "completed" => [w], "timed_out" => [slow], "run" => capped["run"])
                 @test nb.cells_dict[UUID(w)].output.body == "5"
                 @test nb.cells_dict[UUID(slow)].running || nb.cells_dict[UUID(slow)].queued
             finally
                 touch(gate)
             end
-            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [w])
+            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "run" => capped["run"], "cells" => [w])
             @test nb.cells_dict[UUID(slow)].output.body == "5"
             @test !any(c -> c["running"] || c["queued"], result("snapshot", Dict("notebook_id" => nid))["cells"])
             result("apply", ops(Dict("op" => "delete", "cell_id" => slow), Dict("op" => "delete", "cell_id" => w)))
@@ -581,9 +582,9 @@ end
             try wait(failing) catch end
             marked = nb.cells_dict[UUID(X)]
             marked.queued = true
-            EndeavorRuntime._watch_run!(EndeavorRuntime.standalone_session(), nb, [marked], failing)
+            EndeavorRuntime._watch_run!(EndeavorRuntime.standalone_session(), nb, [marked], failing, "failed-run")
             @test !marked.queued
-            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [X])
+            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "run" => "failed-run", "cells" => [X])
 
             # Move and delete, then the cleanup run that follows a delete.
             result("apply", ops(Dict("op" => "move", "cell_id" => z, "index" => 0)))
