@@ -434,8 +434,6 @@ struct Graph {
     cells: Vec<Node>,
     /// The cells that can run, in the order they run.
     order: Vec<String>,
-    /// Cells that can't run: in a cycle, or defining what another cell does.
-    errable: Vec<String>,
 }
 
 struct Node {
@@ -477,7 +475,7 @@ impl Graph {
                 packages: names(&c["packages"]),
             })
         });
-        Graph { cells: cells.collect(), order: names(&value["order"]), errable: names(&value["errable"]) }
+        Graph { cells: cells.collect(), order: names(&value["order"]) }
     }
 
     fn node(&self, id: &str) -> Option<&Node> {
@@ -514,13 +512,6 @@ impl Graph {
             }
         }
         found
-    }
-
-    /// The order a whole run goes in: runnable cells, then the rest.
-    fn execution_order(&self) -> Vec<String> {
-        let mut order = self.order.clone();
-        order.extend(self.errable.iter().filter(|id| !self.order.contains(id)).cloned());
-        order
     }
 }
 
