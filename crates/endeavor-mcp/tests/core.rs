@@ -1957,6 +1957,37 @@ fn julia_status(core: &Core) -> serde_json::Value {
 }
 
 #[test]
+fn a_call_made_while_embers_install_runs_waits_for_it_as_the_first_did() {
+    require_debug_build();
+    let dir = state_dir("core-r-install-wait");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    // An R whose Ember install takes 5 s and then fails.
+    let r = dir.join("slow-install-r");
+    std::fs::write(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 5; exit 1;; esac\nexit 1\n").unwrap();
+    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = temp_folder("core-r-install-wait-home");
+    let home = home.display().to_string();
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
+    let core = Core::try_start_with(&dir, &[("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str()), ("ENDEAVOR_TEST_EMBER_WAIT_SECS", "2")], &args).unwrap();
+    let folder = temp_folder("core-r-install-wait-notebooks");
+    let path = folder.join("a.R");
+    std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
+    give_folder(&core, "s1", &folder);
+    let open = || tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
+    // The call that starts the install waits its 2 s.
+    let began = std::time::Instant::now();
+    assert_eq!(open()["error"], "r_installing");
+    assert!(began.elapsed() >= Duration::from_secs(2), "the first call waited");
+    // The next waits too, as the answer says, and has the install's end once it comes (#175).
+    let began = std::time::Instant::now();
+    let second = open();
+    assert!(began.elapsed() >= Duration::from_millis(1500), "the second call waited too: {second}");
+    let third = open();
+    assert_ne!(third["error"], "r_installing", "the install ended within the third call's wait: {third}");
+}
+
+#[test]
 fn the_app_reads_where_r_is_and_a_core_that_never_started_it_says_so() {
     let dir = state_dir("core-r-status");
     let bridge = FakeBridge::start(&dir);

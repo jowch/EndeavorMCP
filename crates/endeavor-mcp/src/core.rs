@@ -747,9 +747,15 @@ pub const EMBER_REPOSITORY: &str = "https://jowch.r-universe.dev";
 /// none (Ember #66). `install.R` installs from them first on an Apple Silicon Mac.
 pub const EMBER_MAC_ARM64: &str = "https://github.com/jowch/Ember/releases/download";
 
-/// How long the call that starts R waits for the check for a newer Ember, or its install, before
-/// answering `r_installing`: as long as Julia's start.
+/// How long a call that starts R waits for the check for a newer Ember, or its install, before
+/// answering `r_installing`: as long as Julia's start. ENDEAVOR_TEST_EMBER_WAIT_SECS sets it in
+/// debug builds.
 const EMBER_WAIT: Duration = JULIA_WAIT;
+
+fn ember_wait() -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_EMBER_WAIT_SECS").ok()?.parse().ok()).flatten();
+    test.map_or(EMBER_WAIT, Duration::from_secs)
+}
 
 /// What `install.R` exits with when Ember's newest build failed and the one before it is used.
 const KEPT_PREVIOUS: i32 = 3;
@@ -1208,6 +1214,15 @@ impl RStarter {
             return Ok(());
         }
         let mut install = self.own_install.lock().unwrap();
+        // A call made while another's install runs waits for it too, as the answer says (#175).
+        if matches!(*install, Install::Running) {
+            drop(install);
+            install = wait_for_install(&self.own_install, ember_wait());
+            if !matches!(*install, Install::Running) {
+                drop(install);
+                return self.own_r(in_app);
+            }
+        }
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => {}
             // Said once; the next call tries again.
@@ -1233,7 +1248,7 @@ impl RStarter {
                 });
             }
         }
-        Err(format!("r_installing::Installing Endeavor's own R {}, which takes a minute or two. Make the same call again right away: each call waits up to {} seconds.", crate::r::OWN_VERSION, EMBER_WAIT.as_secs()))
+        Err(format!("r_installing::Installing Endeavor's own R {}, which takes a minute or two. Make the same call again right away: each call waits up to {} seconds.", crate::r::OWN_VERSION, ember_wait().as_secs()))
     }
 
     /// Install Ember into Endeavor's own folder, or update it if r-universe has a newer build
@@ -1248,10 +1263,16 @@ impl RStarter {
                 eprintln!("endeavor core: still updating Ember; starting R with the installed one");
                 return Ok(false);
             }
-            Err(format!("r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Make the same call again right away: each call waits up to {} seconds.", EMBER_WAIT.as_secs()))
+            Err(format!("r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Make the same call again right away: each call waits up to {} seconds.", ember_wait().as_secs()))
         };
         let updating = EmberBuilds::read(folder).installed(folder);
         let mut install = self.install.lock().unwrap();
+        // A call made while the first install runs waits for it too, as the answer says (#175). One
+        // made while an update runs starts R with the installed Ember at once, as before.
+        if matches!(*install, Install::Running) && !updating {
+            drop(install);
+            install = wait_for_install(&self.install, ember_wait());
+        }
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => return installing(updating),
             // Finished after the call that started it stopped waiting; a failure is said once, and the next call tries again.
@@ -1281,7 +1302,7 @@ impl RStarter {
             *state.lock().unwrap() = Install::Done(done);
             let _ = tx.send(());
         });
-        if rx.recv_timeout(EMBER_WAIT).is_err() {
+        if rx.recv_timeout(ember_wait()).is_err() {
             return installing(updating);
         }
         match std::mem::replace(&mut *self.install.lock().unwrap(), Install::Idle) {
@@ -1296,6 +1317,19 @@ impl RStarter {
             let _ = child.wait();
         }
         let _ = std::fs::remove_file(&self.state);
+    }
+}
+
+/// `state` once the install another call started has ended, or after `wait` if it hasn't.
+fn wait_for_install(state: &std::sync::Mutex<Install>, wait: Duration) -> std::sync::MutexGuard<'_, Install> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let install = state.lock().unwrap();
+        if !matches!(*install, Install::Running) || std::time::Instant::now() >= deadline {
+            return install;
+        }
+        drop(install);
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -1997,6 +2031,30 @@ fn refuse(client: &mut impl Write, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_made_while_an_install_runs_waits_for_it() {
+        // It ends: the call has its result as soon as it does (#175).
+        let state = Arc::new(std::sync::Mutex::new(Install::Running));
+        let began = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(600));
+                *state.lock().unwrap() = Install::Done(Ok(false));
+            });
+            assert!(matches!(*wait_for_install(&state, Duration::from_secs(30)), Install::Done(Ok(false))));
+        });
+        assert!(began.elapsed() >= Duration::from_millis(600), "waited for it");
+        // It doesn't: the call waits as long as it may, and no longer.
+        let began = std::time::Instant::now();
+        *state.lock().unwrap() = Install::Running;
+        assert!(matches!(*wait_for_install(&state, Duration::from_secs(1)), Install::Running));
+        assert!(began.elapsed() >= Duration::from_secs(1), "waited as long as it may");
+        // Nothing running: no wait.
+        *state.lock().unwrap() = Install::Idle;
+        let began = std::time::Instant::now();
+        assert!(matches!(*wait_for_install(&state, Duration::from_secs(30)), Install::Idle) && began.elapsed() < Duration::from_secs(1));
+    }
 
     #[test]
     fn a_julia_start_says_how_long_so_far_and_to_call_again_now() {
