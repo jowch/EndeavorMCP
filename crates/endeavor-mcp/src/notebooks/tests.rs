@@ -1144,6 +1144,17 @@ fn a_waited_submit_with_nothing_staged_says_how_the_cells_that_ran_meanwhile_wen
         submit()
     });
     assert_eq!((&receipt["execution"]["status"], &receipt["affected_cells"]), (&json!("completed"), &json!([Y])), "{receipt}");
+    // A cell queued at the start that ends without running (an interrupt dropped it) isn't one of them.
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.engine.with(NB, |nb| nb.cells[0].queued = true);
+    let receipt = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            ends(false);
+            s.engine.with(NB, |nb| nb.cells[0].queued = false);
+        });
+        submit()
+    });
+    assert_eq!((&receipt["execution"]["status"], &receipt["affected_cells"]), (&json!("completed"), &json!([Y])), "{receipt}");
 }
 
 #[test]

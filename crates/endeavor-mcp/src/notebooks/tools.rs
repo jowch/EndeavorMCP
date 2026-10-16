@@ -589,14 +589,16 @@ impl Call<'_> {
     }
 
     /// Wait, within the call's `WAIT_SECONDS`, for the runs this session started in `nb` to end:
-    /// the cells that ran during the wait or were running or queued at its start, and of those
-    /// the ones still running or queued if a run is still going at its end. A cell another run
-    /// ran meanwhile counts too: the snapshots don't say whose run ran a cell.
+    /// the cells seen running or that finished a run during the wait, with the ones still running
+    /// or queued if a run is still going at its end. A queued cell that never ran (an interrupt
+    /// dropped it) isn't one. A cell another run ran meanwhile counts too: the snapshots don't
+    /// say whose run ran a cell.
     fn wait_for_own_run(&self, nb: &Snapshot) -> Result<(Vec<String>, Vec<String>), String> {
         let mut nb = self.nbs.snapshot(&nb.id)?;
         let before: HashMap<String, f64> = nb.cells.iter().map(|(id, c)| (id.clone(), c.last_run)).collect();
         let busy = |nb: &Snapshot, id: &String| nb.cells.get(id).is_some_and(|c| c.running || c.queued);
-        let mut ran: HashSet<String> = nb.cells.keys().filter(|id| busy(&nb, id)).cloned().collect();
+        let running = |nb: &Snapshot| nb.cells.iter().filter(|(_, c)| c.running).map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let mut ran: HashSet<String> = running(&nb).into_iter().collect();
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
         let mut going = Vec::new();
         while self.nbs.own_run_going(self.owner, &nb) {
@@ -609,11 +611,12 @@ impl Call<'_> {
                 return Err(argument_error("client_gone::The caller hung up during the wait"));
             }
             nb = self.nbs.snapshot(&nb.id)?;
-            ran.extend(nb.cells.keys().filter(|id| busy(&nb, id)).cloned());
+            ran.extend(running(&nb));
         }
         ran.extend(nb.cells.iter().filter(|(id, c)| before.get(*id).is_some_and(|last| c.last_run != *last)).map(|(id, _)| id.clone()));
         // A cell still busy once the session's runs ended is another run's.
         ran.retain(|id| !busy(&nb, id) || going.contains(id));
+        ran.extend(going.iter().cloned());
         Ok((nb.order.iter().filter(|id| ran.contains(*id)).cloned().collect(), going))
     }
 
