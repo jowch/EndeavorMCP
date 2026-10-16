@@ -94,19 +94,22 @@ pub fn channel_julia(juliaup: &Path, version: &str) -> Option<Channel> {
 /// Add the channel `version` to juliaup, which downloads that Julia. `progress` hears how long it
 /// has taken so far. juliaup counts adding a channel it already has as done. A failure that wasn't
 /// the time limit is tried once more: on Windows a first install failed once with "Access is
-/// denied", and the next one worked (EndeavorMCP #132).
+/// denied", and a retry after clearing juliaup's folder worked (EndeavorMCP #132). A retry in the
+/// same folder is likely to work too, since juliaup leaves no partial download, but hasn't been seen.
+/// The folder is the person's, so it is never cleared here.
 pub fn add(juliaup: &Path, version: &str, progress: &mut dyn FnMut(String)) -> Result<Channel, String> {
     let what = format!("Downloading Julia {version} with juliaup");
     progress(format!("{what}…"));
-    let add = |progress: &mut dyn FnMut(String)| run(Command::new(juliaup).args(["add", version]), ADD_LIMIT, &mut |waited| progress(format!("{what}… {} so far", minutes(waited))));
-    let mut added = add(progress);
+    // The second try's ticks say it's the second ("… trying once more, 15 s so far").
+    let add = |again: &str, progress: &mut dyn FnMut(String)| run(Command::new(juliaup).args(["add", version]), ADD_LIMIT, &mut |waited| progress(format!("{what}…{again} {} so far", minutes(waited))));
+    let mut added = add("", progress);
     if let Err(Failed::Error(first)) = &added
         && channel_julia(juliaup, version).is_none()
     {
         eprintln!("juliaup couldn't install Julia {version} ({first}); trying once more.");
         progress(format!("{what}… trying once more"));
         std::thread::sleep(RETRY_PAUSE);
-        added = add(progress);
+        added = add(" trying once more,", progress);
     }
     channel_julia(juliaup, version).ok_or_else(|| match added {
         Err(why) => format!("juliaup couldn't install Julia {version} ({why})."),

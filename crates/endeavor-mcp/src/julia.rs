@@ -298,7 +298,7 @@ pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String>
             progress(format!("{why} Downloading Endeavor's own Julia {JULIA_VERSION} instead."));
             return download_own(progress);
         }
-        // juliaup has tried twice by now, but a failure like Windows' "Access is denied" can still pass later.
+        // A failed add was already retried once, but a failure like Windows' "Access is denied" can still pass later.
         #[cfg(windows)]
         Err(why) => return Err(format!("{why} Trying again may work.")),
     };
