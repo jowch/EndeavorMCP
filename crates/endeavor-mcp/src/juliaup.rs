@@ -234,9 +234,31 @@ fn run(command: &mut Command, limit: Duration, tick: &mut dyn FnMut(Duration)) -
     if status.success() {
         return Ok(stdout);
     }
-    // Its last words, from stderr if it wrote any (winget writes to stdout).
+    // All of what it said goes to the log; the error is its last words, from stderr if it wrote any
+    // (winget writes to stdout).
+    let program = Path::new(command.get_program()).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let said: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    // The last 40 lines: juliaup's error chain comes at the end.
+    for line in &said[said.len().saturating_sub(40)..] {
+        eprintln!("{program}: {line}");
+    }
     let last = |text: &str| text.lines().map(str::trim).rfind(|l| !l.is_empty()).map(str::to_owned);
-    Err(Failed::Error(last(stderr.as_str()).or_else(|| last(stdout.as_str())).unwrap_or_else(|| status.to_string())))
+    Err(Failed::Error(last_words(&stderr).or_else(|| last(stdout.as_str())).unwrap_or_else(|| status.to_string())))
+}
+
+/// What a failed command said last. juliaup's errors end in a chain ("Error: …", "Caused by:", then
+/// "0: <the step that failed>", …, "N: <the operating system's error>"): its last line alone ("1: Access
+/// is denied. (os error 5)") doesn't say which step failed, so the step that failed goes first.
+fn last_words(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let chain = lines.iter().position(|l| *l == "Caused by:").map(|at| &lines[at + 1..]).unwrap_or_default();
+    let cause = |line: &str| line.split_once(": ").filter(|(n, _)| n.parse::<u32>().is_ok()).map(|(_, text)| text.to_owned());
+    let causes: Vec<String> = chain.iter().filter_map(|l| cause(l)).collect();
+    match causes.as_slice() {
+        [] => lines.last().map(|l| l.to_string()),
+        [only] => Some(only.clone()),
+        [.., step, why] => Some(format!("{}: {why}", step.trim_end_matches('.'))),
+    }
 }
 
 /// "4 min", or "30 s" under a minute.
@@ -276,6 +298,18 @@ mod tests {
         assert_eq!(channel(&as_default, "1.12.6"), julia(true));
         assert_eq!(channel(r#"{"DefaultChannel":null,"OtherChannels":[]}"#, "1.12.6"), None, "a juliaup with no channels yet");
         assert_eq!(channel("not json", "1.12.6"), None);
+    }
+
+    #[test]
+    fn a_juliaup_error_says_which_step_failed() {
+        let error = "    Checking for new Julia versions\n  Installing Julia 1.12.6+0.x64.w64.mingw32\nError: Failed to extract downloaded file from url `https://example.org/julia.tar.gz`.\n\nCaused by:\n    0: Failed to move extracted archive to 'C:\\d\\juliaup\\julia-temp-3KkKKt'. Previous installation has been restored.\n    1: Access is denied. (os error 5)\n";
+        assert_eq!(last_words(error).unwrap(), r"Failed to move extracted archive to 'C:\d\juliaup\julia-temp-3KkKKt'. Previous installation has been restored: Access is denied. (os error 5)");
+        // anyhow numbers the causes only when there are two or more.
+        assert_eq!(last_words("Error: no such channel\n\nCaused by:\n    The channel 9.9 isn't known\n").unwrap(), "The channel 9.9 isn't known");
+        let three = "Error: Failed to install\n\nCaused by:\n    0: Failed to extract\n    1: Failed to move\n    2: Access is denied. (os error 5)\n";
+        assert_eq!(last_words(three).unwrap(), "Failed to move: Access is denied. (os error 5)", "the innermost step, not the first");
+        assert_eq!(last_words("Error: the configuration file is locked\n").unwrap(), "Error: the configuration file is locked", "no chain: the last line");
+        assert_eq!(last_words("\n"), None);
     }
 
     /// A stand-in juliaup whose `add` fails as many times as `fails` says, with Windows' error.
