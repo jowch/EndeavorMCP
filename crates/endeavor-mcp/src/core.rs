@@ -1977,6 +1977,11 @@ mod tests {
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (accepted, _) = listener.accept().unwrap();
         eprintln!("an accepted socket is inheritable: {}", inheritable(&accepted));
+        let clone = accepted.try_clone().unwrap();
+        eprintln!("its try_clone is inheritable: {}", inheritable(&clone));
+        let connected = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        eprintln!("a connected socket is inheritable: {}; its try_clone: {}", inheritable(&connected), inheritable(&connected.try_clone().unwrap()));
+        drop(clone);
         not_inherited(&accepted);
         assert!(!inheritable(&accepted));
         let mut child = Command::new("cmd").args(["/C", "ping -n 30 127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
