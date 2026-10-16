@@ -392,6 +392,11 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
             "tool_errors": calls.iter().filter(|c| c.is_error).count(),
             "turns": agent.turns,
             "cost_usd": agent.cost_usd,
+            "requests": agent.tokens.requests,
+            "context_tokens": agent.tokens.context,
+            "input_tokens": agent.tokens.input,
+            "output_tokens": agent.tokens.output,
+            "reply_bytes": calls.iter().map(|c| c.reply_bytes).sum::<usize>(),
         },
         "model": agent.model,
         "models_used": agent.models_used,
@@ -459,7 +464,20 @@ struct AgentRun {
     tools: Vec<String>,
     turns: Option<u64>,
     cost_usd: Option<f64>,
+    tokens: Tokens,
     problem: Option<String>,
+}
+
+/// What the model read and wrote, from the usage on Claude's messages. Each
+/// request reads the whole conversation so far, so `input` (the sum over
+/// requests) is what the session's input costs scale with, cached or not.
+#[derive(Default)]
+struct Tokens {
+    requests: u64,
+    /// The conversation's size at the last request.
+    context: u64,
+    input: u64,
+    output: u64,
 }
 
 /// Claude Code, headless, with the plugin from this checkout and this binary as
@@ -555,6 +573,7 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
     }
     let mut run = AgentRun { problem, ..AgentRun::default() };
     let text = std::fs::read_to_string(work.join("transcript.jsonl")).unwrap_or_default();
+    let mut last_message: Option<String> = None;
     for event in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         match event["type"].as_str() {
             Some("system") if event["subtype"] == "init" => {
@@ -569,6 +588,16 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
                 }
             }
             Some("assistant") => {
+                // A message with several parts comes as several events with the same id and usage.
+                if last_message.as_deref() != event["message"]["id"].as_str() {
+                    last_message = event["message"]["id"].as_str().map(str::to_owned);
+                    let usage = &event["message"]["usage"];
+                    let read = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].iter().map(|k| usage[*k].as_u64().unwrap_or(0)).sum::<u64>();
+                    run.tokens.requests += 1;
+                    run.tokens.context = read;
+                    run.tokens.input += read;
+                    run.tokens.output += usage["output_tokens"].as_u64().unwrap_or(0);
+                }
                 for part in event["message"]["content"].as_array().into_iter().flatten().filter(|p| p["type"] == "tool_use") {
                     run.tools.push(part["name"].as_str().unwrap_or_default().to_owned());
                 }
@@ -640,18 +669,23 @@ fn row(id: &str, attempts: &[Value], expected: Option<&str>) -> Value {
     json!({ "task": id, "status": status, "expected_to_fail": expected, "attempts": attempts.len(), "failed": failed, "failures": failures, "first": first, "models": models })
 }
 
+/// A token count in thousands, or `?` when the agent didn't report one.
+fn thousands(n: &Value) -> String {
+    n.as_u64().filter(|n| *n > 0).map_or("?".into(), |n| format!("{:.1}k", n as f64 / 1000.0))
+}
+
 fn summary_md(summary: &Value) -> String {
     let models: Vec<&str> = summary["models"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let models = if models.is_empty() { "unknown".to_owned() } else { models.join(", ") };
-    let mut md = format!("# Smoke run at {}\n\nAgent: {}\n\nModels: {models}\n\n| Task | Status | Failed attempts | Tool calls | Tool errors | Time | Cost |\n|---|---|---|---|---|---|---|\n", summary["commit"].as_str().unwrap_or("?"), summary["agent"].as_str().unwrap_or("?"));
+    let mut md = format!("# Smoke run at {}\n\nAgent: {}\n\nModels: {models}\n\n| Task | Status | Failed attempts | Tool calls | Tool errors | Time | Cost | Requests | Input tokens | Output tokens | Tool replies |\n|---|---|---|---|---|---|---|---|---|---|---|\n", summary["commit"].as_str().unwrap_or("?"), summary["agent"].as_str().unwrap_or("?"));
     for r in summary["tasks"].as_array().into_iter().flatten() {
         let m = &r["first"];
         if r["attempts"] == 0 {
-            md += &format!("| {} | {} | 0/0 | | | | |\n", r["task"].as_str().unwrap_or_default(), r["status"].as_str().unwrap_or_default());
+            md += &format!("| {} | {} | 0/0 | | | | | | | | |\n", r["task"].as_str().unwrap_or_default(), r["status"].as_str().unwrap_or_default());
             continue;
         }
         md += &format!(
-            "| {} | {} | {}/{} | {} | {} | {:.0} s | {} |\n",
+            "| {} | {} | {}/{} | {} | {} | {:.0} s | {} | {} | {} | {} | {} |\n",
             r["task"].as_str().unwrap_or_default(),
             r["status"].as_str().unwrap_or_default(),
             r["failed"],
@@ -660,9 +694,13 @@ fn summary_md(summary: &Value) -> String {
             m["tool_errors"],
             m["seconds"].as_f64().unwrap_or(0.0),
             m["cost_usd"].as_f64().map_or("?".into(), |c| format!("${c:.2}")),
+            m["requests"],
+            thousands(&m["input_tokens"]),
+            thousands(&m["output_tokens"]),
+            m["reply_bytes"].as_u64().map_or("?".into(), |b| format!("{:.1} KB", b as f64 / 1000.0)),
         );
     }
-    md += "\nTime, tool calls and cost are from each task's first attempt.\n";
+    md += "\nEach number is from the task's first attempt. Input tokens add up what every request read, cached or not; tool replies are the notebook tools' text, apart from pictures.\n";
     for r in summary["tasks"].as_array().into_iter().flatten().filter(|r| r["failed"] != 0) {
         md += &format!("\n## {}\n\n", r["task"].as_str().unwrap_or_default());
         for f in r["failures"].as_array().into_iter().flatten() {
