@@ -37,6 +37,8 @@ pub struct Call {
     /// The reply's text, parsed as JSON where it is JSON.
     pub reply: Value,
     pub is_error: bool,
+    /// The size of the reply's text in bytes: what the agent reads of it, apart from pictures.
+    pub reply_bytes: usize,
     /// When the request was sent, in Unix seconds.
     pub at: f64,
 }
@@ -57,6 +59,7 @@ pub fn calls(path: &Path) -> Vec<Call> {
                     args: msg["params"]["arguments"].clone(),
                     reply: Value::Null,
                     is_error: false,
+                    reply_bytes: 0,
                     at: entry["t"].as_f64().unwrap_or(0.0),
                 },
             )),
@@ -65,6 +68,7 @@ pub fn calls(path: &Path) -> Vec<Call> {
                 if let Some((_, call)) = calls.iter_mut().rev().find(|(k, c)| *k == key && c.reply.is_null()) {
                     call.is_error = msg["result"]["isError"] == true || !msg["error"].is_null();
                     let text = msg["result"]["content"][0]["text"].as_str().or(msg["error"]["message"].as_str()).unwrap_or_default();
+                    call.reply_bytes = text.len();
                     call.reply = serde_json::from_str(text).unwrap_or_else(|_| json!(text));
                 }
             }

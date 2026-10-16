@@ -1256,7 +1256,7 @@ mod tests {
         let names = |result: Value| result["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(
             ask("initialize", false)["instructions"],
-            "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat. \
+            "These tools edit and run a live notebook, in Julia (Pluto) or R (Ember), that the user sees in Endeavor, next to this chat. \
 Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
 how to find this session's notebook, the read-edit-run loop, and the rules for a cell. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`."
         );
