@@ -72,29 +72,20 @@ const FILE_SECS: &str = "900";
 const TEXT_SECS: &str = "60";
 
 /// `url`'s body, or with `to`, nothing, having written it there. With curl,
-/// or wget where there's no curl. A redirect is followed only to https: curl
-/// refuses any other, and wget, which has no such switch, prints the headers
-/// (`-S`) so a download that went through one is thrown away.
+/// or wget where there's no curl. From https, a redirect is followed only to
+/// https: curl refuses any other; GNU Wget has no such switch, so it prints the
+/// headers (`-S`) and a download that went through one is thrown away; Wget2
+/// prints none under `-q`, and is told to keep to https instead.
 pub(crate) fn download(url: &str, to: Option<&Path>) -> Result<Vec<u8>, String> {
     let mut curl = Command::new("curl");
     curl.args(["-fsSL", "--retry", "2", "--connect-timeout", CONNECT_SECS, "--max-time", if to.is_some() { FILE_SECS } else { TEXT_SECS }, "--proto-redir", "=https"]);
-    let mut wget = Command::new("wget");
-    wget.args(["-q", "-S", "--tries=3"]);
-    wget.arg(format!("--connect-timeout={CONNECT_SECS}")).arg(format!("--timeout={TEXT_SECS}"));
     client::no_window(&mut curl);
-    client::no_window(&mut wget);
-    match to {
-        Some(path) => {
-            curl.arg("-o").arg(path);
-            wget.arg("-O").arg(path);
-        }
-        None => {
-            wget.args(["-O", "-"]);
-        }
+    if let Some(path) = to {
+        curl.arg("-o").arg(path);
     }
     let (output, by_wget) = match curl.arg(url).output() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
-            wget.arg(url).output().map_err(|e| match e.kind() {
+            wget(url, to).output().map_err(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => "Downloading needs curl or wget, and neither is on the PATH.".to_owned(),
                 _ => format!("Couldn't start wget: {e}"),
             })?,
@@ -110,11 +101,37 @@ pub(crate) fn download(url: &str, to: Option<&Path>) -> Result<Vec<u8>, String> 
         return Err(format!("Couldn't download {url}: it was redirected to {to_where}, which isn't https, so the download was thrown away."));
     }
     if !output.status.success() {
-        // wget's -S headers aren't the reason; its error lines don't start with a space.
-        let reason = if by_wget { stderr.lines().filter(|l| !l.starts_with(' ')).collect::<Vec<_>>().join("\n") } else { stderr.into_owned() };
+        // Under -q, wget's only word on why is the last status line of its headers.
+        let reason = if by_wget { stderr.lines().map(str::trim).rfind(|l| l.starts_with("HTTP/")).unwrap_or("wget failed").to_owned() } else { stderr.into_owned() };
         return Err(format!("Couldn't download {url} ({}).", reason.trim()));
     }
     Ok(output.stdout)
+}
+
+/// The wget that fetches `url` to `to`, or to stdout.
+fn wget(url: &str, to: Option<&Path>) -> Command {
+    let mut wget = Command::new("wget");
+    client::no_window(&mut wget);
+    wget.args(["-q", "-S", "--tries=3"]);
+    wget.arg(format!("--connect-timeout={CONNECT_SECS}")).arg(format!("--timeout={TEXT_SECS}"));
+    if is_wget2() && url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) {
+        wget.arg("--https-enforce=hard");
+    }
+    match to {
+        Some(path) => wget.arg("-O").arg(path),
+        None => wget.args(["-O", "-"]),
+    };
+    wget.arg(url);
+    wget
+}
+
+/// Whether `wget` is GNU Wget2, which accepts `--https-enforce` (Wget 1.x and
+/// BusyBox's refuse it) and prints no headers under `-q`.
+fn is_wget2() -> bool {
+    let mut version = Command::new("wget");
+    client::no_window(&mut version);
+    version.arg("--version").stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    version.output().is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().next().is_some_and(|line| line.starts_with("GNU Wget2")))
 }
 
 /// The first redirect, in wget's `-S` headers for a fetch of `url`, that went

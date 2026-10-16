@@ -904,9 +904,10 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
   background so the download is usually done before the server starts.
 - Without `curl`, `install.sh` uses `wget` under `timeout`, or under a
   watchdog of its own, so a download over 15 minutes is given up on. curl
-  follows a redirect only to https. wget can't be told to, so it prints the
-  headers and a download that went through a redirect to anything else is
-  thrown away. The same goes for the helper fetched for a server and for
+  follows a redirect only to https. GNU Wget can't be told to, so it prints
+  the headers and a download that went through a redirect to anything else is
+  thrown away. Wget2 (`wget` on Fedora 40 and later) prints no headers under
+  `-q`, so from an https address it gets `--https-enforce=hard` instead. The same goes for the helper fetched for a server and for
   `endeavor update`. PowerShell 5.1's `install.ps1` has no such check yet
   (#98).
 - `ENDEAVOR_BIN` names a binary to run instead (`docs/testing.md`).
