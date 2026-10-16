@@ -119,10 +119,14 @@ fn ended(serve: Child) -> (Option<i32>, String) {
 /// A page of the runtime's, as a browser with the pages' token asks for it.
 fn page(port: u16, pages: &str, target: &str) -> String {
     let mut page = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    page.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     write!(page, "GET {target} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAccept: text/html\r\nAuthorization: Bearer {pages}\r\n\r\n").unwrap();
-    let mut said = String::new();
-    let _ = page.read_to_string(&mut said);
-    said
+    // HTTP/1.0: the reply ends with the connection.
+    let mut said = Vec::new();
+    if let Err(why) = page.read_to_end(&mut said) {
+        panic!("GET {target}: the connection didn't end within 20 s ({why}); so far: {}", String::from_utf8_lossy(&said));
+    }
+    String::from_utf8_lossy(&said).into_owned()
 }
 
 /// Start Julia from the runtime's page and wait until the stand-in Pluto answers through it: Julia's pid.
