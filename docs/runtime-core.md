@@ -188,6 +188,12 @@ and 3), and for the app:
   doesn't time out waiting for a response to start. In Manual the app adds
   `edits: true`, and the core holds a call that changes the notebook the same
   way, whatever the run policy.
+- When the agent cancels a call that is running code in a notebook (the user
+  pressed Stop), it interrupts the notebook's run, as Pluto's own Stop does,
+  and the call ends with the cells interrupted. A cell that doesn't stop for
+  Ctrl+C (one long `sleep`) ends with its notebook's process, again as with
+  Pluto's Stop: the notebook then waits for a restart, and this isn't reported
+  as a crash (`exited`).
 - It reports in `/endeavor/events` the app build it was started by (`build`), so the
   app can tell a runtime from an older build and hold back what that runtime
   can't do.

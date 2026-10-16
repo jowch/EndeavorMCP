@@ -498,6 +498,57 @@ fn the_runtime_end_to_end() {
         rt.call("endeavor/stop_notebook", json!({ "path": cards })).unwrap();
     });
 
+    step("the agent's Stop interrupts the cell its call is running", || {
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "slow = (for _ in 1:600; sleep(1); end; 1)", "after_cell_id": last }));
+        let slow = added["cell_id"].clone();
+        let id = rt.id();
+        let run = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "execute_cell", "arguments": { "notebook_id": previewed, "cell_id": slow, "wait_for_completion": true } } });
+        let cancel = json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": id, "reason": "The user stopped the turn" } });
+        let started = Instant::now();
+        let mut call = rt.helper.connect();
+        call.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+        let (run, headers) = (run.to_string(), "X-Endeavor-Session: 2\r\nX-Endeavor-Host: lab\r\n");
+        write!(call, "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\n\r\n{run}", rt.token, run.len()).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(rt.post("/mcp", SERVER, &cancel.to_string()).0, "HTTP/1.1 202 Accepted");
+        let mut reply = String::new();
+        call.read_to_string(&mut reply).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(20), "the call ended {:.1} s after it began: {reply}", started.elapsed().as_secs_f64());
+        let read = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+        assert_eq!(read["errored"], true, "{read}");
+        assert!(read["output"].as_str().is_some_and(|output| output.contains("InterruptException")), "{read}");
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+
+        // One long `sleep` doesn't stop for Ctrl+C: Pluto ends the notebook's process, as its own
+        // Stop does. That isn't a crash: the notebook waits for a restart, without `exited`.
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "slow = (sleep(600); 1)", "after_cell_id": last }));
+        let slow = added["cell_id"].clone();
+        let id = rt.id();
+        let run = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "execute_cell", "arguments": { "notebook_id": previewed, "cell_id": slow, "wait_for_completion": true } } });
+        let cancel = json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": id } });
+        let started = Instant::now();
+        let mut call = rt.helper.connect();
+        call.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+        let run = run.to_string();
+        write!(call, "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\n\r\n{run}", rt.token, run.len()).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(rt.post("/mcp", SERVER, &cancel.to_string()).0, "HTTP/1.1 202 Accepted");
+        let mut reply = String::new();
+        call.read_to_string(&mut reply).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(30), "the call ended {:.1} s after it began: {reply}", started.elapsed().as_secs_f64());
+        let listed = rt.notebooks(SERVER).into_iter().find(|nb| nb["notebook_id"] == previewed.as_str()).unwrap();
+        assert_eq!((&listed["exited"], &listed["execution_allowed"]), (&Value::Null, &json!(false)), "{listed}");
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+        rt.call("endeavor/restart_notebook", json!({ "notebook_id": previewed })).unwrap();
+        let ran = rt.ok(SERVER, "execute_cell", json!({ "notebook_id": previewed, "cell_id": last, "wait_for_completion": true }));
+        assert_eq!(ran["execution"]["status"], "completed", "{ran}");
+    });
+
     step("a notebook's own Julia ending by itself ends the run waiting for it", || {
         let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
         let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();

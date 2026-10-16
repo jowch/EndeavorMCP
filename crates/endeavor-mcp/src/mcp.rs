@@ -397,8 +397,17 @@ impl Bridge {
     /// while a call waits on the user: whether the client hung up.
     fn dispatch(&self, message: &Value, caller: &Caller, gone: &dyn Fn() -> bool) -> Option<String> {
         let began = Instant::now();
-        if message["method"] == "notifications/cancelled" && self.notebooks.asks.cancel(&caller.owner, &message["params"]["requestId"]) {
-            self.notebooks.publish();
+        if message["method"] == "notifications/cancelled" && !caller.owner.is_empty() {
+            let request = &message["params"]["requestId"];
+            // Waiting for the user's answer, it goes; running code, the run is interrupted.
+            if self.notebooks.asks.cancel(&caller.owner, request) {
+                self.notebooks.publish();
+            } else if let Some(notebook) = self.notebooks.cancelled_run(&caller.owner, request) {
+                // Pluto's interrupt can take seconds (it presses Ctrl+C again until the run ends):
+                // the notification is answered at once, and the call ends when the run does.
+                let (notebooks, owner) = (self.notebooks.clone(), caller.owner.clone());
+                std::thread::spawn(move || notebooks.interrupt(&notebook, &owner));
+            }
         }
         answer(message, caller, self.standalone.is_some(), |params| {
             let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone, began };
@@ -479,6 +488,14 @@ impl Bridge {
         let run = match self.ask_first(call, name, &arguments) {
             Ok(run) => run,
             Err(result) => return result,
+        };
+        // A call that runs code in a notebook is interrupted if the agent cancels it (its Stop).
+        let notebook = arguments.get("notebook_id").and_then(Value::as_str);
+        let _running = match notebook {
+            Some(notebook) if run && runs_code(name, &arguments) && !caller.owner.is_empty() && !call.request.is_null() => {
+                Some(self.notebooks.running(&caller.owner, call.request, notebook))
+            }
+            _ => None,
         };
         let reply = if run {
             self.notebooks.tool_watched(&caller.owner, name, &arguments, &folder, call.began, call.gone)
