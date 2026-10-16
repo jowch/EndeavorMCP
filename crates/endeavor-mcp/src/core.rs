@@ -1294,7 +1294,9 @@ fn block_stop_signals() -> (libc::sigset_t, libc::sigset_t) {
 /// process group, as that helper's own cancel would (`Runtime::kill`), once the helper has gone: the pipe's end
 /// arrives however it ended. A helper that is killed outright can't stop the start it began, and an ssh server may
 /// kill it when its client goes, instead of ending its input (#95). The core is stopped by the same SIGTERM, which
-/// it hears as any stop signal (`pass_on_stop_signals`), and a group still left later is killed.
+/// it hears as any stop signal (`pass_on_stop_signals`). If the core is still running ten seconds later, the group
+/// gets SIGKILL; once the core has exited, nothing more is sent. Only the start is covered: after the helper says
+/// "k", a helper that is killed leaves the runtime running, as one that detaches does.
 #[cfg(unix)]
 fn watch_lifeline(fd: i32) {
     use std::io::Read;

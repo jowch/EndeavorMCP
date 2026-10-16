@@ -492,7 +492,10 @@ pipe (`core --lifeline FD`). The helper writes one byte to it once the app
 has the runtime, or when the app detaches. If the pipe ends before that byte,
 however the helper ended, SIGKILL included, the core sends SIGTERM to its
 own process group (itself, Julia and Julia's children), as the helper's own
-cancel would, and SIGKILL ten seconds later (#95).
+cancel would. If the core is still running ten seconds later, it sends the
+group SIGKILL; once the core has exited, nothing more is sent (#95). This
+covers only the start: once the helper has written its byte, a helper that
+is killed leaves the runtime running. It is Unix only (#144).
 
 **The package folder locally.** On servers the app and `serve` already use
 the same one. On your own computer they differ (the app's is in its data

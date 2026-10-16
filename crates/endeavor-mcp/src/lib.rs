@@ -435,8 +435,8 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                 match result {
                     Ok(now) => {
                         *routes.write().unwrap() = now.route();
-                        let _ = mux.send(&now.ready(id, now.reattached).frame());
                         keep_runtime();
+                        let _ = mux.send(&now.ready(id, now.reattached).frame());
                         attached = Some(now);
                     }
                     Err(unstarted) => {
