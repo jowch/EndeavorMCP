@@ -449,7 +449,6 @@ impl Call<'_> {
         let Ran { mut warnings, cells: cells_run, going } = ran;
         let cells_run = &cells_run[..];
         let nb = self.nbs.snapshot(id)?;
-        let graph = self.nbs.graph(id, GraphQuery::default())?;
         // The cells of a run that ran out of its wait that are running now, read
         // after the wait: some may have finished meanwhile.
         let still_running: Vec<String> = nb.order.iter().filter(|id| going.contains(id) && nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect();
@@ -483,11 +482,12 @@ impl Call<'_> {
             })
             .collect::<Result<_, String>>()?;
         let pending = self.pending_run(&nb);
+        // The notebook's order isn't in it: two lists of every cell's id grow
+        // with the notebook and come back on every change, and an agent that
+        // needs an order asks for it (`get_cell_order`, `get_execution_order`).
         let receipt = json!({
             "applied": true,
             "mutation": mutation,
-            "cell_order": nb.order,
-            "execution_order": graph.execution_order(),
             "affected_cells": cells_run,
             "execution": { "status": status },
             "outputs": { "changed": changed },
@@ -544,6 +544,15 @@ impl Call<'_> {
             out["not_run"] = json!(true);
         }
         let Value::Object(out) = out else { unreachable!() };
+        out
+    }
+
+    /// The cell an edit or a new cell changed, as `read_cell` shows it
+    /// without its code: the agent sent that code, and gets it back from
+    /// `read_cell`.
+    fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
+        let mut out = self.cell_json(nb, id);
+        out.remove("code");
         out
     }
 
@@ -617,7 +626,7 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, &before, code);
         let ran = self.run_or_stage(&nb, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "edit_cell", "cell_id": cell }), ran, None)?;
-        receipt.extend(self.cell_json(&after, &cell));
+        receipt.extend(self.changed_cell_json(&after, &cell));
         Ok(Value::Object(receipt))
     }
 
@@ -695,7 +704,7 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, "", &code);
         let ran = self.run_or_stage(&added, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), ran, None)?;
-        receipt.extend(self.cell_json(&after, &cell));
+        receipt.extend(self.changed_cell_json(&after, &cell));
         Ok(Value::Object(receipt))
     }
 
@@ -807,7 +816,10 @@ impl Call<'_> {
         };
         self.apply(&nb.id, vec![json!({ "op": "move", "cell_id": cell, "index": index })])?;
         let mutation = json!({ "type": "move_cell", "cell_id": cell, "old_index": old_index + 1, "new_index": index + 1 });
-        Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?.0))
+        // A move is about the order, so its receipt has it.
+        let (mut receipt, after) = self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?;
+        receipt.insert("cell_order".into(), json!(after.order));
+        Ok(Value::Object(receipt))
     }
 
     fn read_notebook_code(&self) -> Result<Value, String> {

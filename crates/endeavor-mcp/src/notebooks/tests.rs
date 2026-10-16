@@ -533,7 +533,8 @@ fn edits_are_staged_until_they_run_however_they_run() {
     assert_eq!(receipt["execution"]["status"], "staged");
     assert_eq!((&receipt["pending_run"], &receipt["stale"], &receipt["affected_cells"]), (&json!([X]), &json!(true), &json!([])));
     assert_eq!(receipt["mutation"], json!({ "type": "edit_cell", "cell_id": X }));
-    assert_eq!((&receipt["cell_order"], &receipt["execution_order"]), (&json!([X, Y]), &json!([X, Y])));
+    // The order isn't in a change's receipt; the cell is, without the code the agent sent.
+    assert_eq!((&receipt["cell_order"], &receipt["execution_order"], &receipt["code"]), (&Value::Null, &Value::Null, &Value::Null));
     assert_eq!(s.engine.code(NB, X), "x = 10");
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([X]), "listing counts as no read");
 
@@ -736,7 +737,7 @@ fn adding_moving_folding_and_deleting_cells() {
     let add = |args: Value| s.call("", "add_cell", args);
     let first = add(json!({ "notebook_id": NB, "code": "a = 1" })).unwrap();
     let a = first["cell_id"].as_str().unwrap().to_owned();
-    assert_eq!((&first["code"], &first["code_folded"], &first["pending_run"]), (&json!("a = 1"), &json!(false), &json!([a])));
+    assert_eq!((&first["code_folded"], &first["pending_run"]), (&json!(false), &json!([a])));
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": "" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": a, "folded": "yes" })), "invalid_argument");
@@ -745,8 +746,9 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!((&b["code_folded"], &b["execution"]["status"]), (&json!(true), &json!("staged")));
     let b = b["cell_id"].as_str().unwrap().to_owned();
     let c = add(json!({ "notebook_id": NB, "code": 42, "after_cell_id": a, "run_after": true })).unwrap();
-    assert_eq!((&c["code"], &c["affected_cells"], &c["execution"]["status"]), (&json!("42"), &json!([c["cell_id"]]), &json!("running")));
+    assert_eq!((&c["affected_cells"], &c["execution"]["status"]), (&json!([c["cell_id"]]), &json!("running")));
     let c = c["cell_id"].as_str().unwrap().to_owned();
+    assert_eq!(s.engine.code(NB, &c), "42");
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone(), b.clone()]);
     s.edit("", NB, &b, "b = a + 1");
 
@@ -771,7 +773,7 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!(deleted["warnings"], json!(["async_execution::cell deletion cleanup queued"]));
     assert_eq!((&deleted["execution"]["status"], &deleted["pending_run"]), (&json!("completed"), &json!([a])));
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone()]);
-    assert_eq!(*s.engine.calls.lock().unwrap().iter().rev().nth(2).unwrap(), "run", "Pluto's cleanup after a delete");
+    assert_eq!(*s.engine.calls.lock().unwrap().iter().rev().nth(1).unwrap(), "run", "Pluto's cleanup after a delete");
     assert_eq!(s.refused("", "delete_cell", json!({ "notebook_id": NB, "cell_id": b })), "cell_not_found");
 }
 
