@@ -399,12 +399,15 @@ function allow_execution!(session, nb, run::Bool, timeout::Real)
     if run
         nb.process_status = Pluto.ProcessStatus.starting
         _notify_browser(session, nb)
-        run_cells!(session, nb, collect(nb.cells); wait=false, timeout)
+        ran = run_cells!(session, nb, collect(nb.cells); wait=false, timeout)
     else
         nb.process_status = Pluto.ProcessStatus.ready
         _notify_browser(session, nb)
     end
-    return Dict{String,Any}("already_allowed" => false, "ran" => run, "process_status" => string(nb.process_status))
+    result = Dict{String,Any}("already_allowed" => false, "ran" => run, "process_status" => string(nb.process_status))
+    # The run it started, named as `run` names one, so the core can tell when it ends.
+    run && haskey(ran, "run") && (result["run"] = ran["run"])
+    return result
 end
 
 # Pluto's own Restart: a new process, then every cell runs. Refused in safe

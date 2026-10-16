@@ -331,7 +331,15 @@ impl Engine {
                 }
                 nb.safe_preview = false;
                 nb.starting = params["run"] == true;
-                Ok(json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } }))
+                let mut reply = json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } });
+                // The run of every cell goes on while a cell in `linger()` runs, and is named, as the runtime's are.
+                if params["run"] == true && nb.cells.iter().any(|c| c.code.contains("linger()")) {
+                    nb.cells.iter_mut().filter(|c| c.code.contains("linger()")).for_each(|c| c.running = true);
+                    let mut watched = self.watched.lock().unwrap();
+                    *watched += 1;
+                    reply["run"] = json!(format!("run-{watched}"));
+                }
+                Ok(reply)
             }
             "render_text" => Ok(json!({ "text": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("table") } { json!("n\tmean\n3\t2.5") } else { Value::Null } })),
             "render_png" => Ok({
@@ -1165,6 +1173,30 @@ fn a_waited_submit_with_nothing_staged_says_how_the_cells_that_ran_meanwhile_wen
         submit()
     });
     assert_eq!((&receipt["execution"]["status"], &receipt["affected_cells"]), (&json!("completed"), &json!([Y])), "{receipt}");
+}
+
+#[test]
+fn allow_executions_run_of_the_notebook_is_the_sessions_run() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    s.engine.with(NB, |nb| nb.safe_preview = true);
+    s.call("7", "allow_execution", json!({ "notebook_id": NB })).unwrap();
+    s.engine.with(NB, |nb| nb.starting = false);
+    // A waited submit with nothing staged waits for it, as for a run `submit_changes` starts (#170).
+    let began = Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+    let receipt = super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, began).unwrap());
+    assert_eq!((&receipt["execution"]["status"], &receipt["execution"]["still_running"]), (&json!("running"), &json!([Y])), "{receipt}");
+    assert!(began.elapsed() >= Duration::from_secs(44), "waited for the run");
+    // Not another session's.
+    let receipt = super::tools::tool_json(s.notebooks.tool("8", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, Instant::now()).unwrap());
+    assert_eq!(receipt["execution"]["status"], "completed", "{receipt}");
+    // Once it ends there is nothing to wait for.
+    s.engine.with(NB, |nb| nb.cells[1].running = false);
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [X, Y] } }));
+    let began = Instant::now();
+    let receipt = super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, began).unwrap());
+    assert_eq!(receipt["execution"]["status"], "completed", "{receipt}");
+    assert!(began.elapsed() < Duration::from_secs(1), "nothing to wait for");
 }
 
 #[test]

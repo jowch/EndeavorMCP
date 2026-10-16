@@ -379,6 +379,24 @@ fn an_r_notebook_through_the_runtime() {
         assert!(failed.is_some_and(|c| c["output_summary"].as_str().unwrap().contains("boom")), "{waited}");
     });
 
+    step("allow_execution's run of the notebook is the agent's: a waited submit waits for it (#170)", || {
+        let (up, down) = ("70700001-0000-4000-8000-000000000001", "70700002-0000-4000-8000-000000000002");
+        std::fs::write(
+            folder.join("allowed.R"),
+            format!("### An Ember notebook ###\n# /// environment\n# on_cell_change = \"autorun\"\n# ///\n\n# %% id={up}\na <- {{ Sys.sleep(2); 1 }}\n\n# %% id={down}\n{{ Sys.sleep(2); a + 1 }}\n\n# /// cell order\n# {up}\n# {down}\n# ///\n"),
+        )
+        .unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "allowed.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        let allowed = agent.ok("allow_execution", json!({ "notebook_id": id }));
+        assert_eq!(allowed["ran"], true, "{allowed}");
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["execution"]["status"] == "completed" && waited["affected_cells"].as_array().unwrap().contains(&json!(down)), "{waited}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": down }));
+        assert!(read["running"] == false && read["queued"] == false && read["output"].as_str().unwrap().contains('2'), "the waited submit waited for the run: {read}");
+    });
+
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();

@@ -1193,6 +1193,17 @@ impl Call<'_> {
         if ran {
             let nb = self.notebook()?;
             self.nbs.with_state(&nb.id, |state| state.prune(&nb));
+            // The run of the whole notebook is the session's, as one `submit_changes` starts is: a
+            // read or a waited submit waits for it (#170). The engine names it; one that didn't
+            // goes on while a cell it started hasn't finished.
+            let run = allowed["run"].as_str().map(str::to_owned);
+            self.nbs.with_state(&nb.id, |state| {
+                let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
+                state.ended.retain(|r| Some(r) != run.as_ref());
+                if !self.owner.is_empty() && !ended {
+                    state.started.push(Started { owner: self.owner.to_owned(), run, cells: nb.order.iter().cloned().collect() });
+                }
+            });
             result["run_warnings"] = json!(["async_execution::allow_execution queued non-blocking notebook run; poll read_cell for completion"]);
         }
         Ok(result)

@@ -617,9 +617,12 @@ end
                   Dict("error" => "ArgumentError: execution_blocked::The notebook is in safe preview; Run notebook starts it")
             @test result("run", Dict("notebook_id" => previewed, "cells" => [X], "wait" => true, "timeout" => 60)) ==
                   Dict("accepted" => false, "process_status" => "waiting_for_permission")
-            @test result("allow_execution", Dict("notebook_id" => previewed, "run" => true, "timeout" => 60)) ==
-                  Dict("already_allowed" => false, "ran" => true, "process_status" => "starting")
-            @test X in next_note("run_finished"; nid=previewed)["cells"]
+            # The reply names the run it starts, and that run's `run_finished` says when it ends (#170).
+            allowed = result("allow_execution", Dict("notebook_id" => previewed, "run" => true, "timeout" => 60))
+            @test delete!(copy(allowed), "run") == Dict("already_allowed" => false, "ran" => true, "process_status" => "starting")
+            @test allowed["run"] isa String
+            finished = next_note("run_finished"; nid=previewed)
+            @test X in finished["cells"] && finished["run"] == allowed["run"]
             @test result("allow_execution", Dict("notebook_id" => previewed, "run" => false, "timeout" => 60)) ==
                   Dict("already_allowed" => true, "ran" => false, "process_status" => "ready")
 

@@ -288,6 +288,16 @@ check("an unwaited run ends after its dependent, which sleeps 2 s", !is.null(goi
 check("run_finished lists the run's own cells", identical(unlist(fin$params$cells), up))
 invisible(result("shutdown", list(notebook_id = aid)))
 
+# ---- allow_execution names the run of the notebook it starts (#170) ----
+
+aid <- result("open", list(path = auto, run = FALSE))$notebook_id
+seq_before <- result("status")$seq
+allowed <- result("allow_execution", list(notebook_id = aid, run = TRUE, timeout = 30))
+ns <- collect(seq_before, function(ns) any(vapply(ns, function(n) identical(n$method, "run_finished") && identical(n$params$run, allowed$run), logical(1))))
+check("allow_execution with a run names it, and its run_finished comes once the cells ran",
+      isTRUE(allowed$ran) && is.character(allowed$run) && idle())
+invisible(result("shutdown", list(notebook_id = aid)))
+
 # ---- errors, render_text, render_png, validate ----
 
 err <- result("apply", list(notebook_id = nid, ops = list(list(op = "insert", index = 4, code = "stop(\"boom\")", folded = FALSE),
