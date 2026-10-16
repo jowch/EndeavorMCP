@@ -588,6 +588,24 @@ impl Call<'_> {
         Ok(Value::Array(snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()))
     }
 
+    /// Wait, within the call's `WAIT_SECONDS`, for the runs this session started in `nb` to end:
+    /// the cells still running or queued if one is still going then.
+    fn wait_for_own_run(&self, nb: &Snapshot) -> Result<Vec<String>, String> {
+        let mut nb = self.nbs.snapshot(&nb.id)?;
+        let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
+        while self.nbs.own_run_going(self.owner, &nb) {
+            if Instant::now() >= deadline {
+                return Ok(nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            if (self.gone)() {
+                return Err(argument_error("client_gone::The caller hung up during the wait"));
+            }
+            nb = self.nbs.snapshot(&nb.id)?;
+        }
+        Ok(Vec::new())
+    }
+
     fn read_cell(&self) -> Result<Value, String> {
         let mut nb = self.notebook()?;
         let cell = self.cell(&nb)?;
@@ -814,6 +832,14 @@ impl Call<'_> {
             }
         }
         if targets.is_empty() {
+            // Nothing staged, but a run this session started may still be going (its dependents,
+            // say): a waited call waits for it, as `read_cell` does, rather than say it completed
+            // while it runs (#151).
+            if wait == true {
+                let going = self.wait_for_own_run(&nb)?;
+                let status = if going.is_empty() { "completed" } else { "running" };
+                return Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, Ran { warnings: Vec::new(), cells: Vec::new(), going }, Some(status))?.0));
+            }
             return Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?.0));
         }
         if let Some(missing) = targets.iter().find(|id| !nb.cells.contains_key(*id)) {
