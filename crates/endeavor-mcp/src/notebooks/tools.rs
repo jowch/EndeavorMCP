@@ -7,7 +7,7 @@
 //! An error is the text of the exception Julia raised: `ArgumentError: kind::message`
 //! names its kind (see `mcp::tool_error`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -589,21 +589,35 @@ impl Call<'_> {
     }
 
     /// Wait, within the call's `WAIT_SECONDS`, for the runs this session started in `nb` to end:
-    /// the cells still running or queued if one is still going then.
-    fn wait_for_own_run(&self, nb: &Snapshot) -> Result<Vec<String>, String> {
+    /// the cells seen running or that finished a run during the wait, with the ones still running
+    /// or queued if a run is still going at its end. A queued cell that never ran (an interrupt
+    /// dropped it) isn't one. A cell another run ran meanwhile counts too: the snapshots don't
+    /// say whose run ran a cell.
+    fn wait_for_own_run(&self, nb: &Snapshot) -> Result<(Vec<String>, Vec<String>), String> {
         let mut nb = self.nbs.snapshot(&nb.id)?;
+        let before: HashMap<String, f64> = nb.cells.iter().map(|(id, c)| (id.clone(), c.last_run)).collect();
+        let busy = |nb: &Snapshot, id: &String| nb.cells.get(id).is_some_and(|c| c.running || c.queued);
+        let running = |nb: &Snapshot| nb.cells.iter().filter(|(_, c)| c.running).map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let mut ran: HashSet<String> = running(&nb).into_iter().collect();
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
+        let mut going = Vec::new();
         while self.nbs.own_run_going(self.owner, &nb) {
             if Instant::now() >= deadline {
-                return Ok(nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect());
+                going = nb.order.iter().filter(|id| busy(&nb, id)).cloned().collect();
+                break;
             }
             std::thread::sleep(Duration::from_millis(500));
             if (self.gone)() {
                 return Err(argument_error("client_gone::The caller hung up during the wait"));
             }
             nb = self.nbs.snapshot(&nb.id)?;
+            ran.extend(running(&nb));
         }
-        Ok(Vec::new())
+        ran.extend(nb.cells.iter().filter(|(id, c)| before.get(*id).is_some_and(|last| c.last_run != *last)).map(|(id, _)| id.clone()));
+        // A cell still busy once the session's runs ended is another run's.
+        ran.retain(|id| !busy(&nb, id) || going.contains(id));
+        ran.extend(going.iter().cloned());
+        Ok((nb.order.iter().filter(|id| ran.contains(*id)).cloned().collect(), going))
     }
 
     fn read_cell(&self) -> Result<Value, String> {
@@ -834,10 +848,12 @@ impl Call<'_> {
             // Nothing staged, but a run this session started may still be going (its dependents,
             // say): a waited call waits for it, as `read_cell` does, rather than say it completed
             // while it runs (#151).
+            // Its receipt says how the cells that ran meanwhile went: "errored" if one of them
+            // did, as for the cells a call runs itself (#171).
             if wait == true {
-                let going = self.wait_for_own_run(&nb)?;
-                let status = if going.is_empty() { "completed" } else { "running" };
-                return Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, Ran { warnings: Vec::new(), cells: Vec::new(), going }, Some(status))?.0));
+                let (ran, going) = self.wait_for_own_run(&nb)?;
+                let status = ran.is_empty().then_some("completed");
+                return Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, Ran { warnings: Vec::new(), cells: ran, going }, status)?.0));
             }
             return Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?.0));
         }

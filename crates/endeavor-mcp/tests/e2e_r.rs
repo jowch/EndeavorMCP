@@ -347,13 +347,13 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["output"].as_str().unwrap().starts_with("Warning: careful"), "{read}");
     });
 
-    step("a run goes on through the dependents Ember queues: a read or a waited submit waits for them (#151)", || {
+    step("a run goes on through the dependents Ember queues: a read or a waited submit waits for them (#151) and says if one failed (#171)", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();
         let made = agent.ok("new_notebook", json!({ "path": "chain.R" }));
         let (id, up) = (made["notebook_id"].as_str().unwrap().to_owned(), made["cell_ids"][0].clone());
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
-        let down = agent.ok("add_cell", json!({ "notebook_id": id, "code": "{ Sys.sleep(3); a + 1 }", "after_cell_id": up }))["cell_id"].clone();
+        let down = agent.ok("add_cell", json!({ "notebook_id": id, "code": "{ Sys.sleep(3); if (a > 3) stop(\"boom\"); a + 1 }", "after_cell_id": up }))["cell_id"].clone();
         agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
         let output = |agent: &mut Agent| agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": down }));
         assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "the first run");
@@ -365,9 +365,18 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 3" }));
         agent.ok("submit_changes", json!({ "notebook_id": id }));
         let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
-        assert_eq!(waited["execution"]["status"], "completed", "{waited}");
+        // The cells that ran while it waited: the dependent, and `up` too if it was still running then.
+        let ran = |waited: &Value| waited["affected_cells"].as_array().unwrap().contains(&down);
+        assert!(waited["execution"]["status"] == "completed" && ran(&waited), "{waited}");
         let read = output(&mut agent);
         assert!(read["running"] == false && read["output"].as_str().unwrap().contains('4'), "the waited submit with nothing staged waited for it: {read}");
+        // And says when the dependent failed (#171).
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 4" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["execution"]["status"] == "errored" && ran(&waited), "{waited}");
+        let failed = waited["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == down).cloned();
+        assert!(failed.is_some_and(|c| c["output_summary"].as_str().unwrap().contains("boom")), "{waited}");
     });
 
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {

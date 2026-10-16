@@ -201,7 +201,8 @@ Next:
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the
-  agent's run, until those finish (#151; interface 12). When R ends, its
+  agent's run, until those finish (#151; interface 12). A waited `submit_changes` with
+  nothing staged reports the cells that ran while it waited, and `errored` if one failed (#171; interface 14). When R ends, its
   notebooks close with it: the agent's next call on one answers
   `notebook_closed` with why (how R's process ended and its last error), and
   `/endeavor/events` lists them under `engine_ended` until each opens again
