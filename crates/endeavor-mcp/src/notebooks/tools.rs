@@ -27,6 +27,9 @@ pub(super) const TIMEOUT_SECONDS: f64 = 60.0;
 pub const WAIT_SECONDS: f64 = 45.0;
 /// The least a run is waited for, however much of `WAIT_SECONDS` went before.
 pub const WAIT_FLOOR_SECONDS: f64 = 5.0;
+/// The most `interrupt_notebook` waits for the cells to stop. One still running then is
+/// usually in compiled code that ignores interrupts; Ember offers its restart 3 s after a Stop.
+const INTERRUPT_WAIT_SECONDS: f64 = 10.0;
 /// Claude accepts images up to about 5 MB; plots are typically tens of KB.
 const MAX_IMAGE_BYTES: usize = 4_000_000;
 /// How long a package step can take before the agent is told it is taking
@@ -87,6 +90,7 @@ impl Notebooks {
             "open_notebook" => t.open_notebook(folder),
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),
+            "interrupt_notebook" => t.interrupt_notebook(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
         }?;
         Ok(Reply::Json(result))
@@ -586,6 +590,24 @@ impl Call<'_> {
         Ok(Value::Array(snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()))
     }
 
+    /// Wait, within the call's `WAIT_SECONDS`, for the runs this session started in `nb` to end:
+    /// the cells still running or queued if one is still going then.
+    fn wait_for_own_run(&self, nb: &Snapshot) -> Result<Vec<String>, String> {
+        let mut nb = self.nbs.snapshot(&nb.id)?;
+        let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
+        while self.nbs.own_run_going(self.owner, &nb) {
+            if Instant::now() >= deadline {
+                return Ok(nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            if (self.gone)() {
+                return Err(argument_error("client_gone::The caller hung up during the wait"));
+            }
+            nb = self.nbs.snapshot(&nb.id)?;
+        }
+        Ok(Vec::new())
+    }
+
     fn read_cell(&self) -> Result<Value, String> {
         let mut nb = self.notebook()?;
         let cell = self.cell(&nb)?;
@@ -812,6 +834,14 @@ impl Call<'_> {
             }
         }
         if targets.is_empty() {
+            // Nothing staged, but a run this session started may still be going (its dependents,
+            // say): a waited call waits for it, as `read_cell` does, rather than say it completed
+            // while it runs (#151).
+            if wait == true {
+                let going = self.wait_for_own_run(&nb)?;
+                let status = if going.is_empty() { "completed" } else { "running" };
+                return Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, Ran { warnings: Vec::new(), cells: Vec::new(), going }, Some(status))?.0));
+            }
             return Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?.0));
         }
         if let Some(missing) = targets.iter().find(|id| !nb.cells.contains_key(*id)) {
@@ -1160,6 +1190,45 @@ impl Call<'_> {
             let nb = self.notebook()?;
             self.nbs.with_state(&nb.id, |state| state.prune(&nb));
             result["run_warnings"] = json!(["async_execution::allow_execution queued non-blocking notebook run; poll read_cell for completion"]);
+        }
+        Ok(result)
+    }
+
+    /// The page's Stop, for the agent (#161): interrupt the notebook's run, whoever started it.
+    /// The running cells end interrupted and the queued ones don't run. Pluto's interrupt
+    /// returns once the run has stopped (ending the process if a cell won't); Ember's sends
+    /// SIGINT and returns, so the cells are watched until they stop, for at most
+    /// `INTERRUPT_WAIT_SECONDS` and within the call's `WAIT_SECONDS`.
+    fn interrupt_notebook(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        let busy = |nb: &Snapshot, id: &String| nb.cells.get(id).is_some_and(|c| c.running || c.queued);
+        let running: Vec<String> = nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running)).cloned().collect();
+        let queued: Vec<String> = nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.queued && !c.running)).cloned().collect();
+        if running.is_empty() && queued.is_empty() {
+            return Ok(json!({ "notebook_id": nb.id, "interrupted": false, "message": "Nothing was running." }));
+        }
+        let reply = self.nbs.call("interrupt", json!({ "notebook_id": nb.id }))?;
+        let mut now = self.nbs.snapshot(&nb.id)?;
+        let deadline = Instant::now() + self.wait_left().min(Duration::from_secs_f64(INTERRUPT_WAIT_SECONDS));
+        while running.iter().chain(&queued).any(|id| busy(&now, id)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(250));
+            if (self.gone)() {
+                return Err(argument_error("client_gone::The caller hung up during the wait"));
+            }
+            now = self.nbs.snapshot(&nb.id)?;
+        }
+        let (still_running, stopped): (Vec<String>, Vec<String>) = running.into_iter().partition(|id| busy(&now, id));
+        let dropped: Vec<String> = queued.into_iter().filter(|id| !busy(&now, id)).collect();
+        let mut result = json!({
+            "notebook_id": nb.id, "interrupted": reply["interrupted"] == true || !stopped.is_empty() || !dropped.is_empty(),
+            "stopped": stopped, "dropped": dropped, "still_running": still_running, "process_status": now.process_status,
+        });
+        if !result["still_running"].as_array().unwrap().is_empty() {
+            result["message"] = json!(
+                "These cells haven't stopped yet. Compiled code often stops only when it returns. Read them later; if one doesn't stop, the user can restart the notebook from its page, which clears every value."
+            );
+        } else if now.process_status != nb.process_status && now.process_status == "no_process" {
+            result["message"] = json!("A cell didn't stop, so the notebook's process was ended. Its values are gone: the next run starts a new process.");
         }
         Ok(result)
     }

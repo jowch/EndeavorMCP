@@ -344,7 +344,17 @@ impl Engine {
                 }
             }),
             "validate" => Ok(json!({ "errors": if params["code"].as_str().unwrap().contains('\n') { json!([{ "type": "pluto_multi_expression" }]) } else { json!([]) } })),
-            "interrupt" => Ok(json!({ "interrupted": true })),
+            // The running cells end interrupted, but for one in `stubborn()`, and the queued ones don't run.
+            "interrupt" => {
+                let busy = nb.cells.iter().any(|c| c.running);
+                for cell in nb.cells.iter_mut() {
+                    cell.queued = false;
+                    if cell.running && !cell.code.contains("stubborn()") {
+                        (cell.running, cell.errored, cell.output) = (false, true, "InterruptException".into());
+                    }
+                }
+                Ok(json!({ "interrupted": busy }))
+            }
             other => Err(format!("ArgumentError: unknown_method::Unknown adapter method: '{other}'")),
         }
     }
@@ -1078,6 +1088,30 @@ fn a_read_of_a_dependent_still_running_in_the_sessions_run_waits_for_it() {
         assert!(began.elapsed() < Duration::from_secs(1), "the run ended (wait_for_completion {wait})");
         s.engine.with(NB, |nb| nb.cells[1].running = false);
     }
+}
+
+#[test]
+fn a_waited_submit_with_nothing_staged_waits_for_the_sessions_run() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    let submit = |began: Instant| super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, began).unwrap());
+    let late = || Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+
+    // Nothing is staged, but the dependent of the session's run is still running: not "completed" (#151).
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let began = late();
+    let receipt = submit(began);
+    assert_eq!((&receipt["execution"]["status"], &receipt["execution"]["still_running"]), (&json!("running"), &json!([Y])), "{receipt}");
+    assert!(began.elapsed() >= Duration::from_secs(44), "waited for the run");
+
+    // Once the run ends there is nothing to wait for.
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [X] } }));
+    let began = Instant::now();
+    assert_eq!(submit(began)["execution"]["status"], "completed");
+    assert!(began.elapsed() < Duration::from_secs(1), "nothing to wait for");
+    // Nor for the user's run, or another session's.
+    let receipt = super::tools::tool_json(s.notebooks.tool("8", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, Instant::now()).unwrap());
+    assert_eq!(receipt["execution"]["status"], "completed", "{receipt}");
 }
 
 #[test]
@@ -2300,6 +2334,36 @@ fn a_stop_interrupts_the_sessions_own_run() {
     running(true);
     s.notebooks.stop_for("7", NB, false);
     assert_eq!(interrupts(), 2, "a waited run that finished");
+}
+
+#[test]
+fn interrupt_notebook_stops_the_run_and_says_what_it_stopped() {
+    let s = setup();
+    const Z: &str = "33333333-3333-3333-3333-333333333333";
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)"), (Y, "y = 1"), (Z, "stubborn()")]);
+    let interrupt = || s.call("7", "interrupt_notebook", json!({ "notebook_id": NB })).unwrap();
+    let interrupts = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "interrupt").count();
+
+    assert_eq!(interrupt(), json!({ "notebook_id": NB, "interrupted": false, "message": "Nothing was running." }));
+    assert_eq!(interrupts(), 0, "nothing was asked of the engine");
+
+    // The user's run, or any session's: the running cell ends interrupted and the queued one doesn't run.
+    s.engine.with(NB, |nb| (nb.cells[0].running, nb.cells[1].queued) = (true, true));
+    let stopped = interrupt();
+    assert_eq!(
+        stopped,
+        json!({ "notebook_id": NB, "interrupted": true, "stopped": [X], "dropped": [Y], "still_running": [], "process_status": "ready" })
+    );
+    assert_eq!(interrupts(), 1);
+    let read = s.call("7", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["running"], &read["errored"]), (&json!(false), &json!(true)));
+
+    // A cell that doesn't stop within the call is named, with what to do.
+    s.engine.with(NB, |nb| nb.cells[2].running = true);
+    let late = Instant::now() - Duration::from_secs_f64(super::tools::WAIT_SECONDS);
+    let stuck = tool_json(s.notebooks.tool("7", "interrupt_notebook", &json!({ "notebook_id": NB }), &Folder::Process, late).unwrap());
+    assert_eq!((&stuck["interrupted"], &stuck["stopped"], &stuck["still_running"]), (&json!(true), &json!([]), &json!([Z])));
+    assert!(stuck["message"].as_str().unwrap().contains("haven't stopped"), "{stuck}");
 }
 
 #[test]

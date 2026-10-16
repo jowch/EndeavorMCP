@@ -107,7 +107,7 @@ passes on to the runtime log and keeps. A call that names one of them answers
 what differs per kind (launch command, detection, page adapter, skills) is
 the small `Backend` enum in `crates/wire/src/backend.rs`.
 
-The core calls `interrupt` for the user's Stop (see the Stop bullet below).
+The core calls `interrupt` for the user's Stop and for the agent's `interrupt_notebook` (see the Stop bullets below).
 
 Core → engine:
 
@@ -119,7 +119,7 @@ Core → engine:
 | `snapshot(nid)` | path, order, process status, whether execution is allowed, whether it's in safe preview, per cell: code, folded, running, queued, errored, last run time, runtime, output summary or structured error, whether the tools hide it (boilerplate such as Pluto's package cells) and whether it's markdown. Without `nid`, every open notebook, in the engine's order |
 | `graph(nid, fresh?, refresh?, edges?, packages?)` | per cell, in the engine's order: definitions, function names, references, as of the engine's last analysis (`fresh`: of the notebook as it is now, not kept); with `edges`, each cell's direct upstream and downstream cells; with `packages`, the packages each cell loads; the runnable cells in run order, and the rest |
 | `apply(nid, ops)` | ops: set code (refused, before any op applies, if a cell's code isn't the `expected` code), insert at an index, delete, move to an index, fold. The engine saves the file and updates its own UI. The inserted cells' ids |
-| `run(nid, cells, wait, timeout)` | accepted, or not because gated (with the process status). The run always starts in the background and is watched until its task ends, with no time limit (only the notebook's process ending or leaving the session cuts it short): a failed task releases the cells marked queued by hand, and `run_finished` follows. With `wait`, the reply is read when the run is over or after `timeout` seconds, whichever is first: the process status, which cells finished, `timed_out` (the notebook's cells still running or queued, empty when the run is over) and, if the process ended by itself, `exited`. A run that goes on (unwaited, or outlasting `timeout`) is named by the reply's `run` id, which its `run_finished` carries. `timeout` is ignored without `wait` |
+| `run(nid, cells, wait, timeout)` | accepted, or not because gated (with the process status). The run always starts in the background and is watched until its task ends, with no time limit (only the notebook's process ending or leaving the session cuts it short): a failed task releases the cells marked queued by hand, and `run_finished` follows. With `wait`, the reply is read when the run is over or after `timeout` seconds, whichever is first: the process status, which cells finished, `timed_out` (the notebook's cells still running or queued, empty when the run is over) and, if the process ended by itself, `exited`. A run that goes on (unwaited, or outlasting `timeout`) is named by the reply's `run` id, which its `run_finished` carries. In R, a run in autorun covers the cells downstream of its cells, which Ember queues as each result comes in, so it is over when those have run too. `timeout` is ignored without `wait` |
 | `interrupt(nid)` | — |
 | `restart(nid, timeout)` | the engine's own restart: a new process, then every cell runs (refused in safe preview) |
 | `move(nid, path)` | the file moved to `path` (checked by the core), and its new path |
@@ -216,6 +216,14 @@ and 3), and for the app:
   Pluto's Stop: the notebook then waits for a restart, and this isn't reported
   as a crash (`exited`). A process that lives through the interrupt and ends
   later is reported as a crash, as before.
+- The agent can stop a run itself with `interrupt_notebook` (#161), which is the
+  notebook's Stop button: it interrupts the run whoever started it. It asks nothing in
+  any mode, plan mode refuses it, and it stays in the session's own notebook. Its
+  result lists the cells that were running and `stopped`, the queued ones `dropped`,
+  and any `still_running`. Pluto's interrupt returns once the run has ended; Ember's
+  sends SIGINT and returns, so the core watches the cells for up to 10 s, within the
+  call's 45 s. A cell still running then is in code that ignores the interrupt, and
+  the result says only a restart ends it.
 - It reports in `/endeavor/events` the app build it was started by (`build`), so the
   app can tell a runtime from an older build and hold back what that runtime
   can't do.

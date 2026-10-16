@@ -196,7 +196,11 @@ Next:
   shows Ember's own `stale` and `not_run` (every cell after a restart), a
   warning in a cell's output starts with `Warning:`, and `read_notebook_code`
   marks cells as an Ember file does (`# %% id=`). `edit_cell` can fold the
-  cell it edits, in either engine (#162; the interface number is 10). When R ends, its
+  cell it edits, in either engine (#162; the interface number is 10). R's adapter
+  names each run, as Pluto's does, and in autorun counts the cells downstream of
+  the run's cells as part of it, since Ember queues each one as its parent's
+  result comes in. So a run goes on, and `read_cell` waits for a dependent of the
+  agent's run, until those finish (#151; interface 12). When R ends, its
   notebooks close with it: the agent's next call on one answers
   `notebook_closed` with why (how R's process ended and its last error), and
   `/endeavor/events` lists them under `engine_ended` until each opens again
@@ -305,6 +309,15 @@ Next:
   or `not_started`, whoever is waiting, the agent included. It starts nothing.
   After a first install that finished with no call waiting it reads
   `not_started` until the agent's next call (#148). The interface number is 9.
+- An agent can stop a run with `interrupt_notebook` (#161; interface 11), as the
+  notebook's Stop button does. Before it, an agent asked to "stop if it takes too long"
+  had no way to, and its edits queued behind the run. It asks nothing in any mode and
+  plan mode refuses it. In R, a cell in compiled code that ignores SIGINT is reported
+  `still_running`, and only the page's restart ends it. Until then no R cell stopped
+  for an interrupt at all, from the page either: R's adapter inherited the core's
+  signal mask, which blocks SIGINT, SIGTERM and SIGHUP for the core's own thread, and
+  passed it to Ember's workers. R now starts with the mask the core was started with,
+  as Julia does.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds

@@ -50,7 +50,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 10;
+pub const INTERFACE: u32 = 12;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -211,7 +211,10 @@ pub fn main(argv: &[String]) -> ! {
     let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
-    let r = Arc::new(RStarter::new(&args, &engine_token, allow_r_install));
+    let r = RStarter::new(&args, &engine_token, allow_r_install);
+    #[cfg(unix)]
+    let r = RStarter { mask: Some(inherited_mask), ..r };
+    let r = Arc::new(r);
     let _ = served.r.set(r.clone());
     let starting = (r.clone(), served.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, wait| match backend {
@@ -962,6 +965,9 @@ struct RStarter {
     state: PathBuf,
     /// The engines' key, which R's bridge takes: not the MCP bearer token.
     token: String,
+    /// The signal mask the core was started with, for R (`with_mask`), as for Julia.
+    #[cfg(unix)]
+    mask: Option<libc::sigset_t>,
     spawn: Spawner,
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
     /// Whether R's adapter is starting (`launch`), for `status`.
@@ -971,6 +977,25 @@ struct RStarter {
 }
 
 impl RStarter {
+    /// Start `command` with the signal mask the core was started with, not the core's, which blocks
+    /// Ctrl-C, SIGTERM and SIGHUP for its own thread to take. R inherits a blocked mask and passes it
+    /// to Ember's workers, where a cell's interrupt (SIGINT) and the supervisor's SIGTERM then wait
+    /// forever (#161).
+    fn with_mask(&self, command: &mut Command) {
+        #[cfg(unix)]
+        if let Some(mask) = self.mask {
+            // SAFETY: only async-signal-safe calls between fork and exec.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                    Ok(())
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = command;
+    }
+
     fn new(args: &Args, token: &str, allow_own: Arc<std::sync::atomic::AtomicBool>) -> RStarter {
         let test_repository = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_EMBER_REPOSITORY").ok()).flatten();
         RStarter {
@@ -987,6 +1012,8 @@ impl RStarter {
             adapter: args.runtime.join("r").join("adapter.R"),
             state: args.state_dir.join(R_STATE),
             token: token.to_owned(),
+            #[cfg(unix)]
+            mask: None,
             spawn: Spawner::new(),
             child: Arc::default(),
             launching: false.into(),
@@ -1094,6 +1121,7 @@ impl RStarter {
         let secret = ember_secret().map_err(|e| format!("r_failed::{e}"))?;
         let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
         command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null()).stderr(Stdio::piped());
+        self.with_mask(&mut command);
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
         unsafe {
@@ -1235,6 +1263,7 @@ impl RStarter {
         let install_r = self.adapter.with_file_name("install.R");
         let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, folder, Path::new(&self.repository), Path::new(&self.mac_arm64)]);
         command.stdin(Stdio::null());
+        self.with_mask(&mut command);
         let (state, r) = (self.install.clone(), self.r.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

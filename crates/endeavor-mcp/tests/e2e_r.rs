@@ -317,6 +317,22 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["stale"] == false && read["output"].as_str().unwrap().contains("42"), "{read}");
     });
 
+    step("interrupt_notebook stops a slow cell and its queued dependent doesn't run (#161)", || {
+        agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
+        let slow = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow <- { Sys.sleep(600); 1 }", "after_cell_id": B }))["cell_id"].clone();
+        let after = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow + 1", "after_cell_id": slow }))["cell_id"].clone();
+        agent.ok("submit_changes", json!({ "notebook_id": notebook }));
+        common::wait_for("the slow cell to start", || agent.ok("list_notebooks", json!({}))[0]["running"].as_array().is_some_and(|r| r.contains(&slow)));
+        let stopped = agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        assert_eq!((&stopped["interrupted"], &stopped["stopped"], &stopped["dropped"], &stopped["still_running"]), (&json!(true), &json!([slow]), &json!([after]), &json!([])), "{stopped}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
+        assert!(read["errored"] == true && read["running"] == false, "{read}");
+        let again = agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        assert_eq!(again["interrupted"], false, "{again}");
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": after }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
+    });
+
     step("new_notebook makes an R notebook from an .R path; a warning reads as one", || {
         // A session works on one notebook, so another session makes this one.
         let mut agent = Agent::new(port, &token);
@@ -329,6 +345,29 @@ fn an_r_notebook_through_the_runtime() {
         common::wait_for("the new cell to run", || agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }))["output"].as_str().is_some_and(|o| o.contains("7")));
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
         assert!(read["output"].as_str().unwrap().starts_with("Warning: careful"), "{read}");
+    });
+
+    step("a run goes on through the dependents Ember queues: a read or a waited submit waits for them (#151)", || {
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let made = agent.ok("new_notebook", json!({ "path": "chain.R" }));
+        let (id, up) = (made["notebook_id"].as_str().unwrap().to_owned(), made["cell_ids"][0].clone());
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
+        let down = agent.ok("add_cell", json!({ "notebook_id": id, "code": "{ Sys.sleep(3); a + 1 }", "after_cell_id": up }))["cell_id"].clone();
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        let output = |agent: &mut Agent| agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": down }));
+        assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "the first run");
+        // Only the upstream cell is run; Ember queues the dependent as its result comes in.
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 2" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id }));
+        let read = output(&mut agent);
+        assert!(read["running"] == false && read["output"].as_str().unwrap().contains('3'), "the read waited for the dependent: {read}");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 3" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert_eq!(waited["execution"]["status"], "completed", "{waited}");
+        let read = output(&mut agent);
+        assert!(read["running"] == false && read["output"].as_str().unwrap().contains('4'), "the waited submit with nothing staged waited for it: {read}");
     });
 
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {

@@ -77,10 +77,11 @@ pub fn is_tool(name: &str) -> bool {
     known_tool(current_name(name), false).is_some()
 }
 
-/// Tools that change the notebook or run code, here or on the server.
-pub const WRITE_TOOLS: [&str; 12] = [
+/// Tools that change the notebook or run code, here or on the server. `interrupt_notebook` only
+/// stops a run, so no mode asks first, but plan mode refuses it and it stays in the session's notebook.
+pub const WRITE_TOOLS: [&str; 13] = [
     "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
-    "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell",
+    "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell", "interrupt_notebook",
 ];
 
 /// Whether a call to `tool` with `arguments` runs code: the calls Ask to run
@@ -1209,7 +1210,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (10, "9f9bf233f5210d52"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (12, "c098f3e7b11f1a89"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1256,7 +1257,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (10, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (12, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]
@@ -1383,9 +1384,10 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
     #[test]
     fn manual_holds_every_write_and_no_read() {
         let held = |tool: &str, policy: &str, edits: bool| asks_first(tool, &json!({ "cell_id": "a", "code": "1" }), policy, edits);
-        for tool in WRITE_TOOLS {
+        for tool in WRITE_TOOLS.iter().filter(|tool| **tool != "interrupt_notebook") {
             assert!(held(tool, "ask", true), "{tool} in Manual");
         }
+        assert!(!held("interrupt_notebook", "ask", true), "stopping a run never asks");
         for tool in ["read_cell", "read_notebook_code", "list_notebooks", "view_cell_output", "search_code", "open_notebook", "keep_notebook_alive", "read_file"] {
             assert!(!held(tool, "ask", true) && !held(tool, "auto", true), "{tool} only reads");
         }
