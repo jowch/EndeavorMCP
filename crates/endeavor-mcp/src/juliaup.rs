@@ -236,8 +236,10 @@ fn run(command: &mut Command, limit: Duration, tick: &mut dyn FnMut(Duration)) -
     }
     // All of what it said goes to the log; the error is its last words, from stderr if it wrote any
     // (winget writes to stdout).
-    let program = command.get_program().to_string_lossy().into_owned();
-    for line in stderr.lines().map(str::trim).filter(|l| !l.is_empty()).take(40) {
+    let program = Path::new(command.get_program()).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let said: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    // The last 40 lines: juliaup's error chain comes at the end.
+    for line in &said[said.len().saturating_sub(40)..] {
         eprintln!("{program}: {line}");
     }
     let last = |text: &str| text.lines().map(str::trim).rfind(|l| !l.is_empty()).map(str::to_owned);
@@ -302,7 +304,10 @@ mod tests {
     fn a_juliaup_error_says_which_step_failed() {
         let error = "    Checking for new Julia versions\n  Installing Julia 1.12.6+0.x64.w64.mingw32\nError: Failed to extract downloaded file from url `https://example.org/julia.tar.gz`.\n\nCaused by:\n    0: Failed to move extracted archive to 'C:\\d\\juliaup\\julia-temp-3KkKKt'. Previous installation has been restored.\n    1: Access is denied. (os error 5)\n";
         assert_eq!(last_words(error).unwrap(), r"Failed to move extracted archive to 'C:\d\juliaup\julia-temp-3KkKKt'. Previous installation has been restored: Access is denied. (os error 5)");
-        assert_eq!(last_words("Error: no such channel\n\nCaused by:\n    0: The channel 9.9 isn't known\n").unwrap(), "The channel 9.9 isn't known");
+        // anyhow numbers the causes only when there are two or more.
+        assert_eq!(last_words("Error: no such channel\n\nCaused by:\n    The channel 9.9 isn't known\n").unwrap(), "The channel 9.9 isn't known");
+        let three = "Error: Failed to install\n\nCaused by:\n    0: Failed to extract\n    1: Failed to move\n    2: Access is denied. (os error 5)\n";
+        assert_eq!(last_words(three).unwrap(), "Failed to move: Access is denied. (os error 5)", "the innermost step, not the first");
         assert_eq!(last_words("Error: the configuration file is locked\n").unwrap(), "Error: the configuration file is locked", "no chain: the last line");
         assert_eq!(last_words("\n"), None);
     }
