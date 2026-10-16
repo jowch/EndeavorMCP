@@ -78,6 +78,8 @@ struct Engine {
     made: Mutex<u32>,
     /// The `timeout` of each waited `run`.
     waits: Mutex<Vec<f64>>,
+    /// How many runs went on after their `run` answered: each is named `run-<n>` in its reply.
+    watched: Mutex<u32>,
     /// The next `open`, `new` or `allow_execution` waits here before it answers, like a cold
     /// first open compiling; while an `allow_execution` waits, so does a `snapshot`, as the
     /// runtime answers nothing else while it starts the notebook.
@@ -311,6 +313,12 @@ impl Engine {
                     self.waits.lock().unwrap().push(params["timeout"].as_f64().unwrap());
                     reply["completed"] = json!(finishing);
                     reply["timed_out"] = json!(lingering);
+                }
+                // A run that goes on is watched, as the runtime's are.
+                if (params["wait"] != true && !cells.is_empty()) || !lingering.is_empty() {
+                    let mut watched = self.watched.lock().unwrap();
+                    *watched += 1;
+                    reply["run"] = json!(format!("run-{watched}"));
                 }
                 Ok(reply)
             }
@@ -2149,10 +2157,30 @@ fn a_stop_interrupts_the_sessions_own_run() {
     // reactive one) isn't the session's.
     running(false);
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
-    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-2", "cells": [X] } }));
     running(true);
     s.notebooks.stop_for("7", NB, false);
     assert_eq!(interrupts(), 2, "the user's later run of a cell the session ran");
+    // A run that ends with its cell queued again by a later run (Pluto's own Restart runs every
+    // cell): the later run isn't the session's.
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-3", "cells": [] } }));
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "a restart's run of a cell the session ran");
+    // A run that ended before the tool that started it recorded it.
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-4", "cells": [X] } }));
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "a quick run that already ended");
+    // Its process ended, or the app restarted it: no run of the session's goes on.
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.notified(&json!({ "method": "process_exited", "params": { "notebook_id": NB, "running": [X] } }));
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "after the process ended");
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.restart(NB).unwrap();
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "after the app's Restart");
     // Nor is a waited run that finished within the wait.
     running(false);
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
@@ -2170,6 +2198,6 @@ fn the_apps_stop_looks_at_the_notebooks_with_the_sessions_runs() {
     assert_eq!(s.notebooks.session_runs("7"), [NB]);
     assert_eq!(s.notebooks.session_runs("8"), Vec::<String>::new(), "another session's");
     assert_eq!(s.notebooks.session_runs(""), Vec::<String>::new(), "no session");
-    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
-    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new(), "the run ended");
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [] } }));
+    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new(), "the run ended, its cell queued again or not");
 }

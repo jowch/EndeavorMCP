@@ -561,6 +561,30 @@ fn the_runtime_end_to_end() {
         };
         assert!(read["output"].as_str().is_some_and(|output| output.contains("InterruptException")), "{read}");
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+
+        // After a Restart, the cell the session started runs again, but as the restart's run: the
+        // session's Stop leaves it alone.
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "slow = (for _ in 1:15; sleep(1); end; 1)", "after_cell_id": last, "run_after": true }));
+        let slow = added["cell_id"].clone();
+        std::thread::sleep(Duration::from_secs(2));
+        rt.call("endeavor/restart_notebook", json!({ "notebook_id": previewed })).unwrap();
+        let started = Instant::now();
+        let running = |rt: &mut Runtime| rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": slow }))["running"] == true;
+        while !running(&mut rt) {
+            assert!(started.elapsed() < Duration::from_secs(60), "the restart's run didn't reach the cell");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert_eq!(rt.call("endeavor/stop_session", json!({ "owner": "2" })).unwrap(), json!({ "notebooks": [] }), "the restart's run");
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(running(&mut rt), "the restart's run of the cell goes on");
+        while running(&mut rt) {
+            assert!(started.elapsed() < Duration::from_secs(90), "the cell didn't finish");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
     });
 
     step("a notebook's own Julia ending by itself ends the run waiting for it", || {

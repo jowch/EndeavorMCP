@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use super::{Change, Folder, GraphQuery, Notebooks, Snapshot, absolute_path, canonical_path, uuid_value};
+use super::{Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, uuid_value};
 use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
 
@@ -359,10 +359,15 @@ impl Call<'_> {
         // A run of these cells was accepted: they are no longer staged, whether or not they have finished.
         if reply["accepted"] == true {
             self.nbs.with_state(&nb.id, |state| {
-                // Its cells that haven't finished: a waited run's that did finish are done.
+                // Its cells that haven't finished: a waited run's that did finish are done, and
+                // so are all of a run that ended before this records it.
                 let finished = ids("completed");
-                if !self.owner.is_empty() {
-                    state.started.entry(self.owner.to_owned()).or_default().extend(cells.iter().filter(|c| !finished.contains(c)).cloned());
+                let run = reply["run"].as_str().map(str::to_owned);
+                let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
+                state.ended.retain(|r| Some(r) != run.as_ref());
+                let unfinished: HashSet<String> = cells.iter().filter(|c| !finished.contains(c)).cloned().collect();
+                if !self.owner.is_empty() && !ended && !unfinished.is_empty() {
+                    state.started.push(Started { owner: self.owner.to_owned(), run, cells: unfinished });
                 }
                 for cell in &cells {
                     state.pending.remove(cell);

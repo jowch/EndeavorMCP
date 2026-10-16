@@ -370,17 +370,16 @@ impl Bridge {
             "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", "")))),
             // The user pressed Stop in the app, which the runtime hears of no other way when no call is
             // under way: interrupt the session's runs that are still going. Answered at once with the
-            // notebooks it looks at, since Pluto's interrupt can take seconds.
+            // notebooks it looks at (each may turn out to have nothing going), since Pluto's interrupt
+            // can take seconds; each on its own thread, so one that ends its process doesn't hold up
+            // the next.
             "endeavor/stop_session" => {
                 let owner = text("owner", "");
                 let stopping = self.notebooks.session_runs(&owner);
-                let notebooks = self.notebooks.clone();
-                let looked_at = stopping.clone();
-                std::thread::spawn(move || {
-                    for notebook in &looked_at {
-                        notebooks.stop_for(&owner, notebook, false);
-                    }
-                });
+                for notebook in stopping.clone() {
+                    let (notebooks, owner) = (self.notebooks.clone(), owner.clone());
+                    std::thread::spawn(move || notebooks.stop_for(&owner, &notebook, false));
+                }
                 return Some(answer(Ok(json!({ "notebooks": stopping }))));
             }
             "endeavor/move_notebook" => return Some(answer(self.notebooks.move_notebook(&text("notebook_id", ""), &text("path", "")))),
