@@ -260,10 +260,12 @@ fn an_r_notebook_through_the_runtime() {
             // Still installing is a normal result, not a failure. The app sees the same step, whoever waits.
             assert!(!failed && matches!(opened["error"].as_str(), Some("r_installing" | "notebook_opening")) && Instant::now() < deadline, "{opened}");
             let status = app_call(port, &token, "endeavor/r_status")["result"].clone();
-            // It may have moved on since the call answered.
+            // It may have moved on since the call answered: R started, or the install finished with no
+            // call waiting, which reads `not_started` until the next call (#148).
             if opened["error"] == "r_installing" {
                 let step = status["step"].as_str().unwrap_or_default();
-                assert!(status["state"] == "ready" || status["state"] == "starting" && ["Installing Ember for R notebooks", "Starting R"].contains(&step), "{status} while {opened}");
+                let starting = status["state"] == "starting" && ["Installing Ember for R notebooks", "Starting R"].contains(&step);
+                assert!(starting || status["state"] == "ready" || status["state"] == "not_started", "{status} while {opened}");
             }
             std::thread::sleep(Duration::from_secs(5));
         };

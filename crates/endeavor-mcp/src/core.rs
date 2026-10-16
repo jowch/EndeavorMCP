@@ -215,7 +215,7 @@ pub fn main(argv: &[String]) -> ! {
     let _ = served.r.set(r.clone());
     let starting = (r.clone(), served.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, wait| match backend {
-        Backend::Ember => starting.0.start(&starting.1),
+        Backend::Ember => starting.0.start_noting(&starting.1),
         Backend::Pluto => starting.1.julia.wait(&starting.1, wait.min(JULIA_WAIT)).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait. Set before
@@ -775,6 +775,47 @@ enum Install {
     Failed(String),
 }
 
+/// What `r_status` reads: whether R's adapter runs, the installs of Endeavor's own R and of Ember,
+/// whether Ember is installed, whether the adapter is starting, and why the last start failed.
+struct RNow<'a> {
+    running: bool,
+    own: &'a Install,
+    ember: &'a Install,
+    ember_installed: bool,
+    launching: bool,
+    failed: Option<&'a str>,
+}
+
+/// Where R notebooks' setup is (`endeavor/r_status`): `ready` while R's adapter runs (with `updating`
+/// while a newer Ember installs for the next start), `starting` with the step in words (installing
+/// Endeavor's own R, installing or updating Ember, starting R), `failed` with the error's code and why
+/// (until the next start), else `not_started`. An install that finished after the call that started it
+/// stopped waiting reads `not_started` until the next call starts R (#148).
+fn r_status(now: &RNow) -> Value {
+    let failed = |why: &str| {
+        let (code, message) = why.split_once("::").unwrap_or(("r_failed", why));
+        json!({ "state": "failed", "code": code, "message": message })
+    };
+    let ember_running = matches!(now.ember, Install::Running);
+    if now.running {
+        return if ember_running { json!({ "state": "ready", "updating": true }) } else { json!({ "state": "ready" }) };
+    }
+    if matches!(now.own, Install::Running) {
+        return json!({ "state": "starting", "step": format!("Installing Endeavor's own R {}", crate::r::OWN_VERSION) });
+    }
+    if ember_running {
+        return json!({ "state": "starting", "step": if now.ember_installed { "Updating Ember" } else { "Installing Ember for R notebooks" } });
+    }
+    if now.launching {
+        return json!({ "state": "starting", "step": "Starting R" });
+    }
+    match (now.own, now.ember, now.failed) {
+        (Install::Failed(why), ..) | (_, Install::Done(Err(why)), _) => failed(why),
+        (.., Some(why)) => failed(why),
+        _ => json!({ "state": "not_started" }),
+    }
+}
+
 /// The Ember builds in Endeavor's own folder (`ember.dcf`, which `install.R` writes): the one in use,
 /// the one before it, and the ones that failed here.
 #[derive(Debug, Default, PartialEq)]
@@ -900,6 +941,8 @@ struct RStarter {
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
     /// Whether R's adapter is starting (`launch`), for `status`.
     launching: std::sync::atomic::AtomicBool,
+    /// Why the last start failed, until the next one (`start_noting`), for `status`.
+    failed: std::sync::Mutex<Option<String>>,
 }
 
 impl RStarter {
@@ -922,29 +965,38 @@ impl RStarter {
             spawn: Spawner::new(),
             child: Arc::default(),
             launching: false.into(),
+            failed: Default::default(),
         }
     }
 
-    /// Where R notebooks' setup is, for the app (`endeavor/r_status`), without starting anything:
-    /// `starting` with the step in words (installing Endeavor's own R, installing or updating Ember,
-    /// starting R), `ready` while R's adapter runs, else `not_started`. Whoever waits for it, the agent
-    /// included. A failure isn't kept here: the call that started R hears it.
+    /// Where R notebooks' setup is, for the app (`endeavor/r_status`), without starting anything (see
+    /// `r_status`). Whoever waits for it, the agent included.
     fn status(&self) -> Value {
-        let step = if matches!(*self.own_install.lock().unwrap(), Install::Running) {
-            Some(format!("Installing Endeavor's own R {}", crate::r::OWN_VERSION))
-        } else if matches!(*self.install.lock().unwrap(), Install::Running) {
-            let folder = self.ember_folder();
-            Some(if EmberBuilds::read(&folder).installed(&folder) { "Updating Ember".to_owned() } else { "Installing Ember for R notebooks".to_owned() })
-        } else if self.launching.load(std::sync::atomic::Ordering::SeqCst) {
-            Some("Starting R".to_owned())
-        } else {
-            None
-        };
-        if let Some(step) = step {
-            return json!({ "state": "starting", "step": step });
-        }
         let running = self.child.lock().unwrap().as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)));
-        json!({ "state": if running { "ready" } else { "not_started" } })
+        let folder = self.ember_folder();
+        let own = self.own_install.lock().unwrap();
+        let ember = self.install.lock().unwrap();
+        let failed = self.failed.lock().unwrap();
+        r_status(&RNow {
+            running,
+            own: &own,
+            ember: &ember,
+            ember_installed: EmberBuilds::read(&folder).installed(&folder),
+            launching: self.launching.load(std::sync::atomic::Ordering::SeqCst),
+            failed: failed.as_deref(),
+        })
+    }
+
+    /// `start`, keeping why it failed for `status` until the next start. Still installing isn't a failure.
+    fn start_noting(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+        *self.failed.lock().unwrap() = None;
+        let started = self.start(served);
+        if let Err(why) = &started
+            && !why.starts_with("r_installing::")
+        {
+            *self.failed.lock().unwrap() = Some(why.clone());
+        }
+        started
     }
 
     /// Start the adapter and wait until it's up: what answers for R, and Ember's page on `/ember/`.
@@ -1925,6 +1977,26 @@ mod tests {
         assert!(standalone.starts_with("r_not_found::") && standalone.contains("`use_machine`") && standalone.contains("R 4.6.1 (about 165 MB"), "{standalone}");
         let app = own_r_offer(&item, true);
         assert!(app.starts_with("r_not_found::") && app.contains("Install R in the notebook pane") && app.contains("Settings under Notebooks, then R") && !app.contains("use_machine"), "{app}");
+    }
+
+    #[test]
+    fn r_status_says_each_step_and_ready_wins_over_an_update() {
+        let (idle, running, done_ok, done_err) = (Install::Idle, Install::Running, Install::Done(Ok(false)), Install::Done(Err("r_failed::Couldn't install Ember".into())));
+        let own_failed = Install::Failed("r_failed::Couldn't install R: no network".into());
+        let now = |running_r, own, ember, ember_installed, launching, failed| r_status(&RNow { running: running_r, own, ember, ember_installed, launching, failed });
+        let step = |s: &str| json!({ "state": "starting", "step": s });
+        assert_eq!(now(false, &idle, &idle, false, false, None), json!({ "state": "not_started" }));
+        assert_eq!(now(false, &running, &idle, false, false, None), step(&format!("Installing Endeavor's own R {}", crate::r::OWN_VERSION)));
+        assert_eq!(now(false, &idle, &running, false, false, None), step("Installing Ember for R notebooks"));
+        assert_eq!(now(false, &idle, &running, true, false, None), step("Updating Ember"));
+        assert_eq!(now(false, &idle, &idle, true, true, None), step("Starting R"));
+        assert_eq!(now(true, &idle, &idle, true, false, None), json!({ "state": "ready" }));
+        assert_eq!(now(true, &idle, &running, true, false, None), json!({ "state": "ready", "updating": true }), "R runs while a newer Ember installs");
+        assert_eq!(now(false, &own_failed, &idle, false, false, None), json!({ "state": "failed", "code": "r_failed", "message": "Couldn't install R: no network" }));
+        assert_eq!(now(false, &idle, &done_err, false, false, None), json!({ "state": "failed", "code": "r_failed", "message": "Couldn't install Ember" }));
+        assert_eq!(now(false, &idle, &idle, false, false, Some("r_not_found::Couldn't find R")), json!({ "state": "failed", "code": "r_not_found", "message": "Couldn't find R" }));
+        assert_eq!(now(true, &idle, &idle, true, false, Some("r_failed::old")), json!({ "state": "ready" }), "a running R outranks an old failure");
+        assert_eq!(now(false, &idle, &done_ok, true, false, None), json!({ "state": "not_started" }), "installed while no call waited (#148)");
     }
 
     #[test]
