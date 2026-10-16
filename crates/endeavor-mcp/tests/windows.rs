@@ -112,9 +112,7 @@ fn serve_starts_julia_when_asked_and_stop_ends_both() {
     let serve = serve(&dir, &bridge, Some(&julia));
     let core = read_json(&dir.join("runtime.json"))["pid"].as_u64().unwrap();
     assert!(dir.join("runtime.log").is_file(), "the log is there");
-    // The core holds one byte of starting.lock past what the file says, so its pid can be read meanwhile.
-    let lock: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("starting.lock")).unwrap()).unwrap();
-    assert_eq!(lock["pid"].as_u64(), Some(core), "{lock}");
+    assert_eq!(std::fs::read_to_string(dir.join("starting.lock")).unwrap(), "", "recorded, the core let go of the start lock");
     assert!(!dir.join("julia.pids").exists(), "serve starts no Julia until something needs it");
 
     let julia = start_julia(&dir);
@@ -151,6 +149,38 @@ fn julia_ending_ends_serve_with_an_error() {
     let killed = Command::new("taskkill").args(["/F", "/PID", &julia.to_string()]).output().unwrap();
     assert!(killed.status.success(), "{killed:?}");
     assert_eq!(ended(serve), (Some(1), format!("Endeavor stopped. Its log is {}.", dir.join("runtime.log").display())));
+}
+
+/// A core that waits for Julia before it records itself (no `--julia-when-needed`) holds starting.lock
+/// meanwhile: a reader sees it held (`runtime::lock_state` asks for a shared lock over the whole file)
+/// and still reads the core's pid, because the core locks one byte past what the file holds. Once
+/// `runtime.json` is written it lets go and empties the file.
+#[test]
+fn the_core_holds_starting_lock_with_its_pid_readable_until_it_is_recorded() {
+    let dir = state_dir("windows-start-lock");
+    let bridge = FakeBridge::start(&dir);
+    let julia = stand_in(&dir);
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+    command.arg("core").arg("--state-dir").arg(&dir).arg("--julia").arg(&julia).arg("--runtime").arg(dir.join("runtime")).arg("--depot").arg(dir.join("depot"));
+    command.env("ENDEAVOR_TOKEN", TOKEN).env("ENDEAVOR_LAUNCHER", "process").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    env_for(&mut command, &dir, &bridge);
+    let mut core = command.spawn().unwrap();
+    wait_for("Julia to be started", || !julia_pids(&dir).is_empty());
+    let lock = std::fs::File::open(dir.join("starting.lock")).unwrap();
+    assert!(lock.try_lock_shared().is_err(), "a reader sees the start under way");
+    let said: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("starting.lock")).unwrap()).unwrap();
+    assert_eq!(said["pid"].as_u64(), Some(core.id() as u64), "{said}");
+    assert!(!dir.join("runtime.json").exists());
+
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    wait_for("the core to record itself", || dir.join("runtime.json").exists());
+    wait_for("the core to let go of the lock", || std::fs::read_to_string(dir.join("starting.lock")).unwrap_or_default().is_empty());
+    assert!(lock.try_lock_shared().is_ok(), "no start under way");
+    drop(lock);
+    let stop = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--state-dir").arg(&dir).output().unwrap();
+    assert!(stop.status.success(), "{stop:?}");
+    core.wait().unwrap();
 }
 
 /// What failed for the Antigravity plugin on Windows before #10: an agent's notebook call through
