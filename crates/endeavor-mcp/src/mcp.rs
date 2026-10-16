@@ -172,6 +172,10 @@ pub struct Bridge {
     folders: Mutex<HashMap<String, Option<String>>>,
     /// Each agent session's last tool results, for the app to look up.
     results: Results,
+    /// Each agent session's open or creation the user allowed on a card, with when they did, while
+    /// it is told its engine is still starting (`STARTING_KINDS`): the same call again carries it on
+    /// without asking the user again (`ask_first`).
+    starting_calls: Mutex<HashMap<String, (String, Value, Instant)>>,
     /// `run_shell`'s environment, changed from ours as Julia's was: its
     /// depot, and none of what the helper passes the runtime.
     shell_env: Vec<(&'static str, Option<String>)>,
@@ -249,6 +253,7 @@ impl Bridge {
             policies: Mutex::default(),
             folders: Mutex::default(),
             results: Results::default(),
+            starting_calls: Mutex::default(),
             shell_env,
             standalone: None,
             on_folder: std::sync::OnceLock::new(),
@@ -292,6 +297,8 @@ impl Bridge {
                     _ => "",
                 };
                 eprintln!("[ Info: Session {owner} policy: {policy}{what}");
+                // A yes was given under the mode it was asked in.
+                self.starting_calls.lock().unwrap().remove(&owner);
                 self.policies.lock().unwrap().insert(owner, Policy { policy, asks, edits });
             }
             "endeavor/answer_run" => {
@@ -413,6 +420,8 @@ impl Bridge {
         let began = Instant::now();
         if message["method"] == "notifications/cancelled" && !caller.owner.is_empty() {
             let request = &message["params"]["requestId"];
+            // The user's Stop: a yes for a call waiting on its engine goes with it.
+            self.starting_calls.lock().unwrap().remove(&caller.owner);
             // Waiting for the user's answer, it goes; running code, the run is interrupted.
             if self.notebooks.asks.cancel(&caller.owner, request) {
                 self.notebooks.publish();
@@ -461,8 +470,12 @@ impl Bridge {
             }
         }
         self.notebooks.note_call(&caller.owner);
-        if !caller.owner.is_empty() && acts(name, &arguments) && self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
-            self.notebooks.publish();
+        if !caller.owner.is_empty() && acts(name, &arguments) {
+            if self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
+                self.notebooks.publish();
+            }
+            // Anything else the session does ends what its earlier yes covered.
+            self.starting_calls.lock().unwrap().retain(|owner, (tool, args, _)| *owner != caller.owner || (tool == name && *args == arguments));
         }
         self.notebooks.note_activity(&arguments);
         if let Some(refusal) = refusal {
@@ -516,6 +529,12 @@ impl Bridge {
         } else {
             self.notebooks.tool_unrun(&caller.owner, name, &arguments, &folder, call.began)
         };
+        // An allowed open or creation still waiting on its engine keeps its yes (`ask_first`); one that
+        // ended, or that the agent gave up on, doesn't.
+        let waits_on_engine = matches!(&reply, Err(error) if starting(error)) && !(call.gone)();
+        if matches!(name, "open_notebook" | "new_notebook") && !waits_on_engine {
+            self.starting_calls.lock().unwrap().remove(&caller.owner);
+        }
         match reply {
             Ok(Reply::Json(mut result)) => {
                 self.add_browser_url(name, caller, &mut result);
@@ -571,6 +590,16 @@ impl Bridge {
             }
             return Ok(true);
         }
+        // The user let this same call run on a card, and it was told its engine is still starting
+        // (Julia's download, say), so the agent made it again. It is still that one call: it doesn't
+        // ask again. Only this session's, only the same tool with the same arguments, only while
+        // nothing else came between (another call, a Stop, a change of mode), and only for a while
+        // after the user said yes.
+        let carried_on = self.starting_calls.lock().unwrap().get(owner).is_some_and(|(t, args, allowed)| t == tool && args == arguments && allowed.elapsed() < STARTING_CALL_KEPT);
+        if carried_on {
+            eprintln!("[ Info: Session {owner} makes its allowed {tool} again while the engine starts; not asked again");
+            return Ok(true);
+        }
         if !self.notebooks.followed() {
             return Err(tool_error("ArgumentError: no_app::Endeavor isn't connected to ask the user about this. Try again once Endeavor is open.", false));
         }
@@ -584,6 +613,9 @@ impl Bridge {
         self.notebooks.publish();
         match outcome {
             Outcome::Answered(Answer { allow: true, user_ran }) => {
+                if matches!(tool, "open_notebook" | "new_notebook") {
+                    self.starting_calls.lock().unwrap().insert(owner.clone(), (tool.to_owned(), arguments.clone(), Instant::now()));
+                }
                 let notebook = arguments.get("notebook_id").map(julia_string).unwrap_or_default();
                 if user_ran.as_array().is_some_and(|cells| !cells.is_empty()) {
                     let _ = self.notebooks.run_anyway(&notebook, &user_ran);
@@ -613,6 +645,18 @@ impl Bridge {
         }
         None
     }
+}
+
+/// How long after the user allowed an open or creation the same call again, while its engine is
+/// still starting, goes on without asking (`Bridge::starting_calls`): counted from the yes, so a
+/// start that stalls doesn't keep it for as long as the agent tries. An agent told to try again in a
+/// minute does well within it; a first Julia download that takes longer is asked about again.
+const STARTING_CALL_KEPT: Duration = Duration::from_secs(5 * 60);
+
+/// Whether a tool's error says only that the engine or the notebook is still on its way: its kind
+/// is the whole text before the first `::`.
+fn starting(error: &str) -> bool {
+    error.split_once("::").is_some_and(|(kind, _)| STARTING_KINDS.contains(&kind))
 }
 
 /// How long into a call it waits for the user's answer: what is left of the 60 seconds agents give a
