@@ -429,7 +429,7 @@ fn cell<'a>(event: &'a Value, notebook: &str, cell: &str) -> &'a Value {
 fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     let s = setup();
     let (first, rx) = s.notebooks.subscribe().unwrap();
-    assert_eq!(first, r#"{"asks":[],"cells":{},"idle_stopped":[],"notebooks":[]}"#, "the current state, on connect");
+    assert_eq!(first, r#"{"asks":[],"cells":{},"engine_ended":[],"idle_stopped":[],"notebooks":[]}"#, "the current state, on connect");
 
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 6"), (Y, "y = x * 7")]);
     s.notebooks.publish();

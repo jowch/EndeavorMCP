@@ -54,6 +54,10 @@ pub trait Upstream: Send + Sync {
     fn adapter(&self, raw: &[u8]) -> io::Result<String>;
     /// The engine's notification stream, from its start.
     fn notifications(&self) -> io::Result<Box<dyn BufRead + Send>>;
+    /// Why the engine ended, once it stopped answering: its process's exit and last error, if known.
+    fn why_ended(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Starts an engine's adapter: what answers for it once it's up, or why it couldn't start. The
@@ -705,6 +709,7 @@ impl Notebooks {
                 state.notebooks.entry(id).or_default().last_active = Some(now);
                 if let Ok(path) = canonical_path(params["path"].as_str().unwrap_or_default()) {
                     state.idle_stopped.retain(|(p, _)| *p != path);
+                    self.engines.reopened(|closed| canonical_path(closed).is_ok_and(|closed| closed == path));
                 }
                 true
             }
@@ -877,6 +882,8 @@ impl Notebooks {
     ///   {"notebooks": [the list_notebooks summary],
     ///    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before, version, name}, ...]},
     ///    "idle_stopped": [{path, hours, safe_preview}, ...],
+    ///    "engine_ended": [{path, language, why}, ...]: notebooks that closed because their
+    ///      engine (R's) ended, until each is opened again,
     ///    "asks": [{id, owner, call_id, tool, arguments, since}, ...],
     ///    "build": the app build this runtime came from, if it was told}
     /// with cells in notebook order. `unrun`: edited by the agent and not run
@@ -920,7 +927,8 @@ impl Notebooks {
             cells.insert(nb.id.clone(), Value::Array(states));
         }
         let idle_stopped: Vec<Value> = state.idle_stopped.iter().map(|(_, entry)| entry.clone()).collect();
-        let mut event = json!({ "notebooks": list, "cells": cells, "idle_stopped": idle_stopped, "asks": self.asks.list() });
+        let engine_ended: Vec<Value> = self.engines.closed().iter().map(|c| json!({ "path": c.path, "language": c.language, "why": c.why })).collect();
+        let mut event = json!({ "notebooks": list, "cells": cells, "idle_stopped": idle_stopped, "engine_ended": engine_ended, "asks": self.asks.list() });
         if let Some(build) = self.build.get() {
             event["build"] = build.clone().into();
         }
@@ -1223,11 +1231,17 @@ impl Notebooks {
 
     /// `endeavor/stop_notebook`: shut down the open notebook at `path` (the
     /// app's "Stop notebook"). `safe_preview` says whether it was still in safe
-    /// preview, so the app can reopen it the same way.
+    /// preview, so the app can reopen it the same way. A notebook at `path` that
+    /// closed when its engine ended leaves `engine_ended`.
     pub fn stop_notebook(&self, path: &str) -> Result<Value, String> {
         let target = canonical_path(path)?;
         let snapshots = self.snapshots()?;
         let Some(nb) = snapshots.iter().find(|nb| canonical_path(&nb.path).is_ok_and(|p| p == target)) else {
+            // One that closed when its engine ended: the user lets it go.
+            if self.engines.reopened(|closed| engines::same_path(closed, &target)) {
+                self.publish();
+                return Ok(json!({ "stopped": true, "safe_preview": false }));
+            }
             return Ok(json!({ "stopped": false }));
         };
         let safe_preview = self.shutdown(&nb.id)?;

@@ -802,6 +802,64 @@ impl EmberBuilds {
     }
 }
 
+/// What R last wrote to stderr, which goes on to the runtime's log as it comes.
+#[derive(Default)]
+struct LastWords {
+    said: std::sync::Mutex<(std::collections::VecDeque<String>, bool)>,
+    ended: std::sync::Condvar,
+}
+
+impl LastWords {
+    /// Its last lines, once its stderr has ended (as when R ends) or after `wait`.
+    fn after_end(&self, wait: Duration) -> Vec<String> {
+        let said = self.said.lock().unwrap();
+        let (said, _) = self.ended.wait_timeout_while(said, wait, |(_, ended)| !*ended).unwrap();
+        said.0.iter().cloned().collect()
+    }
+}
+
+/// Pass R's stderr on to ours, keeping its last lines.
+fn pass_on_stderr(stderr: std::process::ChildStderr) -> Arc<LastWords> {
+    const KEPT: usize = 20;
+    let words = Arc::new(LastWords::default());
+    let keep = words.clone();
+    std::thread::spawn(move || {
+        let mut reader = io::BufReader::new(stderr);
+        let mut line = Vec::new();
+        while matches!(io::BufRead::read_until(&mut reader, b'\n', &mut line), Ok(n) if n > 0) {
+            let _ = io::Write::write_all(&mut io::stderr(), &line);
+            let text = String::from_utf8_lossy(&line).trim().to_owned();
+            line.clear();
+            if !text.is_empty() {
+                let mut said = keep.said.lock().unwrap();
+                said.0.push_back(text);
+                if said.0.len() > KEPT {
+                    said.0.pop_front();
+                }
+            }
+        }
+        keep.said.lock().unwrap().1 = true;
+        keep.ended.notify_all();
+    });
+    words
+}
+
+/// Why R ended, for the agent and the user: how its process ended (nothing while it runs) and its last error.
+fn why_r_ended(status: Option<std::process::ExitStatus>, said: &[String]) -> String {
+    const LONGEST: usize = 300;
+    let how = status.map_or_else(|| "it stopped answering".to_owned(), |status| status.to_string());
+    // R's error and the "Execution halted" after it.
+    let last: Vec<&str> = said.iter().rev().take(3).rev().map(String::as_str).collect();
+    if last.is_empty() {
+        return how;
+    }
+    let mut last = last.join(" ");
+    if last.chars().count() > LONGEST {
+        last = format!("…{}", last.chars().rev().take(LONGEST).collect::<Vec<_>>().into_iter().rev().collect::<String>());
+    }
+    format!("{how}; R's last output: {last}")
+}
+
 /// Starts R's adapter (`runtime/r/adapter.R`), with Ember in it, the first time an R notebook is
 /// opened, and stops it when the core ends.
 struct RStarter {
@@ -827,7 +885,7 @@ struct RStarter {
     /// The engines' key, which R's bridge takes: not the MCP bearer token.
     token: String,
     spawn: Spawner,
-    child: std::sync::Mutex<Option<std::process::Child>>,
+    child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
 }
 
 impl RStarter {
@@ -848,7 +906,7 @@ impl RStarter {
             state: args.state_dir.join(R_STATE),
             token: token.to_owned(),
             spawn: Spawner::new(),
-            child: std::sync::Mutex::default(),
+            child: Arc::default(),
         }
     }
 
@@ -914,7 +972,7 @@ impl RStarter {
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("r_failed::{e}"))?;
         let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
-        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null());
+        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null()).stderr(Stdio::piped());
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
         unsafe {
@@ -924,6 +982,7 @@ impl RStarter {
             });
         }
         let mut child = self.spawn.spawn(command).map_err(|e| format!("r_not_found::Couldn't start R ({}): {e}", self.r.describe()))?;
+        let last_words = child.stderr.take().map(pass_on_stderr);
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let state = loop {
             if let Ok(Some(status)) = child.try_wait() {
@@ -948,11 +1007,29 @@ impl RStarter {
         let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("r_failed::R's state has no {key}: {state}"));
         let (bridge, ember) = (port("bridge_port")?, port("ember_port")?);
         *served.ember.lock().unwrap() = Some(Page { port: ember, secret });
+        let (children, pid) = (self.child.clone(), child.id());
         if let Some(mut old) = self.child.lock().unwrap().replace(child) {
             let _ = old.kill();
             let _ = old.wait();
         }
-        Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone())))
+        let why_ended = move || {
+            let by = std::time::Instant::now() + Duration::from_secs(1);
+            let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
+            // A killed process can close its stderr a moment before it can be reaped, so its exit is
+            // waited for, within the same second.
+            let status = loop {
+                let mut children = children.lock().unwrap();
+                let Some(child) = children.as_mut().filter(|child| child.id() == pid) else { break None };
+                let status = child.try_wait().ok().flatten();
+                if status.is_some() || std::time::Instant::now() >= by {
+                    break status;
+                }
+                drop(children);
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            Some(why_r_ended(status, &said))
+        };
+        Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
     }
 
     /// The folder Endeavor installs Ember in: one for Endeavor's own R, which is kept apart from the
@@ -1736,6 +1813,35 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn why_r_ended_says_how_its_process_ended_and_its_last_output() {
+        use std::os::unix::process::ExitStatusExt;
+        let said = |lines: &[&str]| lines.iter().map(|line| line.to_string()).collect::<Vec<_>>();
+        assert_eq!(why_r_ended(None, &[]), "it stopped answering");
+        assert_eq!(why_r_ended(Some(ExitStatus::from_raw(9)), &[]), "signal: 9 (SIGKILL)");
+        let error = said(&["Listening on 127.0.0.1", "Error in loadNamespace(x) : there is no package called 'ember'", "Calls: loadNamespace -> withRestarts", "Execution halted"]);
+        assert_eq!(why_r_ended(Some(ExitStatus::from_raw(1 << 8)), &error), "exit status: 1; R's last output: Error in loadNamespace(x) : there is no package called 'ember' Calls: loadNamespace -> withRestarts Execution halted");
+        let long = why_r_ended(None, &said(&[&"x".repeat(1000)]));
+        assert!(long.ends_with(&format!("…{}", "x".repeat(300))), "the end is kept: {long}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_processs_stderr_is_kept_to_its_last_lines_once_it_ends() {
+        let mut child = Command::new("sh")
+            .args(["-c", "i=0; while [ $i -lt 30 ]; do echo \"line $i\" >&2; i=$((i+1)); done; printf '\\n  \\377 not utf-8\\nError: boom\\n' >&2; exit 3"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let words = pass_on_stderr(child.stderr.take().unwrap());
+        let status = child.wait().unwrap();
+        let said = words.after_end(Duration::from_secs(10));
+        assert_eq!(said.len(), 20, "the last 20 lines: {said:?}");
+        assert_eq!(said[said.len() - 2..], ["\u{FFFD} not utf-8", "Error: boom"], "blank lines are left out, and bytes that aren't UTF-8 don't stop it");
+        assert_eq!(why_r_ended(Some(status), &said), "exit status: 3; R's last output: line 29 \u{FFFD} not utf-8 Error: boom");
+    }
 
     #[test]
     fn own_r_is_offered_through_use_machine_or_the_apps_settings() {

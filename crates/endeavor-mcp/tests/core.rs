@@ -324,7 +324,7 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     write!(socket, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     let head = read_until(&mut reader, "\r\n\r\n");
     assert!(head.starts_with("HTTP/1.1 200 OK\r\n") && head.contains("Content-Type: text/event-stream\r\n") && !head.contains("chunked"), "{head}");
-    assert_eq!(read_until(&mut reader, "\n\n"), "data: {\"asks\":[],\"build\":\"1.0.0-abc\",\"cells\":{},\"idle_stopped\":[],\"notebooks\":[]}\n\n", "the state now, and the build it came from");
+    assert_eq!(read_until(&mut reader, "\n\n"), "data: {\"asks\":[],\"build\":\"1.0.0-abc\",\"cells\":{},\"engine_ended\":[],\"idle_stopped\":[],\"notebooks\":[]}\n\n", "the state now, and the build it came from");
 
     // Julia says a notebook changed: the core reads it and tells the app.
     bridge.set_notebooks(vec![notebook("n1", "x = 1")]);
