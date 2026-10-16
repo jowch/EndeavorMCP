@@ -309,3 +309,85 @@ const _SHUTDOWN = Ref{Function}(() -> exit(0))
 function bind_standalone_session!(sess)
     _STANDALONE_SESSION[] = sess
 end
+
+# EndeavorRuntimeWarm: the precompile workload that saves a notebook's first
+# open about 10 s, kept out of setup because it adds about 30 s to setup's
+# precompile on Windows. boot.jl loads it when it's precompiled; when it isn't,
+# this precompiles it in a separate, low-priority process once nothing has been
+# opening or running for `quiet` seconds, so it doesn't slow a notebook the user
+# is waiting for. The next start loads it.
+const WARM = Base.PkgId(UUID("49c484a2-cf3f-4fbb-b7be-c7f520ff48f2"), "EndeavorRuntimeWarm")
+
+# A notebook is starting its process, or a cell is queued or running.
+function _runtime_busy(session)::Bool
+    session === nothing && return false
+    any(values(session.notebooks)) do nb
+        nb.process_status in (Pluto.ProcessStatus.starting, Pluto.ProcessStatus.waiting_to_restart) ||
+            any(c -> c.running || c.queued, nb.cells)
+    end
+end
+
+# The command that precompiles `pkg` in `project`, below normal priority: `nice`
+# where there is one, and on Windows the process lowers its own priority class,
+# which the precompile processes it starts inherit.
+function _warm_command(pkg::Base.PkgId, project::AbstractString)
+    lower = Sys.iswindows() ?
+        "ccall((:SetPriorityClass, \"kernel32\"), stdcall, Cint, (Ptr{Cvoid}, UInt32), ccall((:GetCurrentProcess, \"kernel32\"), stdcall, Ptr{Cvoid}, ()), 0x00004000); " : ""
+    script = lower * "import Pkg; Pkg.precompile([$(repr(pkg.name))])"
+    julia = `$(Base.julia_cmd()) --startup-file=no --project=$project -e $script`
+    nice = Sys.iswindows() ? nothing : Sys.which("nice")
+    cmd = nice === nothing ? julia : `$nice -n 10 $julia`
+    # The project and the standard library, whatever load path this process was given.
+    addenv(cmd, "JULIA_LOAD_PATH" => join(["@", "@stdlib"], Sys.iswindows() ? ';' : ':'))
+end
+
+# A precompile writes its image to temporary files (`jl_…`) in the package's cache folder and
+# renames them when it's done, so one that was ended leaves them behind, tens of MB each. An
+# hour old means no precompile is still writing them.
+function _sweep_warm_temps(pkg::Base.PkgId)
+    dir = Base.compilecache_dir(pkg)
+    isdir(dir) || return
+    for name in readdir(dir)
+        path = joinpath(dir, name)
+        # One that can't be removed (held by antivirus on Windows, say) is left for next time.
+        try
+            startswith(name, "jl_") && isfile(path) && time() - mtime(path) > 3600 && rm(path; force=true)
+        catch
+        end
+    end
+end
+
+"""
+Precompile `pkg` in the background once the runtime has been quiet for `quiet` seconds. The task.
+The quiet starts when the runtime is ready, so where the app starts Julia ahead the warm-up can
+run while the user is still choosing what to do, and a notebook opened then shares the computer
+with it.
+"""
+function warm_up_later(pkg::Base.PkgId=WARM; project::AbstractString=dirname(Base.active_project()), quiet::Real=30.0, every::Real=5.0)
+    errormonitor(@async begin
+        quiet_since = time()
+        while time() - quiet_since < quiet
+            sleep(every)
+            _runtime_busy(standalone_session()) && (quiet_since = time())
+        end
+        _sweep_warm_temps(pkg)
+        @info "Precompiling $(pkg.name) in the background, for faster notebook opens from the next start"
+        out = IOBuffer()
+        began = time()
+        proc = run(pipeline(ignorestatus(_warm_command(pkg, project)); stdout=out, stderr=out); wait=false)
+        # Not left running when the runtime ends.
+        atexit(() -> process_running(proc) && kill(proc))
+        wait(proc)
+        took = round(time() - began; digits=1)
+        said = String(take!(out))
+        tail = join(last(split(said, '\n'; keepempty=false), 20), '\n')
+        if success(proc)
+            # A workload that failed is a warning, not a failed precompile.
+            occursin("Warning:", said) ? @warn("Precompiled $(pkg.name) in $took s, with warnings", output = tail) :
+                @info("Precompiled $(pkg.name) in $took s")
+        else
+            @warn "Couldn't precompile $(pkg.name) ($(proc.exitcode)), so notebooks keep opening without it; trying again at the next start" output = tail
+        end
+        nothing
+    end)
+end

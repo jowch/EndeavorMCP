@@ -1,0 +1,12 @@
+name = "EndeavorRuntimeWarm"
+uuid = "49c484a2-cf3f-4fbb-b7be-c7f520ff48f2"
+version = "0.1.0"
+
+[deps]
+EndeavorRuntime = "9c048436-5824-40ce-b1d7-dfbd8086df84"
+Pluto = "c3e4b0f8-55cb-11ea-2926-15256bba5781"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+
+[compat]
+PrecompileTools = "1"
+julia = "1.9"

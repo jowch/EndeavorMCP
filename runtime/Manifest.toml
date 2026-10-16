@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "10db22f7cf5ce7c84289b48b44d8eb5bc75030e9"
+project_hash = "363b2bf4428ec22a27242d9befdde6392f3c9104"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -83,9 +83,15 @@ uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 version = "1.7.0"
 
 [[deps.EndeavorRuntime]]
-deps = ["Base64", "HTTP", "JSON", "Pluto", "PrecompileTools", "UUIDs"]
+deps = ["Base64", "HTTP", "JSON", "Pluto", "UUIDs"]
 path = "EndeavorRuntime"
 uuid = "9c048436-5824-40ce-b1d7-dfbd8086df84"
+version = "0.1.0"
+
+[[deps.EndeavorRuntimeWarm]]
+deps = ["EndeavorRuntime", "Pluto", "PrecompileTools"]
+path = "EndeavorRuntimeWarm"
+uuid = "49c484a2-cf3f-4fbb-b7be-c7f520ff48f2"
 version = "0.1.0"
 
 [[deps.ExceptionUnwrapping]]

@@ -1,15 +1,25 @@
-# A cold first open spent about 25 s compiling Pluto's open-and-run path and ours
-# (#16). This workload runs that path once while the package precompiles, so the
-# code it compiles is cached with the package: a new notebook's first run in its
-# own worker process, an edit and a run, and the reads an agent makes, through
-# the same `adapter_call` the bridge uses. A first open still starts a worker
-# process (about 7 s) and compiles what the workload can't reach.
+# A cold first open spends about 25 s compiling Pluto's open-and-run path and
+# EndeavorRuntime's (#16). This package's precompile workload runs that path
+# once, so the code it compiles is cached with this package: a new notebook's
+# first run in its own worker process, an edit and a run, and the reads an agent
+# makes, through the same `adapter_call` the bridge uses. A first open still
+# starts a worker process and compiles what the workload can't reach.
+#
+# It is a package of its own so that setup doesn't wait for it: on Windows the
+# workload adds about 30 s to setup's precompile. Setup precompiles
+# EndeavorRuntime alone; once the runtime has been quiet for a while it
+# precompiles this one in a low-priority process of its own
+# (`EndeavorRuntime.warm_up_later`), and the next start loads it if it's ready.
 #
 # A workload that fails only costs the speedup, so its error is a warning, not a
 # failed precompile. Whatever happens it must leave nothing running, or the
 # precompile waits forever: the notebook is shut down, any worker process still
 # running ended, the pipes it opened closed, the session's timer closed, and
 # Pluto's throttle timers left to run out.
+module EndeavorRuntimeWarm
+
+using EndeavorRuntime
+using Pluto
 using PrecompileTools: @setup_workload, @compile_workload
 
 # The pipes being read now: Base keeps each one it reads from in `uvhandles`.
@@ -32,7 +42,7 @@ function _end_workload!(session, nb, procs_before, pipes_before)
     foreach(close, setdiff(_read_pipes(), pipes_before))
     # One not being read is closed when it is collected.
     GC.gc()
-    close_notification_streams!()
+    EndeavorRuntime.close_notification_streams!()
     finalize(session)
     # Pluto's throttled updates keep a timer for a moment after their last call.
     sleep(2.0)
@@ -44,7 +54,7 @@ end
         session = Pluto.ServerSession(; options = Pluto.Configuration.from_flat_kwargs(
             launch_browser = false,
             enable_ai_editor_features = false,
-            on_event = _handle_pluto_event,
+            on_event = EndeavorRuntime._handle_pluto_event,
         ))
         # Not `open`: it first renders text cells in this process, which can't run
         # while precompiling. The notebook is added as `open` adds it, and its first
@@ -57,7 +67,7 @@ end
         try
             Pluto.save_notebook(nb, nb.path)
             session.notebooks[nb.notebook_id] = nb
-            call(method, params) = adapter_call(session, method, params)
+            call(method, params) = EndeavorRuntime.adapter_call(session, method, params)
             id = string(nb.notebook_id)
             cells = [string(c.cell_id) for c in nb.cells]
             ran = call("run", Dict{String,Any}("notebook_id" => id, "cells" => cells, "wait" => true, "timeout" => 120.0))
@@ -70,10 +80,12 @@ end
             call("graph", Dict{String,Any}("notebook_id" => id, "edges" => true, "packages" => true))
             call("render_text", Dict{String,Any}("notebook_id" => id, "cell_id" => first(cells)))
         catch e
-            @warn "EndeavorRuntime's precompile workload failed, so a first open will compile more" exception = e
+            @warn "EndeavorRuntimeWarm's precompile workload failed, so a first open will compile more" exception = e
         finally
             _end_workload!(session, nb, procs, pipes)
         end
     end
     rm(folder; recursive = true, force = true)
+end
+
 end
