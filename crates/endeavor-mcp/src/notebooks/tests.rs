@@ -819,26 +819,61 @@ fn restoring_a_turns_cells_puts_their_code_back_all_or_nothing() {
     s.seconds(1.0);
     s.read("7", NB, X);
     s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 4", "run_after": true })).unwrap();
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
     s.seconds(1.0);
     assert_eq!(pending(), json!([]));
     assert_eq!(restore(json!([{ "cell_id": X, "expected": "x = 4", "code": "x = 1" }])).unwrap()["restored"], json!([X]));
     assert_eq!(pending(), json!([X]));
+    s.notebooks.publish();
+    let event = rx.try_iter().last().map(|e| serde_json::from_str::<Value>(&e).unwrap()).expect("an event");
+    assert_eq!((&cell(&event, NB, X)["unrun"], &cell(&event, NB, X)["before"]), (&json!(true), &json!("x = 4")), "the turn's code ran, so the diff is against it");
+    // The agent hasn't read what was put back: its run waits until it has.
+    let refused = s.call("7", "submit_changes", json!({ "notebook_id": NB }));
+    assert!(refused.as_ref().is_err_and(|e| e.contains(&format!("run_conflict::The user or another Endeavor session changed {X}"))), "{refused:?}");
+    s.read("7", NB, X);
+    s.call("7", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(pending(), json!([]));
+    s.notebooks.publish();
+
+    // Two turns leave x unrun (1, then 2, then 3): restoring the second keeps it unrun, with the diff against 1.
+    s.seconds(1.0);
+    s.edit("7", NB, X, "x = 2");
+    s.edit("7", NB, X, "x = 3");
+    restore(json!([{ "cell_id": X, "expected": "x = 3", "code": "x = 2" }])).unwrap();
+    assert_eq!(pending(), json!([X]));
+    s.notebooks.publish();
+    let event = rx.try_iter().last().map(|e| serde_json::from_str::<Value>(&e).unwrap()).expect("an event");
+    assert_eq!(cell(&event, NB, X)["before"], "x = 1");
+    s.read("7", NB, X);
+    s.call("7", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
 
     // The user changed one of the cells since, or it's gone: nothing changes, and the reply says which.
     s.read("7", NB, Y);
     s.edit("7", NB, Y, "y = x + 1");
     s.engine.with(NB, |nb| nb.cells[0].code = "x = 5".into());
+    assert_eq!(s.engine.code(NB, X), "x = 5");
     let gone = "33333333-3333-3333-3333-333333333333";
     let refused = restore(json!([{ "cell_id": Y, "expected": "y = x + 1", "code": "y = x" }, { "cell_id": X, "expected": "x = 1", "code": "x = 0" }, { "cell_id": gone, "expected": "", "code": null }])).unwrap();
     assert_eq!(refused, json!({ "restored": [], "changed": [X, gone] }));
     assert_eq!((s.engine.code(NB, X), s.engine.code(NB, Y)), ("x = 5".to_owned(), "y = x + 1".to_owned()));
 
-    for bad in [json!([]), json!({}), json!([{ "cell_id": Y, "code": "y = x" }]), json!([{ "cell_id": Y, "expected": "y = x + 1", "code": 1 }])] {
+    for bad in [json!([]), json!({}), json!([{ "cell_id": Y, "code": "y = x" }]), json!([{ "cell_id": Y, "expected": "y = x + 1", "code": 1 }]), json!([{ "cell_id": Y, "expected": "y = x + 1" }])] {
         assert_eq!(restore(bad), Err("ArgumentError: invalid_argument::cells must be a list of {cell_id, expected, code}".into()));
     }
     let twice = json!([{ "cell_id": Y, "expected": "y = x + 1", "code": "y = x" }, { "cell_id": Y, "expected": "y = x + 1", "code": null }]);
     assert_eq!(restore(twice), Err(format!("ArgumentError: invalid_argument::cell {Y} is listed twice")));
     assert_eq!(s.engine.code(NB, Y), "y = x + 1");
+
+    // A run of the turn's edit still going when the user restores: what was put back is unrun.
+    s.read("7", NB, X);
+    s.call("7", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.notebooks.publish();
+    s.seconds(1.0);
+    s.read("7", NB, Y);
+    s.edit("7", NB, Y, "y = x + 2");
+    s.engine.with(NB, |nb| nb.cells[1].running = true);
+    restore(json!([{ "cell_id": Y, "expected": "y = x + 2", "code": "y = x + 1" }])).unwrap();
+    assert_eq!(pending(), json!([Y]));
 }
 
 #[test]
@@ -1121,7 +1156,7 @@ fn several_sessions_on_one_notebook() {
     call("A", "edit_cell", json!({ "cell_id": c, "code": "c = 11" })).unwrap();
 
     let conflict = format!(
-        "ArgumentError: run_conflict::Another Endeavor session changed {a} since you last read them, and the cells you're running depend on them. \
+        "ArgumentError: run_conflict::The user or another Endeavor session changed {a} since you last read them, and the cells you're running depend on them. \
          Read them (read_cell or read_notebook_code), then run again."
     );
     assert_eq!(call("A", "execute_cell", json!({ "cell_id": b })), Err(conflict.clone()));

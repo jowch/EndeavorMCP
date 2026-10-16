@@ -71,8 +71,10 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   (interface 9, Endeavor #79): `endeavor/restore_cells` sets the turn's edited
   cells back to their earlier code and deletes the cells it added, all or
   nothing, and only if every cell still has the code the turn left. Nothing
-  runs; the code is the user's, and a cell whose code isn't what last ran
-  shows unrun. Cells the turn deleted can't come back yet. The app's Restore
+  runs; the code is the user's, a cell whose code isn't what last ran shows
+  unrun, and an agent reads a restored cell before a run of it or of what
+  needs it (`run_conflict`). Cells the turn deleted can't come back yet, and
+  a cell to delete isn't checked by the engine itself (#146). The app's Restore
   button is the next step.
 - The pages have a token of their own since 2026-10-15 (interface 8, #100). The
   bearer token, which an agent's MCP config carries, opens `/mcp` and

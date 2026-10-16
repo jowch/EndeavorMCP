@@ -307,6 +307,25 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["stale"] == false && read["output"].as_str().unwrap().contains("42"), "{read}");
     });
 
+    step("the app's Restore puts back an edit and an added cell, all or nothing", || {
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 7\n" }));
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
+        let added = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "z <- x", "after_cell_id": B }));
+        let c = added["cell_id"].as_str().unwrap().to_owned();
+        let restore = |expected: &str| {
+            let cells = json!([{ "cell_id": A, "expected": expected, "code": "x <- 41" }, { "cell_id": c, "expected": "z <- x", "code": null }]);
+            app_call_with(port, &token, "endeavor/restore_cells", json!({ "notebook_id": notebook, "cells": cells }))["result"].clone()
+        };
+        assert_eq!(restore("x <- 8"), json!({ "restored": [], "changed": [A] }), "A isn't as the turn left it");
+        // As the agent wrote it, with the trailing newline Ember doesn't keep.
+        assert_eq!(restore("x <- 7\n"), json!({ "restored": [A, c], "changed": [] }));
+        let order = agent.ok("get_cell_order", json!({ "notebook_id": notebook }));
+        assert_eq!(order["cell_ids"], json!([A, B]), "{order}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
+        assert_eq!(read["code"], "x <- 41", "{read}");
+    });
+
     step("new_notebook makes an R notebook from an .R path; a warning reads as one", || {
         // A session works on one notebook, so another session makes this one.
         let mut agent = Agent::new(port, &token);

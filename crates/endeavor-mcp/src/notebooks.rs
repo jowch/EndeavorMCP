@@ -1349,15 +1349,17 @@ impl Notebooks {
     /// the cell is gone), nothing changes and `changed` names those cells.
     /// Nothing runs, except Pluto's cleanup of what a deleted cell defined.
     /// The restored code is the user's, and a restored cell whose code isn't
-    /// what last ran is pending, so it shows unrun.
+    /// what last ran is pending, so it shows unrun; an agent reads it before
+    /// running it (`run_conflict`). `warnings` says if the cleanup failed.
     pub fn restore_cells(&self, notebook_id: &str, cells: &Value) -> Result<Value, String> {
         let bad = || tools::argument_error("invalid_argument::cells must be a list of {cell_id, expected, code}");
         let mut restores: Vec<(String, String, Option<String>)> = Vec::new();
         for entry in cells.as_array().filter(|cells| !cells.is_empty()).ok_or_else(bad)? {
             let (Some(cell), Some(expected)) = (entry["cell_id"].as_str(), entry["expected"].as_str()) else { return Err(bad()) };
-            let code = match &entry["code"] {
-                Value::Null => None,
-                Value::String(code) => Some(code.clone()),
+            // Only an explicit null deletes: a cell left without `code` can't be brought back.
+            let code = match entry.get("code") {
+                Some(Value::Null) => None,
+                Some(Value::String(code)) => Some(code.clone()),
                 _ => return Err(bad()),
             };
             if restores.iter().any(|(seen, ..)| seen == cell) {
@@ -1366,6 +1368,20 @@ impl Notebooks {
             restores.push((cell.to_owned(), expected.to_owned(), code));
         }
         let nb = self.snapshot(notebook_id)?;
+        // Ember keeps code as it stores it (`normalise_code`), and compares `expected` that way too.
+        let backend = self.backend_of(&nb.id);
+        let stored = |code: &str| match backend {
+            Backend::Pluto => code.to_owned(),
+            Backend::Ember => {
+                let code = code.replace("\r\n", "\n");
+                let mut lines: Vec<&str> = code.split('\n').collect();
+                while lines.last().is_some_and(|line| line.trim().is_empty()) {
+                    lines.pop();
+                }
+                lines.join("\n")
+            }
+        };
+        let restores: Vec<(String, String, Option<String>)> = restores.into_iter().map(|(cell, expected, code)| (cell, stored(&expected), code.map(|code| stored(&code)))).collect();
         let changed: Vec<String> = restores.iter().filter(|(cell, expected, _)| nb.cells.get(cell).is_none_or(|c| c.code != *expected)).map(|(cell, ..)| cell.clone()).collect();
         if !changed.is_empty() {
             return Ok(json!({ "restored": [], "changed": changed }));
@@ -1374,7 +1390,12 @@ impl Notebooks {
         // checked against the snapshot just above, not by the engine.
         let mut ops: Vec<Value> = restores.iter().filter_map(|(cell, expected, code)| Some(json!({ "op": "set_code", "cell_id": cell, "code": code.as_ref()?, "expected": expected }))).collect();
         ops.extend(restores.iter().filter(|(.., code)| code.is_none()).map(|(cell, ..)| json!({ "op": "delete", "cell_id": cell })));
-        let pending = self.with_state(&nb.id, |state| state.pending_run(&nb));
+        // A cell a run is taking (the turn's `run_after` that wasn't waited for) has its agent code run.
+        let pending: Vec<String> = self.with_state(&nb.id, |state| {
+            let pending = state.pending_run(&nb);
+            let in_run = |cell: &String| nb.cells.get(cell).is_some_and(|c| c.running || c.queued) || state.started.iter().any(|run| run.cells.contains(cell));
+            pending.into_iter().filter(|cell| !in_run(cell)).collect()
+        });
         if let Err(error) = self.call("apply", json!({ "notebook_id": nb.id, "ops": ops })) {
             // A cell changed between the snapshot and the edit.
             if error.contains("stale_read::") {
@@ -1385,33 +1406,49 @@ impl Notebooks {
             return Err(error);
         }
         let now = (self.clock)();
-        self.with_state(&nb.id, |state| {
-            for (cell, _, code) in &restores {
-                state.tool_edits.remove(cell);
-                let before = state.befores.remove(cell);
+        {
+            let mut state = self.state.lock().unwrap();
+            state.seq += 1;
+            let seq = state.seq;
+            let notebook = state.notebooks.entry(nb.id.clone()).or_default();
+            for (cell, expected, code) in &restores {
+                notebook.tool_edits.remove(cell);
                 match code {
                     None => {
-                        state.pending.remove(cell);
-                        state.reads.retain(|(_, read), _| read != cell);
+                        notebook.pending.remove(cell);
+                        notebook.befores.remove(cell);
+                        notebook.reads.retain(|(_, read), _| read != cell);
+                        notebook.changes.remove(cell);
                     }
                     Some(code) => {
-                        state.authors.insert(cell.clone(), (hash(code), "user"));
-                        // Unrun agent code put back to what last ran is in step again; anything else is unrun.
-                        if pending.contains(cell) && before.as_ref() == Some(code) {
-                            state.pending.remove(cell);
+                        notebook.authors.insert(cell.clone(), (hash(code), "user"));
+                        // The user's change: an agent reads the cell before a run of it or what needs it.
+                        notebook.changes.insert(cell.clone(), Change { owner: tools::USER.to_owned(), seq });
+                        // Unrun agent code put back to what last ran is in step again; anything else is
+                        // unrun, its before-text the code that last ran (the turn's, if the turn ran it).
+                        if !pending.contains(cell) {
+                            notebook.befores.insert(cell.clone(), expected.clone());
+                            notebook.pending.insert(cell.clone(), now);
+                        } else if notebook.befores.get(cell) == Some(code) {
+                            notebook.befores.remove(cell);
+                            notebook.pending.remove(cell);
                         } else {
-                            state.pending.insert(cell.clone(), now);
+                            notebook.pending.insert(cell.clone(), now);
                         }
                     }
                 }
             }
-        });
-        if restores.iter().any(|(.., code)| code.is_none()) {
-            // Pluto's reactive cleanup of what the deleted cells defined, as delete_cell does.
-            self.call("run", json!({ "notebook_id": nb.id, "cells": [], "wait": false, "timeout": tools::TIMEOUT_SECONDS }))?;
         }
         self.publish();
-        Ok(json!({ "restored": restores.iter().map(|(cell, ..)| cell).collect::<Vec<_>>(), "changed": [] }))
+        let mut result = json!({ "restored": restores.iter().map(|(cell, ..)| cell).collect::<Vec<_>>(), "changed": [] });
+        if restores.iter().any(|(.., code)| code.is_none()) {
+            // Pluto's reactive cleanup of what the deleted cells defined, as delete_cell does. The restore
+            // is made either way.
+            if let Err(error) = self.call("run", json!({ "notebook_id": nb.id, "cells": [], "wait": false, "timeout": tools::TIMEOUT_SECONDS })) {
+                result["warnings"] = json!([format!("cleanup_failed::{error}")]);
+            }
+        }
+        Ok(result)
     }
 
     /// `endeavor/move_notebook`: rename or move an open notebook's file (the
