@@ -82,7 +82,7 @@ const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|au
                          auto is slurm where Slurm's sinfo is, else process)
        endeavor relay --state-dir DIR
        endeavor node-start --state-dir DIR --julia JULIA [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--build BUILD]
-       endeavor core --state-dir DIR (--julia JULIA|auto|own | --julia-shell LINE) [--install-julia] [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] [--own-r [--install-r]] --runtime RUNTIME_DIR --depot DEPOT
+       endeavor core --state-dir DIR (--julia JULIA|auto|own | --julia-shell LINE) [--install-julia] [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] [--own-r [--install-r]] [--lifeline FD] --runtime RUNTIME_DIR --depot DEPOT
        endeavor askpass PROMPT
        endeavor serve|mcp|stop [OPTIONS]   (without the app; `endeavor serve --help`)
        endeavor update                      replace this binary with the newest build (Linux, macOS, Windows)
@@ -253,6 +253,21 @@ type Answer = Arc<dyn Fn(&wire::files::Request) -> wire::files::Reply + Send + S
 /// again (for the core): none for the `endeavor` binary, the flag for the app.
 static HELPER_ARGS: OnceLock<&'static [&'static str]> = OnceLock::new();
 
+/// With `--own-with-client`, the write end of the core's lifeline: a pipe whose other end the core this
+/// helper started reads (`core --lifeline`). However this process ends, SIGKILL included, the core then
+/// reads the pipe's end, and ends with Julia unless `keep_runtime` was called first.
+#[cfg(unix)]
+static LIFELINE: Mutex<Option<std::io::PipeWriter>> = Mutex::new(None);
+
+/// Tell the core this helper started that it is wanted, so that it lives on when this helper ends: once the
+/// app has it, or detaches while it starts.
+fn keep_runtime() {
+    #[cfg(unix)]
+    if let Some(mut lifeline) = LIFELINE.lock().unwrap().take() {
+        let _ = lifeline.write_all(b"k");
+    }
+}
+
 /// The helper's main, given its arguments without the program name. Call it
 /// before the process starts any thread: it blocks SIGUSR1 for all of them.
 pub fn run(argv: Vec<String>) -> ! {
@@ -420,6 +435,7 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                 match result {
                     Ok(now) => {
                         *routes.write().unwrap() = now.route();
+                        keep_runtime();
                         let _ = mux.send(&now.ready(id, now.reattached).frame());
                         attached = Some(now);
                     }
@@ -454,6 +470,7 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
             // quit, and the flag only covers an app that vanishes without saying.
             Event::App(ToHelper::Detach) => {
                 parts.discard();
+                keep_runtime();
                 std::process::exit(0)
             }
             Event::Eof => std::process::exit(0),
@@ -759,6 +776,7 @@ impl<'a> Client<'a> {
             }
             Heard::Detach => {
                 self.parts.discard();
+                keep_runtime();
                 std::process::exit(0)
             }
             Heard::Eof if self.args.quit_with_client && waiting != Waiting::Lock => return false,
@@ -1460,9 +1478,21 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
     command.args(args.r.args()).args(args.own_r.then_some("--own-r")).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
-    // SAFETY: setsid and sigprocmask are async-signal-safe.
+    // A start this connection owns ends if this helper does before the app has it (`LIFELINE`).
+    let lifeline = match args.own_with_client {
+        true => Some(std::io::pipe().map_err(|e| format!("Couldn't start the runtime: {e}"))?),
+        false => None,
+    };
+    let kept = lifeline.as_ref().map(|(reader, _)| reader.as_raw_fd());
+    if let Some(fd) = kept {
+        command.arg("--lifeline").arg(fd.to_string());
+    }
+    // SAFETY: setsid, sigprocmask and fcntl are async-signal-safe.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
+            if let Some(fd) = kept {
+                libc::fcntl(fd, libc::F_SETFD, 0);
+            }
             libc::setsid();
             // Not the signals the starting process blocked for itself (`standalone` blocks Ctrl-C's).
             let mut none: libc::sigset_t = std::mem::zeroed();
@@ -1471,7 +1501,11 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
             Ok(())
         });
     }
-    command.spawn().map_err(|e| format!("Couldn't start the runtime: {e}"))
+    let child = command.spawn().map_err(|e| format!("Couldn't start the runtime: {e}"))?;
+    if let Some((_, writer)) = lifeline {
+        *LIFELINE.lock().unwrap() = Some(writer);
+    }
+    Ok(child)
 }
 
 /// Start the runtime detached from us (its own process group, a console of its

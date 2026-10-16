@@ -97,7 +97,7 @@ function _handle_pluto_event(event)::Nothing
         nb = event.notebook
         if sess === nothing || !haskey(sess.notebooks, nb.notebook_id)
             forget_topology!(nb.notebook_id)
-            lock(() -> (delete!(_WATCHED, nb.notebook_id); delete!(_EXITED, nb.notebook_id)), _NOTIFY_LOCK)
+            lock(() -> (delete!(_WATCHED, nb.notebook_id); delete!(_EXITED, nb.notebook_id); delete!(_INTERRUPTED, nb.notebook_id)), _NOTIFY_LOCK)
             _notify_notebook!("notebook_shut_down", nb)
         else
             notify_state!(nb)
@@ -113,6 +113,8 @@ const _WATCHED = Dict{UUID,Any}()
 # The cells that were running when a notebook's process ended by itself, until
 # it gets a new one.
 const _EXITED = Dict{UUID,Vector{String}}()
+# The process an interrupt was sent to (`interrupt!`), which may end it.
+const _INTERRUPTED = Dict{UUID,Any}()
 
 "Watch the notebook's process, once it has one and if no one watches it yet."
 function watch_worker!(session, nb)::Nothing
@@ -136,6 +138,29 @@ function watch_worker!(session, nb)::Nothing
     return nothing
 end
 
+"""
+Interrupt the notebook's run, as Pluto's Stop does. A cell that doesn't stop
+(one long `sleep`) is ended with its process, Pluto pressing Ctrl+C until it
+does; that isn't the process ending by itself (`worker_exited!`), and the next
+run starts a new one.
+"""
+function interrupt!(session, nb)
+    task = get(Pluto.WorkspaceManager.active_workspaces, nb.notebook_id, nothing)
+    (task === nothing || !istaskdone(task) || istaskfailed(task)) && return Dict{String,Any}("interrupted" => false)
+    workspace = fetch(task)
+    # As Pluto's Stop button (`interrupt_all`): once, and only while a cell runs. The cells
+    # queued after it are skipped.
+    (nb.wants_to_interrupt || isready(workspace.dowork_token) || !any(c -> c.running, nb.cells)) &&
+        return Dict{String,Any}("interrupted" => false)
+    nb.wants_to_interrupt = true
+    lock(() -> _INTERRUPTED[nb.notebook_id] = workspace.worker, _NOTIFY_LOCK)
+    interrupted = Pluto.WorkspaceManager.interrupt_workspace((session, nb); verbose=false)
+    # Its process lived through it: a later end of it is a crash again.
+    Pluto.Malt.isrunning(workspace.worker) &&
+        lock(() -> get(_INTERRUPTED, nb.notebook_id, nothing) === workspace.worker && delete!(_INTERRUPTED, nb.notebook_id), _NOTIFY_LOCK)
+    Dict{String,Any}("interrupted" => interrupted)
+end
+
 "The cells that were running when the notebook's process ended by itself; nothing while it has one."
 function exited_cells(nb)
     nb.process_status === Pluto.ProcessStatus.no_process || return nothing
@@ -145,6 +170,8 @@ end
 function worker_exited!(session, nb, workspace)::Nothing
     # Pluto marks a process it stops (shutdown, restart) discarded first.
     workspace.discarded && return
+    # Ended by an interrupt: as after Pluto's Stop, the next run starts a new process.
+    lock(() -> pop!(_INTERRUPTED, nb.notebook_id, nothing), _NOTIFY_LOCK) === workspace.worker && return
     get(session.notebooks, nb.notebook_id, nothing) === nb || return
     running = [string(id) for id in nb.cell_order if nb.cells_dict[id].running]
     lock(() -> _EXITED[nb.notebook_id] = running, _NOTIFY_LOCK)

@@ -78,6 +78,8 @@ struct Engine {
     made: Mutex<u32>,
     /// The `timeout` of each waited `run`.
     waits: Mutex<Vec<f64>>,
+    /// How many runs went on after their `run` answered: each is named `run-<n>` in its reply.
+    watched: Mutex<u32>,
     /// The next `open`, `new` or `allow_execution` waits here before it answers, like a cold
     /// first open compiling; while an `allow_execution` waits, so does a `snapshot`, as the
     /// runtime answers nothing else while it starts the notebook.
@@ -312,6 +314,12 @@ impl Engine {
                     reply["completed"] = json!(finishing);
                     reply["timed_out"] = json!(lingering);
                 }
+                // A run that goes on is watched, as the runtime's are.
+                if (params["wait"] != true && !cells.is_empty()) || !lingering.is_empty() {
+                    let mut watched = self.watched.lock().unwrap();
+                    *watched += 1;
+                    reply["run"] = json!(format!("run-{watched}"));
+                }
                 Ok(reply)
             }
             "allow_execution" => {
@@ -326,8 +334,17 @@ impl Engine {
                 Ok(json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } }))
             }
             "render_text" => Ok(json!({ "text": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("table") } { json!("n\tmean\n3\t2.5") } else { Value::Null } })),
-            "render_png" => Ok(json!({ "png": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("plot") } { json!("iVBORw==") } else { Value::Null }, "mime": "text/plain" })),
+            "render_png" => Ok({
+                let at = find(nb, &params["cell_id"]);
+                let code = &nb.cells[at].code;
+                if code.contains("widget") {
+                    json!({ "png": "iVBORw==", "mime": "text/html", "source": "embedded image" })
+                } else {
+                    json!({ "png": if code.contains("plot") { json!("iVBORw==") } else { Value::Null }, "mime": "text/plain" })
+                }
+            }),
             "validate" => Ok(json!({ "errors": if params["code"].as_str().unwrap().contains('\n') { json!([{ "type": "pluto_multi_expression" }]) } else { json!([]) } })),
+            "interrupt" => Ok(json!({ "interrupted": true })),
             other => Err(format!("ArgumentError: unknown_method::Unknown adapter method: '{other}'")),
         }
     }
@@ -412,7 +429,7 @@ fn cell<'a>(event: &'a Value, notebook: &str, cell: &str) -> &'a Value {
 fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
     let s = setup();
     let (first, rx) = s.notebooks.subscribe().unwrap();
-    assert_eq!(first, r#"{"asks":[],"cells":{},"idle_stopped":[],"notebooks":[]}"#, "the current state, on connect");
+    assert_eq!(first, r#"{"asks":[],"cells":{},"engine_ended":[],"idle_stopped":[],"notebooks":[]}"#, "the current state, on connect");
 
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 6"), (Y, "y = x * 7")]);
     s.notebooks.publish();
@@ -1166,6 +1183,16 @@ fn view_cell_output_sends_the_png_the_engine_renders() {
     assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y}: its output (text/plain) has no PNG rendering; read_cell shows it as text")));
     s.engine.with(NB, |nb| nb.cells[0].errored = true);
     assert_eq!(view(X).err(), Some(format!("ArgumentError: no_image::Cell {X} errored; read_cell shows the error")));
+}
+
+#[test]
+fn view_cell_output_says_when_the_picture_came_from_the_html() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "widget(fig)")]);
+    match s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": X }), &Folder::Process, Instant::now()).unwrap() {
+        Reply::Image { meta, .. } => assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/html", "png_bytes": 4, "source": "embedded image" })),
+        Reply::Json(_) => panic!("no image"),
+    }
 }
 
 #[test]
@@ -2088,4 +2115,91 @@ fn a_new_notebook_without_a_path_is_of_the_sessions_kind() {
     s.notebooks.bind("r-session", "");
     s.call("r-session", "new_notebook", json!({})).unwrap();
     assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|call| *call == "new").count(), 4);
+}
+
+#[test]
+fn a_stop_interrupts_the_sessions_own_run() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
+    let interrupts = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "interrupt").count();
+    let running = |busy: bool| s.engine.with(NB, |nb| nb.cells[0].running = busy);
+
+    // The cancelled call is known while it is under way.
+    assert_eq!(s.notebooks.cancelled("7", &json!(5)), None, "no call under way");
+    {
+        let _call = s.notebooks.running("7", &json!(5), NB, false);
+        assert_eq!(s.notebooks.cancelled("8", &json!(5)), None, "another session's call of the same id");
+        assert_eq!(s.notebooks.cancelled("7", &json!(6)), None, "another call");
+        assert_eq!(s.notebooks.cancelled("7", &json!(5)), Some((NB.to_owned(), false)));
+    }
+    assert_eq!(s.notebooks.cancelled("7", &json!(5)), None, "the call ended");
+
+    // A call that runs code is interrupted.
+    s.notebooks.stop_for("7", NB, true);
+    assert_eq!(interrupts(), 1);
+
+    // Any other call (reading the cell, say): only while a run this session started is going.
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 1, "the user's own run, or another session's, is left alone");
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    running(true);
+    s.notebooks.stop_for("8", NB, false);
+    assert_eq!(interrupts(), 1, "not another session's Stop");
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "the run session 7 started");
+    running(false);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "once it has ended");
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "and it is forgotten then: this run isn't the session's");
+
+    // A run that ended with no Stop between: a later run of the same cell (the user's, or a
+    // reactive one) isn't the session's.
+    running(false);
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-2", "cells": [X] } }));
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "the user's later run of a cell the session ran");
+    // A run that ends with its cell queued again by a later run (Pluto's own Restart runs every
+    // cell): the later run isn't the session's.
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-3", "cells": [] } }));
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "a restart's run of a cell the session ran");
+    // A run that ended before the tool that started it recorded it.
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-4", "cells": [X] } }));
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "a quick run that already ended");
+    // Its process ended, or the app restarted it: no run of the session's goes on.
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.notified(&json!({ "method": "process_exited", "params": { "notebook_id": NB, "running": [X] } }));
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "after the process ended");
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.restart(NB).unwrap();
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "after the app's Restart");
+    // Nor is a waited run that finished within the wait.
+    running(false);
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "a waited run that finished");
+}
+
+#[test]
+fn the_apps_stop_looks_at_the_notebooks_with_the_sessions_runs() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
+    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new());
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!(s.notebooks.session_runs("7"), [NB]);
+    assert_eq!(s.notebooks.session_runs("8"), Vec::<String>::new(), "another session's");
+    assert_eq!(s.notebooks.session_runs(""), Vec::<String>::new(), "no session");
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [] } }));
+    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new(), "the run ended, its cell queued again or not");
 }

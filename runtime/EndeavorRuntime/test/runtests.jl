@@ -180,6 +180,36 @@ end
         @test startswith(err, "no_image::") && occursin("safe preview", err)                   # an SVG needs the worker
     end
 
+    @testset "render_png reads a picture embedded in HTML" begin
+        # A widget's static render (as Masque.jl shows a figure): HTML holding a PNG.
+        png = vcat(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], zeros(UInt8, 6_000))
+        icon = vcat(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], zeros(UInt8, 100))
+        widget = "<div><img src='data:image/png;base64,$(base64encode(icon))'><img draggable=\"false\" src=\"data:image/png;base64,$(base64encode(png))\" style=\"width:100%\"><script>mount()</script></div>"
+        session, nb, cells = make_session_with_notebook("HTML(widget)", "HTML(icon)", "md\"# hi\"")
+        cells[1].output = Pluto.CellOutput(; body=widget, mime=MIME("text/html"))
+        cells[2].output = Pluto.CellOutput(; body="<img src='data:image/png;base64,$(base64encode(icon))'> n = 3", mime=MIME("text/html"))
+        cells[3].output = Pluto.CellOutput(; body="<h1>hi</h1>", mime=MIME("text/html"))
+        # Without a worker (safe preview) the stored HTML is enough.
+        rendered = EndeavorRuntime.render_png(session, nb, cells[1])
+        @test base64decode(rendered["png"]) == png && rendered["source"] == "embedded image"
+        @test occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[1]))
+        # An icon isn't the output's picture.
+        @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[2]))
+        @test_throws ArgumentError EndeavorRuntime.render_png(session, nb, cells[2])
+        @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[3]))
+        # A large data URI that isn't a PNG gets neither the pointer nor an image.
+        cells[3].output = Pluto.CellOutput(; body="<img src='data:image/png;base64,$(base64encode(zeros(UInt8, 6_000)))'>", mime=MIME("text/html"))
+        @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[3]))
+        @test_throws ArgumentError EndeavorRuntime.render_png(session, nb, cells[3])
+        # With a worker: a value with no PNG form falls back to the embedded one.
+        session, nb, cells = make_session_with_notebook("HTML(\"$(escape_string(widget))\")", "md\"# hi\"")
+        Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
+        @test cells[1].output.mime == MIME("text/html")
+        rendered = EndeavorRuntime.render_png(session, nb, cells[1])
+        @test base64decode(rendered["png"]) == png && rendered["source"] == "embedded image"
+        @test EndeavorRuntime.render_png(session, nb, cells[2]) == Dict("png" => nothing, "mime" => "text/html")
+    end
+
     @testset "render_text shows rich outputs as text" begin
         session, nb, cells = make_session_with_notebook(
             "Dict(\"mean\" => 2.5)",
@@ -521,9 +551,9 @@ end
             @test result("run", Dict("notebook_id" => nid, "cells" => [Y, z], "wait" => true, "timeout" => 60)) ==
                   Dict("accepted" => true, "process_status" => "ready", "completed" => [Y, z], "timed_out" => [])
             @test nb.cells_dict[UUID(z)].output.body == "49"
-            @test result("run", Dict("notebook_id" => nid, "cells" => [X], "wait" => false, "timeout" => 60)) ==
-                  Dict("accepted" => true, "process_status" => "ready")
-            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [X])
+            started = result("run", Dict("notebook_id" => nid, "cells" => [X], "wait" => false, "timeout" => 60))
+            @test started == Dict("accepted" => true, "process_status" => "ready", "run" => started["run"])
+            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "run" => started["run"], "cells" => [X])
 
             # A waited run that outlasts `timeout` returns when it passes, with the cell that
             # finished and the dependent still running. The run goes on, watched: a
@@ -531,15 +561,16 @@ end
             gate = joinpath(mktempdir(), "release")
             insert(code, index) = only(result("apply", ops(Dict("op" => "insert", "code" => code, "folded" => false, "index" => index)))["inserted"])
             w, slow = insert("w = 5", 3), insert("slow = (while !isfile($(repr(gate))); sleep(0.05); end; w)", 4)
+            local capped
             try
                 capped = result("run", Dict("notebook_id" => nid, "cells" => [w], "wait" => true, "timeout" => 8))
-                @test capped == Dict("accepted" => true, "process_status" => "ready", "completed" => [w], "timed_out" => [slow])
+                @test capped == Dict("accepted" => true, "process_status" => "ready", "completed" => [w], "timed_out" => [slow], "run" => capped["run"])
                 @test nb.cells_dict[UUID(w)].output.body == "5"
                 @test nb.cells_dict[UUID(slow)].running || nb.cells_dict[UUID(slow)].queued
             finally
                 touch(gate)
             end
-            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [w])
+            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "run" => capped["run"], "cells" => [w])
             @test nb.cells_dict[UUID(slow)].output.body == "5"
             @test !any(c -> c["running"] || c["queued"], result("snapshot", Dict("notebook_id" => nid))["cells"])
             result("apply", ops(Dict("op" => "delete", "cell_id" => slow), Dict("op" => "delete", "cell_id" => w)))
@@ -551,9 +582,9 @@ end
             try wait(failing) catch end
             marked = nb.cells_dict[UUID(X)]
             marked.queued = true
-            EndeavorRuntime._watch_run!(EndeavorRuntime.standalone_session(), nb, [marked], failing)
+            EndeavorRuntime._watch_run!(EndeavorRuntime.standalone_session(), nb, [marked], failing, "failed-run")
             @test !marked.queued
-            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "cells" => [X])
+            @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "run" => "failed-run", "cells" => [X])
 
             # Move and delete, then the cleanup run that follows a delete.
             result("apply", ops(Dict("op" => "move", "cell_id" => z, "index" => 0)))

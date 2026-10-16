@@ -95,11 +95,19 @@ stdio: an engine's stdout and stderr are the runtime log, which Pluto,
 packages and notebook code all print to, so a stdio protocol would need a
 pipe of its own, and every adapter already serves HTTP (the engine's UI). The core opens the
 stream once the engine answers and reopens it if it drops, rereading every
-notebook when it does. The core keeps one `AdapterProcess` per engine kind;
+notebook when it does. An engine other than Pluto's that stops answering
+(R's) is dropped, and the next R notebook opened starts it again. Its
+notebooks are kept as closed, with why it ended, until R reports one open
+again (an open's reply, or a snapshot that lists it) or the app's
+`stop_notebook` dismisses it: how
+its process ended and the last lines it wrote to stderr, which the core
+passes on to the runtime log and keeps. A call that names one of them answers
+`notebook_closed` with that reason, and `/endeavor/events` lists them under
+`engine_ended` (`{path, language, why}`). The core keeps one `AdapterProcess` per engine kind;
 what differs per kind (launch command, detection, page adapter, skills) is
 the small `Backend` enum in `crates/wire/src/backend.rs`.
 
-Nothing calls `interrupt` yet.
+The core calls `interrupt` for the user's Stop (see the Stop bullet below).
 
 Core → engine:
 
@@ -111,7 +119,7 @@ Core → engine:
 | `snapshot(nid)` | path, order, process status, whether execution is allowed, whether it's in safe preview, per cell: code, folded, running, queued, errored, last run time, runtime, output summary or structured error, whether the tools hide it (boilerplate such as Pluto's package cells) and whether it's markdown. Without `nid`, every open notebook, in the engine's order |
 | `graph(nid, fresh?, refresh?, edges?, packages?)` | per cell, in the engine's order: definitions, function names, references, as of the engine's last analysis (`fresh`: of the notebook as it is now, not kept); with `edges`, each cell's direct upstream and downstream cells; with `packages`, the packages each cell loads; the runnable cells in run order, and the rest |
 | `apply(nid, ops)` | ops: set code (refused, before any op applies, if a cell's code isn't the `expected` code), insert at an index, delete, move to an index, fold. The engine saves the file and updates its own UI. The inserted cells' ids |
-| `run(nid, cells, wait, timeout)` | accepted, or not because gated (with the process status). The run always starts in the background and is watched until its task ends, with no time limit (only the notebook's process ending or leaving the session cuts it short): a failed task releases the cells marked queued by hand, and `run_finished` follows. With `wait`, the reply is read when the run is over or after `timeout` seconds, whichever is first: the process status, which cells finished, `timed_out` (the notebook's cells still running or queued, empty when the run is over) and, if the process ended by itself, `exited`. A run that outlasts `timeout` goes on and sends `run_finished` as an unwaited one does. `timeout` is ignored without `wait` |
+| `run(nid, cells, wait, timeout)` | accepted, or not because gated (with the process status). The run always starts in the background and is watched until its task ends, with no time limit (only the notebook's process ending or leaving the session cuts it short): a failed task releases the cells marked queued by hand, and `run_finished` follows. With `wait`, the reply is read when the run is over or after `timeout` seconds, whichever is first: the process status, which cells finished, `timed_out` (the notebook's cells still running or queued, empty when the run is over) and, if the process ended by itself, `exited`. A run that goes on (unwaited, or outlasting `timeout`) is named by the reply's `run` id, which its `run_finished` carries. `timeout` is ignored without `wait` |
 | `interrupt(nid)` | — |
 | `restart(nid, timeout)` | the engine's own restart: a new process, then every cell runs (refused in safe preview) |
 | `move(nid, path)` | the file moved to `path` (checked by the core), and its new path |
@@ -127,8 +135,9 @@ Engine → core, as notifications, each naming its notebook:
 - `notebook_opened(nid, path)`; `notebook_shut_down(nid)`, once it has left
   the engine (a restart in place isn't one); `file_saved(nid)`;
   `execution_done(nid)`, when a run finishes; `topology_changed(nid)`, when
-  the dependency graph changed; `run_finished(nid, cells)`, the cells a run
-  finished that the core didn't wait for or stopped waiting for.
+  the dependency graph changed; `run_finished(nid, run, cells)`, a run the
+  core didn't wait for or stopped waiting for ended, with the cells it
+  finished (a cell can end it unfinished, queued again by a restart's run).
 
 Notifications say when to look; the core reads a fresh `snapshot` and `graph`
 each time it tells the app anything, coalescing a burst of notifications
@@ -188,6 +197,25 @@ and 3), and for the app:
   doesn't time out waiting for a response to start. In Manual the app adds
   `edits: true`, and the core holds a call that changes the notebook the same
   way, whatever the run policy.
+- When the agent cancels a call on a notebook (the user pressed Stop), it
+  interrupts the notebook's run, as Pluto's own Stop does, if that call was
+  running code or a run the same session started there is still going. The
+  cells end interrupted; a run only the user or another session started is
+  left alone. A session's run stops counting as its own when it ends
+  (`run_finished`), when the process ends, or on a Restart, even if a later
+  run (a restart's) is running its cells. A Stop while no call is under way (the agent was writing) sends
+  the runtime nothing from the agent, so the app also sends
+  `endeavor/stop_session` `{owner}` on Stop: it interrupts the session's runs
+  that are still going, by the same rule, and answers at once with the
+  notebooks it looks at. A core from before it answers that the method is
+  unknown, and its runs go on, as they did. The
+  interrupt lands 2 s or more after Stop: Pluto first waits 2 s for the run to
+  end by itself. As with Pluto's Stop, a cell that starts in that time (one
+  queued behind the session's) is the one interrupted. A cell that doesn't stop for
+  Ctrl+C (one long `sleep`) ends with its notebook's process, again as with
+  Pluto's Stop: the notebook then waits for a restart, and this isn't reported
+  as a crash (`exited`). A process that lives through the interrupt and ends
+  later is reported as a crash, as before.
 - It reports in `/endeavor/events` the app build it was started by (`build`), so the
   app can tell a runtime from an older build and hold back what that runtime
   can't do.

@@ -32,6 +32,8 @@ const INSTALL_LIMIT: Duration = Duration::from_secs(10 * 60);
 const ADD_LIMIT: Duration = Duration::from_secs(45 * 60);
 /// How long juliaup may take to list or remove a channel.
 const LIST_LIMIT: Duration = Duration::from_secs(60);
+/// The pause before `juliaup add` is tried once more.
+const RETRY_PAUSE: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 5 });
 
 /// The `juliaup` program, if this computer has one: where juliaup's installer
 /// puts it, else on the PATH (on Windows, also the Store app's alias, which the
@@ -90,11 +92,25 @@ pub fn channel_julia(juliaup: &Path, version: &str) -> Option<Channel> {
 }
 
 /// Add the channel `version` to juliaup, which downloads that Julia. `progress` hears how long it
-/// has taken so far. juliaup counts adding a channel it already has as done.
+/// has taken so far. juliaup counts adding a channel it already has as done. A failure that wasn't
+/// the time limit is tried once more: on Windows a first install failed once with "Access is
+/// denied", and a retry after clearing juliaup's folder worked (EndeavorMCP #132). A retry in the
+/// same folder is likely to work too, since juliaup leaves no partial download, but hasn't been seen.
+/// The folder is the person's, so it is never cleared here.
 pub fn add(juliaup: &Path, version: &str, progress: &mut dyn FnMut(String)) -> Result<Channel, String> {
     let what = format!("Downloading Julia {version} with juliaup");
     progress(format!("{what}…"));
-    let added = run(Command::new(juliaup).args(["add", version]), ADD_LIMIT, &mut |waited| progress(format!("{what}… {} so far", minutes(waited))));
+    // The second try's ticks say it's the second ("… trying once more, 15 s so far").
+    let add = |again: &str, progress: &mut dyn FnMut(String)| run(Command::new(juliaup).args(["add", version]), ADD_LIMIT, &mut |waited| progress(format!("{what}…{again} {} so far", minutes(waited))));
+    let mut added = add("", progress);
+    if let Err(Failed::Error(first)) = &added
+        && channel_julia(juliaup, version).is_none()
+    {
+        eprintln!("juliaup couldn't install Julia {version} ({first}); trying once more.");
+        progress(format!("{what}… trying once more"));
+        std::thread::sleep(RETRY_PAUSE);
+        added = add(" trying once more,", progress);
+    }
     channel_julia(juliaup, version).ok_or_else(|| match added {
         Err(why) => format!("juliaup couldn't install Julia {version} ({why})."),
         Ok(_) => format!("juliaup said it installed Julia {version}, but doesn't list it."),
@@ -218,9 +234,31 @@ fn run(command: &mut Command, limit: Duration, tick: &mut dyn FnMut(Duration)) -
     if status.success() {
         return Ok(stdout);
     }
-    // Its last words, from stderr if it wrote any (winget writes to stdout).
+    // All of what it said goes to the log; the error is its last words, from stderr if it wrote any
+    // (winget writes to stdout).
+    let program = Path::new(command.get_program()).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let said: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    // The last 40 lines: juliaup's error chain comes at the end.
+    for line in &said[said.len().saturating_sub(40)..] {
+        eprintln!("{program}: {line}");
+    }
     let last = |text: &str| text.lines().map(str::trim).rfind(|l| !l.is_empty()).map(str::to_owned);
-    Err(Failed::Error(last(stderr.as_str()).or_else(|| last(stdout.as_str())).unwrap_or_else(|| status.to_string())))
+    Err(Failed::Error(last_words(&stderr).or_else(|| last(stdout.as_str())).unwrap_or_else(|| status.to_string())))
+}
+
+/// What a failed command said last. juliaup's errors end in a chain ("Error: …", "Caused by:", then
+/// "0: <the step that failed>", …, "N: <the operating system's error>"): its last line alone ("1: Access
+/// is denied. (os error 5)") doesn't say which step failed, so the step that failed goes first.
+fn last_words(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let chain = lines.iter().position(|l| *l == "Caused by:").map(|at| &lines[at + 1..]).unwrap_or_default();
+    let cause = |line: &str| line.split_once(": ").filter(|(n, _)| n.parse::<u32>().is_ok()).map(|(_, text)| text.to_owned());
+    let causes: Vec<String> = chain.iter().filter_map(|l| cause(l)).collect();
+    match causes.as_slice() {
+        [] => lines.last().map(|l| l.to_string()),
+        [only] => Some(only.clone()),
+        [.., step, why] => Some(format!("{}: {why}", step.trim_end_matches('.'))),
+    }
 }
 
 /// "4 min", or "30 s" under a minute.
@@ -260,5 +298,60 @@ mod tests {
         assert_eq!(channel(&as_default, "1.12.6"), julia(true));
         assert_eq!(channel(r#"{"DefaultChannel":null,"OtherChannels":[]}"#, "1.12.6"), None, "a juliaup with no channels yet");
         assert_eq!(channel("not json", "1.12.6"), None);
+    }
+
+    #[test]
+    fn a_juliaup_error_says_which_step_failed() {
+        let error = "    Checking for new Julia versions\n  Installing Julia 1.12.6+0.x64.w64.mingw32\nError: Failed to extract downloaded file from url `https://example.org/julia.tar.gz`.\n\nCaused by:\n    0: Failed to move extracted archive to 'C:\\d\\juliaup\\julia-temp-3KkKKt'. Previous installation has been restored.\n    1: Access is denied. (os error 5)\n";
+        assert_eq!(last_words(error).unwrap(), r"Failed to move extracted archive to 'C:\d\juliaup\julia-temp-3KkKKt'. Previous installation has been restored: Access is denied. (os error 5)");
+        // anyhow numbers the causes only when there are two or more.
+        assert_eq!(last_words("Error: no such channel\n\nCaused by:\n    The channel 9.9 isn't known\n").unwrap(), "The channel 9.9 isn't known");
+        let three = "Error: Failed to install\n\nCaused by:\n    0: Failed to extract\n    1: Failed to move\n    2: Access is denied. (os error 5)\n";
+        assert_eq!(last_words(three).unwrap(), "Failed to move: Access is denied. (os error 5)", "the innermost step, not the first");
+        assert_eq!(last_words("Error: the configuration file is locked\n").unwrap(), "Error: the configuration file is locked", "no chain: the last line");
+        assert_eq!(last_words("\n"), None);
+    }
+
+    /// A stand-in juliaup whose `add` fails as many times as `fails` says, with Windows' error.
+    #[cfg(unix)]
+    fn failing_juliaup(name: &str, fails: u32) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("endeavor-juliaup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fails"), fails.to_string()).unwrap();
+        let script = r#"#!/bin/sh
+dir=$(dirname "$0")
+case "$1" in
+api) if [ -e "$dir/added" ]; then printf '{"DefaultChannel":{"Name":"1.12.6","File":"%s"},"OtherChannels":[]}' "$0"; else echo '{"DefaultChannel":null,"OtherChannels":[]}'; fi ;;
+add) n=$(cat "$dir/fails"); echo $((n - 1)) > "$dir/fails"
+     if [ "$n" -gt 0 ]; then echo "1: Access is denied. (os error 5)" >&2; exit 1; fi
+     touch "$dir/added" ;;
+esac
+"#;
+        let juliaup = dir.join("juliaup");
+        std::fs::write(&juliaup, script).unwrap();
+        std::fs::set_permissions(&juliaup, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        juliaup
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_add_that_fails_once_is_tried_again() {
+        let juliaup = failing_juliaup("once", 1);
+        let mut said = Vec::new();
+        let added = add(&juliaup, "1.12.6", &mut |line| said.push(line));
+        assert_eq!(added, Ok(Channel { julia: juliaup.clone(), default: true }));
+        assert!(said.iter().any(|line| line.ends_with("trying once more")), "{said:?}");
+        let _ = std::fs::remove_dir_all(juliaup.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_add_that_fails_twice_says_why() {
+        let juliaup = failing_juliaup("twice", 2);
+        let added = add(&juliaup, "1.12.6", &mut |_| {});
+        assert_eq!(added, Err("juliaup couldn't install Julia 1.12.6 (1: Access is denied. (os error 5)).".to_owned()));
+        assert_eq!(std::fs::read_to_string(juliaup.with_file_name("fails")).unwrap().trim(), "0", "tried twice, not more");
+        let _ = std::fs::remove_dir_all(juliaup.parent().unwrap());
     }
 }

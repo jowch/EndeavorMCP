@@ -498,6 +498,95 @@ fn the_runtime_end_to_end() {
         rt.call("endeavor/stop_notebook", json!({ "path": cards })).unwrap();
     });
 
+    step("the agent's Stop interrupts the cell its call is running", || {
+        // Add a cell with `code` after the last one, run it waiting, and cancel the call 3 s in,
+        // as the agent's client does when the user presses Stop: the cell, and how long the call took.
+        let stop_during = |rt: &mut Runtime, code: &str| {
+            let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+            let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+            rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+            let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": code, "after_cell_id": last }));
+            let id = rt.id();
+            let run = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "execute_cell", "arguments": { "notebook_id": previewed, "cell_id": added["cell_id"], "wait_for_completion": true } } }).to_string();
+            let cancel = json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": id, "reason": "The user stopped the turn" } });
+            let started = Instant::now();
+            let mut call = rt.helper.connect();
+            call.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+            let headers = "X-Endeavor-Session: 2\r\nX-Endeavor-Host: lab\r\n";
+            write!(call, "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\n\r\n{run}", rt.token, run.len()).unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            assert_eq!(rt.post("/mcp", SERVER, &cancel.to_string()).0, "HTTP/1.1 202 Accepted");
+            let mut reply = String::new();
+            call.read_to_string(&mut reply).unwrap();
+            (added["cell_id"].clone(), last, started.elapsed())
+        };
+
+        // One long `sleep` doesn't stop for Ctrl+C: Pluto ends the notebook's process, as its own
+        // Stop does. That isn't a crash: the notebook waits for a restart, without `exited`.
+        let (slow, last, took) = stop_during(&mut rt, "slow = (sleep(600); 1)");
+        assert!(took < Duration::from_secs(30), "the call ended {:.1} s after it began", took.as_secs_f64());
+        let listed = rt.notebooks(SERVER).into_iter().find(|nb| nb["notebook_id"] == previewed.as_str()).unwrap();
+        assert_eq!((&listed["exited"], &listed["execution_allowed"]), (&Value::Null, &json!(false)), "{listed}");
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+        rt.call("endeavor/restart_notebook", json!({ "notebook_id": previewed })).unwrap();
+        let ran = rt.ok(SERVER, "execute_cell", json!({ "notebook_id": previewed, "cell_id": last, "wait_for_completion": true }));
+        assert_eq!(ran["execution"]["status"], "completed", "{ran}");
+
+        // A cell that stops for Ctrl+C ends interrupted, and its process lives on. The next step
+        // ends that process, which is reported as a crash again.
+        let (slow, _, took) = stop_during(&mut rt, "slow = (for _ in 1:600; sleep(1); end; 1)");
+        assert!(took < Duration::from_secs(20), "the call ended {:.1} s after it began", took.as_secs_f64());
+        let read = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+        assert_eq!(read["errored"], true, "{read}");
+        assert!(read["output"].as_str().is_some_and(|output| output.contains("InterruptException")), "{read}");
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+
+        // Stop in the app while no call is under way: a run the session started without waiting ends.
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "slow = (for _ in 1:600; sleep(1); end; 1)", "after_cell_id": last, "run_after": true }));
+        let slow = added["cell_id"].clone();
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(rt.call("endeavor/stop_session", json!({ "owner": "8" })).unwrap(), json!({ "notebooks": [] }), "another session's Stop");
+        let started = Instant::now();
+        assert_eq!(rt.call("endeavor/stop_session", json!({ "owner": "2" })).unwrap(), json!({ "notebooks": [previewed] }));
+        let read = loop {
+            let read = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+            if read["running"] == false && read["queued"] == false {
+                break read;
+            }
+            assert!(started.elapsed() < Duration::from_secs(20), "still running {:.1} s after Stop: {read}", started.elapsed().as_secs_f64());
+            std::thread::sleep(Duration::from_millis(500));
+        };
+        assert!(read["output"].as_str().is_some_and(|output| output.contains("InterruptException")), "{read}");
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+
+        // After a Restart, the cell the session started runs again, but as the restart's run: the
+        // session's Stop leaves it alone.
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "slow = (for _ in 1:15; sleep(1); end; 1)", "after_cell_id": last, "run_after": true }));
+        let slow = added["cell_id"].clone();
+        std::thread::sleep(Duration::from_secs(2));
+        rt.call("endeavor/restart_notebook", json!({ "notebook_id": previewed })).unwrap();
+        let started = Instant::now();
+        let running = |rt: &mut Runtime| rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": slow }))["running"] == true;
+        while !running(&mut rt) {
+            assert!(started.elapsed() < Duration::from_secs(60), "the restart's run didn't reach the cell");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert_eq!(rt.call("endeavor/stop_session", json!({ "owner": "2" })).unwrap(), json!({ "notebooks": [] }), "the restart's run");
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(running(&mut rt), "the restart's run of the cell goes on");
+        while running(&mut rt) {
+            assert!(started.elapsed() < Duration::from_secs(90), "the cell didn't finish");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+    });
+
     step("a notebook's own Julia ending by itself ends the run waiting for it", || {
         let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
         let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();

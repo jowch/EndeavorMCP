@@ -7,8 +7,9 @@
 # `data: {"method", "params"}` line each: notebook_opened, notebook_shut_down
 # (it left the session), file_saved, execution_done, cell_state (every cell's
 # code and run state: Pluto's hook doesn't say which cell changed),
-# topology_changed, run_finished (the cells an unwaited run finished), and
-# process_exited (its own process ended by itself; the cells that were running).
+# topology_changed, run_finished (an unwaited run ended: its `run` id and the
+# cells it finished), and process_exited (its own process ended by itself; the
+# cells that were running).
 #
 # Each notification carries `seq`, a counter that `apply` also advances; its
 # reply and `snapshot`'s carry it too. A snapshot or notification numbered
@@ -126,13 +127,23 @@ function _release_cells!(nb, cells)
 end
 
 # What happens when a run ends that no caller is waiting for: a failed task
-# releases the cells, and `run_finished` says which of them finished. Waits as
-# long as the run takes, which only the notebook's process ending or leaving
-# the session cuts short.
-function _watch_run!(session, nb, cells, run)
+# releases the cells, and `run_finished` says which run (`id`, the `run` that
+# `run_cells!` answered) ended and which of its cells finished. A cell can end
+# the run unfinished, queued again by a later run (a restart's). Waits as long
+# as the run takes, which only the notebook's process ending or leaving the
+# session cuts short.
+function _watch_run!(session, nb, cells, run, id)
     _wait_over(() -> _run_over(session, nb, run), Inf)
     istaskfailed(run) && _release_cells!(nb, cells)
-    notify!("run_finished", Dict{String,Any}("notebook_id" => string(nb.notebook_id), "cells" => [string(c.cell_id) for c in cells if !_unfinished(c)]))
+    notify!("run_finished", Dict{String,Any}("notebook_id" => string(nb.notebook_id), "run" => id, "cells" => [string(c.cell_id) for c in cells if !_unfinished(c)]))
+    return nothing
+end
+
+# Watch a run that goes on (`_watch_run!`); its id goes in the reply as `run`.
+function _watch!(result, session, nb, cells, run)
+    id = string(uuid4())
+    result["run"] = id
+    @async _watch_run!(session, nb, cells, run, id)
     return nothing
 end
 
@@ -340,8 +351,8 @@ end
 # the reply says which cells finished within `timeout` seconds, which cells of
 # the notebook were still running or queued then, and `exited` the cells that
 # were running if its process ended by itself meanwhile. A run that goes on,
-# waited for or not, is watched (`_watch_run!`): a `run_finished` notification
-# says which cells finished when it ends.
+# waited for or not, is watched (`_watch_run!`): the reply's `run` names it,
+# and a `run_finished` notification with that `run` says when it ends.
 function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
     accepted = Pluto.will_run_code(nb)
     # Pluto marks cells queued only inside its run task, after package sync;
@@ -362,9 +373,9 @@ function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
         end
         result["completed"] = [string(c.cell_id) for c in cells if !_unfinished(c)]
         result["timed_out"] = [string(c.cell_id) for c in (over ? cells : nb.cells) if _unfinished(c)]
-        over || @async _watch_run!(session, nb, cells, run)
+        over || _watch!(result, session, nb, cells, run)
     elseif accepted && !isempty(cells)
-        @async _watch_run!(session, nb, cells, run)
+        _watch!(result, session, nb, cells, run)
     end
     _notify_browser(session, nb)
     return result
@@ -448,8 +459,10 @@ function new_notebook(session, path, folder)
 end
 
 function render_png(session, nb, cell)
-    png = _cell_png(session, nb, cell)
-    return Dict{String,Any}("png" => png === nothing ? nothing : base64encode(png), "mime" => string(cell.output.mime))
+    png, source = _cell_png(session, nb, cell)
+    rendered = Dict{String,Any}("png" => png === nothing ? nothing : base64encode(png), "mime" => string(cell.output.mime))
+    png !== nothing && source != "value" && (rendered["source"] = source)
+    return rendered
 end
 
 render_text(session, nb, cell) = Dict{String,Any}("text" => _cell_text(session, nb, cell))
@@ -471,7 +484,7 @@ function adapter_call(session, method::AbstractString, params)
     method == "shutdown" && return shutdown_notebook!(session, nb)
     method == "apply" && return apply!(session, nb, params["ops"])
     method == "run" && return run_cells!(session, nb, [_adapter_cell(nb, c) for c in params["cells"]]; wait=params["wait"], timeout=params["timeout"])
-    method == "interrupt" && return Dict{String,Any}("interrupted" => Pluto.WorkspaceManager.interrupt_workspace((session, nb); verbose=false))
+    method == "interrupt" && return interrupt!(session, nb)
     method == "restart" && return restart!(session, nb, params["timeout"])
     method == "allow_execution" && return allow_execution!(session, nb, params["run"], params["timeout"])
     method == "move" && return move!(session, nb, params["path"])
