@@ -193,8 +193,10 @@ Next:
   it, with Ember in it, the first time an R notebook is opened, and follows
   its notifications by long-polling. The core makes Ember's page secret and
   hands it to R. `new_notebook` makes one from an `.R` path, `read_cell`
-  shows Ember's own `stale` and `not_run` (every cell after a restart), and a
-  warning in a cell's output starts with `Warning:`. When R ends, its
+  shows Ember's own `stale` and `not_run` (every cell after a restart), a
+  warning in a cell's output starts with `Warning:`, and `read_notebook_code`
+  marks cells as an Ember file does (`# %% id=`). `edit_cell` can fold the
+  cell it edits, in either engine (#162; the interface number is 10). When R ends, its
   notebooks close with it: the agent's next call on one answers
   `notebook_closed` with why (how R's process ended and its last error), and
   `/endeavor/events` lists them under `engine_ended` until each opens again
@@ -303,7 +305,7 @@ Next:
   or `not_started`, whoever is waiting, the agent included. It starts nothing.
   After a first install that finished with no call waiting it reads
   `not_started` until the agent's next call (#148). The interface number is 9.
-- An agent can stop a run with `interrupt_notebook` (#161; interface 10), as the
+- An agent can stop a run with `interrupt_notebook` (#161; interface 11), as the
   notebook's Stop button does. Before it, an agent asked to "stop if it takes too long"
   had no way to, and its edits queued behind the run. It asks nothing in any mode and
   plan mode refuses it. In R, a cell in compiled code that ignores SIGINT is reported

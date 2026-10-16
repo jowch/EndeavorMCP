@@ -117,7 +117,7 @@ impl Engine {
             "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
-                "last_run": c.last_run, "runtime": 0, "output": c.output, "hidden": c.hidden, "markdown": c.code.starts_with("md\""),
+                "last_run": c.last_run, "runtime": 0, "output": c.output, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
                 "stale": c.stale, "not_run": c.not_run,
             })).collect::<Vec<_>>(),
         })
@@ -778,6 +778,15 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!(s.engine.code(NB, &c), "42");
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone(), b.clone()]);
     s.edit("", NB, &b, "b = a + 1");
+    // An edit can fold or unfold the cell too, and leaves it as it is without `folded`.
+    let folded_b = || s.engine.with(NB, |nb| nb.cells.iter().find(|c| c.id == b).unwrap().folded);
+    assert_eq!(s.refused("", "edit_cell", json!({ "notebook_id": NB, "cell_id": b, "code": "b = a + 2", "folded": "no" })), "invalid_argument");
+    assert_eq!((s.engine.code(NB, &b), folded_b()), ("b = a + 1".to_owned(), true), "a refused edit changes nothing");
+    let unfolded = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": b, "code": "b = a + 2", "folded": false })).unwrap();
+    assert_eq!((&unfolded["code_folded"], &unfolded["execution"]["status"]), (&json!(false), &json!("staged")));
+    assert_eq!((s.engine.code(NB, &b), folded_b()), ("b = a + 2".to_owned(), false));
+    s.edit("", NB, &b, "b = a + 1");
+    assert!(!folded_b());
 
     let moved = s.call("", "move_cell", json!({ "notebook_id": NB, "cell_id": b, "after_cell_id": "" })).unwrap();
     assert_eq!((&moved["mutation"]["old_index"], &moved["mutation"]["new_index"], &moved["cell_order"]), (&json!(3), &json!(1), &json!([b, a, c])));
@@ -802,6 +811,21 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone()]);
     assert_eq!(*s.engine.calls.lock().unwrap().iter().rev().nth(1).unwrap(), "run", "Pluto's cleanup after a delete");
     assert_eq!(s.refused("", "delete_cell", json!({ "notebook_id": NB, "cell_id": b })), "cell_not_found");
+}
+
+/// An Ember notebook reads with its own file's markers, and its text cells, `#'` lines already,
+/// with no `# md:`.
+#[test]
+fn an_ember_notebook_reads_as_code_with_its_own_markers() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "#' # Title"), (Y, "b <- 2")]);
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    let read = |markdown: bool| s.call("", "read_notebook_code", json!({ "notebook_id": R, "order": "visual", "include_markdown": markdown })).unwrap();
+    assert_eq!(read(false)["code"], format!("# %% id={Y}\nb <- 2"));
+    assert_eq!(read(true)["code"], format!("# %% id={X}\n#' # Title\n\n# %% id={Y}\nb <- 2"));
 }
 
 #[test]
