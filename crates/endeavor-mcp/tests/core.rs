@@ -1146,6 +1146,7 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let hint = |name: &str| reply["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
     assert_eq!((hint("edit_cell"), hint("read_cell"), hint("allow_execution")), (false.into(), true.into(), false.into()));
     assert_eq!(hint("open_notebook"), false, "it can run the notebook");
+    assert_eq!(hint("interrupt_notebook"), false, "it stops a run");
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")), "Julia answers only the adapter's calls");
 }
 
@@ -1190,11 +1191,11 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let tools = reply["result"]["tools"].as_array().unwrap();
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), 29);
-    assert_eq!((&names[..3], &names[26..]), (&["list_notebooks", "read_cell", "view_cell_output"][..], &["list_folder", "read_file", "run_shell"][..]), "the notebook tools, then the host tools");
-    let hints: Vec<_> = tools[26..].iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
+    assert_eq!(names.len(), 30);
+    assert_eq!((&names[..3], &names[27..]), (&["list_notebooks", "read_cell", "view_cell_output"][..], &["list_folder", "read_file", "run_shell"][..]), "the notebook tools, then the host tools");
+    let hints: Vec<_> = tools[27..].iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
     assert_eq!(hints, [true, true, false]);
-    assert_eq!(tools[28]["inputSchema"]["required"], serde_json::json!(["command"]));
+    assert_eq!(tools[29]["inputSchema"]["required"], serde_json::json!(["command"]));
     assert!(!mcp(&core, list, &[]).1.contains("list_folder"), "not on this Mac");
 
     // Answered here, and the app hears the notebooks' state after each call.

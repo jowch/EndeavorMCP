@@ -587,6 +587,25 @@ fn the_runtime_end_to_end() {
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
     });
 
+    step("interrupt_notebook stops the run and says which cells it stopped (#161)", || {
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "slow = (for _ in 1:600; sleep(1); end; 1)", "after_cell_id": last, "run_after": true }));
+        let slow = added["cell_id"].clone();
+        let started = Instant::now();
+        while !rt.notebooks(SERVER).into_iter().any(|nb| nb["running"].as_array().is_some_and(|r| r.contains(&slow))) {
+            assert!(started.elapsed() < Duration::from_secs(60), "the cell didn't start");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let stopped = rt.ok(SERVER, "interrupt_notebook", json!({ "notebook_id": previewed }));
+        assert_eq!((&stopped["interrupted"], &stopped["stopped"], &stopped["still_running"]), (&json!(true), &json!([slow]), &json!([])), "{stopped}");
+        let read = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+        assert!(read["output"].as_str().is_some_and(|output| output.contains("InterruptException")), "{read}");
+        assert_eq!(rt.ok(SERVER, "interrupt_notebook", json!({ "notebook_id": previewed }))["interrupted"], false, "nothing runs now");
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
+    });
+
     step("a notebook's own Julia ending by itself ends the run waiting for it", || {
         let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
         let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();

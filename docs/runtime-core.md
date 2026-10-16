@@ -107,7 +107,7 @@ passes on to the runtime log and keeps. A call that names one of them answers
 what differs per kind (launch command, detection, page adapter, skills) is
 the small `Backend` enum in `crates/wire/src/backend.rs`.
 
-The core calls `interrupt` for the user's Stop (see the Stop bullet below).
+The core calls `interrupt` for the user's Stop and for the agent's `interrupt_notebook` (see the Stop bullets below).
 
 Core → engine:
 
@@ -216,6 +216,14 @@ and 3), and for the app:
   Pluto's Stop: the notebook then waits for a restart, and this isn't reported
   as a crash (`exited`). A process that lives through the interrupt and ends
   later is reported as a crash, as before.
+- The agent can stop a run itself with `interrupt_notebook` (#161), which is the
+  notebook's Stop button: it interrupts the run whoever started it. It asks nothing in
+  any mode, plan mode refuses it, and it stays in the session's own notebook. Its
+  result lists the cells that were running and `stopped`, the queued ones `dropped`,
+  and any `still_running`. Pluto's interrupt returns once the run has ended; Ember's
+  sends SIGINT and returns, so the core watches the cells for up to 10 s, within the
+  call's 45 s. A cell still running then is in code that ignores the interrupt, and
+  the result says only a restart ends it.
 - It reports in `/endeavor/events` the app build it was started by (`build`), so the
   app can tell a runtime from an older build and hold back what that runtime
   can't do.

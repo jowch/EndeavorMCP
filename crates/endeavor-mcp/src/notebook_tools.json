@@ -537,5 +537,20 @@
       "type": "object"
     },
     "name": "allow_execution"
+  },
+  {
+    "description": "Stop the notebook's run, as the Stop button in the notebook does: the running cells end interrupted and the queued ones don't run. It stops the whole run, whoever started it. Use it when the user asks you to stop, or for a run you started that is taking too long or is wrong. The result lists the cells that `stopped`, the queued cells `dropped`, and any `still_running`.",
+    "inputSchema": {
+      "properties": {
+        "notebook_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "notebook_id"
+      ],
+      "type": "object"
+    },
+    "name": "interrupt_notebook"
   }
 ]
