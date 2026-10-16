@@ -755,6 +755,16 @@ fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
     let receipt = s.call("", "edit_cells", edits).unwrap();
     assert_eq!(receipt["mutation"], json!({ "type": "edit_cells", "cell_ids": [X, Y] }));
     assert_eq!((&receipt["pending_run"], &receipt["execution"]["status"]), (&json!([X, Y]), &json!("staged")));
+
+    // Each edit can fold or unfold its cell; one without `folded` leaves the fold as it is.
+    let folded = || s.engine.with(NB, |nb| (nb.cells[0].folded, nb.cells[1].folded));
+    let bad = json!({ "notebook_id": NB, "cells": [{ "cell_id": X, "code": "x = 11", "folded": true }, { "cell_id": Y, "code": "y = 21", "folded": "yes" }] });
+    assert_eq!(s.refused("", "edit_cells", bad), "invalid_argument");
+    assert_eq!((s.engine.code(NB, X), folded()), ("x = 10".into(), (false, false)), "a refused batch changes no cell");
+    s.call("", "edit_cells", json!({ "notebook_id": NB, "cells": [{ "cell_id": X, "code": "x = 11", "folded": true }, { "cell_id": Y, "code": "y = 21" }] })).unwrap();
+    assert_eq!((s.engine.code(NB, X), s.engine.code(NB, Y), folded()), ("x = 11".into(), "y = 21".into(), (true, false)));
+    s.call("", "edit_cells", json!({ "notebook_id": NB, "cells": [{ "cell_id": X, "code": "x = 12", "folded": false }, { "cell_id": Y, "code": "y = 22", "folded": null }] })).unwrap();
+    assert_eq!(folded(), (false, false));
 }
 
 #[test]

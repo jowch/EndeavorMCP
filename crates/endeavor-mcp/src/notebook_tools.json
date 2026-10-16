@@ -83,7 +83,7 @@
     "inputSchema": {
       "properties": {
         "cells": {
-          "description": "The edits, as {cell_id, code} objects.",
+          "description": "The edits, as {cell_id, code} objects, each with an optional `folded`.",
           "items": {
             "properties": {
               "cell_id": {
@@ -91,6 +91,10 @@
               },
               "code": {
                 "type": "string"
+              },
+              "folded": {
+                "description": "Also hide (true) or show (false) this cell's code, as `fold_cell` does. Default: left as it is.",
+                "type": "boolean"
               }
             },
             "required": [
