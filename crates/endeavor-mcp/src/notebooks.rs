@@ -136,6 +136,9 @@ struct NotebookState {
     reads: HashMap<(String, String), (String, u64)>,
     /// Which session last changed each cell through the tools, and when.
     changes: HashMap<String, Change>,
+    /// The cells each session's runs started that haven't finished (a waited run's
+    /// unfinished cells, until `run_finished`): what that session's Stop interrupts.
+    started: HashMap<String, HashSet<String>>,
 }
 
 impl NotebookState {
@@ -296,6 +299,25 @@ pub struct Notebooks {
     kinds: Mutex<HashMap<String, Backend>>,
     /// Opens and creations under way or not yet collected, by what they open (`open_waited`).
     openings: Mutex<HashMap<String, Arc<Opening>>>,
+    /// Agents' calls on a notebook under way (`running`): owner, JSON-RPC id, notebook, and
+    /// whether the call runs code. The agent's cancellation of one is its Stop (`cancelled`).
+    runs: Mutex<Vec<(String, Value, String, bool)>>,
+}
+
+/// An agent's call on a notebook, noted until it drops (`Notebooks::running`).
+pub struct Running<'a> {
+    notebooks: &'a Notebooks,
+    owner: String,
+    request: Value,
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let mut runs = self.notebooks.runs.lock().unwrap();
+        if let Some(at) = runs.iter().position(|(owner, request, _, _)| *owner == self.owner && *request == self.request) {
+            runs.remove(at);
+        }
+    }
 }
 
 /// One call to the engines' adapter (`message`): its result, or the error it raised.
@@ -542,6 +564,7 @@ impl Notebooks {
             exits_when_idle: false,
             kinds: Mutex::default(),
             openings: Mutex::default(),
+            runs: Mutex::default(),
         }
     }
 
@@ -694,11 +717,15 @@ impl Notebooks {
                 }
                 true
             }
-            // The cells a run the tools didn't wait for finished: no longer pending.
+            // The cells a run the tools didn't wait for finished: no longer pending, and no
+            // longer a session's run that its Stop interrupts.
             "run_finished" => {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
                     for cell in params["cells"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                         notebook.pending.remove(cell);
+                        for started in notebook.started.values_mut() {
+                            started.remove(cell);
+                        }
                     }
                 }
                 true
@@ -1169,6 +1196,52 @@ impl Notebooks {
         let safe_preview = self.shutdown(&nb.id)?;
         self.publish();
         Ok(json!({ "stopped": true, "safe_preview": safe_preview }))
+    }
+
+    /// Note `owner`'s call `request` on `notebook_id` until the result drops, so that cancelling
+    /// it can interrupt the notebook (`cancelled`). `runs_code`: the call runs code itself.
+    pub fn running(&self, owner: &str, request: &Value, notebook_id: &str, runs_code: bool) -> Running<'_> {
+        self.runs.lock().unwrap().push((owner.to_owned(), request.clone(), notebook_id.to_owned(), runs_code));
+        Running { notebooks: self, owner: owner.to_owned(), request: request.clone() }
+    }
+
+    /// The notebook of `owner`'s call `request`, if it is under way (`running`), and whether the
+    /// call runs code: the agent cancelled it, which is the user's Stop.
+    pub fn cancelled(&self, owner: &str, request: &Value) -> Option<(String, bool)> {
+        let runs = self.runs.lock().unwrap();
+        runs.iter().find(|(o, r, _, _)| o == owner && r == request).map(|(_, _, notebook, runs_code)| (notebook.clone(), *runs_code))
+    }
+
+    /// The user's Stop, for `owner`'s cancelled call on `notebook_id`: interrupt the notebook's
+    /// run, as Pluto's own Stop does, if the call was running code, or if a run this session
+    /// started there is still going (an agent often starts a run without waiting, then waits by
+    /// reading the cell). A run only the user or another session started is left alone.
+    pub fn stop_for(&self, owner: &str, notebook_id: &str, runs_code: bool) {
+        if !runs_code {
+            let started = self.with_state(notebook_id, |state| state.started.get(owner).cloned().unwrap_or_default());
+            if started.is_empty() {
+                return;
+            }
+            let Ok(nb) = self.snapshot(notebook_id) else { return };
+            let going: HashSet<String> = started.into_iter().filter(|id| nb.cells.get(id).is_some_and(|c| c.running || c.queued)).collect();
+            if going.is_empty() {
+                self.with_state(notebook_id, |state| state.started.remove(owner));
+                return;
+            }
+            self.with_state(notebook_id, |state| state.started.insert(owner.to_owned(), going));
+        }
+        self.interrupt(notebook_id, owner);
+    }
+
+    /// Interrupt `notebook_id`'s run, as Pluto's own Stop does, for `owner`'s cancelled call: the
+    /// cells end interrupted. A cell that doesn't stop (one long `sleep`) ends the notebook's
+    /// process, as with Pluto's Stop, and the notebook waits for a restart.
+    pub fn interrupt(&self, notebook_id: &str, owner: &str) {
+        match self.call("interrupt", json!({ "notebook_id": notebook_id })) {
+            Ok(reply) if reply["interrupted"] == false => eprintln!("[ Info: Session {owner} stopped: nothing was running in notebook {notebook_id}"),
+            Ok(_) => eprintln!("[ Info: Interrupted notebook {notebook_id}: session {owner} stopped"),
+            Err(error) => eprintln!("┌ Warning: Couldn't interrupt notebook {notebook_id} for session {owner}'s Stop: {error}"),
+        }
     }
 
     /// The user's run reached `cells` (each with its `last_run` from before

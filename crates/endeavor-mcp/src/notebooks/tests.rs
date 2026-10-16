@@ -336,6 +336,7 @@ impl Engine {
                 }
             }),
             "validate" => Ok(json!({ "errors": if params["code"].as_str().unwrap().contains('\n') { json!([{ "type": "pluto_multi_expression" }]) } else { json!([]) } })),
+            "interrupt" => Ok(json!({ "interrupted": true })),
             other => Err(format!("ArgumentError: unknown_method::Unknown adapter method: '{other}'")),
         }
     }
@@ -2104,4 +2105,58 @@ fn a_new_notebook_without_a_path_is_of_the_sessions_kind() {
     s.notebooks.bind("r-session", "");
     s.call("r-session", "new_notebook", json!({})).unwrap();
     assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|call| *call == "new").count(), 4);
+}
+
+#[test]
+fn a_stop_interrupts_the_sessions_own_run() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
+    let interrupts = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "interrupt").count();
+    let running = |busy: bool| s.engine.with(NB, |nb| nb.cells[0].running = busy);
+
+    // The cancelled call is known while it is under way.
+    assert_eq!(s.notebooks.cancelled("7", &json!(5)), None, "no call under way");
+    {
+        let _call = s.notebooks.running("7", &json!(5), NB, false);
+        assert_eq!(s.notebooks.cancelled("8", &json!(5)), None, "another session's call of the same id");
+        assert_eq!(s.notebooks.cancelled("7", &json!(6)), None, "another call");
+        assert_eq!(s.notebooks.cancelled("7", &json!(5)), Some((NB.to_owned(), false)));
+    }
+    assert_eq!(s.notebooks.cancelled("7", &json!(5)), None, "the call ended");
+
+    // A call that runs code is interrupted.
+    s.notebooks.stop_for("7", NB, true);
+    assert_eq!(interrupts(), 1);
+
+    // Any other call (reading the cell, say): only while a run this session started is going.
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 1, "the user's own run, or another session's, is left alone");
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    running(true);
+    s.notebooks.stop_for("8", NB, false);
+    assert_eq!(interrupts(), 1, "not another session's Stop");
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "the run session 7 started");
+    running(false);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "once it has ended");
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "and it is forgotten then: this run isn't the session's");
+
+    // A run that ended with no Stop between: a later run of the same cell (the user's, or a
+    // reactive one) isn't the session's.
+    running(false);
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "the user's later run of a cell the session ran");
+    // Nor is a waited run that finished within the wait.
+    running(false);
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    running(true);
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 2, "a waited run that finished");
 }
