@@ -685,11 +685,7 @@ impl Call<'_> {
         let code = self.arg("code")?;
         self.require_fresh_read(&nb, &cell)?;
         let run_after = bool_arg(self.args, "run_after", false)?;
-        let folded = match self.args.get("folded") {
-            None | Some(Value::Null) => None,
-            Some(Value::Bool(folded)) => Some(*folded),
-            Some(_) => return Err(argument_error("invalid_argument::folded must be a boolean")),
-        };
+        let folded = optional_folded(self.args.get("folded"))?;
         let before = nb.cells[&cell].code.clone();
         let mut ops = vec![json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": before })];
         ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
@@ -721,18 +717,21 @@ impl Call<'_> {
             _ => return Err(argument_error("invalid_argument::cells must be a list of {cell_id, code}")),
         };
         let mut cells = Vec::new();
+        let mut folds = Vec::new();
         for edit in &edits {
             if !edit.is_object() {
                 return Err(argument_error("invalid_argument::cells must be a list of {cell_id, code}"));
             }
             let cell = cell_named(&nb, edit.get("cell_id").ok_or_else(|| key_error("cell_id"))?)?;
             self.require_fresh_read(&nb, &cell)?;
+            folds.push(optional_folded(edit.get("folded"))?);
             cells.push(cell);
         }
         let mut ops = Vec::new();
-        for (edit, cell) in edits.iter().zip(&cells) {
+        for ((edit, cell), folded) in edits.iter().zip(&cells).zip(&folds) {
             let code = edit.get("code").ok_or_else(|| key_error("code"))?;
             ops.push(json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": nb.cells[cell].code }));
+            ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
         }
         let applied = self.apply(&nb.id, ops)?;
         for (edit, cell) in edits.iter().zip(&cells) {
@@ -1313,6 +1312,15 @@ fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
         None => Ok(default),
         Some(Value::Bool(flag)) => Ok(*flag),
         Some(_) => Err(argument_error(&format!("invalid_argument::{name} must be a boolean"))),
+    }
+}
+
+/// An edit's `folded`: a Bool, or left out (or null) to keep the cell's fold as it is.
+fn optional_folded(value: Option<&Value>) -> Result<Option<bool>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(folded)) => Ok(Some(*folded)),
+        Some(_) => Err(argument_error("invalid_argument::folded must be a boolean")),
     }
 }
 
