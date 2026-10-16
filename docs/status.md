@@ -24,7 +24,13 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   Slurm (`tests/machines.rs`), and over real ssh and Julia in `e2e_machines`.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
-- CI (`ci.yml`) builds and tests on Linux, macOS and Windows. `e2e.yml` runs
+- CI (`ci.yml`) builds and tests on Linux, macOS and Windows. Most integration
+  tests are Unix only (their stand-in Julia is a shell script); on Windows,
+  `tests/windows.rs` runs the local start with a stand-in `julia.exe`
+  (`examples/stand_in_julia.rs`): `serve` with a given Julia and with the one
+  on the PATH, `starting.lock`'s pid read while the core holds it, a Julia that
+  ends, `endeavor stop`, and an agent's call through `endeavor mcp` (#9).
+  Not covered there yet: the cancel of a start, and real Julia. `e2e.yml` runs
   `e2e_julia` and `e2e_serve` against real Julia on Linux. `helpers.yml`
   publishes the binaries for Linux, macOS and Windows to the `helpers` release
   under a key computed from the helper's source (`scripts/helpers.sh`), and

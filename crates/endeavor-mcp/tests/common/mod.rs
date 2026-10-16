@@ -49,6 +49,7 @@ pub fn find_julia() -> Option<(PathBuf, Option<PathBuf>)> {
     path.starts_with('/').then(|| (PathBuf::from(path), None))
 }
 
+#[cfg(unix)]
 /// A julia that says it's 1.12, records its arguments, the token it was given (`engine_token`, which
 /// `FakeBridge` then requires) and its pid (a line of `julia.pids` per run), writes
 /// its state for the core naming `bridge`'s ports, and sleeps as its own pid. It waits first while the file
@@ -77,6 +78,7 @@ exec sleep 600
     julia
 }
 
+#[cfg(unix)]
 /// Write `contents` to `path` as an executable file. A child process writes it: while this process holds
 /// a file open for writing, a fork by any of its threads copies that descriptor until the child execs,
 /// and running the file in that time fails with ETXTBSY ("Text file busy"). The tests run on many threads.
@@ -144,6 +146,7 @@ pub fn julia_pids(dir: &Path) -> Vec<i32> {
     std::fs::read_to_string(dir.join("julia.pids")).map(|text| text.split_whitespace().filter_map(|p| p.parse().ok()).collect()).unwrap_or_default()
 }
 
+#[cfg(unix)]
 /// Whether `pid` runs. A zombie doesn't: a container whose PID 1 reaps slowly or not at all may keep an
 /// ended process that was reparented to it for a while, or for good, and the runtime counts it as gone
 /// too (`unixproc::start_time`).
@@ -156,6 +159,7 @@ pub fn pid_alive(pid: i32) -> bool {
     !stat.rfind(')').and_then(|end| stat[end + 1..].split_whitespace().next()).is_some_and(|state| state == "Z" || state == "X")
 }
 
+#[cfg(unix)]
 /// Whether a process of the group `pgid` runs, by the runtime's rule (`unixproc::group_running`):
 /// zombies don't count. Without `/proc` (macOS, which reaps), any member counts.
 #[allow(dead_code)]
@@ -331,8 +335,13 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
             }
             if body.contains("endeavor/shutdown") {
                 let pid = read_json(&dir.join("julia.json"))["pid"].as_i64().unwrap() as i32;
+                #[cfg(unix)]
                 // SAFETY: plain syscall.
-                unsafe { libc::kill(pid, libc::SIGTERM) };
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM)
+                };
+                #[cfg(windows)]
+                let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output();
             }
         } else {
             let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
