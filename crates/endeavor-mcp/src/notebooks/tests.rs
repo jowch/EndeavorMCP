@@ -870,7 +870,7 @@ fn a_waited_run_that_outlasts_the_cap_returns_with_its_cells_still_running() {
     assert_eq!(ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| c["cell_id"].clone()).collect::<Vec<_>>(), vec![json!(X)]);
     assert_eq!(ran["pending_run"], json!([]), "cells being run are no longer staged");
     assert!(ran["warnings"][0].as_str().unwrap().starts_with("execution_timeout::"), "{ran}");
-    assert!(ran["message"].as_str().unwrap().contains("list_notebooks"), "{ran}");
+    assert!(ran["message"].as_str().unwrap().contains("Call read_cell on one of them"), "{ran}");
 
     // A read shows the dependent running and not stale; a bare submit_changes runs nothing again.
     let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
@@ -976,6 +976,56 @@ fn cells_waiting_on_a_package_install_say_so_and_a_read_of_one_waits() {
     let began = Instant::now();
     s.read("", NB, X);
     assert!(began.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn a_read_of_a_cell_the_sessions_own_run_is_running_waits_for_it() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
+    let running = |busy: bool| s.engine.with(NB, |nb| nb.cells[0].running = busy);
+    let read = |owner: &str, began: Instant| super::tools::tool_json(s.notebooks.tool(owner, "read_cell", &json!({ "notebook_id": NB, "cell_id": X }), &Folder::Process, began).unwrap());
+    let late = || Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+
+    // The user's own run is read at once.
+    running(true);
+    let began = Instant::now();
+    assert_eq!(read("7", began)["running"], true);
+    assert!(began.elapsed() < Duration::from_secs(1), "the user's run isn't waited for");
+
+    // The session's own run is waited for, within the call's cap; another session's read isn't held up.
+    running(false);
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    running(true);
+    let began = Instant::now();
+    assert_eq!(read("8", began)["running"], true);
+    assert!(began.elapsed() < Duration::from_secs(1), "another session's run isn't waited for");
+    let began = late();
+    assert_eq!(read("7", began)["running"], true, "still running when the wait ends");
+    assert!(began.elapsed() >= Duration::from_secs(44), "it waited");
+    assert!(began.elapsed() < Duration::from_secs(super::tools::WAIT_SECONDS as u64), "within the cap");
+
+    // The run ends: the waiting read returns then, with the output.
+    let engine = s.engine.clone();
+    let now = *s.clock.lock().unwrap();
+    let finish = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(600));
+        engine.with(NB, |nb| {
+            nb.cells[0].running = false;
+            nb.cells[0].last_run = now;
+            nb.cells[0].output = "done".into();
+        });
+    });
+    let began = Instant::now();
+    let done = read("7", began);
+    finish.join().unwrap();
+    assert!(began.elapsed() < Duration::from_secs(5), "returned when the run ended");
+    assert_eq!((&done["running"], &done["output"]), (&json!(false), &json!("done")));
+
+    // Once it has ended, a later run of the cell isn't the session's.
+    running(true);
+    let began = Instant::now();
+    read("7", began);
+    assert!(began.elapsed() < Duration::from_secs(1), "a later run isn't waited for");
 }
 
 #[test]

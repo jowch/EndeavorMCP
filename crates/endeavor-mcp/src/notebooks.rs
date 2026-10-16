@@ -1264,18 +1264,23 @@ impl Notebooks {
                 return;
             }
             let Ok(nb) = self.snapshot(notebook_id) else { return };
-            let going = self.with_state(notebook_id, |state| {
-                for started in state.started.iter_mut().filter(|started| started.owner == owner) {
-                    started.cells.retain(|id| nb.cells.get(id).is_some_and(|c| c.running || c.queued));
-                }
-                state.started.retain(|started| !started.cells.is_empty());
-                state.started.iter().any(|started| started.owner == owner)
-            });
-            if !going {
+            if !self.own_run_going(owner, &nb) {
                 return;
             }
         }
         self.interrupt(notebook_id, owner);
+    }
+
+    /// Whether a run `owner` started in `nb` is still going, as `nb` shows it. Its cells that
+    /// have finished are forgotten, and so is a run with none left.
+    fn own_run_going(&self, owner: &str, nb: &Snapshot) -> bool {
+        self.with_state(&nb.id, |state| {
+            for started in state.started.iter_mut().filter(|started| started.owner == owner) {
+                started.cells.retain(|id| nb.cells.get(id).is_some_and(|c| c.running || c.queued));
+            }
+            state.started.retain(|started| !started.cells.is_empty());
+            state.started.iter().any(|started| started.owner == owner)
+        })
     }
 
     /// The notebooks where runs `owner` started may still be going (`stop_for` checks): what the
