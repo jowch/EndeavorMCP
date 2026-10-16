@@ -269,26 +269,21 @@ pub fn main(argv: &[String]) -> ! {
     }
 }
 
-/// What a call hears while Julia starts: the step, how long so far, and to call again now, since
-/// each call is the wait (an agent told to try again "in a minute" with no way to pause gave up
-/// after a dozen tries, #153). After `START_QUIET_SECONDS` with no sign of progress, to tell the
-/// user and stop.
-fn starting_message(step: &str, so_far: Duration, quiet: Duration) -> String {
+/// What a call that waited `wait` hears while Julia starts: the step, how long so far, and to call
+/// again now, since each call is the wait (an agent told to try again "in a minute" with no way to
+/// pause gave up after a dozen tries, #153). A start that stops moving fails at `julia_stall()`,
+/// with its own message.
+fn starting_message(step: &str, so_far: Duration, wait: Duration) -> String {
     let words = |d: Duration| if d.as_secs() >= 90 { format!("about {} minutes", (d.as_secs() + 30) / 60) } else { format!("{} seconds", d.as_secs()) };
-    let what = format!("julia_starting::{step} ({} so far).", words(so_far));
-    if quiet.as_secs() >= START_QUIET_SECONDS {
-        return format!("{what} Nothing has moved for {}, which is longer than a start takes. Tell the user it may be stuck, and stop calling.", words(quiet));
+    let what = format!(
+        "julia_starting::{step} ({} so far). The first start on a computer gets Julia and installs Pluto's packages, which can take 10 minutes or more; later starts are much faster.",
+        words(so_far)
+    );
+    if wait.is_zero() {
+        return what;
     }
-    format!(
-        "{what} The first start on a computer gets Julia and installs Pluto's packages, which can take 10 minutes or more; later starts take seconds. \
-         Tell the user once, then make the same call again right away: each call waits up to {} seconds for the start, so don't pause between calls.",
-        JULIA_WAIT.as_secs()
-    )
+    format!("{what} Tell the user once, then make the same call again right away: each call waits up to {} for the start, so don't pause between calls.", words(wait))
 }
-
-/// How long a start can go with no new step and no new line in the runtime's log before the agent
-/// is told it may be stuck: a long precompile prints nothing for a few minutes.
-const START_QUIET_SECONDS: u64 = 600;
 
 /// How long a call that needs Julia waits for it to start before it's told Julia is still starting:
 /// well within the 45 s an agent's call waits, and less if the call already waited (for the user's
@@ -540,7 +535,7 @@ impl JuliaStarter {
                 }
                 Phase::Idle => return Err("julia_failed::The runtime is stopping.".into()),
                 Phase::Starting(step) if left.is_zero() => {
-                    return Err(starting_message(step, now.began.elapsed(), now.moved.elapsed()));
+                    return Err(starting_message(step, now.began.elapsed(), wait));
                 }
                 Phase::Starting(_) => now = self.changed.wait_timeout(now, left).unwrap().0,
             }
@@ -1973,14 +1968,15 @@ mod tests {
 
     #[test]
     fn a_julia_start_says_how_long_so_far_and_to_call_again_now() {
-        let said = starting_message("Julia 1.12.6 is starting and loading Pluto", Duration::from_secs(250), Duration::from_secs(20));
-        for part in ["julia_starting::Julia 1.12.6 is starting and loading Pluto (about 4 minutes so far).", "10 minutes", "right away", "waits up to 30 seconds", "don't pause"] {
+        let said = starting_message("Julia 1.12.6 is starting and loading Pluto", Duration::from_secs(250), Duration::from_secs(30));
+        for part in ["julia_starting::Julia 1.12.6 is starting and loading Pluto (about 4 minutes so far).", "10 minutes", "much faster", "right away", "waits up to 30 seconds", "don't pause"] {
             assert!(said.contains(part), "{part}: {said}");
         }
         assert!(!said.contains("in a minute"), "{said}");
-        assert!(starting_message("Julia is starting", Duration::from_secs(40), Duration::ZERO).contains("(40 seconds so far)"));
-        let stuck = starting_message("Julia is starting", Duration::from_secs(900), Duration::from_secs(600));
-        assert!(stuck.contains("Nothing has moved for about 10 minutes") && stuck.contains("stop calling"), "{stuck}");
+        // The wait the call had, which an approval card can shorten.
+        assert!(starting_message("Julia is starting", Duration::from_secs(40), Duration::from_secs(5)).contains("(40 seconds so far)") && starting_message("Julia is starting", Duration::from_secs(40), Duration::from_secs(5)).contains("waits up to 5 seconds"));
+        // The runtime's own page, which waits for nothing, doesn't tell anyone to call again.
+        assert!(!starting_message("Julia is starting", Duration::from_secs(40), Duration::ZERO).contains("call again"));
     }
 
     #[test]

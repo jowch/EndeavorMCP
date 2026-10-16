@@ -1405,7 +1405,7 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         assert_eq!(text("IOError: readdir(\"/a::b\"): denied"), r#"{"error":"readdir(\"/a","message":"b\"): denied"}"#);
         assert_eq!(tool_error("x", false)["isError"], true);
         // Still starting is not a failure: the agent waits and calls again, and the code stays.
-        let starting = tool_error("julia_starting::Julia 1.12.6 is starting and loading Pluto. Try again in a minute.", false);
+        let starting = tool_error("julia_starting::Julia 1.12.6 is starting and loading Pluto (40 seconds so far).", false);
         assert_eq!(starting["isError"], false);
         assert_eq!(text("julia_starting::Julia is starting"), r#"{"error":"julia_starting","message":"Julia is starting"}"#);
         assert_eq!(tool_error("r_installing::Installing Ember", false)["isError"], false);
