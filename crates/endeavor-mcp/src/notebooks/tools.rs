@@ -366,7 +366,9 @@ impl Call<'_> {
                 let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
                 state.ended.retain(|r| Some(r) != run.as_ref());
                 let unfinished: HashSet<String> = cells.iter().filter(|c| !finished.contains(c)).cloned().collect();
-                if !self.owner.is_empty() && !ended && !unfinished.is_empty() {
+                // A run the engine named goes on until its `run_finished`, the cells that depend
+                // on its cells too, even once its own cells have finished.
+                if !self.owner.is_empty() && !ended && (run.is_some() || !unfinished.is_empty()) {
                     state.started.push(Started { owner: self.owner.to_owned(), run, cells: unfinished });
                 }
                 for cell in &cells {
@@ -522,7 +524,7 @@ impl Call<'_> {
                 "message".into(),
                 json!(format!(
                     "The run is still going and continues: a waited run returns after at most {WAIT_SECONDS} seconds. \
-                     Call list_notebooks (`running` lists the cells running) or read_cell to see when it ends. Don't run the cells in `execution.still_running` again."
+                     Call read_cell on one of them: it waits up to {WAIT_SECONDS} seconds for the cell to finish. Don't run the cells in `execution.still_running` again."
                 )),
             );
         }
@@ -584,9 +586,17 @@ impl Call<'_> {
         let cell = self.cell(&nb)?;
         // A cell waiting on a package step is waited for, within the call's
         // `WAIT_SECONDS`: an agent that reads it at once sees no change and
-        // gives up long before a first install ends.
+        // gives up long before a first install ends. So is a cell that a run
+        // this session started is running or will run: an agent that reads it
+        // at once reads it again, each read a whole request of the agent's
+        // context. The user's own run, or another session's, isn't waited for.
+        // (Asked on every read, so that a run seen to end is forgotten.)
+        let waits = |nb: &Snapshot| {
+            let own = self.nbs.own_run_going(self.owner, nb);
+            nb.cells.get(&cell).is_some_and(|c| (c.queued && nb.installing()) || ((c.running || c.queued) && own))
+        };
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
-        while nb.installing() && nb.cells.get(&cell).is_some_and(|c| c.queued) && Instant::now() < deadline {
+        while waits(&nb) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(500));
             // Nobody will see this read, so it doesn't count as one.
             if (self.gone)() {
