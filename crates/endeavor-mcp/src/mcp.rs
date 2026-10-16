@@ -172,6 +172,10 @@ pub struct Bridge {
     folders: Mutex<HashMap<String, Option<String>>>,
     /// Each agent session's last tool results, for the app to look up.
     results: Results,
+    /// Each agent session's open or creation that was let run and told its engine is still starting
+    /// (`STARTING_KINDS`), with when it was told: the same call again carries it on without asking
+    /// the user again (`ask_first`).
+    starting_calls: Mutex<HashMap<String, (String, Value, Instant)>>,
     /// `run_shell`'s environment, changed from ours as Julia's was: its
     /// depot, and none of what the helper passes the runtime.
     shell_env: Vec<(&'static str, Option<String>)>,
@@ -249,6 +253,7 @@ impl Bridge {
             policies: Mutex::default(),
             folders: Mutex::default(),
             results: Results::default(),
+            starting_calls: Mutex::default(),
             shell_env,
             standalone: None,
             on_folder: std::sync::OnceLock::new(),
@@ -461,8 +466,12 @@ impl Bridge {
             }
         }
         self.notebooks.note_call(&caller.owner);
-        if !caller.owner.is_empty() && acts(name, &arguments) && self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
-            self.notebooks.publish();
+        if !caller.owner.is_empty() && acts(name, &arguments) {
+            if self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
+                self.notebooks.publish();
+            }
+            // Anything else the session does ends what its earlier yes covered.
+            self.starting_calls.lock().unwrap().retain(|owner, (tool, args, _)| *owner != caller.owner || (tool == name && *args == arguments));
         }
         self.notebooks.note_activity(&arguments);
         if let Some(refusal) = refusal {
@@ -516,6 +525,13 @@ impl Bridge {
         } else {
             self.notebooks.tool_unrun(&caller.owner, name, &arguments, &folder, call.began)
         };
+        if matches!(name, "open_notebook" | "new_notebook") && !caller.owner.is_empty() {
+            let mut starting_calls = self.starting_calls.lock().unwrap();
+            match &reply {
+                Err(error) if starting(error) => _ = starting_calls.insert(caller.owner.clone(), (name.to_owned(), arguments.clone(), Instant::now())),
+                _ => _ = starting_calls.remove(&caller.owner),
+            }
+        }
         match reply {
             Ok(Reply::Json(mut result)) => {
                 self.add_browser_url(name, caller, &mut result);
@@ -571,6 +587,15 @@ impl Bridge {
             }
             return Ok(true);
         }
+        // The user let this same call run, and it was told its engine is still starting (Julia's
+        // download, say), so the agent made it again. It is still that one call: it doesn't ask again.
+        // Only this session's, only the same tool with the same arguments, only while nothing else
+        // came between, and only for a while after the last time it was told.
+        let carried_on = self.starting_calls.lock().unwrap().get(owner).is_some_and(|(t, args, told)| t == tool && args == arguments && told.elapsed() < STARTING_CALL_KEPT);
+        if carried_on {
+            eprintln!("[ Info: Session {owner} makes its allowed {tool} again while the engine starts; not asked again");
+            return Ok(true);
+        }
         if !self.notebooks.followed() {
             return Err(tool_error("ArgumentError: no_app::Endeavor isn't connected to ask the user about this. Try again once Endeavor is open.", false));
         }
@@ -613,6 +638,16 @@ impl Bridge {
         }
         None
     }
+}
+
+/// How long after an allowed open or creation was told its engine is still starting the same call
+/// again goes on without asking (`Bridge::starting_calls`). An agent told to try again in a minute
+/// does well within it; one that comes back much later is asked again.
+const STARTING_CALL_KEPT: Duration = Duration::from_secs(5 * 60);
+
+/// Whether a tool's error says only that the engine or the notebook is still on its way.
+fn starting(error: &str) -> bool {
+    error.split_once("::").is_some_and(|(kind, _)| STARTING_KINDS.contains(&kind.rsplit(':').next().unwrap_or_default().trim()))
 }
 
 /// How long into a call it waits for the user's answer: what is left of the 60 seconds agents give a

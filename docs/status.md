@@ -265,7 +265,11 @@ Next:
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is
   opened or made or a page of Pluto's past the runtime's link is asked for, and answers
-  `julia_starting` while Julia starts (a normal result, not an error: #105). The plugin's `serve`, `mcp` and machines
+  `julia_starting` while Julia starts (a normal result, not an error: #105). An open or
+  creation the user let run that is told Julia (or R's setup) is still starting
+  doesn't ask again when the agent makes the same call again: only that session's,
+  only the same tool and arguments, only while it has done nothing else since, and
+  for 5 minutes after the last such answer (Endeavor #90). The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
   before, and only starting it waits. A session whose folder has Pluto
   notebooks, or whose caller says it is a Julia session (`kind`), gets Julia
