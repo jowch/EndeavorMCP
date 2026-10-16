@@ -13,6 +13,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use common::front::Front;
 use common::*;
@@ -44,9 +46,34 @@ fn env_for(command: &mut Command, dir: &Path, bridge: &FakeBridge) {
         .env("APPDATA", dir.join("roaming"));
 }
 
+/// What a test that fails part way leaves running, ended when it unwinds: `endeavor stop --force` on
+/// its state folder, then each process it started, with what they started.
+struct Cleanup {
+    dir: PathBuf,
+    pids: Vec<u32>,
+}
+
+impl Cleanup {
+    fn new(dir: &Path) -> Cleanup {
+        Cleanup { dir: dir.to_owned(), pids: Vec::new() }
+    }
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let _ = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--force").arg("--state-dir").arg(&self.dir).output();
+        for pid in &self.pids {
+            let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output();
+        }
+    }
+}
+
 /// `endeavor serve` with its state in `dir` and `julia` (none: it looks on the PATH, with `dir`'s
 /// `fakebin` first), once it has said how to connect.
-fn serve(dir: &Path, bridge: &FakeBridge, julia: Option<&Path>) -> Child {
+fn serve(dir: &Path, bridge: &FakeBridge, julia: Option<&Path>, cleanup: &mut Cleanup) -> Child {
     // The stand-in bridge takes only its own token.
     std::fs::write(dir.join("token"), TOKEN).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
@@ -62,13 +89,24 @@ fn serve(dir: &Path, bridge: &FakeBridge, julia: Option<&Path>) -> Child {
     }
     env_for(&mut command, dir, bridge);
     let mut serve = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    let mut out = BufReader::new(serve.stdout.take().unwrap());
-    let mut line = String::new();
-    while line.trim_end() != "Press Ctrl-C to stop Endeavor." {
-        line.clear();
-        assert!(out.read_line(&mut line).unwrap() > 0, "serve ended before it was up");
+    cleanup.pids.push(serve.id());
+    // Read on a thread, so a serve that hangs before it is up fails the test rather than the job.
+    let out = BufReader::new(serve.stdout.take().unwrap());
+    let (tx, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in out.lines() {
+            let Ok(line) = line else { break };
+            let _ = tx.send(line);
+        }
+    });
+    loop {
+        match lines.recv_timeout(Duration::from_secs(60)) {
+            Ok(line) if line == "Press Ctrl-C to stop Endeavor." => return serve,
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("serve wasn't up within a minute"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("serve ended before it was up"),
+        }
     }
-    serve
 }
 
 /// Wait for `serve` to end: its exit code and the last line it wrote to stderr.
@@ -107,9 +145,10 @@ fn running(pid: u32) -> bool {
 #[test]
 fn serve_starts_julia_when_asked_and_stop_ends_both() {
     let dir = state_dir("windows-serve-stop");
+    let mut cleanup = Cleanup::new(&dir);
     let bridge = FakeBridge::start(&dir);
     let julia = stand_in(&dir);
-    let serve = serve(&dir, &bridge, Some(&julia));
+    let serve = serve(&dir, &bridge, Some(&julia), &mut cleanup);
     let core = read_json(&dir.join("runtime.json"))["pid"].as_u64().unwrap();
     assert!(dir.join("runtime.log").is_file(), "the log is there");
     assert_eq!(std::fs::read_to_string(dir.join("starting.lock")).unwrap(), "", "recorded, the core let go of the start lock");
@@ -129,9 +168,10 @@ fn serve_starts_julia_when_asked_and_stop_ends_both() {
 #[test]
 fn serve_with_no_julia_given_starts_the_julia_exe_on_the_path() {
     let dir = state_dir("windows-serve-path");
+    let mut cleanup = Cleanup::new(&dir);
     let bridge = FakeBridge::start(&dir);
     stand_in(&dir);
-    let serve = serve(&dir, &bridge, None);
+    let serve = serve(&dir, &bridge, None, &mut cleanup);
     let julia = start_julia(&dir);
     let stop = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--state-dir").arg(&dir).output().unwrap();
     assert!(stop.status.success(), "{stop:?}");
@@ -142,9 +182,10 @@ fn serve_with_no_julia_given_starts_the_julia_exe_on_the_path() {
 #[test]
 fn julia_ending_ends_serve_with_an_error() {
     let dir = state_dir("windows-serve-crash");
+    let mut cleanup = Cleanup::new(&dir);
     let bridge = FakeBridge::start(&dir);
     let julia = stand_in(&dir);
-    let serve = serve(&dir, &bridge, Some(&julia));
+    let serve = serve(&dir, &bridge, Some(&julia), &mut cleanup);
     let julia = start_julia(&dir);
     let killed = Command::new("taskkill").args(["/F", "/PID", &julia.to_string()]).output().unwrap();
     assert!(killed.status.success(), "{killed:?}");
@@ -158,6 +199,7 @@ fn julia_ending_ends_serve_with_an_error() {
 #[test]
 fn the_core_holds_starting_lock_with_its_pid_readable_until_it_is_recorded() {
     let dir = state_dir("windows-start-lock");
+    let mut cleanup = Cleanup::new(&dir);
     let bridge = FakeBridge::start(&dir);
     let julia = stand_in(&dir);
     std::fs::write(dir.join("hold"), "").unwrap();
@@ -166,10 +208,16 @@ fn the_core_holds_starting_lock_with_its_pid_readable_until_it_is_recorded() {
     command.env("ENDEAVOR_TOKEN", TOKEN).env("ENDEAVOR_LAUNCHER", "process").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     env_for(&mut command, &dir, &bridge);
     let mut core = command.spawn().unwrap();
+    cleanup.pids.push(core.id());
     wait_for("Julia to be started", || !julia_pids(&dir).is_empty());
     let lock = std::fs::File::open(dir.join("starting.lock")).unwrap();
     assert!(lock.try_lock_shared().is_err(), "a reader sees the start under way");
-    let said: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("starting.lock")).unwrap()).unwrap();
+    // The core empties the file before it writes it, so read until it parses.
+    let mut said = serde_json::Value::Null;
+    wait_for("starting.lock to name the core", || {
+        said = std::fs::read_to_string(dir.join("starting.lock")).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        !said.is_null()
+    });
     assert_eq!(said["pid"].as_u64(), Some(core.id() as u64), "{said}");
     assert!(!dir.join("runtime.json").exists());
 
@@ -189,6 +237,7 @@ fn the_core_holds_starting_lock_with_its_pid_readable_until_it_is_recorded() {
 fn an_agents_notebook_call_through_the_front_reaches_julia() {
     require_debug_build();
     let dir = state_dir("windows-front");
+    let _cleanup = Cleanup::new(&dir.join("state"));
     let (state, project) = (dir.join("state"), dir.join("project"));
     std::fs::create_dir_all(&state).unwrap();
     std::fs::create_dir_all(&project).unwrap();
