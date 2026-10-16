@@ -1091,6 +1091,30 @@ fn a_read_of_a_dependent_still_running_in_the_sessions_run_waits_for_it() {
 }
 
 #[test]
+fn a_waited_submit_with_nothing_staged_waits_for_the_sessions_run() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    let submit = |began: Instant| super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, began).unwrap());
+    let late = || Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+
+    // Nothing is staged, but the dependent of the session's run is still running: not "completed" (#151).
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let began = late();
+    let receipt = submit(began);
+    assert_eq!((&receipt["execution"]["status"], &receipt["execution"]["still_running"]), (&json!("running"), &json!([Y])), "{receipt}");
+    assert!(began.elapsed() >= Duration::from_secs(44), "waited for the run");
+
+    // Once the run ends there is nothing to wait for.
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [X] } }));
+    let began = Instant::now();
+    assert_eq!(submit(began)["execution"]["status"], "completed");
+    assert!(began.elapsed() < Duration::from_secs(1), "nothing to wait for");
+    // Nor for the user's run, or another session's.
+    let receipt = super::tools::tool_json(s.notebooks.tool("8", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, Instant::now()).unwrap());
+    assert_eq!(receipt["execution"]["status"], "completed", "{receipt}");
+}
+
+#[test]
 fn a_waited_run_that_outlasts_the_cap_during_an_install_keeps_its_still_running_list() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
