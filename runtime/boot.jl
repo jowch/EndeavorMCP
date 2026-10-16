@@ -14,8 +14,20 @@
 const log_flusher = Timer(_ -> (flush(stdout); flush(stderr)), 0.25; interval=0.25)
 
 import Pkg
-Pkg.instantiate(; io=stderr)
+# EndeavorRuntimeWarm is left out of setup's precompile, which it would slow by
+# about 30 s on Windows: it's loaded only once it's precompiled, which the runtime
+# does in the background (`warm_up_later`).
+Pkg.instantiate(; io=stderr, allow_autoprecomp=false)
+Pkg.precompile(["EndeavorRuntime"]; io=stderr)
 using EndeavorRuntime
+const warm = Base.isprecompiled(EndeavorRuntime.WARM)
+if warm
+    try
+        Base.require(EndeavorRuntime.WARM)
+    catch e
+        @warn "Couldn't load EndeavorRuntimeWarm; notebooks open without it" exception = e
+    end
+end
 
 pluto_port, mcp_port = parse.(Int, ARGS[1:2])
 # Taken from the environment (not argv, which `ps` shows to every user) and dropped
@@ -48,5 +60,6 @@ end
 mv(tmp, state; force=true)
 atexit(() -> rm(state; force=true))
 @info "Runtime ready" pluto_port mcp_port
+warm || EndeavorRuntime.warm_up_later()
 
 wait(Condition())

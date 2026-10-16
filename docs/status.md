@@ -247,10 +247,15 @@ Next:
   longer than a call (#128). `run_shell` too: a command still running when the call
   has waited returns `still_running` with its output so far and goes on, up to its
   `timeout_seconds`; the same call again waits for it, without asking the user again,
-  and gets its result (#16). A precompile workload in `EndeavorRuntime`
-  runs a notebook once while the package precompiles, so a cold first open went
-  from about 33 s to about 13 s here (#16). Most of what is left is starting the
-  notebook's worker process. Precompiling takes about 25 s longer, once per build.
+  and gets its result (#16). A precompile workload runs a notebook once while
+  its package precompiles, so a cold first open went from about 33 s to about 13 s
+  here, and a later open on Windows from about 19 s to about 11 s (#16). Most of
+  what is left is starting the notebook's worker process. The workload is its own
+  package, `EndeavorRuntimeWarm`, because it adds about 30 s to precompiling on
+  Windows: setup precompiles `EndeavorRuntime` alone, the runtime precompiles the
+  warm package in a low-priority process once nothing has been opening or running
+  for 30 s, and the next start loads it. So a first-ever notebook doesn't wait
+  for it, and opens get faster from the next start.
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is

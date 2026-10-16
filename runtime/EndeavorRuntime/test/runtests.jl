@@ -221,6 +221,39 @@ end
         @test_throws ArgumentError EndeavorRuntime.adapter_call(nothing, "snapshot", Dict{String,Any}())
     end
 
+    @testset "warm-up: waits for quiet, then precompiles in a process of its own" begin
+        @test !EndeavorRuntime._runtime_busy(nothing)
+        session, nb, cells = make_session_with_notebook("x = 1")
+        nb.process_status = Pluto.ProcessStatus.ready
+        @test !EndeavorRuntime._runtime_busy(session)
+        cells[1].queued = true
+        @test EndeavorRuntime._runtime_busy(session)
+        cells[1].queued = false
+        nb.process_status = Pluto.ProcessStatus.starting
+        @test EndeavorRuntime._runtime_busy(session)
+        nb.process_status = Pluto.ProcessStatus.ready
+        @test !EndeavorRuntime._runtime_busy(session)
+
+        # A small package in a project of its own stands in for EndeavorRuntimeWarm.
+        project = mktempdir()
+        uuid = UUIDs.uuid4()
+        mkpath(joinpath(project, "Tiny", "src"))
+        write(joinpath(project, "Tiny", "Project.toml"), "name = \"Tiny\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
+        write(joinpath(project, "Tiny", "src", "Tiny.jl"), "module Tiny\nf() = 1\nend\n")
+        write(joinpath(project, "Project.toml"), "[deps]\nTiny = \"$uuid\"\n\n[sources]\nTiny = {path = \"Tiny\"}\n")
+        # Written whole, so nothing needs resolving (or a registry).
+        write(joinpath(project, "Manifest.toml"), "julia_version = \"$VERSION\"\nmanifest_format = \"2.0\"\n\n[[deps.Tiny]]\npath = \"Tiny\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
+        julia = `$(Base.julia_cmd()) --startup-file=no --project=$project`
+        precompiled() = success(`$julia -e 'exit(Base.isprecompiled(Base.identify_package("Tiny")) ? 0 : 1)'`)
+        @test !precompiled()
+        pkg = Base.PkgId(uuid, "Tiny")
+        @test occursin("Pkg.precompile([\"Tiny\"])", string(EndeavorRuntime._warm_command(pkg, project)))
+        @test Sys.iswindows() || occursin("nice", string(EndeavorRuntime._warm_command(pkg, project)))
+        task = EndeavorRuntime.warm_up_later(pkg; project, quiet=0.2, every=0.1)
+        @test timedwait(() -> istaskdone(task), 120.0) === :ok
+        @test precompiled()
+    end
+
     @testset "lifecycle: start serves both ports, stop frees them for a restart" begin
         EndeavorRuntime.stop_pluto_stack!()
         pluto_port = 1250 + rand(0:99)
