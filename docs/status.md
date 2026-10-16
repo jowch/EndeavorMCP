@@ -291,8 +291,11 @@ Next:
   download, and juliaup's channel only if Endeavor added it (decided before
   adding, from juliaup's own list). On a juliaup with no channels, Endeavor's
   becomes juliaup's default, which juliaup won't remove; `OwnFrom::Juliaup`
-  says so (`default`) and removing explains what to do. On Linux and macOS a
-  failed `juliaup add` falls back to the checked download. `tests/own_julia.rs`
+  says so (`default`) and removing explains what to do. A failed
+  `juliaup add` is tried once more (#132: a first install on Windows failed
+  once with "Access is denied", and the next one worked). If that fails too,
+  Linux and macOS fall back to the checked download, and on Windows the error
+  says trying again may work. `tests/own_julia.rs`
   covers these with real downloads (ignored by default); run on Linux only so
   far.
 - marimo after Ember.

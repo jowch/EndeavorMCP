@@ -298,8 +298,9 @@ pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String>
             progress(format!("{why} Downloading Endeavor's own Julia {JULIA_VERSION} instead."));
             return download_own(progress);
         }
+        // juliaup has tried twice by now, but a failure like Windows' "Access is denied" can still pass later.
         #[cfg(windows)]
-        Err(why) => return Err(why),
+        Err(why) => return Err(format!("{why} Trying again may work.")),
     };
     if ours && let Some(mark) = added_mark() {
         let _ = std::fs::create_dir_all(mark.parent().unwrap());
