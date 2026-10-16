@@ -81,7 +81,7 @@ function _serialize_output(cell)
     body = cell.output.body
     body === nothing && return ""
     mime = cell.output.mime
-    see = _is_visual(mime) ? "; call view_cell_output to see it" : ""
+    see = _is_visual(mime) || _embedded_png_b64(cell.output) !== nothing ? "; call view_cell_output to see it" : ""
     if mime == MIME("text/plain") && body isa AbstractString
         return body
     elseif body isa AbstractString
@@ -102,29 +102,65 @@ end
 # formats rarely have a PNG form, so read_cell doesn't point agents at the tool for them.
 _is_visual(mime) = mime == MIME("image/png") || mime == MIME("image/svg+xml")
 
-"""
-    _cell_png(session, nb, cell) -> Union{Vector{UInt8}, Nothing}
+# The smallest embedded PNG that counts as the output's picture: smaller ones are icons
+# and the like, which would stand in for a table or a widget the agent can't see.
+const _EMBEDDED_PNG_MIN = 4_096
 
-PNG rendering of a cell's output. Pluto displays the richest format it can (SVG
-before PNG for plots), so unless the output already is a PNG, ask the notebook's
-worker to re-render the cell's value as `image/png`. `nothing` if the value has
-no PNG form; throws `no_image::` if the notebook has no running worker (safe preview).
+"""
+    _embedded_png_b64(output) -> Union{SubString, Nothing}
+
+The base64 of the largest PNG an HTML output carries as `<img src="data:image/png;base64,…">`
+(a widget's static render, such as a Masque.jl figure), if it is at least
+`_EMBEDDED_PNG_MIN` bytes. Read from the stored HTML, so it needs no worker.
+"""
+function _embedded_png_b64(output)
+    output.mime == MIME("text/html") && output.body isa AbstractString || return nothing
+    best = nothing
+    for m in eachmatch(r"<img\b[^>]*?\bsrc\s*=\s*[\"']data:image/png;base64,([A-Za-z0-9+/=]+)[\"']"i, output.body)
+        b64 = m.captures[1]
+        (best === nothing || sizeof(b64) > sizeof(best)) && (best = b64)
+    end
+    best === nothing || sizeof(best) * 3 ÷ 4 < _EMBEDDED_PNG_MIN ? nothing : best
+end
+
+function _embedded_png(output)
+    b64 = _embedded_png_b64(output)
+    b64 === nothing && return nothing
+    png = try base64decode(b64) catch; return nothing end
+    return length(png) >= 8 && png[1:8] == UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] ? png : nothing
+end
+
+"""
+    _cell_png(session, nb, cell) -> (Union{Vector{UInt8}, Nothing}, source)
+
+PNG rendering of a cell's output and where it came from (`"value"` or `"embedded image"`).
+Pluto displays the richest format it can (SVG before PNG for plots), so unless the
+output already is a PNG, ask the notebook's worker to re-render the cell's value as
+`image/png`. A value with no PNG form whose HTML carries one (`_embedded_png`) gives
+that. `nothing` if there is neither; throws `no_image::` if only the worker could
+render it and the notebook has none (safe preview).
 """
 function _cell_png(session, nb, cell)
     body = cell.output.body
-    cell.output.mime == MIME("image/png") && body isa Vector{UInt8} && return body
+    cell.output.mime == MIME("image/png") && body isa Vector{UInt8} && return (body, "value")
     workspace = Pluto.WorkspaceManager.get_workspace((session, nb); allow_creation=false)
-    workspace === nothing && throw(ArgumentError("no_image::Cell $(cell.cell_id): the notebook " *
-        "has no running worker (safe preview or not yet run), so its value can't be rendered"))
+    if workspace === nothing
+        embedded = _embedded_png(cell.output)
+        embedded === nothing || return (embedded, "embedded image")
+        throw(ArgumentError("no_image::Cell $(cell.cell_id): the notebook " *
+            "has no running worker (safe preview or not yet run), so its value can't be rendered"))
+    end
     cell_id = cell.cell_id
     # ponytail: no timeout (documented in the tool description); a worker busy with a
     # long run delays this call until it yields.
-    Pluto.WorkspaceManager.Malt.remote_eval_fetch(workspace.worker, quote
+    png = Pluto.WorkspaceManager.Malt.remote_eval_fetch(workspace.worker, quote
         let value = get(PlutoRunner.cell_results, $cell_id, nothing)
             value !== nothing && showable(MIME"image/png"(), value) ?
                 repr(MIME"image/png"(), value) : nothing
         end
     end)
+    png === nothing || return (png, "value")
+    return (_embedded_png(cell.output), "embedded image")
 end
 
 # ---------------------------------------------------------------------------

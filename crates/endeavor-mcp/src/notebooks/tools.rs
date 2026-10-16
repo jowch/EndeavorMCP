@@ -602,7 +602,12 @@ impl Call<'_> {
         if bytes > MAX_IMAGE_BYTES {
             return Err(argument_error(&format!("image_too_large::Cell {cell} renders to {bytes} bytes (max {MAX_IMAGE_BYTES})")));
         }
-        Ok(Reply::Image { meta: json!({ "cell_id": cell, "shown_as": mime, "png_bytes": bytes }), png_base64: png.to_owned() })
+        let mut meta = json!({ "cell_id": cell, "shown_as": mime, "png_bytes": bytes });
+        // An image read from the output's HTML (a widget's static picture), not rendered from the value.
+        if let Some(source) = rendered["source"].as_str() {
+            meta["source"] = json!(source);
+        }
+        Ok(Reply::Image { meta, png_base64: png.to_owned() })
     }
 
     fn edit_cell(&self) -> Result<Value, String> {

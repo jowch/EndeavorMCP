@@ -180,6 +180,32 @@ end
         @test startswith(err, "no_image::") && occursin("safe preview", err)                   # an SVG needs the worker
     end
 
+    @testset "render_png reads a picture embedded in HTML" begin
+        # A widget's static render (as Masque.jl shows a figure): HTML holding a PNG.
+        png = vcat(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], zeros(UInt8, 6_000))
+        icon = vcat(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], zeros(UInt8, 100))
+        widget = "<div><img src='data:image/png;base64,$(base64encode(icon))'><img draggable=\"false\" src=\"data:image/png;base64,$(base64encode(png))\" style=\"width:100%\"><script>mount()</script></div>"
+        session, nb, cells = make_session_with_notebook("HTML(widget)", "HTML(icon)", "md\"# hi\"")
+        cells[1].output = Pluto.CellOutput(; body=widget, mime=MIME("text/html"))
+        cells[2].output = Pluto.CellOutput(; body="<img src='data:image/png;base64,$(base64encode(icon))'> n = 3", mime=MIME("text/html"))
+        cells[3].output = Pluto.CellOutput(; body="<h1>hi</h1>", mime=MIME("text/html"))
+        # Without a worker (safe preview) the stored HTML is enough.
+        rendered = EndeavorRuntime.render_png(session, nb, cells[1])
+        @test base64decode(rendered["png"]) == png && rendered["source"] == "embedded image"
+        @test occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[1]))
+        # An icon isn't the output's picture.
+        @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[2]))
+        @test_throws ArgumentError EndeavorRuntime.render_png(session, nb, cells[2])
+        @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[3]))
+        # With a worker: a value with no PNG form falls back to the embedded one.
+        session, nb, cells = make_session_with_notebook("HTML(\"$(escape_string(widget))\")", "md\"# hi\"")
+        Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
+        @test cells[1].output.mime == MIME("text/html")
+        rendered = EndeavorRuntime.render_png(session, nb, cells[1])
+        @test base64decode(rendered["png"]) == png && rendered["source"] == "embedded image"
+        @test EndeavorRuntime.render_png(session, nb, cells[2]) == Dict("png" => nothing, "mime" => "text/html")
+    end
+
     @testset "render_text shows rich outputs as text" begin
         session, nb, cells = make_session_with_notebook(
             "Dict(\"mean\" => 2.5)",

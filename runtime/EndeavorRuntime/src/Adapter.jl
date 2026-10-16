@@ -448,8 +448,10 @@ function new_notebook(session, path, folder)
 end
 
 function render_png(session, nb, cell)
-    png = _cell_png(session, nb, cell)
-    return Dict{String,Any}("png" => png === nothing ? nothing : base64encode(png), "mime" => string(cell.output.mime))
+    png, source = _cell_png(session, nb, cell)
+    rendered = Dict{String,Any}("png" => png === nothing ? nothing : base64encode(png), "mime" => string(cell.output.mime))
+    png !== nothing && source != "value" && (rendered["source"] = source)
+    return rendered
 end
 
 render_text(session, nb, cell) = Dict{String,Any}("text" => _cell_text(session, nb, cell))

@@ -28,7 +28,7 @@
     "name": "read_cell"
   },
   {
-    "description": "See a cell's output as an image (PNG). Use it to check what a plot or figure looks like; `read_cell` only describes images. The call waits while cells run. In safe preview it works only for an output that is already an image. Fails with `no_image` when the output has no image form (text, Markdown, HTML): use `read_cell` for those.",
+    "description": "See a cell's output as an image (PNG). Use it to check what a plot or figure looks like; `read_cell` only describes images. The call waits while cells run. It also works for an HTML output (a widget, an interactive plot) whose value has an image form or whose HTML holds the picture; `read_cell` says when. In safe preview it works only for an output that is already an image or HTML that holds one. Fails with `no_image` when the output has no image form (text, Markdown, most HTML): use `read_cell` for those.",
     "inputSchema": {
       "properties": {
         "cell_id": {

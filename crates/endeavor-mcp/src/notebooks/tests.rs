@@ -326,7 +326,15 @@ impl Engine {
                 Ok(json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } }))
             }
             "render_text" => Ok(json!({ "text": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("table") } { json!("n\tmean\n3\t2.5") } else { Value::Null } })),
-            "render_png" => Ok(json!({ "png": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("plot") } { json!("iVBORw==") } else { Value::Null }, "mime": "text/plain" })),
+            "render_png" => Ok({
+                let at = find(nb, &params["cell_id"]);
+                let code = &nb.cells[at].code;
+                if code.contains("widget") {
+                    json!({ "png": "iVBORw==", "mime": "text/html", "source": "embedded image" })
+                } else {
+                    json!({ "png": if code.contains("plot") { json!("iVBORw==") } else { Value::Null }, "mime": "text/plain" })
+                }
+            }),
             "validate" => Ok(json!({ "errors": if params["code"].as_str().unwrap().contains('\n') { json!([{ "type": "pluto_multi_expression" }]) } else { json!([]) } })),
             other => Err(format!("ArgumentError: unknown_method::Unknown adapter method: '{other}'")),
         }
@@ -1164,6 +1172,16 @@ fn view_cell_output_sends_the_png_the_engine_renders() {
     assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y}: its output (text/plain) has no PNG rendering; read_cell shows it as text")));
     s.engine.with(NB, |nb| nb.cells[0].errored = true);
     assert_eq!(view(X).err(), Some(format!("ArgumentError: no_image::Cell {X} errored; read_cell shows the error")));
+}
+
+#[test]
+fn view_cell_output_says_when_the_picture_came_from_the_html() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "widget(fig)")]);
+    match s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": X }), &Folder::Process, Instant::now()).unwrap() {
+        Reply::Image { meta, .. } => assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/html", "png_bytes": 4, "source": "embedded image" })),
+        Reply::Json(_) => panic!("no image"),
+    }
 }
 
 #[test]
