@@ -75,12 +75,17 @@ struct Args {
     /// when none is found; `--install-r`: it may install it without asking again.
     own_r: bool,
     install_r: bool,
+    /// `--lifeline FD`: the read end of a pipe from the helper that started the core (`connect
+    /// --own-with-client`), whose end before it says "k" means the start was abandoned (`watch_lifeline`).
+    #[cfg_attr(windows, allow(dead_code))]
+    lifeline: Option<i32>,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut args = argv.iter();
     let (mut state_dir, mut julia, mut runtime, mut depot, mut r, mut r_library) = (None, None, None, None, None, None);
     let (mut install_julia, mut julia_when_needed, mut own_r, mut install_r) = (false, false, false, false);
+    let mut lifeline = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--install-julia" => install_julia = true,
@@ -99,6 +104,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
                     "--r" | "--r-shell" => r = Some(crate::r::Source::from_flag(arg, value?)),
                     "--r-library" => r_library = Some(value?),
+                    "--lifeline" => lifeline = Some(value?.parse().map_err(|_| "--lifeline needs a file descriptor")?),
                     _ => return Err(format!("unknown argument {arg}")),
                 }
             }
@@ -115,6 +121,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         r_library,
         own_r,
         install_r,
+        lifeline,
     })
 }
 
@@ -148,6 +155,10 @@ pub fn main(argv: &[String]) -> ! {
     let starting_lock = crate::runtime::hold_starting(&args.state_dir).unwrap_or_else(|e| fail(format!("Couldn't lock {}: {e}", args.state_dir.display())));
     #[cfg(unix)]
     let (stop_signals, inherited_mask) = block_stop_signals();
+    #[cfg(unix)]
+    if let Some(fd) = args.lifeline {
+        watch_lifeline(fd);
+    }
     // The runtime is the `runtime/` inside the folder `unpack` made.
     let _lease = args.runtime.parent().and_then(crate::lease);
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
@@ -1277,6 +1288,34 @@ fn block_stop_signals() -> (libc::sigset_t, libc::sigset_t) {
         libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old);
         (set, old)
     }
+}
+
+/// Until the helper that started the core says it is wanted, end the core, Julia, and anything else in the core's
+/// process group, as that helper's own cancel would (`Runtime::kill`), once the helper has gone: the pipe's end
+/// arrives however it ended. A helper that is killed outright can't stop the start it began, and an ssh server may
+/// kill it when its client goes, instead of ending its input (#95). The core is stopped by the same SIGTERM, which
+/// it hears as any stop signal (`pass_on_stop_signals`). If the core is still running ten seconds later, the group
+/// gets SIGKILL; once the core has exited, nothing more is sent. Only the start is covered: after the helper says
+/// "k", a helper that is killed leaves the runtime running, as one that detaches does.
+#[cfg(unix)]
+fn watch_lifeline(fd: i32) {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    // SAFETY: the helper passed this end to the core alone, and nothing else here owns it.
+    let mut lifeline = unsafe { std::fs::File::from_raw_fd(fd) };
+    // SAFETY: plain syscall. Julia and R don't take it along.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    std::thread::spawn(move || {
+        let mut said = [0u8; 1];
+        if matches!(lifeline.read(&mut said), Ok(1)) {
+            return;
+        }
+        eprintln!("endeavor core: the connection that started Endeavor ended while it started; stopping");
+        // SAFETY: plain syscalls on the core's own process group (setsid made it one).
+        unsafe { libc::kill(0, libc::SIGTERM) };
+        std::thread::sleep(Duration::from_secs(10));
+        unsafe { libc::kill(0, libc::SIGKILL) };
+    });
 }
 
 /// A stop signal sent to the core goes to Julia, and the core exits when Julia does; with no Julia
