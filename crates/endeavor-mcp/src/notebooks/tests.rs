@@ -1029,6 +1029,34 @@ fn a_read_of_a_cell_the_sessions_own_run_is_running_waits_for_it() {
 }
 
 #[test]
+fn a_read_of_a_dependent_still_running_in_the_sessions_run_waits_for_it() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    let read = |began: Instant| super::tools::tool_json(s.notebooks.tool("7", "read_cell", &json!({ "notebook_id": NB, "cell_id": Y }), &Folder::Process, began).unwrap());
+    let late = || Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+
+    // A waited run whose own cell finished and whose dependent outlasts the cap, and a run not
+    // waited for: either way the dependent is waited for, though the run's own cell is done.
+    for wait in [true, false] {
+        let ran = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": wait })).unwrap();
+        if wait {
+            assert_eq!(ran["execution"]["still_running"], json!([Y]), "{ran}");
+        }
+        let began = late();
+        assert_eq!(read(began)["running"], true);
+        assert!(began.elapsed() >= Duration::from_secs(44), "waited for the dependent (wait_for_completion {wait})");
+
+        // The run ends: a later run of the cell isn't the session's.
+        let run = format!("run-{}", 2 - wait as u8);
+        s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": run, "cells": [X] } }));
+        let began = Instant::now();
+        read(began);
+        assert!(began.elapsed() < Duration::from_secs(1), "the run ended (wait_for_completion {wait})");
+        s.engine.with(NB, |nb| nb.cells[1].running = false);
+    }
+}
+
+#[test]
 fn a_waited_run_that_outlasts_the_cap_during_an_install_keeps_its_still_running_list() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);

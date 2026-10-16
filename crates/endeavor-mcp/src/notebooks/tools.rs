@@ -366,7 +366,9 @@ impl Call<'_> {
                 let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
                 state.ended.retain(|r| Some(r) != run.as_ref());
                 let unfinished: HashSet<String> = cells.iter().filter(|c| !finished.contains(c)).cloned().collect();
-                if !self.owner.is_empty() && !ended && !unfinished.is_empty() {
+                // A run the engine named goes on until its `run_finished`, the cells that depend
+                // on its cells too, even once its own cells have finished.
+                if !self.owner.is_empty() && !ended && (run.is_some() || !unfinished.is_empty()) {
                     state.started.push(Started { owner: self.owner.to_owned(), run, cells: unfinished });
                 }
                 for cell in &cells {

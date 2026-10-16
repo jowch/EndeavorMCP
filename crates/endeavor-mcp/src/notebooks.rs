@@ -750,7 +750,7 @@ impl Notebooks {
                             for started in &mut notebook.started {
                                 started.cells.retain(|cell| !finished.contains(&cell.as_str()));
                             }
-                            notebook.started.retain(|started| !started.cells.is_empty());
+                            notebook.started.retain(|started| started.run.is_some() || !started.cells.is_empty());
                         }
                     }
                 }
@@ -1271,14 +1271,20 @@ impl Notebooks {
         self.interrupt(notebook_id, owner);
     }
 
-    /// Whether a run `owner` started in `nb` is still going, as `nb` shows it. Its cells that
-    /// have finished are forgotten, and so is a run with none left.
+    /// Whether a run `owner` started in `nb` is still going, as `nb` shows it. A run the engine
+    /// named goes on, with the cells that depend on its cells, until its `run_finished`, and
+    /// while it does some cell is running or queued: a notebook with none has seen it end. A
+    /// run the engine didn't name goes on while one of its own cells hasn't finished. A run
+    /// seen to have ended is forgotten.
     fn own_run_going(&self, owner: &str, nb: &Snapshot) -> bool {
+        let busy = nb.cells.values().any(|c| c.running || c.queued);
         self.with_state(&nb.id, |state| {
             for started in state.started.iter_mut().filter(|started| started.owner == owner) {
-                started.cells.retain(|id| nb.cells.get(id).is_some_and(|c| c.running || c.queued));
+                if started.run.is_none() || !busy {
+                    started.cells.retain(|id| busy && nb.cells.get(id).is_some_and(|c| c.running || c.queued));
+                }
             }
-            state.started.retain(|started| !started.cells.is_empty());
+            state.started.retain(|started| (started.run.is_some() && busy) || !started.cells.is_empty());
             state.started.iter().any(|started| started.owner == owner)
         })
     }
