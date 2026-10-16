@@ -111,7 +111,7 @@ const _EMBEDDED_PNG_MIN = 4_096
 
 The base64 of the largest PNG an HTML output carries as `<img src="data:image/png;base64,…">`
 (a widget's static render, such as a Masque.jl figure), if it is at least
-`_EMBEDDED_PNG_MIN` bytes. Read from the stored HTML, so it needs no worker.
+`_EMBEDDED_PNG_MIN` bytes and starts with the PNG signature. Read from the stored HTML, so it needs no worker.
 """
 function _embedded_png_b64(output)
     output.mime == MIME("text/html") && output.body isa AbstractString || return nothing
@@ -120,7 +120,8 @@ function _embedded_png_b64(output)
         b64 = m.captures[1]
         (best === nothing || sizeof(b64) > sizeof(best)) && (best = b64)
     end
-    best === nothing || sizeof(best) * 3 ÷ 4 < _EMBEDDED_PNG_MIN ? nothing : best
+    # "iVBORw0KGgo" is the PNG signature in base64, so read_cell's pointer and render_png agree.
+    best === nothing || sizeof(best) * 3 ÷ 4 < _EMBEDDED_PNG_MIN || !startswith(best, "iVBORw0KGgo") ? nothing : best
 end
 
 function _embedded_png(output)

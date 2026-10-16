@@ -197,6 +197,10 @@ end
         @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[2]))
         @test_throws ArgumentError EndeavorRuntime.render_png(session, nb, cells[2])
         @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[3]))
+        # A large data URI that isn't a PNG gets neither the pointer nor an image.
+        cells[3].output = Pluto.CellOutput(; body="<img src='data:image/png;base64,$(base64encode(zeros(UInt8, 6_000)))'>", mime=MIME("text/html"))
+        @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[3]))
+        @test_throws ArgumentError EndeavorRuntime.render_png(session, nb, cells[3])
         # With a worker: a value with no PNG form falls back to the embedded one.
         session, nb, cells = make_session_with_notebook("HTML(\"$(escape_string(widget))\")", "md\"# hi\"")
         Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
