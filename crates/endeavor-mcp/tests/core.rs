@@ -1938,6 +1938,16 @@ fn julia_status(core: &Core) -> serde_json::Value {
 }
 
 #[test]
+fn the_app_reads_where_r_is_and_a_core_that_never_started_it_says_so() {
+    let dir = state_dir("core-r-status");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    let core = Core::start_when_needed(&dir, &julia);
+    let reply: serde_json::Value = serde_json::from_str(&app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/r_status"}"#)).unwrap();
+    assert_eq!(reply["result"], serde_json::json!({ "state": "not_started" }));
+}
+
+#[test]
 fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fails() {
     require_debug_build();
     let dir = state_dir("core-julia-status");

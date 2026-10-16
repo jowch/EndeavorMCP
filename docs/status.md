@@ -284,6 +284,12 @@ Next:
   minutes (no new step, nothing new in the runtime's log) is stopped and the
   start fails, and a download under 1 kB/s for 5 minutes fails and resumes on
   the next try. The interface number is 5.
+- The app can ask where R notebooks' setup is (Endeavor #93): `endeavor/r_status`
+  answers `starting` with the step in words ("Installing Endeavor's own R …",
+  "Installing Ember for R notebooks", "Updating Ember", "Starting R"),
+  `ready` while R runs, or `not_started`, whoever is waiting, the agent
+  included. It starts nothing and keeps no failure: the call that started R
+  hears why. The interface number is 9.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds
