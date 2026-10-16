@@ -151,7 +151,8 @@ fn serve_starts_julia_when_asked_and_stop_ends_both() {
     let serve = serve(&dir, &bridge, Some(&julia), &mut cleanup);
     let core = read_json(&dir.join("runtime.json"))["pid"].as_u64().unwrap();
     assert!(dir.join("runtime.log").is_file(), "the log is there");
-    assert_eq!(std::fs::read_to_string(dir.join("starting.lock")).unwrap(), "", "recorded, the core let go of the start lock");
+    // The core lets go of the start lock just after it writes runtime.json, which serve may report first.
+    wait_for("the core to empty the start lock", || std::fs::read_to_string(dir.join("starting.lock")).unwrap_or_default().is_empty());
     assert!(!dir.join("julia.pids").exists(), "serve starts no Julia until something needs it");
 
     let julia = start_julia(&dir);
@@ -223,8 +224,9 @@ fn the_core_holds_starting_lock_with_its_pid_readable_until_it_is_recorded() {
 
     std::fs::remove_file(dir.join("hold")).unwrap();
     wait_for("the core to record itself", || dir.join("runtime.json").exists());
-    wait_for("the core to let go of the lock", || std::fs::read_to_string(dir.join("starting.lock")).unwrap_or_default().is_empty());
-    assert!(lock.try_lock_shared().is_ok(), "no start under way");
+    wait_for("the core to empty the lock file", || std::fs::read_to_string(dir.join("starting.lock")).unwrap_or_default().is_empty());
+    // It empties the file and then lets go of the lock.
+    wait_for("the core to let go of the lock", || lock.try_lock_shared().is_ok());
     drop(lock);
     let stop = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--state-dir").arg(&dir).output().unwrap();
     assert!(stop.status.success(), "{stop:?}");
