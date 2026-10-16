@@ -486,7 +486,7 @@
     "name": "session_status"
   },
   {
-    "description": "Open an existing notebook file the user named, and make it this session's notebook. Use it when the user asks to open, show or look at a `.jl` or `.R` notebook, rather than reading the file. It opens in safe preview: no code runs until the user allows it. If the file is already open, the session joins that notebook as it is (`already_open`) and nothing runs. Fails with `one_notebook` if the session already works in another notebook that is open.",
+    "description": "Open an existing notebook file the user named, and make it this session's notebook. When the user asks to open, show or look at a `.jl` or `.R` file, try it before reading the file; it fails with `not_a_notebook` if the file isn't one. It opens in safe preview: no code runs until the user allows it. If the file is already open, the session joins that notebook as it is (`already_open`) and nothing runs. Fails with `one_notebook` if the session already works in another notebook that is open.",
     "inputSchema": {
       "properties": {
         "path": {

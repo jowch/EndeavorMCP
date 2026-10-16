@@ -1371,9 +1371,18 @@ fn opening_and_making_notebooks() {
     let path = format!("{dir}{SEP}nb0.jl");
     let opened = s.call("", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap();
     assert_eq!(opened["warnings"], json!(["async_execution::open queued non-blocking notebook run; poll read_cell for completion"]));
-    assert_eq!((&opened["execution_allowed"], &opened["ran"], &opened["process_status"]), (&json!(true), &json!(true), &json!("starting")));
+    assert_eq!((&opened["execution_allowed"], &opened["ran"], &opened["process_status"], opened.get("note")), (&json!(true), &json!(true), &json!("starting"), None));
     let previewed = s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}nb1.jl") })).unwrap();
-    assert_eq!((&previewed["execution_allowed"], previewed.get("warnings")), (&json!(false), None));
+    assert_eq!((&previewed["execution_allowed"], previewed.get("warnings"), &previewed["note"]), (&json!(false), None, &json!(super::tools::NOT_RUN)));
+    // A script, an empty file or a file of another kind isn't sent to the runtime, which would leave a backup copy of it.
+    let opens = || s.engine.calls.lock().unwrap().iter().filter(|call| *call == "open").count();
+    let before = opens();
+    for (name, text) in [("fit.jl", "using Statistics\nmean([1, 2])\n"), ("fit.R", "x <- mean(c(1, 2))\n"), ("empty.jl", ""), ("notes.txt", "### A Pluto.jl notebook ###\n")] {
+        let script = format!("{dir}{SEP}{name}");
+        std::fs::write(&script, text).unwrap();
+        assert_eq!(s.call("", "open_notebook", json!({ "path": script })), Err(format!("ArgumentError: not_a_notebook::'{script}' isn't a notebook: it doesn't start with a Pluto or Ember notebook's first line")));
+    }
+    assert_eq!(opens(), before, "the runtime wasn't asked to open them");
     assert_eq!(s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}none.jl") })), Err(format!("ArgumentError: file_not_found::No file at '{dir}{SEP}none.jl'")));
     assert_eq!(s.call("", "open_notebook", json!({})), Err("ArgumentError: invalid_path::path is required".into()));
     assert_eq!(s.call("", "open_notebook", json!({ "path": path, "run_notebook": "yes" })), Err("TypeError: non-boolean (String) used in boolean context".into()));
@@ -1485,7 +1494,7 @@ fn temp_notebooks(name: &str, count: usize) -> Vec<String> {
     (0..count)
         .map(|i| {
             let path = dir.join(format!("nb{i}.jl"));
-            std::fs::write(&path, "").unwrap();
+            std::fs::write(&path, "### A Pluto.jl notebook ###\n").unwrap();
             path.display().to_string()
         })
         .collect()
@@ -1581,7 +1590,7 @@ fn opening_an_open_notebook_joins_it_and_changes_nothing() {
     let joined = s.call("b", "open_notebook", json!({ "path": &paths[0], "run_notebook": true })).unwrap();
     assert_eq!(
         joined,
-        json!({ "notebook_id": id, "path": paths[0], "execution_allowed": false, "ran": false, "process_status": "waiting_for_permission", "already_open": true })
+        json!({ "notebook_id": id, "path": paths[0], "execution_allowed": false, "ran": false, "process_status": "waiting_for_permission", "already_open": true, "note": super::tools::NOT_RUN })
     );
     assert_eq!(s.notebooks.bound("b").as_ref(), Some(&paths[0]));
     let apps = s.call("", "open_notebook", json!({ "path": &paths[0] })).unwrap();
