@@ -402,11 +402,11 @@ impl Bridge {
             // Waiting for the user's answer, it goes; running code, the run is interrupted.
             if self.notebooks.asks.cancel(&caller.owner, request) {
                 self.notebooks.publish();
-            } else if let Some(notebook) = self.notebooks.cancelled_run(&caller.owner, request) {
+            } else if let Some((notebook, runs_code)) = self.notebooks.cancelled(&caller.owner, request) {
                 // Pluto's interrupt can take seconds (it presses Ctrl+C again until the run ends):
                 // the notification is answered at once, and the call ends when the run does.
                 let (notebooks, owner) = (self.notebooks.clone(), caller.owner.clone());
-                std::thread::spawn(move || notebooks.interrupt(&notebook, &owner));
+                std::thread::spawn(move || notebooks.stop_for(&owner, &notebook, runs_code));
             }
         }
         answer(message, caller, self.standalone.is_some(), |params| {
@@ -489,11 +489,11 @@ impl Bridge {
             Ok(run) => run,
             Err(result) => return result,
         };
-        // A call that runs code in a notebook is interrupted if the agent cancels it (its Stop).
+        // The agent cancelling a call on a notebook is the user's Stop (`Notebooks::stop_for`).
         let notebook = arguments.get("notebook_id").and_then(Value::as_str);
         let _running = match notebook {
-            Some(notebook) if run && runs_code(name, &arguments) && !caller.owner.is_empty() && !call.request.is_null() => {
-                Some(self.notebooks.running(&caller.owner, call.request, notebook))
+            Some(notebook) if !caller.owner.is_empty() && !call.request.is_null() => {
+                Some(self.notebooks.running(&caller.owner, call.request, notebook, run && runs_code(name, &arguments)))
             }
             _ => None,
         };

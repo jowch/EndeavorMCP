@@ -359,6 +359,9 @@ impl Call<'_> {
         // A run of these cells was accepted: they are no longer staged, whether or not they have finished.
         if reply["accepted"] == true {
             self.nbs.with_state(&nb.id, |state| {
+                if !self.owner.is_empty() {
+                    state.started.entry(self.owner.to_owned()).or_default().extend(cells.iter().cloned());
+                }
                 for cell in &cells {
                     state.pending.remove(cell);
                     state.tool_edits.remove(cell);

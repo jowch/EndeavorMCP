@@ -188,9 +188,12 @@ and 3), and for the app:
   doesn't time out waiting for a response to start. In Manual the app adds
   `edits: true`, and the core holds a call that changes the notebook the same
   way, whatever the run policy.
-- When the agent cancels a call that is running code in a notebook (the user
-  pressed Stop), it interrupts the notebook's run, as Pluto's own Stop does,
-  and the call ends with the cells interrupted. A cell that doesn't stop for
+- When the agent cancels a call on a notebook (the user pressed Stop), it
+  interrupts the notebook's run, as Pluto's own Stop does, if that call was
+  running code or a run the same session started there is still going. The
+  cells end interrupted; a run only the user or another session started is
+  left alone. A Stop while no call is under way (the agent was writing) sends
+  the runtime nothing, so a run started without waiting goes on. A cell that doesn't stop for
   Ctrl+C (one long `sleep`) ends with its notebook's process, again as with
   Pluto's Stop: the notebook then waits for a restart, and this isn't reported
   as a crash (`exited`).
