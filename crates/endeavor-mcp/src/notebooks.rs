@@ -1341,6 +1341,79 @@ impl Notebooks {
         Ok(result)
     }
 
+    /// `endeavor/restore_cells`: the app's Restore on a turn's changed cells,
+    /// the user putting back what an agent's turn changed. `cells` is a list
+    /// of {cell_id, expected, code}: `expected` the code the turn left the
+    /// cell with, `code` the code to put back, or null to delete a cell the
+    /// turn added. All or nothing: if any cell's code isn't `expected` (or
+    /// the cell is gone), nothing changes and `changed` names those cells.
+    /// Nothing runs, except Pluto's cleanup of what a deleted cell defined.
+    /// The restored code is the user's, and a restored cell whose code isn't
+    /// what last ran is pending, so it shows unrun.
+    pub fn restore_cells(&self, notebook_id: &str, cells: &Value) -> Result<Value, String> {
+        let bad = || tools::argument_error("invalid_argument::cells must be a list of {cell_id, expected, code}");
+        let mut restores: Vec<(String, String, Option<String>)> = Vec::new();
+        for entry in cells.as_array().filter(|cells| !cells.is_empty()).ok_or_else(bad)? {
+            let (Some(cell), Some(expected)) = (entry["cell_id"].as_str(), entry["expected"].as_str()) else { return Err(bad()) };
+            let code = match &entry["code"] {
+                Value::Null => None,
+                Value::String(code) => Some(code.clone()),
+                _ => return Err(bad()),
+            };
+            if restores.iter().any(|(seen, ..)| seen == cell) {
+                return Err(tools::argument_error(&format!("invalid_argument::cell {cell} is listed twice")));
+            }
+            restores.push((cell.to_owned(), expected.to_owned(), code));
+        }
+        let nb = self.snapshot(notebook_id)?;
+        let changed: Vec<String> = restores.iter().filter(|(cell, expected, _)| nb.cells.get(cell).is_none_or(|c| c.code != *expected)).map(|(cell, ..)| cell.clone()).collect();
+        if !changed.is_empty() {
+            return Ok(json!({ "restored": [], "changed": changed }));
+        }
+        // Edits first: the engine checks every `expected` before it applies any op. A cell to delete was
+        // checked against the snapshot just above, not by the engine.
+        let mut ops: Vec<Value> = restores.iter().filter_map(|(cell, expected, code)| Some(json!({ "op": "set_code", "cell_id": cell, "code": code.as_ref()?, "expected": expected }))).collect();
+        ops.extend(restores.iter().filter(|(.., code)| code.is_none()).map(|(cell, ..)| json!({ "op": "delete", "cell_id": cell })));
+        let pending = self.with_state(&nb.id, |state| state.pending_run(&nb));
+        if let Err(error) = self.call("apply", json!({ "notebook_id": nb.id, "ops": ops })) {
+            // A cell changed between the snapshot and the edit.
+            if error.contains("stale_read::") {
+                let now = self.snapshot(&nb.id)?;
+                let changed: Vec<&String> = restores.iter().filter(|(cell, expected, _)| now.cells.get(cell).is_none_or(|c| c.code != *expected)).map(|(cell, ..)| cell).collect();
+                return Ok(json!({ "restored": [], "changed": changed }));
+            }
+            return Err(error);
+        }
+        let now = (self.clock)();
+        self.with_state(&nb.id, |state| {
+            for (cell, _, code) in &restores {
+                state.tool_edits.remove(cell);
+                let before = state.befores.remove(cell);
+                match code {
+                    None => {
+                        state.pending.remove(cell);
+                        state.reads.retain(|(_, read), _| read != cell);
+                    }
+                    Some(code) => {
+                        state.authors.insert(cell.clone(), (hash(code), "user"));
+                        // Unrun agent code put back to what last ran is in step again; anything else is unrun.
+                        if pending.contains(cell) && before.as_ref() == Some(code) {
+                            state.pending.remove(cell);
+                        } else {
+                            state.pending.insert(cell.clone(), now);
+                        }
+                    }
+                }
+            }
+        });
+        if restores.iter().any(|(.., code)| code.is_none()) {
+            // Pluto's reactive cleanup of what the deleted cells defined, as delete_cell does.
+            self.call("run", json!({ "notebook_id": nb.id, "cells": [], "wait": false, "timeout": tools::TIMEOUT_SECONDS }))?;
+        }
+        self.publish();
+        Ok(json!({ "restored": restores.iter().map(|(cell, ..)| cell).collect::<Vec<_>>(), "changed": [] }))
+    }
+
     /// `endeavor/move_notebook`: rename or move an open notebook's file (the
     /// app's Rename… and Move to…), never over another file. Sessions bound to
     /// it, and an `idle_stopped` entry for it, follow it to its new path.

@@ -67,6 +67,13 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   the app's R notebooks. Error kinds the Pluto adapter returns
   (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
   Pluto's rules and say so.
+- The app can put back what an agent's turn changed since 2026-10-16
+  (interface 9, Endeavor #79): `endeavor/restore_cells` sets the turn's edited
+  cells back to their earlier code and deletes the cells it added, all or
+  nothing, and only if every cell still has the code the turn left. Nothing
+  runs; the code is the user's, and a cell whose code isn't what last ran
+  shows unrun. Cells the turn deleted can't come back yet. The app's Restore
+  button is the next step.
 - The pages have a token of their own since 2026-10-15 (interface 8, #100). The
   bearer token, which an agent's MCP config carries, opens `/mcp` and
   `/endeavor/…` only; the pages' token (`page_token` in the state folder and

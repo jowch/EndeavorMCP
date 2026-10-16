@@ -793,6 +793,55 @@ fn adding_moving_folding_and_deleting_cells() {
 }
 
 #[test]
+fn restoring_a_turns_cells_puts_their_code_back_all_or_nothing() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x")]);
+    let (_, rx) = s.notebooks.subscribe().unwrap();
+    let restore = |cells: Value| s.notebooks.restore_cells(NB, &cells);
+    let pending = || s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"].clone();
+
+    // A turn edits x without running it and adds z: restoring puts x back, in step with its last run, and deletes z.
+    s.read("7", NB, X);
+    s.edit("7", NB, X, "x = 2");
+    s.read("7", NB, Y);
+    let z = s.call("7", "add_cell", json!({ "notebook_id": NB, "after_cell_id": Y, "code": "z = y" })).unwrap()["cell_id"].as_str().unwrap().to_owned();
+    let calls = s.engine.calls.lock().unwrap().len();
+    let restored = restore(json!([{ "cell_id": X, "expected": "x = 2", "code": "x = 1" }, { "cell_id": z, "expected": "z = y", "code": null }])).unwrap();
+    assert_eq!(restored, json!({ "restored": [X, z], "changed": [] }));
+    assert_eq!((s.engine.order(NB), s.engine.code(NB, X)), (vec![X.to_owned(), Y.to_owned()], "x = 1".to_owned()));
+    assert_eq!(pending(), json!([]), "x's code is what last ran");
+    assert_eq!(s.engine.calls.lock().unwrap()[calls..].iter().filter(|m| *m == "run").count(), 1, "only Pluto's cleanup of the deleted cell");
+    let event = rx.try_iter().last().map(|e| serde_json::from_str::<Value>(&e).unwrap()).expect("an event");
+    assert_eq!((&cell(&event, NB, X)["author"], &cell(&event, NB, X)["before"], &cell(&event, NB, X)["unrun"]), (&json!("user"), &Value::Null, &json!(false)));
+    assert_eq!(s.refused("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 3" })), "stale_read", "the agent reads it again first");
+
+    // A turn that ran its edit: the restored code hasn't run, so the cell is unrun.
+    s.seconds(1.0);
+    s.read("7", NB, X);
+    s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 4", "run_after": true })).unwrap();
+    s.seconds(1.0);
+    assert_eq!(pending(), json!([]));
+    assert_eq!(restore(json!([{ "cell_id": X, "expected": "x = 4", "code": "x = 1" }])).unwrap()["restored"], json!([X]));
+    assert_eq!(pending(), json!([X]));
+
+    // The user changed one of the cells since, or it's gone: nothing changes, and the reply says which.
+    s.read("7", NB, Y);
+    s.edit("7", NB, Y, "y = x + 1");
+    s.engine.with(NB, |nb| nb.cells[0].code = "x = 5".into());
+    let gone = "33333333-3333-3333-3333-333333333333";
+    let refused = restore(json!([{ "cell_id": Y, "expected": "y = x + 1", "code": "y = x" }, { "cell_id": X, "expected": "x = 1", "code": "x = 0" }, { "cell_id": gone, "expected": "", "code": null }])).unwrap();
+    assert_eq!(refused, json!({ "restored": [], "changed": [X, gone] }));
+    assert_eq!((s.engine.code(NB, X), s.engine.code(NB, Y)), ("x = 5".to_owned(), "y = x + 1".to_owned()));
+
+    for bad in [json!([]), json!({}), json!([{ "cell_id": Y, "code": "y = x" }]), json!([{ "cell_id": Y, "expected": "y = x + 1", "code": 1 }])] {
+        assert_eq!(restore(bad), Err("ArgumentError: invalid_argument::cells must be a list of {cell_id, expected, code}".into()));
+    }
+    let twice = json!([{ "cell_id": Y, "expected": "y = x + 1", "code": "y = x" }, { "cell_id": Y, "expected": "y = x + 1", "code": null }]);
+    assert_eq!(restore(twice), Err(format!("ArgumentError: invalid_argument::cell {Y} is listed twice")));
+    assert_eq!(s.engine.code(NB, Y), "y = x + 1");
+}
+
+#[test]
 fn reading_the_notebook_as_code_hides_boilerplate_and_counts_as_reading_it() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "md\"# Title\""), ("33333333-3333-3333-3333-333333333333", " \n"), ("44444444-4444-4444-4444-444444444444", "PLUTO = 1")]);
