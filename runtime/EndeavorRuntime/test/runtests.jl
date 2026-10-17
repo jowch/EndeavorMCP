@@ -716,6 +716,24 @@ end
             next_note("notebook_shut_down"; nid)
             sleep(2)
             @test exits() == []
+
+            # A process that ended while it started: Pluto's own Restart, as the notebook's page
+            # sends it, starts a new one, and every cell runs (#194).
+            workers() = Set(p for p in filter(f -> all(isdigit, f), readdir("/proc"))
+                            if (c = try read("/proc/$p/cmdline", String) catch; "" end; occursin("Malt", c) && occursin("worker.jl", c)))
+            crashing = result("open", Dict("path" => fresh_fixture(), "run" => false))["notebook_id"]
+            cnb = EndeavorRuntime.standalone_session().notebooks[UUID(crashing)]
+            before = workers()
+            result("allow_execution", Dict("notebook_id" => crashing, "run" => true, "timeout" => 60))
+            @test timedwait(() -> !isempty(setdiff(workers(), before)), 60; pollint=0.02) == :ok
+            run(`kill -9 $(collect(setdiff(workers(), before)))`)
+            # The start fails when Malt reads no port from it, at the latest after its own 30 s.
+            @test timedwait(() -> istaskfailed(Pluto.WorkspaceManager.active_workspaces[cnb.notebook_id]), 60) == :ok
+            Pluto.responses[:restart_process](Pluto.ClientRequest(session=EndeavorRuntime.standalone_session(), notebook=cnb); run_async=false)
+            @test cnb.process_status == Pluto.ProcessStatus.ready
+            @test [string(cnb.cells_dict[UUID(id)].output.body) for id in (X, Y)] == ["6", "42"]
+            @test !any(c -> c.running || c.queued || c.errored, cnb.cells)
+            result("shutdown", Dict("notebook_id" => crashing))
             close(sock)
         finally
             EndeavorRuntime.stop_pluto_stack!()

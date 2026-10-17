@@ -442,6 +442,23 @@ function _forget_failed_start!(nb)
     return nothing
 end
 
+# Pluto's own Restart, from the notebook's page, goes to its `restart_process` handler and not
+# through `restart!`, so it forgets a failed start the same way first (#194). Once per Julia.
+const _PLUTO_RESTART = Ref{Any}(nothing)
+function _wrap_page_restart!()
+    _PLUTO_RESTART[] === nothing || return nothing
+    original = _PLUTO_RESTART[] = Pluto.responses[:restart_process]
+    Pluto.responses[:restart_process] = function (request; kwargs...)
+        nb = request.notebook
+        if nb !== nothing && nb.process_status !== Pluto.ProcessStatus.waiting_to_restart
+            _forget_failed_start!(nb)
+            nb.wants_to_interrupt = false
+        end
+        original(request; kwargs...)
+    end
+    return nothing
+end
+
 # Move the notebook's file to `path` (checked by the core), as Pluto's own file box does.
 function move!(session, nb, path::AbstractString)
     Pluto.SessionActions.move(session, nb, path)
