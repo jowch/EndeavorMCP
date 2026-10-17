@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "structure_error")
+wanted <- c("%||%", "package_step", "structure_error", "input_line", "json_value", "json_choice")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -80,6 +80,45 @@ d <- A$structure_error(list(kind = "missing_package", message = "there is no pac
 check("a missing package with no header fix: no fixes", is.null(d$fixes))
 d <- A$structure_error(list(kind = "error", message = "boom", fixes = "Do this"))
 check("another error keeps its fixes and reads as runtime", identical(d$kind, "runtime") && identical(unclass(d$fixes), "Do this"))
+
+# ---- input_line ----
+input <- function(spec, value = spec$value, default = spec$value, name = "n", bound = TRUE, reason = NULL) {
+  list(name = name, bound = bound, reason = reason, spec = spec, default = default, value = value)
+}
+slider <- list(type = "slider", value = 100, min = 10, max = 500, step = 10, label = NULL)
+check("a slider says its range, step and value",
+      identical(A$input_line(input(slider)), "n: slider 10 to 500, step 10, value 100"))
+check("a value moved from its default says the default",
+      identical(A$input_line(input(slider, value = 250)), "n: slider 10 to 500, step 10, value 250 (default 100)"))
+check("a number with one bound and no step",
+      identical(A$input_line(input(list(type = "number", value = 1.5, min = NA, max = 2, step = NA))), "n: number at most 2, value 1.5"))
+check("a checkbox and a text box",
+      identical(A$input_line(input(list(type = "checkbox", value = TRUE))), "n: checkbox, value TRUE") &&
+      identical(A$input_line(input(list(type = "text", value = "Results"))), "n: text, value \"Results\""))
+select <- list(type = "select", value = "pearson", choices = c(Pearson = "pearson", Spearman = "spearman"),
+               labels = c("Pearson", "Spearman"), multiple = FALSE)
+check("a dropdown names its labels and the values to send",
+      identical(A$input_line(input(select)), "n: select of Pearson = \"pearson\", Spearman = \"spearman\", value \"pearson\""))
+radio <- list(type = "radio", value = "a", choices = c("a", "b"), labels = c("a", "b"))
+check("a choice whose label is the value is shown once",
+      identical(A$input_line(input(radio)), "n: radio of \"a\", \"b\", value \"a\""))
+check("an input read in another cell isn't bound, and says how to fix it",
+      grepl("Not bound: read `n` in another cell.", A$input_line(input(slider, bound = FALSE, reason = "read_elsewhere")), fixed = TRUE))
+check("an input not assigned at the top of a cell has no name",
+      startsWith(A$input_line(input(slider, name = NULL, bound = FALSE, reason = "not_assigned")), "slider 10 to 500"))
+
+# ---- json_value ----
+check("JSON's 2 is the choice 2L",
+      identical(A$json_value(list(type = "select", choices = 1:3), 2L), 2L) &&
+      identical(A$json_value(list(type = "radio", choices = c(1.5, 2)), 2L), 2))
+check("a string choice is itself, and one not offered is left for R to refuse",
+      identical(A$json_value(select, "spearman"), "spearman") && identical(A$json_value(select, "kendall"), "kendall"))
+check("a JSON array for a multiple dropdown is a vector of its choices",
+      identical(A$json_value(list(type = "select", choices = c("a", "b", "c"), multiple = TRUE), list("c", "a")), c("c", "a")))
+check("a JSON array for a single dropdown is one choice that is a vector",
+      identical(A$json_value(list(type = "select", choices = list(a = c(2, 3), b = "x"), multiple = FALSE), list(2L, 3L)), c(2, 3)))
+check("a number for a slider is left as it is",
+      identical(A$json_value(slider, 7L), 7L))
 
 cat(sprintf("\n%d passed, %d failed\n", passed, failed))
 if (failed > 0) quit(status = 1)

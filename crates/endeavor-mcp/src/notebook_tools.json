@@ -614,5 +614,33 @@
       "type": "object"
     },
     "name": "apply_package_update"
+  },
+  {
+    "description": "R notebooks only. Set the value of an input (a slider, number box, checkbox, text box, dropdown or radio buttons from the emberui package, written `n <- input_slider(1, 10)`), as the user moving its widget does. `read_cell` lists a cell's inputs under `inputs`, with their names, what they allow and their values. R checks the value: one the input doesn't allow fails with `invalid_value`, saying what it allows. For a dropdown or radio, `value` is the choice itself (`\"pearson\"`), not its label; with several choices allowed, a list of them. The cells that read the name rerun, as `execute_cell` runs them, or in lazy mode turn stale; the input's own cell doesn't rerun. While R runs another cell, it reads the value only after that cell: if that is past the wait, the result says `pending`, and the value lands then. The value lasts until the notebook closes and isn't saved: to keep it, edit the input's default in its cell (`value = 250`), as a user would.",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "description": "The variable the input is assigned to.",
+          "type": "string"
+        },
+        "notebook_id": {
+          "type": "string"
+        },
+        "value": {
+          "description": "The new value: a number, true or false, a string, or for a dropdown with several choices, a list of choices."
+        },
+        "wait_for_completion": {
+          "description": "Wait for the cells that rerun, as execute_cell does.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "notebook_id",
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "set_input"
   }
 ]

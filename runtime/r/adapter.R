@@ -291,7 +291,46 @@ snapshot_cell <- function(v) {
     d$output <- output_text(v)
   }
   d$notes <- I(cell_notes(v))
+  d$inputs <- I(vapply(v$inputs %||% list(), input_line, character(1)))
   d
+}
+
+# One of a cell's inputs (emberui, Ember's docs/inputs.md) as read_cell
+# shows it: "n: slider 10 to 500, step 10, value 250 (default 100)". An
+# input that isn't bound says why, as the page's greyed widget does.
+input_line <- function(i) {
+  # A number as JSON writes it (5, not 5L), anything else as R prints it.
+  shown <- function(x) {
+    if (is.numeric(x) && length(x) == 1 && is.null(names(x))) format(x, digits = 15)
+    else paste(deparse(x, width.cutoff = 500L), collapse = "")
+  }
+  spec <- i$spec %||% list()
+  type <- spec$type %||% "input"
+  range <- function(min, max) {
+    min <- if (length(min) == 1 && !is.na(min)) min
+    max <- if (length(max) == 1 && !is.na(max)) max
+    if (!is.null(min) && !is.null(max)) sprintf(" %s to %s", shown(min), shown(max))
+    else if (!is.null(min)) sprintf(" at least %s", shown(min))
+    else if (!is.null(max)) sprintf(" at most %s", shown(max))
+    else ""
+  }
+  what <- switch(type,
+    slider = , number = paste0(type, range(spec$min, spec$max),
+                               if (length(spec$step) == 1 && !is.na(spec$step)) sprintf(", step %s", shown(spec$step)) else ""),
+    select = , radio = {
+      values <- vapply(spec$choices %||% list(), shown, character(1), USE.NAMES = FALSE)
+      labels <- unlist(spec$labels %||% values)
+      choices <- ifelse(labels == values | labels == gsub('^"|"$', "", values), values, sprintf("%s = %s", labels, values))
+      sprintf("%s%s of %s", if (isTRUE(spec$multiple)) "multiple " else "", type, paste(choices, collapse = ", "))
+    },
+    type)
+  value <- sprintf(", value %s", shown(i$value))
+  if (!identical(i$value, i$default)) value <- sprintf("%s (default %s)", value, shown(i$default))
+  name <- if (is.null(i$name)) "" else sprintf("%s: ", i$name)
+  why <- if (isTRUE(i$bound)) "" else switch(i$reason %||% "",
+    read_elsewhere = sprintf(" Not bound: read `%s` in another cell.", i$name),
+    " Not bound: assign this input to a name at the top of the cell to use it.")
+  paste0(name, what, value, why)
 }
 
 # The notes Ember's page shows under a cell after its last run, worded as the
@@ -648,6 +687,109 @@ set_package_date <- function(rec, date) {
   list(date = state$file$header$snapshot, changes = rows(changes), process_status = process_status(state))
 }
 
+# ---- Inputs ------------------------------------------------------------------
+
+# Ember's set_input(): a new value for the input bound to `name`. The worker
+# checks it against the input's spec; a value it refuses is an error that
+# says what the input allows. In autorun the cells that read `name` rerun,
+# as a run of them, waited for as `run` waits; in lazy mode they are only
+# marked stale. Either way the input's own cell doesn't rerun. R reads the
+# value only once a running cell finishes; if it hasn't by the deadline, the
+# value is still on its way, so the reply says it is pending, not refused.
+set_input <- function(rec, name, value, wait, timeout) {
+  if (!is.character(name) || length(name) != 1 || is.na(name) || !nzchar(name)) {
+    argument_error("invalid_argument", "name must be the name an input is assigned to")
+  }
+  state <- notebook_state(rec$nb)
+  input <- bound_input(state, name)
+  if (!is.null(input)) value <- json_value(input$spec, value)
+  accepted <- tryCatch(ember::set_input(rec$nb, name, value, wait = FALSE),
+                       ember_refused = function(e) argument_error("input_refused", conditionMessage(e)))
+  deadline <- Sys.time() + as.numeric(timeout %||% 60)
+  promise(function(resolve, reject) {
+    answered <- function() {
+      if (registered(rec) && !is.null(notebook_state(rec$nb)$worker$input) && Sys.time() < deadline) {
+        return(later::later(answered, 0.05))
+      }
+      state <- if (registered(rec)) notebook_state(rec$nb)
+      if (!is.null(state$worker$input)) {
+        return(resolve(list(cell = accepted$cell, cells = I(character()), pending = TRUE,
+                            lazy = !identical(state$file$header$on_cell_change, "autorun"),
+                            accepted = TRUE, process_status = process_status(state))))
+      }
+      out <- state$input_outcome
+      if (is.null(out) || !identical(out$name, name)) {
+        return(reject(tryCatch(argument_error("input_refused", "R didn't answer; the input's value is unchanged"), error = identity)))
+      }
+      if (!isTRUE(out$ok)) return(reject(tryCatch(argument_error("invalid_value", out$error), error = identity)))
+      cells <- as.character(out$cells)
+      result <- list(cell = accepted$cell, value = out$value,
+                     cells = I(cells), lazy = !identical(state$file$header$on_cell_change, "autorun"),
+                     accepted = TRUE, process_status = process_status(state))
+      if (result$lazy || length(cells) == 0) return(resolve(result))
+      if (!isTRUE(wait)) {
+        result$run <- watch_run(rec, cells, cells)
+        return(resolve(result))
+      }
+      over_by <- function() {
+        over <- run_over(rec, cells)
+        if (!over && Sys.time() < deadline) return(later::later(over_by, 0.05))
+        if (!registered(rec)) {
+          result[c("completed", "timed_out")] <- list(I(cells), I(character()))
+          return(resolve(result))
+        }
+        state <- notebook_state(rec$nb)
+        result$process_status <- process_status(state)
+        exited <- exited_cells(state)
+        if (!is.null(exited)) result$exited <- I(exited)
+        result$completed <- I(setdiff(cells, unfinished(state, cells)))
+        result$timed_out <- I(if (over) unfinished(state, cells) else unfinished(state, names(state$cells)))
+        if (!over) result$run <- watch_run(rec, cells, cells)
+        resolve(result)
+      }
+      over_by()
+    }
+    answered()
+  })
+}
+
+# The input bound to `name`, as the cells' last results report it, or NULL.
+bound_input <- function(state, name) {
+  for (r in state$results) {
+    for (i in r$inputs %||% list()) if (isTRUE(i$bound) && identical(i$name, name)) return(i)
+  }
+  NULL
+}
+
+# A value from JSON, which has no integers and no vectors, as the R value
+# the input means: a dropdown's or radio's choice compared as a number when
+# both are numbers (JSON's 2 is the choice 2L or 2), and a JSON array as a
+# vector: a multiple dropdown's choices, or one choice that is itself a
+# vector. emberui compares numbers by value too; this is a backstop for an
+# older emberui, which compared with identical().
+json_value <- function(spec, value) {
+  choice <- spec$type %in% c("select", "radio")
+  if (choice && !isTRUE(spec$multiple) && is.list(value) && length(value) > 0 &&
+      all(vapply(value, function(v) is.atomic(v) && length(v) == 1, logical(1)))) {
+    value <- json_choice(spec$choices, unlist(value))
+  } else if (is.list(value) && length(value) > 0 && all(vapply(value, function(v) is.atomic(v) && length(v) == 1, logical(1)))) {
+    value <- if (choice) lapply(value, json_choice, choices = spec$choices) else value
+    if (!is.list(spec$choices)) value <- unlist(value)
+  } else if (spec$type %in% c("select", "radio")) {
+    value <- json_choice(spec$choices, value)
+  }
+  value
+}
+
+json_choice <- function(choices, v) {
+  for (ch in as.list(choices)) {
+    ch <- unname(ch)
+    if (identical(ch, v)) return(ch)
+    if (is.numeric(ch) && is.numeric(v) && length(ch) == length(v) && isTRUE(all(ch == v))) return(ch)
+  }
+  v
+}
+
 interrupt <- function(rec) {
   state <- notebook_state(rec$nb)
   busy <- !is.null(state$worker$running) || length(state$pending) > 0
@@ -767,6 +909,7 @@ adapter_call <- function(method, params) {
     restart = restart(rec),
     preview_packages = preview_packages(rec, params$date, params$timeout),
     set_package_date = set_package_date(rec, params$date),
+    set_input = set_input(rec, params$name, params$value, isTRUE(params$wait), params$timeout),
     allow_execution = allow(rec, isTRUE(params$run)),
     move = move(rec, params$path),
     render_text = render_text(rec, check_cell(rec, params$cell_id)),

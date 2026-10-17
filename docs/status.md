@@ -217,7 +217,8 @@ Next:
   in every tool that takes a cell id (Ember #82, interface 20). An agent can restart a notebook with
   `restart_notebook`, as the page's Restart does (#202, interface 21). The notes Ember shows under a cell's last run (`changed_in_place`, `settings_found`, `load_note`) reach the agent: as `warnings` on the run that made them, and as `notes` in `read_cell` (#207, interface 22). The tools also show an R notebook's `package_date`, and `preview_package_update` and
   `apply_package_update` move it, as the Packages tab's Update does: Ember's
-  `preview_date()`, then its `set_date()` (#201, interface 23). R's adapter
+  `preview_date()`, then its `set_date()` (#201, interface 23). `set_input` sets an input from emberui (Ember #36),
+  as moving its widget does, and `read_cell` lists a cell's inputs (interface 24). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the

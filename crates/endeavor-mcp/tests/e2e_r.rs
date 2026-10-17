@@ -570,6 +570,49 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "E" })).get("notes"), None);
     });
 
+    // emberui comes from Ember's r-universe (`universe:jowch`), so this step needs it listed there.
+    step("set_input sets an input, as moving its widget does: its readers rerun, its own cell doesn't (#36)", || {
+        std::fs::write(
+            folder.join("inputs.R"),
+            "### An Ember notebook ###\n# /// environment\n# [sources]\n# emberui = \"universe:jowch\"\n# ///\n\n# %% id=L\nlibrary(emberui)\n\n# %% id=I\nn <- input_slider(1L, 10L, 5L)\nm <- input_select(c(A = 1, B = 2))\n\n# %% id=N\nn * 2\n\n# %% id=M\nm + 100\n\n# /// cell order\n# L\n# I\n# N\n# M\n# ///\n",
+        )
+        .unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "inputs.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        let started = Instant::now();
+        loop {
+            let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": "M", "wait_for_completion": true }));
+            if agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "N" }))["output"].as_str().is_some_and(|o| o.contains("10")) {
+                break;
+            }
+            // emberui installs first, which can outlast one call's wait.
+            assert!(started.elapsed() < Duration::from_secs(600), "the notebook never ran: {ran}");
+            agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
+        }
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "I" }));
+        assert_eq!(read["inputs"], json!(["n: slider 1 to 10, value 5", "m: select of A = 1, B = 2, value 1"]), "{read}");
+        let output = read["output"].clone();
+
+        let set = agent.ok("set_input", json!({ "notebook_id": id, "name": "n", "value": 7, "wait_for_completion": true }));
+        assert_eq!((&set["affected_cells"], &set["execution"]["status"]), (&json!(["N"]), &json!("completed")), "{set}");
+        assert!(set["outputs"]["changed"][0]["output_summary"].as_str().unwrap().contains("14"), "{set}");
+        // JSON's 2 is the choice 2.
+        let set = agent.ok("set_input", json!({ "notebook_id": id, "name": "m", "value": 2, "wait_for_completion": true }));
+        assert!(set["outputs"]["changed"][0]["output_summary"].as_str().unwrap().contains("102"), "{set}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "I" }));
+        assert_eq!(read["inputs"], json!(["n: slider 1 to 10, value 7 (default 5)", "m: select of A = 1, B = 2, value 2 (default 1)"]), "{read}");
+        assert_eq!(read["output"], output, "the input's own cell didn't rerun: {read}");
+
+        let (refused, said) = agent.call("set_input", json!({ "notebook_id": id, "name": "n", "value": 70 }));
+        assert!(refused && said["error"] == "invalid_value" && said["message"].as_str().unwrap().contains("from 1 to 10"), "{said}");
+        let (refused, said) = agent.call("set_input", json!({ "notebook_id": id, "name": "nope", "value": 1 }));
+        assert!(refused && said["error"] == "input_refused", "{said}");
+        assert!(!std::fs::read_to_string(folder.join("inputs.R")).unwrap().contains("7L"), "a value set isn't saved in the file");
+    });
+
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();
