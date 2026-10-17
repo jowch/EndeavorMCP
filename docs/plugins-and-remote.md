@@ -952,8 +952,11 @@ build's key. Nobody edits it by hand: after a push to `main` has built on every
 platform, the Helpers workflow's pin job writes that build's key to
 `scripts/release-key` and the copies and pushes the commit to `main`. Until
 then, and if a platform's build fails, the plugins keep the last complete build:
-it exists, but its embedded skills can be a few minutes older than the
-plugin's. Before this, each PR committed its own key, which went stale whenever
+it exists, but its embedded skills can be older than the plugin's (by an hour
+or two when the macOS builds queue). A run pins only a build of newer source
+than the pinned one, which its commit's "Built from" line names, so a re-run of
+an old run can't move the pin back, and merges landing while a build runs
+don't stop it from pinning. Before this, each PR committed its own key, which went stale whenever
 `main` moved, so every PR had to merge `main` and re-pin before it could merge.
 
 **What was seen with Antigravity** (agy 1.3.2, Windows 10, through `agy -p`;
