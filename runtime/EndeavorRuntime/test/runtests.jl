@@ -719,8 +719,8 @@ end
 
             # A process that ended while it started: Pluto's own Restart, as the notebook's page
             # sends it, starts a new one, and every cell runs (#194).
-            workers() = Set(p for p in filter(f -> all(isdigit, f), readdir("/proc"))
-                            if (c = try read("/proc/$p/cmdline", String) catch; "" end; occursin("Malt", c) && occursin("worker.jl", c)))
+            # The Malt workers running now, a notebook's own Julia (pgrep, as macOS has no /proc).
+            workers() = Set(readlines(ignorestatus(`pgrep -f "Malt.*worker.jl"`)))
             crashing = result("open", Dict("path" => fresh_fixture(), "run" => false))["notebook_id"]
             cnb = EndeavorRuntime.standalone_session().notebooks[UUID(crashing)]
             before = workers()
