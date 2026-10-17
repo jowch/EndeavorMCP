@@ -27,6 +27,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `notebook_not_found`, `cell_not_found` | The id is wrong, or the notebook was closed or the cell deleted | `list_notebooks`, or read the notebook again |
 | `file_exists` | `new_notebook` on a path that exists | `open_notebook` it, or pick another name |
 | `file_not_found` | `open_notebook` on a path with no file | Check the path; a relative path starts in the session's folder |
+| `not_a_notebook` | `open_notebook` on a file that isn't a Pluto or Ember notebook, such as a script | Read it as a file |
 | `invalid_path` | `open_notebook` had a null path or one that isn't a string; `new_notebook` had a path that doesn't end in `.jl` or `.R`, or whose folder doesn't exist; or the server was not told the project folder and the path is relative (or `new_notebook` had none) | Fix the path; if the server was not told the project folder, give an absolute path |
 | `execution_not_gated` | `allow_execution` on a notebook that isn't in safe preview | Nothing to do; it can already run |
 | `invalid_keep` | `keep_notebook_alive` without `keep` as true or false | Pass `keep` |
