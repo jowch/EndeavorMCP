@@ -17,6 +17,10 @@ Read this when the notebook is an Ember notebook (a `.R` file). It covers what E
 
 - Running a cell also runs the cells that depend on it. A cell whose result was made before a cell it depends on last ran shows `stale` in `read_cell`. Run it to bring it up to date.
 - After the notebook restarts, or when it opens without running, every cell shows `not_run` and keeps no output until it runs. Run the cells you need, or `run_all_cells`.
+- Ember can put a note on a cell's last run. A run's `warnings` give each one as `kind::Cell <id>: text`, and `read_cell` lists them in `notes`:
+  - `changed_in_place`: the cell changed, by reference, a value another cell defines, such as a data.table changed with `:=` or `set()`, an environment or an R6 object. The cells that read it don't rerun, so their results and a rerun of this cell can be wrong. Make the change in the cell that defines the value.
+  - `settings_found`: the run set a global setting, such as `options()`, so the cell became a settings cell and the cells after it reran.
+  - `load_note`: a package the cell loaded reset a setting that a settings cell sets. Move that setting into this cell, after the package loads.
 
 ## Errors
 

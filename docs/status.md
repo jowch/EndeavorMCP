@@ -214,7 +214,7 @@ Next:
   notebook's stale cells as `stale_cells`, and `list_notebooks` and
   `open_notebook` show `on_cell_change` (#196, interface 19). A hand-written
   R notebook's short cell ids (`# %% id=B`, which Ember keeps) name its cells
-  in every tool that takes a cell id (Ember #82, interface 20). R's adapter
+  in every tool that takes a cell id (Ember #82, interface 20). The notes Ember shows under a cell's last run (`changed_in_place`, `settings_found`, `load_note`) reach the agent: as `warnings` on the run that made them, and as `notes` in `read_cell` (#207, interface 21). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the

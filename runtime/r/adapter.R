@@ -290,7 +290,30 @@ snapshot_cell <- function(v) {
   } else {
     d$output <- output_text(v)
   }
+  d$notes <- I(cell_notes(v))
   d
+}
+
+# The notes Ember's page shows under a cell after its last run, worded as the
+# page words them (Ember's lang/english.json), each "kind::text" like a tool
+# warning (#207). `changed_in_place`: the run changed, by reference, a value
+# another cell defines, so the cells that read it didn't rerun.
+# `settings_found`: the run found a global setting, so the cell became a
+# settings cell. `load_notes`: a package it loaded reset a setting a settings
+# cell sets.
+cell_notes <- function(v) {
+  names_of <- function(x) paste(sub("^\\.__C__", "class ", as.character(x)), collapse = ", ")
+  notes <- character()
+  if (length(v$changed_in_place) > 0) {
+    notes <- c(notes, sprintf("changed_in_place::Changed %s in place, which another cell defines, so the cells that read it don't rerun. Make the change in the cell that defines it.", names_of(v$changed_in_place)))
+  }
+  if (length(v$settings_found) > 0) {
+    notes <- c(notes, sprintf("settings_found::Found a global setting (%s) when this cell ran; the cells after it rerun.", names_of(v$settings_found)))
+  }
+  for (n in v$load_notes %||% list()) {
+    notes <- c(notes, sprintf("load_note::Loading %s resets %s, which a settings cell sets. Under Rscript the setting is lost, because settings cells come first in the file. Move it into this cell, after %s loads.", n$package, n$setting, n$package))
+  }
+  notes
 }
 
 # Ember's package work as it goes, in the shape Adapter.jl's `package_step`
