@@ -533,6 +533,17 @@ impl Call<'_> {
                 Ok(entry)
             })
             .collect::<Result<_, String>>()?;
+        // The notes Ember shows under a cell this run ran, such as a value
+        // another cell defines changed in place, whose readers don't rerun
+        // (#207): an agent that doesn't see them reads a wrong result as right.
+        for id in ran.iter().filter(|id| !still_running.contains(id)) {
+            if let Some(cell) = nb.cells.get(id).filter(|c| !c.running && !c.queued) {
+                for note in &cell.notes {
+                    let (kind, text) = note.split_once("::").unwrap_or(("note", note));
+                    warnings.push(format!("{kind}::Cell {id}: {text}"));
+                }
+            }
+        }
         let pending = self.pending_run(&nb);
         // The notebook's order isn't in it: two lists of every cell's id grow
         // with the notebook and come back on every change, and an agent that
@@ -616,6 +627,9 @@ impl Call<'_> {
         if cell.not_run {
             out["not_run"] = json!(true);
         }
+        if !cell.notes.is_empty() {
+            out["notes"] = json!(cell.notes);
+        }
         let Value::Object(out) = out else { unreachable!() };
         out
     }
@@ -629,7 +643,7 @@ impl Call<'_> {
         let mut out = self.cell_json(nb, id);
         out.remove("code");
         if out["running"] == true || out["queued"] == true {
-            for key in ["output", "errored", "error"] {
+            for key in ["output", "errored", "error", "notes"] {
                 if let Some(previous) = out.remove(key) {
                     out.insert(format!("previous_{key}"), previous);
                 }
