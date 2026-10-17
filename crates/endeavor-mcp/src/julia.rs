@@ -420,7 +420,9 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
     let staging = cache.join(format!("{top}.unpacking"));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-    let untar = Command::new("tar").arg("-xzf").arg(&part).arg("-C").arg(&staging).status().map_err(|e| e.to_string())?;
+    let mut untar = Command::new("tar");
+    crate::host_tools::with_command_mask(untar.arg("-xzf").arg(&part).arg("-C").arg(&staging));
+    let untar = untar.status().map_err(|e| e.to_string())?;
     if !untar.success() || !staging.join(&top).is_dir() {
         return Err(format!("Couldn't unpack Julia {JULIA_VERSION} ({untar})."));
     }
