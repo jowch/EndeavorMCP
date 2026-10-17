@@ -1268,7 +1268,7 @@ mod tests {
             "allow_julia_install", "allow_r_install", "answer_run", "file_info", "julia_status", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
-        let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
+        let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
         assert_eq!((crate::core::INTERFACE, calls, record_fields()), (23, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
