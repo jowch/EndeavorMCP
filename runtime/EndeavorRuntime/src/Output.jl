@@ -148,6 +148,7 @@ function _cell_png(session, nb, cell)
     if workspace === nothing
         embedded = _embedded_png(cell.output)
         embedded === nothing || return (embedded, "embedded image")
+        # The app can show the notebook's own picture for this error (`NO_WORKER` in notebooks/tools.rs).
         throw(ArgumentError("no_image::Cell $(cell.cell_id): the notebook " *
             "has no running worker (safe preview or not yet run), so its value can't be rendered"))
     end

@@ -707,7 +707,7 @@ impl Call<'_> {
         let rendered = self.nbs.call("render_png", json!({ "notebook_id": nb.id, "cell_id": cell }))?;
         let mime = rendered["mime"].as_str().unwrap_or_default();
         let Some(png) = rendered["png"].as_str() else {
-            return Err(argument_error(&format!("no_image::Cell {cell}: its output ({mime}) has no PNG rendering; read_cell shows it as text")));
+            return Err(argument_error(&format!("no_image::Cell {cell}: its output ({mime}) {NO_PNG}; read_cell shows it as text")));
         };
         let bytes = base64_len(png);
         if bytes > MAX_IMAGE_BYTES {
@@ -1523,6 +1523,47 @@ pub(super) fn cut(text: &str, max: usize) -> String {
     }
     let end = (0..=max).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
     format!("{}\n… (cut; read_cell shows more)", &text[..end])
+}
+
+/// How `view_cell_output` says an output has no PNG form, and how the runtime says it couldn't ask
+/// the worker for one (`_cell_png` in `Output.jl`): the failures a picture of the notebook can stand in for.
+const NO_PNG: &str = "has no PNG rendering";
+const NO_WORKER: &str = "has no running worker";
+
+/// Whether a picture of the output as the notebook draws it (`guard::Snapshot`) shows the agent more
+/// than `view_cell_output`'s `result`: an HTML output with no PNG form, one whose picture came from
+/// its HTML (maybe only part of it), or any output while the notebook has no worker to render it.
+pub(crate) fn snapshot_may_help(result: &Value) -> bool {
+    let content = &result["content"];
+    if result["isError"] == true {
+        let error: Value = content[0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()).unwrap_or_default();
+        let message = error["message"].as_str().unwrap_or_default();
+        return error["error"] == "no_image" && ((message.contains("(text/html)") && message.contains(NO_PNG)) || message.contains(NO_WORKER));
+    }
+    let meta: Value = content[0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()).unwrap_or_default();
+    content[1]["type"] == "image" && meta["source"] == "embedded image"
+}
+
+/// `view_cell_output`'s result for `png` (base64), a picture of cell `cell` as the notebook draws it,
+/// in place of the runtime's `result`, or None if it is over the size an agent takes. It keeps the
+/// output's MIME type when the runtime's result named it.
+pub(crate) fn screenshot_result(cell: &str, png: String, result: &Value) -> Option<Value> {
+    let bytes = base64_len(&png);
+    if bytes > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    let said: Value = serde_json::from_str(text).unwrap_or_default();
+    let shown_as = said["shown_as"].as_str().map(str::to_owned).or_else(|| {
+        let message = said["message"].as_str()?;
+        let (_, rest) = message.split_once("its output (")?;
+        Some(rest.split_once(')')?.0.to_owned())
+    });
+    let mut meta = json!({ "cell_id": cell, "source": "screenshot", "png_bytes": bytes });
+    if let Some(shown_as) = shown_as {
+        meta["shown_as"] = json!(shown_as);
+    }
+    Some(crate::mcp::image_result(&meta, png))
 }
 
 fn base64_len(text: &str) -> usize {
