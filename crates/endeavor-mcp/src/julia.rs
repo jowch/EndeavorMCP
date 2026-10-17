@@ -433,14 +433,21 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
 /// Download `url` into `part`, resuming what an earlier try left, and check it is the `size` bytes
 /// with SHA-256 `sha256`; `name` is what a person calls it ("Julia 1.12.6"). A corrupt download is deleted.
 pub(crate) fn download(part: &Path, url: &str, sha256: &str, size: u64, name: &str, progress: &mut dyn FnMut(String)) -> Result<(), String> {
-    let mut download = if has("curl") {
+    let mut command = if has("curl") {
         // A download that stalls (under 1 kB/s for 5 minutes) fails, rather than wait for good; the next try resumes it.
-        Command::new("curl").args(["-fsSL", "--retry", "3", "--speed-limit", "1000", "--speed-time", "300", "-C", "-", "-o"]).arg(part).arg(url).stderr(Stdio::piped()).spawn()
+        let mut curl = Command::new("curl");
+        curl.args(["-fsSL", "--retry", "3", "--speed-limit", "1000", "--speed-time", "300", "-C", "-", "-o"]).arg(part).arg(url);
+        curl
     } else if has("wget") {
-        Command::new("wget").args(["-q", "-c", "--read-timeout=300", "-O"]).arg(part).arg(url).stderr(Stdio::piped()).spawn()
+        let mut wget = Command::new("wget");
+        wget.args(["-q", "-c", "--read-timeout=300", "-O"]).arg(part).arg(url);
+        wget
     } else {
         return Err(format!("Couldn't download {name}: there is neither curl nor wget."));
-    }
+    };
+    // Stopped with the core, not left downloading because the core's mask blocks Ctrl-C (#181).
+    crate::host_tools::with_command_mask(&mut command);
+    let mut download = command.stderr(Stdio::piped()).spawn()
     .map_err(|e| format!("Couldn't start the download of {name}: {e}"))?;
     let mut shown = u64::MAX;
     let status = loop {

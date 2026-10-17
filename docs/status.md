@@ -327,7 +327,9 @@ Next:
   signal mask, which blocks SIGINT, SIGTERM and SIGHUP for the core's own thread, and
   passed it to Ember's workers. R now starts with the mask the core was started with,
   as Julia does. So do `run_shell`'s commands (#165), which before ignored SIGINT and
-  SIGTERM, as did everything they started.
+  SIGTERM, as did everything they started, and the curl or wget the core starts to
+  download Julia, Endeavor's own R or a helper (#181), which before went on after
+  a Ctrl-C had stopped the core.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds
