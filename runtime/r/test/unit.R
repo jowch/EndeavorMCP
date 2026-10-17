@@ -115,6 +115,8 @@ check("a string choice is itself, and one not offered is left for R to refuse",
       identical(A$json_value(select, "spearman"), "spearman") && identical(A$json_value(select, "kendall"), "kendall"))
 check("a JSON array for a multiple dropdown is a vector of its choices",
       identical(A$json_value(list(type = "select", choices = c("a", "b", "c"), multiple = TRUE), list("c", "a")), c("c", "a")))
+check("a JSON array for a single dropdown is one choice that is a vector",
+      identical(A$json_value(list(type = "select", choices = list(a = c(2, 3), b = "x"), multiple = FALSE), list(2L, 3L)), c(2, 3)))
 check("a number for a slider is left as it is",
       identical(A$json_value(slider, 7L), 7L))
 

@@ -1442,6 +1442,14 @@ impl Call<'_> {
         self.nbs.publish();
         let cells: Vec<String> = reply["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
         let mutation = json!({ "type": "set_input", "name": name, "cell_id": reply["cell"], "value": reply["value"] });
+        // R reads the value only once its running cell finishes. Not read by the wait's end,
+        // it is still on its way: said so, not reported as refused (it would land anyway).
+        if reply["pending"] == true {
+            let (mut receipt, _) = self.receipt(&nb.id, mutation, &[], Vec::new(), Some("running"))?;
+            receipt.insert("pending".into(), json!(true));
+            receipt.insert("message".into(), json!(format!("`{name}` will be set when R finishes the cell it is running; then the cells that read it {}. read_cell the input's cell to see its value once it has.", if reply["lazy"] == true { "turn stale" } else { "rerun" })));
+            return Ok(Value::Object(receipt));
+        }
         let (mut receipt, _) = if reply["lazy"] == true || cells.is_empty() {
             self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?
         } else {

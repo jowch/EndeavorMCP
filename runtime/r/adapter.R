@@ -693,7 +693,9 @@ set_package_date <- function(rec, date) {
 # checks it against the input's spec; a value it refuses is an error that
 # says what the input allows. In autorun the cells that read `name` rerun,
 # as a run of them, waited for as `run` waits; in lazy mode they are only
-# marked stale. Either way the input's own cell doesn't rerun.
+# marked stale. Either way the input's own cell doesn't rerun. R reads the
+# value only once a running cell finishes; if it hasn't by the deadline, the
+# value is still on its way, so the reply says it is pending, not refused.
 set_input <- function(rec, name, value, wait, timeout) {
   if (!is.character(name) || length(name) != 1 || is.na(name) || !nzchar(name)) {
     argument_error("invalid_argument", "name must be the name an input is assigned to")
@@ -710,6 +712,11 @@ set_input <- function(rec, name, value, wait, timeout) {
         return(later::later(answered, 0.05))
       }
       state <- if (registered(rec)) notebook_state(rec$nb)
+      if (!is.null(state$worker$input)) {
+        return(resolve(list(cell = accepted$cell, cells = I(character()), pending = TRUE,
+                            lazy = !identical(state$file$header$on_cell_change, "autorun"),
+                            accepted = TRUE, process_status = process_status(state))))
+      }
       out <- state$input_outcome
       if (is.null(out) || !identical(out$name, name)) {
         return(reject(tryCatch(argument_error("input_refused", "R didn't answer; the input's value is unchanged"), error = identity)))
@@ -756,12 +763,17 @@ bound_input <- function(state, name) {
 
 # A value from JSON, which has no integers and no vectors, as the R value
 # the input means: a dropdown's or radio's choice compared as a number when
-# both are numbers (JSON's 2 is the choice 2L or 2), and a JSON array, the
-# choices of a multiple dropdown, as a vector. emberui matches choices with
-# identical(), so 2 would otherwise never be the choice 2L.
+# both are numbers (JSON's 2 is the choice 2L or 2), and a JSON array as a
+# vector: a multiple dropdown's choices, or one choice that is itself a
+# vector. emberui compares numbers by value too; this is a backstop for an
+# older emberui, which compared with identical().
 json_value <- function(spec, value) {
-  if (is.list(value) && length(value) > 0 && all(vapply(value, function(v) is.atomic(v) && length(v) == 1, logical(1)))) {
-    value <- if (spec$type %in% c("select", "radio")) lapply(value, json_choice, choices = spec$choices) else value
+  choice <- spec$type %in% c("select", "radio")
+  if (choice && !isTRUE(spec$multiple) && is.list(value) && length(value) > 0 &&
+      all(vapply(value, function(v) is.atomic(v) && length(v) == 1, logical(1)))) {
+    value <- json_choice(spec$choices, unlist(value))
+  } else if (is.list(value) && length(value) > 0 && all(vapply(value, function(v) is.atomic(v) && length(v) == 1, logical(1)))) {
+    value <- if (choice) lapply(value, json_choice, choices = spec$choices) else value
     if (!is.list(spec$choices)) value <- unlist(value)
   } else if (spec$type %in% c("select", "radio")) {
     value <- json_choice(spec$choices, value)

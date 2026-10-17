@@ -259,6 +259,10 @@ impl Engine {
                 if params["value"] == "bad" {
                     return Err("ArgumentError: invalid_value::The value must be a number from 1 to 10.".into());
                 }
+                // R is running a cell and hasn't read the value by the wait's end.
+                if params["value"] == "late" {
+                    return Ok(json!({ "accepted": true, "pending": true, "process_status": "running", "cell": input, "cells": [], "lazy": nb.lazy }));
+                }
                 let readers: Vec<String> = nb.cells.iter().filter(|c| c.id != input && c.analysis().1.iter().any(|n| n == name)).map(|c| c.id.clone()).collect();
                 for cell in nb.cells.iter_mut().filter(|c| readers.contains(&c.id)) {
                     if nb.lazy {
@@ -2883,6 +2887,11 @@ fn set_input_sets_an_r_notebooks_input_and_reruns_or_stales_its_readers() {
     let none = s.call("9", "set_input", json!({ "notebook_id": R, "name": "z", "value": 1 })).unwrap_err();
     assert!(none.contains("input_refused"), "{none}");
     assert!(s.call("9", "set_input", json!({ "notebook_id": R, "name": "n" })).unwrap_err().contains("value"), "value is required");
+
+    // A value R hasn't read by the wait's end, behind a running cell, is still on its way.
+    let late = s.call("9", "set_input", json!({ "notebook_id": R, "name": "n", "value": "late" })).unwrap();
+    assert_eq!((&late["pending"], &late["execution"]["status"]), (&json!(true), &json!("running")), "{late}");
+    assert!(late["message"].as_str().unwrap().contains("will be set when R finishes"), "{late}");
 
     // In lazy mode they are marked stale, and the result names them.
     ember.with(R, |nb| nb.lazy = true);
