@@ -607,6 +607,24 @@ fn edits_are_staged_until_they_run_however_they_run() {
 }
 
 #[test]
+fn an_edit_whose_cell_is_still_running_gives_the_old_output_as_previous() {
+    // edit_cell's run isn't waited for, so the receipt comes back while the
+    // cell runs, holding the output from before the edit (#190).
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);
+    s.engine.with(NB, |nb| nb.cells[0].output = "1".into());
+    s.read("", NB, X);
+    let receipt = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = linger()", "run_after": true })).unwrap();
+    assert_eq!((&receipt["running"], &receipt["previous_output"], receipt.get("output")), (&json!(true), &json!("1"), None), "{receipt}");
+    assert_eq!(receipt["outputs"]["changed"], json!([]), "its old output isn't a change");
+
+    // Once it has finished, a read gives the new output as `output`.
+    s.engine.with(NB, |nb| (nb.cells[0].running, nb.cells[0].output) = (false, "2".into()));
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["output"], read.get("previous_output")), (&json!("2"), None));
+}
+
+#[test]
 fn an_edit_the_user_didnt_let_run_is_kept_staged() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);

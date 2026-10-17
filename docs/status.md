@@ -198,7 +198,9 @@ Next:
   marks cells as an Ember file does (`# %% id=`). `edit_cell` can fold the
   cell it edits, in either engine (#162), and so can each edit in `edit_cells`
   (#168; the interface number is 13), whose receipt says each cell's fold after the
-  edits (`mutation.code_folded`; #174, interface 16). R's adapter
+  edits (`mutation.code_folded`; #174, interface 16). While an edited cell is
+  still running, the edit's result gives its old output as `previous_output`
+  and leaves it out of `outputs.changed` (#190, interface 17). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the
