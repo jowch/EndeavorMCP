@@ -329,6 +329,24 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
         assert_eq!(ran["affected_cells"], json!([A, B]), "{ran}");
+        assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {A}: cells this run needs that were edited or stale since they last ran.")]), "{ran}");
+
+        // A stale ancestor, its code unchanged: Ember runs it first too, and the receipt says so.
+        let c = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "w <- x * 2", "after_cell_id": B }))["cell_id"].as_str().unwrap().to_owned();
+        let d = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "w + 1", "after_cell_id": c }))["cell_id"].as_str().unwrap().to_owned();
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": d, "wait_for_completion": true }));
+        assert_eq!(ran["affected_cells"], json!([c, d]), "{ran}");
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 7" }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": d, "wait_for_completion": true }));
+        assert_eq!((&ran["affected_cells"], &ran["pending_run"]), (&json!([c, d]), &json!([])), "{ran}");
+        assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {c}: cells this run needs that were edited or stale since they last ran.")]), "{ran}");
+        assert!(ran["outputs"]["changed"][1]["output_summary"].as_str().unwrap().contains("15"), "{ran}");
+        // Back as it was: x is 41 and B ran with it; C and D gone.
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": d }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": c }));
     });
 
     step("interrupt_notebook stops a slow cell and its queued dependent doesn't run (#161)", || {

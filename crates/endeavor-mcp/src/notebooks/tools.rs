@@ -346,8 +346,11 @@ impl Call<'_> {
         }
         let mut warnings = Vec::new();
         // Cells the targets need that the engine ran first, as Ember does one
-        // whose code changed since it last ran (a staged edit): this run's
-        // cells too, so the receipt shows them (#187). Known once it is over.
+        // edited since it last ran (a staged edit) or stale (an ancestor ran
+        // since): this run's cells too, so the receipt shows them (#187).
+        // Known once it is over, from what ran rather than from the engine's
+        // plan, so it misses an ancestor still running when the wait ends (it
+        // stays staged) and counts one the user ran during the wait.
         let mut also = Vec::new();
         if reply["accepted"] == true && wait {
             let now = self.nbs.snapshot(&nb.id)?;
@@ -409,7 +412,7 @@ impl Call<'_> {
             warnings.push(format!("also_ran::Also ran {}: cells this run needs that had never run.", needed.join(", ")));
         }
         if !also.is_empty() {
-            warnings.push(format!("also_ran::Also ran {}: cells this run needs that had changed since they last ran.", also.join(", ")));
+            warnings.push(format!("also_ran::Also ran {}: cells this run needs that were edited or stale since they last ran.", also.join(", ")));
         }
         Ok(Ran { warnings, cells, going })
     }

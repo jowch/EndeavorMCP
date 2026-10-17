@@ -1282,7 +1282,7 @@ fn a_run_lists_a_staged_cell_it_needs_that_the_engine_ran_first() {
     assert_eq!((&ran["affected_cells"], &ran["pending_run"], &ran["execution"]["status"]), (&json!([X, Y]), &json!([]), &json!("completed")), "{ran}");
     let changed: Vec<_> = ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| (c["cell_id"].clone(), c["output_summary"].clone())).collect();
     assert_eq!(changed, vec![(json!(X), json!("ran x = 5")), (json!(Y), json!("ran y = x + 1"))]);
-    assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {X}: cells this run needs that had changed since they last ran.")]));
+    assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {X}: cells this run needs that were edited or stale since they last ran.")]));
 
     // An engine that leaves it staged (Pluto): the receipt is the target's alone.
     s.seconds(1.0);
