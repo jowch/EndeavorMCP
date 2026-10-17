@@ -174,17 +174,17 @@ impl Notebooks {
     /// run of the targets runs these too, so they don't fail on names those
     /// cells define. None while the notebook isn't running code.
     fn never_run_upstream(&self, nb: &Snapshot, targets: &[String]) -> Result<Vec<String>, String> {
+        Ok(self.upstream(nb, targets)?.into_iter().filter(|id| nb.cells.get(id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).collect())
+    }
+
+    /// The cells `targets` depend on, directly or not, the targets left out,
+    /// in notebook order. None while the notebook isn't running code.
+    fn upstream(&self, nb: &Snapshot, targets: &[String]) -> Result<Vec<String>, String> {
         if targets.is_empty() || !nb.execution_allowed {
             return Ok(Vec::new());
         }
         let upstream = self.graph(&nb.id, GraphQuery { fresh: true, edges: true, ..Default::default() })?.upstream_of(targets);
-        Ok(nb
-            .order
-            .iter()
-            .filter(|id| upstream.contains(*id) && !targets.contains(id))
-            .filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c)))
-            .cloned()
-            .collect())
+        Ok(nb.order.iter().filter(|id| upstream.contains(*id) && !targets.contains(id)).cloned().collect())
     }
 }
 
@@ -333,8 +333,9 @@ impl Call<'_> {
     /// or not.
     fn run(&self, nb: &Snapshot, targets: &[String], wait: bool) -> Result<Ran, String> {
         self.nbs.with_state(&nb.id, |state| state.prune(nb));
-        let needed = self.nbs.never_run_upstream(nb, targets)?;
-        let cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
+        let upstream = self.nbs.upstream(nb, targets)?;
+        let needed: Vec<String> = upstream.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).cloned().collect();
+        let mut cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
         let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
         let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout }))?;
         let ids = |key: &str| reply[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
@@ -344,6 +345,28 @@ impl Call<'_> {
             return Err(argument_error(&format!("process_exited::{}", exited_message(super::engines::language(super::engines::of_path(&nb.path)), cell.as_deref()))));
         }
         let mut warnings = Vec::new();
+        // Cells the targets need that the engine ran first, as Ember does one
+        // edited since it last ran (a staged edit) or stale (an ancestor ran
+        // since): this run's cells too, so the receipt shows them (#187).
+        // Known once it is over, from what ran rather than from the engine's
+        // plan, so it misses an ancestor still running when the wait ends (it
+        // stays staged) and counts one the user ran during the wait.
+        let mut also = Vec::new();
+        if reply["accepted"] == true && wait {
+            let now = self.nbs.snapshot(&nb.id)?;
+            also = upstream
+                .iter()
+                .filter(|id| !cells.contains(id))
+                .filter(|id| match (nb.cells.get(*id), now.cells.get(*id)) {
+                    (Some(before), Some(after)) => !(after.running || after.queued) && after.last_run > before.last_run,
+                    _ => false,
+                })
+                .cloned()
+                .collect();
+            if !also.is_empty() {
+                cells = nb.order.iter().filter(|id| also.contains(id) || needed.contains(id)).chain(targets).cloned().collect();
+            }
+        }
         let mut going = Vec::new();
         if reply["accepted"] != true {
             let status = reply["process_status"].as_str().unwrap_or_default();
@@ -368,7 +391,7 @@ impl Call<'_> {
             self.nbs.with_state(&nb.id, |state| {
                 // Its cells that haven't finished: a waited run's that did finish are done, and
                 // so are all of a run that ended before this records it.
-                let finished = ids("completed");
+                let finished: Vec<String> = ids("completed").into_iter().chain(also.iter().cloned()).collect();
                 let run = reply["run"].as_str().map(str::to_owned);
                 let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
                 state.ended.retain(|r| Some(r) != run.as_ref());
@@ -387,6 +410,9 @@ impl Call<'_> {
         }
         if reply["accepted"] == true && !needed.is_empty() {
             warnings.push(format!("also_ran::Also ran {}: cells this run needs that had never run.", needed.join(", ")));
+        }
+        if !also.is_empty() {
+            warnings.push(format!("also_ran::Also ran {}: cells this run needs that were edited or stale since they last ran.", also.join(", ")));
         }
         Ok(Ran { warnings, cells, going })
     }
