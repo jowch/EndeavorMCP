@@ -560,5 +560,20 @@
       "type": "object"
     },
     "name": "interrupt_notebook"
+  },
+  {
+    "description": "Restart the notebook's process, as the Restart on the notebook's page does: every value is gone. A Julia notebook then runs every cell in the new process; read a cell to wait for it. An R notebook's cells are left `not_run` until you run them (`run_all_cells` runs it from the top). Use it when the user asks for a fresh start, or, with the user's say-so, for a cell that `interrupt_notebook` couldn't stop. Refused in safe preview.",
+    "inputSchema": {
+      "properties": {
+        "notebook_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "notebook_id"
+      ],
+      "type": "object"
+    },
+    "name": "restart_notebook"
   }
 ]

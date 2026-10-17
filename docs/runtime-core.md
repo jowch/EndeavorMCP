@@ -224,6 +224,12 @@ and 3), and for the app:
   sends SIGINT and returns, so the core watches the cells for up to 10 s, within the
   call's 45 s. A cell still running then is in code that ignores the interrupt, and
   the result says only a restart ends it.
+- The agent can restart a notebook with `restart_notebook` (#202), the page's Restart:
+  the same `restart` call as `endeavor/restart_notebook`. It runs code, so Ask to run
+  asks first, and plan mode refuses it. Pluto's restart then runs every cell, and that
+  run is the session's, as `allow_execution`'s is, so a read waits for it and the
+  session's Stop interrupts it. Ember's leaves every cell not run, and the result says
+  how to run them.
 - It reports in `/endeavor/events` the app build it was started by (`build`), so the
   app can tell a runtime from an older build and hold back what that runtime
   can't do.

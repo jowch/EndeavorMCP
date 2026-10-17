@@ -390,6 +390,25 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
     });
 
+    step("restart_notebook starts R fresh: a slow cell ends, and every cell is not run (#202)", || {
+        agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
+        let slow = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow <- { Sys.sleep(600); 1 }", "after_cell_id": B }))["cell_id"].clone();
+        agent.ok("submit_changes", json!({ "notebook_id": notebook }));
+        common::wait_for("the slow cell to start", || agent.ok("list_notebooks", json!({}))[0]["running"].as_array().is_some_and(|r| r.contains(&slow)));
+        let restarted = agent.ok("restart_notebook", json!({ "notebook_id": notebook }));
+        assert!(restarted["restarted"] == true && restarted["message"].as_str().unwrap().contains("run_all_cells"), "{restarted}");
+        common::wait_for("R to start again", || {
+            let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
+            read["not_run"] == true && read["running"] == false
+        });
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
+        assert!(read["running"] == false && read["not_run"] == true, "{read}");
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
+        agent.ok("run_all_cells", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
+        assert!(read["errored"] == false && read.get("not_run").is_none_or(|v| v == false), "{read}");
+    });
+
     step("new_notebook makes an R notebook from an .R path; a warning reads as one", || {
         // A session works on one notebook, so another session makes this one.
         let mut agent = Agent::new(port, &token);

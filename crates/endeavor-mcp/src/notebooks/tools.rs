@@ -91,6 +91,7 @@ impl Notebooks {
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),
             "interrupt_notebook" => t.interrupt_notebook(),
+            "restart_notebook" => t.restart_notebook(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
         }?;
         Ok(Reply::Json(result))
@@ -1325,12 +1326,37 @@ impl Call<'_> {
             result["message"] = json!("The notebook's process is still starting. Its run will skip these cells once the process is up.");
         } else if !result["still_running"].as_array().unwrap().is_empty() {
             result["message"] = json!(
-                "These cells haven't stopped yet. Compiled code often stops only when it returns. Read them later; if one doesn't stop, the user can restart the notebook from its page, which clears every value."
+                "These cells haven't stopped yet. Compiled code often stops only when it returns. Read them later; if one doesn't stop, restart_notebook ends it, but it clears every value, so ask the user first."
             );
         } else if now.process_status != nb.process_status && now.process_status == "no_process" {
             result["message"] = json!("A cell didn't stop, so the notebook's process was ended. Its values are gone: the next run starts a new process.");
         }
         Ok(result)
+    }
+
+    /// The page's Restart, for the agent (#202): a new process for the notebook, with every value
+    /// gone. Pluto's then runs every cell, and that run is the session's, as `allow_execution`'s
+    /// is: a read or a waited submit waits for it. Ember's leaves every cell not run. The engines
+    /// refuse it in safe preview.
+    fn restart_notebook(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        let reply = self.nbs.restart(&nb.id)?;
+        if reply["restarted"] != true {
+            return Ok(json!({ "notebook_id": nb.id, "restarted": false, "message": "The notebook is already restarting. Read a cell to wait for it." }));
+        }
+        let now = self.nbs.snapshot(&nb.id)?;
+        let message = match self.nbs.backend_of(&nb.id) {
+            Backend::Pluto => {
+                self.nbs.with_state(&nb.id, |state| {
+                    if !self.owner.is_empty() {
+                        state.started.push(Started { owner: self.owner.to_owned(), run: None, cells: nb.order.iter().cloned().collect() });
+                    }
+                });
+                "A new process started, and every cell runs in it. Read a cell to wait for its result."
+            }
+            Backend::Ember => "R started fresh. Every cell is `not_run` and holds no value until it runs: `run_all_cells` runs the notebook from the top.",
+        };
+        Ok(json!({ "notebook_id": nb.id, "restarted": true, "process_status": now.process_status, "message": message }))
     }
 }
 

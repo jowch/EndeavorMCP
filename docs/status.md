@@ -212,7 +212,9 @@ Next:
   `previous_output`, `previous_errored` and `previous_error`, and leaves it out
   of `outputs.changed` (#190, interface 17). In Ember's lazy mode, a run's result warns `lazy_mode` and lists the
   notebook's stale cells as `stale_cells`, and `list_notebooks` and
-  `open_notebook` show `on_cell_change` (#196, interface 19). R's adapter
+  `open_notebook` show `on_cell_change` (#196, interface 19). An agent can
+  restart a notebook with `restart_notebook`, as the page's Restart does (#202,
+  interface 20). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the

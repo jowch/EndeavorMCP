@@ -664,6 +664,24 @@ fn the_runtime_end_to_end() {
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
     });
 
+    step("restart_notebook starts a new process, and a read waits for its run (#202)", || {
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "process_id = getpid()", "after_cell_id": last, "run_after": true }));
+        let cell = added["cell_id"].clone();
+        let before = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": cell }));
+        assert!(before["running"] == false && before["errored"] == false, "{before}");
+        let restarted = rt.ok(SERVER, "restart_notebook", json!({ "notebook_id": previewed }));
+        assert!(restarted["restarted"] == true && restarted["message"].as_str().unwrap().contains("every cell runs"), "{restarted}");
+        let started = Instant::now();
+        let after = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": cell }));
+        eprintln!("the read after the restart took {:.1} s", started.elapsed().as_secs_f64());
+        assert!(after["running"] == false && after["queued"] == false && after["errored"] == false, "the read waited for the restart's run: {after}");
+        assert_ne!(after["output"], before["output"], "a new process: {before} {after}");
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": cell }));
+    });
+
     step("a notebook's own Julia ending by itself ends the run waiting for it", || {
         let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
         let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
