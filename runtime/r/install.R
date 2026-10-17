@@ -50,9 +50,12 @@ failed <- strsplit(state$Failed, " ", fixed = TRUE)[[1]]
 # too, so it gets the build chosen here even if the index changes meanwhile.
 # NULL when ember isn't listed (or a repository didn't answer, which R only
 # warns about), NA when R couldn't ask.
+# `reached` when one of them answered with an index.
 options(timeout = 20)
+reached <- FALSE
 newest <- function(where) tryCatch({
   listed <- suppressWarnings(available.packages(contriburl = where$contriburl, type = where$type, fields = "SHA256"))
+  if (nrow(listed)) reached <<- TRUE
   if ("ember" %in% rownames(listed)) listed["ember", , drop = FALSE]
 }, error = function(e) {
   message(conditionMessage(e))
@@ -70,12 +73,22 @@ if (length(args) > 2 && nzchar(args[[3]]) && binary != "source" && startsWith(R.
   tools_here <- suppressWarnings(system2("xcode-select", "-p", stdout = FALSE, stderr = FALSE)) == 0
   if (installed(state$Current) && !tools_here) places <- Filter(function(where) where$type != "source", places)
 }
+# Where outbound connections hang rather than being refused, as on some compute
+# nodes, each place waits out the timeout, and R would start that much later each
+# time. So when none answered within the last hour, `unreachable` says so, and
+# with an Ember installed R starts with it without asking again (#90).
+unreachable <- file.path(folder, "unreachable")
+if (installed(state$Current) && file.exists(unreachable) && difftime(Sys.time(), file.mtime(unreachable), units = "hours") < 1) {
+  message("Ember's repositories didn't answer within the last hour; R notebooks use the installed Ember, ", state$Current, ".")
+  quit(status = 0)
+}
 for (where in places) {
   listed <- newest(where)
   if (!is.null(listed)) break
 }
 type <- where$type
 build <- if (is.matrix(listed)) listed[1, ]
+if (reached) unlink(unreachable) else if (installed(state$Current)) invisible(file.create(unreachable))
 if (is.null(build)) {
   if (installed(state$Current)) {
     message("Couldn't reach Ember's repositories, or they list no Ember for this R; R notebooks use the installed Ember, ", state$Current, ".")
