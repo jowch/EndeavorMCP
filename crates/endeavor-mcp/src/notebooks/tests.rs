@@ -120,7 +120,7 @@ impl Engine {
             "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
-                "last_run": c.last_run, "runtime": 0, "output": c.output, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
+                "last_run": c.last_run, "runtime": 0, "output": c.output, "error": if c.errored { json!({ "msg": c.output }) } else { Value::Null }, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
                 "stale": c.stale, "not_run": c.not_run,
             })).collect::<Vec<_>>(),
         })
@@ -613,6 +613,25 @@ fn edits_are_staged_until_they_run_however_they_run() {
     s.seconds(1.0);
     s.engine.with(NB, |nb| nb.cells[0].last_run = 1.0e6 + 3.5);
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([]), "Pluto's own run button");
+}
+
+#[test]
+fn an_edit_whose_cell_is_still_running_gives_the_old_output_as_previous() {
+    // edit_cell's run isn't waited for, so the receipt comes back while the
+    // cell runs, holding the output from before the edit (#190).
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);
+    s.engine.with(NB, |nb| (nb.cells[0].output, nb.cells[0].errored) = ("boom".into(), true));
+    s.read("", NB, X);
+    let receipt = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = linger()", "run_after": true })).unwrap();
+    assert_eq!((&receipt["running"], &receipt["previous_output"], receipt.get("output")), (&json!(true), &json!("boom"), None), "{receipt}");
+    assert_eq!((&receipt["previous_errored"], &receipt["previous_error"], receipt.get("errored"), receipt.get("error")), (&json!(true), &json!({ "msg": "boom" }), None, None), "the old error isn't the edit's: {receipt}");
+    assert_eq!(receipt["outputs"]["changed"], json!([]), "its old output isn't a change");
+
+    // Once it has finished, a read gives the new output as `output`.
+    s.engine.with(NB, |nb| (nb.cells[0].running, nb.cells[0].output, nb.cells[0].errored) = (false, "2".into(), false));
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["output"], &read["errored"], read.get("error"), read.get("previous_output")), (&json!("2"), &json!(false), None, None));
 }
 
 #[test]

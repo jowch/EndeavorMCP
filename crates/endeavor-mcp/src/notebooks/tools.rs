@@ -508,13 +508,14 @@ impl Call<'_> {
             },
         };
         // A blocked run touched no cell; existing outputs are not this run's result.
-        // A cell still running has the output of its last run.
+        // A cell still running or queued has the output of its last run, so it
+        // isn't listed: a run not waited for comes back before its cells finish (#190).
         let ran: &[String] = if status == "blocked" { &[] } else { cells_run };
         let changed: Vec<Value> = ran
             .iter()
             .filter(|id| !still_running.contains(id))
             .filter_map(|id| Some((id, nb.cells.get(id)?)))
-            .filter(|(_, cell)| !cell.output.is_empty())
+            .filter(|(_, cell)| !cell.output.is_empty() && !cell.running && !cell.queued)
             .map(|(id, cell)| {
                 let mut entry = json!({ "cell_id": id, "output_summary": cell.output });
                 if let Some(error) = &cell.error {
@@ -595,10 +596,20 @@ impl Call<'_> {
     }
 
     /// The cell an edit changed, as `read_cell` shows it without its code:
-    /// the agent sent that code, and gets it back from `read_cell`.
+    /// the agent sent that code, and gets it back from `read_cell`. While the
+    /// edited cell is running or queued, its output and error are the ones from
+    /// before the edit, so they are `previous_output`, `previous_errored` and
+    /// `previous_error` (#190).
     fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
         let mut out = self.cell_json(nb, id);
         out.remove("code");
+        if out["running"] == true || out["queued"] == true {
+            for key in ["output", "errored", "error"] {
+                if let Some(previous) = out.remove(key) {
+                    out.insert(format!("previous_{key}"), previous);
+                }
+            }
+        }
         out
     }
 
