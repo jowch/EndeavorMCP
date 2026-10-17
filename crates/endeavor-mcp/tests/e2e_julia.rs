@@ -519,6 +519,8 @@ fn the_runtime_end_to_end() {
         // Right away: the notebook's own Julia is still starting, and its run waits for it.
         let stopped = rt.ok(THIRD, "interrupt_notebook", json!({ "notebook_id": id }));
         assert_eq!(stopped["interrupted"], true, "{stopped}");
+        // And says the cells won't run, however long the process takes to start.
+        assert_eq!(stopped["dropped"], json!(ids), "{stopped}");
         // Once its process is up, the run ends without running a cell.
         let began = Instant::now();
         let busy = |read: &Value| read["running"] == true || read["queued"] == true;

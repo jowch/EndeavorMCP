@@ -1227,9 +1227,12 @@ impl Call<'_> {
             return Ok(json!({ "notebook_id": nb.id, "interrupted": false, "message": "Nothing was running." }));
         }
         let reply = self.nbs.call("interrupt", json!({ "notebook_id": nb.id }))?;
+        // The notebook's process is still starting, so its run hasn't started a cell, and it skips
+        // them all once the process is up (#179): they are dropped, however long the start takes.
+        let pending = reply["pending"] == true;
         let mut now = self.nbs.snapshot(&nb.id)?;
         let deadline = Instant::now() + self.wait_left().min(Duration::from_secs_f64(INTERRUPT_WAIT_SECONDS));
-        while running.iter().chain(&queued).any(|id| busy(&now, id)) && Instant::now() < deadline {
+        while !pending && running.iter().chain(&queued).any(|id| busy(&now, id)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(250));
             if (self.gone)() {
                 return Err(argument_error("client_gone::The caller hung up during the wait"));
@@ -1237,12 +1240,14 @@ impl Call<'_> {
             now = self.nbs.snapshot(&nb.id)?;
         }
         let (still_running, stopped): (Vec<String>, Vec<String>) = running.into_iter().partition(|id| busy(&now, id));
-        let dropped: Vec<String> = queued.into_iter().filter(|id| !busy(&now, id)).collect();
+        let dropped: Vec<String> = queued.into_iter().filter(|id| pending || !busy(&now, id)).collect();
         let mut result = json!({
             "notebook_id": nb.id, "interrupted": reply["interrupted"] == true || !stopped.is_empty() || !dropped.is_empty(),
             "stopped": stopped, "dropped": dropped, "still_running": still_running, "process_status": now.process_status,
         });
-        if !result["still_running"].as_array().unwrap().is_empty() {
+        if pending {
+            result["message"] = json!("The notebook's process is still starting. Its run will skip these cells once the process is up.");
+        } else if !result["still_running"].as_array().unwrap().is_empty() {
             result["message"] = json!(
                 "These cells haven't stopped yet. Compiled code often stops only when it returns. Read them later; if one doesn't stop, the user can restart the notebook from its page, which clears every value."
             );
