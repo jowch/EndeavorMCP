@@ -188,6 +188,9 @@ impl Notebooks {
     }
 }
 
+/// The owner of a change the user made through the app (`endeavor/restore_cells`): no session's.
+pub const USER: &str = "(the user)";
+
 fn other_owner(change: &Change, owner: &str) -> bool {
     !change.owner.is_empty() && change.owner != owner
 }
@@ -316,7 +319,7 @@ impl Call<'_> {
             return Ok(None);
         }
         Ok(Some(format!(
-            "run_conflict::{} changed since this session last read them (by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
+            "run_conflict::{} changed since this session last read them (by the user, by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
              Read them (read_cell or read_notebook_code), then run again.",
             conflicted.join(", ")
         )))
