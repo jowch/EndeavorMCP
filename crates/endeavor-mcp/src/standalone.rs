@@ -803,7 +803,8 @@ struct Relay {
 fn relay(options: Options) -> ! {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let fresh = format!("stdio-{}-{}", std::process::id(), now.as_millis());
-    let session = session_key(std::env::var("CLAUDE_CODE_SESSION_ID").ok().as_deref()).unwrap_or(fresh);
+    let conversation = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+    let session = session_key(conversation.as_deref(), std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some()).unwrap_or(fresh);
     let relay = Arc::new(Relay::new(options, session, Box::new(io::stdout())));
     relay.target_from_project();
     let stdin = io::stdin();
@@ -826,8 +827,13 @@ fn relay(options: Options) -> ! {
 /// resumed. Under it a resumed conversation is the same session, with its reads,
 /// edits and notebook, rather than a new one that has to read its own edits again
 /// and is told another session changed them (#176). None for anything that isn't a
-/// short id, so it can go in a header.
-fn session_key(conversation: Option<&str>) -> Option<String> {
+/// short id, so it can go in a header, and in a process Claude Code's shell started
+/// (`CLAUDE_CODE_CHILD_SESSION`, which Claude Code sets for its Bash tool and not
+/// for its MCP servers): another agent run from there isn't that conversation.
+fn session_key(conversation: Option<&str>, child_of_shell: bool) -> Option<String> {
+    if child_of_shell {
+        return None;
+    }
     let id = conversation?.trim();
     let ok = !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     ok.then(|| format!("claude-{id}"))

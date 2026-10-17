@@ -297,7 +297,9 @@ notebook (the first it opens or creates, or the one the app gives it), and
   servers that variable and keeps it when a conversation is resumed, so a
   resumed conversation is the same session, with its reads and its notebook
   (#176). A nested `claude -p` that inherits its caller's id, rather than
-  getting its own `--session-id`, shares the caller's session.
+  getting its own `--session-id`, shares the caller's session. A process
+  started from Claude Code's shell (`CLAUDE_CODE_CHILD_SESSION` set) keeps a
+  key of its own, so another agent run from there isn't that conversation.
 - **A client over plain HTTP** (`endeavor serve`, with only the bearer token)
   gets an `Mcp-Session-Id` in the reply to its `initialize`
   (`mcp-` and 32 random hex digits). Streamable HTTP clients send it back on
