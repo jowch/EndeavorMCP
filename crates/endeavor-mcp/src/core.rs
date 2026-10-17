@@ -45,9 +45,10 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// runtime with the same number as it is, and treats one with another number (or none) as another
 /// build's. Two builds with one number must take each other's calls both ways: a newer front meets
 /// an older core as often as the reverse, and lists its own build's tools. So raise it with any
-/// change to those, additions included (a tool, an argument, a call, a field), and with a change in
-/// what one returns or does while its arguments stay the same. Descriptions and changes inside the
-/// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
+/// change to those that a caller of the build before would get wrong, additions included (a tool, an
+/// argument, a call), and with a change in what one returns or does while its arguments stay the same.
+/// A field of the record that older callers ignore, and that a newer one does without when it's
+/// missing, doesn't count (`network`); nor do descriptions and changes inside the core. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
 pub const INTERFACE: u32 = 23;

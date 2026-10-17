@@ -414,9 +414,12 @@ leaves build keys out, since an agent passes it on to the user.
 line `interface <n>`) and compares the build only with a binary from before
 that line was printed. Two builds with one number must
 take each other's calls both ways, since a newer front meets an older core as
-often as the reverse. So the number goes up with any change to what it covers,
-additions included, and with a change in what a call returns or does while its
-arguments stay the same; descriptions and changes inside the core don't count.
+often as the reverse. So the number goes up with any change to what it covers
+that a caller of the build before would get wrong, additions included, and with
+a change in what a call returns or does while its arguments stay the same. A
+record field that older callers ignore, and that a newer one does without when
+it's missing (`network`), doesn't count; nor do descriptions and changes inside
+the core.
 Tests in `mcp.rs` hold a fingerprint of the notebook tools' names and
 arguments (descriptions left out), and the lists of the app's `/endeavor/call`
 methods and of `runtime.json`'s fields, and fail when they change. Nothing
