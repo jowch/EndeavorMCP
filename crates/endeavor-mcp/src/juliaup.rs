@@ -197,6 +197,8 @@ impl std::fmt::Display for Failed {
 fn run(command: &mut Command, limit: Duration, tick: &mut dyn FnMut(Duration)) -> Result<String, Failed> {
     use std::io::Read;
     crate::client::no_window(command);
+    // `juliaup add` downloads Julia: with the core's mask it would go on after a Ctrl-C (#181).
+    crate::host_tools::with_command_mask(command);
     // juliaup's errors end in a backtrace when these ask for one, and the last line is what's shown.
     command.env_remove("RUST_BACKTRACE").env_remove("RUST_LIB_BACKTRACE");
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| Failed::Error(e.to_string()))?;

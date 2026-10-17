@@ -386,7 +386,8 @@ be a folder's name on every system.
 ready. The session keeps it in memory, and the front adds it to each
 request, as it does for a runtime on this computer.
 
-**The session key.** The front makes a key for its run and sends it on
+**The session key.** The front makes a key for its run (under Claude Code,
+from the conversation's id, so a resumed conversation keeps it) and sends it on
 every request, with the server's name once it uses a server. The front
 outlives a dropped `ssh`, so the agent keeps its notebook when the
 connection is made again. The key is the same on every runtime the session

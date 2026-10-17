@@ -23,7 +23,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `placement_required` | `add_cell` without `after_cell_id` in a notebook that has cells | Pass the cell to add after |
 | `not_staged` | `submit_changes` was given a `cell_ids` entry that isn't in `pending_run` | Leave `cell_ids` out, or use `execute_cell` for a cell you didn't edit |
 | `one_notebook` | The call is for a notebook other than this session's | Work in this session's notebook; read the other one as a file |
-| `run_conflict` | Cells you ran depend on cells another session changed since you read them; nothing ran | Read the cells it names, then run again |
+| `run_conflict` | Cells you ran depend on cells changed since this session read them (by another session, or before this conversation was resumed); nothing ran | Read the cells it names, then run again |
 | `notebook_not_found`, `cell_not_found` | The id is wrong, or the notebook was closed or the cell deleted | `list_notebooks`, or read the notebook again |
 | `file_exists` | `new_notebook` on a path that exists | `open_notebook` it, or pick another name |
 | `file_not_found` | `open_notebook` on a path with no file | Check the path; a relative path starts in the session's folder |

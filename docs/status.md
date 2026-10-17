@@ -291,7 +291,9 @@ Next:
   starting doesn't ask again when the agent makes the same call again: only that
   session's, only the same tool and arguments, only while nothing came between
   (another call, a Stop, a change of mode), and for 5 minutes after the user's yes
-  (Endeavor #90). The plugin's `serve`, `mcp` and machines
+  (Endeavor #90). Under Claude Code, `endeavor mcp`'s session key comes from the
+  conversation's id, so a resumed conversation keeps its reads and its notebook
+  (#176). The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
   before, and only starting it waits. A session whose folder has Pluto
   notebooks, or whose caller says it is a Julia session (`kind`), gets Julia
@@ -327,7 +329,9 @@ Next:
   signal mask, which blocks SIGINT, SIGTERM and SIGHUP for the core's own thread, and
   passed it to Ember's workers. R now starts with the mask the core was started with,
   as Julia does. So do `run_shell`'s commands (#165), which before ignored SIGINT and
-  SIGTERM, as did everything they started.
+  SIGTERM, as did everything they started, and the curl, wget or juliaup the core starts to
+  download Julia, Endeavor's own R or a helper (#181), which before went on after
+  a Ctrl-C had stopped the core.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds

@@ -316,7 +316,7 @@ impl Call<'_> {
             return Ok(None);
         }
         Ok(Some(format!(
-            "run_conflict::Another Endeavor session changed {} since you last read them, and the cells you're running depend on them. \
+            "run_conflict::{} changed since this session last read them (by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
              Read them (read_cell or read_notebook_code), then run again.",
             conflicted.join(", ")
         )))

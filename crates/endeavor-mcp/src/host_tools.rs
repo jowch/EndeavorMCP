@@ -577,7 +577,8 @@ fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
     }
 }
 
-/// The signal mask the core was started with, which `run_shell`'s commands get (#165). The core
+/// The signal mask the core was started with, which `run_shell`'s commands get (#165), and the
+/// downloads it starts (#181). The core
 /// blocks Ctrl-C, SIGTERM and SIGHUP for its own thread to take, and a blocked mask survives exec:
 /// a command would otherwise ignore SIGINT and SIGTERM, and so would everything it starts. Unset
 /// outside the core, whose signals aren't blocked.
@@ -588,6 +589,28 @@ static COMMAND_MASK: std::sync::OnceLock<libc::sigset_t> = std::sync::OnceLock::
 #[cfg(unix)]
 pub fn set_command_mask(mask: libc::sigset_t) {
     let _ = COMMAND_MASK.set(mask);
+}
+
+/// Start `command` with the mask the core was started with (`COMMAND_MASK`), not the core's
+/// own; outside the core, as it is.
+pub fn with_command_mask(command: &mut std::process::Command) {
+    #[cfg(unix)]
+    with_mask(command, COMMAND_MASK.get().copied());
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+#[cfg(unix)]
+fn with_mask(command: &mut std::process::Command, mask: Option<libc::sigset_t>) {
+    if let Some(mask) = mask {
+        // SAFETY: pthread_sigmask is async-signal-safe.
+        unsafe {
+            command.pre_exec(move || {
+                libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+    }
 }
 
 /// Start `command` in `cwd`, and a thread that reads its output until it ends or `timeout` kills it.
@@ -601,19 +624,15 @@ fn start_shell(command: &str, cwd: &str, timeout: Duration, shell: &Shell) -> Re
             None => command.env_remove(name),
         };
     }
-    // The mask the core started with, not the core's own (`COMMAND_MASK`).
-    let mask = COMMAND_MASK.get().copied();
-    // SAFETY: setsid and pthread_sigmask are async-signal-safe. Its own session and
-    // process group, so a timeout can kill everything the command started.
+    // SAFETY: setsid is async-signal-safe. Its own session and process group, so a timeout can
+    // kill everything the command started.
     unsafe {
-        command.pre_exec(move || {
+        command.pre_exec(|| {
             libc::setsid();
-            if let Some(mask) = &mask {
-                libc::pthread_sigmask(libc::SIG_SETMASK, mask, std::ptr::null_mut());
-            }
             Ok(())
         });
     }
+    with_command_mask(&mut command);
     let mut child = command.spawn().map_err(|e| format!("IOError: could not spawn {}: {e}", julia_repr(cwd)))?;
     let running = Arc::new(Running { began: Instant::now(), cwd: cwd.to_owned(), state: Mutex::default(), came: Condvar::new() });
     let shared = running.clone();
@@ -704,6 +723,39 @@ fn read_ready(pipes: &mut [Option<Box<dyn ReadFd>>; 2], wait: Duration) -> Vec<(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_command_given_a_mask_starts_with_it_not_the_threads() {
+        // The blocked signals of `cat`'s own process, from its status.
+        let blocked = |command: &mut std::process::Command| {
+            let out = String::from_utf8(command.output().unwrap().stdout).unwrap();
+            out.lines().find_map(|l| l.strip_prefix("SigBlk:")).unwrap().trim().to_owned()
+        };
+        let cat = || {
+            let mut cat = std::process::Command::new("cat");
+            cat.arg("/proc/self/status");
+            cat
+        };
+        // On its own thread, which blocks SIGHUP as the core does (#181).
+        std::thread::spawn(move || {
+            // SAFETY: plain sigset and mask calls on this thread.
+            let none = unsafe {
+                let (mut blocking, mut none): (libc::sigset_t, libc::sigset_t) = (std::mem::zeroed(), std::mem::zeroed());
+                libc::sigemptyset(&mut blocking);
+                libc::sigaddset(&mut blocking, libc::SIGHUP);
+                libc::sigemptyset(&mut none);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &blocking, std::ptr::null_mut());
+                none
+            };
+            assert_ne!(blocked(&mut cat()), "0000000000000000", "without a mask, the thread's blocked SIGHUP survives exec");
+            let mut given = cat();
+            super::with_mask(&mut given, Some(none));
+            assert_eq!(blocked(&mut given), "0000000000000000");
+        })
+        .join()
+        .unwrap();
+    }
+
     use super::*;
 
     #[test]

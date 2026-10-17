@@ -80,6 +80,7 @@ pub(crate) fn download(url: &str, to: Option<&Path>) -> Result<Vec<u8>, String> 
     let mut curl = Command::new("curl");
     curl.args(["-fsSL", "--retry", "2", "--connect-timeout", CONNECT_SECS, "--max-time", if to.is_some() { FILE_SECS } else { TEXT_SECS }, "--proto-redir", "=https"]);
     client::no_window(&mut curl);
+    crate::host_tools::with_command_mask(&mut curl);
     if let Some(path) = to {
         curl.arg("-o").arg(path);
     }
@@ -112,6 +113,7 @@ pub(crate) fn download(url: &str, to: Option<&Path>) -> Result<Vec<u8>, String> 
 fn wget(url: &str, to: Option<&Path>) -> Command {
     let mut wget = Command::new("wget");
     client::no_window(&mut wget);
+    crate::host_tools::with_command_mask(&mut wget);
     wget.args(["-q", "-S", "--tries=3"]);
     wget.arg(format!("--connect-timeout={CONNECT_SECS}")).arg(format!("--timeout={TEXT_SECS}"));
     if is_wget2() && url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) {
