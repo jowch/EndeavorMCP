@@ -912,6 +912,31 @@ fn an_ember_notebook_reads_as_code_with_its_own_markers() {
     assert_eq!(read(true)["code"], format!("# %% id={X}\n#' # Title\n\n# %% id={Y}\nb <- 2"));
 }
 
+/// A hand-written R notebook keeps its short cell ids (`# %% id=B`), and the tools take them
+/// (Ember #82). Any other id that isn't a UUID is refused as before, a short one the notebook lacks too.
+#[test]
+fn an_ember_notebooks_short_cell_ids_name_its_cells() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[("A", "a <- 1"), ("B", "b <- a")]);
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    s.read("", R, "A");
+    s.read("", R, "B");
+    s.edit("", R, "B", "b <- a + 1");
+    assert_eq!(ember.code(R, "B"), "b <- a + 1");
+    s.call("", "move_cell", json!({ "notebook_id": R, "cell_id": "B", "after_cell_id": "" })).unwrap();
+    assert_eq!(ember.order(R), ["B".to_owned(), "A".to_owned()]);
+    s.call("", "move_cell", json!({ "notebook_id": R, "cell_id": "B", "after_cell_id": "A" })).unwrap();
+    assert_eq!(ember.order(R), ["A".to_owned(), "B".to_owned()]);
+    let c = s.call("", "add_cell", json!({ "notebook_id": R, "code": "c <- 3", "after_cell_id": "A" })).unwrap();
+    assert_eq!(ember.order(R)[1], c["cell_id"].as_str().unwrap());
+    s.call("", "submit_changes", json!({ "notebook_id": R, "cell_ids": ["B"] })).unwrap();
+    assert_eq!(s.refused("", "read_cell", json!({ "notebook_id": R, "cell_id": "Z" })), "invalid_cell_id");
+    assert_eq!(s.refused("", "read_cell", json!({ "notebook_id": R, "cell_id": "cell:1" })), "invalid_cell_id");
+}
+
 #[test]
 fn restoring_a_turns_cells_puts_their_code_back_all_or_nothing() {
     let s = setup();
