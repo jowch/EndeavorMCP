@@ -313,7 +313,7 @@ enum Stop {
 }
 
 /// Write `runtime.json` for the helper: the core's pid and its one `port`, its launcher, node and
-/// job, its tokens, and whether it ends itself when idle.
+/// job, its tokens, whether it ends itself when idle, and the network settings it was started with.
 fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_token: &str) -> Result<(), String> {
     // A Slurm job's id, so a reconnect can find the job with squeue.
     let job = if launcher == "slurm" { std::env::var("SLURM_JOB_ID").unwrap_or_default() } else { String::new() };
@@ -323,7 +323,7 @@ fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_tok
     let mut state = json!({
         "launcher": launcher, "node": crate::hostname(), "job": job,
         "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": bridge.token, "page_token": page_token, "exits_when_idle": bridge.notebooks.exits_when_idle,
-        "interface": INTERFACE,
+        "interface": INTERFACE, "network": crate::network_settings(),
     });
     if let Some(standalone) = &bridge.standalone {
         state["folder"] = standalone.folder.clone().into();

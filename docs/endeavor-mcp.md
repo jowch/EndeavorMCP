@@ -422,6 +422,22 @@ arguments (descriptions left out), and the lists of the app's `/endeavor/call`
 methods and of `runtime.json`'s fields, and fail when they change. Nothing
 catches a change in what a call or the events stream returns.
 
+**A runtime started with other network settings.** A runtime keeps the
+environment of the session that started it, and later sessions share it
+(#93). A proxy that only lived as long as that session then breaks every
+download, package installs among them, and nothing said why. So
+`runtime.json` records the network variables it was started with
+(`network`: `NETWORK_VARS`, the proxy and CA bundle variables). For each one
+that is set, it records a short hash of the value and never the value,
+since a proxy's address can carry a password. A front that attaches to a
+runtime it didn't start compares that with its own. When they differ, it
+tells the agent once, naming the variables, that the runtime's downloads use
+the other session's settings, and that stopping it (`stop_machine` "local")
+lets the next call start one with this session's. A record without
+`network`, from an earlier build, is not compared. Only this computer's
+runtime is checked: a machine's runtime has the environment of its own
+login, not this session's.
+
 ## The machine tools
 
 _Built 2026-10-06, in `endeavor mcp` only._

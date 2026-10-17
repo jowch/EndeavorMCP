@@ -91,6 +91,14 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   through `/adapter` either. A client meeting a runtime from before sends the bearer token to its
   pages, which that runtime still takes. An older app that attaches to a newer
   runtime gets its pages refused until Julia restarts from the app's build.
+- A session that attaches to the runtime on this computer is told once when
+  that runtime was started with other network settings (#93, 2026-10-17).
+  `runtime.json` records a short hash of each proxy and CA bundle variable
+  that is set (`network`), not its value. A runtime still downloads with the
+  settings of the session that started it; the notice says so, and says that
+  stopping it lets the next call start one with this session's. The record
+  gained a field that older callers ignore, so the interface stays 23
+  (endeavor-mcp.md, "A runtime started with other network settings").
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
   SHA-256 and keeps it (tested against a fake release; the wiring is
