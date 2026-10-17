@@ -269,7 +269,10 @@ fn an_r_notebook_through_the_runtime() {
             }
             std::thread::sleep(Duration::from_secs(5));
         };
-        assert_eq!(app_call(port, &token, "endeavor/r_status")["result"], json!({ "state": "ready" }));
+        // R runs. A newer Ember published since the last run may still be installing for the next
+        // start, which r_status says with `updating` (#206).
+        let status = app_call(port, &token, "endeavor/r_status")["result"].clone();
+        assert!(status == json!({ "state": "ready" }) || status == json!({ "state": "ready", "updating": true }), "{status}");
         // A warning here is `ember_previous`: Ember's newest build didn't work, which the daily run is for.
         assert_eq!(opened.get("warnings"), None, "{opened}");
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
