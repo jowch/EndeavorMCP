@@ -249,7 +249,9 @@ Next:
   (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
   the SHA256 of its file, and one with any package Ember needs that R lacks or can't load.
   The call waits up to 30 seconds for that. The first install then returns
-  `r_installing` until it's done; an update goes on while R starts with the
+  `r_installing` until it's done, and each call made meanwhile waits up to 30
+  seconds for it too, as the answer says (#175: before, only the call that started
+  it waited, and agents looped). An update goes on while R starts with the
   installed Ember. Offline, R starts with the installed Ember. A build that fails to
   install or load, or that R's adapter doesn't start with, isn't tried again;
   R starts with the build before it, and the agent gets an `ember_previous`
