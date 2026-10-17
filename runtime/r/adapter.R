@@ -335,6 +335,7 @@ snapshot <- function(rec) {
     safe_preview = !isTRUE(state$allowed),
     exited = if (is.null(exited)) NULL else I(exited),
     packages = package_step(rec, snap, state),
+    lazy = identical(state$file$header$on_cell_change, "lazy"),
     cells = unname(lapply(snap$cells, snapshot_cell)))
 }
 

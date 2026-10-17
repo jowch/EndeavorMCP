@@ -302,7 +302,10 @@ fn an_r_notebook_through_the_runtime() {
     step("an ancestor run alone leaves its dependent's result stale", || {
         agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 50" }));
-        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        // The result says the notebook is lazy and names what it left stale (#196).
+        assert_eq!(ran["left_stale"], json!([B]), "{ran}");
+        assert!(ran["warnings"].to_string().contains("lazy_mode::"), "{ran}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
         // growth.R is in Ember's lazy mode, so a run leaves its dependents stale; in autorun Ember would
         // rerun B on its own and the flag would clear a moment later. B still shows its result from x = 41.

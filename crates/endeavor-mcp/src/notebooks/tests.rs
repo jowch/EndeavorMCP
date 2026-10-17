@@ -62,6 +62,8 @@ struct FakeNotebook {
     /// Cells the next run runs before its own, not naming them in its reply, as
     /// Ember runs an ancestor whose code changed since it last ran.
     runs_first: Vec<String>,
+    /// Ember's lazy mode: a run marks its dependents stale instead of running them.
+    lazy: bool,
 }
 
 #[derive(Default)]
@@ -93,7 +95,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new() });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy: false });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -116,7 +118,7 @@ impl Engine {
             "notebook_id": nb.id, "path": nb.path,
             "process_status": if nb.safe_preview { "waiting_for_permission" } else if nb.exited.is_some() { "no_process" } else if nb.starting { "starting" } else { "ready" },
             "execution_allowed": !nb.safe_preview && nb.exited.is_none(), "safe_preview": nb.safe_preview, "exited": nb.exited,
-            "packages": nb.packages,
+            "packages": nb.packages, "lazy": nb.lazy,
             "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
@@ -191,7 +193,7 @@ impl Engine {
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
                 let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new() });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy: false });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed }));
             }
             _ => {}
@@ -311,6 +313,11 @@ impl Engine {
                     cell.last_run = now;
                     cell.errored = cell.code.contains("error(");
                     cell.output = if cell.errored { "boom".into() } else { format!("ran {}", cell.code) };
+                }
+                if nb.lazy {
+                    for cell in nb.cells.iter_mut().filter(|c| !cells.contains(&c.id) && c.analysis().1.iter().any(|name| defined.contains(name))) {
+                        cell.stale = true;
+                    }
                 }
                 let mut reply = json!({ "accepted": true, "process_status": "ready" });
                 if params["wait"] == true {
@@ -632,6 +639,28 @@ fn an_edit_whose_cell_is_still_running_gives_the_old_output_as_previous() {
     s.engine.with(NB, |nb| (nb.cells[0].running, nb.cells[0].output, nb.cells[0].errored) = (false, "2".into(), false));
     let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     assert_eq!((&read["output"], &read["errored"], read.get("error"), read.get("previous_output")), (&json!("2"), &json!(false), None, None));
+}
+
+#[test]
+fn a_run_in_lazy_mode_says_so_and_names_the_dependents_it_left_stale() {
+    // Ember's lazy mode marks a run's dependents stale instead of rerunning
+    // them; the agent is told, not left to find them (#196).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1")]);
+    s.engine.with(NB, |nb| nb.lazy = true);
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["on_cell_change"], "lazy");
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 2");
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!((&ran["affected_cells"], &ran["left_stale"]), (&json!([X]), &json!([Y])), "{ran}");
+    assert!(ran["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("lazy_mode::")), "{ran}");
+
+    // In autorun there's no such warning or list.
+    s.engine.with(NB, |nb| (nb.lazy, nb.cells[1].stale) = (false, false));
+    s.edit("", NB, X, "x = 3");
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert!(ran.get("left_stale").is_none() && !ran["warnings"].to_string().contains("lazy_mode"), "{ran}");
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0].get("on_cell_change"), None);
 }
 
 #[test]

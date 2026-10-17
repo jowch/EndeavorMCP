@@ -539,12 +539,28 @@ impl Call<'_> {
             "affected_cells": cells_run,
             "execution": { "status": status },
             "outputs": { "changed": changed },
-            "pending_run": pending,
+            "pending_run": &pending,
             "warnings": warnings,
         });
         let Value::Object(mut receipt) = receipt else { unreachable!() };
         if !still_running.is_empty() {
             receipt["execution"]["still_running"] = json!(still_running);
+        }
+        // In lazy mode the run's dependents don't run: they're marked stale,
+        // which the agent wouldn't otherwise learn until it read them (#196).
+        if nb.lazy && status != "blocked" {
+            let left_stale: Vec<&String> = nb
+                .order
+                .iter()
+                .filter(|id| !cells_run.contains(id) && !pending.contains(id))
+                .filter(|id| nb.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden))
+                .collect();
+            receipt["warnings"].as_array_mut().unwrap().push(json!(
+                "lazy_mode::This notebook is in lazy mode: the cells that depend on a run are marked stale instead of rerunning. `left_stale` names the stale ones; run them to update them"
+            ));
+            if !left_stale.is_empty() {
+                receipt.insert("left_stale".into(), json!(left_stale));
+            }
         }
         if nb.installing() {
             receipt.insert("packages".into(), nb.packages.clone().unwrap_or_default());
