@@ -61,6 +61,6 @@ A notebook opened from a file runs nothing until the user allows it, because its
 
 ## Other sessions in the notebook
 
-Several agents can work in one notebook. When a write is refused with `stale_read`, or a run with `run_conflict`, those cells changed since this session read them: the user changed them, or another session did, or this conversation did before it was resumed: read them again, then retry. A notebook with `this_session` false is another session's: read it, but don't change it. If the user asks you to work in it and this session has no notebook yet, `open_notebook` with its path joins it; if this session already has one, that fails with `one_notebook`, so tell the user it needs a new session.
+Several agents can work in one notebook. When a write is refused with `stale_read`, or a run with `run_conflict`, those cells changed since this session read them. The user changed them, or another session did, or this conversation did before it was resumed. Read them again, then retry. A notebook with `this_session` false is another session's: read it, but don't change it. If the user asks you to work in it and this session has no notebook yet, `open_notebook` with its path joins it; if this session already has one, that fails with `one_notebook`, so tell the user it needs a new session.
 
 For any other error code or warning, see [reference/errors.md](reference/errors.md).

@@ -74,7 +74,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
   Pluto's rules and say so.
 - The app can put back what an agent's turn changed since 2026-10-16
-  (interface 10, Endeavor #79): `endeavor/restore_cells` sets the turn's edited
+  (interface 18, Endeavor #79): `endeavor/restore_cells` sets the turn's edited
   cells back to their earlier code and deletes the cells it added, all or
   nothing, and only if every cell still has the code the turn left. Nothing
   runs; the code is the user's, a cell whose code isn't what last ran shows
