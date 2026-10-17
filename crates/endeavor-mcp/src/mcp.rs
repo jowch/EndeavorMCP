@@ -376,6 +376,7 @@ impl Bridge {
                 return Some(answer(self.notebooks.run_preview(&text("tool", ""), &arguments)));
             }
             "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", "")))),
+            "endeavor/restore_cells" => return Some(answer(self.notebooks.restore_cells(&text("notebook_id", ""), &params["cells"]))),
             // The user pressed Stop in the app, which the runtime hears of no other way when no call is
             // under way: interrupt the session's runs that are still going. Answered at once with the
             // notebooks it looks at (each may turn out to have nothing going), since Pluto's interrupt
@@ -1215,7 +1216,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (17, "112ad351ec43381e"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (18, "112ad351ec43381e"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1258,11 +1259,11 @@ mod tests {
         // caught here; that stays the author's to judge.
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
-            "allow_julia_install", "allow_r_install", "answer_run", "file_info", "julia_status", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "run_preview", "set_folder",
+            "allow_julia_install", "allow_r_install", "answer_run", "file_info", "julia_status", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (17, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (18, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

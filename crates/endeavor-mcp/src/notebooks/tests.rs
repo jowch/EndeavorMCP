@@ -882,6 +882,90 @@ fn an_ember_notebook_reads_as_code_with_its_own_markers() {
 }
 
 #[test]
+fn restoring_a_turns_cells_puts_their_code_back_all_or_nothing() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x")]);
+    let (_, rx) = s.notebooks.subscribe().unwrap();
+    let restore = |cells: Value| s.notebooks.restore_cells(NB, &cells);
+    let pending = || s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"].clone();
+
+    // A turn edits x without running it and adds z: restoring puts x back, in step with its last run, and deletes z.
+    s.read("7", NB, X);
+    s.edit("7", NB, X, "x = 2");
+    s.read("7", NB, Y);
+    let z = s.call("7", "add_cell", json!({ "notebook_id": NB, "after_cell_id": Y, "code": "z = y" })).unwrap()["cell_id"].as_str().unwrap().to_owned();
+    let calls = s.engine.calls.lock().unwrap().len();
+    let restored = restore(json!([{ "cell_id": X, "expected": "x = 2", "code": "x = 1" }, { "cell_id": z, "expected": "z = y", "code": null }])).unwrap();
+    assert_eq!(restored, json!({ "restored": [X, z], "changed": [] }));
+    assert_eq!((s.engine.order(NB), s.engine.code(NB, X)), (vec![X.to_owned(), Y.to_owned()], "x = 1".to_owned()));
+    assert_eq!(pending(), json!([]), "x's code is what last ran");
+    assert_eq!(s.engine.calls.lock().unwrap()[calls..].iter().filter(|m| *m == "run").count(), 1, "only Pluto's cleanup of the deleted cell");
+    let event = rx.try_iter().last().map(|e| serde_json::from_str::<Value>(&e).unwrap()).expect("an event");
+    assert_eq!((&cell(&event, NB, X)["author"], &cell(&event, NB, X)["before"], &cell(&event, NB, X)["unrun"]), (&json!("user"), &Value::Null, &json!(false)));
+    assert_eq!(s.refused("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 3" })), "stale_read", "the agent reads it again first");
+
+    // A turn that ran its edit: the restored code hasn't run, so the cell is unrun.
+    s.seconds(1.0);
+    s.read("7", NB, X);
+    s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 4", "run_after": true })).unwrap();
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
+    s.seconds(1.0);
+    assert_eq!(pending(), json!([]));
+    assert_eq!(restore(json!([{ "cell_id": X, "expected": "x = 4", "code": "x = 1" }])).unwrap()["restored"], json!([X]));
+    assert_eq!(pending(), json!([X]));
+    s.notebooks.publish();
+    let event = rx.try_iter().last().map(|e| serde_json::from_str::<Value>(&e).unwrap()).expect("an event");
+    assert_eq!((&cell(&event, NB, X)["unrun"], &cell(&event, NB, X)["before"]), (&json!(true), &json!("x = 4")), "the turn's code ran, so the diff is against it");
+    // The agent hasn't read what was put back: its run waits until it has.
+    let refused = s.call("7", "submit_changes", json!({ "notebook_id": NB }));
+    assert!(refused.as_ref().is_err_and(|e| e.contains(&format!("run_conflict::{X} changed since this session last read them"))), "{refused:?}");
+    s.read("7", NB, X);
+    s.call("7", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(pending(), json!([]));
+    s.notebooks.publish();
+
+    // Two turns leave x unrun (1, then 2, then 3): restoring the second keeps it unrun, with the diff against 1.
+    s.seconds(1.0);
+    s.edit("7", NB, X, "x = 2");
+    s.edit("7", NB, X, "x = 3");
+    restore(json!([{ "cell_id": X, "expected": "x = 3", "code": "x = 2" }])).unwrap();
+    assert_eq!(pending(), json!([X]));
+    s.notebooks.publish();
+    let event = rx.try_iter().last().map(|e| serde_json::from_str::<Value>(&e).unwrap()).expect("an event");
+    assert_eq!(cell(&event, NB, X)["before"], "x = 1");
+    s.read("7", NB, X);
+    s.call("7", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+
+    // The user changed one of the cells since, or it's gone: nothing changes, and the reply says which.
+    s.read("7", NB, Y);
+    s.edit("7", NB, Y, "y = x + 1");
+    s.engine.with(NB, |nb| nb.cells[0].code = "x = 5".into());
+    assert_eq!(s.engine.code(NB, X), "x = 5");
+    let gone = "33333333-3333-3333-3333-333333333333";
+    let refused = restore(json!([{ "cell_id": Y, "expected": "y = x + 1", "code": "y = x" }, { "cell_id": X, "expected": "x = 1", "code": "x = 0" }, { "cell_id": gone, "expected": "", "code": null }])).unwrap();
+    assert_eq!(refused, json!({ "restored": [], "changed": [X, gone] }));
+    assert_eq!((s.engine.code(NB, X), s.engine.code(NB, Y)), ("x = 5".to_owned(), "y = x + 1".to_owned()));
+
+    for bad in [json!([]), json!({}), json!([{ "cell_id": Y, "code": "y = x" }]), json!([{ "cell_id": Y, "expected": "y = x + 1", "code": 1 }]), json!([{ "cell_id": Y, "expected": "y = x + 1" }])] {
+        assert_eq!(restore(bad), Err("ArgumentError: invalid_argument::cells must be a list of {cell_id, expected, code}".into()));
+    }
+    let twice = json!([{ "cell_id": Y, "expected": "y = x + 1", "code": "y = x" }, { "cell_id": Y, "expected": "y = x + 1", "code": null }]);
+    assert_eq!(restore(twice), Err(format!("ArgumentError: invalid_argument::cell {Y} is listed twice")));
+    assert_eq!(s.engine.code(NB, Y), "y = x + 1");
+
+    // A run of the turn's edit still going when the user restores: what was put back is unrun.
+    s.read("7", NB, X);
+    s.call("7", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.notebooks.publish();
+    s.seconds(1.0);
+    s.read("7", NB, Y);
+    s.edit("7", NB, Y, "y = x + 2");
+    s.engine.with(NB, |nb| nb.cells[1].running = true);
+    restore(json!([{ "cell_id": Y, "expected": "y = x + 2", "code": "y = x + 1" }])).unwrap();
+    assert_eq!(pending(), json!([Y]));
+}
+
+#[test]
 fn reading_the_notebook_as_code_hides_boilerplate_and_counts_as_reading_it() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "md\"# Title\""), ("33333333-3333-3333-3333-333333333333", " \n"), ("44444444-4444-4444-4444-444444444444", "PLUTO = 1")]);
@@ -1356,7 +1440,7 @@ fn several_sessions_on_one_notebook() {
     call("A", "edit_cell", json!({ "cell_id": c, "code": "c = 11" })).unwrap();
 
     let conflict = format!(
-        "ArgumentError: run_conflict::{a} changed since this session last read them (by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
+        "ArgumentError: run_conflict::{a} changed since this session last read them (by the user, by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
          Read them (read_cell or read_notebook_code), then run again."
     );
     assert_eq!(call("A", "execute_cell", json!({ "cell_id": b })), Err(conflict.clone()));
@@ -1595,9 +1679,18 @@ fn opening_and_making_notebooks() {
     let path = format!("{dir}{SEP}nb0.jl");
     let opened = s.call("", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap();
     assert_eq!(opened["warnings"], json!(["async_execution::open queued non-blocking notebook run; poll read_cell for completion"]));
-    assert_eq!((&opened["execution_allowed"], &opened["ran"], &opened["process_status"]), (&json!(true), &json!(true), &json!("starting")));
+    assert_eq!((&opened["execution_allowed"], &opened["ran"], &opened["process_status"], opened.get("note")), (&json!(true), &json!(true), &json!("starting"), None));
     let previewed = s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}nb1.jl") })).unwrap();
-    assert_eq!((&previewed["execution_allowed"], previewed.get("warnings")), (&json!(false), None));
+    assert_eq!((&previewed["execution_allowed"], previewed.get("warnings"), &previewed["note"]), (&json!(false), None, &json!(super::tools::NOT_RUN)));
+    // A script, an empty file or a file of another kind isn't sent to the runtime, which would leave a backup copy of it.
+    let opens = || s.engine.calls.lock().unwrap().iter().filter(|call| *call == "open").count();
+    let before = opens();
+    for (name, text) in [("fit.jl", "using Statistics\nmean([1, 2])\n"), ("fit.R", "x <- mean(c(1, 2))\n"), ("empty.jl", ""), ("notes.txt", "### A Pluto.jl notebook ###\n")] {
+        let script = format!("{dir}{SEP}{name}");
+        std::fs::write(&script, text).unwrap();
+        assert_eq!(s.call("", "open_notebook", json!({ "path": script })), Err(format!("ArgumentError: not_a_notebook::'{script}' isn't a notebook: it doesn't start with a Pluto or Ember notebook's first line")));
+    }
+    assert_eq!(opens(), before, "the runtime wasn't asked to open them");
     assert_eq!(s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}none.jl") })), Err(format!("ArgumentError: file_not_found::No file at '{dir}{SEP}none.jl'")));
     assert_eq!(s.call("", "open_notebook", json!({})), Err("ArgumentError: invalid_path::path is required".into()));
     assert_eq!(s.call("", "open_notebook", json!({ "path": path, "run_notebook": "yes" })), Err("TypeError: non-boolean (String) used in boolean context".into()));
@@ -1709,7 +1802,7 @@ fn temp_notebooks(name: &str, count: usize) -> Vec<String> {
     (0..count)
         .map(|i| {
             let path = dir.join(format!("nb{i}.jl"));
-            std::fs::write(&path, "").unwrap();
+            std::fs::write(&path, "### A Pluto.jl notebook ###\n").unwrap();
             path.display().to_string()
         })
         .collect()
@@ -1805,7 +1898,7 @@ fn opening_an_open_notebook_joins_it_and_changes_nothing() {
     let joined = s.call("b", "open_notebook", json!({ "path": &paths[0], "run_notebook": true })).unwrap();
     assert_eq!(
         joined,
-        json!({ "notebook_id": id, "path": paths[0], "execution_allowed": false, "ran": false, "process_status": "waiting_for_permission", "already_open": true })
+        json!({ "notebook_id": id, "path": paths[0], "execution_allowed": false, "ran": false, "process_status": "waiting_for_permission", "already_open": true, "note": super::tools::NOT_RUN })
     );
     assert_eq!(s.notebooks.bound("b").as_ref(), Some(&paths[0]));
     let apps = s.call("", "open_notebook", json!({ "path": &paths[0] })).unwrap();
