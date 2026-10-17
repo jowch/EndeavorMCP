@@ -1988,6 +1988,51 @@ fn a_call_made_while_embers_install_runs_waits_for_it_as_the_first_did() {
 }
 
 #[test]
+fn calls_made_together_while_embers_install_runs_each_wait_no_longer_than_one_call_may() {
+    require_debug_build();
+    let dir = state_dir("core-r-install-together");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    // An R whose Ember install takes longer than all the calls below.
+    let r = dir.join("slow-install-r");
+    std::fs::write(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 30; exit 1;; esac\nexit 1\n").unwrap();
+    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = temp_folder("core-r-install-together-home");
+    let home = home.display().to_string();
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
+    let core = Core::try_start_with(&dir, &[("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str()), ("ENDEAVOR_TEST_EMBER_WAIT_SECS", "4")], &args).unwrap();
+    let folder = temp_folder("core-r-install-together-notebooks");
+    let path = folder.join("a.R");
+    std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
+    for agent in ["s1", "s2", "s3"] {
+        give_folder(&core, agent, &folder);
+    }
+    // Starts go one at a time, so a call that queues behind the others counts its wait from when it
+    // came, not from its turn: each answers within one wait of 4 s, where waiting a whole one after
+    // the calls before it would take 8, 12 s (#175).
+    let answered: Vec<(Duration, serde_json::Value)> = std::thread::scope(|scope| {
+        let calls: Vec<_> = ["s1", "s2", "s3"]
+            .map(|agent| {
+                let (core, path) = (&core, &path);
+                scope.spawn(move || {
+                    let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "open_notebook", "arguments": { "path": path.display().to_string() } } });
+                    let began = std::time::Instant::now();
+                    let reply: serde_json::Value = serde_json::from_str(&mcp(core, &message.to_string(), &[("X-Endeavor-Session", agent)]).1).unwrap();
+                    let said: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+                    (began.elapsed(), said)
+                })
+            })
+            .into_iter()
+            .collect();
+        calls.into_iter().map(|call| call.join().unwrap()).collect()
+    });
+    for (took, said) in &answered {
+        assert_eq!(said["error"], "r_installing", "{said}");
+        assert!(*took < Duration::from_secs(7), "no call waited much more than one wait: {answered:?}");
+    }
+}
+
+#[test]
 fn the_app_reads_where_r_is_and_a_core_that_never_started_it_says_so() {
     let dir = state_dir("core-r-status");
     let bridge = FakeBridge::start(&dir);

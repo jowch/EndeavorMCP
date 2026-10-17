@@ -219,9 +219,9 @@ pub fn main(argv: &[String]) -> ! {
     let r = Arc::new(r);
     let _ = served.r.set(r.clone());
     let starting = (r.clone(), served.clone());
-    let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, wait| match backend {
-        Backend::Ember => starting.0.start_noting(&starting.1),
-        Backend::Pluto => starting.1.julia.wait(&starting.1, wait.min(julia_wait())).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
+    let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, came, wait| match backend {
+        Backend::Ember => starting.0.start_noting(&starting.1, came + wait.min(ember_wait())),
+        Backend::Pluto => starting.1.julia.wait(&starting.1, wait.saturating_sub(came.elapsed()).min(julia_wait())).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait. Set before
     // the first connection: the front that started the core sends its folder as soon as it can.
@@ -1048,9 +1048,9 @@ impl RStarter {
     }
 
     /// `start`, keeping why it failed for `status` until the next start. Still installing isn't a failure.
-    fn start_noting(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+    fn start_noting(&self, served: &Served, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         *self.failed.lock().unwrap() = None;
-        let started = self.start(served);
+        let started = self.start(served, until);
         if let Err(why) = &started
             && !why.starts_with("r_installing::")
         {
@@ -1061,20 +1061,21 @@ impl RStarter {
 
     /// Start the adapter and wait until it's up: what answers for R, and Ember's page on `/ember/`.
     /// With Endeavor's own Ember, first update it if r-universe has a newer build, and if the
-    /// adapter doesn't start with a new build, start it with the one before.
-    fn start(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+    /// adapter doesn't start with a new build, start it with the one before. An install is waited
+    /// for `until` then: the call's own wait, and never longer than `ember_wait()` from when it came.
+    fn start(&self, served: &Served, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         // Ember, its install and R's adapter haven't been tried on Windows.
         if cfg!(windows) {
             return Err("unsupported::R notebooks don't work on Windows yet".into());
         }
         // Not standalone means the app's: own R is offered only with `--own-r`, on this computer, where a
         // `serve` or `mcp` runtime is always standalone (`standalone::core_env`); a server's never gets it.
-        self.own_r(served.bridge.standalone.is_none())?;
+        self.own_r(served.bridge.standalone.is_none(), until)?;
         let folder = &self.ember_folder();
         if let Some(library) = &self.library {
             return self.launch(served, library);
         }
-        match self.update(folder) {
+        match self.update(folder, until) {
             Ok(true) => self.tell_previous(served),
             Ok(false) => {}
             // install.R failed in a way it didn't plan for: the installed Ember still works.
@@ -1202,7 +1203,7 @@ impl RStarter {
     /// notebooks can't open yet. Without the user's yes, the answer asks for it; with it, R is
     /// installed in the background (a minute or two), and the call that starts that returns at once.
     /// In the app (`in_app`), whose agents have no `use_machine`, the user installs it from the app.
-    fn own_r(&self, in_app: bool) -> Result<(), String> {
+    fn own_r(&self, in_app: bool, until: std::time::Instant) -> Result<(), String> {
         use std::sync::atomic::Ordering::SeqCst;
         let Some(item) = self.r.own_item().filter(|_| self.offer_own) else { return Ok(()) };
         if self.shell_has_r.load(SeqCst) {
@@ -1217,10 +1218,10 @@ impl RStarter {
         // A call made while another's install runs waits for it too, as the answer says (#175).
         if matches!(*install, Install::Running) {
             drop(install);
-            install = wait_for_install(&self.own_install, ember_wait());
+            install = wait_for_install(&self.own_install, until.saturating_duration_since(std::time::Instant::now()));
             if !matches!(*install, Install::Running) {
                 drop(install);
-                return self.own_r(in_app);
+                return self.own_r(in_app, until);
             }
         }
         match std::mem::replace(&mut *install, Install::Running) {
@@ -1257,7 +1258,7 @@ impl RStarter {
     /// longer than an agent's call may wait, so then the call answers `r_installing` and the
     /// install goes on. An update that takes longer goes on too, and R starts with the Ember
     /// installed; the next start uses the new one.
-    fn update(&self, folder: &Path) -> Result<bool, String> {
+    fn update(&self, folder: &Path, until: std::time::Instant) -> Result<bool, String> {
         let installing = |updating: bool| {
             if updating {
                 eprintln!("endeavor core: still updating Ember; starting R with the installed one");
@@ -1271,7 +1272,7 @@ impl RStarter {
         // made while an update runs starts R with the installed Ember at once, as before.
         if matches!(*install, Install::Running) && !updating {
             drop(install);
-            install = wait_for_install(&self.install, ember_wait());
+            install = wait_for_install(&self.install, until.saturating_duration_since(std::time::Instant::now()));
         }
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => return installing(updating),
@@ -1302,7 +1303,7 @@ impl RStarter {
             *state.lock().unwrap() = Install::Done(done);
             let _ = tx.send(());
         });
-        if rx.recv_timeout(ember_wait()).is_err() {
+        if rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).is_err() {
             return installing(updating);
         }
         match std::mem::replace(&mut *self.install.lock().unwrap(), Install::Idle) {
