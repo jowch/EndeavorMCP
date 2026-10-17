@@ -1216,7 +1216,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (19, "112ad351ec43381e"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (20, "112ad351ec43381e"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1263,7 +1263,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (19, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (20, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

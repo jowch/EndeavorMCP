@@ -35,6 +35,19 @@ jobs:
       - name: Plugin copies
         if: runner.os == 'Linux'
         run: sh scripts/plugins.sh check
+      # Only the Helpers workflow's pin job changes the pinned build, on main.
+      # A PR that changes it could put a build that was never published on main.
+      - name: Pinned build unchanged
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        # The checkout is the PR merged into its base's current tip, which is
+        # the merge's first parent (the event's base.sha can be older).
+        run: |
+          git fetch -q --deepen=1
+          if ! git diff --quiet HEAD^1 HEAD -- scripts/release-key '*/launch/release-key'; then
+            git diff --stat HEAD^1 HEAD -- scripts/release-key '*/launch/release-key'
+            echo "::error::This PR changes the pinned build (release-key). Only the Helpers workflow sets it, on main. Take main's copy: git checkout origin/main -- scripts/release-key '*/launch/release-key'"
+            exit 1
+          fi
       - name: Build
         run: cargo build --locked --workspace --all-targets
       - name: Test

@@ -10,8 +10,6 @@
 #   scripts/helpers.sh --fetch-only  keep or download, never build (Endeavor's
 #                                    git hooks run this)
 #   scripts/helpers.sh --key         print the helper source key
-#   scripts/helpers.sh --committed   fail if the helper source has uncommitted
-#                                    changes, which the key wouldn't include
 #
 # Downloads come from the "helpers" release on GitHub, which the Helpers
 # workflow (.github/workflows/helpers.yml) fills for every change to the
@@ -69,7 +67,6 @@ dirty() {
 fetch_only=
 case "${1:-}" in
   --key) key; exit 0 ;;
-  --committed) if dirty; then exit 1; else exit 0; fi ;;
   --fetch-only) fetch_only=1 ;;
 esac
 

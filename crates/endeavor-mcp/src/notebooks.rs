@@ -1560,6 +1560,20 @@ pub(crate) fn uuid_value(value: &Value) -> Option<String> {
     }
 }
 
+/// A short cell id as Ember keeps it from a hand-written file (`# %% id=B`):
+/// 1 to 64 of `[A-Za-z0-9._-]` (Ember #82). Pluto's cell ids are always UUIDs.
+pub(crate) fn short_cell_id(value: &Value) -> Option<String> {
+    let text = value.as_str()?;
+    let valid = (1..=64).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    valid.then(|| text.to_owned())
+}
+
+/// The cell `value` names in `nb`: one of its cells by that exact id (an R
+/// notebook's short id), else a UUID as Julia's `UUID(value)` takes it.
+fn cell_id_in(nb: &Snapshot, value: &Value) -> Option<String> {
+    short_cell_id(value).filter(|id| nb.cells.contains_key(id)).or_else(|| uuid_value(value))
+}
+
 fn uuid_of(value: u128) -> String {
     let hex = format!("{value:032x}");
     format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
