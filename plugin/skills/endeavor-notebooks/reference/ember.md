@@ -19,6 +19,7 @@ Read this when the notebook is an Ember notebook (a `.R` file). It covers what E
 ## Runs
 
 - Running a cell also runs the cells that depend on it. A cell whose result was made before a cell it depends on last ran shows `stale` in `read_cell`. Run it to bring it up to date.
+- A cell that `source()`s a file depends on that file too. When the file changes, the cell and the cells that depend on it rerun, or show `stale` in lazy mode (`on_cell_change` is `lazy`). After you edit a helper file, read the cells; don't run them again to pick the change up. A file newly added to a folder that a cell sources in a loop is picked up only when that cell runs again.
 - After the notebook restarts, or when it opens without running, every cell shows `not_run` and keeps no output until it runs. Run the cells you need, or `run_all_cells`.
 - Ember can put a note on a cell's last run. A run's `warnings` give each one as `kind::Cell <id>: text`, and `read_cell` lists them in `notes`:
   - `changed_in_place`: the cell changed, by reference, a value another cell defines, such as a data.table changed with `:=` or `set()`, an environment or an R6 object. The cells that read it don't rerun, so their results and a rerun of this cell can be wrong. Make the change in the cell that defines the value.
