@@ -142,10 +142,18 @@ end
 Interrupt the notebook's run, as Pluto's Stop does. A cell that doesn't stop
 (one long `sleep`) is ended with its process, Pluto pressing Ctrl+C until it
 does; that isn't the process ending by itself (`worker_exited!`), and the next
-run starts a new one.
+run starts a new one. While the notebook's process is still starting, its run
+hasn't started a cell: it is told to skip them all once the process is up, as
+it skips the cells queued after one Stop interrupts (#179: before, nothing was
+interrupted, and every cell ran).
 """
 function interrupt!(session, nb)
     task = get(Pluto.WorkspaceManager.active_workspaces, nb.notebook_id, nothing)
+    if (task === nothing || !istaskdone(task)) && Pluto.will_run_code(nb) && any(_unfinished, nb.cells)
+        # Pluto's run clears this when it ends.
+        nb.wants_to_interrupt = true
+        return Dict{String,Any}("interrupted" => true, "pending" => true)
+    end
     (task === nothing || !istaskdone(task) || istaskfailed(task)) && return Dict{String,Any}("interrupted" => false)
     workspace = fetch(task)
     # As Pluto's Stop button (`interrupt_all`): once, and only while a cell runs. The cells

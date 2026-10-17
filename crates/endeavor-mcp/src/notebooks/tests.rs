@@ -357,7 +357,12 @@ impl Engine {
             }),
             "validate" => Ok(json!({ "errors": if params["code"].as_str().unwrap().contains('\n') { json!([{ "type": "pluto_multi_expression" }]) } else { json!([]) } })),
             // The running cells end interrupted, but for one in `stubborn()`, and the queued ones don't run.
+            // A run queued behind `starting()` waits for the notebook's process, which is still starting:
+            // the run is told to skip its cells, which stay queued until the process is up (#179).
             "interrupt" => {
+                if nb.cells.iter().any(|c| c.queued && c.code.contains("starting()")) {
+                    return Ok(json!({ "interrupted": true, "pending": true }));
+                }
                 let busy = nb.cells.iter().any(|c| c.running);
                 for cell in nb.cells.iter_mut() {
                     cell.queued = false;
@@ -2494,6 +2499,18 @@ fn interrupt_notebook_stops_the_run_and_says_what_it_stopped() {
     let stuck = tool_json(s.notebooks.tool("7", "interrupt_notebook", &json!({ "notebook_id": NB }), &Folder::Process, late).unwrap());
     assert_eq!((&stuck["interrupted"], &stuck["stopped"], &stuck["still_running"]), (&json!(true), &json!([]), &json!([Z])));
     assert!(stuck["message"].as_str().unwrap().contains("haven't stopped"), "{stuck}");
+
+    // While the notebook's process starts, the queued cells are dropped at once, and the answer says why (#179).
+    s.engine.with(NB, |nb| {
+        nb.cells[2].running = false;
+        nb.cells[1].code = "starting()".into();
+        (nb.cells[0].queued, nb.cells[1].queued) = (true, true);
+    });
+    let began = Instant::now();
+    let starting = interrupt();
+    assert!(began.elapsed() < Duration::from_secs(2), "no wait for cells that won't run");
+    assert_eq!((&starting["interrupted"], &starting["dropped"], &starting["still_running"]), (&json!(true), &json!([X, Y]), &json!([])), "{starting}");
+    assert!(starting["message"].as_str().unwrap().contains("still starting"), "{starting}");
 }
 
 #[test]

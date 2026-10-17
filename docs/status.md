@@ -335,6 +335,10 @@ Next:
   SIGTERM, as did everything they started, and the curl, wget or juliaup the core starts to
   download Julia, Endeavor's own R or a helper (#181), which before went on after
   a Ctrl-C had stopped the core.
+  In Julia, an interrupt while the notebook's process is still starting stops its
+  run before any cell, and the answer lists them all as `dropped` at once (#179).
+  Before, it reported them dropped, or none when the start took longer than its
+  wait, and they all ran once the process was up.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds
