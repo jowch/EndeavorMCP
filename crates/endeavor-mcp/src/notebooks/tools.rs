@@ -39,6 +39,8 @@ const INSTALL_USUAL_SECONDS: u64 = 600;
 const CELL_MARKER: &str = "# ╔═╡ ";
 /// And of an Ember notebook, as an Ember `.R` file does.
 const EMBER_CELL_MARKER: &str = "# %% id=";
+/// What `open_notebook` says about a notebook in safe preview, so the agent passes it on.
+pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has run, so its cells have no outputs yet. Tell the user that when you describe it. It runs only once the user allows it.";
 /// How much of each output's text a change's receipt carries; `read_cell` has
 /// the rest.
 const RECEIPT_TEXT_MAX: usize = 2_000;
@@ -188,6 +190,9 @@ impl Notebooks {
     }
 }
 
+/// The owner of a change the user made through the app (`endeavor/restore_cells`): no session's.
+pub const USER: &str = "(the user)";
+
 fn other_owner(change: &Change, owner: &str) -> bool {
     !change.owner.is_empty() && change.owner != owner
 }
@@ -316,7 +321,7 @@ impl Call<'_> {
             return Ok(None);
         }
         Ok(Some(format!(
-            "run_conflict::{} changed since this session last read them (by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
+            "run_conflict::{} changed since this session last read them (by the user, by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
              Read them (read_cell or read_notebook_code), then run again.",
             conflicted.join(", ")
         )))
@@ -1103,8 +1108,11 @@ impl Call<'_> {
         if !std::path::Path::new(path).exists() {
             return Err(argument_error(&format!("file_not_found::No file at '{path}'")));
         }
-        if wire::backend::Backend::of_file(std::path::Path::new(path)) == Some(wire::backend::Backend::Ember) {
-            r_notebooks(&format!("'{path}' is an Ember notebook (R)"))?;
+        // A plain script isn't opened: Pluto would leave a backup copy of it next to it before refusing it.
+        match wire::backend::Backend::of_file(std::path::Path::new(path)) {
+            None => return Err(argument_error(&format!("not_a_notebook::'{path}' isn't a notebook: it doesn't start with a Pluto or Ember notebook's first line"))),
+            Some(wire::backend::Backend::Ember) => r_notebooks(&format!("'{path}' is an Ember notebook (R)"))?,
+            Some(wire::backend::Backend::Pluto) => {}
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
@@ -1122,6 +1130,8 @@ impl Call<'_> {
         let mut warnings = self.nbs.take_notices();
         if run {
             warnings.push("async_execution::open queued non-blocking notebook run; poll read_cell for completion".into());
+        } else {
+            result["note"] = json!(NOT_RUN);
         }
         if !warnings.is_empty() {
             result["warnings"] = json!(warnings);
@@ -1150,6 +1160,9 @@ impl Call<'_> {
             "notebook_id": nb.id, "path": nb.path, "execution_allowed": nb.execution_allowed, "ran": false,
             "process_status": nb.process_status, "already_open": true,
         });
+        if !nb.execution_allowed {
+            joined["note"] = json!(NOT_RUN);
+        }
         if nb.lazy {
             joined["on_cell_change"] = json!("lazy");
         }

@@ -6,8 +6,10 @@ description: >-
   `submit_changes`, ...): creating or opening a notebook; adding, editing,
   deleting, folding or running cells; reading results and checking plots;
   widgets and data analysis in a Julia (Pluto) or R (Ember) notebook; working in a notebook
-  another agent has open; or a notebook tool refusing a call. Read it before
-  the first notebook tool call of a session. Not for Jupyter `.ipynb` files.
+  another agent has open; or a notebook tool refusing a call. For a `.jl` or
+  `.R` file the user asks to open, show or look at, try `open_notebook` before
+  reading the file. Read it before the first
+  notebook tool call of a session. Not for Jupyter `.ipynb` files.
 ---
 
 # Working in a live notebook
@@ -59,6 +61,6 @@ A notebook opened from a file runs nothing until the user allows it, because its
 
 ## Other sessions in the notebook
 
-Several agents can work in one notebook. When a write is refused with `stale_read`, or a run with `run_conflict`, those cells changed since this session read them, in another session or in this conversation before it was resumed: read them again, then retry. A notebook with `this_session` false is another session's: read it, but don't change it. If the user asks you to work in it and this session has no notebook yet, `open_notebook` with its path joins it; if this session already has one, that fails with `one_notebook`, so tell the user it needs a new session.
+Several agents can work in one notebook. When a write is refused with `stale_read`, or a run with `run_conflict`, those cells changed since this session read them: the user changed them, or another session did, or this conversation did before it was resumed: read them again, then retry. A notebook with `this_session` false is another session's: read it, but don't change it. If the user asks you to work in it and this session has no notebook yet, `open_notebook` with its path joins it; if this session already has one, that fails with `one_notebook`, so tell the user it needs a new session.
 
 For any other error code or warning, see [reference/errors.md](reference/errors.md).

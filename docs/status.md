@@ -73,6 +73,15 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   the app's R notebooks. Error kinds the Pluto adapter returns
   (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
   Pluto's rules and say so.
+- The app can put back what an agent's turn changed since 2026-10-16
+  (interface 10, Endeavor #79): `endeavor/restore_cells` sets the turn's edited
+  cells back to their earlier code and deletes the cells it added, all or
+  nothing, and only if every cell still has the code the turn left. Nothing
+  runs; the code is the user's, a cell whose code isn't what last ran shows
+  unrun, and an agent reads a restored cell before a run of it or of what
+  needs it (`run_conflict`). Cells the turn deleted can't come back yet, and
+  a cell to delete isn't checked by the engine itself (#146). The app's Restore
+  button is the next step.
 - The pages have a token of their own since 2026-10-15 (interface 8, #100). The
   bearer token, which an agent's MCP config carries, opens `/mcp` and
   `/endeavor/…` only; the pages' token (`page_token` in the state folder and
@@ -203,7 +212,7 @@ Next:
   `previous_output`, `previous_errored` and `previous_error`, and leaves it out
   of `outputs.changed` (#190, interface 17). In Ember's lazy mode, a run's result warns `lazy_mode` and lists the
   notebook's stale cells as `stale_cells`, and `list_notebooks` shows
-  `on_cell_change` (#196, interface 18). R's adapter
+  `on_cell_change` (#196, interface 19). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the
