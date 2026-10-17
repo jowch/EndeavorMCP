@@ -303,8 +303,8 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 50" }));
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
-        // The result says the notebook is lazy and names what it left stale (#196).
-        assert_eq!(ran["left_stale"], json!([B]), "{ran}");
+        // The result says the notebook is lazy and names its stale cells (#196).
+        assert_eq!(ran["stale_cells"], json!([B]), "{ran}");
         assert!(ran["warnings"].to_string().contains("lazy_mode::"), "{ran}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
         // growth.R is in Ember's lazy mode, so a run leaves its dependents stale; in autorun Ember would
@@ -343,7 +343,9 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": d, "wait_for_completion": true }));
         assert_eq!((&ran["affected_cells"], &ran["pending_run"]), (&json!([c, d]), &json!([])), "{ran}");
-        assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {c}: cells this run needs that were edited or stale since they last ran.")]), "{ran}");
+        assert_eq!(ran["warnings"][0], json!(format!("also_ran::Also ran {c}: cells this run needs that were edited or stale since they last ran.")), "{ran}");
+        // B is still stale from the run of A, and the notebook is lazy (#196).
+        assert_eq!(ran["stale_cells"], json!([B]), "{ran}");
         assert!(ran["outputs"]["changed"][1]["output_summary"].as_str().unwrap().contains("15"), "{ran}");
         // Back as it was: x is 41 and B ran with it; C and D gone.
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));

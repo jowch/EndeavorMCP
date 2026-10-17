@@ -548,18 +548,21 @@ impl Call<'_> {
         }
         // In lazy mode the run's dependents don't run: they're marked stale,
         // which the agent wouldn't otherwise learn until it read them (#196).
+        // The list is every stale cell, as `read_notebook_code`'s
+        // `stale_cell_ids`: ones an earlier run left count too. A notebook with
+        // none says nothing.
         if nb.lazy && status != "blocked" {
-            let left_stale: Vec<&String> = nb
+            let stale_cells: Vec<&String> = nb
                 .order
                 .iter()
                 .filter(|id| !cells_run.contains(id) && !pending.contains(id))
                 .filter(|id| nb.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden))
                 .collect();
-            receipt["warnings"].as_array_mut().unwrap().push(json!(
-                "lazy_mode::This notebook is in lazy mode: the cells that depend on a run are marked stale instead of rerunning. `left_stale` names the stale ones; run them to update them"
-            ));
-            if !left_stale.is_empty() {
-                receipt.insert("left_stale".into(), json!(left_stale));
+            if !stale_cells.is_empty() {
+                receipt["warnings"].as_array_mut().unwrap().push(json!(
+                    "lazy_mode::This notebook is in lazy mode: the cells that depend on a run are marked stale instead of rerunning. `stale_cells` names the cells that are stale now; run the ones that should be current"
+                ));
+                receipt.insert("stale_cells".into(), json!(stale_cells));
             }
         }
         if nb.installing() {
@@ -1143,10 +1146,14 @@ impl Call<'_> {
             Err(error) => return Some(Err(error)),
         };
         self.nbs.opened_by(self.owner, &nb.path);
-        Some(Ok(json!({
+        let mut joined = json!({
             "notebook_id": nb.id, "path": nb.path, "execution_allowed": nb.execution_allowed, "ran": false,
             "process_status": nb.process_status, "already_open": true,
-        })))
+        });
+        if nb.lazy {
+            joined["on_cell_change"] = json!("lazy");
+        }
+        Some(Ok(joined))
     }
 
     fn new_notebook(&self, folder: &Folder) -> Result<Value, String> {

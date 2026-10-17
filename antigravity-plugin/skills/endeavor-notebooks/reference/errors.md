@@ -57,7 +57,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `execution_blocked` | Nothing ran: the notebook is in safe preview, or its process is stopped. The cells stay in `pending_run` |
 | `execution_timeout` | A waited run was still going after 45 seconds and the call returned. The run continues; `execution.still_running` names its cells that are running, and they are no longer in `pending_run`. Read them later and do not run them again |
 | `also_ran` | The run also ran the named cells: ones your cells depend on that had never run, or (in R) that were edited or stale since they last ran. A waited run lists them in `affected_cells` and `outputs.changed` |
-| `lazy_mode` | The R notebook is in Ember's lazy mode: the cells that depend on what ran were marked stale, not rerun. `left_stale` names the stale cells; run the ones that should be current |
+| `lazy_mode` | The R notebook is in Ember's lazy mode: the cells that depend on what ran were marked stale, not rerun. `stale_cells` names every cell that is stale now; run the ones that should be current |
 | `already_ran` | The user ran your staged cells before your run reached them, so they were not run a second time. The outputs are from that run |
 | `ember_previous` | From opening or making an R notebook: Ember's newest build didn't work here, so R notebooks use the one before it. Mention it to the user if R notebooks act up |
 | `run_conflict` | From `add_cell` or `edit_cell` with `run_after`: the edit was made and staged, not run. Read the named cells, then `submit_changes` |

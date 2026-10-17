@@ -202,7 +202,7 @@ Next:
   still running, the edit's result gives its old output and error as
   `previous_output`, `previous_errored` and `previous_error`, and leaves it out
   of `outputs.changed` (#190, interface 17). In Ember's lazy mode, a run's result warns `lazy_mode` and lists the
-  dependents it left stale as `left_stale`, and `list_notebooks` shows
+  notebook's stale cells as `stale_cells`, and `list_notebooks` shows
   `on_cell_change` (#196, interface 18). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's

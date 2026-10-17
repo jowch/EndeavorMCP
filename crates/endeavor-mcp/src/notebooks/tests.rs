@@ -642,7 +642,7 @@ fn an_edit_whose_cell_is_still_running_gives_the_old_output_as_previous() {
 }
 
 #[test]
-fn a_run_in_lazy_mode_says_so_and_names_the_dependents_it_left_stale() {
+fn a_run_in_lazy_mode_says_so_and_names_the_stale_cells() {
     // Ember's lazy mode marks a run's dependents stale instead of rerunning
     // them; the agent is told, not left to find them (#196).
     let s = setup();
@@ -652,14 +652,14 @@ fn a_run_in_lazy_mode_says_so_and_names_the_dependents_it_left_stale() {
     s.read("", NB, X);
     s.edit("", NB, X, "x = 2");
     let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
-    assert_eq!((&ran["affected_cells"], &ran["left_stale"]), (&json!([X]), &json!([Y])), "{ran}");
+    assert_eq!((&ran["affected_cells"], &ran["stale_cells"]), (&json!([X]), &json!([Y])), "{ran}");
     assert!(ran["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("lazy_mode::")), "{ran}");
 
     // In autorun there's no such warning or list.
     s.engine.with(NB, |nb| (nb.lazy, nb.cells[1].stale) = (false, false));
     s.edit("", NB, X, "x = 3");
     let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
-    assert!(ran.get("left_stale").is_none() && !ran["warnings"].to_string().contains("lazy_mode"), "{ran}");
+    assert!(ran.get("stale_cells").is_none() && !ran["warnings"].to_string().contains("lazy_mode"), "{ran}");
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0].get("on_cell_change"), None);
 }
 
