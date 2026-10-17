@@ -650,9 +650,14 @@ fn an_r_notebook_through_the_runtime() {
 /// `listed` instead when given. The name install.R gives the build: the first 12 characters of the
 /// listed SHA256.
 fn stand_in_repository(repository: &Path, label: &str, broken: bool, listed: Option<&str>) -> String {
+    stand_in_importing(repository, label, broken, listed, "jsonlite")
+}
+
+/// The same, with a stand-in that imports `imports`.
+fn stand_in_importing(repository: &Path, label: &str, broken: bool, listed: Option<&str>, imports: &str) -> String {
     let source = fresh(repository.with_extension("source")).join("ember");
     std::fs::create_dir_all(source.join("R")).unwrap();
-    std::fs::write(source.join("DESCRIPTION"), format!("Package: ember\nVersion: 0.0.0.9000\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\nImports: jsonlite\nRemoteSha: {label}\n")).unwrap();
+    std::fs::write(source.join("DESCRIPTION"), format!("Package: ember\nVersion: 0.0.0.9000\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\nImports: {imports}\nRemoteSha: {label}\n")).unwrap();
     let on_load = if broken { ".onLoad <- function(...) stop(\"a broken build\")\n" } else { "" };
     std::fs::write(source.join("R/build.R"), format!("build <- function() \"{label}\"\n{on_load}")).unwrap();
     std::fs::write(source.join("NAMESPACE"), "export(build)\n").unwrap();
@@ -663,6 +668,55 @@ fn stand_in_repository(repository: &Path, label: &str, broken: bool, listed: Opt
     let index = format!("tools::write_PACKAGES('.'); p <- read.dcf('PACKAGES'); p <- cbind(p, SHA256 = '{sha}'); write.dcf(p, 'PACKAGES'); g <- gzfile('PACKAGES.gz', 'wt'); write.dcf(p, g); close(g); unlink('PACKAGES.rds')");
     assert!(Command::new("Rscript").args(["-e", &index]).current_dir(&contrib).status().unwrap().success());
     sha[..12].to_owned()
+}
+
+/// A package `name` at `version` that imports `imports`, built into the CRAN-like repository `cran`,
+/// whose index is written again.
+fn cran_package(cran: &Path, name: &str, version: &str, imports: &str) {
+    let source = fresh(cran.with_extension("source")).join(name);
+    std::fs::create_dir_all(source.join("R")).unwrap();
+    let imports = if imports.is_empty() { String::new() } else { format!("Imports: {imports}\n") };
+    std::fs::write(source.join("DESCRIPTION"), format!("Package: {name}\nVersion: {version}\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\n{imports}")).unwrap();
+    std::fs::write(source.join("R/v.R"), format!("v <- function() \"{version}\"\n")).unwrap();
+    std::fs::write(source.join("NAMESPACE"), "export(v)\n").unwrap();
+    let contrib = cran.join("src/contrib");
+    std::fs::create_dir_all(&contrib).unwrap();
+    assert!(Command::new("R").args(["CMD", "build", "--no-manual"]).arg(&source).current_dir(&contrib).stdout(Stdio::null()).status().unwrap().success());
+    assert!(Command::new("Rscript").args(["-e", "tools::write_PACKAGES('.')"]).current_dir(&contrib).status().unwrap().success());
+}
+
+/// A dependency R can load but that is older than Ember needs is installed into `deps`, where it
+/// shadows the old copy, and Ember installs (#90). Before, it was left as it was, Ember failed to load,
+/// and with no Ember installed every start tried again. (A package from CRAN that needs a newer one is
+/// already fine: `install.packages` brings the newer one along.)
+#[test]
+#[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
+fn a_dependency_too_old_for_ember_is_installed_beside_it() {
+    if !Command::new("Rscript").arg("--version").stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
+        eprintln!("SKIPPED: no Rscript on the PATH.");
+        return;
+    }
+    let work = fresh(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-r-old-dependency"));
+    let (repository, folder, cran, site) = (work.join("repository"), work.join("ember"), work.join("cran"), fresh(work.join("site")));
+    // CRAN has 2.0; the user's library has 1.0, which loads.
+    cran_package(&cran, "endeavorlow", "1.0", "");
+    let old = cran.join("src/contrib/endeavorlow_1.0.tar.gz");
+    assert!(Command::new("R").args(["CMD", "INSTALL", "--no-test-load", "-l"]).arg(&site).arg(&old).stdout(Stdio::null()).status().unwrap().success());
+    std::fs::remove_file(&old).unwrap();
+    cran_package(&cran, "endeavorlow", "2.0", "");
+    let a = stand_in_importing(&repository, "a", false, None, "endeavorlow (>= 2.0)");
+    let status = Command::new("Rscript")
+        .args(["--vanilla", concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/r/install.R")])
+        .arg(&folder)
+        .arg(format!("file://{}", repository.display()))
+        .env("ENDEAVOR_CRAN", format!("file://{}", cran.display()))
+        .env("R_LIBS", &site)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(0));
+    let libs = format!("{}:{}:{}", folder.join(&a).display(), folder.join("deps").display(), site.display());
+    let out = Command::new("Rscript").args(["-e", "cat(ember::build(), endeavorlow::v())"]).env("R_LIBS", libs).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a 2.0", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 /// The adapter's pure functions (the install status, the errors' fixes), checked by

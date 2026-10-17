@@ -112,8 +112,10 @@ fail <- function(why, blame = TRUE) {
 }
 
 # Ember's dependencies, all the way down, that this R can't load: missing ones,
-# and ones in a library that were built for another R. They go into `deps`,
-# which comes first, so a broken copy elsewhere is shadowed.
+# ones in a library that were built for another R, and ones that load but are
+# older than Ember or a package in the tree needs (#90): `install.packages`
+# brings a newer one along only for the packages it installs. They go into `deps`, which
+# comes first, so a broken or old copy elsewhere is shadowed.
 options(timeout = max(600, getOption("timeout")), Ncpus = max(1L, parallel::detectCores() - 1L))
 dir.create(deps, showWarnings = FALSE)
 .libPaths(c(deps, .libPaths()))
@@ -122,7 +124,31 @@ direct <- unique(unlist(lapply(c("Depends", "Imports", "LinkingTo"), function(fi
 on_cran <- tryCatch(available.packages(repos = cran), error = function(e) fail(paste("Couldn't reach CRAN:", conditionMessage(e)), blame = FALSE))
 tree <- unique(c(direct, unlist(tools::package_dependencies(direct, db = on_cran, which = c("Depends", "Imports", "LinkingTo"), recursive = TRUE))))
 tree <- setdiff(tree, c("R", rownames(installed.packages(priority = "base"))))
-loads <- function(pkg) suppressWarnings(requireNamespace(pkg, quietly = TRUE))
+# The lowest version of each package that Ember and the tree, as CRAN lists
+# it, ask for with `>=` or `>`.
+wanted <- list()
+needs <- function(field) {
+  if (is.na(field)) return()
+  for (dep in strsplit(field, ",", fixed = TRUE)[[1]]) {
+    parts <- regmatches(dep, regexec("^\\s*([[:alnum:].]+)\\s*\\(\\s*>=?\\s*([^) ]+)\\s*\\)", dep))[[1]]
+    if (length(parts) == 3 && parts[[2]] %in% tree) {
+      known <- wanted[[parts[[2]]]]
+      if (is.null(known) || package_version(parts[[3]]) > known) wanted[[parts[[2]]]] <<- package_version(parts[[3]])
+    }
+  }
+}
+for (field in c("Depends", "Imports", "LinkingTo")) {
+  needs(build[[field]])
+  for (pkg in intersect(tree, rownames(on_cran))) needs(on_cran[pkg, field])
+}
+# The version R would load, read from its DESCRIPTION: a namespace loaded
+# here may be an older copy than the one just installed.
+too_old <- function(pkg) {
+  if (is.null(wanted[[pkg]])) return(FALSE)
+  found <- suppressWarnings(packageDescription(pkg, lib.loc = .libPaths(), fields = "Version"))
+  !is.na(found) && package_version(found) < wanted[[pkg]]
+}
+loads <- function(pkg) !too_old(pkg) && suppressWarnings(requireNamespace(pkg, quietly = TRUE))
 missing <- tree[!vapply(tree, loads, logical(1))]
 if (length(missing)) {
   message("Installing ", paste(missing, collapse = ", "), " for R notebooks")
