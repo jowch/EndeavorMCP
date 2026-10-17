@@ -802,7 +802,9 @@ struct Relay {
 
 fn relay(options: Options) -> ! {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let relay = Arc::new(Relay::new(options, format!("stdio-{}-{}", std::process::id(), now.as_millis()), Box::new(io::stdout())));
+    let fresh = format!("stdio-{}-{}", std::process::id(), now.as_millis());
+    let session = session_key(std::env::var("CLAUDE_CODE_SESSION_ID").ok().as_deref()).unwrap_or(fresh);
+    let relay = Arc::new(Relay::new(options, session, Box::new(io::stdout())));
     relay.target_from_project();
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -817,6 +819,18 @@ fn relay(options: Options) -> ! {
     }
     relay.connections.close_all();
     std::process::exit(0)
+}
+
+/// The session key of an agent whose client names its conversation: Claude Code gives
+/// its MCP servers `CLAUDE_CODE_SESSION_ID`, and keeps it when the conversation is
+/// resumed. Under it a resumed conversation is the same session, with its reads,
+/// edits and notebook, rather than a new one that has to read its own edits again
+/// and is told another session changed them (#176). None for anything that isn't a
+/// short id, so it can go in a header.
+fn session_key(conversation: Option<&str>) -> Option<String> {
+    let id = conversation?.trim();
+    let ok = !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    ok.then(|| format!("claude-{id}"))
 }
 
 impl Relay {

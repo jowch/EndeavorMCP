@@ -292,7 +292,12 @@ notebook (the first it opens or creates, or the one the app gives it), and
   `X-Endeavor-Host`) from their MCP config. Nothing else is involved.
 - **The stdio form** (`endeavor mcp`) makes a key for each run
   (`stdio-<pid>-<millis>`) and sends it as `X-Endeavor-Session`, so each
-  agent that starts it is one session.
+  agent that starts it is one session. Under Claude Code the key is
+  `claude-<CLAUDE_CODE_SESSION_ID>` instead: Claude Code gives its MCP
+  servers that variable and keeps it when a conversation is resumed, so a
+  resumed conversation is the same session, with its reads and its notebook
+  (#176). A nested `claude -p` that inherits its caller's id, rather than
+  getting its own `--session-id`, shares the caller's session.
 - **A client over plain HTTP** (`endeavor serve`, with only the bearer token)
   gets an `Mcp-Session-Id` in the reply to its `initialize`
   (`mcp-` and 32 random hex digits). Streamable HTTP clients send it back on

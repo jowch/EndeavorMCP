@@ -492,3 +492,13 @@ fn without_the_plugin_the_handshake_points_to_the_guide() {
     let read_only = |name: &str| lines[1]["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
     assert_eq!([read_only("list_machines"), read_only("add_machine"), read_only("use_machine"), read_only("stop_machine")], [true, false, false, false]);
 }
+
+#[test]
+fn a_claude_code_conversation_keeps_its_session_key_across_a_resume() {
+    let id = "3bcbb519-dea6-4a97-86f8-ebbef9018507";
+    assert_eq!(session_key(Some(id)), Some(format!("claude-{id}")), "the same key for the same conversation, so a resume is the same session");
+    for bad in ["", "  ", "a b", "x\r\nX-Endeavor-Host: evil", &"a".repeat(65)] {
+        assert_eq!(session_key(Some(bad)), None, "{bad:?} can't go in a header: the process gets a key of its own");
+    }
+    assert_eq!(session_key(None), None);
+}
