@@ -6,8 +6,10 @@ description: >-
   `submit_changes`, ...): creating or opening a notebook; adding, editing,
   deleting, folding or running cells; reading results and checking plots;
   widgets and data analysis in a Julia (Pluto) or R (Ember) notebook; working in a notebook
-  another agent has open; or a notebook tool refusing a call. Read it before
-  the first notebook tool call of a session. Not for Jupyter `.ipynb` files.
+  another agent has open; or a notebook tool refusing a call. For a `.jl` or
+  `.R` file the user asks to open, show or look at, try `open_notebook` before
+  reading the file. Read it before the first
+  notebook tool call of a session. Not for Jupyter `.ipynb` files.
 ---
 
 # Working in a live notebook
