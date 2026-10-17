@@ -576,10 +576,8 @@ impl Call<'_> {
     fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
         let mut out = self.cell_json(nb, id);
         out.remove("code");
-        if out["running"] == true || out["queued"] == true {
-            if let Some(previous) = out.remove("output") {
-                out.insert("previous_output".into(), previous);
-            }
+        if (out["running"] == true || out["queued"] == true) && let Some(previous) = out.remove("output") {
+            out.insert("previous_output".into(), previous);
         }
         out
     }
