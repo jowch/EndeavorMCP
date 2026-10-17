@@ -299,19 +299,18 @@ fn macos_version() -> Option<u32> {
 /// Expand the installer into `staging` and unpack its R framework: R's own folder (`Resources`).
 fn unpack(pkg: &Path, staging: &Path) -> Result<PathBuf, String> {
     let expanded = staging.join("pkg");
-    let status = Command::new("pkgutil").arg("--expand").arg(pkg).arg(&expanded).stdout(Stdio::null()).status().map_err(|e| format!("pkgutil: {e}"))?;
+    let mut pkgutil = Command::new("pkgutil");
+    crate::host_tools::with_command_mask(pkgutil.arg("--expand").arg(pkg).arg(&expanded).stdout(Stdio::null()));
+    let status = pkgutil.status().map_err(|e| format!("pkgutil: {e}"))?;
     if !status.success() {
         return Err(format!("pkgutil --expand ended with {status}"));
     }
     let payload = ["R-fw.pkg", "r.pkg"].iter().map(|part| expanded.join(part).join("Payload")).find(|p| p.is_file()).ok_or("the installer has no R framework")?;
     let framework = staging.join("framework");
     std::fs::create_dir_all(&framework).map_err(|e| e.to_string())?;
-    let status = Command::new("sh")
-        .args(["-c", "gzip -dcf \"$0\" | cpio -i 2>/dev/null"])
-        .arg(&payload)
-        .current_dir(&framework)
-        .status()
-        .map_err(|e| format!("cpio: {e}"))?;
+    let mut cpio = Command::new("sh");
+    crate::host_tools::with_command_mask(cpio.args(["-c", "gzip -dcf \"$0\" | cpio -i 2>/dev/null"]).arg(&payload).current_dir(&framework));
+    let status = cpio.status().map_err(|e| format!("cpio: {e}"))?;
     let resources = framework.join("R.framework/Versions/Current/Resources");
     if !status.success() || !resources.join("bin").join("R").is_file() {
         return Err(format!("unpacking the framework ended with {status}"));
