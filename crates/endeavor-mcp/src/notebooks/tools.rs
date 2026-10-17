@@ -571,13 +571,18 @@ impl Call<'_> {
 
     /// The cell an edit changed, as `read_cell` shows it without its code:
     /// the agent sent that code, and gets it back from `read_cell`. While the
-    /// edited cell is running or queued, its output is the one from before the
-    /// edit, so it is `previous_output`, not `output` (#190).
+    /// edited cell is running or queued, its output and error are the ones from
+    /// before the edit, so they are `previous_output`, `previous_errored` and
+    /// `previous_error` (#190).
     fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
         let mut out = self.cell_json(nb, id);
         out.remove("code");
-        if (out["running"] == true || out["queued"] == true) && let Some(previous) = out.remove("output") {
-            out.insert("previous_output".into(), previous);
+        if out["running"] == true || out["queued"] == true {
+            for key in ["output", "errored", "error"] {
+                if let Some(previous) = out.remove(key) {
+                    out.insert(format!("previous_{key}"), previous);
+                }
+            }
         }
         out
     }
