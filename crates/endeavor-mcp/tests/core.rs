@@ -2016,8 +2016,12 @@ fn a_failed_ember_install_is_said_to_every_call_for_a_while_before_one_tries_aga
     // Every call is told the failure, from either agent, and none installs again (#183).
     let first = open("s1");
     assert_eq!(first["error"], "r_failed", "{first}");
+    assert!(!first.to_string().contains("didn't try again"), "{first}");
     for agent in ["s1", "s2", "s1", "s2"] {
-        assert_eq!(open(agent), first, "the same failure");
+        let kept = open(agent);
+        assert_eq!(kept["error"], "r_failed", "the same failure: {kept}");
+        // And says it was not tried again, so an agent doesn't report the old cause as current.
+        assert!(kept.to_string().contains("this call didn't try again; a call made"), "{kept}");
     }
     assert_eq!(tries_so_far(), 1, "one install for all of them");
     // Once its time is up, the next call tries again.

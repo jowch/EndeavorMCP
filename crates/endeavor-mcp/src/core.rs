@@ -822,10 +822,15 @@ fn retry_after() -> Duration {
     test.map_or(Duration::from_secs(60), Duration::from_secs)
 }
 
-/// Why a failed install is still what calls are told, if it is (`retry_after`).
+/// Why a failed install is still what calls are told, if it is (`retry_after`), saying that
+/// nothing was tried for this call and when a call will try: else an agent whose user just
+/// installed a compiler reads the same words and says the compiler is still missing.
 fn failure_kept(install: &Install) -> Option<String> {
     match install {
-        Install::Failed(why, at) if at.elapsed() < retry_after() => Some(why.clone()),
+        Install::Failed(why, at) if at.elapsed() < retry_after() => {
+            let left = retry_after().saturating_sub(at.elapsed()).as_secs().max(1);
+            Some(format!("{}. That was the try {} s ago, and this call didn't try again; a call made {left} s from now does.", why.trim_end_matches('.'), at.elapsed().as_secs()))
+        }
         _ => None,
     }
 }
