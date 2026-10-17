@@ -79,7 +79,7 @@
     "name": "edit_cell"
   },
   {
-    "description": "Replace the code of several cells in one call. Each must have been read first; if one has not, no cell is changed. Never runs them: `submit_changes` does.",
+    "description": "Replace the code of several cells in one call. Each must have been read first; if one has not, no cell is changed. Never runs them: `submit_changes` does. The receipt's `mutation.code_folded` says whether each cell's code is hidden after the edits.",
     "inputSchema": {
       "properties": {
         "cells": {
