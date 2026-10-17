@@ -274,6 +274,7 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(opened.get("warnings"), None, "{opened}");
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("growth.R").display().to_string()), &json!(false)), "{opened}");
+        assert_eq!(opened["on_cell_change"], "lazy", "growth.R is in lazy mode (#196): {opened}");
         assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/ember/edit?id={notebook}")));
         let r_state = std::fs::read_to_string(state.join("r.json")).expect("R's adapter wrote its state");
         assert!(!r_state.contains("ember_secret"), "the core made Ember's secret and R doesn't write it back: {r_state}");
@@ -302,7 +303,10 @@ fn an_r_notebook_through_the_runtime() {
     step("an ancestor run alone leaves its dependent's result stale", || {
         agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 50" }));
-        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        // The result says the notebook is lazy and names its stale cells (#196).
+        assert_eq!(ran["stale_cells"], json!([B]), "{ran}");
+        assert!(ran["warnings"].to_string().contains("lazy_mode::"), "{ran}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
         // growth.R is in Ember's lazy mode, so a run leaves its dependents stale; in autorun Ember would
         // rerun B on its own and the flag would clear a moment later. B still shows its result from x = 41.
@@ -359,7 +363,9 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": d, "wait_for_completion": true }));
         assert_eq!((&ran["affected_cells"], &ran["pending_run"]), (&json!([c, d]), &json!([])), "{ran}");
-        assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {c}: cells this run needs that were edited or stale since they last ran.")]), "{ran}");
+        assert_eq!(ran["warnings"][0], json!(format!("also_ran::Also ran {c}: cells this run needs that were edited or stale since they last ran.")), "{ran}");
+        // B is still stale from the run of A, and the notebook is lazy (#196).
+        assert_eq!(ran["stale_cells"], json!([B]), "{ran}");
         assert!(ran["outputs"]["changed"][1]["output_summary"].as_str().unwrap().contains("15"), "{ran}");
         // Back as it was: x is 41 and B ran with it; C and D gone.
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
