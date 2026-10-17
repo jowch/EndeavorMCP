@@ -61,8 +61,9 @@ pub trait Upstream: Send + Sync {
 }
 
 /// Starts an engine's adapter: what answers for it once it's up, or why it couldn't start. The
-/// `Duration` is what is left of the call's wait, which Julia's start waits no longer than.
-pub type Starter = Box<dyn Fn(Backend, Duration) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
+/// call came at the `Instant` and waits up to the `Duration` from then, however long it queued
+/// behind other starts (#175); Julia's start waits no longer than that.
+pub type Starter = Box<dyn Fn(Backend, Instant, Duration) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
 
 /// Julia's bridge, once it answers.
 pub struct Julia {
@@ -626,12 +627,13 @@ impl Notebooks {
         if self.engines.has(backend) {
             return Ok(());
         }
+        let began = Instant::now();
         let _starting = (backend != Backend::Pluto).then(|| self.starting.lock().unwrap());
         if self.engines.has(backend) {
             return Ok(());
         }
         let Some(starter) = self.starter.get() else { return Ok(()) };
-        let upstream = starter(backend, wait)?;
+        let upstream = starter(backend, began, wait)?;
         self.add_engine(backend, upstream);
         Ok(())
     }

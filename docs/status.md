@@ -196,11 +196,16 @@ Next:
   shows Ember's own `stale` and `not_run` (every cell after a restart), a
   warning in a cell's output starts with `Warning:`, and `read_notebook_code`
   marks cells as an Ember file does (`# %% id=`). `edit_cell` can fold the
-  cell it edits, in either engine (#162; the interface number is 10). R's adapter
+  cell it edits, in either engine (#162), and so can each edit in `edit_cells`
+  (#168; the interface number is 13), whose receipt says each cell's fold after the
+  edits (`mutation.code_folded`; #174, interface 16). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the
-  agent's run, until those finish (#151; interface 12). When R ends, its
+  agent's run, until those finish (#151; interface 12). A waited `submit_changes` with
+  nothing staged reports the cells that ran while it waited, and `errored` if one failed (#171; interface 14).
+  `allow_execution`'s run of the notebook is the agent's run too, so a read or a waited submit
+  right after it waits for it, in both engines (#170; interface 15). When R ends, its
   notebooks close with it: the agent's next call on one answers
   `notebook_closed` with why (how R's process ended and its last error), and
   `/endeavor/events` lists them under `engine_ended` until each opens again
@@ -244,7 +249,9 @@ Next:
   (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
   the SHA256 of its file, and one with any package Ember needs that R lacks or can't load.
   The call waits up to 30 seconds for that. The first install then returns
-  `r_installing` until it's done; an update goes on while R starts with the
+  `r_installing` until it's done, and each call made meanwhile waits up to 30
+  seconds for it too, as the answer says (#175: before, only the call that started
+  it waited, and agents looped). An update goes on while R starts with the
   installed Ember. Offline, R starts with the installed Ember. A build that fails to
   install or load, or that R's adapter doesn't start with, isn't tried again;
   R starts with the build before it, and the agent gets an `ember_previous`
@@ -317,7 +324,8 @@ Next:
   for an interrupt at all, from the page either: R's adapter inherited the core's
   signal mask, which blocks SIGINT, SIGTERM and SIGHUP for the core's own thread, and
   passed it to Ember's workers. R now starts with the mask the core was started with,
-  as Julia does.
+  as Julia does. So do `run_shell`'s commands (#165), which before ignored SIGINT and
+  SIGTERM, as did everything they started.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds

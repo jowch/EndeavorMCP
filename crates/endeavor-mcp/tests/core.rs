@@ -920,6 +920,24 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
     assert_eq!(text(&mcp(&core, &shell(7), &caller).1)["stdout"], "ran\n");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn run_shells_command_starts_with_the_signal_mask_the_core_started_with() {
+    let dir = state_dir("core-shell-mask");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{"owner":"7","policy":"auto","asks":true}}"#);
+    let blocked = |status: &str| status.lines().find(|l| l.starts_with("SigBlk:")).map(str::to_owned);
+    let shell = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_shell","arguments":{"command":"cat /proc/self/status"}}}"#;
+    let reply: serde_json::Value = serde_json::from_str(&mcp(&core, shell, &caller).1).unwrap();
+    let text: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    // The core blocks SIGINT, SIGTERM and SIGHUP for its own thread; a command it starts doesn't (#165).
+    let core_status = std::fs::read_to_string(format!("/proc/{}/status", core.process.id())).unwrap();
+    assert_ne!(blocked(&core_status), blocked(&std::fs::read_to_string("/proc/thread-self/status").unwrap()), "the core's mask is its own");
+    assert_eq!(blocked(text["stdout"].as_str().unwrap()), blocked(&std::fs::read_to_string("/proc/thread-self/status").unwrap()), "{text}");
+}
+
 #[test]
 fn a_held_call_answers_as_an_event_stream_at_once() {
     let dir = state_dir("core-held-stream");
@@ -1936,6 +1954,82 @@ fn a_session_said_to_be_julias_starts_julia_ahead_whatever_its_folder_has() {
 fn julia_status(core: &Core) -> serde_json::Value {
     let reply: serde_json::Value = serde_json::from_str(&app_call(core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/julia_status"}"#)).unwrap();
     reply["result"].clone()
+}
+
+#[test]
+fn a_call_made_while_embers_install_runs_waits_for_it_as_the_first_did() {
+    require_debug_build();
+    let dir = state_dir("core-r-install-wait");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    // An R whose Ember install takes 5 s and then fails.
+    let r = dir.join("slow-install-r");
+    std::fs::write(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 5; exit 1;; esac\nexit 1\n").unwrap();
+    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = temp_folder("core-r-install-wait-home");
+    let home = home.display().to_string();
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
+    let core = Core::try_start_with(&dir, &[("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str()), ("ENDEAVOR_TEST_EMBER_WAIT_SECS", "2")], &args).unwrap();
+    let folder = temp_folder("core-r-install-wait-notebooks");
+    let path = folder.join("a.R");
+    std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
+    give_folder(&core, "s1", &folder);
+    let open = || tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
+    // The call that starts the install waits its 2 s.
+    let began = std::time::Instant::now();
+    assert_eq!(open()["error"], "r_installing");
+    assert!(began.elapsed() >= Duration::from_secs(2), "the first call waited");
+    // The next waits too, as the answer says, and has the install's end once it comes (#175).
+    let began = std::time::Instant::now();
+    let second = open();
+    assert!(began.elapsed() >= Duration::from_millis(1500), "the second call waited too: {second}");
+    let third = open();
+    assert_ne!(third["error"], "r_installing", "the install ended within the third call's wait: {third}");
+}
+
+#[test]
+fn calls_made_together_while_embers_install_runs_each_wait_no_longer_than_one_call_may() {
+    require_debug_build();
+    let dir = state_dir("core-r-install-together");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    // An R whose Ember install takes longer than all the calls below.
+    let r = dir.join("slow-install-r");
+    std::fs::write(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 30; exit 1;; esac\nexit 1\n").unwrap();
+    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = temp_folder("core-r-install-together-home");
+    let home = home.display().to_string();
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
+    let core = Core::try_start_with(&dir, &[("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str()), ("ENDEAVOR_TEST_EMBER_WAIT_SECS", "4")], &args).unwrap();
+    let folder = temp_folder("core-r-install-together-notebooks");
+    let path = folder.join("a.R");
+    std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
+    for agent in ["s1", "s2", "s3"] {
+        give_folder(&core, agent, &folder);
+    }
+    // Starts go one at a time, so a call that queues behind the others counts its wait from when it
+    // came, not from its turn: each answers within one wait of 4 s, where waiting a whole one after
+    // the calls before it would take 8, 12 s (#175).
+    let answered: Vec<(Duration, serde_json::Value)> = std::thread::scope(|scope| {
+        let calls: Vec<_> = ["s1", "s2", "s3"]
+            .map(|agent| {
+                let (core, path) = (&core, &path);
+                scope.spawn(move || {
+                    let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "open_notebook", "arguments": { "path": path.display().to_string() } } });
+                    let began = std::time::Instant::now();
+                    let reply: serde_json::Value = serde_json::from_str(&mcp(core, &message.to_string(), &[("X-Endeavor-Session", agent)]).1).unwrap();
+                    let said: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+                    (began.elapsed(), said)
+                })
+            })
+            .into_iter()
+            .collect();
+        calls.into_iter().map(|call| call.join().unwrap()).collect()
+    });
+    for (took, said) in &answered {
+        assert_eq!(said["error"], "r_installing", "{said}");
+        assert!(*took < Duration::from_secs(7), "no call waited much more than one wait: {answered:?}");
+    }
 }
 
 #[test]

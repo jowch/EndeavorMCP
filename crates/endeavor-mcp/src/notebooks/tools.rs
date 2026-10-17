@@ -7,7 +7,7 @@
 //! An error is the text of the exception Julia raised: `ArgumentError: kind::message`
 //! names its kind (see `mcp::tool_error`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -591,21 +591,35 @@ impl Call<'_> {
     }
 
     /// Wait, within the call's `WAIT_SECONDS`, for the runs this session started in `nb` to end:
-    /// the cells still running or queued if one is still going then.
-    fn wait_for_own_run(&self, nb: &Snapshot) -> Result<Vec<String>, String> {
+    /// the cells seen running or that finished a run during the wait, with the ones still running
+    /// or queued if a run is still going at its end. A queued cell that never ran (an interrupt
+    /// dropped it) isn't one. A cell another run ran meanwhile counts too: the snapshots don't
+    /// say whose run ran a cell.
+    fn wait_for_own_run(&self, nb: &Snapshot) -> Result<(Vec<String>, Vec<String>), String> {
         let mut nb = self.nbs.snapshot(&nb.id)?;
+        let before: HashMap<String, f64> = nb.cells.iter().map(|(id, c)| (id.clone(), c.last_run)).collect();
+        let busy = |nb: &Snapshot, id: &String| nb.cells.get(id).is_some_and(|c| c.running || c.queued);
+        let running = |nb: &Snapshot| nb.cells.iter().filter(|(_, c)| c.running).map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let mut ran: HashSet<String> = running(&nb).into_iter().collect();
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
+        let mut going = Vec::new();
         while self.nbs.own_run_going(self.owner, &nb) {
             if Instant::now() >= deadline {
-                return Ok(nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect());
+                going = nb.order.iter().filter(|id| busy(&nb, id)).cloned().collect();
+                break;
             }
             std::thread::sleep(Duration::from_millis(500));
             if (self.gone)() {
                 return Err(argument_error("client_gone::The caller hung up during the wait"));
             }
             nb = self.nbs.snapshot(&nb.id)?;
+            ran.extend(running(&nb));
         }
-        Ok(Vec::new())
+        ran.extend(nb.cells.iter().filter(|(id, c)| before.get(*id).is_some_and(|last| c.last_run != *last)).map(|(id, _)| id.clone()));
+        // A cell still busy once the session's runs ended is another run's.
+        ran.retain(|id| !busy(&nb, id) || going.contains(id));
+        ran.extend(going.iter().cloned());
+        Ok((nb.order.iter().filter(|id| ran.contains(*id)).cloned().collect(), going))
     }
 
     fn read_cell(&self) -> Result<Value, String> {
@@ -673,11 +687,7 @@ impl Call<'_> {
         let code = self.arg("code")?;
         self.require_fresh_read(&nb, &cell)?;
         let run_after = bool_arg(self.args, "run_after", false)?;
-        let folded = match self.args.get("folded") {
-            None | Some(Value::Null) => None,
-            Some(Value::Bool(folded)) => Some(*folded),
-            Some(_) => return Err(argument_error("invalid_argument::folded must be a boolean")),
-        };
+        let folded = optional_folded(self.args.get("folded"))?;
         let before = nb.cells[&cell].code.clone();
         let mut ops = vec![json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": before })];
         ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
@@ -709,18 +719,21 @@ impl Call<'_> {
             _ => return Err(argument_error("invalid_argument::cells must be a list of {cell_id, code}")),
         };
         let mut cells = Vec::new();
+        let mut folds = Vec::new();
         for edit in &edits {
             if !edit.is_object() {
                 return Err(argument_error("invalid_argument::cells must be a list of {cell_id, code}"));
             }
             let cell = cell_named(&nb, edit.get("cell_id").ok_or_else(|| key_error("cell_id"))?)?;
             self.require_fresh_read(&nb, &cell)?;
+            folds.push(optional_folded(edit.get("folded"))?);
             cells.push(cell);
         }
         let mut ops = Vec::new();
-        for (edit, cell) in edits.iter().zip(&cells) {
+        for ((edit, cell), folded) in edits.iter().zip(&cells).zip(&folds) {
             let code = edit.get("code").ok_or_else(|| key_error("code"))?;
             ops.push(json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": nb.cells[cell].code }));
+            ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
         }
         let applied = self.apply(&nb.id, ops)?;
         for (edit, cell) in edits.iter().zip(&cells) {
@@ -728,7 +741,11 @@ impl Call<'_> {
         }
         self.mark_pending(&nb.id, &cells);
         let mutation = json!({ "type": "edit_cells", "cell_ids": cells });
-        Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), None)?.0))
+        let (mut receipt, after) = self.receipt(&nb.id, mutation, &[], Vec::new(), None)?;
+        // Each cell's fold after the edits, as `edit_cell`'s `code_folded` says its cell's.
+        let folds: Map<String, Value> = cells.iter().filter_map(|c| Some((c.clone(), json!(after.cells.get(c)?.folded)))).collect();
+        receipt["mutation"]["code_folded"] = Value::Object(folds);
+        Ok(Value::Object(receipt))
     }
 
     fn add_cell(&self) -> Result<Value, String> {
@@ -837,10 +854,12 @@ impl Call<'_> {
             // Nothing staged, but a run this session started may still be going (its dependents,
             // say): a waited call waits for it, as `read_cell` does, rather than say it completed
             // while it runs (#151).
+            // Its receipt says how the cells that ran meanwhile went: "errored" if one of them
+            // did, as for the cells a call runs itself (#171).
             if wait == true {
-                let going = self.wait_for_own_run(&nb)?;
-                let status = if going.is_empty() { "completed" } else { "running" };
-                return Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, Ran { warnings: Vec::new(), cells: Vec::new(), going }, Some(status))?.0));
+                let (ran, going) = self.wait_for_own_run(&nb)?;
+                let status = ran.is_empty().then_some("completed");
+                return Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, Ran { warnings: Vec::new(), cells: ran, going }, status)?.0));
             }
             return Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?.0));
         }
@@ -1189,6 +1208,17 @@ impl Call<'_> {
         if ran {
             let nb = self.notebook()?;
             self.nbs.with_state(&nb.id, |state| state.prune(&nb));
+            // The run of the whole notebook is the session's, as one `submit_changes` starts is: a
+            // read or a waited submit waits for it (#170). The engine names it; one that didn't
+            // goes on while a cell it started hasn't finished.
+            let run = allowed["run"].as_str().map(str::to_owned);
+            self.nbs.with_state(&nb.id, |state| {
+                let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
+                state.ended.retain(|r| Some(r) != run.as_ref());
+                if !self.owner.is_empty() && !ended {
+                    state.started.push(Started { owner: self.owner.to_owned(), run, cells: nb.order.iter().cloned().collect() });
+                }
+            });
             result["run_warnings"] = json!(["async_execution::allow_execution queued non-blocking notebook run; poll read_cell for completion"]);
         }
         Ok(result)
@@ -1308,6 +1338,15 @@ fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
         None => Ok(default),
         Some(Value::Bool(flag)) => Ok(*flag),
         Some(_) => Err(argument_error(&format!("invalid_argument::{name} must be a boolean"))),
+    }
+}
+
+/// An edit's `folded`: a Bool, or left out (or null) to keep the cell's fold as it is.
+fn optional_folded(value: Option<&Value>) -> Result<Option<bool>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(folded)) => Ok(Some(*folded)),
+        Some(_) => Err(argument_error("invalid_argument::folded must be a boolean")),
     }
 }
 

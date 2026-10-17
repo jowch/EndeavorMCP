@@ -79,11 +79,11 @@
     "name": "edit_cell"
   },
   {
-    "description": "Replace the code of several cells in one call. Each must have been read first; if one has not, no cell is changed. Never runs them: `submit_changes` does.",
+    "description": "Replace the code of several cells in one call. Each must have been read first; if one has not, no cell is changed. Never runs them: `submit_changes` does. The receipt's `mutation.code_folded` says whether each cell's code is hidden after the edits.",
     "inputSchema": {
       "properties": {
         "cells": {
-          "description": "The edits, as {cell_id, code} objects.",
+          "description": "The edits, as {cell_id, code} objects, each with an optional `folded`.",
           "items": {
             "properties": {
               "cell_id": {
@@ -91,6 +91,10 @@
               },
               "code": {
                 "type": "string"
+              },
+              "folded": {
+                "description": "Also hide (true) or show (false) this cell's code, as `fold_cell` does. Default: left as it is.",
+                "type": "boolean"
               }
             },
             "required": [

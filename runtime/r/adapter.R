@@ -532,10 +532,14 @@ allow <- function(rec, run_all) {
     return(list(already_allowed = TRUE, ran = FALSE, process_status = process_status(state)))
   }
   allow_execution(rec$nb)
-  if (isTRUE(run_all)) run_everything(rec)
-  list(already_allowed = FALSE, ran = isTRUE(run_all), process_status = process_status(notebook_state(rec$nb)))
+  run <- if (isTRUE(run_all)) run_everything(rec)
+  result <- list(already_allowed = FALSE, ran = isTRUE(run_all), process_status = process_status(notebook_state(rec$nb)))
+  # The run it started, named as `run` names one, so the core can tell when it ends.
+  if (!is.null(run)) result$run <- run
+  result
 }
 
+# Run every cell; the run's name, if it goes on.
 run_everything <- function(rec) {
   r <- run_cells(rec$nb, NULL, wait = FALSE)
   if (isTRUE(r$accepted) && length(r$queued) > 0) watch_run(rec, r$queued, r$queued)
