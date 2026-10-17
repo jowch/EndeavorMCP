@@ -1326,7 +1326,7 @@ impl Call<'_> {
             result["message"] = json!("The notebook's process is still starting. Its run will skip these cells once the process is up.");
         } else if !result["still_running"].as_array().unwrap().is_empty() {
             result["message"] = json!(
-                "These cells haven't stopped yet. Compiled code often stops only when it returns. Read them later; if one doesn't stop, restart_notebook ends it, but it clears every value, so ask the user first."
+                "These cells haven't stopped yet. Compiled code often stops only when it returns. Read them later; if one doesn't stop, restart_notebook ends it, but it clears every value, so ask the user first. In Julia the restart runs every cell again, so edit the cell first."
             );
         } else if now.process_status != nb.process_status && now.process_status == "no_process" {
             result["message"] = json!("A cell didn't stop, so the notebook's process was ended. Its values are gone: the next run starts a new process.");
@@ -1336,27 +1336,40 @@ impl Call<'_> {
 
     /// The page's Restart, for the agent (#202): a new process for the notebook, with every value
     /// gone. Pluto's then runs every cell, and that run is the session's, as `allow_execution`'s
-    /// is: a read or a waited submit waits for it. Ember's leaves every cell not run. The engines
+    /// is: a read or a waited submit waits for it. Since it runs every cell, a cell that was running
+    /// runs again, so the result names those (`running_again`): a restart meant to end a stuck cell
+    /// doesn't, unless the cell was edited first. Ember's leaves every cell not run. The engines
     /// refuse it in safe preview.
     fn restart_notebook(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
+        let running: Vec<String> = nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running)).cloned().collect();
         let reply = self.nbs.restart(&nb.id)?;
         if reply["restarted"] != true {
             return Ok(json!({ "notebook_id": nb.id, "restarted": false, "message": "The notebook is already restarting. Read a cell to wait for it." }));
         }
         let now = self.nbs.snapshot(&nb.id)?;
-        let message = match self.nbs.backend_of(&nb.id) {
+        let mut result = json!({ "notebook_id": nb.id, "restarted": true, "process_status": now.process_status });
+        result["message"] = json!(match self.nbs.backend_of(&nb.id) {
             Backend::Pluto => {
                 self.nbs.with_state(&nb.id, |state| {
                     if !self.owner.is_empty() {
                         state.started.push(Started { owner: self.owner.to_owned(), run: None, cells: nb.order.iter().cloned().collect() });
                     }
                 });
-                "A new process started, and every cell runs in it. Read a cell to wait for its result."
+                if running.is_empty() {
+                    "A new process started, and every cell runs in it. Read a cell to wait for its result.".to_owned()
+                } else {
+                    let again = running.len();
+                    result["running_again"] = json!(running);
+                    format!(
+                        "A new process started, and every cell runs in it, so the {} in `running_again` {} running again with the same code. To end {}, interrupt_notebook, edit {} so it finishes (the edit stays staged), then restart_notebook again.",
+                        if again == 1 { "cell" } else { "cells" }, if again == 1 { "is" } else { "are" }, if again == 1 { "it" } else { "them" }, if again == 1 { "it" } else { "them" }
+                    )
+                }
             }
-            Backend::Ember => "R started fresh. Every cell is `not_run` and holds no value until it runs: `run_all_cells` runs the notebook from the top.",
-        };
-        Ok(json!({ "notebook_id": nb.id, "restarted": true, "process_status": now.process_status, "message": message }))
+            Backend::Ember => "R started fresh. Every cell is `not_run` and holds no value until it runs: `run_all_cells` runs the notebook from the top.".to_owned(),
+        });
+        Ok(result)
     }
 }
 

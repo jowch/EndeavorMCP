@@ -228,7 +228,8 @@ and 3), and for the app:
   the same `restart` call as `endeavor/restart_notebook`. It runs code, so Ask to run
   asks first, and plan mode refuses it. Pluto's restart then runs every cell, and that
   run is the session's, as `allow_execution`'s is, so a read waits for it and the
-  session's Stop interrupts it. Ember's leaves every cell not run, and the result says
+  session's Stop interrupts it. That run includes a cell that was running, stuck or
+  not: the result names those (`running_again`) and says to edit them first. Ember's leaves every cell not run, and the result says
   how to run them.
 - It reports in `/endeavor/events` the app build it was started by (`build`), so the
   app can tell a runtime from an older build and hold back what that runtime

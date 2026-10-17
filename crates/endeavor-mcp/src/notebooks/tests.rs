@@ -2679,6 +2679,14 @@ fn restart_notebook_restarts_and_a_julia_notebooks_run_is_the_sessions() {
     assert_eq!(interrupts(), 0, "another session's Stop");
     s.notebooks.stop_for("7", NB, false);
     assert_eq!(interrupts(), 1, "the restart's run is session 7's");
+    assert_eq!(restarted.get("running_again"), None, "nothing was running");
+
+    // A cell that was running runs again in the new process: the result names it and says to edit it first.
+    s.engine.with(NB, |nb| nb.cells[0].running = true);
+    let again = s.call("7", "restart_notebook", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!(again["running_again"], json!([X]), "{again}");
+    assert!(again["message"].as_str().unwrap().contains("the cell in `running_again` is running again") && again["message"].as_str().unwrap().contains("edit it"), "{again}");
+    s.engine.with(NB, |nb| nb.cells[0].running = false);
 
     // Refused in safe preview, as the page's Restart is.
     s.engine.with(NB, |nb| nb.safe_preview = true);
