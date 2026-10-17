@@ -541,13 +541,7 @@ impl Bridge {
                 self.add_browser_url(name, caller, &mut result);
                 text(&result)
             }
-            Ok(Reply::Image { meta, png_base64 }) => json!({
-                "content": [
-                    { "type": "text", "text": to_json(&meta) },
-                    { "type": "image", "data": png_base64, "mimeType": "image/png" },
-                ],
-                "isError": false,
-            }),
+            Ok(Reply::Image { meta, png_base64 }) => image_result(&meta, png_base64),
             Err(error) => tool_error(&error, help),
         }
     }
@@ -1032,6 +1026,17 @@ const ERRORS_TOPIC_HINT: &str = "See `notebook_guide` with `topic` set to `endea
 /// or a notebook's open that outlasted the call. The agent only waits and makes the same call again,
 /// so the result isn't marked an error; it keeps the `error` code, which clients match on.
 const STARTING_KINDS: [&str; 3] = ["julia_starting", "r_installing", "notebook_opening"];
+
+/// A tool's result that is a PNG (base64), with `meta` as its text.
+pub(crate) fn image_result(meta: &Value, png_base64: String) -> Value {
+    json!({
+        "content": [
+            { "type": "text", "text": to_json(meta) },
+            { "type": "image", "data": png_base64, "mimeType": "image/png" },
+        ],
+        "isError": false,
+    })
+}
 
 /// A failed tool call's result, from the text of the error Julia raised:
 /// `ArgumentError: kind::message` names its kind; anything else is a

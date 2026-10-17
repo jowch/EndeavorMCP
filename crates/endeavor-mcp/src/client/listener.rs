@@ -5,11 +5,13 @@
 
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
 use wire::relay::Mux;
+
+use crate::guard::Snapshot;
 
 /// How long a connection that arrives while the runtime is away waits for it
 /// to come back, so a short drop goes unnoticed.
@@ -55,8 +57,10 @@ pub struct Listener {
     upstream: Mutex<Upstream>,
     changed: Condvar,
     closed: AtomicBool,
-    /// Without one, connections are relayed without reading the HTTP in them.
+    /// Without one (nor `snapshot`), connections are relayed without reading the HTTP in them.
     refuse: Option<Refuse>,
+    /// How the client draws a cell's output when the runtime has no picture of it (`set_snapshot`).
+    snapshot: OnceLock<Box<Snapshot>>,
     messages: Messages,
 }
 
@@ -94,6 +98,7 @@ impl Listener {
             changed: Condvar::new(),
             closed: AtomicBool::new(false),
             refuse,
+            snapshot: OnceLock::new(),
             messages,
         });
         let accepting = listener.clone();
@@ -133,20 +138,21 @@ impl Listener {
                 drop(upstream);
                 // The runtime runs code unless it doesn't ask and this client holds runs for the user's answer.
                 let no_run_gate = if asks { None } else { self.messages.no_run_gate };
-                if self.refuse.is_none() && no_run_gate.is_none() {
+                if self.refuse.is_none() && no_run_gate.is_none() && self.snapshot.get().is_none() {
                     drop(mux.open(connection));
                     return;
                 }
                 let Ok((ours, theirs)) = loopback_pair() else { return };
                 if mux.open(theirs).is_ok() {
-                    let _ = crate::serve_guarded(connection, ours, &|session, tool, arguments| {
+                    let refuse = |session: &str, tool: &str, arguments: &Value| {
                         if let Some(why) = no_run_gate
                             && crate::runs_code(tool, arguments)
                         {
                             return Some(why(&self.name));
                         }
                         self.refuse.as_ref().and_then(|refuse| refuse(session, tool, arguments))
-                    });
+                    };
+                    let _ = crate::serve_guarded(connection, ours, &refuse, self.snapshot.get().map(|s| &**s));
                 }
             }
             Upstream::Away { token, why } => {
@@ -157,6 +163,12 @@ impl Listener {
             }
             Upstream::None => {}
         }
+    }
+
+    /// From now on, a `view_cell_output` the runtime has no picture for gets `snapshot`'s
+    /// (`serve_guarded`). Set once: a later one is ignored.
+    pub fn set_snapshot(&self, snapshot: Box<Snapshot>) {
+        let _ = self.snapshot.set(snapshot);
     }
 
     /// Relay connections to `mux`'s runtime from now on. `asks`: its `Ready` gave its build or its

@@ -34,6 +34,7 @@ use wire::backend::Backend;
 pub use engines::Engines;
 pub use r::R;
 pub use tools::{Reply, WAIT_FLOOR_SECONDS, WAIT_SECONDS};
+pub(crate) use tools::{screenshot_result, snapshot_may_help};
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
 /// How long the result of an open that outlasted its call is kept for the same call made again.
@@ -1429,7 +1430,7 @@ fn parse_uuid(text: &str) -> Option<String> {
 
 /// A JSON value as Julia's `UUID(value)` takes it: a UUID string, or a
 /// whole number (a Bool is 0 or 1).
-fn uuid_value(value: &Value) -> Option<String> {
+pub(crate) fn uuid_value(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => parse_uuid(s),
         Value::Bool(b) => Some(uuid_of(*b as u128)),
