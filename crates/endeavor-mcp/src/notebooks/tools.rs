@@ -92,6 +92,8 @@ impl Notebooks {
             "allow_execution" => t.allow_execution(),
             "interrupt_notebook" => t.interrupt_notebook(),
             "restart_notebook" => t.restart_notebook(),
+            "preview_package_update" => t.preview_package_update(),
+            "apply_package_update" => t.apply_package_update(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
         }?;
         Ok(Reply::Json(result))
@@ -1145,6 +1147,9 @@ impl Call<'_> {
         if opened["lazy"] == true {
             result["on_cell_change"] = json!("lazy");
         }
+        if opened["package_date"].is_string() {
+            result["package_date"] = opened["package_date"].clone();
+        }
         let mut warnings = self.nbs.take_notices();
         if run {
             warnings.push("async_execution::open queued non-blocking notebook run; poll read_cell for completion".into());
@@ -1183,6 +1188,9 @@ impl Call<'_> {
         }
         if nb.lazy {
             joined["on_cell_change"] = json!("lazy");
+        }
+        if let Some(date) = &nb.package_date {
+            joined["package_date"] = json!(date);
         }
         Some(Ok(joined))
     }
@@ -1382,6 +1390,63 @@ impl Call<'_> {
                 }
             }
             Backend::Ember => "R started fresh. Every cell is `not_run` and holds no value until it runs: `run_all_cells` runs the notebook from the top.".to_owned(),
+        });
+        Ok(result)
+    }
+
+    /// The session's notebook, if it is an R notebook: only Ember's packages have a snapshot date.
+    fn r_notebook(&self) -> Result<Snapshot, String> {
+        let nb = self.notebook()?;
+        if self.nbs.backend_of(&nb.id) != Backend::Ember {
+            return Err(argument_error("not_r_notebook::Only an R notebook has a package date. A Julia notebook's package versions are in its Pkg environment"));
+        }
+        Ok(nb)
+    }
+
+    /// Ember's preview of moving an R notebook's snapshot date, which its package versions come
+    /// from (#201): what would change, with nothing changed yet. Without `date` it is today, the
+    /// page's "Update" (the newest packages). Fetching that date's index can take a while, so it
+    /// is waited for within the call.
+    fn preview_package_update(&self) -> Result<Value, String> {
+        let nb = self.r_notebook()?;
+        let date = self.args.get("date").cloned().unwrap_or(Value::Null);
+        if !date.is_null() && !date.is_string() {
+            return Err(argument_error("invalid_argument::date must be a day as YYYY-MM-DD"));
+        }
+        let timeout = self.run_wait().saturating_sub(Duration::from_secs(1)).as_secs_f64();
+        let mut result = self.nbs.call("preview_packages", json!({ "notebook_id": nb.id, "date": date, "timeout": timeout }))?;
+        let reason = result["message"].take();
+        if reason.is_string() {
+            result["reason"] = reason;
+        }
+        let none = result["changes"].as_array().is_none_or(Vec::is_empty);
+        result["message"] = json!(match result["status"].as_str() {
+            Some("ready") if none => "Nothing would change: every package is already at its version for this date.",
+            Some("ready") => "Nothing has changed yet. Tell the user what would change; apply_package_update with this date applies it.",
+            Some("failed") => "This date can't be used, and the notebook is unchanged: `problems` says why.",
+            _ => "The package index for this date is still being fetched. Call again with the same date to wait for it.",
+        });
+        result["notebook_id"] = json!(nb.id);
+        Ok(result)
+    }
+
+    /// Apply the preview of `date` (Ember's `set_date`), refused unless that preview is ready
+    /// and current. The header's date and the lock change and the file is saved; the library
+    /// installs, and if R had a changed package loaded it restarts once the library is ready.
+    fn apply_package_update(&self) -> Result<Value, String> {
+        let nb = self.r_notebook()?;
+        let date = self.arg("date")?.clone();
+        if !date.is_string() {
+            return Err(argument_error("invalid_argument::date must be a day as YYYY-MM-DD"));
+        }
+        let mut result = self.nbs.call("set_package_date", json!({ "notebook_id": nb.id, "date": date }))?;
+        self.nbs.publish();
+        result["notebook_id"] = json!(nb.id);
+        // In safe preview Ember installs nothing until the user lets the notebook run.
+        result["message"] = json!(if result["process_status"] == "waiting_for_permission" {
+            "The notebook's package date has moved. Its library installs once the user allows the notebook to run (the notebook's page, or allow_execution): nothing installs or runs until then."
+        } else {
+            "The notebook's package date has moved. Its library installs now: cells that need it wait, queued, and a read of one waits for the install. If R had a changed package loaded, R restarts once the library is ready and every cell is left `not_run`."
         });
         Ok(result)
     }

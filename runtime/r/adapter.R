@@ -359,6 +359,7 @@ snapshot <- function(rec) {
     exited = if (is.null(exited)) NULL else I(exited),
     packages = package_step(rec, snap, state),
     lazy = identical(state$file$header$on_cell_change, "lazy"),
+    package_date = state$file$header$snapshot,
     cells = unname(lapply(snap$cells, snapshot_cell)))
 }
 
@@ -579,6 +580,74 @@ restart <- function(rec) {
   list(restarted = TRUE)
 }
 
+# ---- Moving the package date -------------------------------------------------
+
+# A data frame's rows, or [] for none.
+rows <- function(df) {
+  if (is.null(df) || NROW(df) == 0) return(I(list()))
+  rownames(df) <- NULL
+  df
+}
+
+# The date a call names, or today: local time, as the Packages tab's Update
+# button does (`ember_update_packages`).
+date_param <- function(date) {
+  if (is.null(date) || identical(date, "")) return(format(Sys.time(), "%Y-%m-%d"))
+  if (!is.character(date) || length(date) != 1 || !grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", date) || is.na(as.Date(date, optional = TRUE))) {
+    argument_error("invalid_argument", "date must be a day as YYYY-MM-DD")
+  }
+  date
+}
+
+# Ember's preview of moving the notebook's snapshot date (`preview_date()`):
+# what would change, and nothing changes yet. It may fetch that date's index
+# first, so it is waited for until it is ready or failed, or `timeout` passes
+# (then `status` is still "fetching").
+preview_packages <- function(rec, date, timeout) {
+  date <- date_param(date)
+  preview_date(rec$nb, date, wait = FALSE)
+  deadline <- Sys.time() + as.numeric(timeout %||% 60)
+  current <- function() {
+    prop <- package_status(rec$nb)$proposal
+    if (!is.null(prop) && identical(prop$date, date) && identical(prop$kind %||% "date", "date")) prop
+  }
+  promise(function(resolve, reject) {
+    check <- function() {
+      prop <- if (registered(rec)) current()
+      done <- !is.null(prop) && prop$status %in% c("ready", "failed")
+      if (!done && registered(rec) && Sys.time() < deadline) return(later::later(check, 0.1))
+      status <- if (is.null(prop)) "fetching" else prop$status
+      # What the agent was shown, which the apply must match (set_package_date).
+      rec$previewed <- if (identical(status, "ready")) list(date = date, changes = to_json(rows(prop$changes)))
+      resolve(list(
+        date = date, current_date = notebook_state(rec$nb)$file$header$snapshot,
+        status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message))
+    }
+    check()
+  })
+}
+
+# Ember's set_date(): apply the preview for `date`, refused unless it is
+# ready and current. The library installs; a worker with a changed package
+# loaded restarts once it is ready, and its cells are left not run.
+# Ember redoes its proposal when the notebook's packages change, so the
+# proposal can differ from what preview_packages showed the agent: then
+# this refuses too, and the agent previews again (#201).
+set_package_date <- function(rec, date) {
+  date <- date_param(date)
+  prop <- package_status(rec$nb)$proposal
+  shown <- rec$previewed
+  if (!is.null(prop) && identical(prop$date, date) && identical(prop$status, "ready") &&
+      !(identical(shown$date, date) && identical(shown$changes, to_json(rows(prop$changes))))) {
+    argument_error("no_preview", "the notebook's packages changed since the preview, so the update would change more or less than it showed. Call preview_package_update again and tell the user what it shows")
+  }
+  changes <- tryCatch(set_date(rec$nb, date),
+                      ember_refused = function(e) argument_error("no_preview", conditionMessage(e)))
+  rec$previewed <- NULL
+  state <- notebook_state(rec$nb)
+  list(date = state$file$header$snapshot, changes = rows(changes), process_status = process_status(state))
+}
+
 interrupt <- function(rec) {
   state <- notebook_state(rec$nb)
   busy <- !is.null(state$worker$running) || length(state$pending) > 0
@@ -602,7 +671,7 @@ open_path <- function(path, run_all) {
   }
   state <- notebook_state(rec$nb)
   list(notebook_id = rec$id, path = state$path, process_status = process_status(state),
-       lazy = identical(state$file$header$on_cell_change, "lazy"))
+       lazy = identical(state$file$header$on_cell_change, "lazy"), package_date = state$file$header$snapshot)
 }
 
 # A new notebook at `path`, else named "notebook.R" (then "notebook 2.R", ...)
@@ -696,6 +765,8 @@ adapter_call <- function(method, params) {
     run = run(rec, unlist(params$cells) %||% character(), isTRUE(params$wait), params$timeout),
     interrupt = interrupt(rec),
     restart = restart(rec),
+    preview_packages = preview_packages(rec, params$date, params$timeout),
+    set_package_date = set_package_date(rec, params$date),
     allow_execution = allow(rec, isTRUE(params$run)),
     move = move(rec, params$path),
     render_text = render_text(rec, check_cell(rec, params$cell_id)),

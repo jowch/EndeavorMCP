@@ -575,5 +575,44 @@
       "type": "object"
     },
     "name": "restart_notebook"
+  },
+  {
+    "description": "R notebooks only. An R notebook's package versions are those current on its package date (`package_date` in `list_notebooks` and `open_notebook`), so `available.packages()` in a cell lists that date's versions, not today's. This previews moving that date and changes nothing: the result has `changes` (each package's `from` and `to` versions) and any `problems`. Without `date` it previews today, which is what updating the packages means. It can take a while to fetch the date's package index; if `status` is still `fetching`, call it again with the same date.",
+    "inputSchema": {
+      "properties": {
+        "date": {
+          "description": "A day as YYYY-MM-DD. Leave it out to update to today's packages.",
+          "type": "string"
+        },
+        "notebook_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "notebook_id"
+      ],
+      "type": "object"
+    },
+    "name": "preview_package_update"
+  },
+  {
+    "description": "R notebooks only. Move the notebook's package date to the `date` of a `preview_package_update` whose `status` is `ready`, applying exactly the `changes` it showed. Refused with `no_preview` if there is no such preview, or the notebook's packages changed since. The file's date and package versions change, the new library installs, and if R had a changed package loaded it restarts and every cell is left `not_run`. Use it when the user asked to update the packages or move the date, after telling them what changes.",
+    "inputSchema": {
+      "properties": {
+        "date": {
+          "description": "The previewed day, as YYYY-MM-DD.",
+          "type": "string"
+        },
+        "notebook_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "notebook_id",
+        "date"
+      ],
+      "type": "object"
+    },
+    "name": "apply_package_update"
   }
 ]

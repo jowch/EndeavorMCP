@@ -368,6 +368,8 @@ struct Snapshot {
     /// Ember's lazy mode: a run marks the cells that depend on it stale
     /// instead of rerunning them (#196). Pluto has no such mode.
     lazy: bool,
+    /// An R notebook's snapshot date, which its packages' versions come from (#201). Pluto has none.
+    package_date: Option<String>,
     cells: HashMap<String, Cell>,
 }
 
@@ -441,6 +443,7 @@ impl Snapshot {
             exited: value["exited"].as_array().map(|ids| ids.iter().filter_map(text).collect()),
             packages: value.get("packages").filter(|p| p.is_object()).cloned(),
             lazy: flag(&value["lazy"]),
+            package_date: value["package_date"].as_str().map(str::to_owned),
             cells: cells.collect::<Option<_>>()?,
         })
     }
@@ -475,6 +478,9 @@ impl Snapshot {
         }
         if self.lazy {
             summary["on_cell_change"] = json!("lazy");
+        }
+        if let Some(date) = &self.package_date {
+            summary["package_date"] = json!(date);
         }
         summary
     }

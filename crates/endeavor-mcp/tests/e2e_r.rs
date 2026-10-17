@@ -490,6 +490,72 @@ fn an_r_notebook_through_the_runtime() {
         assert!(failed, "{missing}");
     });
 
+    step("an R notebook's package date: shown, previewed and moved (#201)", || {
+        let (lib, ver) = ("70800001-0000-4000-8000-000000000001", "70800002-0000-4000-8000-000000000002");
+        std::fs::write(
+            folder.join("dated.R"),
+            format!("### An Ember notebook ###\n# /// environment\n# snapshot = \"2026-06-01\"\n# ///\n\n# %% id={lib}\nlibrary(jsonlite)\n\n# %% id={ver}\nas.character(packageVersion(\"jsonlite\"))\n\n# /// cell order\n# {lib}\n# {ver}\n# ///\n"),
+        )
+        .unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let opened = agent.ok("open_notebook", json!({ "path": "dated.R", "run_notebook": true }));
+        assert_eq!(opened["package_date"], "2026-06-01", "{opened}");
+        let id = opened["notebook_id"].as_str().unwrap().to_owned();
+        assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01");
+        let preview = |agent: &mut Agent, date: Option<&str>| {
+            let args = match date { Some(date) => json!({ "notebook_id": id, "date": date }), None => json!({ "notebook_id": id }) };
+            let started = Instant::now();
+            loop {
+                let p = agent.ok("preview_package_update", args.clone());
+                if p["status"] != "fetching" {
+                    return p;
+                }
+                assert!(started.elapsed() < Duration::from_secs(300), "the index never came: {p}");
+            }
+        };
+        let (bad, _) = agent.call("preview_package_update", json!({ "notebook_id": id, "date": "June 1" }));
+        assert!(bad, "a date that isn't a day is refused");
+        let (refused, said) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2026-06-02" }));
+        assert!(refused && said.to_string().contains("no_preview"), "{said}");
+
+        // Two years back, jsonlite was older: the preview says so, and nothing changes.
+        let old = preview(&mut agent, Some("2024-06-03"));
+        assert_eq!(old["status"], "ready", "{old}");
+        assert!(old["changes"].as_array().unwrap().iter().any(|c| c["name"] == "jsonlite" && c["to"] != c["from"]), "{old}");
+        assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "a preview changes nothing");
+        // A package added since the preview: the apply would change more than it showed, so it's
+        // refused, and a new preview shows the package too.
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        agent.ok("add_cell", json!({ "notebook_id": id, "code": "library(base64enc)", "after_cell_id": lib }));
+        let (refused, said) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2024-06-03" }));
+        assert!(refused && said.to_string().contains("no_preview"), "{said}");
+        let again = preview(&mut agent, Some("2024-06-03"));
+        assert!(again["changes"].as_array().unwrap().iter().any(|c| c["name"] == "base64enc"), "{again}");
+        assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "the refused apply moved nothing");
+
+        // Updating is today's date: applied, the file's date moves and the cell sees the version the preview named.
+        let today = preview(&mut agent, None);
+        assert_eq!(today["status"], "ready", "{today}");
+        let date = today["date"].as_str().unwrap().to_owned();
+        let to = today["changes"].as_array().unwrap().iter().find(|c| c["name"] == "jsonlite").map(|c| c["to"].as_str().unwrap().to_owned());
+        let applied = agent.ok("apply_package_update", json!({ "notebook_id": id, "date": date }));
+        assert_eq!(applied["date"], date.as_str(), "{applied}");
+        assert!(std::fs::read_to_string(folder.join("dated.R")).unwrap().contains(&format!("snapshot = \"{date}\"")), "the file's date moved");
+        if let Some(to) = to {
+            let started = Instant::now();
+            agent.ok("run_all_cells", json!({ "notebook_id": id }));
+            loop {
+                let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": ver }));
+                if read["output"].as_str().is_some_and(|o| o.contains(&to)) {
+                    break;
+                }
+                assert!(started.elapsed() < Duration::from_secs(300), "jsonlite never became {to}: {read}");
+                agent.ok("run_all_cells", json!({ "notebook_id": id }));
+            }
+        }
+    });
+
     step("a cell that changes another cell's environment in place says so, in the run and in read_cell (#207)", || {
         std::fs::write(folder.join("inplace.R"), "### An Ember notebook ###\n\n# %% id=E\nbox <- new.env()\nbox$n <- 1\nbox$add <- function() box$n <- box$n + 1\n\n# %% id=F\nbox$add()\n\n# /// cell order\n# E\n# F\n# ///\n").unwrap();
         let mut agent = Agent::new(port, &token);
