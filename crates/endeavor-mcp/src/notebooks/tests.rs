@@ -2690,6 +2690,46 @@ fn interrupt_notebook_stops_the_run_and_says_what_it_stopped() {
 }
 
 #[test]
+fn restart_notebook_restarts_and_a_julia_notebooks_run_is_the_sessions() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x")]);
+    let interrupts = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "interrupt").count();
+
+    let restarted = s.call("7", "restart_notebook", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!((&restarted["restarted"], &restarted["process_status"]), (&json!(true), &json!("ready")), "{restarted}");
+    assert!(restarted["message"].as_str().unwrap().contains("every cell runs"), "{restarted}");
+    // Pluto's restart runs every cell, and that run is the session's: its Stop interrupts it, another's doesn't.
+    s.engine.with(NB, |nb| (nb.cells[0].running, nb.cells[1].queued) = (true, true));
+    s.notebooks.stop_for("8", NB, false);
+    assert_eq!(interrupts(), 0, "another session's Stop");
+    s.notebooks.stop_for("7", NB, false);
+    assert_eq!(interrupts(), 1, "the restart's run is session 7's");
+    assert_eq!(restarted.get("running_again"), None, "nothing was running");
+
+    // A cell that was running runs again in the new process: the result names it and says to edit it first.
+    s.engine.with(NB, |nb| nb.cells[0].running = true);
+    let again = s.call("7", "restart_notebook", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!(again["running_again"], json!([X]), "{again}");
+    assert!(again["message"].as_str().unwrap().contains("the cell in `running_again` is running again") && again["message"].as_str().unwrap().contains("edit it"), "{again}");
+    s.engine.with(NB, |nb| nb.cells[0].running = false);
+
+    // Refused in safe preview, as the page's Restart is.
+    s.engine.with(NB, |nb| nb.safe_preview = true);
+    let refused = s.call("7", "restart_notebook", json!({ "notebook_id": NB })).unwrap_err();
+    assert!(refused.contains("execution_blocked"), "{refused}");
+
+    // Ember's restart leaves every cell not run, and the result says how to run them.
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "x <- 1")]);
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("9", "list_notebooks", json!({})).unwrap();
+    let restarted = s.call("9", "restart_notebook", json!({ "notebook_id": R })).unwrap();
+    assert_eq!(restarted["restarted"], true);
+    assert!(restarted["message"].as_str().unwrap().contains("run_all_cells"), "{restarted}");
+}
+
+#[test]
 fn the_apps_stop_looks_at_the_notebooks_with_the_sessions_runs() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);

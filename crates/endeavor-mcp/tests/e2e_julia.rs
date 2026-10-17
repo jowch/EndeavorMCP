@@ -721,6 +721,54 @@ fn the_runtime_end_to_end() {
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
     });
 
+    step("restart_notebook starts a new process, and a read waits for its run (#202)", || {
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "process_id = getpid()", "after_cell_id": last, "run_after": true }));
+        let cell = added["cell_id"].clone();
+        let before = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": cell }));
+        assert!(before["running"] == false && before["errored"] == false, "{before}");
+        let restarted = rt.ok(SERVER, "restart_notebook", json!({ "notebook_id": previewed }));
+        assert!(restarted["restarted"] == true && restarted["message"].as_str().unwrap().contains("every cell runs"), "{restarted}");
+        let started = Instant::now();
+        let after = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": cell }));
+        eprintln!("the read after the restart took {:.1} s", started.elapsed().as_secs_f64());
+        assert!(after["running"] == false && after["queued"] == false && after["errored"] == false, "the read waited for the restart's run: {after}");
+        assert_ne!(after["output"], before["output"], "a new process: {before} {after}");
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": cell }));
+    });
+
+    step("a restart runs a stuck cell again, and says so; edited first, it finishes (#202)", || {
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "stuck = (for _ in 1:600; sleep(1); end; 1)", "after_cell_id": last, "run_after": true }));
+        let stuck = added["cell_id"].clone();
+        let wait_running = |rt: &mut Runtime| {
+            let started = Instant::now();
+            while !rt.notebooks(SERVER).into_iter().any(|nb| nb["running"].as_array().is_some_and(|r| r.contains(&stuck))) {
+                assert!(started.elapsed() < Duration::from_secs(120), "the cell didn't start");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        };
+        wait_running(&mut rt);
+        let restarted = rt.ok(SERVER, "restart_notebook", json!({ "notebook_id": previewed }));
+        assert_eq!(restarted["running_again"], json!([stuck]), "{restarted}");
+        assert!(restarted["message"].as_str().unwrap().contains("edit it"), "{restarted}");
+        wait_running(&mut rt);
+        // The restart's run may still be on an earlier cell, with this one queued: either way it ends.
+        let stopped = rt.ok(SERVER, "interrupt_notebook", json!({ "notebook_id": previewed }));
+        assert!([&stopped["stopped"], &stopped["dropped"]].iter().any(|ids| ids.as_array().unwrap().contains(&stuck)), "{stopped}");
+        rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": stuck }));
+        rt.ok(SERVER, "edit_cell", json!({ "notebook_id": previewed, "cell_id": stuck, "code": "stuck = 2" }));
+        let again = rt.ok(SERVER, "restart_notebook", json!({ "notebook_id": previewed }));
+        assert!(again["restarted"] == true && again.get("running_again").is_none(), "{again}");
+        let read = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": stuck }));
+        assert!(read["running"] == false && read["errored"] == false && read["output"].as_str().is_some_and(|o| o.contains('2')), "the edited cell ran and finished: {read}");
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": stuck }));
+    });
+
     step("a notebook's own Julia ending by itself ends the run waiting for it", || {
         let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
         let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
