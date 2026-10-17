@@ -317,6 +317,20 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["stale"] == false && read["output"].as_str().unwrap().contains("42"), "{read}");
     });
 
+    step("a run of a cell runs its ancestor's staged edit first, and the receipt lists it (#187)", || {
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 5" }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
+        assert_eq!((&ran["affected_cells"], &ran["pending_run"], &ran["execution"]["status"]), (&json!([A, B]), &json!([]), &json!("completed")), "{ran}");
+        let changed: Vec<&Value> = ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| &c["cell_id"]).collect();
+        assert_eq!(changed, [&json!(A), &json!(B)], "{ran}");
+        assert!(ran["outputs"]["changed"][1]["output_summary"].as_str().unwrap().contains('6'), "{ran}");
+        // Back as it was, for the steps after.
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
+        assert_eq!(ran["affected_cells"], json!([A, B]), "{ran}");
+    });
+
     step("interrupt_notebook stops a slow cell and its queued dependent doesn't run (#161)", || {
         agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
         let slow = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow <- { Sys.sleep(600); 1 }", "after_cell_id": B }))["cell_id"].clone();

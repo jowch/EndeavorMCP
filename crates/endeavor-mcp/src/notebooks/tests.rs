@@ -59,6 +59,9 @@ struct FakeNotebook {
     packages: Option<Value>,
     /// Out of safe preview, its new process still starting (`starting` in Pluto).
     starting: bool,
+    /// Cells the next run runs before its own, not naming them in its reply, as
+    /// Ember runs an ancestor whose code changed since it last ran.
+    runs_first: Vec<String>,
 }
 
 #[derive(Default)]
@@ -90,7 +93,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new() });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -188,7 +191,7 @@ impl Engine {
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
                 let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new() });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed }));
             }
             _ => {}
@@ -303,7 +306,8 @@ impl Engine {
                 for cell in nb.cells.iter_mut().filter(|c| lingering.contains(&c.id)) {
                     cell.running = true;
                 }
-                for cell in nb.cells.iter_mut().filter(|c| finishing.contains(&c.id)) {
+                let first = std::mem::take(&mut nb.runs_first);
+                for cell in nb.cells.iter_mut().filter(|c| finishing.contains(&c.id) || first.contains(&c.id)) {
                     cell.last_run = now;
                     cell.errored = cell.code.contains("error(");
                     cell.output = if cell.errored { "boom".into() } else { format!("ran {}", cell.code) };
@@ -1260,6 +1264,32 @@ fn a_run_also_runs_the_cells_it_needs_that_never_ran() {
     assert_eq!((&ran["affected_cells"], &ran["execution"]["status"]), (&json!([X, Y]), &json!("completed")));
     assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {X}: cells this run needs that had never run.")]));
     assert_eq!(s.notebooks.run_preview("execute_cell", &run).unwrap()["needed_ids"], json!([]), "x has run now");
+}
+
+#[test]
+fn a_run_lists_a_staged_cell_it_needs_that_the_engine_ran_first() {
+    // As Ember does (#187): y needs x, whose staged edit Ember runs first. The
+    // receipt lists x, with its new output, and x is no longer staged.
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1")]);
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.seconds(1.0);
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 5");
+    s.seconds(1.0);
+    s.engine.with(NB, |nb| nb.runs_first = vec![X.into()]);
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
+    assert_eq!((&ran["affected_cells"], &ran["pending_run"], &ran["execution"]["status"]), (&json!([X, Y]), &json!([]), &json!("completed")), "{ran}");
+    let changed: Vec<_> = ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| (c["cell_id"].clone(), c["output_summary"].clone())).collect();
+    assert_eq!(changed, vec![(json!(X), json!("ran x = 5")), (json!(Y), json!("ran y = x + 1"))]);
+    assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {X}: cells this run needs that had changed since they last ran.")]));
+
+    // An engine that leaves it staged (Pluto): the receipt is the target's alone.
+    s.seconds(1.0);
+    s.edit("", NB, X, "x = 6");
+    s.seconds(1.0);
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
+    assert_eq!((&ran["affected_cells"], &ran["pending_run"], &ran["warnings"]), (&json!([Y]), &json!([X]), &json!([])), "{ran}");
 }
 
 #[test]
