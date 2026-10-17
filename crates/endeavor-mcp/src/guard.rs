@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::http::{self, Framing, Head};
 use crate::mcp::{to_json, tool_error};
-use crate::notebooks::{screenshot_result, snapshot_may_help, uuid_value};
+use crate::notebooks::{screenshot_result, short_cell_id, snapshot_may_help, uuid_value};
 
 /// A picture of a cell's output as the user's notebook draws it, given the session's key, the
 /// notebook's id and the cell's: a PNG, in base64. None if it can't be taken: the notebook isn't
@@ -66,7 +66,8 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
             if let Some(snapshot) = view {
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);
                 if !relay_view(&request, &mut client, &mut from_runtime, &|result| {
-                    let (notebook, cell) = (uuid_value(&arguments["notebook_id"])?, uuid_value(&arguments["cell_id"])?);
+                    let cell = &arguments["cell_id"];
+                    let (notebook, cell) = (uuid_value(&arguments["notebook_id"])?, uuid_value(cell).or_else(|| short_cell_id(cell))?);
                     screenshot_result(&cell, snapshot(&session, &notebook, &cell)?, result)
                 })? {
                     return Ok(());

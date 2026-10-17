@@ -454,6 +454,20 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["running"] == false && read["queued"] == false && read["output"].as_str().unwrap().contains('2'), "the waited submit waited for the run: {read}");
     });
 
+    step("a hand-written R notebook's short cell ids name its cells (Ember #82)", || {
+        std::fs::write(folder.join("short.R"), "### An Ember notebook ###\n\n# %% id=A\nn <- 1\n\n# %% id=B\nn + 1\n\n# /// cell order\n# A\n# B\n# ///\n").unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "short.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "B" }));
+        assert_eq!(read["code"], "n + 1", "{read}");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code"], "n <- 1");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": "A", "code": "n <- 41" }));
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code"], "n <- 41");
+        let (failed, missing) = agent.call("read_cell", json!({ "notebook_id": id, "cell_id": "C" }));
+        assert!(failed, "{missing}");
+    });
+
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();

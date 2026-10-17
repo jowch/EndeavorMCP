@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use super::{Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, uuid_value};
+use super::{Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, cell_id_in, uuid_value};
 use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
 use wire::backend::Backend;
@@ -134,7 +134,7 @@ impl Notebooks {
         let graph = self.graph(&nb.id, GraphQuery { refresh: true, edges: true, ..Default::default() })?;
         let targets: Vec<String> = if tool == "submit_changes" {
             let ids = match args.get("cell_ids") {
-                Some(ids) => julia_iterate(ids)?.iter().map(|c| uuid_value(c).ok_or_else(|| malformed_uuid(c))).collect::<Result<Vec<_>, _>>()?,
+                Some(ids) => julia_iterate(ids)?.iter().map(|c| cell_id_in(&nb, c).ok_or_else(|| malformed_uuid(c))).collect::<Result<Vec<_>, _>>()?,
                 None => self.with_state(&nb.id, |state| state.pending_run(&nb)),
             };
             ids.into_iter().filter(|id| nb.cells.contains_key(id)).collect()
@@ -827,7 +827,7 @@ impl Call<'_> {
         let index = match after.filter(|_| !unplaced) {
             None => nb.order.len(),
             Some(after) => {
-                let target = uuid_value(after).ok_or_else(|| argument_error(&format!("invalid_cell_id::Invalid cell ID: '{}'", julia_string(after))))?;
+                let target = cell_id_in(&nb, after).ok_or_else(|| argument_error(&format!("invalid_cell_id::Invalid cell ID: '{}'", julia_string(after))))?;
                 let at = nb.order.iter().position(|c| *c == target).ok_or_else(|| key_error(&format!("cell_not_found::Cell '{target}' not found in notebook")))?;
                 at + 1
             }
@@ -884,7 +884,7 @@ impl Call<'_> {
             Some(ids) => {
                 let ids = julia_iterate(ids)?
                     .iter()
-                    .map(|c| uuid_value(c).ok_or_else(|| argument_error(&format!("invalid_cell_id::Invalid cell ID: '{}'", julia_string(c)))))
+                    .map(|c| cell_id_in(&nb, c).ok_or_else(|| argument_error(&format!("invalid_cell_id::Invalid cell ID: '{}'", julia_string(c)))))
                     .collect::<Result<Vec<_>, _>>()?;
                 let force = match self.args.get("force").unwrap_or(&json!(false)) {
                     Value::Bool(force) => *force,
@@ -959,7 +959,7 @@ impl Call<'_> {
             0
         } else {
             let shown = julia_string(after);
-            let target = uuid_value(after).ok_or_else(|| argument_error(&format!("invalid_cell_id::Invalid cell ID: '{shown}'")))?;
+            let target = cell_id_in(&nb, after).ok_or_else(|| argument_error(&format!("invalid_cell_id::Invalid cell ID: '{shown}'")))?;
             rest.iter().position(|c| **c == target).ok_or_else(|| key_error(&format!("cell_not_found::Target cell '{shown}' not found")))? + 1
         };
         self.apply(&nb.id, vec![json!({ "op": "move", "cell_id": cell, "index": index })])?;
@@ -1337,7 +1337,7 @@ impl Call<'_> {
 /// The cell a `cell_id` argument names, refused as Julia's lookup refused it.
 fn cell_named(nb: &Snapshot, value: &Value) -> Result<String, String> {
     let shown = julia_string(value);
-    let id = uuid_value(value).ok_or_else(|| argument_error(&format!("invalid_cell_id::Invalid cell ID: '{shown}'")))?;
+    let id = cell_id_in(nb, value).ok_or_else(|| argument_error(&format!("invalid_cell_id::Invalid cell ID: '{shown}'")))?;
     if !nb.cells.contains_key(&id) {
         return Err(key_error(&format!("cell_not_found::No cell with id '{shown}' in notebook")));
     }
