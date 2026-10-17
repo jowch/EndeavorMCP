@@ -536,6 +536,63 @@ fn the_runtime_end_to_end() {
         rt.call("endeavor/stop_notebook", json!({ "path": starting })).unwrap();
     });
 
+    step("a notebook whose process ended while it started restarts, and its cells run (#194)", || {
+        // The Malt workers running now: a notebook's own Julia.
+        let workers = || -> std::collections::HashSet<i32> {
+            std::fs::read_dir("/proc").unwrap().filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                .filter(|pid: &i32| std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| String::from_utf8_lossy(&c).contains("Malt") && String::from_utf8_lossy(&c).contains("worker.jl")))
+                .collect()
+        };
+        let ids = ["19400001-bbeb-11f1-8e5f-a5a8320edb60", "19400002-bbeb-11f1-8e5f-a5a8320edb60", "19400003-bbeb-11f1-8e5f-a5a8320edb60"];
+        let codes = ["p = 1", "q = p + 1", "r = q + 1"];
+        let mut text = String::from("### A Pluto.jl notebook ###\n# v1.0.3\n\nusing Markdown\nusing InteractiveUtils\n\n");
+        for (id, code) in ids.iter().zip(codes) {
+            text.push_str(&format!("# ╔═╡ {id}\n{code}\n\n"));
+        }
+        text.push_str("# ╔═╡ Cell order:\n");
+        for id in ids {
+            text.push_str(&format!("# ╠═{id}\n"));
+        }
+        let crashing = mac.join("crashing.jl");
+        std::fs::write(&crashing, text).unwrap();
+        let crashing = crashing.to_str().unwrap().to_owned();
+        let opened = rt.app_tool("open_notebook", json!({ "path": crashing, "run_notebook": false }));
+        let id = opened["notebook_id"].as_str().unwrap().to_owned();
+        rt.call("endeavor/set_notebook", json!({ "owner": "3", "notebook": crashing })).unwrap();
+        let before = workers();
+        rt.ok(THIRD, "allow_execution", json!({ "notebook_id": id, "run_notebook": true }));
+        // Its Julia ends before Pluto connects to it, as a crash at startup would.
+        let began = Instant::now();
+        let worker = loop {
+            if let Some(&pid) = workers().difference(&before).next() {
+                break pid;
+            }
+            assert!(began.elapsed() < Duration::from_secs(60), "no new worker started");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // SAFETY: plain syscall.
+        unsafe { libc::kill(worker, libc::SIGKILL) };
+        std::thread::sleep(Duration::from_secs(3));
+        for cell in ids {
+            let read = rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+            assert!(read["output"].as_str().unwrap_or("").is_empty(), "nothing ran before the restart: {read}");
+        }
+        // The app's Restart starts a new process, and every cell runs.
+        let restarted = rt.call("endeavor/restart_notebook", json!({ "notebook_id": id }));
+        assert_eq!(restarted.as_ref().map(|r| r["restarted"].clone()), Ok(json!(true)), "{restarted:?}");
+        let began = Instant::now();
+        let busy = |read: &Value| read["running"] == true || read["queued"] == true || read["output"].as_str().unwrap_or("").is_empty();
+        while ids.iter().any(|cell| busy(&rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": cell })))) {
+            assert!(began.elapsed() < Duration::from_secs(180), "the cells didn't run after the restart");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        for (cell, value) in ids.iter().zip(["1", "2", "3"]) {
+            let read = rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+            assert_eq!(read["output"], value, "{read}");
+        }
+        rt.call("endeavor/stop_notebook", json!({ "path": crashing })).unwrap();
+    });
+
     step("the agent's Stop interrupts the cell its call is running", || {
         // Add a cell with `code` after the last one, run it waiting, and cancel the call 3 s in,
         // as the agent's client does when the user presses Stop: the cell, and how long the call took.
