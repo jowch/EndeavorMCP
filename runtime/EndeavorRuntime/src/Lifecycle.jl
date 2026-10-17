@@ -206,6 +206,7 @@ function _init_pluto_session!(; pluto_port, launch_browser, require_secret_for_a
         on_event                  = _handle_pluto_event,
     )
     sess = Pluto.ServerSession(; options = opts)
+    _wrap_page_restart!()
     if notebook !== nothing
         Pluto.SessionActions.open(sess, String(notebook); run_async = true)
     end

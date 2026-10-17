@@ -352,6 +352,9 @@ Next:
   run before any cell, and the answer lists them all as `dropped` at once (#179).
   Before, it reported them dropped, or none when the start took longer than its
   wait, and they all ran once the process was up.
+  A notebook whose process ended while it started can be restarted, from the app
+  or from Pluto's own restart on its page, and its cells run (#194). Before, the restart failed with the start's error and
+  its cells stayed queued until the notebook was stopped and opened again.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds

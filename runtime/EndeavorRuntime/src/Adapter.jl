@@ -420,11 +420,43 @@ function restart!(session, nb, timeout::Real)
     nb.process_status = Pluto.ProcessStatus.waiting_to_restart
     session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(nb)
     _notify_browser(session, nb)
+    # A process that ended while it started leaves its failed start behind, and the shutdown
+    # and the new run would rethrow its error (#194). So would an interrupt asked of that start.
+    _forget_failed_start!(nb)
+    nb.wants_to_interrupt = false
     Pluto.SessionActions.shutdown(session, nb; keep_in_session=true, async=true, verbose=false)
     nb.process_status = Pluto.ProcessStatus.starting
     _notify_browser(session, nb)
     run_cells!(session, nb, collect(nb.cells); wait=false, timeout)
     return Dict{String,Any}("restarted" => true)
+end
+
+# Drop the notebook's start from Pluto's workspaces if it failed (its process ended before Pluto
+# connected): every later fetch of it rethrows that error, so nothing could start a new one.
+function _forget_failed_start!(nb)
+    WM = Pluto.WorkspaceManager
+    WM.withtoken(WM.get_workspace_token) do
+        task = get(WM.active_workspaces, nb.notebook_id, nothing)
+        task !== nothing && istaskfailed(task) && delete!(WM.active_workspaces, nb.notebook_id)
+    end
+    return nothing
+end
+
+# Pluto's own Restart, from the notebook's page, goes to its `restart_process` handler and not
+# through `restart!`, so it forgets a failed start the same way first (#194). Once per Julia.
+const _PLUTO_RESTART = Ref{Any}(nothing)
+function _wrap_page_restart!()
+    _PLUTO_RESTART[] === nothing || return nothing
+    original = _PLUTO_RESTART[] = Pluto.responses[:restart_process]
+    Pluto.responses[:restart_process] = function (request; kwargs...)
+        nb = request.notebook
+        if nb !== nothing && nb.process_status !== Pluto.ProcessStatus.waiting_to_restart
+            _forget_failed_start!(nb)
+            nb.wants_to_interrupt = false
+        end
+        original(request; kwargs...)
+    end
+    return nothing
 end
 
 # Move the notebook's file to `path` (checked by the core), as Pluto's own file box does.
