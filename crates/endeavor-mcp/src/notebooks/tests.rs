@@ -64,6 +64,9 @@ struct FakeNotebook {
     runs_first: Vec<String>,
     /// Ember's lazy mode: a run marks its dependents stale instead of running them.
     lazy: bool,
+    /// An R notebook's snapshot date, and the date of its ready preview of a move.
+    package_date: Option<String>,
+    previewed: Option<String>,
 }
 
 #[derive(Default)]
@@ -95,7 +98,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy: false });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy: false, package_date: None, previewed: None });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -118,7 +121,7 @@ impl Engine {
             "notebook_id": nb.id, "path": nb.path,
             "process_status": if nb.safe_preview { "waiting_for_permission" } else if nb.exited.is_some() { "no_process" } else if nb.starting { "starting" } else { "ready" },
             "execution_allowed": !nb.safe_preview && nb.exited.is_none(), "safe_preview": nb.safe_preview, "exited": nb.exited,
-            "packages": nb.packages, "lazy": nb.lazy,
+            "packages": nb.packages, "lazy": nb.lazy, "package_date": nb.package_date,
             "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
@@ -195,7 +198,7 @@ impl Engine {
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
                 // A file named for it is in Ember's lazy mode.
                 let lazy = method == "open" && path.contains("lazy");
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy, package_date: None, previewed: None });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed, "lazy": lazy }));
             }
             _ => {}
@@ -230,6 +233,24 @@ impl Engine {
                     cell.last_run = now;
                 }
                 Ok(json!({ "restarted": true }))
+            }
+            // Ember's date preview: today ("2026-10-17") is ready with one change, 2000 has no index.
+            "preview_packages" => {
+                let date = params["date"].as_str().unwrap_or("2026-10-17").to_owned();
+                if date.starts_with("2000") {
+                    nb.previewed = None;
+                    return Ok(json!({ "date": date, "current_date": nb.package_date, "status": "failed", "changes": [],
+                        "problems": [{ "kind": "index_unavailable", "package": null, "message": "no package index for 2000-01-01" }], "message": "no index" }));
+                }
+                nb.previewed = Some(date.clone());
+                Ok(json!({ "date": date, "current_date": nb.package_date, "status": "ready", "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "problems": [], "message": null }))
+            }
+            "set_package_date" => {
+                if nb.previewed.as_deref() != params["date"].as_str() {
+                    return Err("ArgumentError: no_preview::no ready, current preview for that date".into());
+                }
+                nb.package_date = nb.previewed.take();
+                Ok(json!({ "date": nb.package_date, "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "process_status": "ready" }))
             }
             "move" => {
                 let _ = std::fs::rename(&nb.path, params["path"].as_str().unwrap());
@@ -2727,6 +2748,43 @@ fn restart_notebook_restarts_and_a_julia_notebooks_run_is_the_sessions() {
     let restarted = s.call("9", "restart_notebook", json!({ "notebook_id": R })).unwrap();
     assert_eq!(restarted["restarted"], true);
     assert!(restarted["message"].as_str().unwrap().contains("run_all_cells"), "{restarted}");
+}
+
+#[test]
+fn an_r_notebooks_package_date_is_shown_previewed_and_moved() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "library(dplyr)")]);
+    ember.with(R, |nb| nb.package_date = Some("2026-06-01".into()));
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    let listed = s.call("9", "list_notebooks", json!({})).unwrap();
+    assert_eq!(listed.as_array().unwrap().iter().find(|nb| nb["notebook_id"] == R).unwrap()["package_date"], "2026-06-01", "{listed}");
+
+    // Without a date, today: what would change, and the date hasn't moved.
+    let preview = s.call("9", "preview_package_update", json!({ "notebook_id": R })).unwrap();
+    assert_eq!((&preview["status"], &preview["date"], &preview["current_date"]), (&json!("ready"), &json!("2026-10-17"), &json!("2026-06-01")), "{preview}");
+    assert!(preview["message"].as_str().unwrap().contains("apply_package_update"), "{preview}");
+    assert_eq!(preview.get("reason"), None, "{preview}");
+
+    // A date that can't be used says why, with Ember's own reason.
+    let failed = s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2000-01-01" })).unwrap();
+    assert!(failed["status"] == "failed" && failed["reason"] == "no index" && failed["message"].as_str().unwrap().contains("problems"), "{failed}");
+
+    // Applying needs the previewed date's ready preview.
+    let refused = s.call("9", "apply_package_update", json!({ "notebook_id": R, "date": "2026-10-17" })).unwrap_err();
+    assert!(refused.contains("no_preview"), "{refused}");
+    assert!(s.call("9", "apply_package_update", json!({ "notebook_id": R })).unwrap_err().contains("date"), "date is required");
+    s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2026-10-17" })).unwrap();
+    let applied = s.call("9", "apply_package_update", json!({ "notebook_id": R, "date": "2026-10-17" })).unwrap();
+    assert_eq!((&applied["date"], &applied["changes"][0]["to"]), (&json!("2026-10-17"), &json!("1.2.1")), "{applied}");
+    let listed = s.call("9", "list_notebooks", json!({})).unwrap();
+    assert_eq!(listed.as_array().unwrap().iter().find(|nb| nb["notebook_id"] == R).unwrap()["package_date"], "2026-10-17");
+
+    // A Julia notebook has no package date.
+    s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1")]);
+    let julia = s.call("7", "preview_package_update", json!({ "notebook_id": NB })).unwrap_err();
+    assert!(julia.contains("not_r_notebook"), "{julia}");
 }
 
 #[test]
