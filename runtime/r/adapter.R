@@ -642,9 +642,13 @@ shutdown <- function(rec) {
 # nothing more to render.
 render_text <- function(rec, cell) list(text = NULL)
 
+# jsonlite's base64 breaks the line every 72 characters. The core counts
+# every character as data (`base64_len()`), and a strict client may not
+# decode it, so the breaks go (#208).
 render_image <- function(rec, cell) {
   r <- render_png(rec$nb, cell)
-  list(png = if (is.raw(r$png)) jsonlite::base64_enc(r$png) else NULL, mime = r$mime %||% "")
+  png <- if (is.raw(r$png)) gsub("\n", "", jsonlite::base64_enc(r$png), fixed = TRUE)
+  list(png = png, mime = r$mime %||% "")
 }
 
 validate <- function(rec, cell, code) {
