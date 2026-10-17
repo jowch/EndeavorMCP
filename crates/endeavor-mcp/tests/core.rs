@@ -1988,6 +1988,49 @@ fn a_call_made_while_embers_install_runs_waits_for_it_as_the_first_did() {
 }
 
 #[test]
+fn a_failed_ember_install_is_said_to_every_call_for_a_while_before_one_tries_again() {
+    require_debug_build();
+    let dir = state_dir("core-r-install-failed");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    // An R whose Ember install fails at once, and counts its tries.
+    let (r, tries) = (dir.join("failing-install-r"), dir.join("install-tries"));
+    std::fs::write(&r, format!("#!/bin/sh\ncase \"$*\" in *install.R*) echo try >> '{}'; exit 1;; esac\nexit 1\n", tries.display())).unwrap();
+    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = temp_folder("core-r-install-failed-home");
+    let home = home.display().to_string();
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
+    let core = Core::try_start_with(&dir, &[("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str()), ("ENDEAVOR_TEST_INSTALL_RETRY_SECS", "3")], &args).unwrap();
+    let folder = temp_folder("core-r-install-failed-notebooks");
+    let path = folder.join("a.R");
+    std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
+    for agent in ["s1", "s2"] {
+        give_folder(&core, agent, &folder);
+    }
+    let open = |agent: &str| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "open_notebook", "arguments": { "path": path.display().to_string() } } });
+        let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), &[("X-Endeavor-Session", agent)]).1).unwrap();
+        serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let tries_so_far = || std::fs::read_to_string(&tries).unwrap_or_default().lines().count();
+    // Every call is told the failure, from either agent, and none installs again (#183).
+    let first = open("s1");
+    assert_eq!(first["error"], "r_failed", "{first}");
+    assert!(!first.to_string().contains("didn't try again"), "{first}");
+    for agent in ["s1", "s2", "s1", "s2"] {
+        let kept = open(agent);
+        assert_eq!(kept["error"], "r_failed", "the same failure: {kept}");
+        // And says it was not tried again, so an agent doesn't report the old cause as current.
+        assert!(kept.to_string().contains("this call didn't try again; a call made"), "{kept}");
+    }
+    assert_eq!(tries_so_far(), 1, "one install for all of them");
+    // Once its time is up, the next call tries again.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(open("s2")["error"], "r_failed");
+    assert_eq!(tries_so_far(), 2, "tried again");
+}
+
+#[test]
 fn calls_made_together_while_embers_install_runs_each_wait_no_longer_than_one_call_may() {
     require_debug_build();
     let dir = state_dir("core-r-install-together");
