@@ -1300,7 +1300,7 @@ fn several_sessions_on_one_notebook() {
     call("A", "edit_cell", json!({ "cell_id": c, "code": "c = 11" })).unwrap();
 
     let conflict = format!(
-        "ArgumentError: run_conflict::Another Endeavor session changed {a} since you last read them, and the cells you're running depend on them. \
+        "ArgumentError: run_conflict::{a} changed since this session last read them (by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
          Read them (read_cell or read_notebook_code), then run again."
     );
     assert_eq!(call("A", "execute_cell", json!({ "cell_id": b })), Err(conflict.clone()));

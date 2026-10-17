@@ -291,7 +291,9 @@ Next:
   starting doesn't ask again when the agent makes the same call again: only that
   session's, only the same tool and arguments, only while nothing came between
   (another call, a Stop, a change of mode), and for 5 minutes after the user's yes
-  (Endeavor #90). The plugin's `serve`, `mcp` and machines
+  (Endeavor #90). Under Claude Code, `endeavor mcp`'s session key comes from the
+  conversation's id, so a resumed conversation keeps its reads and its notebook
+  (#176). The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
   before, and only starting it waits. A session whose folder has Pluto
   notebooks, or whose caller says it is a Julia session (`kind`), gets Julia

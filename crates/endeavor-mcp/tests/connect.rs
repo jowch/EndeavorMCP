@@ -1450,7 +1450,11 @@ impl FakeSlurm {
     }
 
     fn set(&self, file: &str, value: &str) {
-        std::fs::write(self.dir.join(file), format!("{value}\n")).unwrap();
+        // Whole, or not at all: the fake squeue reads these while helpers poll (#186).
+        let path = self.dir.join(file);
+        let part = self.dir.join(format!(".{file}.part"));
+        std::fs::write(&part, format!("{value}\n")).unwrap();
+        std::fs::rename(&part, &path).unwrap();
     }
 
     fn read(&self, file: &str) -> String {
@@ -1771,7 +1775,8 @@ fn two_helpers_on_a_cluster_share_one_job_and_a_stop_from_one_ends_it_for_both()
     slurm.set("state", "RUNNING");
     let _runtime = FakeRuntime::in_job(&dir, &this_host(), "42");
     for helper in [&first, &second, &third] {
-        let ToApp::Ready { job: Some(job), .. } = after_start(helper) else { panic!("expected Ready") };
+        let got = after_start(helper);
+        let ToApp::Ready { job: Some(job), .. } = got else { panic!("expected Ready, got {got:?}") };
         assert_eq!(job.id, "42");
     }
     assert_eq!(slurm.read("sbatch.args").lines().count(), 1);
