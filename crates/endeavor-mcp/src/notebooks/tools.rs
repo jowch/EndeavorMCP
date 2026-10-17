@@ -739,7 +739,11 @@ impl Call<'_> {
         }
         self.mark_pending(&nb.id, &cells);
         let mutation = json!({ "type": "edit_cells", "cell_ids": cells });
-        Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), None)?.0))
+        let (mut receipt, after) = self.receipt(&nb.id, mutation, &[], Vec::new(), None)?;
+        // Each cell's fold after the edits, as `edit_cell`'s `code_folded` says its cell's.
+        let folds: Map<String, Value> = cells.iter().filter_map(|c| Some((c.clone(), json!(after.cells.get(c)?.folded)))).collect();
+        receipt["mutation"]["code_folded"] = Value::Object(folds);
+        Ok(Value::Object(receipt))
     }
 
     fn add_cell(&self) -> Result<Value, String> {
