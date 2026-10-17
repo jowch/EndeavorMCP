@@ -712,7 +712,8 @@ impl Call<'_> {
             let own = self.nbs.own_run_going(self.owner, nb);
             nb.cells.get(&cell).is_some_and(|c| (c.queued && nb.installing()) || ((c.running || c.queued) && own))
         };
-        let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
+        let waited = Instant::now();
+        let deadline = waited + self.wait_left().saturating_sub(Duration::from_secs(1));
         while waits(&nb) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(500));
             // Nobody will see this read, so it doesn't count as one.
@@ -721,6 +722,10 @@ impl Call<'_> {
             }
             nb = self.nbs.snapshot(&nb.id)?;
         }
+        // The wait ran out with the cell still going. An agent can't tell how long a call took,
+        // so it is told (#203); else it reads an answer like an immediate one, and reports that
+        // the read didn't wait.
+        let ran_out = (waits(&nb) && waited.elapsed() >= Duration::from_millis(500)).then(|| self.began.elapsed().as_secs());
         let Some(code) = nb.cells.get(&cell).map(|c| c.code.clone()) else { return Err(key_error(&format!("cell_not_found::No cell with id '{cell}' in notebook"))) };
         self.record_read(&nb.id, &cell, &code);
         let mut out = self.cell_json(&nb, &cell);
@@ -730,6 +735,11 @@ impl Call<'_> {
         if nb.installing() {
             out.insert("packages".into(), nb.packages.clone().unwrap_or_default());
             out.insert("message".into(), json!(installing_message(&nb)));
+        } else if let Some(seconds) = ran_out {
+            out.insert("message".into(), json!(format!(
+                "This read waited {seconds} s, and the cell is still {}: the run goes on. Read it again to keep waiting, or call interrupt_notebook if the user wants it stopped.",
+                if nb.cells.get(&cell).is_some_and(|c| c.running) { "running" } else { "queued" }
+            )));
         }
         Ok(Value::Object(out))
     }

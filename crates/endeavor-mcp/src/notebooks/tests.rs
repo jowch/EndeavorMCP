@@ -1261,8 +1261,10 @@ fn a_read_of_a_cell_the_sessions_own_run_is_running_waits_for_it() {
     // The user's own run is read at once.
     running(true);
     let began = Instant::now();
-    assert_eq!(read("7", began)["running"], true);
+    let at_once = read("7", began);
+    assert_eq!(at_once["running"], true);
     assert!(began.elapsed() < Duration::from_secs(1), "the user's run isn't waited for");
+    assert_eq!(at_once.get("message"), None, "nothing was waited for, so nothing ran out: {at_once}");
 
     // The session's own run is waited for, within the call's cap; another session's read isn't held up.
     running(false);
@@ -1272,7 +1274,9 @@ fn a_read_of_a_cell_the_sessions_own_run_is_running_waits_for_it() {
     assert_eq!(read("8", began)["running"], true);
     assert!(began.elapsed() < Duration::from_secs(1), "another session's run isn't waited for");
     let began = late();
-    assert_eq!(read("7", began)["running"], true, "still running when the wait ends");
+    let ran_out = read("7", began);
+    assert_eq!(ran_out["running"], true, "still running when the wait ends");
+    assert!(ran_out["message"].as_str().is_some_and(|m| m.starts_with("This read waited 4") && m.contains("s, and the cell is still running")), "the read says its wait ran out (#203): {ran_out}");
     assert!(began.elapsed() >= Duration::from_secs(44), "it waited");
     assert!(began.elapsed() < Duration::from_secs(super::tools::WAIT_SECONDS as u64), "within the cap");
 
