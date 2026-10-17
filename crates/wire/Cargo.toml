@@ -12,3 +12,7 @@ sha2 = "0.10"
 [target.'cfg(windows)'.dependencies]
 # Paths as Julia's realpath gives them, without std's \\?\ prefix.
 dunce = "1"
+
+[target.'cfg(windows)'.dev-dependencies]
+# Whether a socket handle is inheritable (`Shared`'s test).
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }

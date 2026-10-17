@@ -96,7 +96,8 @@ impl Drop for Asker {
 /// One askpass: the token, then its `Ask`, within `MOST_BYTES` and `READ_LIMIT`; a connection
 /// without the token is closed unanswered.
 fn serve(socket: TcpStream, token: &str, answer: &AnswerFn) {
-    let Ok(mut writer) = socket.try_clone() else { return };
+    let socket = wire::Shared::new(socket);
+    let mut writer = socket.clone();
     let mut reader = BufReader::new(Until { socket, until: Instant::now() + READ_LIMIT }.take(MOST_BYTES));
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() || !same(line.trim_end_matches(['\r', '\n']).as_bytes(), token.as_bytes()) {
@@ -116,7 +117,7 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 
 /// A socket whose reads all end by `until`, however slowly the other side sends.
 struct Until {
-    socket: TcpStream,
+    socket: wire::Shared,
     until: Instant,
 }
 

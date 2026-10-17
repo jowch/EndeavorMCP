@@ -117,12 +117,35 @@ In `target/smoke/<time>-<commit>/` (each attempt runs in the temporary
 folder, and is copied here without the runtime's own `state/` and `home/`):
 
 - `summary.md` and `summary.json`: one line per task, with its status, the
-  checks that failed, and the first attempt's tool calls, tool errors, time
-  and cost.
+  checks that failed, and the first attempt's tool calls, tool errors, time,
+  cost and tokens (below).
 - `<task>/attempt-<n>/`: `result.json` (each check, the metrics, and every cell as the agent left it and as it ran again),
   `mcp.jsonl` (the proxy's log), `transcript.jsonl` (Claude's stream-json
   output), `agent-stderr.txt`, and `project/` with the notebook as the agent
   left it.
+
+## What a task costs
+
+Each attempt's `metrics` record what the agent spent, so a change to the
+tools or the skills can be compared before and after, per task and model:
+
+| Metric | Is |
+|---|---|
+| `requests` | the model requests Claude made, one per step of its turn |
+| `input_tokens` | what those requests read, added up, cached or not. Each request reads the whole conversation so far, so this grows with both the number of requests and what stays in the conversation (the skill, tool replies) |
+| `context_tokens` | the conversation's size at the last request |
+| `output_tokens` | what the model wrote, its thinking included |
+| `reply_bytes` | the size of the notebook tools' replies, from the proxy's log, apart from pictures. It doesn't depend on the agent, so it compares across agents too |
+
+Requests and input tokens come from Claude's own usage reports; another
+agent needs its own reader. Most of a request is the agent's own system
+prompt and tools: about 10,700 tokens for Claude Code with the suite's few
+tools. So a call that saves a request saves more than a reply cut by a
+few hundred tokens. To compare two runs:
+
+```sh
+jq -r '.tasks[] | [.task, .first.requests, .first.input_tokens, .first.reply_bytes] | @tsv' target/smoke/<run>/summary.json
+```
 
 ## Server tasks
 
@@ -200,6 +223,7 @@ something subtle, make it soft.
 | `N7-plot` | a plot | the agent looks at the picture (`view_cell_output`) before it reports |
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
 | `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: the agent waits through it and reports the table (#58) |
+| `N10-big-notebook` | change one value in an open notebook of 42 cells and report a count | what a larger notebook costs: reads, and each change's reply |
 | `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
 | `R2-first-package` | a dplyr table and its mean in a new R notebook | R's first package install: the agent waits through it and doesn't run the cells again; when the install outlasts a waited run, the tools say R is getting dplyr ready (#78) |
 | `M1-machine` | add my server and compute something in a notebook there; then "yes, install it" | `add_machine`'s `needs_install`: the agent asks first and installs only after the yes, then works on the server |

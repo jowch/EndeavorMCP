@@ -224,6 +224,19 @@ check("cell_state from the edit is numbered below apply's seq",
                  function(n) n$seq < applied$seq, logical(1))))
 check("topology_changed and file_saved", all(c("topology_changed", "file_saved") %in% methods_of(ns)))
 
+# edit_cell with `folded`: set_code and fold in one batch, a code cell and a text one.
+invisible(result("apply", list(notebook_id = nid, ops = list(
+  list(op = "set_code", cell_id = ids[3], code = "#' # Title", expected = "y * 3"),
+  list(op = "fold", cell_id = ids[3], folded = FALSE)))))
+cell <- cell_of(result("snapshot", list(notebook_id = nid)), ids[3])
+check("apply: set_code to a text cell and unfold it", identical(cell$code, "#' # Title") && !isTRUE(cell$folded))
+invisible(result("apply", list(notebook_id = nid, ops = list(
+  list(op = "set_code", cell_id = ids[3], code = "y * 3", expected = "#' # Title"),
+  list(op = "fold", cell_id = ids[3], folded = TRUE)))))
+cell <- cell_of(result("snapshot", list(notebook_id = nid)), ids[3])
+check("apply: set_code and fold a code cell", identical(cell$code, "y * 3") && isTRUE(cell$folded))
+invisible(result("apply", list(notebook_id = nid, ops = list(list(op = "fold", cell_id = ids[3], folded = FALSE)))))
+
 # ---- run without waiting: execution_done, run_finished ----
 
 after_edit <- result("status")$seq
@@ -236,6 +249,54 @@ check("run_finished names the cell", !is.null(fin) && identical(unlist(fin$param
 check("seq increases", all(diff(vapply(ns, function(n) n$seq, numeric(1))) > 0))
 snap <- result("snapshot", list(notebook_id = nid))
 check("the new cell's output", grepl("56", cell_of(snap, new_id)$output))
+
+check("run without wait: the run is named", is.character(going$run) && nzchar(going$run))
+check("run_finished names the run", !is.null(fin) && identical(fin$params$run, going$run))
+
+# ---- an autorun run goes on through its dependents (#151) ----
+
+auto <- file.path(dir, "auto.R")
+writeLines(c(
+  "### An Ember notebook ###", "# /// environment", '# on_cell_change = "autorun"', "# ///", "",
+  "# %% id=44444444-4444-4444-8444-444444444444", "a <- 1", "",
+  "# %% id=55555555-5555-4555-8555-555555555555", "{ Sys.sleep(2); a + 1 }", "",
+  "# /// cell order", "# 44444444-4444-4444-8444-444444444444", "# 55555555-5555-4555-8555-555555555555", "# ///"), auto)
+aid <- result("open", list(path = auto, run = FALSE))$notebook_id
+invisible(result("allow_execution", list(notebook_id = aid, run = FALSE, timeout = 30)))
+up <- "44444444-4444-4444-8444-444444444444"
+down <- "55555555-5555-4555-8555-555555555555"
+r <- result("run", list(notebook_id = aid, cells = list(up, down), wait = TRUE, timeout = 60))
+last_run <- function() cell_of(result("snapshot", list(notebook_id = aid)), down)$last_run
+before_run <- last_run()
+# A waited run of the upstream cell returns once its dependent has run too, as Pluto's does.
+r <- result("run", list(notebook_id = aid, cells = list(up), wait = TRUE, timeout = 60))
+check("a waited run covers the dependent Ember queues", length(r$timed_out) == 0 && last_run() > before_run &&
+      !isTRUE(cell_of(result("snapshot", list(notebook_id = aid)), down)$running))
+# Nothing left running from before, so the run below is timed alone.
+idle <- function() !any(vapply(result("snapshot", list(notebook_id = aid))$cells, function(c) isTRUE(c$running) || isTRUE(c$queued), logical(1)))
+# The deadline only keeps a broken run from hanging the test.
+deadline <- Sys.time() + 60
+while (!idle() && Sys.time() < deadline) Sys.sleep(0.1)
+before_run <- last_run()
+seq_before <- result("status")$seq
+t0 <- Sys.time()
+going <- result("run", list(notebook_id = aid, cells = list(up), wait = FALSE, timeout = 30))
+ns <- collect(seq_before, function(ns) any(vapply(ns, function(n) identical(n$method, "run_finished") && identical(n$params$run, going$run), logical(1))))
+took <- as.numeric(Sys.time() - t0, units = "secs")
+fin <- Find(function(n) identical(n$method, "run_finished") && identical(n$params$run, going$run), ns)
+check("an unwaited run ends after its dependent, which sleeps 2 s", !is.null(going$run) && !is.null(fin) && took >= 1.5 && last_run() > before_run)
+check("run_finished lists the run's own cells", identical(unlist(fin$params$cells), up))
+invisible(result("shutdown", list(notebook_id = aid)))
+
+# ---- allow_execution names the run of the notebook it starts (#170) ----
+
+aid <- result("open", list(path = auto, run = FALSE))$notebook_id
+seq_before <- result("status")$seq
+allowed <- result("allow_execution", list(notebook_id = aid, run = TRUE, timeout = 30))
+ns <- collect(seq_before, function(ns) any(vapply(ns, function(n) identical(n$method, "run_finished") && identical(n$params$run, allowed$run), logical(1))))
+check("allow_execution with a run names it, and its run_finished comes once the cells ran",
+      isTRUE(allowed$ran) && is.character(allowed$run) && idle())
+invisible(result("shutdown", list(notebook_id = aid)))
 
 # ---- errors, render_text, render_png, validate ----
 

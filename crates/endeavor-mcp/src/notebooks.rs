@@ -61,8 +61,9 @@ pub trait Upstream: Send + Sync {
 }
 
 /// Starts an engine's adapter: what answers for it once it's up, or why it couldn't start. The
-/// `Duration` is what is left of the call's wait, which Julia's start waits no longer than.
-pub type Starter = Box<dyn Fn(Backend, Duration) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
+/// call came at the `Instant` and waits up to the `Duration` from then, however long it queued
+/// behind other starts (#175); Julia's start waits no longer than that.
+pub type Starter = Box<dyn Fn(Backend, Instant, Duration) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
 
 /// Julia's bridge, once it answers.
 pub struct Julia {
@@ -473,8 +474,6 @@ struct Graph {
     cells: Vec<Node>,
     /// The cells that can run, in the order they run.
     order: Vec<String>,
-    /// Cells that can't run: in a cycle, or defining what another cell does.
-    errable: Vec<String>,
 }
 
 struct Node {
@@ -516,7 +515,7 @@ impl Graph {
                 packages: names(&c["packages"]),
             })
         });
-        Graph { cells: cells.collect(), order: names(&value["order"]), errable: names(&value["errable"]) }
+        Graph { cells: cells.collect(), order: names(&value["order"]) }
     }
 
     fn node(&self, id: &str) -> Option<&Node> {
@@ -553,13 +552,6 @@ impl Graph {
             }
         }
         found
-    }
-
-    /// The order a whole run goes in: runnable cells, then the rest.
-    fn execution_order(&self) -> Vec<String> {
-        let mut order = self.order.clone();
-        order.extend(self.errable.iter().filter(|id| !self.order.contains(id)).cloned());
-        order
     }
 }
 
@@ -635,12 +627,13 @@ impl Notebooks {
         if self.engines.has(backend) {
             return Ok(());
         }
+        let began = Instant::now();
         let _starting = (backend != Backend::Pluto).then(|| self.starting.lock().unwrap());
         if self.engines.has(backend) {
             return Ok(());
         }
         let Some(starter) = self.starter.get() else { return Ok(()) };
-        let upstream = starter(backend, wait)?;
+        let upstream = starter(backend, began, wait)?;
         self.add_engine(backend, upstream);
         Ok(())
     }
@@ -759,7 +752,7 @@ impl Notebooks {
                             for started in &mut notebook.started {
                                 started.cells.retain(|cell| !finished.contains(&cell.as_str()));
                             }
-                            notebook.started.retain(|started| !started.cells.is_empty());
+                            notebook.started.retain(|started| started.run.is_some() || !started.cells.is_empty());
                         }
                     }
                 }
@@ -965,7 +958,7 @@ impl Notebooks {
 
     /// Serve `GET /events`: the notebooks' state now and after every change,
     /// until the client goes.
-    pub fn stream_events(&self, request: &Head, mut client: TcpStream) -> io::Result<()> {
+    pub fn stream_events(&self, request: &Head, mut client: wire::Shared) -> io::Result<()> {
         let (first, rx) = match self.subscribe() {
             Ok(subscription) => subscription,
             Err(e) => {
@@ -1273,18 +1266,29 @@ impl Notebooks {
                 return;
             }
             let Ok(nb) = self.snapshot(notebook_id) else { return };
-            let going = self.with_state(notebook_id, |state| {
-                for started in state.started.iter_mut().filter(|started| started.owner == owner) {
-                    started.cells.retain(|id| nb.cells.get(id).is_some_and(|c| c.running || c.queued));
-                }
-                state.started.retain(|started| !started.cells.is_empty());
-                state.started.iter().any(|started| started.owner == owner)
-            });
-            if !going {
+            if !self.own_run_going(owner, &nb) {
                 return;
             }
         }
         self.interrupt(notebook_id, owner);
+    }
+
+    /// Whether a run `owner` started in `nb` is still going, as `nb` shows it. A run the engine
+    /// named goes on, with the cells that depend on its cells, until its `run_finished`, and
+    /// while it does some cell is running or queued: a notebook with none has seen it end. A
+    /// run the engine didn't name goes on while one of its own cells hasn't finished. A run
+    /// seen to have ended is forgotten.
+    fn own_run_going(&self, owner: &str, nb: &Snapshot) -> bool {
+        let busy = nb.cells.values().any(|c| c.running || c.queued);
+        self.with_state(&nb.id, |state| {
+            for started in state.started.iter_mut().filter(|started| started.owner == owner) {
+                if started.run.is_none() || !busy {
+                    started.cells.retain(|id| busy && nb.cells.get(id).is_some_and(|c| c.running || c.queued));
+                }
+            }
+            state.started.retain(|started| (started.run.is_some() && busy) || !started.cells.is_empty());
+            state.started.iter().any(|started| started.owner == owner)
+        })
     }
 
     /// The notebooks where runs `owner` started may still be going (`stop_for` checks): what the

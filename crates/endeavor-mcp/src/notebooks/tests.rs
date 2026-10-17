@@ -59,6 +59,9 @@ struct FakeNotebook {
     packages: Option<Value>,
     /// Out of safe preview, its new process still starting (`starting` in Pluto).
     starting: bool,
+    /// Cells the next run runs before its own, not naming them in its reply, as
+    /// Ember runs an ancestor whose code changed since it last ran.
+    runs_first: Vec<String>,
 }
 
 #[derive(Default)]
@@ -90,7 +93,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new() });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -117,7 +120,7 @@ impl Engine {
             "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
-                "last_run": c.last_run, "runtime": 0, "output": c.output, "hidden": c.hidden, "markdown": c.code.starts_with("md\""),
+                "last_run": c.last_run, "runtime": 0, "output": c.output, "error": if c.errored { json!({ "msg": c.output }) } else { Value::Null }, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
                 "stale": c.stale, "not_run": c.not_run,
             })).collect::<Vec<_>>(),
         })
@@ -188,7 +191,7 @@ impl Engine {
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
                 let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new() });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed }));
             }
             _ => {}
@@ -303,7 +306,8 @@ impl Engine {
                 for cell in nb.cells.iter_mut().filter(|c| lingering.contains(&c.id)) {
                     cell.running = true;
                 }
-                for cell in nb.cells.iter_mut().filter(|c| finishing.contains(&c.id)) {
+                let first = std::mem::take(&mut nb.runs_first);
+                for cell in nb.cells.iter_mut().filter(|c| finishing.contains(&c.id) || first.contains(&c.id)) {
                     cell.last_run = now;
                     cell.errored = cell.code.contains("error(");
                     cell.output = if cell.errored { "boom".into() } else { format!("ran {}", cell.code) };
@@ -331,7 +335,15 @@ impl Engine {
                 }
                 nb.safe_preview = false;
                 nb.starting = params["run"] == true;
-                Ok(json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } }))
+                let mut reply = json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } });
+                // The run of every cell goes on while a cell in `linger()` runs, and is named, as the runtime's are.
+                if params["run"] == true && nb.cells.iter().any(|c| c.code.contains("linger()")) {
+                    nb.cells.iter_mut().filter(|c| c.code.contains("linger()")).for_each(|c| c.running = true);
+                    let mut watched = self.watched.lock().unwrap();
+                    *watched += 1;
+                    reply["run"] = json!(format!("run-{watched}"));
+                }
+                Ok(reply)
             }
             "render_text" => Ok(json!({ "text": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("table") } { json!("n\tmean\n3\t2.5") } else { Value::Null } })),
             "render_png" => Ok({
@@ -344,7 +356,22 @@ impl Engine {
                 }
             }),
             "validate" => Ok(json!({ "errors": if params["code"].as_str().unwrap().contains('\n') { json!([{ "type": "pluto_multi_expression" }]) } else { json!([]) } })),
-            "interrupt" => Ok(json!({ "interrupted": true })),
+            // The running cells end interrupted, but for one in `stubborn()`, and the queued ones don't run.
+            // A run queued behind `starting()` waits for the notebook's process, which is still starting:
+            // the run is told to skip its cells, which stay queued until the process is up (#179).
+            "interrupt" => {
+                if nb.cells.iter().any(|c| c.queued && c.code.contains("starting()")) {
+                    return Ok(json!({ "interrupted": true, "pending": true }));
+                }
+                let busy = nb.cells.iter().any(|c| c.running);
+                for cell in nb.cells.iter_mut() {
+                    cell.queued = false;
+                    if cell.running && !cell.code.contains("stubborn()") {
+                        (cell.running, cell.errored, cell.output) = (false, true, "InterruptException".into());
+                    }
+                }
+                Ok(json!({ "interrupted": busy }))
+            }
             other => Err(format!("ArgumentError: unknown_method::Unknown adapter method: '{other}'")),
         }
     }
@@ -550,7 +577,8 @@ fn edits_are_staged_until_they_run_however_they_run() {
     assert_eq!(receipt["execution"]["status"], "staged");
     assert_eq!((&receipt["pending_run"], &receipt["stale"], &receipt["affected_cells"]), (&json!([X]), &json!(true), &json!([])));
     assert_eq!(receipt["mutation"], json!({ "type": "edit_cell", "cell_id": X }));
-    assert_eq!((&receipt["cell_order"], &receipt["execution_order"]), (&json!([X, Y]), &json!([X, Y])));
+    // The order isn't in a change's receipt; the cell is, without the code the agent sent.
+    assert_eq!((&receipt["cell_order"], &receipt["execution_order"], &receipt["code"]), (&Value::Null, &Value::Null, &Value::Null));
     assert_eq!(s.engine.code(NB, X), "x = 10");
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([X]), "listing counts as no read");
 
@@ -585,6 +613,25 @@ fn edits_are_staged_until_they_run_however_they_run() {
     s.seconds(1.0);
     s.engine.with(NB, |nb| nb.cells[0].last_run = 1.0e6 + 3.5);
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([]), "Pluto's own run button");
+}
+
+#[test]
+fn an_edit_whose_cell_is_still_running_gives_the_old_output_as_previous() {
+    // edit_cell's run isn't waited for, so the receipt comes back while the
+    // cell runs, holding the output from before the edit (#190).
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);
+    s.engine.with(NB, |nb| (nb.cells[0].output, nb.cells[0].errored) = ("boom".into(), true));
+    s.read("", NB, X);
+    let receipt = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = linger()", "run_after": true })).unwrap();
+    assert_eq!((&receipt["running"], &receipt["previous_output"], receipt.get("output")), (&json!(true), &json!("boom"), None), "{receipt}");
+    assert_eq!((&receipt["previous_errored"], &receipt["previous_error"], receipt.get("errored"), receipt.get("error")), (&json!(true), &json!({ "msg": "boom" }), None, None), "the old error isn't the edit's: {receipt}");
+    assert_eq!(receipt["outputs"]["changed"], json!([]), "its old output isn't a change");
+
+    // Once it has finished, a read gives the new output as `output`.
+    s.engine.with(NB, |nb| (nb.cells[0].running, nb.cells[0].output, nb.cells[0].errored) = (false, "2".into(), false));
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["output"], &read["errored"], read.get("error"), read.get("previous_output")), (&json!("2"), &json!(false), None, None));
 }
 
 #[test]
@@ -742,8 +789,23 @@ fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
     assert_eq!((s.engine.code(NB, X), s.engine.code(NB, Y)), ("x = 4".into(), "y = 4".into()));
     s.read("", NB, Y);
     let receipt = s.call("", "edit_cells", edits).unwrap();
-    assert_eq!(receipt["mutation"], json!({ "type": "edit_cells", "cell_ids": [X, Y] }));
+    assert_eq!(receipt["mutation"], json!({ "type": "edit_cells", "cell_ids": [X, Y], "code_folded": { X: false, Y: false } }));
     assert_eq!((&receipt["pending_run"], &receipt["execution"]["status"]), (&json!([X, Y]), &json!("staged")));
+
+    // Each edit can fold or unfold its cell; one without `folded` leaves the fold as it is.
+    let folded = || s.engine.with(NB, |nb| (nb.cells[0].folded, nb.cells[1].folded));
+    let bad = json!({ "notebook_id": NB, "cells": [{ "cell_id": X, "code": "x = 11", "folded": true }, { "cell_id": Y, "code": "y = 21", "folded": "yes" }] });
+    assert_eq!(s.refused("", "edit_cells", bad), "invalid_argument");
+    assert_eq!((s.engine.code(NB, X), folded()), ("x = 10".into(), (false, false)), "a refused batch changes no cell");
+    s.engine.with(NB, |nb| nb.cells[1].folded = true);
+    let receipt = s.call("", "edit_cells", json!({ "notebook_id": NB, "cells": [{ "cell_id": X, "code": "x = 11", "folded": true }, { "cell_id": Y, "code": "y = 21" }] })).unwrap();
+    assert_eq!((s.engine.code(NB, X), s.engine.code(NB, Y), folded()), ("x = 11".into(), "y = 21".into(), (true, true)));
+    // The receipt says each cell's fold, the one left as it was too.
+    assert_eq!(receipt["mutation"]["code_folded"], json!({ X: true, Y: true }));
+    s.call("", "edit_cells", json!({ "notebook_id": NB, "cells": [{ "cell_id": X, "code": "x = 12", "folded": false }, { "cell_id": Y, "code": "y = 22", "folded": false }] })).unwrap();
+    assert_eq!(folded(), (false, false));
+    s.call("", "edit_cells", json!({ "notebook_id": NB, "cells": [{ "cell_id": Y, "code": "y = 23", "folded": null }] })).unwrap();
+    assert_eq!(folded(), (false, false));
 }
 
 #[test]
@@ -753,7 +815,7 @@ fn adding_moving_folding_and_deleting_cells() {
     let add = |args: Value| s.call("", "add_cell", args);
     let first = add(json!({ "notebook_id": NB, "code": "a = 1" })).unwrap();
     let a = first["cell_id"].as_str().unwrap().to_owned();
-    assert_eq!((&first["code"], &first["code_folded"], &first["pending_run"]), (&json!("a = 1"), &json!(false), &json!([a])));
+    assert_eq!((&first["code"], &first["code_folded"], &first["pending_run"]), (&json!("a = 1"), &json!(false), &json!([a])), "a new cell's reply has its code, for the app");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": "" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": a, "folded": "yes" })), "invalid_argument");
@@ -764,8 +826,18 @@ fn adding_moving_folding_and_deleting_cells() {
     let c = add(json!({ "notebook_id": NB, "code": 42, "after_cell_id": a, "run_after": true })).unwrap();
     assert_eq!((&c["code"], &c["affected_cells"], &c["execution"]["status"]), (&json!("42"), &json!([c["cell_id"]]), &json!("running")));
     let c = c["cell_id"].as_str().unwrap().to_owned();
+    assert_eq!(s.engine.code(NB, &c), "42");
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone(), b.clone()]);
     s.edit("", NB, &b, "b = a + 1");
+    // An edit can fold or unfold the cell too, and leaves it as it is without `folded`.
+    let folded_b = || s.engine.with(NB, |nb| nb.cells.iter().find(|c| c.id == b).unwrap().folded);
+    assert_eq!(s.refused("", "edit_cell", json!({ "notebook_id": NB, "cell_id": b, "code": "b = a + 2", "folded": "no" })), "invalid_argument");
+    assert_eq!((s.engine.code(NB, &b), folded_b()), ("b = a + 1".to_owned(), true), "a refused edit changes nothing");
+    let unfolded = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": b, "code": "b = a + 2", "folded": false })).unwrap();
+    assert_eq!((&unfolded["code_folded"], &unfolded["execution"]["status"]), (&json!(false), &json!("staged")));
+    assert_eq!((s.engine.code(NB, &b), folded_b()), ("b = a + 2".to_owned(), false));
+    s.edit("", NB, &b, "b = a + 1");
+    assert!(!folded_b());
 
     let moved = s.call("", "move_cell", json!({ "notebook_id": NB, "cell_id": b, "after_cell_id": "" })).unwrap();
     assert_eq!((&moved["mutation"]["old_index"], &moved["mutation"]["new_index"], &moved["cell_order"]), (&json!(3), &json!(1), &json!([b, a, c])));
@@ -788,8 +860,23 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!(deleted["warnings"], json!(["async_execution::cell deletion cleanup queued"]));
     assert_eq!((&deleted["execution"]["status"], &deleted["pending_run"]), (&json!("completed"), &json!([a])));
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone()]);
-    assert_eq!(*s.engine.calls.lock().unwrap().iter().rev().nth(2).unwrap(), "run", "Pluto's cleanup after a delete");
+    assert_eq!(*s.engine.calls.lock().unwrap().iter().rev().nth(1).unwrap(), "run", "Pluto's cleanup after a delete");
     assert_eq!(s.refused("", "delete_cell", json!({ "notebook_id": NB, "cell_id": b })), "cell_not_found");
+}
+
+/// An Ember notebook reads with its own file's markers, and its text cells, `#'` lines already,
+/// with no `# md:`.
+#[test]
+fn an_ember_notebook_reads_as_code_with_its_own_markers() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "#' # Title"), (Y, "b <- 2")]);
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    let read = |markdown: bool| s.call("", "read_notebook_code", json!({ "notebook_id": R, "order": "visual", "include_markdown": markdown })).unwrap();
+    assert_eq!(read(false)["code"], format!("# %% id={Y}\nb <- 2"));
+    assert_eq!(read(true)["code"], format!("# %% id={X}\n#' # Title\n\n# %% id={Y}\nb <- 2"));
 }
 
 #[test]
@@ -829,7 +916,7 @@ fn restoring_a_turns_cells_puts_their_code_back_all_or_nothing() {
     assert_eq!((&cell(&event, NB, X)["unrun"], &cell(&event, NB, X)["before"]), (&json!(true), &json!("x = 4")), "the turn's code ran, so the diff is against it");
     // The agent hasn't read what was put back: its run waits until it has.
     let refused = s.call("7", "submit_changes", json!({ "notebook_id": NB }));
-    assert!(refused.as_ref().is_err_and(|e| e.contains(&format!("run_conflict::The user or another Endeavor session changed {X}"))), "{refused:?}");
+    assert!(refused.as_ref().is_err_and(|e| e.contains(&format!("run_conflict::{X} changed since this session last read them"))), "{refused:?}");
     s.read("7", NB, X);
     s.call("7", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
     assert_eq!(pending(), json!([]));
@@ -952,7 +1039,7 @@ fn a_waited_run_that_outlasts_the_cap_returns_with_its_cells_still_running() {
     assert_eq!(ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| c["cell_id"].clone()).collect::<Vec<_>>(), vec![json!(X)]);
     assert_eq!(ran["pending_run"], json!([]), "cells being run are no longer staged");
     assert!(ran["warnings"][0].as_str().unwrap().starts_with("execution_timeout::"), "{ran}");
-    assert!(ran["message"].as_str().unwrap().contains("list_notebooks"), "{ran}");
+    assert!(ran["message"].as_str().unwrap().contains("Call read_cell on one of them"), "{ran}");
 
     // A read shows the dependent running and not stale; a bare submit_changes runs nothing again.
     let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
@@ -1061,6 +1148,175 @@ fn cells_waiting_on_a_package_install_say_so_and_a_read_of_one_waits() {
 }
 
 #[test]
+fn a_read_of_a_cell_the_sessions_own_run_is_running_waits_for_it() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
+    let running = |busy: bool| s.engine.with(NB, |nb| nb.cells[0].running = busy);
+    let read = |owner: &str, began: Instant| super::tools::tool_json(s.notebooks.tool(owner, "read_cell", &json!({ "notebook_id": NB, "cell_id": X }), &Folder::Process, began).unwrap());
+    let late = || Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+
+    // The user's own run is read at once.
+    running(true);
+    let began = Instant::now();
+    assert_eq!(read("7", began)["running"], true);
+    assert!(began.elapsed() < Duration::from_secs(1), "the user's run isn't waited for");
+
+    // The session's own run is waited for, within the call's cap; another session's read isn't held up.
+    running(false);
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    running(true);
+    let began = Instant::now();
+    assert_eq!(read("8", began)["running"], true);
+    assert!(began.elapsed() < Duration::from_secs(1), "another session's run isn't waited for");
+    let began = late();
+    assert_eq!(read("7", began)["running"], true, "still running when the wait ends");
+    assert!(began.elapsed() >= Duration::from_secs(44), "it waited");
+    assert!(began.elapsed() < Duration::from_secs(super::tools::WAIT_SECONDS as u64), "within the cap");
+
+    // The run ends: the waiting read returns then, with the output.
+    let engine = s.engine.clone();
+    let now = *s.clock.lock().unwrap();
+    let finish = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(600));
+        engine.with(NB, |nb| {
+            nb.cells[0].running = false;
+            nb.cells[0].last_run = now;
+            nb.cells[0].output = "done".into();
+        });
+    });
+    let began = Instant::now();
+    let done = read("7", began);
+    finish.join().unwrap();
+    assert!(began.elapsed() < Duration::from_secs(5), "returned when the run ended");
+    assert_eq!((&done["running"], &done["output"]), (&json!(false), &json!("done")));
+
+    // Once it has ended, a later run of the cell isn't the session's.
+    running(true);
+    let began = Instant::now();
+    read("7", began);
+    assert!(began.elapsed() < Duration::from_secs(1), "a later run isn't waited for");
+}
+
+#[test]
+fn a_read_of_a_dependent_still_running_in_the_sessions_run_waits_for_it() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    let read = |began: Instant| super::tools::tool_json(s.notebooks.tool("7", "read_cell", &json!({ "notebook_id": NB, "cell_id": Y }), &Folder::Process, began).unwrap());
+    let late = || Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+
+    // A waited run whose own cell finished and whose dependent outlasts the cap, and a run not
+    // waited for: either way the dependent is waited for, though the run's own cell is done.
+    for wait in [true, false] {
+        let ran = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": wait })).unwrap();
+        if wait {
+            assert_eq!(ran["execution"]["still_running"], json!([Y]), "{ran}");
+        }
+        let began = late();
+        assert_eq!(read(began)["running"], true);
+        assert!(began.elapsed() >= Duration::from_secs(44), "waited for the dependent (wait_for_completion {wait})");
+
+        // The run ends: a later run of the cell isn't the session's.
+        let run = format!("run-{}", 2 - wait as u8);
+        s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": run, "cells": [X] } }));
+        let began = Instant::now();
+        read(began);
+        assert!(began.elapsed() < Duration::from_secs(1), "the run ended (wait_for_completion {wait})");
+        s.engine.with(NB, |nb| nb.cells[1].running = false);
+    }
+}
+
+#[test]
+fn a_waited_submit_with_nothing_staged_waits_for_the_sessions_run() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    let submit = |began: Instant| super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, began).unwrap());
+    let late = || Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+
+    // Nothing is staged, but the dependent of the session's run is still running: not "completed" (#151).
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let began = late();
+    let receipt = submit(began);
+    assert_eq!((&receipt["execution"]["status"], &receipt["execution"]["still_running"]), (&json!("running"), &json!([Y])), "{receipt}");
+    assert!(began.elapsed() >= Duration::from_secs(44), "waited for the run");
+
+    // Once the run ends there is nothing to wait for.
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [X] } }));
+    let began = Instant::now();
+    assert_eq!(submit(began)["execution"]["status"], "completed");
+    assert!(began.elapsed() < Duration::from_secs(1), "nothing to wait for");
+    // Nor for the user's run, or another session's.
+    let receipt = super::tools::tool_json(s.notebooks.tool("8", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, Instant::now()).unwrap());
+    assert_eq!(receipt["execution"]["status"], "completed", "{receipt}");
+}
+
+#[test]
+fn a_waited_submit_with_nothing_staged_says_how_the_cells_that_ran_meanwhile_went() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    let submit = || super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, Instant::now()).unwrap());
+    // `y`, the dependent of the session's run, ends while the call waits: it errored, and so the run did (#171).
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let ends = |errored: bool| {
+        std::thread::sleep(Duration::from_millis(700));
+        let now = *s.clock.lock().unwrap() + 1.0;
+        s.engine.with(NB, |nb| {
+            let y = &mut nb.cells[1];
+            (y.running, y.errored, y.last_run) = (false, errored, now);
+            y.output = if errored { "boom".into() } else { "ran".into() };
+        });
+    };
+    let receipt = std::thread::scope(|scope| {
+        scope.spawn(|| ends(true));
+        submit()
+    });
+    assert_eq!((&receipt["execution"]["status"], &receipt["affected_cells"]), (&json!("errored"), &json!([Y])), "{receipt}");
+    assert_eq!(receipt["outputs"]["changed"][0]["cell_id"], Y, "{receipt}");
+    assert_eq!(receipt["execution"].get("still_running"), None, "{receipt}");
+    // And when it ends well, "completed", naming it.
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let receipt = std::thread::scope(|scope| {
+        scope.spawn(|| ends(false));
+        submit()
+    });
+    assert_eq!((&receipt["execution"]["status"], &receipt["affected_cells"]), (&json!("completed"), &json!([Y])), "{receipt}");
+    // A cell queued at the start that ends without running (an interrupt dropped it) isn't one of them.
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.engine.with(NB, |nb| nb.cells[0].queued = true);
+    let receipt = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            ends(false);
+            s.engine.with(NB, |nb| nb.cells[0].queued = false);
+        });
+        submit()
+    });
+    assert_eq!((&receipt["execution"]["status"], &receipt["affected_cells"]), (&json!("completed"), &json!([Y])), "{receipt}");
+}
+
+#[test]
+fn allow_executions_run_of_the_notebook_is_the_sessions_run() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
+    s.engine.with(NB, |nb| nb.safe_preview = true);
+    s.call("7", "allow_execution", json!({ "notebook_id": NB })).unwrap();
+    s.engine.with(NB, |nb| nb.starting = false);
+    // A waited submit with nothing staged waits for it, as for a run `submit_changes` starts (#170).
+    let began = Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+    let receipt = super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, began).unwrap());
+    assert_eq!((&receipt["execution"]["status"], &receipt["execution"]["still_running"]), (&json!("running"), &json!([Y])), "{receipt}");
+    assert!(began.elapsed() >= Duration::from_secs(44), "waited for the run");
+    // Not another session's.
+    let receipt = super::tools::tool_json(s.notebooks.tool("8", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, Instant::now()).unwrap());
+    assert_eq!(receipt["execution"]["status"], "completed", "{receipt}");
+    // Once it ends there is nothing to wait for.
+    s.engine.with(NB, |nb| nb.cells[1].running = false);
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [X, Y] } }));
+    let began = Instant::now();
+    let receipt = super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, began).unwrap());
+    assert_eq!(receipt["execution"]["status"], "completed", "{receipt}");
+    assert!(began.elapsed() < Duration::from_secs(1), "nothing to wait for");
+}
+
+#[test]
 fn a_waited_run_that_outlasts_the_cap_during_an_install_keeps_its_still_running_list() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + linger()")]);
@@ -1119,6 +1375,32 @@ fn a_run_also_runs_the_cells_it_needs_that_never_ran() {
 }
 
 #[test]
+fn a_run_lists_a_staged_cell_it_needs_that_the_engine_ran_first() {
+    // As Ember does (#187): y needs x, whose staged edit Ember runs first. The
+    // receipt lists x, with its new output, and x is no longer staged.
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1")]);
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.seconds(1.0);
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 5");
+    s.seconds(1.0);
+    s.engine.with(NB, |nb| nb.runs_first = vec![X.into()]);
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
+    assert_eq!((&ran["affected_cells"], &ran["pending_run"], &ran["execution"]["status"]), (&json!([X, Y]), &json!([]), &json!("completed")), "{ran}");
+    let changed: Vec<_> = ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| (c["cell_id"].clone(), c["output_summary"].clone())).collect();
+    assert_eq!(changed, vec![(json!(X), json!("ran x = 5")), (json!(Y), json!("ran y = x + 1"))]);
+    assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {X}: cells this run needs that were edited or stale since they last ran.")]));
+
+    // An engine that leaves it staged (Pluto): the receipt is the target's alone.
+    s.seconds(1.0);
+    s.edit("", NB, X, "x = 6");
+    s.seconds(1.0);
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
+    assert_eq!((&ran["affected_cells"], &ran["pending_run"], &ran["warnings"]), (&json!([Y]), &json!([X]), &json!([])), "{ran}");
+}
+
+#[test]
 fn a_run_forgets_staged_cells_no_longer_in_the_notebook() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);
@@ -1156,7 +1438,7 @@ fn several_sessions_on_one_notebook() {
     call("A", "edit_cell", json!({ "cell_id": c, "code": "c = 11" })).unwrap();
 
     let conflict = format!(
-        "ArgumentError: run_conflict::The user or another Endeavor session changed {a} since you last read them, and the cells you're running depend on them. \
+        "ArgumentError: run_conflict::{a} changed since this session last read them (by the user, by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
          Read them (read_cell or read_notebook_code), then run again."
     );
     assert_eq!(call("A", "execute_cell", json!({ "cell_id": b })), Err(conflict.clone()));
@@ -2271,6 +2553,48 @@ fn a_stop_interrupts_the_sessions_own_run() {
     running(true);
     s.notebooks.stop_for("7", NB, false);
     assert_eq!(interrupts(), 2, "a waited run that finished");
+}
+
+#[test]
+fn interrupt_notebook_stops_the_run_and_says_what_it_stopped() {
+    let s = setup();
+    const Z: &str = "33333333-3333-3333-3333-333333333333";
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)"), (Y, "y = 1"), (Z, "stubborn()")]);
+    let interrupt = || s.call("7", "interrupt_notebook", json!({ "notebook_id": NB })).unwrap();
+    let interrupts = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "interrupt").count();
+
+    assert_eq!(interrupt(), json!({ "notebook_id": NB, "interrupted": false, "message": "Nothing was running." }));
+    assert_eq!(interrupts(), 0, "nothing was asked of the engine");
+
+    // The user's run, or any session's: the running cell ends interrupted and the queued one doesn't run.
+    s.engine.with(NB, |nb| (nb.cells[0].running, nb.cells[1].queued) = (true, true));
+    let stopped = interrupt();
+    assert_eq!(
+        stopped,
+        json!({ "notebook_id": NB, "interrupted": true, "stopped": [X], "dropped": [Y], "still_running": [], "process_status": "ready" })
+    );
+    assert_eq!(interrupts(), 1);
+    let read = s.call("7", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["running"], &read["errored"]), (&json!(false), &json!(true)));
+
+    // A cell that doesn't stop within the call is named, with what to do.
+    s.engine.with(NB, |nb| nb.cells[2].running = true);
+    let late = Instant::now() - Duration::from_secs_f64(super::tools::WAIT_SECONDS);
+    let stuck = tool_json(s.notebooks.tool("7", "interrupt_notebook", &json!({ "notebook_id": NB }), &Folder::Process, late).unwrap());
+    assert_eq!((&stuck["interrupted"], &stuck["stopped"], &stuck["still_running"]), (&json!(true), &json!([]), &json!([Z])));
+    assert!(stuck["message"].as_str().unwrap().contains("haven't stopped"), "{stuck}");
+
+    // While the notebook's process starts, the queued cells are dropped at once, and the answer says why (#179).
+    s.engine.with(NB, |nb| {
+        nb.cells[2].running = false;
+        nb.cells[1].code = "starting()".into();
+        (nb.cells[0].queued, nb.cells[1].queued) = (true, true);
+    });
+    let began = Instant::now();
+    let starting = interrupt();
+    assert!(began.elapsed() < Duration::from_secs(2), "no wait for cells that won't run");
+    assert_eq!((&starting["interrupted"], &starting["dropped"], &starting["still_running"]), (&json!(true), &json!([X, Y]), &json!([])), "{starting}");
+    assert!(starting["message"].as_str().unwrap().contains("still starting"), "{starting}");
 }
 
 #[test]

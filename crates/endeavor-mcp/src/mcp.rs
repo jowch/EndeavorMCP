@@ -77,10 +77,11 @@ pub fn is_tool(name: &str) -> bool {
     known_tool(current_name(name), false).is_some()
 }
 
-/// Tools that change the notebook or run code, here or on the server.
-pub const WRITE_TOOLS: [&str; 12] = [
+/// Tools that change the notebook or run code, here or on the server. `interrupt_notebook` only
+/// stops a run, so no mode asks first, but plan mode refuses it and it stays in the session's notebook.
+pub const WRITE_TOOLS: [&str; 13] = [
     "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
-    "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell",
+    "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell", "interrupt_notebook",
 ];
 
 /// Whether a call to `tool` with `arguments` runs code: the calls Ask to run
@@ -172,6 +173,10 @@ pub struct Bridge {
     folders: Mutex<HashMap<String, Option<String>>>,
     /// Each agent session's last tool results, for the app to look up.
     results: Results,
+    /// Each agent session's open or creation the user allowed on a card, with when they did, while
+    /// it is told its engine is still starting (`STARTING_KINDS`): the same call again carries it on
+    /// without asking the user again (`ask_first`).
+    starting_calls: Mutex<HashMap<String, (String, Value, Instant)>>,
     /// `run_shell`'s environment, changed from ours as Julia's was: its
     /// depot, and none of what the helper passes the runtime.
     shell_env: Vec<(&'static str, Option<String>)>,
@@ -249,6 +254,7 @@ impl Bridge {
             policies: Mutex::default(),
             folders: Mutex::default(),
             results: Results::default(),
+            starting_calls: Mutex::default(),
             shell_env,
             standalone: None,
             on_folder: std::sync::OnceLock::new(),
@@ -292,6 +298,8 @@ impl Bridge {
                     _ => "",
                 };
                 eprintln!("[ Info: Session {owner} policy: {policy}{what}");
+                // A yes was given under the mode it was asked in.
+                self.starting_calls.lock().unwrap().remove(&owner);
                 self.policies.lock().unwrap().insert(owner, Policy { policy, asks, edits });
             }
             "endeavor/answer_run" => {
@@ -398,7 +406,7 @@ impl Bridge {
     }
 
     /// Serve `POST /mcp`. Whether the connection can carry another request.
-    pub fn mcp(&self, request: &Head, reader: &mut BufReader<TcpStream>, client: &mut TcpStream) -> io::Result<bool> {
+    pub fn mcp(&self, request: &Head, reader: &mut BufReader<wire::Shared>, client: &mut wire::Shared) -> io::Result<bool> {
         let mut caller = Caller::of(request);
         if caller.host.is_empty()
             && let Some(host) = self.standalone.as_ref().and_then(|s| s.host.clone())
@@ -414,6 +422,8 @@ impl Bridge {
         let began = Instant::now();
         if message["method"] == "notifications/cancelled" && !caller.owner.is_empty() {
             let request = &message["params"]["requestId"];
+            // The user's Stop: a yes for a call waiting on its engine goes with it.
+            self.starting_calls.lock().unwrap().remove(&caller.owner);
             // Waiting for the user's answer, it goes; running code, the run is interrupted.
             if self.notebooks.asks.cancel(&caller.owner, request) {
                 self.notebooks.publish();
@@ -462,8 +472,12 @@ impl Bridge {
             }
         }
         self.notebooks.note_call(&caller.owner);
-        if !caller.owner.is_empty() && acts(name, &arguments) && self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
-            self.notebooks.publish();
+        if !caller.owner.is_empty() && acts(name, &arguments) {
+            if self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
+                self.notebooks.publish();
+            }
+            // Anything else the session does ends what its earlier yes covered.
+            self.starting_calls.lock().unwrap().retain(|owner, (tool, args, _)| *owner != caller.owner || (tool == name && *args == arguments));
         }
         self.notebooks.note_activity(&arguments);
         if let Some(refusal) = refusal {
@@ -517,6 +531,12 @@ impl Bridge {
         } else {
             self.notebooks.tool_unrun(&caller.owner, name, &arguments, &folder, call.began)
         };
+        // An allowed open or creation still waiting on its engine keeps its yes (`ask_first`); one that
+        // ended, or that the agent gave up on, doesn't.
+        let waits_on_engine = matches!(&reply, Err(error) if starting(error)) && !(call.gone)();
+        if matches!(name, "open_notebook" | "new_notebook") && !waits_on_engine {
+            self.starting_calls.lock().unwrap().remove(&caller.owner);
+        }
         match reply {
             Ok(Reply::Json(mut result)) => {
                 self.add_browser_url(name, caller, &mut result);
@@ -572,6 +592,16 @@ impl Bridge {
             }
             return Ok(true);
         }
+        // The user let this same call run on a card, and it was told its engine is still starting
+        // (Julia's download, say), so the agent made it again. It is still that one call: it doesn't
+        // ask again. Only this session's, only the same tool with the same arguments, only while
+        // nothing else came between (another call, a Stop, a change of mode), and only for a while
+        // after the user said yes.
+        let carried_on = self.starting_calls.lock().unwrap().get(owner).is_some_and(|(t, args, allowed)| t == tool && args == arguments && allowed.elapsed() < STARTING_CALL_KEPT);
+        if carried_on {
+            eprintln!("[ Info: Session {owner} makes its allowed {tool} again while the engine starts; not asked again");
+            return Ok(true);
+        }
         if !self.notebooks.followed() {
             return Err(tool_error("ArgumentError: no_app::Endeavor isn't connected to ask the user about this. Try again once Endeavor is open.", false));
         }
@@ -585,6 +615,9 @@ impl Bridge {
         self.notebooks.publish();
         match outcome {
             Outcome::Answered(Answer { allow: true, user_ran }) => {
+                if matches!(tool, "open_notebook" | "new_notebook") {
+                    self.starting_calls.lock().unwrap().insert(owner.clone(), (tool.to_owned(), arguments.clone(), Instant::now()));
+                }
                 let notebook = arguments.get("notebook_id").map(julia_string).unwrap_or_default();
                 if user_ran.as_array().is_some_and(|cells| !cells.is_empty()) {
                     let _ = self.notebooks.run_anyway(&notebook, &user_ran);
@@ -614,6 +647,18 @@ impl Bridge {
         }
         None
     }
+}
+
+/// How long after the user allowed an open or creation the same call again, while its engine is
+/// still starting, goes on without asking (`Bridge::starting_calls`): counted from the yes, so a
+/// start that stalls doesn't keep it for as long as the agent tries. An agent told to try again in a
+/// minute does well within it; a first Julia download that takes longer is asked about again.
+const STARTING_CALL_KEPT: Duration = Duration::from_secs(5 * 60);
+
+/// Whether a tool's error says only that the engine or the notebook is still on its way: its kind
+/// is the whole text before the first `::`.
+fn starting(error: &str) -> bool {
+    error.split_once("::").is_some_and(|(kind, _)| STARTING_KINDS.contains(&kind))
 }
 
 /// How long into a call it waits for the user's answer: what is left of the 60 seconds agents give a
@@ -780,8 +825,8 @@ fn closed(_socket: &TcpStream) -> bool {
 /// Whether the connection can carry another request.
 pub(crate) fn post(
     request: &Head,
-    reader: &mut BufReader<TcpStream>,
-    client: &mut TcpStream,
+    reader: &mut BufReader<wire::Shared>,
+    client: &mut wire::Shared,
     keep_alive: bool,
     issue_session: bool,
     reply: impl FnOnce(&Value, &dyn Fn() -> bool) -> Option<String>,
@@ -795,7 +840,7 @@ pub(crate) fn post(
         http::respond(client, "400 Bad Request", None, br#"{"error":"Invalid JSON"}"#, keep_alive)?;
         return Ok(keep_alive);
     };
-    let held = Held::new(client.try_clone()?, request, &message, keep_alive);
+    let held = Held::new(client.clone(), request, &message, keep_alive);
     let reply = reply(&message, &|| held.waiting());
     if held.streaming() {
         if let Some(reply) = reply {
@@ -838,7 +883,7 @@ const KEEP_WAITING: Duration = Duration::from_secs(15);
 /// seconds unless `MCP_TOOL_TIMEOUT` or the server's `timeout` says otherwise,
 /// progress or not; so the wait itself ends before that (`Asks::wait`).
 struct Held {
-    socket: TcpStream,
+    socket: wire::Shared,
     /// The client accepts an event stream over HTTP/1.1 (chunked).
     streams: bool,
     keep_alive: bool,
@@ -848,7 +893,7 @@ struct Held {
 }
 
 impl Held {
-    fn new(socket: TcpStream, request: &Head, message: &Value, keep_alive: bool) -> Held {
+    fn new(socket: wire::Shared, request: &Head, message: &Value, keep_alive: bool) -> Held {
         let streams = request.version() == "HTTP/1.1" && request.header("Accept").is_some_and(|accept| accept.contains("text/event-stream"));
         let progress_token = message["params"]["_meta"].get("progressToken").filter(|t| t.is_string() || t.is_number()).cloned();
         Held { socket, streams, keep_alive, progress_token, sent: RefCell::new(None) }
@@ -1166,7 +1211,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (10, "00783e892a3fcb3d"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (18, "112ad351ec43381e"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1213,7 +1258,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (10, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (18, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]
@@ -1257,7 +1302,7 @@ mod tests {
         let names = |result: Value| result["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(
             ask("initialize", false)["instructions"],
-            "These tools edit and run a live Pluto (Julia) notebook that the user sees in Endeavor, next to this chat. \
+            "These tools edit and run a live notebook, in Julia (Pluto) or R (Ember), that the user sees in Endeavor, next to this chat. \
 Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
 how to find this session's notebook, the read-edit-run loop, and the rules for a cell. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`."
         );
@@ -1340,9 +1385,10 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
     #[test]
     fn manual_holds_every_write_and_no_read() {
         let held = |tool: &str, policy: &str, edits: bool| asks_first(tool, &json!({ "cell_id": "a", "code": "1" }), policy, edits);
-        for tool in WRITE_TOOLS {
+        for tool in WRITE_TOOLS.iter().filter(|tool| **tool != "interrupt_notebook") {
             assert!(held(tool, "ask", true), "{tool} in Manual");
         }
+        assert!(!held("interrupt_notebook", "ask", true), "stopping a run never asks");
         for tool in ["read_cell", "read_notebook_code", "list_notebooks", "view_cell_output", "search_code", "open_notebook", "keep_notebook_alive", "read_file"] {
             assert!(!held(tool, "ask", true) && !held(tool, "auto", true), "{tool} only reads");
         }
@@ -1362,7 +1408,7 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         assert_eq!(text("IOError: readdir(\"/a::b\"): denied"), r#"{"error":"readdir(\"/a","message":"b\"): denied"}"#);
         assert_eq!(tool_error("x", false)["isError"], true);
         // Still starting is not a failure: the agent waits and calls again, and the code stays.
-        let starting = tool_error("julia_starting::Julia 1.12.6 is starting and loading Pluto. Try again in a minute.", false);
+        let starting = tool_error("julia_starting::Julia 1.12.6 is starting and loading Pluto (40 seconds so far).", false);
         assert_eq!(starting["isError"], false);
         assert_eq!(text("julia_starting::Julia is starting"), r#"{"error":"julia_starting","message":"Julia is starting"}"#);
         assert_eq!(tool_error("r_installing::Installing Ember", false)["isError"], false);

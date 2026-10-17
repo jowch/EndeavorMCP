@@ -386,7 +386,8 @@ be a folder's name on every system.
 ready. The session keeps it in memory, and the front adds it to each
 request, as it does for a runtime on this computer.
 
-**The session key.** The front makes a key for its run and sends it on
+**The session key.** The front makes a key for its run (under Claude Code,
+from the conversation's id, so a resumed conversation keeps it) and sends it on
 every request, with the server's name once it uses a server. The front
 outlives a dropped `ssh`, so the agent keeps its notebook when the
 connection is made again. The key is the same on every runtime the session
@@ -903,7 +904,13 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
   (matcher `startup`, so not on resume, clear or compact) runs it in the
   background so the download is usually done before the server starts.
 - Without `curl`, `install.sh` uses `wget` under `timeout`, or under a
-  watchdog of its own, so a download over 15 minutes is given up on.
+  watchdog of its own, so a download over 15 minutes is given up on. curl
+  follows a redirect only to https. GNU Wget can't be told to, so it prints
+  the headers and a download that went through a redirect to anything else is
+  thrown away. Wget2 (`wget` on Fedora 40 and later) prints no headers under
+  `-q`, so from an https address it gets `--https-enforce=hard` instead. The same goes for the helper fetched for a server and for
+  `endeavor update`. PowerShell 5.1's `install.ps1` has no such check yet
+  (#98).
 - `ENDEAVOR_BIN` names a binary to run instead (`docs/testing.md`).
 - `endeavor update` leaves a binary in `<bin>` (or `bin-from/…`) alone and
   says the plugin manages it, and how to fetch the newest now.
@@ -1074,6 +1081,9 @@ agents).
   against a damaged download and not a tampered release. The same holds for
   the install scripts and `endeavor update`. The app sends its bundled helper
   unchecked.
+- A Helpers run whose macOS or Windows build failed keeps the checksums an
+  earlier run of the same key published for them, since those builds stay in
+  the release.
 
 ## Open
 

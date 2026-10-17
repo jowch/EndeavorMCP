@@ -7,7 +7,7 @@
 //! An error is the text of the exception Julia raised: `ArgumentError: kind::message`
 //! names its kind (see `mcp::tool_error`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 use super::{Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, uuid_value};
 use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
+use wire::backend::Backend;
 
 /// How long the app's report of a user's run counts. (Also sent as the
 /// `timeout` of runs the engine is not asked to wait for, which it ignores.)
@@ -26,13 +27,18 @@ pub(super) const TIMEOUT_SECONDS: f64 = 60.0;
 pub const WAIT_SECONDS: f64 = 45.0;
 /// The least a run is waited for, however much of `WAIT_SECONDS` went before.
 pub const WAIT_FLOOR_SECONDS: f64 = 5.0;
+/// The most `interrupt_notebook` waits for the cells to stop. One still running then is
+/// usually in compiled code that ignores interrupts; Ember offers its restart 3 s after a Stop.
+const INTERRUPT_WAIT_SECONDS: f64 = 10.0;
 /// Claude accepts images up to about 5 MB; plots are typically tens of KB.
 const MAX_IMAGE_BYTES: usize = 4_000_000;
 /// How long a package step can take before the agent is told it is taking
 /// longer than usual and to stop waiting unless the package log moves.
 const INSTALL_USUAL_SECONDS: u64 = 600;
-/// How `read_notebook_code` starts each cell, as Pluto's file does.
+/// How `read_notebook_code` starts each cell of a Pluto notebook, as Pluto's file does.
 const CELL_MARKER: &str = "# ╔═╡ ";
+/// And of an Ember notebook, as an Ember `.R` file does.
+const EMBER_CELL_MARKER: &str = "# %% id=";
 /// How much of each output's text a change's receipt carries; `read_cell` has
 /// the rest.
 const RECEIPT_TEXT_MAX: usize = 2_000;
@@ -82,6 +88,7 @@ impl Notebooks {
             "open_notebook" => t.open_notebook(folder),
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),
+            "interrupt_notebook" => t.interrupt_notebook(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
         }?;
         Ok(Reply::Json(result))
@@ -167,17 +174,17 @@ impl Notebooks {
     /// run of the targets runs these too, so they don't fail on names those
     /// cells define. None while the notebook isn't running code.
     fn never_run_upstream(&self, nb: &Snapshot, targets: &[String]) -> Result<Vec<String>, String> {
+        Ok(self.upstream(nb, targets)?.into_iter().filter(|id| nb.cells.get(id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).collect())
+    }
+
+    /// The cells `targets` depend on, directly or not, the targets left out,
+    /// in notebook order. None while the notebook isn't running code.
+    fn upstream(&self, nb: &Snapshot, targets: &[String]) -> Result<Vec<String>, String> {
         if targets.is_empty() || !nb.execution_allowed {
             return Ok(Vec::new());
         }
         let upstream = self.graph(&nb.id, GraphQuery { fresh: true, edges: true, ..Default::default() })?.upstream_of(targets);
-        Ok(nb
-            .order
-            .iter()
-            .filter(|id| upstream.contains(*id) && !targets.contains(id))
-            .filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c)))
-            .cloned()
-            .collect())
+        Ok(nb.order.iter().filter(|id| upstream.contains(*id) && !targets.contains(id)).cloned().collect())
     }
 }
 
@@ -312,7 +319,7 @@ impl Call<'_> {
             return Ok(None);
         }
         Ok(Some(format!(
-            "run_conflict::The user or another Endeavor session changed {} since you last read them, and the cells you're running depend on them. \
+            "run_conflict::{} changed since this session last read them (by the user, by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
              Read them (read_cell or read_notebook_code), then run again.",
             conflicted.join(", ")
         )))
@@ -329,8 +336,9 @@ impl Call<'_> {
     /// or not.
     fn run(&self, nb: &Snapshot, targets: &[String], wait: bool) -> Result<Ran, String> {
         self.nbs.with_state(&nb.id, |state| state.prune(nb));
-        let needed = self.nbs.never_run_upstream(nb, targets)?;
-        let cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
+        let upstream = self.nbs.upstream(nb, targets)?;
+        let needed: Vec<String> = upstream.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).cloned().collect();
+        let mut cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
         let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
         let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout }))?;
         let ids = |key: &str| reply[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
@@ -340,6 +348,28 @@ impl Call<'_> {
             return Err(argument_error(&format!("process_exited::{}", exited_message(super::engines::language(super::engines::of_path(&nb.path)), cell.as_deref()))));
         }
         let mut warnings = Vec::new();
+        // Cells the targets need that the engine ran first, as Ember does one
+        // edited since it last ran (a staged edit) or stale (an ancestor ran
+        // since): this run's cells too, so the receipt shows them (#187).
+        // Known once it is over, from what ran rather than from the engine's
+        // plan, so it misses an ancestor still running when the wait ends (it
+        // stays staged) and counts one the user ran during the wait.
+        let mut also = Vec::new();
+        if reply["accepted"] == true && wait {
+            let now = self.nbs.snapshot(&nb.id)?;
+            also = upstream
+                .iter()
+                .filter(|id| !cells.contains(id))
+                .filter(|id| match (nb.cells.get(*id), now.cells.get(*id)) {
+                    (Some(before), Some(after)) => !(after.running || after.queued) && after.last_run > before.last_run,
+                    _ => false,
+                })
+                .cloned()
+                .collect();
+            if !also.is_empty() {
+                cells = nb.order.iter().filter(|id| also.contains(id) || needed.contains(id)).chain(targets).cloned().collect();
+            }
+        }
         let mut going = Vec::new();
         if reply["accepted"] != true {
             let status = reply["process_status"].as_str().unwrap_or_default();
@@ -364,12 +394,14 @@ impl Call<'_> {
             self.nbs.with_state(&nb.id, |state| {
                 // Its cells that haven't finished: a waited run's that did finish are done, and
                 // so are all of a run that ended before this records it.
-                let finished = ids("completed");
+                let finished: Vec<String> = ids("completed").into_iter().chain(also.iter().cloned()).collect();
                 let run = reply["run"].as_str().map(str::to_owned);
                 let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
                 state.ended.retain(|r| Some(r) != run.as_ref());
                 let unfinished: HashSet<String> = cells.iter().filter(|c| !finished.contains(c)).cloned().collect();
-                if !self.owner.is_empty() && !ended && !unfinished.is_empty() {
+                // A run the engine named goes on until its `run_finished`, the cells that depend
+                // on its cells too, even once its own cells have finished.
+                if !self.owner.is_empty() && !ended && (run.is_some() || !unfinished.is_empty()) {
                     state.started.push(Started { owner: self.owner.to_owned(), run, cells: unfinished });
                 }
                 for cell in &cells {
@@ -381,6 +413,9 @@ impl Call<'_> {
         }
         if reply["accepted"] == true && !needed.is_empty() {
             warnings.push(format!("also_ran::Also ran {}: cells this run needs that had never run.", needed.join(", ")));
+        }
+        if !also.is_empty() {
+            warnings.push(format!("also_ran::Also ran {}: cells this run needs that were edited or stale since they last ran.", also.join(", ")));
         }
         Ok(Ran { warnings, cells, going })
     }
@@ -462,7 +497,6 @@ impl Call<'_> {
         let Ran { mut warnings, cells: cells_run, going } = ran;
         let cells_run = &cells_run[..];
         let nb = self.nbs.snapshot(id)?;
-        let graph = self.nbs.graph(id, GraphQuery::default())?;
         // The cells of a run that ran out of its wait that are running now, read
         // after the wait: some may have finished meanwhile.
         let still_running: Vec<String> = nb.order.iter().filter(|id| going.contains(id) && nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect();
@@ -477,13 +511,14 @@ impl Call<'_> {
             },
         };
         // A blocked run touched no cell; existing outputs are not this run's result.
-        // A cell still running has the output of its last run.
+        // A cell still running or queued has the output of its last run, so it
+        // isn't listed: a run not waited for comes back before its cells finish (#190).
         let ran: &[String] = if status == "blocked" { &[] } else { cells_run };
         let changed: Vec<Value> = ran
             .iter()
             .filter(|id| !still_running.contains(id))
             .filter_map(|id| Some((id, nb.cells.get(id)?)))
-            .filter(|(_, cell)| !cell.output.is_empty())
+            .filter(|(_, cell)| !cell.output.is_empty() && !cell.running && !cell.queued)
             .map(|(id, cell)| {
                 let mut entry = json!({ "cell_id": id, "output_summary": cell.output });
                 if let Some(error) = &cell.error {
@@ -496,11 +531,14 @@ impl Call<'_> {
             })
             .collect::<Result<_, String>>()?;
         let pending = self.pending_run(&nb);
+        // The notebook's order isn't in it: two lists of every cell's id grow
+        // with the notebook and come back on every change, and an agent that
+        // needs an order asks for it (`get_cell_order`, `get_execution_order`;
+        // cells that can't run, in a cycle or defining a name twice, show
+        // their error in `read_cell`).
         let receipt = json!({
             "applied": true,
             "mutation": mutation,
-            "cell_order": nb.order,
-            "execution_order": graph.execution_order(),
             "affected_cells": cells_run,
             "execution": { "status": status },
             "outputs": { "changed": changed },
@@ -523,7 +561,7 @@ impl Call<'_> {
                 "message".into(),
                 json!(format!(
                     "The run is still going and continues: a waited run returns after at most {WAIT_SECONDS} seconds. \
-                     Call list_notebooks (`running` lists the cells running) or read_cell to see when it ends. Don't run the cells in `execution.still_running` again."
+                     Call read_cell on one of them: it waits up to {WAIT_SECONDS} seconds for the cell to finish. Don't run the cells in `execution.still_running` again."
                 )),
             );
         }
@@ -560,6 +598,24 @@ impl Call<'_> {
         out
     }
 
+    /// The cell an edit changed, as `read_cell` shows it without its code:
+    /// the agent sent that code, and gets it back from `read_cell`. While the
+    /// edited cell is running or queued, its output and error are the ones from
+    /// before the edit, so they are `previous_output`, `previous_errored` and
+    /// `previous_error` (#190).
+    fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
+        let mut out = self.cell_json(nb, id);
+        out.remove("code");
+        if out["running"] == true || out["queued"] == true {
+            for key in ["output", "errored", "error"] {
+                if let Some(previous) = out.remove(key) {
+                    out.insert(format!("previous_{key}"), previous);
+                }
+            }
+        }
+        out
+    }
+
     fn list_notebooks(&self) -> Result<Value, String> {
         let snapshots = self.nbs.snapshots()?;
         let bound = self.nbs.bound(self.owner);
@@ -572,14 +628,54 @@ impl Call<'_> {
         Ok(Value::Array(snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()))
     }
 
+    /// Wait, within the call's `WAIT_SECONDS`, for the runs this session started in `nb` to end:
+    /// the cells seen running or that finished a run during the wait, with the ones still running
+    /// or queued if a run is still going at its end. A queued cell that never ran (an interrupt
+    /// dropped it) isn't one. A cell another run ran meanwhile counts too: the snapshots don't
+    /// say whose run ran a cell.
+    fn wait_for_own_run(&self, nb: &Snapshot) -> Result<(Vec<String>, Vec<String>), String> {
+        let mut nb = self.nbs.snapshot(&nb.id)?;
+        let before: HashMap<String, f64> = nb.cells.iter().map(|(id, c)| (id.clone(), c.last_run)).collect();
+        let busy = |nb: &Snapshot, id: &String| nb.cells.get(id).is_some_and(|c| c.running || c.queued);
+        let running = |nb: &Snapshot| nb.cells.iter().filter(|(_, c)| c.running).map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let mut ran: HashSet<String> = running(&nb).into_iter().collect();
+        let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
+        let mut going = Vec::new();
+        while self.nbs.own_run_going(self.owner, &nb) {
+            if Instant::now() >= deadline {
+                going = nb.order.iter().filter(|id| busy(&nb, id)).cloned().collect();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            if (self.gone)() {
+                return Err(argument_error("client_gone::The caller hung up during the wait"));
+            }
+            nb = self.nbs.snapshot(&nb.id)?;
+            ran.extend(running(&nb));
+        }
+        ran.extend(nb.cells.iter().filter(|(id, c)| before.get(*id).is_some_and(|last| c.last_run != *last)).map(|(id, _)| id.clone()));
+        // A cell still busy once the session's runs ended is another run's.
+        ran.retain(|id| !busy(&nb, id) || going.contains(id));
+        ran.extend(going.iter().cloned());
+        Ok((nb.order.iter().filter(|id| ran.contains(*id)).cloned().collect(), going))
+    }
+
     fn read_cell(&self) -> Result<Value, String> {
         let mut nb = self.notebook()?;
         let cell = self.cell(&nb)?;
         // A cell waiting on a package step is waited for, within the call's
         // `WAIT_SECONDS`: an agent that reads it at once sees no change and
-        // gives up long before a first install ends.
+        // gives up long before a first install ends. So is a cell that a run
+        // this session started is running or will run: an agent that reads it
+        // at once reads it again, each read a whole request of the agent's
+        // context. The user's own run, or another session's, isn't waited for.
+        // (Asked on every read, so that a run seen to end is forgotten.)
+        let waits = |nb: &Snapshot| {
+            let own = self.nbs.own_run_going(self.owner, nb);
+            nb.cells.get(&cell).is_some_and(|c| (c.queued && nb.installing()) || ((c.running || c.queued) && own))
+        };
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
-        while nb.installing() && nb.cells.get(&cell).is_some_and(|c| c.queued) && Instant::now() < deadline {
+        while waits(&nb) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(500));
             // Nobody will see this read, so it doesn't count as one.
             if (self.gone)() {
@@ -629,13 +725,16 @@ impl Call<'_> {
         let code = self.arg("code")?;
         self.require_fresh_read(&nb, &cell)?;
         let run_after = bool_arg(self.args, "run_after", false)?;
+        let folded = optional_folded(self.args.get("folded"))?;
         let before = nb.cells[&cell].code.clone();
-        let applied = self.apply(&nb.id, vec![json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": before })])?;
+        let mut ops = vec![json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": before })];
+        ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
+        let applied = self.apply(&nb.id, ops)?;
         let code = code.as_str().unwrap_or_default();
         self.edited(&nb.id, &applied, &cell, &before, code);
         let ran = self.run_or_stage(&nb, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "edit_cell", "cell_id": cell }), ran, None)?;
-        receipt.extend(self.cell_json(&after, &cell));
+        receipt.extend(self.changed_cell_json(&after, &cell));
         Ok(Value::Object(receipt))
     }
 
@@ -658,18 +757,21 @@ impl Call<'_> {
             _ => return Err(argument_error("invalid_argument::cells must be a list of {cell_id, code}")),
         };
         let mut cells = Vec::new();
+        let mut folds = Vec::new();
         for edit in &edits {
             if !edit.is_object() {
                 return Err(argument_error("invalid_argument::cells must be a list of {cell_id, code}"));
             }
             let cell = cell_named(&nb, edit.get("cell_id").ok_or_else(|| key_error("cell_id"))?)?;
             self.require_fresh_read(&nb, &cell)?;
+            folds.push(optional_folded(edit.get("folded"))?);
             cells.push(cell);
         }
         let mut ops = Vec::new();
-        for (edit, cell) in edits.iter().zip(&cells) {
+        for ((edit, cell), folded) in edits.iter().zip(&cells).zip(&folds) {
             let code = edit.get("code").ok_or_else(|| key_error("code"))?;
             ops.push(json!({ "op": "set_code", "cell_id": cell, "code": code, "expected": nb.cells[cell].code }));
+            ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
         }
         let applied = self.apply(&nb.id, ops)?;
         for (edit, cell) in edits.iter().zip(&cells) {
@@ -677,7 +779,11 @@ impl Call<'_> {
         }
         self.mark_pending(&nb.id, &cells);
         let mutation = json!({ "type": "edit_cells", "cell_ids": cells });
-        Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), None)?.0))
+        let (mut receipt, after) = self.receipt(&nb.id, mutation, &[], Vec::new(), None)?;
+        // Each cell's fold after the edits, as `edit_cell`'s `code_folded` says its cell's.
+        let folds: Map<String, Value> = cells.iter().filter_map(|c| Some((c.clone(), json!(after.cells.get(c)?.folded)))).collect();
+        receipt["mutation"]["code_folded"] = Value::Object(folds);
+        Ok(Value::Object(receipt))
     }
 
     fn add_cell(&self) -> Result<Value, String> {
@@ -713,6 +819,8 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, "", &code);
         let ran = self.run_or_stage(&added, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), ran, None)?;
+        // With its code: the app learns a new cell's code from this reply
+        // (Endeavor's `CellCodes::observe`), since the call had no id for it.
         receipt.extend(self.cell_json(&after, &cell));
         Ok(Value::Object(receipt))
     }
@@ -781,6 +889,16 @@ impl Call<'_> {
             }
         }
         if targets.is_empty() {
+            // Nothing staged, but a run this session started may still be going (its dependents,
+            // say): a waited call waits for it, as `read_cell` does, rather than say it completed
+            // while it runs (#151).
+            // Its receipt says how the cells that ran meanwhile went: "errored" if one of them
+            // did, as for the cells a call runs itself (#171).
+            if wait == true {
+                let (ran, going) = self.wait_for_own_run(&nb)?;
+                let status = ran.is_empty().then_some("completed");
+                return Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, Ran { warnings: Vec::new(), cells: ran, going }, status)?.0));
+            }
             return Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?.0));
         }
         if let Some(missing) = targets.iter().find(|id| !nb.cells.contains_key(*id)) {
@@ -825,7 +943,10 @@ impl Call<'_> {
         };
         self.apply(&nb.id, vec![json!({ "op": "move", "cell_id": cell, "index": index })])?;
         let mutation = json!({ "type": "move_cell", "cell_id": cell, "old_index": old_index + 1, "new_index": index + 1 });
-        Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?.0))
+        // A move is about the order, so its receipt has it.
+        let (mut receipt, after) = self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?;
+        receipt.insert("cell_order".into(), json!(after.order));
+        Ok(Value::Object(receipt))
     }
 
     fn read_notebook_code(&self) -> Result<Value, String> {
@@ -841,6 +962,9 @@ impl Call<'_> {
             Some("execution") => self.nbs.graph(&nb.id, GraphQuery::default())?.order,
             _ => return Err(argument_error(&format!("invalid_order::order must be 'execution' or 'visual', got '{}'", julia_string(&order)))),
         };
+        // An Ember file's text cells are already `#'` comments, so they need no `# md:`.
+        let ember = self.nbs.backend_of(&nb.id) == Backend::Ember;
+        let marker = if ember { EMBER_CELL_MARKER } else { CELL_MARKER };
         let mut ids = Vec::new();
         let mut blocks = Vec::new();
         let mut left_out = 0;
@@ -853,14 +977,14 @@ impl Call<'_> {
                 left_out += 1;
                 continue;
             }
-            let body = if cell.markdown {
+            let body = if cell.markdown && !ember {
                 format!("# md:\n{}", cell.code)
             } else if julia_strip(&cell.code).is_empty() {
                 "# (empty)".to_owned()
             } else {
                 cell.code.clone()
             };
-            blocks.push(format!("{CELL_MARKER}{id}\n{body}"));
+            blocks.push(format!("{marker}{id}\n{body}"));
             ids.push(id);
         }
         for id in &ids {
@@ -1113,7 +1237,62 @@ impl Call<'_> {
         if ran {
             let nb = self.notebook()?;
             self.nbs.with_state(&nb.id, |state| state.prune(&nb));
+            // The run of the whole notebook is the session's, as one `submit_changes` starts is: a
+            // read or a waited submit waits for it (#170). The engine names it; one that didn't
+            // goes on while a cell it started hasn't finished.
+            let run = allowed["run"].as_str().map(str::to_owned);
+            self.nbs.with_state(&nb.id, |state| {
+                let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
+                state.ended.retain(|r| Some(r) != run.as_ref());
+                if !self.owner.is_empty() && !ended {
+                    state.started.push(Started { owner: self.owner.to_owned(), run, cells: nb.order.iter().cloned().collect() });
+                }
+            });
             result["run_warnings"] = json!(["async_execution::allow_execution queued non-blocking notebook run; poll read_cell for completion"]);
+        }
+        Ok(result)
+    }
+
+    /// The page's Stop, for the agent (#161): interrupt the notebook's run, whoever started it.
+    /// The running cells end interrupted and the queued ones don't run. Pluto's interrupt
+    /// returns once the run has stopped (ending the process if a cell won't); Ember's sends
+    /// SIGINT and returns, so the cells are watched until they stop, for at most
+    /// `INTERRUPT_WAIT_SECONDS` and within the call's `WAIT_SECONDS`.
+    fn interrupt_notebook(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        let busy = |nb: &Snapshot, id: &String| nb.cells.get(id).is_some_and(|c| c.running || c.queued);
+        let running: Vec<String> = nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running)).cloned().collect();
+        let queued: Vec<String> = nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.queued && !c.running)).cloned().collect();
+        if running.is_empty() && queued.is_empty() {
+            return Ok(json!({ "notebook_id": nb.id, "interrupted": false, "message": "Nothing was running." }));
+        }
+        let reply = self.nbs.call("interrupt", json!({ "notebook_id": nb.id }))?;
+        // The notebook's process is still starting, so its run hasn't started a cell, and it skips
+        // them all once the process is up (#179): they are dropped, however long the start takes.
+        let pending = reply["pending"] == true;
+        let mut now = self.nbs.snapshot(&nb.id)?;
+        let deadline = Instant::now() + self.wait_left().min(Duration::from_secs_f64(INTERRUPT_WAIT_SECONDS));
+        while !pending && running.iter().chain(&queued).any(|id| busy(&now, id)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(250));
+            if (self.gone)() {
+                return Err(argument_error("client_gone::The caller hung up during the wait"));
+            }
+            now = self.nbs.snapshot(&nb.id)?;
+        }
+        let (still_running, stopped): (Vec<String>, Vec<String>) = running.into_iter().partition(|id| busy(&now, id));
+        let dropped: Vec<String> = queued.into_iter().filter(|id| pending || !busy(&now, id)).collect();
+        let mut result = json!({
+            "notebook_id": nb.id, "interrupted": reply["interrupted"] == true || !stopped.is_empty() || !dropped.is_empty(),
+            "stopped": stopped, "dropped": dropped, "still_running": still_running, "process_status": now.process_status,
+        });
+        if pending {
+            result["message"] = json!("The notebook's process is still starting. Its run will skip these cells once the process is up.");
+        } else if !result["still_running"].as_array().unwrap().is_empty() {
+            result["message"] = json!(
+                "These cells haven't stopped yet. Compiled code often stops only when it returns. Read them later; if one doesn't stop, the user can restart the notebook from its page, which clears every value."
+            );
+        } else if now.process_status != nb.process_status && now.process_status == "no_process" {
+            result["message"] = json!("A cell didn't stop, so the notebook's process was ended. Its values are gone: the next run starts a new process.");
         }
         Ok(result)
     }
@@ -1193,6 +1372,15 @@ fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
         None => Ok(default),
         Some(Value::Bool(flag)) => Ok(*flag),
         Some(_) => Err(argument_error(&format!("invalid_argument::{name} must be a boolean"))),
+    }
+}
+
+/// An edit's `folded`: a Bool, or left out (or null) to keep the cell's fold as it is.
+fn optional_folded(value: Option<&Value>) -> Result<Option<bool>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(folded)) => Ok(Some(*folded)),
+        Some(_) => Err(argument_error("invalid_argument::folded must be a boolean")),
     }
 }
 

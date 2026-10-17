@@ -812,3 +812,64 @@ fn wget_runs_under_timeout_when_there_is_one() {
     let log = std::fs::read_to_string(place.dir.join("fake/timeout.log")).unwrap();
     assert!(log.lines().all(|l| l.starts_with("900 wget") || l.starts_with("60 wget")) && log.contains("900 wget"), "{log}");
 }
+
+#[test]
+fn under_wget_a_download_redirected_away_from_https_is_thrown_away() {
+    let place = Place::new("wgetredirect");
+    place.release(KEY);
+    let path = place.path_without(&["curl", "wget"]);
+    let dir = place.dir.join("bin");
+    let exe = dir.join(if cfg!(windows) { "endeavor.exe" } else { "endeavor" });
+    // A wget that serves file:// URLs, and prints headers (its -S) saying the binary came through a redirect to `to`.
+    let fake = |to: &str| {
+        let _ = std::fs::remove_file(place.dir.join("fake/wget"));
+        place.fake(
+            "wget",
+            &format!("#!/bin/sh\nwhile [ $# -gt 1 ]; do case $1 in -O) out=$2; shift;; esac; shift; done\nurl=$1\ncase $url in *endeavor-{KEY}-*) printf '  HTTP/1.1 302 Found\\n  Location: {to}\\n  HTTP/1.1 200 OK\\n' >&2;; esac\nif [ \"$out\" = - ]; then cat \"${{url#file://}}\"; else cp \"${{url#file://}}\" \"$out\"; fi\n"),
+        );
+    };
+    fake("http://mirror.example/endeavor");
+    let out = place.command("install.sh", &["--key", KEY, "--dir", dir.to_str().unwrap()], &place.url()).env("PATH", &path).stdin(Stdio::null()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && stderr.contains("was redirected to http://mirror.example/endeavor, which isn't https"), "{stderr}");
+    assert!(!exe.exists());
+    assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "the download was left behind");
+    fake("https://release-assets.example/endeavor?sig=1");
+    let out = place.command("install.sh", &["--key", KEY, "--dir", dir.to_str().unwrap()], &place.url()).env("PATH", &path).stdin(Stdio::null()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(exe.exists());
+}
+
+#[test]
+fn wget2_which_prints_no_headers_is_told_to_keep_to_https() {
+    let place = Place::new("wget2");
+    place.release(KEY);
+    let path = place.path_without(&["curl", "wget"]);
+    let dir = place.dir.join("bin");
+    let log = place.dir.join("fake/wget.log");
+    // A Wget2 that serves https://release.example/<file> from the release folder and notes its arguments.
+    let fake = |version: &str| {
+        let _ = std::fs::remove_file(place.dir.join("fake/wget"));
+        let _ = std::fs::remove_file(&log);
+        place.fake(
+            "wget",
+            &format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo '{version}'; exit 0; }}\necho \"$*\" >> '{log}'\nwhile [ $# -gt 1 ]; do case $1 in -O) out=$2; shift;; esac; shift; done\nfile='{release}'/${{1##*/}}\nif [ \"$out\" = - ]; then cat \"$file\"; else cp \"$file\" \"$out\"; fi\n",
+                log = log.display(),
+                release = place.dir.join("release").display(),
+            ),
+        );
+    };
+    let install = |into: &Path| place.command("install.sh", &["--key", KEY, "--dir", into.to_str().unwrap()], "https://release.example/helpers").env("PATH", &path).stdin(Stdio::null()).output().unwrap();
+    fake("GNU Wget2 2.1.0 - multithreaded metalink/file/website downloader");
+    let out = install(&dir.join("2"));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.lines().count() >= 2 && calls.lines().all(|l| l.contains("--https-enforce=hard")), "{calls}");
+    // GNU Wget 1.x refuses the switch, and its headers are read instead.
+    fake("GNU Wget 1.21.4 built on linux-gnu.");
+    let out = install(&dir.join("1"));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.lines().count() >= 2 && calls.lines().all(|l| !l.contains("--https-enforce") && l.contains("-S")), "{calls}");
+}

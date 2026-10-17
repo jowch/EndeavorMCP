@@ -920,6 +920,24 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
     assert_eq!(text(&mcp(&core, &shell(7), &caller).1)["stdout"], "ran\n");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn run_shells_command_starts_with_the_signal_mask_the_core_started_with() {
+    let dir = state_dir("core-shell-mask");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{"owner":"7","policy":"auto","asks":true}}"#);
+    let blocked = |status: &str| status.lines().find(|l| l.starts_with("SigBlk:")).map(str::to_owned);
+    let shell = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_shell","arguments":{"command":"cat /proc/self/status"}}}"#;
+    let reply: serde_json::Value = serde_json::from_str(&mcp(&core, shell, &caller).1).unwrap();
+    let text: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    // The core blocks SIGINT, SIGTERM and SIGHUP for its own thread; a command it starts doesn't (#165).
+    let core_status = std::fs::read_to_string(format!("/proc/{}/status", core.process.id())).unwrap();
+    assert_ne!(blocked(&core_status), blocked(&std::fs::read_to_string("/proc/thread-self/status").unwrap()), "the core's mask is its own");
+    assert_eq!(blocked(text["stdout"].as_str().unwrap()), blocked(&std::fs::read_to_string("/proc/thread-self/status").unwrap()), "{text}");
+}
+
 #[test]
 fn a_held_call_answers_as_an_event_stream_at_once() {
     let dir = state_dir("core-held-stream");
@@ -1146,6 +1164,7 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let hint = |name: &str| reply["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
     assert_eq!((hint("edit_cell"), hint("read_cell"), hint("allow_execution")), (false.into(), true.into(), false.into()));
     assert_eq!(hint("open_notebook"), false, "it can run the notebook");
+    assert_eq!(hint("interrupt_notebook"), false, "it stops a run");
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")), "Julia answers only the adapter's calls");
 }
 
@@ -1190,11 +1209,11 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let tools = reply["result"]["tools"].as_array().unwrap();
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), 29);
-    assert_eq!((&names[..3], &names[26..]), (&["list_notebooks", "read_cell", "view_cell_output"][..], &["list_folder", "read_file", "run_shell"][..]), "the notebook tools, then the host tools");
-    let hints: Vec<_> = tools[26..].iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
+    assert_eq!(names.len(), 30);
+    assert_eq!((&names[..3], &names[27..]), (&["list_notebooks", "read_cell", "view_cell_output"][..], &["list_folder", "read_file", "run_shell"][..]), "the notebook tools, then the host tools");
+    let hints: Vec<_> = tools[27..].iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
     assert_eq!(hints, [true, true, false]);
-    assert_eq!(tools[28]["inputSchema"]["required"], serde_json::json!(["command"]));
+    assert_eq!(tools[29]["inputSchema"]["required"], serde_json::json!(["command"]));
     assert!(!mcp(&core, list, &[]).1.contains("list_folder"), "not on this Mac");
 
     // Answered here, and the app hears the notebooks' state after each call.
@@ -1938,6 +1957,125 @@ fn julia_status(core: &Core) -> serde_json::Value {
 }
 
 #[test]
+fn a_call_made_while_embers_install_runs_waits_for_it_as_the_first_did() {
+    require_debug_build();
+    let dir = state_dir("core-r-install-wait");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    // An R whose Ember install takes 5 s and then fails.
+    let r = dir.join("slow-install-r");
+    std::fs::write(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 5; exit 1;; esac\nexit 1\n").unwrap();
+    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = temp_folder("core-r-install-wait-home");
+    let home = home.display().to_string();
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
+    let core = Core::try_start_with(&dir, &[("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str()), ("ENDEAVOR_TEST_EMBER_WAIT_SECS", "2")], &args).unwrap();
+    let folder = temp_folder("core-r-install-wait-notebooks");
+    let path = folder.join("a.R");
+    std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
+    give_folder(&core, "s1", &folder);
+    let open = || tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
+    // The call that starts the install waits its 2 s.
+    let began = std::time::Instant::now();
+    assert_eq!(open()["error"], "r_installing");
+    assert!(began.elapsed() >= Duration::from_secs(2), "the first call waited");
+    // The next waits too, as the answer says, and has the install's end once it comes (#175).
+    let began = std::time::Instant::now();
+    let second = open();
+    assert!(began.elapsed() >= Duration::from_millis(1500), "the second call waited too: {second}");
+    let third = open();
+    assert_ne!(third["error"], "r_installing", "the install ended within the third call's wait: {third}");
+}
+
+#[test]
+fn a_failed_ember_install_is_said_to_every_call_for_a_while_before_one_tries_again() {
+    require_debug_build();
+    let dir = state_dir("core-r-install-failed");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    // An R whose Ember install fails at once, and counts its tries.
+    let (r, tries) = (dir.join("failing-install-r"), dir.join("install-tries"));
+    std::fs::write(&r, format!("#!/bin/sh\ncase \"$*\" in *install.R*) echo try >> '{}'; exit 1;; esac\nexit 1\n", tries.display())).unwrap();
+    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = temp_folder("core-r-install-failed-home");
+    let home = home.display().to_string();
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
+    let core = Core::try_start_with(&dir, &[("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str()), ("ENDEAVOR_TEST_INSTALL_RETRY_SECS", "3")], &args).unwrap();
+    let folder = temp_folder("core-r-install-failed-notebooks");
+    let path = folder.join("a.R");
+    std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
+    for agent in ["s1", "s2"] {
+        give_folder(&core, agent, &folder);
+    }
+    let open = |agent: &str| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "open_notebook", "arguments": { "path": path.display().to_string() } } });
+        let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), &[("X-Endeavor-Session", agent)]).1).unwrap();
+        serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let tries_so_far = || std::fs::read_to_string(&tries).unwrap_or_default().lines().count();
+    // Every call is told the failure, from either agent, and none installs again (#183).
+    let first = open("s1");
+    assert_eq!(first["error"], "r_failed", "{first}");
+    assert!(!first.to_string().contains("didn't try again"), "{first}");
+    for agent in ["s1", "s2", "s1", "s2"] {
+        let kept = open(agent);
+        assert_eq!(kept["error"], "r_failed", "the same failure: {kept}");
+        // And says it was not tried again, so an agent doesn't report the old cause as current.
+        assert!(kept.to_string().contains("this call didn't try again; a call made"), "{kept}");
+    }
+    assert_eq!(tries_so_far(), 1, "one install for all of them");
+    // Once its time is up, the next call tries again.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(open("s2")["error"], "r_failed");
+    assert_eq!(tries_so_far(), 2, "tried again");
+}
+
+#[test]
+fn calls_made_together_while_embers_install_runs_each_wait_no_longer_than_one_call_may() {
+    require_debug_build();
+    let dir = state_dir("core-r-install-together");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    // An R whose Ember install takes longer than all the calls below.
+    let r = dir.join("slow-install-r");
+    std::fs::write(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 30; exit 1;; esac\nexit 1\n").unwrap();
+    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = temp_folder("core-r-install-together-home");
+    let home = home.display().to_string();
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
+    let core = Core::try_start_with(&dir, &[("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str()), ("ENDEAVOR_TEST_EMBER_WAIT_SECS", "4")], &args).unwrap();
+    let folder = temp_folder("core-r-install-together-notebooks");
+    let path = folder.join("a.R");
+    std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
+    for agent in ["s1", "s2", "s3"] {
+        give_folder(&core, agent, &folder);
+    }
+    // Starts go one at a time, so a call that queues behind the others counts its wait from when it
+    // came, not from its turn: each answers within one wait of 4 s, where waiting a whole one after
+    // the calls before it would take 8, 12 s (#175).
+    let answered: Vec<(Duration, serde_json::Value)> = std::thread::scope(|scope| {
+        let calls: Vec<_> = ["s1", "s2", "s3"]
+            .map(|agent| {
+                let (core, path) = (&core, &path);
+                scope.spawn(move || {
+                    let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "open_notebook", "arguments": { "path": path.display().to_string() } } });
+                    let began = std::time::Instant::now();
+                    let reply: serde_json::Value = serde_json::from_str(&mcp(core, &message.to_string(), &[("X-Endeavor-Session", agent)]).1).unwrap();
+                    let said: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+                    (began.elapsed(), said)
+                })
+            })
+            .into_iter()
+            .collect();
+        calls.into_iter().map(|call| call.join().unwrap()).collect()
+    });
+    for (took, said) in &answered {
+        assert_eq!(said["error"], "r_installing", "{said}");
+        assert!(*took < Duration::from_secs(7), "no call waited much more than one wait: {answered:?}");
+    }
+}
+
+#[test]
 fn the_app_reads_where_r_is_and_a_core_that_never_started_it_says_so() {
     let dir = state_dir("core-r-status");
     let bridge = FakeBridge::start(&dir);
@@ -1996,6 +2134,113 @@ fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fail
     assert_eq!(retried["result"]["state"], "starting", "{retried}");
     wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
     assert_eq!(julia_pids(&dir).len(), 2, "a second Julia");
+}
+
+#[test]
+fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
+    require_debug_build();
+    let dir = state_dir("core-julia-asks");
+    let bridge = FakeBridge::start(&dir);
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let julia = serving_julia(&dir, &bridge);
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed")];
+    // Long enough for a Stop to come while a call waits for Julia.
+    let core = Core::try_start_with(&dir, &[("ENDEAVOR_TEST_JULIA_WAIT_SECS", "3")], &args).unwrap();
+    let folder = temp_folder("core-julia-asks-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    let other = folder.join("b.jl").display().to_string();
+    let policy = |owner: &str, policy: &str, edits: bool| {
+        app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"{owner}","policy":"{policy}","asks":true,"edits":{edits}}}}}"#));
+    };
+    // Manual.
+    policy("7", "ask", true);
+    policy("8", "ask", true);
+    let call = |owner: &str, name: &str, arguments: serde_json::Value| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        let reply: serde_json::Value = serde_json::from_str(&mcp(&core, &message.to_string(), &[("X-Endeavor-Session", owner)]).1).unwrap();
+        serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let create = |owner: &str| call(owner, "new_notebook", serde_json::json!({ "path": path }));
+
+    // The app answers every card with Allow, and counts them.
+    let mut events = core.connect();
+    events.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    let mut reader = BufReader::new(events.try_clone().unwrap());
+    write!(events, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    event_where(&mut reader, |_| true);
+    let cards = std::sync::Mutex::new(Vec::<(String, String)>::new());
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut line = String::new();
+            // Until the app goes.
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                let Some(data) = line.strip_prefix("data: ") else {
+                    line.clear();
+                    continue;
+                };
+                let event: serde_json::Value = serde_json::from_str(data.trim_end()).unwrap();
+                line.clear();
+                for ask in event["asks"].as_array().into_iter().flatten() {
+                    let mut cards = cards.lock().unwrap();
+                    let id = ask["id"].to_string();
+                    if !cards.iter().any(|(seen, _)| *seen == id) {
+                        cards.push((id.clone(), format!("{} {}", ask["owner"].as_str().unwrap(), ask["tool"].as_str().unwrap())));
+                        app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"endeavor/answer_run","params":{{"id":{id},"allow":true,"user_ran":[]}}}}"#));
+                    }
+                }
+            }
+        });
+        let asked = || cards.lock().unwrap().iter().map(|(_, what)| what.clone()).collect::<Vec<_>>();
+
+        // Julia is downloading: the allowed creation is told Julia is starting, and the agent makes it
+        // again, as agents do, until Julia is ready. The user said yes once.
+        for _ in 0..4 {
+            let created = create("7");
+            assert_eq!(created["error"], "julia_starting", "{created}");
+        }
+        assert_eq!(asked(), ["7 new_notebook"], "one card for the four calls");
+
+        // The yes was this session's, for this call: another session's same call asks, and so does
+        // this one's once it has moved on to something else.
+        assert_eq!(create("8")["error"], "julia_starting");
+        assert_eq!(call("7", "new_notebook", serde_json::json!({ "path": other }))["error"], "julia_starting");
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked(), ["7 new_notebook", "8 new_notebook", "7 new_notebook", "7 new_notebook"]);
+
+        // A yes is the user's, on a card, in the mode it was asked in. A creation that ran in Auto
+        // without one asks once the user switches to Manual; an allowed one asks after any switch.
+        policy("7", "auto", false);
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 4, "Auto doesn't ask");
+        policy("7", "ask", true);
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 5, "no yes was given");
+        policy("7", "ask", true);
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 6, "the mode was set again");
+
+        // The user's Stop while the allowed call waits for Julia: the same call again asks.
+        policy("7", "ask", true);
+        let waiting = scope.spawn(|| create("7"));
+        wait_for("the card to be answered", || asked().len() == 7);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!waiting.is_finished(), "still waiting for Julia");
+        let stop = serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 3 } });
+        mcp(&core, &stop.to_string(), &[("X-Endeavor-Session", "7")]);
+        assert_eq!(waiting.join().unwrap()["error"], "julia_starting");
+        assert_eq!(create("7")["error"], "julia_starting");
+        assert_eq!(asked().len(), 8, "stopped, the yes went with the call");
+
+        // Once Julia is ready the call goes through, and it was the last one the yes covered.
+        std::fs::remove_file(dir.join("hold")).unwrap();
+        wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
+        let created = create("7");
+        assert_ne!(created["error"], "julia_starting", "{created}");
+        assert_eq!(asked().len(), 8, "the call Julia held needed no new card");
+        create("7");
+        assert_eq!(asked().len(), 9, "a new call is a new question");
+        events.shutdown(std::net::Shutdown::Both).unwrap();
+    });
 }
 
 #[test]

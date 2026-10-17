@@ -16,7 +16,7 @@ Read this when the notebook is an Ember notebook (a `.R` file). It covers what E
 ## Runs
 
 - Running a cell also runs the cells that depend on it. A cell whose result was made before a cell it depends on last ran shows `stale` in `read_cell`. Run it to bring it up to date.
-- After `restart_notebook`, or when a notebook opens without running, every cell shows `not_run` and keeps no output until it runs. Run the cells you need, or `run_all_cells`.
+- After the notebook restarts, or when it opens without running, every cell shows `not_run` and keeps no output until it runs. Run the cells you need, or `run_all_cells`.
 
 ## Errors
 

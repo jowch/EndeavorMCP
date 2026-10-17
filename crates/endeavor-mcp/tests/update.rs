@@ -104,3 +104,63 @@ fn update_with_a_bad_checksum_leaves_the_binary() {
     assert_eq!(std::fs::read_dir(exe.parent().unwrap()).unwrap().count(), 1, "nothing left beside it");
     let _ = std::fs::remove_dir_all(exe.parent().unwrap());
 }
+
+/// A `PATH` with no curl, whose `wget` serves `<release URL>/<file>` from a folder holding
+/// this platform's NEW: it says it is `version`, notes its arguments in `wget.log`, and
+/// for the binary prints headers (its -S) saying it came through a redirect to `to`.
+fn wget_only(dir: &std::path::Path, version: &str, to: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let (bin, files) = (dir.join("path"), dir.join("files"));
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&files).unwrap();
+    let name = format!("endeavor-{KEY}-{}", platform().unwrap());
+    std::fs::write(files.join("LATEST"), format!("{KEY}\n")).unwrap();
+    std::fs::write(files.join(format!("endeavor-{KEY}.sha256")), format!("{}  {name}\n", sha(NEW))).unwrap();
+    std::fs::write(files.join(&name), NEW).unwrap();
+    for each in std::env::var("PATH").unwrap().split(':') {
+        for tool in std::fs::read_dir(each).into_iter().flatten().flatten() {
+            let tool_name = tool.file_name();
+            if tool_name != "curl" && tool_name != "wget" && !bin.join(&tool_name).exists() {
+                let _ = std::os::unix::fs::symlink(tool.path(), bin.join(&tool_name));
+            }
+        }
+    }
+    let script = format!(
+        "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo '{version}'; exit 0; }}\necho \"$*\" >> '{log}'\nwhile [ $# -gt 1 ]; do case $1 in -O) out=$2; shift;; esac; shift; done\nfile='{files}'/${{1##*/}}\ncase $file in *endeavor-{KEY}-*) printf '  HTTP/1.1 302 Found\\n  Location: {to}\\n  HTTP/1.1 200 OK\\n' >&2;; esac\nif [ \"$out\" = - ]; then cat \"$file\"; else cp \"$file\" \"$out\"; fi\n",
+        log = dir.join("wget.log").display(),
+        files = files.display(),
+    );
+    let _ = std::fs::remove_file(bin.join("wget"));
+    std::fs::write(bin.join("wget"), script).unwrap();
+    std::fs::set_permissions(bin.join("wget"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin.display().to_string()
+}
+
+#[test]
+fn under_wget_an_update_redirected_away_from_https_leaves_the_binary_and_wget2_keeps_to_https() {
+    if platform().is_none() {
+        return;
+    }
+    let run = |exe: &PathBuf, path: &str| {
+        let home = exe.parent().unwrap().join("home");
+        let out = Command::new(exe).arg("update").env("ENDEAVOR_RELEASE_URL", "https://release.example/helpers").env("PATH", path).env("HOME", &home).env("CARGO_HOME", home.join(".cargo")).env("XDG_STATE_HOME", home.join("state")).output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let exe = copy("wget-redirect");
+    let tools = exe.parent().unwrap().parent().unwrap().join(format!("endeavor-update-cli-wget-tools-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tools);
+    let before = std::fs::read(&exe).unwrap();
+    let (ok, stderr) = run(&exe, &wget_only(&tools, "GNU Wget 1.21.4 built on linux-gnu.", "http://mirror.example/endeavor"));
+    assert!(!ok && stderr.contains("was redirected to http://mirror.example/endeavor, which isn't https"), "{stderr}");
+    assert_eq!(std::fs::read(&exe).unwrap(), before);
+    assert_eq!(std::fs::read_dir(exe.parent().unwrap()).unwrap().filter(|e| e.as_ref().unwrap().file_name() != "home").count(), 1, "nothing left beside it");
+    // Wget2 prints no headers under -q, so it is told to keep to https instead.
+    let _ = std::fs::remove_file(tools.join("wget.log"));
+    let (ok, stderr) = run(&exe, &wget_only(&tools, "GNU Wget2 2.1.0 - multithreaded metalink/file/website downloader", "https://release-assets.example/x"));
+    assert!(ok, "{stderr}");
+    assert_eq!(std::fs::read(&exe).unwrap(), NEW);
+    let calls = std::fs::read_to_string(tools.join("wget.log")).unwrap();
+    assert!(calls.lines().count() >= 3 && calls.lines().all(|l| l.contains("--https-enforce=hard")), "{calls}");
+    let _ = std::fs::remove_dir_all(exe.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&tools);
+}

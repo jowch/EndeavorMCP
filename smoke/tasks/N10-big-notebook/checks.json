@@ -1,0 +1,11 @@
+{
+  "about": "A notebook of 42 cells, already open and run; the agent changes one value and reports a number that depends on it. Measures what a larger notebook costs: the size of reads and of each change's reply. Tags: already_open, size.",
+  "checks": [
+    { "check": "notebooks", "count": 1 },
+    { "check": "no_errored_cells" },
+    { "check": "code_contains", "texts": ["threshold = 0.7"] },
+    { "check": "output_contains", "texts": ["7 of 24 wells"] },
+    { "check": "final_message_contains_any", "texts": ["7 wells", "7 of 24", "seven"] },
+    { "check": "reproducible" }
+  ]
+}

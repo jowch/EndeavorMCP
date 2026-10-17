@@ -336,6 +336,54 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(read["code"], "x <- 41", "{read}");
     });
 
+    step("a run of a cell runs its ancestor's staged edit first, and the receipt lists it (#187)", || {
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 5" }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
+        assert_eq!((&ran["affected_cells"], &ran["pending_run"], &ran["execution"]["status"]), (&json!([A, B]), &json!([]), &json!("completed")), "{ran}");
+        let changed: Vec<&Value> = ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| &c["cell_id"]).collect();
+        assert_eq!(changed, [&json!(A), &json!(B)], "{ran}");
+        assert!(ran["outputs"]["changed"][1]["output_summary"].as_str().unwrap().contains('6'), "{ran}");
+        // Back as it was, for the steps after.
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
+        assert_eq!(ran["affected_cells"], json!([A, B]), "{ran}");
+        assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {A}: cells this run needs that were edited or stale since they last ran.")]), "{ran}");
+
+        // A stale ancestor, its code unchanged: Ember runs it first too, and the receipt says so.
+        let c = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "w <- x * 2", "after_cell_id": B }))["cell_id"].as_str().unwrap().to_owned();
+        let d = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "w + 1", "after_cell_id": c }))["cell_id"].as_str().unwrap().to_owned();
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": d, "wait_for_completion": true }));
+        assert_eq!(ran["affected_cells"], json!([c, d]), "{ran}");
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 7" }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": d, "wait_for_completion": true }));
+        assert_eq!((&ran["affected_cells"], &ran["pending_run"]), (&json!([c, d]), &json!([])), "{ran}");
+        assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {c}: cells this run needs that were edited or stale since they last ran.")]), "{ran}");
+        assert!(ran["outputs"]["changed"][1]["output_summary"].as_str().unwrap().contains("15"), "{ran}");
+        // Back as it was: x is 41 and B ran with it; C and D gone.
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": d }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": c }));
+    });
+
+    step("interrupt_notebook stops a slow cell and its queued dependent doesn't run (#161)", || {
+        agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
+        let slow = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow <- { Sys.sleep(600); 1 }", "after_cell_id": B }))["cell_id"].clone();
+        let after = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow + 1", "after_cell_id": slow }))["cell_id"].clone();
+        agent.ok("submit_changes", json!({ "notebook_id": notebook }));
+        common::wait_for("the slow cell to start", || agent.ok("list_notebooks", json!({}))[0]["running"].as_array().is_some_and(|r| r.contains(&slow)));
+        let stopped = agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        assert_eq!((&stopped["interrupted"], &stopped["stopped"], &stopped["dropped"], &stopped["still_running"]), (&json!(true), &json!([slow]), &json!([after]), &json!([])), "{stopped}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
+        assert!(read["errored"] == true && read["running"] == false, "{read}");
+        let again = agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        assert_eq!(again["interrupted"], false, "{again}");
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": after }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
+    });
+
     step("new_notebook makes an R notebook from an .R path; a warning reads as one", || {
         // A session works on one notebook, so another session makes this one.
         let mut agent = Agent::new(port, &token);
@@ -348,6 +396,56 @@ fn an_r_notebook_through_the_runtime() {
         common::wait_for("the new cell to run", || agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }))["output"].as_str().is_some_and(|o| o.contains("7")));
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
         assert!(read["output"].as_str().unwrap().starts_with("Warning: careful"), "{read}");
+    });
+
+    step("a run goes on through the dependents Ember queues: a read or a waited submit waits for them (#151) and says if one failed (#171)", || {
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let made = agent.ok("new_notebook", json!({ "path": "chain.R" }));
+        let (id, up) = (made["notebook_id"].as_str().unwrap().to_owned(), made["cell_ids"][0].clone());
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
+        let down = agent.ok("add_cell", json!({ "notebook_id": id, "code": "{ Sys.sleep(3); if (a > 3) stop(\"boom\"); a + 1 }", "after_cell_id": up }))["cell_id"].clone();
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        let output = |agent: &mut Agent| agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": down }));
+        assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "the first run");
+        // Only the upstream cell is run; Ember queues the dependent as its result comes in.
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 2" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id }));
+        let read = output(&mut agent);
+        assert!(read["running"] == false && read["output"].as_str().unwrap().contains('3'), "the read waited for the dependent: {read}");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 3" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        // The cells that ran while it waited: the dependent, and `up` too if it was still running then.
+        let ran = |waited: &Value| waited["affected_cells"].as_array().unwrap().contains(&down);
+        assert!(waited["execution"]["status"] == "completed" && ran(&waited), "{waited}");
+        let read = output(&mut agent);
+        assert!(read["running"] == false && read["output"].as_str().unwrap().contains('4'), "the waited submit with nothing staged waited for it: {read}");
+        // And says when the dependent failed (#171).
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 4" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["execution"]["status"] == "errored" && ran(&waited), "{waited}");
+        let failed = waited["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == down).cloned();
+        assert!(failed.is_some_and(|c| c["output_summary"].as_str().unwrap().contains("boom")), "{waited}");
+    });
+
+    step("allow_execution's run of the notebook is the agent's: a waited submit waits for it (#170)", || {
+        let (up, down) = ("70700001-0000-4000-8000-000000000001", "70700002-0000-4000-8000-000000000002");
+        std::fs::write(
+            folder.join("allowed.R"),
+            format!("### An Ember notebook ###\n# /// environment\n# on_cell_change = \"autorun\"\n# ///\n\n# %% id={up}\na <- {{ Sys.sleep(2); 1 }}\n\n# %% id={down}\n{{ Sys.sleep(2); a + 1 }}\n\n# /// cell order\n# {up}\n# {down}\n# ///\n"),
+        )
+        .unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "allowed.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        let allowed = agent.ok("allow_execution", json!({ "notebook_id": id }));
+        assert_eq!(allowed["ran"], true, "{allowed}");
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["execution"]["status"] == "completed" && waited["affected_cells"].as_array().unwrap().contains(&json!(down)), "{waited}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": down }));
+        assert!(read["running"] == false && read["queued"] == false && read["output"].as_str().unwrap().contains('2'), "the waited submit waited for the run: {read}");
     });
 
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {

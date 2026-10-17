@@ -60,6 +60,7 @@ A$seq <- 0
 A$notes <- list()        # the last NOTES_KEPT notifications
 A$waiters <- list()      # held /notifications requests: key -> function()
 A$keys <- 0L
+A$runs <- 0L             # runs named so far (`run_id`)
 
 # ---- Errors ------------------------------------------------------------------
 
@@ -436,22 +437,42 @@ unfinished <- function(state, ids) {
 
 registered <- function(rec) identical(mget(rec$id, envir = A$records, ifnotfound = list(NULL))[[1]], rec)
 
-# A run is over when none of its cells is left, its R ended, or the notebook
-# shut down.
+# A name for a run that goes on, as Pluto's adapter gives one: the core
+# counts the run, its dependents included, as going on until `run_finished`
+# names it (#151).
+run_id <- function() {
+  A$runs <- A$runs + 1L
+  sprintf("r-run-%d", A$runs)
+}
+
+# The cells a run of `ids` covers: in autorun, the cells downstream of them,
+# which Ember queues as each result comes in (in the same step, so a run never
+# looks over between a cell and its dependents). In lazy mode they don't run.
+run_cells_of <- function(rec, ids) {
+  state <- notebook_state(rec$nb)
+  if (!identical(state$file$header$on_cell_change, "autorun")) return(ids)
+  g <- dependency_graph(rec$nb)
+  unique(c(ids, unlist(lapply(intersect(ids, names(g$downstream)), function(id) downstream(g, id, transitive = TRUE)), use.names = FALSE)))
+}
+
+# A run is over when none of its cells, or of the cells that depend on them
+# (`run_cells_of`), is left, its R ended, or the notebook shut down.
 run_over <- function(rec, ids) {
   if (!registered(rec)) return(TRUE)
   state <- notebook_state(rec$nb)
-  identical(state$worker$status, "stopped") || length(unfinished(state, ids)) == 0
+  identical(state$worker$status, "stopped") || length(unfinished(state, run_cells_of(rec, ids))) == 0
 }
 
-# Once a run nobody waits for ends, `run_finished` says which of its cells finished.
-watch_run <- function(rec, cells, ids) {
+# Once a run nobody waits for ends, `run_finished` names it (`run`) and says
+# which of its cells finished.
+watch_run <- function(rec, cells, ids, run = run_id()) {
   check <- function() {
     if (!run_over(rec, ids)) return(later::later(check, 0.2))
     done <- if (registered(rec)) setdiff(cells, unfinished(notebook_state(rec$nb), cells)) else cells
-    notify("run_finished", list(notebook_id = rec$id, cells = I(done)))
+    notify("run_finished", list(notebook_id = rec$id, run = run, cells = I(done)))
   }
   later::later(check, 0.2)
+  run
 }
 
 # Run cells (Ember runs their unrun ancestors first). Not accepted in safe
@@ -474,7 +495,7 @@ run <- function(rec, cells, wait, timeout) {
   }
   ids <- union(cells, r$queued)
   if (!isTRUE(wait)) {
-    watch_run(rec, cells, ids)
+    result$run <- watch_run(rec, cells, ids)
     return(result)
   }
   deadline <- Sys.time() + as.numeric(timeout %||% 60)
@@ -493,7 +514,7 @@ run <- function(rec, cells, wait, timeout) {
       if (!is.null(exited)) result$exited <- I(exited)
       result$completed <- I(setdiff(cells, unfinished(state, cells)))
       result$timed_out <- I(if (over) unfinished(state, cells) else unfinished(state, names(state$cells)))
-      if (!over) watch_run(rec, cells, ids)
+      if (!over) result$run <- watch_run(rec, cells, ids)
       resolve(result)
     }
     check()
@@ -511,10 +532,14 @@ allow <- function(rec, run_all) {
     return(list(already_allowed = TRUE, ran = FALSE, process_status = process_status(state)))
   }
   allow_execution(rec$nb)
-  if (isTRUE(run_all)) run_everything(rec)
-  list(already_allowed = FALSE, ran = isTRUE(run_all), process_status = process_status(notebook_state(rec$nb)))
+  run <- if (isTRUE(run_all)) run_everything(rec)
+  result <- list(already_allowed = FALSE, ran = isTRUE(run_all), process_status = process_status(notebook_state(rec$nb)))
+  # The run it started, named as `run` names one, so the core can tell when it ends.
+  if (!is.null(run)) result$run <- run
+  result
 }
 
+# Run every cell; the run's name, if it goes on.
 run_everything <- function(rec) {
   r <- run_cells(rec$nb, NULL, wait = FALSE)
   if (isTRUE(r$accepted) && length(r$queued) > 0) watch_run(rec, r$queued, r$queued)

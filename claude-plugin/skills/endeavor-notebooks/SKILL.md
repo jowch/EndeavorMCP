@@ -38,10 +38,12 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
 3. **Run once.** `submit_changes` runs everything staged, with dependents. Run once per batch of edits, not per edit, so expensive cells downstream run once. Don't end a turn with cells staged unless the user asked for that, declined the run, or the notebook is in safe preview. If cells stay staged, tell the user which ones haven't run, since the notebook shows output that doesn't match their code.
 4. **Check.**
    - Pass `wait_for_completion=true` when you will read the result next. Without it the run returns at once: do other work, then read the cells until `running` and `queued` are false.
-   - A waited run waits at most 45 seconds from the start of the call. If the run is still going then, the call returns normally with the cells still running in `execution.still_running` and a `message` (`execution.status` is `running`, or `errored` if a cell already failed). The run continues and its cells are no longer in `pending_run`: read them later with `read_cell` or `list_notebooks`, and do not run them again.
+   - A waited run waits at most 45 seconds from the start of the call. If the run is still going then, the call returns normally with the cells still running in `execution.still_running` and a `message` (`execution.status` is `running`, or `errored` if a cell already failed). The run continues and its cells are no longer in `pending_run`: read them later with `read_cell`, which waits up to 45 seconds for a cell your run is still running, and do not run them again. `submit_changes` with nothing staged and `wait_for_completion=true` waits the same way for the rest of your run, and its `affected_cells` and `execution.status` are those of the cells that ran meanwhile (`errored` if one failed).
+   - An edit with `run_after=true` isn't waited for. While its cell is still `running` or `queued`, the result gives the cell's output and error from before the edit as `previous_output`, `previous_errored` and `previous_error`, not `output`, `errored` and `error`, and `outputs.changed` leaves it out. Read the cell for the new output.
    - A waited run that ended lists, under `outputs.changed`, the cells you ran and any upstream cells that had never run, leaving out cells with no output. It does not cover dependents, and `completed` only means those cells did not error. Read the dependents you care about.
    - The first time a notebook uses a package (`using DataFrames` in Julia, `library(dplyr)` in R), it is installed before the cells that need it run, and they stay `queued`. That can take several minutes. Tell the user it is installing, then call `read_cell` on a queued cell to wait. Don't run the cells again meanwhile. Results have `packages` and a `message` saying so, and while packages install each `read_cell` waits up to 45 seconds. In Julia every cell waits; in R, the cells that may need the packages wait and the others run. If the message says it is taking longer than usual, tell the user and follow the message: keep waiting only while the last line of the package log changes.
    - Look at `errored`, `error` and the output before you report.
+5. **Stop.** `interrupt_notebook` stops the notebook's run, as the notebook's Stop button does: the running cells end interrupted and the queued ones don't run. Call it when the user asks you to stop a run, or when a run you started is taking too long or is wrong. Don't call it for a run the user or another session started unless the user asked. The result lists the cells that `stopped`, which now show the interrupt as their error, and the queued cells `dropped`, which keep their old output. Run them again once you've fixed what was wrong. A cell in `still_running` is in code that ignores the interrupt. Tell the user; only a restart from the notebook's page ends it.
 
 `delete_cell`, `move_cell` and `fold_cell` are not staged. Deleting reruns the cell's dependents and can't be undone.
 
@@ -49,7 +51,7 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
 
 - For tables and other rich values, `output` only names the type and `output_text` has the value as text. Read that; don't edit the cell to print it. In a run's result, `output` is named `output_summary`, and `output_text` is cut at 2000 bytes; `read_cell` gives up to 16 KB.
 - For a plot, call `view_cell_output` and look at it before you say it is right. Code that runs can still draw the wrong thing.
-- Fold cells that hold only prose (`add_cell` with `folded=true`, or `fold_cell`), so the reader sees the rendered text and not its source.
+- Fold cells that hold only prose (`add_cell`, `edit_cell` or `edit_cells` with `folded=true`, or `fold_cell`), so the reader sees the rendered text and not its source.
 
 ## Safe preview
 
@@ -57,6 +59,6 @@ A notebook opened from a file runs nothing until the user allows it, because its
 
 ## Other sessions in the notebook
 
-Several agents can work in one notebook. When a write is refused with `stale_read`, or a run with `run_conflict`, the user or another session changed those cells: read them again, then retry. A notebook with `this_session` false is another session's: read it, but don't change it. If the user asks you to work in it and this session has no notebook yet, `open_notebook` with its path joins it; if this session already has one, that fails with `one_notebook`, so tell the user it needs a new session.
+Several agents can work in one notebook. When a write is refused with `stale_read`, or a run with `run_conflict`, those cells changed since this session read them: the user changed them, or another session did, or this conversation did before it was resumed: read them again, then retry. A notebook with `this_session` false is another session's: read it, but don't change it. If the user asks you to work in it and this session has no notebook yet, `open_notebook` with its path joins it; if this session already has one, that fails with `one_notebook`, so tell the user it needs a new session.
 
 For any other error code or warning, see [reference/errors.md](reference/errors.md).

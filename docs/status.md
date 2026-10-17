@@ -24,7 +24,13 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   Slurm (`tests/machines.rs`), and over real ssh and Julia in `e2e_machines`.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
-- CI (`ci.yml`) builds and tests on Linux, macOS and Windows. `e2e.yml` runs
+- CI (`ci.yml`) builds and tests on Linux, macOS and Windows. Most integration
+  tests are Unix only (their stand-in Julia is a shell script); on Windows,
+  `tests/windows.rs` runs the local start with a stand-in `julia.exe`
+  (`examples/stand_in_julia.rs`): `serve` with a given Julia and with the one
+  on the PATH, `starting.lock`'s pid read while the core holds it, a Julia that
+  ends, `endeavor stop`, and an agent's call through `endeavor mcp` (#9).
+  Not covered there yet: the cancel of a start, and real Julia. `e2e.yml` runs
   `e2e_julia` and `e2e_serve` against real Julia on Linux. `helpers.yml`
   publishes the binaries for Linux, macOS and Windows to the `helpers` release
   under a key computed from the helper's source (`scripts/helpers.sh`), and
@@ -196,8 +202,22 @@ Next:
   it, with Ember in it, the first time an R notebook is opened, and follows
   its notifications by long-polling. The core makes Ember's page secret and
   hands it to R. `new_notebook` makes one from an `.R` path, `read_cell`
-  shows Ember's own `stale` and `not_run` (every cell after a restart), and a
-  warning in a cell's output starts with `Warning:`. When R ends, its
+  shows Ember's own `stale` and `not_run` (every cell after a restart), a
+  warning in a cell's output starts with `Warning:`, and `read_notebook_code`
+  marks cells as an Ember file does (`# %% id=`). `edit_cell` can fold the
+  cell it edits, in either engine (#162), and so can each edit in `edit_cells`
+  (#168; the interface number is 13), whose receipt says each cell's fold after the
+  edits (`mutation.code_folded`; #174, interface 16). While an edited cell is
+  still running, the edit's result gives its old output and error as
+  `previous_output`, `previous_errored` and `previous_error`, and leaves it out
+  of `outputs.changed` (#190, interface 17). R's adapter
+  names each run, as Pluto's does, and in autorun counts the cells downstream of
+  the run's cells as part of it, since Ember queues each one as its parent's
+  result comes in. So a run goes on, and `read_cell` waits for a dependent of the
+  agent's run, until those finish (#151; interface 12). A waited `submit_changes` with
+  nothing staged reports the cells that ran while it waited, and `errored` if one failed (#171; interface 14).
+  `allow_execution`'s run of the notebook is the agent's run too, so a read or a waited submit
+  right after it waits for it, in both engines (#170; interface 15). When R ends, its
   notebooks close with it: the agent's next call on one answers
   `notebook_closed` with why (how R's process ended and its last error), and
   `/endeavor/events` lists them under `engine_ended` until each opens again
@@ -241,8 +261,12 @@ Next:
   (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
   the SHA256 of its file, and one with any package Ember needs that R lacks or can't load.
   The call waits up to 30 seconds for that. The first install then returns
-  `r_installing` until it's done; an update goes on while R starts with the
-  installed Ember. Offline, R starts with the installed Ember. A build that fails to
+  `r_installing` until it's done, and each call made meanwhile waits up to 30
+  seconds for it too, as the answer says (#175: before, only the call that started
+  it waited, and agents looped). An install that fails, of Ember or of
+  Endeavor's own R, is what every call is told for a minute; the call after that
+  tries again (#183: before, each call after a failure started a new install). An
+  update goes on while R starts with the installed Ember. Offline, R starts with the installed Ember. A build that fails to
   install or load, or that R's adapter doesn't start with, isn't tried again;
   R starts with the build before it, and the agent gets an `ember_previous`
   warning. A `--r-library` is used as it is, never updated. The E2E workflow's
@@ -274,7 +298,14 @@ Next:
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is
   opened or made or a page of Pluto's past the runtime's link is asked for, and answers
-  `julia_starting` while Julia starts (a normal result, not an error: #105). The plugin's `serve`, `mcp` and machines
+  `julia_starting` while Julia starts (a normal result, not an error: #105). An open or
+  creation the user allowed on a card that is told Julia (or R's setup) is still
+  starting doesn't ask again when the agent makes the same call again: only that
+  session's, only the same tool and arguments, only while nothing came between
+  (another call, a Stop, a change of mode), and for 5 minutes after the user's yes
+  (Endeavor #90). Under Claude Code, `endeavor mcp`'s session key comes from the
+  conversation's id, so a resumed conversation keeps its reads and its notebook
+  (#176). The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
   before, and only starting it waits. A session whose folder has Pluto
   notebooks, or whose caller says it is a Julia session (`kind`), gets Julia
@@ -301,6 +332,22 @@ Next:
   or `not_started`, whoever is waiting, the agent included. It starts nothing.
   After a first install that finished with no call waiting it reads
   `not_started` until the agent's next call (#148). The interface number is 9.
+- An agent can stop a run with `interrupt_notebook` (#161; interface 11), as the
+  notebook's Stop button does. Before it, an agent asked to "stop if it takes too long"
+  had no way to, and its edits queued behind the run. It asks nothing in any mode and
+  plan mode refuses it. In R, a cell in compiled code that ignores SIGINT is reported
+  `still_running`, and only the page's restart ends it. Until then no R cell stopped
+  for an interrupt at all, from the page either: R's adapter inherited the core's
+  signal mask, which blocks SIGINT, SIGTERM and SIGHUP for the core's own thread, and
+  passed it to Ember's workers. R now starts with the mask the core was started with,
+  as Julia does. So do `run_shell`'s commands (#165), which before ignored SIGINT and
+  SIGTERM, as did everything they started, and the curl, wget or juliaup the core starts to
+  download Julia, Endeavor's own R or a helper (#181), which before went on after
+  a Ctrl-C had stopped the core.
+  In Julia, an interrupt while the notebook's process is still starting stops its
+  run before any cell, and the answer lists them all as `dropped` at once (#179).
+  Before, it reported them dropped, or none when the start took longer than its
+  wait, and they all ran once the process was up.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds

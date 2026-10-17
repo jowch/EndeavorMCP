@@ -4,12 +4,12 @@ Read this when a notebook tool returns a code the skill's main text doesn't expl
 
 ## Still starting
 
-These come back the same way, but nothing failed and the call is not marked an error: something is still starting. Tell the user, then make the same call again. Don't look for a fix or try another way meanwhile.
+These come back the same way, but nothing failed and the call is not marked an error: something is still starting. Tell the user, then make the same call again right away: each call waits up to 30 seconds, so calling again is how you wait. Keep calling until the message says otherwise. Don't look for a fix or try another way meanwhile.
 
 | `error` | Meaning | Do |
 |---|---|---|
-| `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take several minutes | Make the same call again in a minute |
-| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Make the same call again in a minute |
+| `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take 10 minutes; the message says how long so far | Make the same call again |
+| `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Make the same call again |
 | `notebook_opening` | `open_notebook`, `new_notebook` or `allow_execution` took longer than one call waits: often the first notebook in a new Julia process, or a notebook leaving safe preview whose packages need installing. It goes on | Make the same call again, with the same arguments, to get its result |
 
 On a machine, a call made while Endeavor starts there, or while its Slurm job is queued, says so in plain text; it is not an error either. See the machines skill.
@@ -23,7 +23,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `placement_required` | `add_cell` without `after_cell_id` in a notebook that has cells | Pass the cell to add after |
 | `not_staged` | `submit_changes` was given a `cell_ids` entry that isn't in `pending_run` | Leave `cell_ids` out, or use `execute_cell` for a cell you didn't edit |
 | `one_notebook` | The call is for a notebook other than this session's | Work in this session's notebook; read the other one as a file |
-| `run_conflict` | Cells you ran depend on cells the user or another session changed since you read them; nothing ran | Read the cells it names, then run again |
+| `run_conflict` | Cells you ran depend on cells changed since this session read them (by the user, by another session, or before this conversation was resumed); nothing ran | Read the cells it names, then run again |
 | `notebook_not_found`, `cell_not_found` | The id is wrong, or the notebook was closed or the cell deleted | `list_notebooks`, or read the notebook again |
 | `file_exists` | `new_notebook` on a path that exists | `open_notebook` it, or pick another name |
 | `file_not_found` | `open_notebook` on a path with no file | Check the path; a relative path starts in the session's folder |
@@ -56,7 +56,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `async_execution` | The run was started and not waited for. The cells are no longer in `pending_run`; read them for results |
 | `execution_blocked` | Nothing ran: the notebook is in safe preview, or its process is stopped. The cells stay in `pending_run` |
 | `execution_timeout` | A waited run was still going after 45 seconds and the call returned. The run continues; `execution.still_running` names its cells that are running, and they are no longer in `pending_run`. Read them later and do not run them again |
-| `also_ran` | The run also ran the named cells: ones your cells depend on that had never run |
+| `also_ran` | The run also ran the named cells: ones your cells depend on that had never run, or (in R) that were edited or stale since they last ran. A waited run lists them in `affected_cells` and `outputs.changed` |
 | `already_ran` | The user ran your staged cells before your run reached them, so they were not run a second time. The outputs are from that run |
 | `ember_previous` | From opening or making an R notebook: Ember's newest build didn't work here, so R notebooks use the one before it. Mention it to the user if R notebooks act up |
 | `run_conflict` | From `add_cell` or `edit_cell` with `run_after`: the edit was made and staged, not run. Read the named cells, then `submit_changes` |

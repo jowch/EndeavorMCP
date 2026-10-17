@@ -50,7 +50,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 10;
+pub const INTERFACE: u32 = 18;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -156,6 +156,8 @@ pub fn main(argv: &[String]) -> ! {
     #[cfg(unix)]
     let (stop_signals, inherited_mask) = block_stop_signals();
     #[cfg(unix)]
+    crate::host_tools::set_command_mask(inherited_mask);
+    #[cfg(unix)]
     if let Some(fd) = args.lifeline {
         watch_lifeline(fd);
     }
@@ -211,12 +213,15 @@ pub fn main(argv: &[String]) -> ! {
     let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
-    let r = Arc::new(RStarter::new(&args, &engine_token, allow_r_install));
+    let r = RStarter::new(&args, &engine_token, allow_r_install);
+    #[cfg(unix)]
+    let r = RStarter { mask: Some(inherited_mask), ..r };
+    let r = Arc::new(r);
     let _ = served.r.set(r.clone());
     let starting = (r.clone(), served.clone());
-    let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, wait| match backend {
-        Backend::Ember => starting.0.start_noting(&starting.1),
-        Backend::Pluto => starting.1.julia.wait(&starting.1, wait.min(JULIA_WAIT)).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
+    let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, came, wait| match backend {
+        Backend::Ember => starting.0.start_noting(&starting.1, came + wait.min(ember_wait())),
+        Backend::Pluto => starting.1.julia.wait(&starting.1, wait.saturating_sub(came.elapsed()).min(julia_wait())).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait. Set before
     // the first connection: the front that started the core sends its folder as soon as it can.
@@ -269,10 +274,32 @@ pub fn main(argv: &[String]) -> ! {
     }
 }
 
+/// What a call that waited `wait` hears while Julia starts: the step, how long so far, and to call
+/// again now, since each call is the wait (an agent told to try again "in a minute" with no way to
+/// pause gave up after a dozen tries, #153). A start that stops moving fails at `julia_stall()`,
+/// with its own message.
+fn starting_message(step: &str, so_far: Duration, wait: Duration) -> String {
+    let words = |d: Duration| if d.as_secs() >= 90 { format!("about {} minutes", (d.as_secs() + 30) / 60) } else { format!("{} seconds", d.as_secs()) };
+    let what = format!(
+        "julia_starting::{step} ({} so far). The first start on a computer gets Julia and installs Pluto's packages, which can take 10 minutes or more; later starts are much faster.",
+        words(so_far)
+    );
+    if wait.is_zero() {
+        return what;
+    }
+    format!("{what} Tell the user once, then make the same call again right away: each call waits up to {} for the start, so don't pause between calls.", words(wait))
+}
+
 /// How long a call that needs Julia waits for it to start before it's told Julia is still starting:
 /// well within the 45 s an agent's call waits, and less if the call already waited (for the user's
 /// answer, say), so that the notebook's open has some of the 45 s too.
+/// ENDEAVOR_TEST_JULIA_WAIT_SECS sets it in debug builds.
 const JULIA_WAIT: Duration = Duration::from_secs(30);
+
+fn julia_wait() -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_JULIA_WAIT_SECS").ok()?.parse().ok()).flatten();
+    test.map_or(JULIA_WAIT, Duration::from_secs)
+}
 
 /// What ends the core.
 enum Stop {
@@ -382,6 +409,8 @@ struct JuliaNow {
     phase: Phase,
     /// While starting: the last sign of progress, a new step or new lines in the runtime's log.
     moved: std::time::Instant,
+    /// When the start began.
+    began: std::time::Instant,
     /// Why the last start failed has been said.
     said: bool,
     /// How Julia ended, if the one started last did.
@@ -432,7 +461,7 @@ impl JuliaStarter {
             #[cfg(unix)]
             mask: None,
             spawn: Spawner::new(),
-            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), said: false, exited: None }),
+            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), began: std::time::Instant::now(), said: false, exited: None }),
             changed: std::sync::Condvar::new(),
             pid: 0.into(),
             stopping: false.into(),
@@ -452,6 +481,7 @@ impl JuliaStarter {
         }
         now.phase = Phase::Starting("Julia is starting".into());
         now.moved = std::time::Instant::now();
+        now.began = now.moved;
         now.exited = None;
         drop(now);
         let served = served.clone();
@@ -510,7 +540,7 @@ impl JuliaStarter {
                 }
                 Phase::Idle => return Err("julia_failed::The runtime is stopping.".into()),
                 Phase::Starting(step) if left.is_zero() => {
-                    return Err(format!("julia_starting::{step}. The first start can take several minutes (Julia, then Pluto's packages). Try again in a minute."));
+                    return Err(starting_message(step, now.began.elapsed(), wait));
                 }
                 Phase::Starting(_) => now = self.changed.wait_timeout(now, left).unwrap().0,
             }
@@ -717,9 +747,15 @@ pub const EMBER_REPOSITORY: &str = "https://jowch.r-universe.dev";
 /// none (Ember #66). `install.R` installs from them first on an Apple Silicon Mac.
 pub const EMBER_MAC_ARM64: &str = "https://github.com/jowch/Ember/releases/download";
 
-/// How long the call that starts R waits for the check for a newer Ember, or its install, before
-/// answering `r_installing`: as long as Julia's start.
+/// How long a call that starts R waits for the check for a newer Ember, or its install, before
+/// answering `r_installing`: as long as Julia's start. ENDEAVOR_TEST_EMBER_WAIT_SECS sets it in
+/// debug builds.
 const EMBER_WAIT: Duration = JULIA_WAIT;
+
+fn ember_wait() -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_EMBER_WAIT_SECS").ok()?.parse().ok()).flatten();
+    test.map_or(EMBER_WAIT, Duration::from_secs)
+}
 
 /// What `install.R` exits with when Ember's newest build failed and the one before it is used.
 const KEPT_PREVIOUS: i32 = 3;
@@ -765,14 +801,38 @@ const ENDED_EARLY: &str = "The shell line for R ended without starting R. A line
 /// Why R notebooks use the Ember before the newest, for the agent.
 const EMBER_PREVIOUS: &str = "ember_previous::Ember's newest build didn't work here, so R notebooks use the Ember before it. The runtime's log says why. Mention it to the user if R notebooks act up.";
 
-/// Where installing or updating Ember is.
+/// Where installing or updating Ember, or Endeavor's own R, is.
 enum Install {
     Idle,
     Running,
     /// Done while no call waited for it: what the next call says.
     Done(Result<bool, String>),
-    /// Endeavor's own R didn't install: said once, and the next call tries again.
-    Failed(String),
+    /// It failed (why, and when): every call is told, until `retry_after()` has passed; the call
+    /// after that tries again. Told once and tried again on the next call, several agents retrying
+    /// started an install each time, six in a minute (#183).
+    Failed(String, std::time::Instant),
+}
+
+/// How long a failed install is said to every call before a call tries it again: long enough
+/// that agents retrying at once don't each start one, short enough that what the user fixed
+/// (the network, a compiler) is tried without restarting. ENDEAVOR_TEST_INSTALL_RETRY_SECS sets it
+/// in debug builds.
+fn retry_after() -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_INSTALL_RETRY_SECS").ok()?.parse().ok()).flatten();
+    test.map_or(Duration::from_secs(60), Duration::from_secs)
+}
+
+/// Why a failed install is still what calls are told, if it is (`retry_after`), saying that
+/// nothing was tried for this call and when a call will try: else an agent whose user just
+/// installed a compiler reads the same words and says the compiler is still missing.
+fn failure_kept(install: &Install) -> Option<String> {
+    match install {
+        Install::Failed(why, at) if at.elapsed() < retry_after() => {
+            let left = retry_after().saturating_sub(at.elapsed()).as_secs().max(1);
+            Some(format!("{}. That was the try {} s ago, and this call didn't try again; a call made {left} s from now does.", why.trim_end_matches('.'), at.elapsed().as_secs()))
+        }
+        _ => None,
+    }
 }
 
 /// What `r_status` reads: whether R's adapter runs, the installs of Endeavor's own R and of Ember,
@@ -810,7 +870,7 @@ fn r_status(now: &RNow) -> Value {
         return json!({ "state": "starting", "step": "Starting R" });
     }
     match (now.own, now.ember, now.failed) {
-        (Install::Failed(why), ..) | (_, Install::Done(Err(why)), _) => failed(why),
+        (Install::Failed(why, _), ..) | (_, Install::Failed(why, _) | Install::Done(Err(why)), _) => failed(why),
         (.., Some(why)) => failed(why),
         _ => json!({ "state": "not_started" }),
     }
@@ -937,6 +997,9 @@ struct RStarter {
     state: PathBuf,
     /// The engines' key, which R's bridge takes: not the MCP bearer token.
     token: String,
+    /// The signal mask the core was started with, for R (`with_mask`), as for Julia.
+    #[cfg(unix)]
+    mask: Option<libc::sigset_t>,
     spawn: Spawner,
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
     /// Whether R's adapter is starting (`launch`), for `status`.
@@ -946,6 +1009,25 @@ struct RStarter {
 }
 
 impl RStarter {
+    /// Start `command` with the signal mask the core was started with, not the core's, which blocks
+    /// Ctrl-C, SIGTERM and SIGHUP for its own thread to take. R inherits a blocked mask and passes it
+    /// to Ember's workers, where a cell's interrupt (SIGINT) and the supervisor's SIGTERM then wait
+    /// forever (#161).
+    fn with_mask(&self, command: &mut Command) {
+        #[cfg(unix)]
+        if let Some(mask) = self.mask {
+            // SAFETY: only async-signal-safe calls between fork and exec.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                    Ok(())
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = command;
+    }
+
     fn new(args: &Args, token: &str, allow_own: Arc<std::sync::atomic::AtomicBool>) -> RStarter {
         let test_repository = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_EMBER_REPOSITORY").ok()).flatten();
         RStarter {
@@ -962,6 +1044,8 @@ impl RStarter {
             adapter: args.runtime.join("r").join("adapter.R"),
             state: args.state_dir.join(R_STATE),
             token: token.to_owned(),
+            #[cfg(unix)]
+            mask: None,
             spawn: Spawner::new(),
             child: Arc::default(),
             launching: false.into(),
@@ -988,9 +1072,9 @@ impl RStarter {
     }
 
     /// `start`, keeping why it failed for `status` until the next start. Still installing isn't a failure.
-    fn start_noting(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+    fn start_noting(&self, served: &Served, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         *self.failed.lock().unwrap() = None;
-        let started = self.start(served);
+        let started = self.start(served, until);
         if let Err(why) = &started
             && !why.starts_with("r_installing::")
         {
@@ -1001,20 +1085,21 @@ impl RStarter {
 
     /// Start the adapter and wait until it's up: what answers for R, and Ember's page on `/ember/`.
     /// With Endeavor's own Ember, first update it if r-universe has a newer build, and if the
-    /// adapter doesn't start with a new build, start it with the one before.
-    fn start(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+    /// adapter doesn't start with a new build, start it with the one before. An install is waited
+    /// for `until` then: the call's own wait, and never longer than `ember_wait()` from when it came.
+    fn start(&self, served: &Served, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         // Ember, its install and R's adapter haven't been tried on Windows.
         if cfg!(windows) {
             return Err("unsupported::R notebooks don't work on Windows yet".into());
         }
         // Not standalone means the app's: own R is offered only with `--own-r`, on this computer, where a
         // `serve` or `mcp` runtime is always standalone (`standalone::core_env`); a server's never gets it.
-        self.own_r(served.bridge.standalone.is_none())?;
+        self.own_r(served.bridge.standalone.is_none(), until)?;
         let folder = &self.ember_folder();
         if let Some(library) = &self.library {
             return self.launch(served, library);
         }
-        match self.update(folder) {
+        match self.update(folder, until) {
             Ok(true) => self.tell_previous(served),
             Ok(false) => {}
             // install.R failed in a way it didn't plan for: the installed Ember still works.
@@ -1069,6 +1154,7 @@ impl RStarter {
         let secret = ember_secret().map_err(|e| format!("r_failed::{e}"))?;
         let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
         command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null()).stderr(Stdio::piped());
+        self.with_mask(&mut command);
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
         unsafe {
@@ -1141,7 +1227,7 @@ impl RStarter {
     /// notebooks can't open yet. Without the user's yes, the answer asks for it; with it, R is
     /// installed in the background (a minute or two), and the call that starts that returns at once.
     /// In the app (`in_app`), whose agents have no `use_machine`, the user installs it from the app.
-    fn own_r(&self, in_app: bool) -> Result<(), String> {
+    fn own_r(&self, in_app: bool, until: std::time::Instant) -> Result<(), String> {
         use std::sync::atomic::Ordering::SeqCst;
         let Some(item) = self.r.own_item().filter(|_| self.offer_own) else { return Ok(()) };
         if self.shell_has_r.load(SeqCst) {
@@ -1153,32 +1239,39 @@ impl RStarter {
             return Ok(());
         }
         let mut install = self.own_install.lock().unwrap();
+        // A call made while another's install runs waits for it too, as the answer says (#175).
+        if matches!(*install, Install::Running) {
+            drop(install);
+            install = wait_for_install(&self.own_install, until.saturating_duration_since(std::time::Instant::now()));
+            if !matches!(*install, Install::Running) {
+                drop(install);
+                return self.own_r(in_app, until);
+            }
+        }
+        if let Some(why) = failure_kept(&install) {
+            return Err(why);
+        }
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => {}
-            // Said once; the next call tries again.
-            Install::Failed(why) => {
-                *install = Install::Idle;
-                return Err(why);
-            }
-            Install::Idle | Install::Done(_) if !self.allow_own.load(SeqCst) => {
+            Install::Idle | Install::Done(_) | Install::Failed(..) if !self.allow_own.load(SeqCst) => {
                 *install = Install::Idle;
                 return Err(own_r_offer(&item, in_app));
             }
-            Install::Idle | Install::Done(_) => {
+            Install::Idle | Install::Done(_) | Install::Failed(..) => {
                 let state = self.own_install.clone();
                 std::thread::spawn(move || {
                     let done = match crate::r::install_own(&mut |line| eprintln!("{line}")) {
                         Ok(_) => Install::Idle,
                         Err(why) => {
                             eprintln!("endeavor core: {why}");
-                            Install::Failed(format!("r_failed::{why}"))
+                            Install::Failed(format!("r_failed::{why}"), std::time::Instant::now())
                         }
                     };
                     *state.lock().unwrap() = done;
                 });
             }
         }
-        Err(format!("r_installing::Installing Endeavor's own R {}, which takes a minute or two. Try again in a minute.", crate::r::OWN_VERSION))
+        Err(format!("r_installing::Installing Endeavor's own R {}, which takes a minute or two. Make the same call again right away: each call waits up to {} seconds.", crate::r::OWN_VERSION, ember_wait().as_secs()))
     }
 
     /// Install Ember into Endeavor's own folder, or update it if r-universe has a newer build
@@ -1186,30 +1279,40 @@ impl RStarter {
     /// before it is used. Installing the first time takes minutes (packages build from source),
     /// longer than an agent's call may wait, so then the call answers `r_installing` and the
     /// install goes on. An update that takes longer goes on too, and R starts with the Ember
-    /// installed; the next start uses the new one.
-    fn update(&self, folder: &Path) -> Result<bool, String> {
+    /// installed; the next start uses the new one. A failure is kept (`Install::Failed`).
+    fn update(&self, folder: &Path, until: std::time::Instant) -> Result<bool, String> {
         let installing = |updating: bool| {
             if updating {
                 eprintln!("endeavor core: still updating Ember; starting R with the installed one");
                 return Ok(false);
             }
-            Err("r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Try again in a minute.".to_owned())
+            Err(format!("r_installing::Installing Ember for R notebooks, which takes a few minutes the first time. Make the same call again right away: each call waits up to {} seconds.", ember_wait().as_secs()))
         };
         let updating = EmberBuilds::read(folder).installed(folder);
         let mut install = self.install.lock().unwrap();
+        // A call made while the first install runs waits for it too, as the answer says (#175). One
+        // made while an update runs starts R with the installed Ember at once, as before.
+        if matches!(*install, Install::Running) && !updating {
+            drop(install);
+            install = wait_for_install(&self.install, until.saturating_duration_since(std::time::Instant::now()));
+        }
+        if let Some(why) = failure_kept(&install) {
+            return Err(why);
+        }
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => return installing(updating),
-            // Finished after the call that started it stopped waiting; a failure is said once, and the next call tries again.
+            // Finished after the call that started it stopped waiting.
             Install::Done(done) => {
                 *install = Install::Idle;
                 return done;
             }
-            Install::Idle | Install::Failed(_) => {}
+            Install::Idle | Install::Failed(..) => {}
         }
         drop(install);
         let install_r = self.adapter.with_file_name("install.R");
         let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, folder, Path::new(&self.repository), Path::new(&self.mac_arm64)]);
         command.stdin(Stdio::null());
+        self.with_mask(&mut command);
         let (state, r) = (self.install.clone(), self.r.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1222,14 +1325,22 @@ impl RStarter {
                 Ok(_) => Err(INSTALL_FAILED.into()),
                 Err(e) => Err(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
             };
-            *state.lock().unwrap() = Install::Done(done);
+            *state.lock().unwrap() = match done {
+                Ok(kept_previous) => Install::Done(Ok(kept_previous)),
+                Err(why) => Install::Failed(why, std::time::Instant::now()),
+            };
             let _ = tx.send(());
         });
-        if rx.recv_timeout(EMBER_WAIT).is_err() {
+        if rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).is_err() {
             return installing(updating);
         }
-        match std::mem::replace(&mut *self.install.lock().unwrap(), Install::Idle) {
+        let mut install = self.install.lock().unwrap();
+        match std::mem::replace(&mut *install, Install::Idle) {
             Install::Done(done) => done,
+            Install::Failed(why, at) => {
+                *install = Install::Failed(why.clone(), at);
+                Err(why)
+            }
             _ => unreachable!("the install thread said it was done"),
         }
     }
@@ -1240,6 +1351,19 @@ impl RStarter {
             let _ = child.wait();
         }
         let _ = std::fs::remove_file(&self.state);
+    }
+}
+
+/// `state` once the install another call started has ended, or after `wait` if it hasn't.
+fn wait_for_install(state: &std::sync::Mutex<Install>, wait: Duration) -> std::sync::MutexGuard<'_, Install> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let install = state.lock().unwrap();
+        if !matches!(*install, Install::Running) || std::time::Instant::now() >= deadline {
+            return install;
+        }
+        drop(install);
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -1570,8 +1694,8 @@ impl Route {
 /// One client's requests in turn, until either side closes.
 fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
     let _ = client.set_nodelay(true);
-    let mut reader = BufReader::new(client.try_clone()?);
-    let mut client = client;
+    let mut client = wire::Shared::new(client);
+    let mut reader = BufReader::new(client.clone());
     let bridge = &served.bridge;
     while let Some(mut request) = Head::read(&mut reader)? {
         let route = Route::of(request.path());
@@ -1718,8 +1842,8 @@ fn julia_starting_page(why: String) -> String {
 /// up on the server for good: a tool call fails with `why`, and the rest is
 /// answered as the core would. Any other request is closed unanswered.
 pub fn serve_unreachable(client: TcpStream, token: &str, why: &str) -> io::Result<()> {
-    let mut reader = BufReader::new(client.try_clone()?);
-    let mut client = client;
+    let mut client = wire::Shared::new(client);
+    let mut reader = BufReader::new(client.clone());
     let Some(request) = Head::read(&mut reader)? else { return Ok(()) };
     if Route::of(request.path()) != Route::Mcp {
         return Ok(());
@@ -1906,7 +2030,7 @@ pub(crate) fn same(given: &str, expected: &str) -> bool {
 /// connection of its own, its body from `client` or already read, and the
 /// response back as it comes, through `edit`. Whether the client connection
 /// can carry another request.
-fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<TcpStream>, port: u16, language: &str, edit: &dyn Fn(&mut Head)) -> io::Result<bool> {
+fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<wire::Shared>, port: u16, language: &str, edit: &dyn Fn(&mut Head)) -> io::Result<bool> {
     let upstream = match TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)) {
         Ok(upstream) => upstream,
         Err(_) => {
@@ -1915,7 +2039,8 @@ fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<TcpStream>
         }
     };
     let _ = upstream.set_nodelay(true);
-    let mut to_upstream = upstream.try_clone()?;
+    let upstream = wire::Shared::new(upstream);
+    let mut to_upstream = upstream.clone();
     let mut request = request;
     match body {
         None => {
@@ -1932,7 +2057,7 @@ fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<TcpStream>
     http::relay_response(&request, client, &mut BufReader::new(upstream), edit)
 }
 
-fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
+fn refuse(client: &mut impl Write, status: &str, why: &str) -> io::Result<()> {
     let body = json!({ "error": why }).to_string();
     write!(client, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
 }
@@ -1940,6 +2065,43 @@ fn refuse(client: &mut TcpStream, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_made_while_an_install_runs_waits_for_it() {
+        // It ends: the call has its result as soon as it does (#175).
+        let state = Arc::new(std::sync::Mutex::new(Install::Running));
+        let began = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(600));
+                *state.lock().unwrap() = Install::Done(Ok(false));
+            });
+            assert!(matches!(*wait_for_install(&state, Duration::from_secs(30)), Install::Done(Ok(false))));
+        });
+        assert!(began.elapsed() >= Duration::from_millis(600), "waited for it");
+        // It doesn't: the call waits as long as it may, and no longer.
+        let began = std::time::Instant::now();
+        *state.lock().unwrap() = Install::Running;
+        assert!(matches!(*wait_for_install(&state, Duration::from_secs(1)), Install::Running));
+        assert!(began.elapsed() >= Duration::from_secs(1), "waited as long as it may");
+        // Nothing running: no wait.
+        *state.lock().unwrap() = Install::Idle;
+        let began = std::time::Instant::now();
+        assert!(matches!(*wait_for_install(&state, Duration::from_secs(30)), Install::Idle) && began.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_julia_start_says_how_long_so_far_and_to_call_again_now() {
+        let said = starting_message("Julia 1.12.6 is starting and loading Pluto", Duration::from_secs(250), Duration::from_secs(30));
+        for part in ["julia_starting::Julia 1.12.6 is starting and loading Pluto (about 4 minutes so far).", "10 minutes", "much faster", "right away", "waits up to 30 seconds", "don't pause"] {
+            assert!(said.contains(part), "{part}: {said}");
+        }
+        assert!(!said.contains("in a minute"), "{said}");
+        // The wait the call had, which an approval card can shorten.
+        assert!(starting_message("Julia is starting", Duration::from_secs(40), Duration::from_secs(5)).contains("(40 seconds so far)") && starting_message("Julia is starting", Duration::from_secs(40), Duration::from_secs(5)).contains("waits up to 5 seconds"));
+        // The runtime's own page, which waits for nothing, doesn't tell anyone to call again.
+        assert!(!starting_message("Julia is starting", Duration::from_secs(40), Duration::ZERO).contains("call again"));
+    }
 
     #[test]
     #[cfg(unix)]
@@ -1981,8 +2143,8 @@ mod tests {
 
     #[test]
     fn r_status_says_each_step_and_ready_wins_over_an_update() {
-        let (idle, running, done_ok, done_err) = (Install::Idle, Install::Running, Install::Done(Ok(false)), Install::Done(Err("r_failed::Couldn't install Ember".into())));
-        let own_failed = Install::Failed("r_failed::Couldn't install R: no network".into());
+        let (idle, running, done_ok, done_err) = (Install::Idle, Install::Running, Install::Done(Ok(false)), Install::Failed("r_failed::Couldn't install Ember".into(), std::time::Instant::now()));
+        let own_failed = Install::Failed("r_failed::Couldn't install R: no network".into(), std::time::Instant::now());
         let now = |running_r, own, ember, ember_installed, launching, failed| r_status(&RNow { running: running_r, own, ember, ember_installed, launching, failed });
         let step = |s: &str| json!({ "state": "starting", "step": s });
         assert_eq!(now(false, &idle, &idle, false, false, None), json!({ "state": "not_started" }));
