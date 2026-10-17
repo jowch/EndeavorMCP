@@ -920,6 +920,24 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
     assert_eq!(text(&mcp(&core, &shell(7), &caller).1)["stdout"], "ran\n");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn run_shells_command_starts_with_the_signal_mask_the_core_started_with() {
+    let dir = state_dir("core-shell-mask");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{"owner":"7","policy":"auto","asks":true}}"#);
+    let blocked = |status: &str| status.lines().find(|l| l.starts_with("SigBlk:")).map(str::to_owned);
+    let shell = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_shell","arguments":{"command":"cat /proc/self/status"}}}"#;
+    let reply: serde_json::Value = serde_json::from_str(&mcp(&core, shell, &caller).1).unwrap();
+    let text: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    // The core blocks SIGINT, SIGTERM and SIGHUP for its own thread; a command it starts doesn't (#165).
+    let core_status = std::fs::read_to_string(format!("/proc/{}/status", core.process.id())).unwrap();
+    assert_ne!(blocked(&core_status), blocked(&std::fs::read_to_string("/proc/thread-self/status").unwrap()), "the core's mask is its own");
+    assert_eq!(blocked(text["stdout"].as_str().unwrap()), blocked(&std::fs::read_to_string("/proc/thread-self/status").unwrap()), "{text}");
+}
+
 #[test]
 fn a_held_call_answers_as_an_event_stream_at_once() {
     let dir = state_dir("core-held-stream");
