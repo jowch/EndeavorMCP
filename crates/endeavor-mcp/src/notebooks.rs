@@ -398,6 +398,9 @@ struct Cell {
     /// "kind::text" like a tool warning: Ember's `changed_in_place`,
     /// `settings_found` and `load_note` (#207). Pluto has none.
     notes: Vec<String>,
+    /// The inputs (emberui) the cell's last run made, one line each, as `read_cell` shows them:
+    /// "n: slider 1 to 10, value 3". Pluto's have none.
+    inputs: Vec<String>,
 }
 
 impl Cell {
@@ -429,6 +432,7 @@ impl Snapshot {
                 stale: flag(&c["stale"]),
                 not_run: flag(&c["not_run"]),
                 notes: c["notes"].as_array().map(|a| a.iter().filter_map(text).collect()).unwrap_or_default(),
+                inputs: c["inputs"].as_array().map(|a| a.iter().filter_map(text).collect()).unwrap_or_default(),
             };
             Some((text(&c["cell_id"])?, cell))
         });
