@@ -556,6 +556,20 @@ fn an_r_notebook_through_the_runtime() {
         }
     });
 
+    step("a cell that changes another cell's environment in place says so, in the run and in read_cell (#207)", || {
+        std::fs::write(folder.join("inplace.R"), "### An Ember notebook ###\n\n# %% id=E\nbox <- new.env()\nbox$n <- 1\nbox$add <- function() box$n <- box$n + 1\n\n# %% id=F\nbox$add()\n\n# /// cell order\n# E\n# F\n# ///\n").unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "inplace.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        agent.ok("allow_execution", json!({ "notebook_id": id }));
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": "F", "wait_for_completion": true }));
+        assert!(ran["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("changed_in_place::Cell F: Changed box in place")), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "F" }));
+        assert!(read["notes"][0].as_str().is_some_and(|n| n.starts_with("changed_in_place::Changed box in place")), "{read}");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "E" })).get("notes"), None);
+    });
+
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();

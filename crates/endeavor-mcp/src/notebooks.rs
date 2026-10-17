@@ -394,6 +394,10 @@ struct Cell {
     /// restart leaves every cell so). Pluto's are always false.
     stale: bool,
     not_run: bool,
+    /// The notes the engine shows under the cell after its last run, each
+    /// "kind::text" like a tool warning: Ember's `changed_in_place`,
+    /// `settings_found` and `load_note` (#207). Pluto has none.
+    notes: Vec<String>,
 }
 
 impl Cell {
@@ -424,6 +428,7 @@ impl Snapshot {
                 markdown: flag(&c["markdown"]),
                 stale: flag(&c["stale"]),
                 not_run: flag(&c["not_run"]),
+                notes: c["notes"].as_array().map(|a| a.iter().filter_map(text).collect()).unwrap_or_default(),
             };
             Some((text(&c["cell_id"])?, cell))
         });

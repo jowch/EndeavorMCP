@@ -24,11 +24,13 @@ struct FakeCell {
     hidden: bool,
     stale: bool,
     not_run: bool,
+    /// Ember's notes on its last run, "kind::text".
+    notes: Vec<String>,
 }
 
 impl FakeCell {
     fn new(id: &str, code: &str) -> FakeCell {
-        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false }
+        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, notes: Vec::new() }
     }
 
     /// What `a, b = 1, 2` defines, and the names the rest of the code uses.
@@ -126,7 +128,7 @@ impl Engine {
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
                 "last_run": c.last_run, "runtime": 0, "output": c.output, "error": if c.errored { json!({ "msg": c.output }) } else { Value::Null }, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
-                "stale": c.stale, "not_run": c.not_run,
+                "stale": c.stale, "not_run": c.not_run, "notes": c.notes,
             })).collect::<Vec<_>>(),
         })
     }
@@ -686,6 +688,28 @@ fn a_run_in_lazy_mode_says_so_and_names_the_stale_cells() {
     let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
     assert!(ran.get("stale_cells").is_none() && !ran["warnings"].to_string().contains("lazy_mode"), "{ran}");
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0].get("on_cell_change"), None);
+}
+
+#[test]
+fn a_cells_notes_reach_the_agent_in_the_runs_warnings_and_in_read_cell() {
+    // Ember's page shows notes under a cell, such as a value another cell
+    // defines changed in place, whose readers don't rerun; the agent sees
+    // them too (#207).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1")]);
+    let note = "changed_in_place::Changed x in place, which another cell defines, so the cells that read it don't rerun. Make the change in the cell that defines it.";
+    s.engine.with(NB, |nb| nb.cells[1].notes = vec![note.into()]);
+    s.read("", NB, Y);
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
+    let wanted = format!("changed_in_place::Cell {Y}: Changed x in place, which another cell defines, so the cells that read it don't rerun. Make the change in the cell that defines it.");
+    assert!(ran["warnings"].as_array().unwrap().iter().any(|w| *w == wanted), "{ran}");
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    assert_eq!(read["notes"], json!([note]), "{read}");
+
+    // A cell with none says nothing.
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    assert!(!ran["warnings"].to_string().contains("changed_in_place"), "{ran}");
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap().get("notes"), None);
 }
 
 #[test]
