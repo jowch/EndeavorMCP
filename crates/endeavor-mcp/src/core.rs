@@ -801,14 +801,38 @@ const ENDED_EARLY: &str = "The shell line for R ended without starting R. A line
 /// Why R notebooks use the Ember before the newest, for the agent.
 const EMBER_PREVIOUS: &str = "ember_previous::Ember's newest build didn't work here, so R notebooks use the Ember before it. The runtime's log says why. Mention it to the user if R notebooks act up.";
 
-/// Where installing or updating Ember is.
+/// Where installing or updating Ember, or Endeavor's own R, is.
 enum Install {
     Idle,
     Running,
     /// Done while no call waited for it: what the next call says.
     Done(Result<bool, String>),
-    /// Endeavor's own R didn't install: said once, and the next call tries again.
-    Failed(String),
+    /// It failed (why, and when): every call is told, until `retry_after()` has passed; the call
+    /// after that tries again. Told once and tried again on the next call, several agents retrying
+    /// started an install each time, six in a minute (#183).
+    Failed(String, std::time::Instant),
+}
+
+/// How long a failed install is said to every call before a call tries it again: long enough
+/// that agents retrying at once don't each start one, short enough that what the user fixed
+/// (the network, a compiler) is tried without restarting. ENDEAVOR_TEST_INSTALL_RETRY_SECS sets it
+/// in debug builds.
+fn retry_after() -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_INSTALL_RETRY_SECS").ok()?.parse().ok()).flatten();
+    test.map_or(Duration::from_secs(60), Duration::from_secs)
+}
+
+/// Why a failed install is still what calls are told, if it is (`retry_after`), saying that
+/// nothing was tried for this call and when a call will try: else an agent whose user just
+/// installed a compiler reads the same words and says the compiler is still missing.
+fn failure_kept(install: &Install) -> Option<String> {
+    match install {
+        Install::Failed(why, at) if at.elapsed() < retry_after() => {
+            let left = retry_after().saturating_sub(at.elapsed()).as_secs().max(1);
+            Some(format!("{}. That was the try {} s ago, and this call didn't try again; a call made {left} s from now does.", why.trim_end_matches('.'), at.elapsed().as_secs()))
+        }
+        _ => None,
+    }
 }
 
 /// What `r_status` reads: whether R's adapter runs, the installs of Endeavor's own R and of Ember,
@@ -846,7 +870,7 @@ fn r_status(now: &RNow) -> Value {
         return json!({ "state": "starting", "step": "Starting R" });
     }
     match (now.own, now.ember, now.failed) {
-        (Install::Failed(why), ..) | (_, Install::Done(Err(why)), _) => failed(why),
+        (Install::Failed(why, _), ..) | (_, Install::Failed(why, _) | Install::Done(Err(why)), _) => failed(why),
         (.., Some(why)) => failed(why),
         _ => json!({ "state": "not_started" }),
     }
@@ -1224,25 +1248,23 @@ impl RStarter {
                 return self.own_r(in_app, until);
             }
         }
+        if let Some(why) = failure_kept(&install) {
+            return Err(why);
+        }
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => {}
-            // Said once; the next call tries again.
-            Install::Failed(why) => {
-                *install = Install::Idle;
-                return Err(why);
-            }
-            Install::Idle | Install::Done(_) if !self.allow_own.load(SeqCst) => {
+            Install::Idle | Install::Done(_) | Install::Failed(..) if !self.allow_own.load(SeqCst) => {
                 *install = Install::Idle;
                 return Err(own_r_offer(&item, in_app));
             }
-            Install::Idle | Install::Done(_) => {
+            Install::Idle | Install::Done(_) | Install::Failed(..) => {
                 let state = self.own_install.clone();
                 std::thread::spawn(move || {
                     let done = match crate::r::install_own(&mut |line| eprintln!("{line}")) {
                         Ok(_) => Install::Idle,
                         Err(why) => {
                             eprintln!("endeavor core: {why}");
-                            Install::Failed(format!("r_failed::{why}"))
+                            Install::Failed(format!("r_failed::{why}"), std::time::Instant::now())
                         }
                     };
                     *state.lock().unwrap() = done;
@@ -1257,7 +1279,7 @@ impl RStarter {
     /// before it is used. Installing the first time takes minutes (packages build from source),
     /// longer than an agent's call may wait, so then the call answers `r_installing` and the
     /// install goes on. An update that takes longer goes on too, and R starts with the Ember
-    /// installed; the next start uses the new one.
+    /// installed; the next start uses the new one. A failure is kept (`Install::Failed`).
     fn update(&self, folder: &Path, until: std::time::Instant) -> Result<bool, String> {
         let installing = |updating: bool| {
             if updating {
@@ -1274,14 +1296,17 @@ impl RStarter {
             drop(install);
             install = wait_for_install(&self.install, until.saturating_duration_since(std::time::Instant::now()));
         }
+        if let Some(why) = failure_kept(&install) {
+            return Err(why);
+        }
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => return installing(updating),
-            // Finished after the call that started it stopped waiting; a failure is said once, and the next call tries again.
+            // Finished after the call that started it stopped waiting.
             Install::Done(done) => {
                 *install = Install::Idle;
                 return done;
             }
-            Install::Idle | Install::Failed(_) => {}
+            Install::Idle | Install::Failed(..) => {}
         }
         drop(install);
         let install_r = self.adapter.with_file_name("install.R");
@@ -1300,14 +1325,22 @@ impl RStarter {
                 Ok(_) => Err(INSTALL_FAILED.into()),
                 Err(e) => Err(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
             };
-            *state.lock().unwrap() = Install::Done(done);
+            *state.lock().unwrap() = match done {
+                Ok(kept_previous) => Install::Done(Ok(kept_previous)),
+                Err(why) => Install::Failed(why, std::time::Instant::now()),
+            };
             let _ = tx.send(());
         });
         if rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).is_err() {
             return installing(updating);
         }
-        match std::mem::replace(&mut *self.install.lock().unwrap(), Install::Idle) {
+        let mut install = self.install.lock().unwrap();
+        match std::mem::replace(&mut *install, Install::Idle) {
             Install::Done(done) => done,
+            Install::Failed(why, at) => {
+                *install = Install::Failed(why.clone(), at);
+                Err(why)
+            }
             _ => unreachable!("the install thread said it was done"),
         }
     }
@@ -2110,8 +2143,8 @@ mod tests {
 
     #[test]
     fn r_status_says_each_step_and_ready_wins_over_an_update() {
-        let (idle, running, done_ok, done_err) = (Install::Idle, Install::Running, Install::Done(Ok(false)), Install::Done(Err("r_failed::Couldn't install Ember".into())));
-        let own_failed = Install::Failed("r_failed::Couldn't install R: no network".into());
+        let (idle, running, done_ok, done_err) = (Install::Idle, Install::Running, Install::Done(Ok(false)), Install::Failed("r_failed::Couldn't install Ember".into(), std::time::Instant::now()));
+        let own_failed = Install::Failed("r_failed::Couldn't install R: no network".into(), std::time::Instant::now());
         let now = |running_r, own, ember, ember_installed, launching, failed| r_status(&RNow { running: running_r, own, ember, ember_installed, launching, failed });
         let step = |s: &str| json!({ "state": "starting", "step": s });
         assert_eq!(now(false, &idle, &idle, false, false, None), json!({ "state": "not_started" }));
