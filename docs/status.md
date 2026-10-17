@@ -250,8 +250,10 @@ Next:
   The call waits up to 30 seconds for that. The first install then returns
   `r_installing` until it's done, and each call made meanwhile waits up to 30
   seconds for it too, as the answer says (#175: before, only the call that started
-  it waited, and agents looped). An update goes on while R starts with the
-  installed Ember. Offline, R starts with the installed Ember. A build that fails to
+  it waited, and agents looped). An install that fails, of Ember or of
+  Endeavor's own R, is what every call is told for a minute; the call after that
+  tries again (#183: before, each call after a failure started a new install). An
+  update goes on while R starts with the installed Ember. Offline, R starts with the installed Ember. A build that fails to
   install or load, or that R's adapter doesn't start with, isn't tried again;
   R starts with the build before it, and the agent gets an `ember_previous`
   warning. A `--r-library` is used as it is, never updated. The E2E workflow's
