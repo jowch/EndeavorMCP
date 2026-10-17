@@ -577,6 +577,19 @@ fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
     }
 }
 
+/// The signal mask the core was started with, which `run_shell`'s commands get (#165). The core
+/// blocks Ctrl-C, SIGTERM and SIGHUP for its own thread to take, and a blocked mask survives exec:
+/// a command would otherwise ignore SIGINT and SIGTERM, and so would everything it starts. Unset
+/// outside the core, whose signals aren't blocked.
+#[cfg(unix)]
+static COMMAND_MASK: std::sync::OnceLock<libc::sigset_t> = std::sync::OnceLock::new();
+
+/// Set, once, the mask `run_shell`'s commands start with (`COMMAND_MASK`).
+#[cfg(unix)]
+pub fn set_command_mask(mask: libc::sigset_t) {
+    let _ = COMMAND_MASK.set(mask);
+}
+
 /// Start `command` in `cwd`, and a thread that reads its output until it ends or `timeout` kills it.
 #[cfg(unix)]
 fn start_shell(command: &str, cwd: &str, timeout: Duration, shell: &Shell) -> Result<Arc<Running>, String> {
@@ -588,11 +601,16 @@ fn start_shell(command: &str, cwd: &str, timeout: Duration, shell: &Shell) -> Re
             None => command.env_remove(name),
         };
     }
-    // SAFETY: setsid is async-signal-safe. Its own session and process group,
-    // so a timeout can kill everything the command started.
+    // The mask the core started with, not the core's own (`COMMAND_MASK`).
+    let mask = COMMAND_MASK.get().copied();
+    // SAFETY: setsid and pthread_sigmask are async-signal-safe. Its own session and
+    // process group, so a timeout can kill everything the command started.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             libc::setsid();
+            if let Some(mask) = &mask {
+                libc::pthread_sigmask(libc::SIG_SETMASK, mask, std::ptr::null_mut());
+            }
             Ok(())
         });
     }

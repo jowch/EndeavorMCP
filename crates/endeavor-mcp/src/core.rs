@@ -156,6 +156,8 @@ pub fn main(argv: &[String]) -> ! {
     #[cfg(unix)]
     let (stop_signals, inherited_mask) = block_stop_signals();
     #[cfg(unix)]
+    crate::host_tools::set_command_mask(inherited_mask);
+    #[cfg(unix)]
     if let Some(fd) = args.lifeline {
         watch_lifeline(fd);
     }
