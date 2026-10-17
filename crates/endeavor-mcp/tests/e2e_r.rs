@@ -785,6 +785,15 @@ fn ember_updates_from_its_repository_and_keeps_the_build_before() {
     });
     step("offline: the installed Ember", || {
         assert_eq!(install("https://nowhere.invalid"), (Some(0), format!("Current: {b} | Previous: {a} | Failed: {c}")));
+        assert!(folder.join("unreachable").exists());
+    });
+    step("offline within the last hour: the installed Ember, without asking again", || {
+        let e = stand_in_repository(&repository, "e", false, None);
+        assert_eq!(install(&url), (Some(0), format!("Current: {b} | Previous: {a} | Failed: {c}")));
+        let earlier = format!("Sys.setFileTime('{}', Sys.time() - 2 * 3600)", folder.join("unreachable").display());
+        assert!(Command::new("Rscript").args(["-e", &earlier]).status().unwrap().success());
+        assert_eq!(install(&url), (Some(0), format!("Current: {e} | Previous: {b} | Failed: {c}")));
+        assert!(!folder.join("unreachable").exists());
     });
 }
 

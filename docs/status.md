@@ -277,7 +277,7 @@ Next:
   it waited, and agents looped). An install that fails, of Ember or of
   Endeavor's own R, is what every call is told for a minute; the call after that
   tries again (#183: before, each call after a failure started a new install). An
-  update goes on while R starts with the installed Ember. Offline, R starts with the installed Ember. A build that fails to
+  update goes on while R starts with the installed Ember. Offline, R starts with the installed Ember, and for an hour after none of Ember's repositories answered it doesn't ask them again: where connections hang rather than being refused, each place waited 20 s at every start (#90). A build that fails to
   install or load, or that R's adapter doesn't start with, isn't tried again;
   R starts with the build before it, and the agent gets an `ember_previous`
   warning. A `--r-library` is used as it is, never updated. The E2E workflow's
