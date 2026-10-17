@@ -560,7 +560,11 @@ restart <- function(rec) {
 # ---- Moving the package date -------------------------------------------------
 
 # A data frame's rows, or [] for none.
-rows <- function(df) if (is.null(df) || NROW(df) == 0) I(list()) else df
+rows <- function(df) {
+  if (is.null(df) || NROW(df) == 0) return(I(list()))
+  rownames(df) <- NULL
+  df
+}
 
 # The date a call names, or today: local time, as the Packages tab's Update
 # button does (`ember_update_packages`).
@@ -589,10 +593,12 @@ preview_packages <- function(rec, date, timeout) {
       prop <- if (registered(rec)) current()
       done <- !is.null(prop) && prop$status %in% c("ready", "failed")
       if (!done && registered(rec) && Sys.time() < deadline) return(later::later(check, 0.1))
+      status <- if (is.null(prop)) "fetching" else prop$status
+      # What the agent was shown, which the apply must match (set_package_date).
+      rec$previewed <- if (identical(status, "ready")) list(date = date, changes = to_json(rows(prop$changes)))
       resolve(list(
         date = date, current_date = notebook_state(rec$nb)$file$header$snapshot,
-        status = if (is.null(prop)) "fetching" else prop$status,
-        changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message))
+        status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message))
     }
     check()
   })
@@ -601,10 +607,20 @@ preview_packages <- function(rec, date, timeout) {
 # Ember's set_date(): apply the preview for `date`, refused unless it is
 # ready and current. The library installs; a worker with a changed package
 # loaded restarts once it is ready, and its cells are left not run.
+# Ember redoes its proposal when the notebook's packages change, so the
+# proposal can differ from what preview_packages showed the agent: then
+# this refuses too, and the agent previews again (#201).
 set_package_date <- function(rec, date) {
   date <- date_param(date)
+  prop <- package_status(rec$nb)$proposal
+  shown <- rec$previewed
+  if (!is.null(prop) && identical(prop$date, date) && identical(prop$status, "ready") &&
+      !(identical(shown$date, date) && identical(shown$changes, to_json(rows(prop$changes))))) {
+    argument_error("no_preview", "the notebook's packages changed since the preview, so the update would change more or less than it showed. Call preview_package_update again and tell the user what it shows")
+  }
   changes <- tryCatch(set_date(rec$nb, date),
                       ember_refused = function(e) argument_error("no_preview", conditionMessage(e)))
+  rec$previewed <- NULL
   state <- notebook_state(rec$nb)
   list(date = state$file$header$snapshot, changes = rows(changes), process_status = process_status(state))
 }

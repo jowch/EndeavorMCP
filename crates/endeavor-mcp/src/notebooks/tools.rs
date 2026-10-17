@@ -1428,9 +1428,12 @@ impl Call<'_> {
         let mut result = self.nbs.call("set_package_date", json!({ "notebook_id": nb.id, "date": date }))?;
         self.nbs.publish();
         result["notebook_id"] = json!(nb.id);
-        result["message"] = json!(
+        // In safe preview Ember installs nothing until the user lets the notebook run.
+        result["message"] = json!(if result["process_status"] == "waiting_for_permission" {
+            "The notebook's package date has moved. Its library installs once the user allows the notebook to run (the notebook's page, or allow_execution): nothing installs or runs until then."
+        } else {
             "The notebook's package date has moved. Its library installs now: cells that need it wait, queued, and a read of one waits for the install. If R had a changed package loaded, R restarts once the library is ready and every cell is left `not_run`."
-        );
+        });
         Ok(result)
     }
 }

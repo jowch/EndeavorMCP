@@ -123,7 +123,7 @@ Core → engine:
 | `interrupt(nid)` | — |
 | `restart(nid, timeout)` | the engine's own restart: a new process, then every cell runs (refused in safe preview) |
 | `preview_packages(nid, date?, timeout)` | R only: Ember's `preview_date()` for `date` (today, in local time, if none, as the Packages tab's Update): the date, the notebook's own, `status` (`ready`, `failed`, or `fetching` if the index didn't come within `timeout`), `changes` and `problems`. Nothing changes |
-| `set_package_date(nid, date)` | R only: Ember's `set_date()`, refused (`no_preview`) unless that date's preview is ready and current: the new date and the applied changes |
+| `set_package_date(nid, date)` | R only: Ember's `set_date()`, refused (`no_preview`) unless that date's preview is ready and current and matches the `changes` `preview_packages` last returned (Ember redoes its proposal when the packages change): the new date and the applied changes |
 | `move(nid, path)` | the file moved to `path` (checked by the core), and its new path |
 | `render_png(nid, cell)` | base64 PNG or none, and the output's MIME type |
 | `validate(nid, cell, code)` | parse errors |

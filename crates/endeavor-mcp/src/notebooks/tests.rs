@@ -250,7 +250,7 @@ impl Engine {
                     return Err("ArgumentError: no_preview::no ready, current preview for that date".into());
                 }
                 nb.package_date = nb.previewed.take();
-                Ok(json!({ "date": nb.package_date, "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "process_status": "ready" }))
+                Ok(json!({ "date": nb.package_date, "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "process_status": if nb.safe_preview { "waiting_for_permission" } else { "ready" } }))
             }
             "move" => {
                 let _ = std::fs::rename(&nb.path, params["path"].as_str().unwrap());
@@ -2780,6 +2780,14 @@ fn an_r_notebooks_package_date_is_shown_previewed_and_moved() {
     assert_eq!((&applied["date"], &applied["changes"][0]["to"]), (&json!("2026-10-17"), &json!("1.2.1")), "{applied}");
     let listed = s.call("9", "list_notebooks", json!({})).unwrap();
     assert_eq!(listed.as_array().unwrap().iter().find(|nb| nb["notebook_id"] == R).unwrap()["package_date"], "2026-10-17");
+
+    assert!(applied["message"].as_str().unwrap().contains("installs now"), "{applied}");
+
+    // In safe preview nothing installs until the user lets the notebook run, and the result says so.
+    ember.with(R, |nb| nb.safe_preview = true);
+    s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2026-10-18" })).unwrap();
+    let waiting = s.call("9", "apply_package_update", json!({ "notebook_id": R, "date": "2026-10-18" })).unwrap();
+    assert!(waiting["message"].as_str().unwrap().contains("once the user allows the notebook to run"), "{waiting}");
 
     // A Julia notebook has no package date.
     s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1")]);

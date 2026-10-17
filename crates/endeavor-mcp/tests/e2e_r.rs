@@ -524,6 +524,15 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(old["status"], "ready", "{old}");
         assert!(old["changes"].as_array().unwrap().iter().any(|c| c["name"] == "jsonlite" && c["to"] != c["from"]), "{old}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "a preview changes nothing");
+        // A package added since the preview: the apply would change more than it showed, so it's
+        // refused, and a new preview shows the package too.
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        agent.ok("add_cell", json!({ "notebook_id": id, "code": "library(base64enc)", "after_cell_id": lib }));
+        let (refused, said) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2024-06-03" }));
+        assert!(refused && said.to_string().contains("no_preview"), "{said}");
+        let again = preview(&mut agent, Some("2024-06-03"));
+        assert!(again["changes"].as_array().unwrap().iter().any(|c| c["name"] == "base64enc"), "{again}");
+        assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "the refused apply moved nothing");
 
         // Updating is today's date: applied, the file's date moves and the cell sees the version the preview named.
         let today = preview(&mut agent, None);
