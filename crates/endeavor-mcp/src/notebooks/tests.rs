@@ -351,6 +351,8 @@ impl Engine {
                 let code = &nb.cells[at].code;
                 if code.contains("widget") {
                     json!({ "png": "iVBORw==", "mime": "text/html", "source": "embedded image" })
+                } else if code.contains("html") {
+                    json!({ "png": Value::Null, "mime": "text/html" })
                 } else {
                     json!({ "png": if code.contains("plot") { json!("iVBORw==") } else { Value::Null }, "mime": "text/plain" })
                 }
@@ -1473,6 +1475,26 @@ fn view_cell_output_says_when_the_picture_came_from_the_html() {
         Reply::Image { meta, .. } => assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/html", "png_bytes": 4, "source": "embedded image" })),
         Reply::Json(_) => panic!("no image"),
     }
+}
+
+#[test]
+fn the_app_s_picture_stands_in_for_html_with_no_png_and_for_a_picture_from_the_html() {
+    const Z: &str = "33333333-3333-3333-3333-333333333333";
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "html(fig)"), (Y, "y = 1"), (Z, "widget(fig)")]);
+    let result = |cell: &str| {
+        let reply = s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": cell }), &Folder::Process, Instant::now());
+        match reply {
+            Ok(Reply::Image { meta, png_base64 }) => crate::mcp::image_result(&meta, png_base64),
+            Ok(Reply::Json(_)) => panic!("not an image"),
+            Err(error) => crate::mcp::tool_error(&error, false),
+        }
+    };
+    assert!(super::snapshot_may_help(&result(X)), "HTML with no PNG");
+    assert!(super::snapshot_may_help(&result(Z)), "a picture from the HTML");
+    assert!(!super::snapshot_may_help(&result(Y)), "text");
+    s.engine.with(NB, |nb| nb.cells[0].errored = true);
+    assert!(!super::snapshot_may_help(&result(X)), "an error");
 }
 
 #[test]

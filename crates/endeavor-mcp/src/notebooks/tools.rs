@@ -1531,10 +1531,25 @@ pub(crate) fn snapshot_may_help(result: &Value) -> bool {
 }
 
 /// `view_cell_output`'s result for `png` (base64), a picture of cell `cell` as the notebook draws it,
-/// or None if it is over the size an agent takes.
-pub(crate) fn screenshot_result(cell: &str, png: String) -> Option<Value> {
+/// in place of the runtime's `result`, or None if it is over the size an agent takes. It keeps the
+/// output's MIME type when the runtime's result named it.
+pub(crate) fn screenshot_result(cell: &str, png: String, result: &Value) -> Option<Value> {
     let bytes = base64_len(&png);
-    (bytes <= MAX_IMAGE_BYTES).then(|| crate::mcp::image_result(&json!({ "cell_id": cell, "source": "screenshot", "png_bytes": bytes }), png))
+    if bytes > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    let said: Value = serde_json::from_str(text).unwrap_or_default();
+    let shown_as = said["shown_as"].as_str().map(str::to_owned).or_else(|| {
+        let message = said["message"].as_str()?;
+        let (_, rest) = message.split_once("its output (")?;
+        Some(rest.split_once(')')?.0.to_owned())
+    });
+    let mut meta = json!({ "cell_id": cell, "source": "screenshot", "png_bytes": bytes });
+    if let Some(shown_as) = shown_as {
+        meta["shown_as"] = json!(shown_as);
+    }
+    Some(crate::mcp::image_result(&meta, png))
 }
 
 fn base64_len(text: &str) -> usize {

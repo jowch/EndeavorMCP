@@ -15,8 +15,9 @@ use crate::mcp::{to_json, tool_error};
 use crate::notebooks::{screenshot_result, snapshot_may_help, uuid_value};
 
 /// A picture of a cell's output as the user's notebook draws it, given the session's key, the
-/// notebook's id and the cell's: a PNG, in base64. None if it can't be taken (the notebook isn't
-/// open in the app, or the cell isn't drawn).
+/// notebook's id and the cell's: a PNG, in base64. None if it can't be taken: the notebook isn't
+/// open in the app, or the output is empty or not drawn yet (a cell that hasn't run), which would
+/// give the agent a blank picture. In safe preview it is asked for any output, text too.
 pub type Snapshot = dyn Fn(&str, &str, &str) -> Option<String> + Send + Sync;
 
 /// Serve `client`'s requests through `upstream`, a connection to the runtime's
@@ -64,9 +65,9 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
             to_runtime.write_all(&body)?;
             if let Some(snapshot) = view {
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);
-                if !relay_view(&request, &mut client, &mut from_runtime, &|| {
+                if !relay_view(&request, &mut client, &mut from_runtime, &|result| {
                     let (notebook, cell) = (uuid_value(&arguments["notebook_id"])?, uuid_value(&arguments["cell_id"])?);
-                    screenshot_result(&cell, snapshot(&session, &notebook, &cell)?)
+                    screenshot_result(&cell, snapshot(&session, &notebook, &cell)?, result)
                 })? {
                     return Ok(());
                 }
@@ -81,9 +82,9 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
 }
 
 /// Pass on the runtime's answer to a `view_cell_output`, unless `snapshot_may_help` and `snapshot`
-/// gives a result with a picture: then the answer is that. Whether the client connection can carry
+/// gives a result with a picture in place of the runtime's: then the answer is that. Whether the client connection can carry
 /// another request.
-fn relay_view(request: &Head, client: &mut wire::Shared, from_runtime: &mut BufReader<wire::Shared>, snapshot: &dyn Fn() -> Option<Value>) -> io::Result<bool> {
+fn relay_view(request: &Head, client: &mut wire::Shared, from_runtime: &mut BufReader<wire::Shared>, snapshot: &dyn Fn(&Value) -> Option<Value>) -> io::Result<bool> {
     let mut response = loop {
         let response = Head::read(from_runtime)?.ok_or(io::ErrorKind::UnexpectedEof)?;
         // `100 Continue` comes before the real response; the client sent its whole body already.
@@ -98,7 +99,7 @@ fn relay_view(request: &Head, client: &mut wire::Shared, from_runtime: &mut BufR
     if response.status() == 200 && json
         && let Ok(mut message) = serde_json::from_slice::<Value>(&body)
         && snapshot_may_help(&message["result"])
-        && let Some(result) = snapshot()
+        && let Some(result) = snapshot(&message["result"])
     {
         message["result"] = result;
         body = to_json(&message).into_bytes();
@@ -296,14 +297,15 @@ mod tests {
         assert_eq!(asked.try_recv().unwrap(), format!("7 {NOTEBOOK} {HTML}"), "the ids as the runtime reads them");
         assert_eq!(html["isError"], false);
         assert_eq!(html["content"][1], json!({ "type": "image", "data": "c25hcHNob3Q=", "mimeType": "image/png" }));
-        assert_eq!(meta(&html), json!({ "cell_id": HTML, "source": "screenshot", "png_bytes": 8 }));
+        assert_eq!(meta(&html), json!({ "cell_id": HTML, "source": "screenshot", "png_bytes": 8, "shown_as": "text/html" }), "what it is, from the error");
 
         // A picture from the output's HTML may be only part of it: the notebook's picture is what the user sees.
         let widget = view(&mut client, WIDGET);
-        assert_eq!(meta(&widget)["source"], "screenshot");
+        assert_eq!((&meta(&widget)["source"], &meta(&widget)["shown_as"]), (&json!("screenshot"), &json!("text/html")));
         assert_eq!(asked.try_recv().unwrap(), format!("7 {NOTEBOOK} {WIDGET}"));
         // In safe preview the runtime can't render the value, but the notebook still shows the output.
-        assert_eq!(meta(&view(&mut client, PREVIEW))["source"], "screenshot");
+        let preview = meta(&view(&mut client, PREVIEW));
+        assert_eq!((&preview["source"], preview.get("shown_as")), (&json!("screenshot"), None), "the runtime didn't say");
         assert_eq!(asked.try_recv().unwrap(), format!("7 {NOTEBOOK} {PREVIEW}"));
 
         // The value's own picture stands, and so does an error the notebook's picture wouldn't help with.

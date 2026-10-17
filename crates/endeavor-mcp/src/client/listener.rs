@@ -166,7 +166,9 @@ impl Listener {
     }
 
     /// From now on, a `view_cell_output` the runtime has no picture for gets `snapshot`'s
-    /// (`serve_guarded`). Set once: a later one is ignored.
+    /// (`serve_guarded`). Set once: a later one is ignored. Call it only where the client takes
+    /// pictures: every connection then goes through the guard, which on Windows doesn't notice an
+    /// agent hanging up during a stream (`wait_readable` isn't ported) until the wait times out.
     pub fn set_snapshot(&self, snapshot: Box<Snapshot>) {
         let _ = self.snapshot.set(snapshot);
     }
