@@ -115,7 +115,7 @@ Core → engine:
 | --- | --- |
 | `open(path, run)` / `new(path? \| folder?)` | notebook id, path, process status; `new` also its cells |
 | `shutdown(nid)` | whether it was in safe preview |
-| `allow_execution(nid, run, timeout)` | whether it was already allowed, whether it ran, process status |
+| `allow_execution(nid, run, timeout)` | whether it was already allowed, whether it ran, process status, and the `run` id of the run it started, as `run` names one, if it goes on |
 | `snapshot(nid)` | path, order, process status, whether execution is allowed, whether it's in safe preview, per cell: code, folded, running, queued, errored, last run time, runtime, output summary or structured error, whether the tools hide it (boilerplate such as Pluto's package cells) and whether it's markdown. Without `nid`, every open notebook, in the engine's order |
 | `graph(nid, fresh?, refresh?, edges?, packages?)` | per cell, in the engine's order: definitions, function names, references, as of the engine's last analysis (`fresh`: of the notebook as it is now, not kept); with `edges`, each cell's direct upstream and downstream cells; with `packages`, the packages each cell loads; the runnable cells in run order, and the rest |
 | `apply(nid, ops)` | ops: set code (refused, before any op applies, if a cell's code isn't the `expected` code), insert at an index, delete, move to an index, fold. The engine saves the file and updates its own UI. The inserted cells' ids |
