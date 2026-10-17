@@ -274,7 +274,15 @@ fn the_runtime_end_to_end() {
     }
 
     let (notebook, path, cell) = step("new notebook, add and edit a cell, run it, read its output", || {
-        let created = rt.ok(MAC, "new_notebook", json!({}));
+        // The first notebook in a new Julia process compiles for a while. If that outlasts the call,
+        // it answers `notebook_opening`, a normal result that says to make the same call again.
+        let started = Instant::now();
+        let created = loop {
+            let created = rt.ok(MAC, "new_notebook", json!({}));
+            if created["error"] != "notebook_opening" || started.elapsed() > Duration::from_secs(900) {
+                break created;
+            }
+        };
         let notebook = created["notebook_id"].as_str().unwrap_or_else(|| panic!("new_notebook: {created}")).to_owned();
         let path = created["path"].as_str().unwrap().to_owned();
         assert!(path.starts_with(mac.to_str().unwrap()) && path.ends_with(".jl"), "made in the session's folder: {path}");

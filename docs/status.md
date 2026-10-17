@@ -269,7 +269,8 @@ Next:
   Each time the core starts R, `runtime/r/install.R` installs it, or updates it
   when there's a newer build, into `~/.cache/endeavor/r/ember`
   (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
-  the SHA256 of its file, and one with any package Ember needs that R lacks or can't load.
+  the SHA256 of its file, and one with any package Ember needs that R lacks, can't load,
+  or has at a version older than Ember or a package it needs asks for (#90).
   The call waits up to 30 seconds for that. The first install then returns
   `r_installing` until it's done, and each call made meanwhile waits up to 30
   seconds for it too, as the answer says (#175: before, only the call that started
