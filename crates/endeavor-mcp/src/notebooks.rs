@@ -365,6 +365,9 @@ struct Snapshot {
     /// Pluto's package step while one is under way (`package_step` in the
     /// runtime): the cells wait, queued, until it ends.
     packages: Option<Value>,
+    /// Ember's lazy mode: a run marks the cells that depend on it stale
+    /// instead of rerunning them (#196). Pluto has no such mode.
+    lazy: bool,
     cells: HashMap<String, Cell>,
 }
 
@@ -432,6 +435,7 @@ impl Snapshot {
             process_status: value["process_status"].clone(),
             exited: value["exited"].as_array().map(|ids| ids.iter().filter_map(text).collect()),
             packages: value.get("packages").filter(|p| p.is_object()).cloned(),
+            lazy: flag(&value["lazy"]),
             cells: cells.collect::<Option<_>>()?,
         })
     }
@@ -463,6 +467,9 @@ impl Snapshot {
         }
         if let Some(packages) = &self.packages {
             summary["packages"] = packages.clone();
+        }
+        if self.lazy {
+            summary["on_cell_change"] = json!("lazy");
         }
         summary
     }

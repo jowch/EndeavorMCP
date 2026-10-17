@@ -544,12 +544,31 @@ impl Call<'_> {
             "affected_cells": cells_run,
             "execution": { "status": status },
             "outputs": { "changed": changed },
-            "pending_run": pending,
+            "pending_run": &pending,
             "warnings": warnings,
         });
         let Value::Object(mut receipt) = receipt else { unreachable!() };
         if !still_running.is_empty() {
             receipt["execution"]["still_running"] = json!(still_running);
+        }
+        // In lazy mode the run's dependents don't run: they're marked stale,
+        // which the agent wouldn't otherwise learn until it read them (#196).
+        // The list is every stale cell an earlier run left too, not only this
+        // run's dependents, leaving out the ones that are pending, running,
+        // queued or hidden. A notebook with none says nothing.
+        if nb.lazy && status != "blocked" {
+            let stale_cells: Vec<&String> = nb
+                .order
+                .iter()
+                .filter(|id| !cells_run.contains(id) && !pending.contains(id))
+                .filter(|id| nb.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden))
+                .collect();
+            if !stale_cells.is_empty() {
+                receipt["warnings"].as_array_mut().unwrap().push(json!(
+                    "lazy_mode::This notebook is in lazy mode: the cells that depend on a run are marked stale instead of rerunning. `stale_cells` names the cells that are stale now; run the ones that should be current"
+                ));
+                receipt.insert("stale_cells".into(), json!(stale_cells));
+            }
         }
         if nb.installing() {
             receipt.insert("packages".into(), nb.packages.clone().unwrap_or_default());
@@ -1108,6 +1127,9 @@ impl Call<'_> {
             "notebook_id": opened["notebook_id"], "path": opened["path"], "execution_allowed": run, "ran": run,
             "process_status": opened["process_status"],
         });
+        if opened["lazy"] == true {
+            result["on_cell_change"] = json!("lazy");
+        }
         let mut warnings = self.nbs.take_notices();
         if run {
             warnings.push("async_execution::open queued non-blocking notebook run; poll read_cell for completion".into());
@@ -1143,6 +1165,9 @@ impl Call<'_> {
         });
         if !nb.execution_allowed {
             joined["note"] = json!(NOT_RUN);
+        }
+        if nb.lazy {
+            joined["on_cell_change"] = json!("lazy");
         }
         Some(Ok(joined))
     }
