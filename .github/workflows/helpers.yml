@@ -7,6 +7,9 @@
 # scripts/helpers.sh downloads the Linux ones, and scripts/install.sh and
 # install.ps1 the newest build for a computer, from there. LATEST, uploaded
 # after them, holds the newest key, for those scripts and for `endeavor update`.
+# On main, once every platform has built, the pin job writes the key into
+# scripts/release-key and the plugins' copies and pushes that to main, so the
+# plugins run the build of main's own source and PRs never re-pin.
 # Before publishing, builds nothing pins any more are pruned once the release
 # holds more than 700 files (scripts/prune-helpers.sh), if the repository
 # variable PRUNE_HELPERS_AUTO is true; prune-helpers.yml runs it by hand.
@@ -185,4 +188,62 @@ jobs:
         if: ${{ needs.build.result != 'success' }}
         run: |
           echo "A build failed (the Linux builds were published, and so was any other that succeeded)." >&2
+          exit 1
+
+  # Points the plugins at this build: commits the key to scripts/release-key
+  # and the plugins' launch/ copies on main. Only when every platform built,
+  # because the plugins run on macOS and Windows too; otherwise the plugins
+  # keep naming the last complete build. The commit touches no helper source,
+  # so it doesn't start this workflow again, and a push made with the
+  # workflow's own token doesn't start CI. It pins only while main's helper
+  # source is still this build's, so a re-run of an old run can't put an older
+  # build back. A merge landing in between makes the push fail; then it starts
+  # again from the new main.
+  pin:
+    needs: [key, build, publish]
+    if: ${{ github.ref == 'refs/heads/main' && needs.build.result == 'success' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Git
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898283+github-actions[bot]@users.noreply.github.com"
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Pin the build
+        env:
+          KEY: ${{ needs.key.outputs.key }}
+        shell: bash
+        run: |
+          set -e
+          for try in 1 2 3 4 5; do
+            git fetch -q origin main
+            git checkout -q -B main origin/main
+            # A re-run of an older run, or a merge that landed meanwhile, can
+            # leave main with other helper source; its own run pins that.
+            want=$(sh scripts/helpers.sh --key)
+            if [ "$want" != "$KEY" ]; then
+              echo "main's helper source is build $want now, not $KEY; leaving the pin to that build's run."
+              exit 0
+            fi
+            printf '%s\n' "$KEY" > scripts/release-key
+            sh scripts/plugins.sh sync
+            if git diff --quiet; then
+              echo "The plugins already name build $KEY."
+              exit 0
+            fi
+            git commit -q -am "Plugins: pin build $KEY"
+            if git push -q origin main; then
+              echo "Pinned build $KEY on main."
+              exit 0
+            fi
+            sleep $((try * 5))
+          done
+          echo "Couldn't push the pin to main; run this workflow again on main." >&2
           exit 1

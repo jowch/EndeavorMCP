@@ -29,7 +29,6 @@ cargo build --locked --workspace --all-targets
 cargo test --locked --workspace --no-fail-fast       # what CI runs
 cargo clippy --locked --workspace --all-targets       # a few warnings today; don't add more
 sh scripts/plugins.sh check                           # CI fails if a plugin copy differs
-sh scripts/plugins.sh repin                           # pin this commit's build; run after committing helper source
 ```
 
 - Run one test: `cargo test --locked -p endeavor-mcp --test machines <name>`.
@@ -50,11 +49,11 @@ sh scripts/plugins.sh repin                           # pin this commit's build;
   first, and the Helpers release (`.github/workflows/helpers.yml`, on `main`)
   must finish before Endeavor moves its pin. The crate version must equal the
   app's (both 0.1.0); bump them together. See `docs/status.md`.
-- **Re-pin after a helper source change.** Any change under `crates/`,
-  `runtime/` or `plugin/` (comments too) changes the build's key, and CI's
-  plugins check fails until `scripts/release-key` names it. Commit the change,
-  run `sh scripts/plugins.sh repin`, and commit what it changes. Once per
-  batch is enough.
+- **Don't edit `release-key`.** The plugins' pinned build
+  (`scripts/release-key` and its copies) is written on `main` by the Helpers
+  workflow once a build of `main` has finished on every platform. PRs leave it
+  alone and need no re-pin when `main` moves. If a pin is missing, run Helpers
+  again on `main`.
 - **Never write a notebook's `.jl` file directly.** All mutation goes through
   Pluto's session API, or reactivity breaks and Pluto's next save overwrites it.
 - **Pluto stays on 127.0.0.1** behind its secret; the runtime's own port uses

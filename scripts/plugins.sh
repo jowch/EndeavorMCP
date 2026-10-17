@@ -5,11 +5,11 @@
 #   scripts/endeavor-mcp.sh, install.sh    the launcher and its installer
 #   scripts/release-key                    the pinned build
 #
-# `sync` writes the copies; `check` fails if any copy differs, or if
-# release-key isn't the build of this commit's helper source
-# (scripts/helpers.sh --key), so that a plugin's skills and binary come from
-# one commit. `repin` writes that build into release-key, then syncs: run it
-# after committing a change to the helper source, and commit what it changes.
+# `sync` writes the copies; `check` fails if any copy differs. release-key
+# names the newest build the Helpers workflow published from main, and only
+# that workflow writes it (.github/workflows/helpers.yml, its pin job), after
+# every platform built: a PR doesn't touch it, so PRs don't have to be re-pinned
+# each time main moves.
 # Each plugin holds the launcher files in launch/ and a copy of the skills,
 # not a link: an agent may not follow a link out of the plugin's folder, and a
 # checkout without symlink support turns a link into a text file.
@@ -20,35 +20,14 @@ cd "$root"
 
 mode=${1:-}
 case $mode in
-  sync | check | repin) ;;
+  sync | check) ;;
   *)
-    echo "usage: plugins.sh sync|check|repin" >&2
+    echo "usage: plugins.sh sync|check" >&2
     exit 2
     ;;
 esac
 
-if [ "$mode" = repin ]; then
-  # The key hashes the committed tree, so uncommitted helper source would pin
-  # a build that doesn't hold it.
-  if ! sh scripts/helpers.sh --committed; then
-    echo "The helper source has uncommitted changes. Commit them, then run: sh scripts/plugins.sh repin" >&2
-    exit 1
-  fi
-  key=$(sh scripts/helpers.sh --key)
-  [ -n "$key" ] || { echo "scripts/helpers.sh --key printed no key." >&2; exit 1; }
-  printf '%s\n' "$key" >scripts/release-key
-  echo "Pinned build $key."
-  mode=sync
-fi
-
 bad=0
-if [ "$mode" = check ]; then
-  want=$(sh scripts/helpers.sh --key)
-  if [ "$(head -n 1 scripts/release-key | tr -d ' \t\r\n')" != "$want" ]; then
-    echo "scripts/release-key doesn't name this commit's build ($want). With the helper source change committed, run: sh scripts/plugins.sh repin" >&2
-    bad=1
-  fi
-fi
 for plugin in claude-plugin codex-plugin antigravity-plugin; do
   if [ "$mode" = sync ]; then
     mkdir -p "$plugin/launch"
