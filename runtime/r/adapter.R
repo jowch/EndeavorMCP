@@ -578,7 +578,8 @@ open_path <- function(path, run_all) {
     run_everything(rec)
   }
   state <- notebook_state(rec$nb)
-  list(notebook_id = rec$id, path = state$path, process_status = process_status(state))
+  list(notebook_id = rec$id, path = state$path, process_status = process_status(state),
+       lazy = identical(state$file$header$on_cell_change, "lazy"))
 }
 
 # A new notebook at `path`, else named "notebook.R" (then "notebook 2.R", ...)

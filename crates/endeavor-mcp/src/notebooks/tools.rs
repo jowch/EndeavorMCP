@@ -553,9 +553,9 @@ impl Call<'_> {
         }
         // In lazy mode the run's dependents don't run: they're marked stale,
         // which the agent wouldn't otherwise learn until it read them (#196).
-        // The list is every stale cell, as `read_notebook_code`'s
-        // `stale_cell_ids`: ones an earlier run left count too. A notebook with
-        // none says nothing.
+        // The list is every stale cell an earlier run left too, not only this
+        // run's dependents, leaving out the ones that are pending, running,
+        // queued or hidden. A notebook with none says nothing.
         if nb.lazy && status != "blocked" {
             let stale_cells: Vec<&String> = nb
                 .order
@@ -1127,6 +1127,9 @@ impl Call<'_> {
             "notebook_id": opened["notebook_id"], "path": opened["path"], "execution_allowed": run, "ran": run,
             "process_status": opened["process_status"],
         });
+        if opened["lazy"] == true {
+            result["on_cell_change"] = json!("lazy");
+        }
         let mut warnings = self.nbs.take_notices();
         if run {
             warnings.push("async_execution::open queued non-blocking notebook run; poll read_cell for completion".into());

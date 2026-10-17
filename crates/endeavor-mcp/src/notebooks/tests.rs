@@ -193,8 +193,10 @@ impl Engine {
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
                 let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy: false });
-                return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed }));
+                // A file named for it is in Ember's lazy mode.
+                let lazy = method == "open" && path.contains("lazy");
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy });
+                return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed, "lazy": lazy }));
             }
             _ => {}
         }
@@ -1689,6 +1691,11 @@ fn opening_and_making_notebooks() {
     assert_eq!((&opened["execution_allowed"], &opened["ran"], &opened["process_status"], opened.get("note")), (&json!(true), &json!(true), &json!("starting"), None));
     let previewed = s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}nb1.jl") })).unwrap();
     assert_eq!((&previewed["execution_allowed"], previewed.get("warnings"), &previewed["note"]), (&json!(false), None, &json!(super::tools::NOT_RUN)));
+    assert_eq!(previewed.get("on_cell_change"), None);
+    // A notebook in Ember's lazy mode says so (#196).
+    let lazy = format!("{dir}{SEP}lazy.jl");
+    std::fs::copy(format!("{dir}{SEP}nb1.jl"), &lazy).unwrap();
+    assert_eq!(s.call("", "open_notebook", json!({ "path": lazy })).unwrap()["on_cell_change"], "lazy");
     // A script, an empty file or a file of another kind isn't sent to the runtime, which would leave a backup copy of it.
     let opens = || s.engine.calls.lock().unwrap().iter().filter(|call| *call == "open").count();
     let before = opens();
