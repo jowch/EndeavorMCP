@@ -498,6 +498,44 @@ fn the_runtime_end_to_end() {
         rt.call("endeavor/stop_notebook", json!({ "path": cards })).unwrap();
     });
 
+    step("an interrupt while the notebook's process starts stops its run, and no cell runs (#179)", || {
+        let ids = ["17900001-bbeb-11f1-8e5f-a5a8320edb60", "17900002-bbeb-11f1-8e5f-a5a8320edb60", "17900003-bbeb-11f1-8e5f-a5a8320edb60"];
+        let codes = ["p = 1", "q = (sleep(2); p + 1)", "r = (sleep(2); q + 1)"];
+        let mut text = String::from("### A Pluto.jl notebook ###\n# v1.0.3\n\nusing Markdown\nusing InteractiveUtils\n\n");
+        for (id, code) in ids.iter().zip(codes) {
+            text.push_str(&format!("# ╔═╡ {id}\n{code}\n\n"));
+        }
+        text.push_str("# ╔═╡ Cell order:\n");
+        for id in ids {
+            text.push_str(&format!("# ╠═{id}\n"));
+        }
+        let starting = mac.join("starting.jl");
+        std::fs::write(&starting, text).unwrap();
+        let starting = starting.to_str().unwrap().to_owned();
+        let opened = rt.app_tool("open_notebook", json!({ "path": starting, "run_notebook": false }));
+        let id = opened["notebook_id"].as_str().unwrap().to_owned();
+        rt.call("endeavor/set_notebook", json!({ "owner": "3", "notebook": starting })).unwrap();
+        rt.ok(THIRD, "allow_execution", json!({ "notebook_id": id, "run_notebook": true }));
+        // Right away: the notebook's own Julia is still starting, and its run waits for it.
+        let stopped = rt.ok(THIRD, "interrupt_notebook", json!({ "notebook_id": id }));
+        assert_eq!(stopped["interrupted"], true, "{stopped}");
+        // And says the cells won't run, however long the process takes to start.
+        assert_eq!(stopped["dropped"], json!(ids), "{stopped}");
+        // Once its process is up, the run ends without running a cell.
+        let began = Instant::now();
+        let busy = |read: &Value| read["running"] == true || read["queued"] == true;
+        while ids.iter().any(|cell| busy(&rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": cell })))) {
+            assert!(began.elapsed() < Duration::from_secs(120), "the run didn't end");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        for (cell, value) in ids.iter().zip(["1", "2", "3"]) {
+            let read = rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+            assert_ne!(read["output"], value, "{cell} ran after the interrupt: {read}");
+        }
+        eprintln!("interrupt while starting: {stopped}");
+        rt.call("endeavor/stop_notebook", json!({ "path": starting })).unwrap();
+    });
+
     step("the agent's Stop interrupts the cell its call is running", || {
         // Add a cell with `code` after the last one, run it waiting, and cancel the call 3 s in,
         // as the agent's client does when the user presses Stop: the cell, and how long the call took.

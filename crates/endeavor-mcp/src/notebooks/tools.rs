@@ -176,17 +176,17 @@ impl Notebooks {
     /// run of the targets runs these too, so they don't fail on names those
     /// cells define. None while the notebook isn't running code.
     fn never_run_upstream(&self, nb: &Snapshot, targets: &[String]) -> Result<Vec<String>, String> {
+        Ok(self.upstream(nb, targets)?.into_iter().filter(|id| nb.cells.get(id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).collect())
+    }
+
+    /// The cells `targets` depend on, directly or not, the targets left out,
+    /// in notebook order. None while the notebook isn't running code.
+    fn upstream(&self, nb: &Snapshot, targets: &[String]) -> Result<Vec<String>, String> {
         if targets.is_empty() || !nb.execution_allowed {
             return Ok(Vec::new());
         }
         let upstream = self.graph(&nb.id, GraphQuery { fresh: true, edges: true, ..Default::default() })?.upstream_of(targets);
-        Ok(nb
-            .order
-            .iter()
-            .filter(|id| upstream.contains(*id) && !targets.contains(id))
-            .filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c)))
-            .cloned()
-            .collect())
+        Ok(nb.order.iter().filter(|id| upstream.contains(*id) && !targets.contains(id)).cloned().collect())
     }
 }
 
@@ -318,7 +318,7 @@ impl Call<'_> {
             return Ok(None);
         }
         Ok(Some(format!(
-            "run_conflict::Another Endeavor session changed {} since you last read them, and the cells you're running depend on them. \
+            "run_conflict::{} changed since this session last read them (by another Endeavor session, or by this conversation before it was resumed), and the cells you're running depend on them. \
              Read them (read_cell or read_notebook_code), then run again.",
             conflicted.join(", ")
         )))
@@ -335,8 +335,9 @@ impl Call<'_> {
     /// or not.
     fn run(&self, nb: &Snapshot, targets: &[String], wait: bool) -> Result<Ran, String> {
         self.nbs.with_state(&nb.id, |state| state.prune(nb));
-        let needed = self.nbs.never_run_upstream(nb, targets)?;
-        let cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
+        let upstream = self.nbs.upstream(nb, targets)?;
+        let needed: Vec<String> = upstream.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).cloned().collect();
+        let mut cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
         let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
         let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout }))?;
         let ids = |key: &str| reply[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
@@ -346,6 +347,28 @@ impl Call<'_> {
             return Err(argument_error(&format!("process_exited::{}", exited_message(super::engines::language(super::engines::of_path(&nb.path)), cell.as_deref()))));
         }
         let mut warnings = Vec::new();
+        // Cells the targets need that the engine ran first, as Ember does one
+        // edited since it last ran (a staged edit) or stale (an ancestor ran
+        // since): this run's cells too, so the receipt shows them (#187).
+        // Known once it is over, from what ran rather than from the engine's
+        // plan, so it misses an ancestor still running when the wait ends (it
+        // stays staged) and counts one the user ran during the wait.
+        let mut also = Vec::new();
+        if reply["accepted"] == true && wait {
+            let now = self.nbs.snapshot(&nb.id)?;
+            also = upstream
+                .iter()
+                .filter(|id| !cells.contains(id))
+                .filter(|id| match (nb.cells.get(*id), now.cells.get(*id)) {
+                    (Some(before), Some(after)) => !(after.running || after.queued) && after.last_run > before.last_run,
+                    _ => false,
+                })
+                .cloned()
+                .collect();
+            if !also.is_empty() {
+                cells = nb.order.iter().filter(|id| also.contains(id) || needed.contains(id)).chain(targets).cloned().collect();
+            }
+        }
         let mut going = Vec::new();
         if reply["accepted"] != true {
             let status = reply["process_status"].as_str().unwrap_or_default();
@@ -370,7 +393,7 @@ impl Call<'_> {
             self.nbs.with_state(&nb.id, |state| {
                 // Its cells that haven't finished: a waited run's that did finish are done, and
                 // so are all of a run that ended before this records it.
-                let finished = ids("completed");
+                let finished: Vec<String> = ids("completed").into_iter().chain(also.iter().cloned()).collect();
                 let run = reply["run"].as_str().map(str::to_owned);
                 let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
                 state.ended.retain(|r| Some(r) != run.as_ref());
@@ -389,6 +412,9 @@ impl Call<'_> {
         }
         if reply["accepted"] == true && !needed.is_empty() {
             warnings.push(format!("also_ran::Also ran {}: cells this run needs that had never run.", needed.join(", ")));
+        }
+        if !also.is_empty() {
+            warnings.push(format!("also_ran::Also ran {}: cells this run needs that were edited or stale since they last ran.", also.join(", ")));
         }
         Ok(Ran { warnings, cells, going })
     }
@@ -484,13 +510,14 @@ impl Call<'_> {
             },
         };
         // A blocked run touched no cell; existing outputs are not this run's result.
-        // A cell still running has the output of its last run.
+        // A cell still running or queued has the output of its last run, so it
+        // isn't listed: a run not waited for comes back before its cells finish (#190).
         let ran: &[String] = if status == "blocked" { &[] } else { cells_run };
         let changed: Vec<Value> = ran
             .iter()
             .filter(|id| !still_running.contains(id))
             .filter_map(|id| Some((id, nb.cells.get(id)?)))
-            .filter(|(_, cell)| !cell.output.is_empty())
+            .filter(|(_, cell)| !cell.output.is_empty() && !cell.running && !cell.queued)
             .map(|(id, cell)| {
                 let mut entry = json!({ "cell_id": id, "output_summary": cell.output });
                 if let Some(error) = &cell.error {
@@ -571,10 +598,20 @@ impl Call<'_> {
     }
 
     /// The cell an edit changed, as `read_cell` shows it without its code:
-    /// the agent sent that code, and gets it back from `read_cell`.
+    /// the agent sent that code, and gets it back from `read_cell`. While the
+    /// edited cell is running or queued, its output and error are the ones from
+    /// before the edit, so they are `previous_output`, `previous_errored` and
+    /// `previous_error` (#190).
     fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
         let mut out = self.cell_json(nb, id);
         out.remove("code");
+        if out["running"] == true || out["queued"] == true {
+            for key in ["output", "errored", "error"] {
+                if let Some(previous) = out.remove(key) {
+                    out.insert(format!("previous_{key}"), previous);
+                }
+            }
+        }
         out
     }
 
@@ -1238,9 +1275,12 @@ impl Call<'_> {
             return Ok(json!({ "notebook_id": nb.id, "interrupted": false, "message": "Nothing was running." }));
         }
         let reply = self.nbs.call("interrupt", json!({ "notebook_id": nb.id }))?;
+        // The notebook's process is still starting, so its run hasn't started a cell, and it skips
+        // them all once the process is up (#179): they are dropped, however long the start takes.
+        let pending = reply["pending"] == true;
         let mut now = self.nbs.snapshot(&nb.id)?;
         let deadline = Instant::now() + self.wait_left().min(Duration::from_secs_f64(INTERRUPT_WAIT_SECONDS));
-        while running.iter().chain(&queued).any(|id| busy(&now, id)) && Instant::now() < deadline {
+        while !pending && running.iter().chain(&queued).any(|id| busy(&now, id)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(250));
             if (self.gone)() {
                 return Err(argument_error("client_gone::The caller hung up during the wait"));
@@ -1248,12 +1288,14 @@ impl Call<'_> {
             now = self.nbs.snapshot(&nb.id)?;
         }
         let (still_running, stopped): (Vec<String>, Vec<String>) = running.into_iter().partition(|id| busy(&now, id));
-        let dropped: Vec<String> = queued.into_iter().filter(|id| !busy(&now, id)).collect();
+        let dropped: Vec<String> = queued.into_iter().filter(|id| pending || !busy(&now, id)).collect();
         let mut result = json!({
             "notebook_id": nb.id, "interrupted": reply["interrupted"] == true || !stopped.is_empty() || !dropped.is_empty(),
             "stopped": stopped, "dropped": dropped, "still_running": still_running, "process_status": now.process_status,
         });
-        if !result["still_running"].as_array().unwrap().is_empty() {
+        if pending {
+            result["message"] = json!("The notebook's process is still starting. Its run will skip these cells once the process is up.");
+        } else if !result["still_running"].as_array().unwrap().is_empty() {
             result["message"] = json!(
                 "These cells haven't stopped yet. Compiled code often stops only when it returns. Read them later; if one doesn't stop, the user can restart the notebook from its page, which clears every value."
             );

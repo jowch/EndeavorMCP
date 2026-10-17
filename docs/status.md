@@ -198,7 +198,10 @@ Next:
   marks cells as an Ember file does (`# %% id=`). `edit_cell` can fold the
   cell it edits, in either engine (#162), and so can each edit in `edit_cells`
   (#168; the interface number is 13), whose receipt says each cell's fold after the
-  edits (`mutation.code_folded`; #174, interface 16). R's adapter
+  edits (`mutation.code_folded`; #174, interface 16). While an edited cell is
+  still running, the edit's result gives its old output and error as
+  `previous_output`, `previous_errored` and `previous_error`, and leaves it out
+  of `outputs.changed` (#190, interface 17). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the
@@ -291,7 +294,9 @@ Next:
   starting doesn't ask again when the agent makes the same call again: only that
   session's, only the same tool and arguments, only while nothing came between
   (another call, a Stop, a change of mode), and for 5 minutes after the user's yes
-  (Endeavor #90). The plugin's `serve`, `mcp` and machines
+  (Endeavor #90). Under Claude Code, `endeavor mcp`'s session key comes from the
+  conversation's id, so a resumed conversation keeps its reads and its notebook
+  (#176). The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
   before, and only starting it waits. A session whose folder has Pluto
   notebooks, or whose caller says it is a Julia session (`kind`), gets Julia
@@ -327,7 +332,13 @@ Next:
   signal mask, which blocks SIGINT, SIGTERM and SIGHUP for the core's own thread, and
   passed it to Ember's workers. R now starts with the mask the core was started with,
   as Julia does. So do `run_shell`'s commands (#165), which before ignored SIGINT and
-  SIGTERM, as did everything they started.
+  SIGTERM, as did everything they started, and the curl, wget or juliaup the core starts to
+  download Julia, Endeavor's own R or a helper (#181), which before went on after
+  a Ctrl-C had stopped the core.
+  In Julia, an interrupt while the notebook's process is still starting stops its
+  run before any cell, and the answer lists them all as `dropped` at once (#179).
+  Before, it reported them dropped, or none when the start took longer than its
+  wait, and they all ran once the process was up.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds
