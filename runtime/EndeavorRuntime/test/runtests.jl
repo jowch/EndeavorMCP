@@ -178,6 +178,7 @@ end
         @test base64decode(EndeavorRuntime.render_png(session, nb, cells[1])["png"]) == png   # a PNG passes through
         err = try EndeavorRuntime.render_png(session, nb, cells[2]); "" catch e; e.msg end
         @test startswith(err, "no_image::") && occursin("safe preview", err)                   # an SVG needs the worker
+        @test occursin("has no running worker", err)    # the app's picture stands in for it (`NO_WORKER`, notebooks/tools.rs)
     end
 
     @testset "render_png reads a picture embedded in HTML" begin
