@@ -579,6 +579,20 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "E" })).get("notes"), None);
     });
 
+    step("an install call doesn't run: the lock answers it, and the cell's note says so (Ember #79, #125)", || {
+        std::fs::write(folder.join("install.R"), "### An Ember notebook ###\n\n# %% id=G\ninstall.packages(\"jsonlite\")\n1 + 1\n\n# /// cell order\n# G\n# ///\n").unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "install.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        agent.ok("allow_execution", json!({ "notebook_id": id }));
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": "G", "wait_for_completion": true }));
+        assert!(ran["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("from_lock::Cell G: Install calls don't run in Ember: it installs jsonlite from the notebook's lock")), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "G" }));
+        assert!(read["output"].as_str().is_some_and(|o| o.contains("[1] 2")), "the cell ran past the call: {read}");
+        assert!(read["notes"][0].as_str().is_some_and(|n| n.starts_with("from_lock::") && n.contains("preview_package_update")), "{read}");
+    });
+
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();

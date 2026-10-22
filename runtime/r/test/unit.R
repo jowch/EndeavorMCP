@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "structure_error")
+wanted <- c("%||%", "package_step", "structure_error", "cell_notes")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -80,6 +80,15 @@ d <- A$structure_error(list(kind = "missing_package", message = "there is no pac
 check("a missing package with no header fix: no fixes", is.null(d$fixes))
 d <- A$structure_error(list(kind = "error", message = "boom", fixes = "Do this"))
 check("another error keeps its fixes and reads as runtime", identical(d$kind, "runtime") && identical(unclass(d$fixes), "Do this"))
+
+# ---- cell_notes ----
+check("no notes: none", length(A$cell_notes(list())) == 0)
+n <- A$cell_notes(list(from_lock = c("mypkg", "", "other")))
+check("install calls that didn't run: one note naming their packages, and the agent's way to a newer version",
+      length(n) == 1 && startsWith(n, "from_lock::Install calls don't run in Ember: it installs mypkg, other from the notebook's lock") &&
+        grepl("call preview_package_update", n, fixed = TRUE))
+check("an install call that names no package: the note says packages",
+      grepl("it installs packages from", A$cell_notes(list(from_lock = "")), fixed = TRUE))
 
 cat(sprintf("\n%d passed, %d failed\n", passed, failed))
 if (failed > 0) quit(status = 1)

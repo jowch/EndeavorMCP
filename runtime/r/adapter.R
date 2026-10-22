@@ -300,7 +300,8 @@ snapshot_cell <- function(v) {
 # another cell defines, so the cells that read it didn't rerun.
 # `settings_found`: the run found a global setting, so the cell became a
 # settings cell. `load_notes`: a package it loaded reset a setting a settings
-# cell sets.
+# cell sets. `from_lock`: the cell's install calls didn't run, since the lock
+# answers them (Ember #79); "" stands for a call that names no package.
 cell_notes <- function(v) {
   names_of <- function(x) paste(sub("^\\.__C__", "class ", as.character(x)), collapse = ", ")
   notes <- character()
@@ -309,6 +310,11 @@ cell_notes <- function(v) {
   }
   if (length(v$settings_found) > 0) {
     notes <- c(notes, sprintf("settings_found::Found a global setting (%s) when this cell ran; the cells after it rerun.", names_of(v$settings_found)))
+  }
+  if (length(v$from_lock) > 0) {
+    named <- setdiff(as.character(v$from_lock), "")
+    notes <- c(notes, sprintf("from_lock::Install calls don't run in Ember: it installs %s from the notebook's lock when a cell uses them. To get a newer version, call preview_package_update.",
+                              if (length(named) > 0) paste(named, collapse = ", ") else "packages"))
   }
   for (n in v$load_notes %||% list()) {
     notes <- c(notes, sprintf("load_note::Loading %s resets %s, which a settings cell sets. Under Rscript the setting is lost, because settings cells come first in the file. Move it into this cell, after %s loads.", n$package, n$setting, n$package))
