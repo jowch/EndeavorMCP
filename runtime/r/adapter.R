@@ -324,13 +324,17 @@ cell_notes <- function(v) {
 # as running, and `read_cell` waits and tells the agent what is going on.
 # `packages` are the ones the cells wait for, `seconds` how long since this
 # adapter first saw the work, and `last_line` the installer's last line, or
-# the package it is on.
+# the package it is on. Step `"asking"`: the install stopped before a large
+# download and waits for the user's OK (Ember #37, `approve_install()`);
+# `download` then gives the total `bytes` and each `package`, `version` and
+# `bytes` (NULL when its size isn't known).
 package_step <- function(rec, snap, state) {
   # A cell that isn't queued may name a package that isn't installed; only a run makes it wait.
   waits <- unique(unlist(lapply(snap$cells, function(c) if (isTRUE(c$queued)) c$waiting_for), use.names = FALSE))
   lib <- state$packages$target
   installing <- identical(lib$status, "installing")
-  if (length(waits) == 0 && !installing) {
+  asking <- identical(lib$status, "asking")
+  if (length(waits) == 0 && !installing && !asking) {
     rec$packages_since <- NULL
     return(NULL)
   }
@@ -338,13 +342,26 @@ package_step <- function(rec, snap, state) {
   progress <- lib$progress
   step <- if (installing) {
     if (is.numeric(progress$total) && progress$total > 1) sprintf("installing, %d of %d", as.integer(progress$done %||% 0), as.integer(progress$total)) else "installing"
-  } else if (identical(lib$status, "checking")) "checking" else "resolving"
+  } else if (asking) "asking" else if (identical(lib$status, "checking")) "checking" else "resolving"
   lines <- trimws(lib$log %||% character())
   lines <- lines[nzchar(lines)]
   last <- if (length(lines) > 0) utils::tail(lines, 1) else if (length(progress$current) == 1 && !is.na(progress$current)) paste("installing", progress$current) else NULL
   if (!is.null(last)) last <- substr(sub("(\\w+://)[^/[:space:]@]+@", "\\1", last), 1, 300)
-  list(step = step, packages = I(sort(as.character(waits))), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
-       last_line = last)
+  out <- list(step = step, packages = I(sort(as.character(waits))), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
+              last_line = last)
+  if (asking) out$download <- download_step(lib$download)
+  out
+}
+
+# An "asking" library's large packages (`library$download`, largest first)
+# as the step gives them.
+download_step <- function(dl) {
+  if (is.null(dl) || nrow(dl) == 0) return(list(bytes = 0, packages = I(list())))
+  list(bytes = sum(dl$bytes, na.rm = TRUE),
+       packages = I(lapply(seq_len(nrow(dl)), function(i) {
+         list(package = dl$package[[i]], version = dl$version[[i]],
+              bytes = if (is.na(dl$bytes[[i]])) NULL else dl$bytes[[i]])
+       })))
 }
 
 snapshot <- function(rec) {
@@ -527,6 +544,15 @@ run_over <- function(rec, ids, readers = character()) {
   identical(state$worker$status, "stopped") || length(unfinished(state, run_cells_of(rec, ids, readers))) == 0
 }
 
+# Whether the notebook's install stopped before a large download and waits
+# for the user's OK (Ember #37), with nothing running: nothing moves until
+# approve_install(), so a waited run returns rather than wait it out.
+waits_for_ok <- function(rec) {
+  if (!registered(rec)) return(FALSE)
+  state <- notebook_state(rec$nb)
+  identical(state$packages$target$status, "asking") && is.null(state$worker$running)
+}
+
 # Once a run nobody waits for ends, `run_finished` names it (`run`) and says
 # which of its cells finished.
 watch_run <- function(rec, cells, ids, readers = character(), run = run_id()) {
@@ -573,7 +599,7 @@ run <- function(rec, cells, wait, timeout) {
   promise(function(resolve, reject) {
     check <- function() {
       over <- run_over(rec, ids, readers)
-      if (!over && Sys.time() < deadline) return(later::later(check, 0.05))
+      if (!over && Sys.time() < deadline && !waits_for_ok(rec)) return(later::later(check, 0.05))
       if (!registered(rec)) {
         result$completed <- I(cells)
         result$timed_out <- I(character())
@@ -707,6 +733,15 @@ set_package_date <- function(rec, date) {
   list(date = state$file$header$snapshot, changes = rows(changes), process_status = process_status(state))
 }
 
+# Ember's approve_install(): the user's OK for an install that stopped
+# before a large download (Ember #37). Refused when no install waits for one.
+approve <- function(rec) {
+  tryCatch(approve_install(rec$nb),
+           ember_refused = function(e) argument_error("nothing_to_approve", conditionMessage(e)))
+  state <- notebook_state(rec$nb)
+  list(approved = TRUE, process_status = process_status(state))
+}
+
 interrupt <- function(rec) {
   state <- notebook_state(rec$nb)
   busy <- !is.null(state$worker$running) || length(state$pending) > 0
@@ -826,6 +861,7 @@ adapter_call <- function(method, params) {
     restart = restart(rec),
     preview_packages = preview_packages(rec, params$date, params$timeout),
     set_package_date = set_package_date(rec, params$date),
+    approve_install = approve(rec),
     allow_execution = allow(rec, isTRUE(params$run)),
     move = move(rec, params$path),
     render_text = render_text(rec, check_cell(rec, params$cell_id)),

@@ -97,6 +97,7 @@ impl Notebooks {
             "interrupt_notebook" => t.interrupt_notebook(),
             "restart_notebook" => t.restart_notebook(),
             "preview_package_update" => t.preview_package_update(),
+            "approve_install" => t.approve_install(),
             "apply_package_update" => t.apply_package_update(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
         }?;
@@ -573,7 +574,8 @@ impl Call<'_> {
         // The cells of a run that ran out of its wait that are running now, read
         // after the wait: some may have finished meanwhile.
         let still_running: Vec<String> = nb.order.iter().filter(|id| going.contains(id) && nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect();
-        if !still_running.is_empty() {
+        // A run waiting on the user's OK for a download didn't run out of time: the message says what it waits for.
+        if !still_running.is_empty() && !nb.asking() {
             warnings.push(format!("execution_timeout::The run was still going when the wait ended after at most {WAIT_SECONDS}s"));
         }
         let status = match status {
@@ -655,7 +657,7 @@ impl Call<'_> {
                 receipt.insert("stale_cells".into(), json!(stale_cells));
             }
         }
-        if nb.installing() {
+        if nb.installing() || nb.asking() {
             receipt.insert("packages".into(), nb.packages.clone().unwrap_or_default());
             let mut message = installing_message(&nb);
             if !still_running.is_empty() {
@@ -751,7 +753,9 @@ impl Call<'_> {
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
         let mut going = Vec::new();
         while self.nbs.own_run_going(self.owner, &nb) {
-            if Instant::now() >= deadline {
+            // An install waiting for the user's OK doesn't go on by itself: the run is still
+            // going, but nothing changes until approve_install.
+            if Instant::now() >= deadline || (nb.asking() && !nb.cells.values().any(|c| c.running)) {
                 going = nb.order.iter().filter(|id| busy(&nb, id)).cloned().collect();
                 break;
             }
@@ -777,11 +781,13 @@ impl Call<'_> {
         // gives up long before a first install ends. So is a cell that a run
         // this session started is running or will run: an agent that reads it
         // at once reads it again, each read a whole request of the agent's
-        // context. The user's own run, or another session's, isn't waited for.
-        // (Asked on every read, so that a run seen to end is forgotten.)
+        // context. The user's own run, or another session's, isn't waited for,
+        // nor a queued cell while the install waits for the user's OK: only
+        // approve_install moves it on. (Asked on every read, so that a run
+        // seen to end is forgotten.)
         let waits = |nb: &Snapshot| {
             let own = self.nbs.own_run_going(self.owner, nb);
-            nb.cells.get(&cell).is_some_and(|c| (c.queued && nb.installing()) || ((c.running || c.queued) && own)) || (own && self.nbs.own_run_will_run(self.owner, nb, &cell))
+            nb.cells.get(&cell).is_some_and(|c| (c.running && own) || (c.queued && !nb.asking() && (nb.installing() || own))) || (own && !nb.asking() && self.nbs.own_run_will_run(self.owner, nb, &cell))
         };
         let waited = Instant::now();
         let deadline = waited + self.wait_left().saturating_sub(Duration::from_secs(1));
@@ -813,7 +819,7 @@ impl Call<'_> {
         if let Some(text) = self.output_text(&nb, &cell)? {
             out.insert("output_text".into(), json!(text));
         }
-        if nb.installing() {
+        if nb.installing() || nb.asking() {
             out.insert("packages".into(), nb.packages.clone().unwrap_or_default());
             out.insert("message".into(), json!(installing_message(&nb)));
         } else if let Some(seconds) = ran_out {
@@ -1553,6 +1559,23 @@ impl Call<'_> {
         });
         Ok(result)
     }
+
+    /// The user's OK for an R notebook's install that stopped before a large download (Ember
+    /// #37's `approve_install`). The tool's description and the asking message say to call it
+    /// only after the user said yes. Refused when no install waits for one.
+    fn approve_install(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        if self.nbs.backend_of(&nb.id) != Backend::Ember {
+            return Err(argument_error("not_r_notebook::Only an R notebook asks before a large download. A Julia notebook's packages install through Pkg"));
+        }
+        let mut result = self.nbs.call("approve_install", json!({ "notebook_id": nb.id }))?;
+        self.nbs.publish();
+        result["notebook_id"] = json!(nb.id);
+        result["message"] = json!(
+            "The download is approved and the library installs now: the queued cells run once it is done, and a read of one waits for the install."
+        );
+        Ok(result)
+    }
 }
 
 /// The cell a `cell_id` argument names, refused as Julia's lookup refused it.
@@ -1591,6 +1614,9 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
 /// plain words: what is going on, that it is slow only the first time, and
 /// how to wait; past `INSTALL_USUAL_SECONDS`, to wait only while the log moves.
 fn installing_message(nb: &Snapshot) -> String {
+    if nb.asking() {
+        return asking_message(nb);
+    }
     let packages = nb.packages.as_ref().cloned().unwrap_or_default();
     let names: Vec<&str> = packages["packages"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let which = if names.is_empty() { "the packages it uses".to_owned() } else { names.join(", ") };
@@ -1611,6 +1637,33 @@ fn installing_message(nb: &Snapshot) -> String {
              Tell the user it is installing, then wait: call read_cell on a cell that is queued, and while packages install each call waits up to {WAIT_SECONDS} seconds.{last}"
         )
     }
+}
+
+/// What the agent hears while an R notebook's install waits for an OK before a large download
+/// (Ember #37): what it would download and how much, and that the user decides. Only the user
+/// can say yes to it, so the agent asks them and doesn't wait.
+fn asking_message(nb: &Snapshot) -> String {
+    let download = nb.packages.as_ref().map(|p| p["download"].clone()).unwrap_or_default();
+    let sized = |bytes: &Value| bytes.as_f64().map(|b| if b >= 1e9 { format!("{:.1} GB", b / 1e9) } else { format!("{:.0} MB", b / 1e6) });
+    let each: Vec<String> = download["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| {
+            let name = [p["package"].as_str(), p["version"].as_str()].into_iter().flatten().collect::<Vec<_>>().join(" ");
+            match sized(&p["bytes"]) {
+                Some(size) => format!("{name} ({size})"),
+                None => format!("{name} (size unknown)"),
+            }
+        })
+        .collect();
+    let which = if each.is_empty() { "some large packages".to_owned() } else { each.join(", ") };
+    let total = sized(&download["bytes"]).map(|size| format!(", {size} in all")).unwrap_or_default();
+    format!(
+        "Before this notebook's cells can run, R has to download {which}{total}. A download this large waits for the user's OK, \
+         so nothing is installing and the cells stay queued. Ask the user whether to download it, and call approve_install only after they say yes; \
+         the page's own button does the same. Don't call read_cell to wait: nothing changes until then."
+    )
 }
 
 /// What Claude hears when a notebook's own process (`language`'s, Julia or R) ends during a run it

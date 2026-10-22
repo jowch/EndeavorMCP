@@ -471,6 +471,12 @@ impl Snapshot {
         self.packages.is_some() && self.cells.values().any(|c| c.queued)
     }
 
+    /// Whether its package step stopped before a large download and waits for the user's OK
+    /// (Ember #37): nothing installs or runs until `approve_install`, so nothing is waited for.
+    fn asking(&self) -> bool {
+        self.packages.as_ref().is_some_and(|p| p["step"] == "asking")
+    }
+
     /// What `list_notebooks` says of it; `this_session`: it's the caller's
     /// own notebook. `exited` only while its own Julia has ended by itself.
     fn summary(&self, pending_run: &[String], this_session: bool) -> Value {

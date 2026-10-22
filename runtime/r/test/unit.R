@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "structure_error", "snapshot_cell", "output_text", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal")
+wanted <- c("%||%", "package_step", "download_step", "structure_error", "snapshot_cell", "output_text", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -33,8 +33,8 @@ check <- function(what, ok) {
 
 cell <- function(queued = FALSE, waiting_for = character()) list(queued = queued, waiting_for = waiting_for)
 snap <- function(...) list(cells = list(...))
-state <- function(status = "ready", progress = NULL, log = character()) {
-  list(packages = list(target = list(status = status, progress = progress, log = log)))
+state <- function(status = "ready", progress = NULL, log = character(), download = NULL) {
+  list(packages = list(target = list(status = status, progress = progress, log = log, download = download)))
 }
 to_json <- function(x) as.character(jsonlite::toJSON(x, auto_unbox = TRUE, null = "null"))
 
@@ -67,6 +67,17 @@ check("last line of the log, with a URL's user and token taken out",
       identical(p$last_line, "fetching https://example.org/x.tar.gz"))
 p <- A$package_step(rec, snap(cell(TRUE, "dplyr")), state("checking"))
 check("checking", identical(p$step, "checking"))
+big <- data.frame(package = c("BSgenome.Hsapiens.UCSC.hg38", "GO.db"), version = c("1.4.5", "3.22.0"),
+                  bytes = c(870e6, NA), stringsAsFactors = FALSE)
+p <- A$package_step(rec, snap(cell(TRUE, "GO.db")), state("asking", download = big))
+check("asking: step asking, with the download's total and each package (an unknown size NULL)",
+      identical(p$step, "asking") && p$download$bytes == 870e6 && length(p$download$packages) == 2 &&
+        identical(p$download$packages[[1]]$package, "BSgenome.Hsapiens.UCSC.hg38") && is.null(p$download$packages[[2]]$bytes))
+p <- A$package_step(new.env(), snap(cell()), state("asking", download = big))
+check("asking with no queued cell: still a step, so the agent hears it", identical(p$step, "asking"))
+if (requireNamespace("jsonlite", quietly = TRUE)) {
+  check("  and its download's packages are an array", grepl('"packages":[{"package"', to_json(p), fixed = TRUE))
+}
 check("the work ending clears the first sighting",
       is.null(A$package_step(rec, snap(cell()), state())) && is.null(rec$packages_since))
 

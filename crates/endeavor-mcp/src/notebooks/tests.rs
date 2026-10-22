@@ -265,6 +265,14 @@ impl Engine {
                 nb.package_date = nb.previewed.take();
                 Ok(json!({ "date": nb.package_date, "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "process_status": if nb.safe_preview { "waiting_for_permission" } else { "ready" } }))
             }
+            // Ember's OK for an install waiting before a large download: it installs now.
+            "approve_install" => {
+                let Some(asking) = nb.packages.take_if(|p| p["step"] == "asking") else {
+                    return Err("ArgumentError: nothing_to_approve::no install is waiting for an OK".into());
+                };
+                nb.packages = Some(json!({ "step": "installing", "packages": asking["packages"], "seconds": 0, "last_line": null }));
+                Ok(json!({ "approved": true, "process_status": "ready" }))
+            }
             "move" => {
                 let _ = std::fs::rename(&nb.path, params["path"].as_str().unwrap());
                 nb.path = params["path"].as_str().unwrap().to_owned();
@@ -326,6 +334,21 @@ impl Engine {
                     return Ok(json!({ "accepted": false, "process_status": "no_process" }));
                 }
                 let cells: Vec<String> = params["cells"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_owned()).collect();
+                // While the install waits for an OK, a run's cells wait with it, queued, and a
+                // waited run returns at once, as the adapter's does (`waits_for_ok`).
+                if nb.packages.as_ref().is_some_and(|p| p["step"] == "asking") {
+                    for cell in nb.cells.iter_mut().filter(|c| cells.contains(&c.id)) {
+                        cell.queued = true;
+                    }
+                    let mut watched = self.watched.lock().unwrap();
+                    *watched += 1;
+                    let mut reply = json!({ "accepted": true, "process_status": "ready", "run": format!("run-{watched}") });
+                    if params["wait"] == true {
+                        reply["completed"] = json!([]);
+                        reply["timed_out"] = json!(cells);
+                    }
+                    return Ok(reply);
+                }
                 // `crash()` takes the notebook's process down while it runs.
                 if let Some(cell) = nb.cells.iter().find(|c| cells.contains(&c.id) && c.code.contains("crash()")) {
                     nb.exited = Some(vec![cell.id.clone()]);
@@ -2767,6 +2790,66 @@ fn an_r_notebooks_package_install_says_r_is_getting_them_ready() {
     let message = read["message"].as_str().unwrap();
     assert!(message.starts_with("R is getting dplyr ready for this notebook (installing, 20 seconds so far)."), "{message}");
     assert_eq!(read["packages"]["packages"], json!(["dplyr"]));
+}
+
+#[test]
+fn an_r_install_waiting_for_an_ok_says_to_ask_the_user_and_nothing_waits_for_it() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "library(BSgenome.Hsapiens.UCSC.hg38)"), (Y, "genome <- BSgenome.Hsapiens.UCSC.hg38")]);
+    let asking = json!({ "step": "asking", "packages": ["BSgenome.Hsapiens.UCSC.hg38"], "seconds": 3, "last_line": null, "download": { "bytes": 1_270_000_000u64, "packages": [
+        { "package": "BSgenome.Hsapiens.UCSC.hg38", "version": "1.4.5", "bytes": 870_000_000u64 },
+        { "package": "GO.db", "version": "3.22.0", "bytes": 400_000_000u64 },
+        { "package": "org.Hs.eg.db", "version": "3.22.0", "bytes": null },
+    ] } });
+    ember.with(R, |nb| {
+        nb.packages = Some(asking.clone());
+        nb.cells.iter_mut().for_each(|c| c.queued = true);
+    });
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("9", "list_notebooks", json!({})).unwrap();
+
+    // A read of a queued cell doesn't wait: only the user's OK moves the install on. It says
+    // what the download is, and that the user decides.
+    let began = Instant::now();
+    let read = s.call("9", "read_cell", json!({ "notebook_id": R, "cell_id": Y })).unwrap();
+    assert!(began.elapsed() < Duration::from_secs(1), "it didn't wait");
+    assert_eq!((&read["queued"], &read["packages"]), (&json!(true), &asking));
+    let message = read["message"].as_str().unwrap();
+    for part in ["BSgenome.Hsapiens.UCSC.hg38 1.4.5 (870 MB), GO.db 3.22.0 (400 MB), org.Hs.eg.db 3.22.0 (size unknown), 1.3 GB in all", "Ask the user", "approve_install only after they say yes", "Don't call read_cell to wait"] {
+        assert!(message.contains(part), "{part}: {message}");
+    }
+
+    // A waited run returns at once too, with its cells still to run and the same message.
+    ember.with(R, |nb| nb.cells[1].queued = false);
+    s.read("9", R, Y);
+    s.edit("9", R, Y, "genome <- BSgenome.Hsapiens.UCSC.hg38::BSgenome.Hsapiens.UCSC.hg38");
+    let began = Instant::now();
+    let ran = s.call("9", "submit_changes", json!({ "notebook_id": R, "wait_for_completion": true })).unwrap();
+    assert!(began.elapsed() < Duration::from_secs(2), "it didn't wait: {ran}");
+    assert_eq!((&ran["execution"]["still_running"], &ran["packages"]), (&json!([Y]), &asking), "{ran}");
+    assert!(ran["message"].as_str().unwrap().contains("approve_install only after they say yes"), "{ran}");
+    // With nothing staged, a waited call waits for the session's own run, but not while that
+    // run waits on the user's OK.
+    let began = Instant::now();
+    let again = s.call("9", "submit_changes", json!({ "notebook_id": R, "wait_for_completion": true })).unwrap();
+    assert!(began.elapsed() < Duration::from_secs(2), "it didn't wait: {again}");
+    assert!(again["execution"]["still_running"].as_array().unwrap().contains(&json!(Y)), "{again}");
+    assert!(again["message"].as_str().unwrap().contains("approve_install only after they say yes"), "{again}");
+    assert_eq!((&again["execution"]["status"], &again["warnings"]), (&json!("running"), &json!([])), "it didn't run out of time: {again}");
+
+    // The OK installs the library; asked again, nothing waits for one.
+    let approved = s.call("9", "approve_install", json!({ "notebook_id": R })).unwrap();
+    assert!(approved["approved"] == true && approved["message"].as_str().unwrap().contains("installs now"), "{approved}");
+    assert_eq!(ember.with(R, |nb| nb.packages.clone().unwrap()["step"].clone()), "installing");
+    let refused = s.call("9", "approve_install", json!({ "notebook_id": R })).unwrap_err();
+    assert!(refused.contains("nothing_to_approve"), "{refused}");
+
+    // A Julia notebook never asks.
+    s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1")]);
+    let julia = s.call("7", "approve_install", json!({ "notebook_id": NB })).unwrap_err();
+    assert!(julia.contains("not_r_notebook"), "{julia}");
 }
 
 #[test]
