@@ -750,15 +750,14 @@ impl Notebooks {
                 }
                 true
             }
-            // A run the tools didn't wait for ended: the cells it finished are no longer
-            // pending, and none of its cells is a session's run that its Stop interrupts, even
-            // one that a later run (a restart's) queued again before it ended.
+            // A run the tools didn't wait for ended: none of its cells is a session's run that
+            // its Stop interrupts, even one that a later run (a restart's) queued again before it
+            // ended. Its cells stay as staged as they are: a staged cell stops being staged once
+            // it has run since its edit (`pending_run`), so an edit made after a cell finished
+            // but before this came stays staged (#231).
             "run_finished" => {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
                     let finished: Vec<&str> = params["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-                    for cell in &finished {
-                        notebook.pending.remove(*cell);
-                    }
                     match params["run"].as_str() {
                         Some(run) => {
                             let before = notebook.started.len();
