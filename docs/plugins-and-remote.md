@@ -935,7 +935,7 @@ from a local copy of the repository and used through `codex exec` (below).
 | Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
 | Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add`, `codex plugin add endeavor@endeavor`, from `.agents/plugins/marketplace.json` | `agy plugin install <folder or its GitHub tree URL>` |
 | Update | `claude plugin marketplace update endeavor`, `claude plugin update endeavor@endeavor`, or the marketplace's auto-update (off by default). The manifest has no `version` on purpose: Claude Code then versions the plugin by commit, and a fixed version would keep every install on its first commit | `codex plugin marketplace upgrade endeavor`. It replaced the installed `0.1.0` copy with the new commit's files although the version stayed (codex-cli 0.162.1, 2026-10-10) | `agy plugin install` again (not checked over an existing install) |
-| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable, so notebook paths must be absolute | none: `--no-folder`, as Codex |
+| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable; the front takes the project folder from each call's metadata (#99) | none: `--no-folder`, as Codex |
 
 Each plugin folder holds `launch/endeavor-mcp.sh`, `launch/install.sh` and
 `launch/release-key`. The command is `sh` with the script as its argument, so
@@ -1008,7 +1008,9 @@ was the documentation used to build the folder):
   So `mcp` cannot find the project folder, and the entry passes `--no-folder`
   (see [`--no-folder`](endeavor-mcp.md)). Each `tools/call` carries
   `_meta["x-codex-turn-metadata"].workspaces`, an object whose keys are workspace
-  paths; it is undocumented and not used.
+  paths. It is undocumented; the front takes the project folder from it when it
+  names exactly one, so relative paths work (see
+  [`--no-folder`](endeavor-mcp.md)).
 - Codex does not pass its own environment to a plugin's server (`ENDEAVOR_BIN`
   and `XDG_*` from the shell were absent); an `env` object in the entry is
   passed.

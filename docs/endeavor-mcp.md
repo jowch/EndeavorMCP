@@ -230,8 +230,9 @@ nothing is running.
 
 `endeavor mcp --no-folder` (it excludes `--folder`, and only `mcp` takes it) is
 for an agent that cannot tell the server its project folder, as Codex's plugin
-cannot. On this computer such a session resolves no relative path: nothing is
-ever taken from the process's working folder, which is the plugin's cache folder.
+cannot. On this computer such a session resolves no relative path until a call
+names the project folder (Codex's do, below): nothing is ever taken from the
+process's working folder, which is the plugin's cache folder.
 
 - **The rule is one function.** `notebooks::requested_path` resolves a path the
   agent gave against the session's `Folder`: `In(dir)`, `Process` (the app's
@@ -252,8 +253,19 @@ ever taken from the process's working folder, which is the plugin's cache folder
   the call, so a refused call starts no runtime. The runtime calls it in the
   same place, after `check_arguments` and before `note_call`, so a refused call
   asks the user nothing, starts nothing, makes no file and is not the session's
-  activity. The front's tool list adds one sentence to the `path` descriptions of
-  `open_notebook` and `new_notebook`: on this computer give an absolute path.
+  activity. The front's tool list adds two sentences to the `path` descriptions of
+  `open_notebook` and `new_notebook`: on this computer give an absolute path,
+  unless the client names the project folder with the call, as Codex does.
+- **Codex's workspace, when it names one.** Each `tools/call` from Codex
+  carries `_meta["x-codex-turn-metadata"].workspaces`, an object keyed by the
+  turn's workspace paths. It is undocumented, so the front reads it with care
+  (`Relay::learn_workspace`, #99): it takes the folder only when exactly one key
+  is an absolute path to a folder that exists, and it also accepts the object
+  sent as a JSON string. From then on that folder is the session's `In(dir)` on
+  this computer, as if `--folder` had named it, and the runtime is told it
+  before the call goes on. A call that names no folder keeps the one learned; a
+  later call naming another single folder replaces it. With `--folder` the
+  field is ignored. Under a client that sends nothing, everything below holds.
 - **The runtime is told, and works in the home folder.** On this computer the
   front sends `endeavor/set_session_folder` `{owner, no_folder: true}` where a
   session with a folder gets `{owner, folder}`; the runtime then holds `Unknown`

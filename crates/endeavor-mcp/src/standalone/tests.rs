@@ -347,7 +347,11 @@ fn fake_core() -> (u16, Arc<Mutex<Vec<(Head, String)>>>) {
 }
 
 fn relay(skills_plugin: bool, state_dir: PathBuf) -> (Arc<Relay>, Out) {
-    let Ok(Command::Mcp(mut options)) = parsed("mcp") else { panic!() };
+    relay_from("mcp", skills_plugin, state_dir)
+}
+
+fn relay_from(line: &str, skills_plugin: bool, state_dir: PathBuf) -> (Arc<Relay>, Out) {
+    let Ok(Command::Mcp(mut options)) = parsed(line) else { panic!() };
     options.skills_plugin = skills_plugin;
     options.state_dir = state_dir;
     let out = Out::default();
@@ -356,6 +360,11 @@ fn relay(skills_plugin: bool, state_dir: PathBuf) -> (Arc<Relay>, Out) {
 
 /// A relay on this computer whose runtime is the stand-in on `port`, found as a recorded one is.
 fn ready_relay(port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool) -> (Arc<Relay>, Out) {
+    ready_relay_from("mcp", port, seen, skills_plugin)
+}
+
+/// `ready_relay` for the front the command `line` starts.
+fn ready_relay_from(line: &str, port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool) -> (Arc<Relay>, Out) {
     let dir = crate::client::scratch(&format!("relay-{port}"));
     // Windows takes a recorded process for alive only with the time it started.
     #[cfg(windows)]
@@ -364,7 +373,7 @@ fn ready_relay(port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool
     let started: Option<u64> = None;
     let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "started": started, "token": "t0k", "port": port, "build": crate::embedded::BUILD_VERSION });
     std::fs::write(dir.join("runtime.json"), record.to_string()).unwrap();
-    let (relay, out) = relay(skills_plugin, dir);
+    let (relay, out) = relay_from(line, skills_plugin, dir);
     match target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO, false) {
         crate::client::Outcome::Ready(_) => {}
         crate::client::Outcome::Failed(why) => panic!("the recorded runtime wasn't found: {why}"),
@@ -473,6 +482,55 @@ fn a_notification_is_passed_on_and_gets_no_answer() {
     relay.tell_session_folder(port, "t0k", None);
     let (_, body) = &seen.lock().unwrap()[2];
     assert_eq!(body, r#"{"id":1,"jsonrpc":"2.0","method":"endeavor/set_session_folder","params":{"no_folder":true,"owner":"stdio-7"}}"#);
+}
+
+#[test]
+fn a_front_with_no_folder_takes_the_project_folder_codex_names_in_a_call() {
+    let (port, seen) = fake_core();
+    let (relay, out) = ready_relay_from("mcp --no-folder", port, &seen, true);
+    let project = crate::client::scratch(&format!("codex-project-{port}"));
+    let other = crate::client::scratch(&format!("codex-other-{port}"));
+    let (project, other) = (project.display().to_string(), other.display().to_string());
+    let call = |id: u32, meta: Value| {
+        let message = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "open_notebook", "arguments": { "path": "trial.jl" }, "_meta": meta } });
+        relay.handle(&message.to_string());
+    };
+    let refused = |line: &str| line.contains("absolute");
+    let told = |seen: &[(Head, String)]| seen.iter().filter(|(head, _)| head.target() == "/endeavor/call").map(|(_, body)| serde_json::from_str::<Value>(body).unwrap()["params"].clone()).collect::<Vec<_>>();
+
+    call(1, json!({}));
+    call(2, json!({ "x-codex-turn-metadata": { "workspaces": { "relative/folder": {}, "/no/such/folder": {} } } }));
+    call(3, json!({ "x-codex-turn-metadata": { "workspaces": { project.clone(): {}, other.clone(): {} } } }));
+    assert!(out.lines().iter().all(|line| refused(line)), "with no single folder that exists, a relative path is still refused: {:?}", out.lines());
+    assert!(seen.lock().unwrap().is_empty(), "and the runtime saw nothing");
+
+    call(4, json!({ "x-codex-turn-metadata": { "workspaces": { project.clone(): { "has_changes": false } } } }));
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(told(&seen), [json!({ "owner": "stdio-7", "folder": project })], "the runtime is told the folder before the call");
+        assert_eq!(serde_json::from_str::<Value>(&seen.last().unwrap().1).unwrap()["params"]["arguments"]["path"], "trial.jl", "the call went on");
+    }
+    assert!(!refused(&out.lines()[3]), "{:?}", out.lines());
+
+    // The same folder again isn't told again; a call naming none keeps it; a string of the object is read too.
+    call(5, json!({ "x-codex-turn-metadata": { "workspaces": { project.clone(): {} } } }));
+    call(6, json!({}));
+    call(7, json!({ "x-codex-turn-metadata": json!({ "workspaces": { other.clone(): {} } }).to_string() }));
+    let seen = seen.lock().unwrap();
+    assert_eq!(told(&seen), [json!({ "owner": "stdio-7", "folder": project }), json!({ "owner": "stdio-7", "folder": other })]);
+    assert_eq!(seen.iter().filter(|(head, _)| head.target() == "/mcp").count(), 4, "calls 4 to 7 went on");
+}
+
+#[test]
+fn a_front_with_a_folder_ignores_the_one_codex_names() {
+    let (port, seen) = fake_core();
+    let (relay, _) = ready_relay(port, &seen, true);
+    let other = crate::client::scratch(&format!("codex-ignored-{port}")).display().to_string();
+    let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "session_status", "arguments": {}, "_meta": { "x-codex-turn-metadata": { "workspaces": { other: {} } } } } });
+    relay.handle(&message.to_string());
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.iter().map(|(head, _)| head.target()).collect::<Vec<_>>(), ["/mcp"], "the call alone, with no new folder told");
+    assert_eq!(relay.local_folder(&relay.current()), Some(Folder::In("/home/ada/project".into())));
 }
 
 #[test]

@@ -778,6 +778,9 @@ struct Relay {
     session: String,
     /// Where this session's notebooks run.
     target: Mutex<Target>,
+    /// The project folder Codex names in a tool call's metadata, for a front started with `--no-folder`
+    /// (`learn_workspace`).
+    workspace: Mutex<Option<String>>,
     /// This computer's runtime, which the target is when it is on this computer.
     local: Arc<Local>,
     /// The connections to the machines this session has used.
@@ -843,6 +846,7 @@ impl Relay {
     fn new(options: Options, session: String, out: Box<dyn Write + Send>) -> Relay {
         Relay {
             target: Mutex::new(Target::local(options.folder.as_deref())),
+            workspace: Mutex::default(),
             local: Arc::new(Local::new(options.clone())),
             options,
             session,
@@ -903,7 +907,38 @@ impl Relay {
     /// `Unknown` for a front started with `--no-folder`. None on a machine, whose folder the front does
     /// not know until the machine says (`ready`).
     fn local_folder(&self, target: &Target) -> Option<Folder> {
-        target.is_local().then(|| self.options.folder.as_ref().map_or(Folder::Unknown, |folder| Folder::In(folder.display().to_string())))
+        target.is_local().then(|| match (&self.options.folder, self.workspace.lock().unwrap().as_ref()) {
+            (Some(folder), _) => Folder::In(folder.display().to_string()),
+            (None, Some(workspace)) => Folder::In(workspace.clone()),
+            (None, None) => Folder::Unknown,
+        })
+    }
+
+    /// For a front started with `--no-folder`, take the session's project folder from Codex's metadata on a
+    /// tool call. Codex starts a plugin's server in the plugin's own folder and names no project, but each
+    /// `tools/call` carries `_meta["x-codex-turn-metadata"].workspaces`, an object keyed by the turn's
+    /// workspace paths (undocumented; #99). Only one existing absolute folder counts: with several, a
+    /// relative path would be a guess. A folder learned is kept until another single one is named, and the
+    /// runtime is told it with the next call (`ready`).
+    fn learn_workspace(&self, message: &Value) {
+        if self.options.folder.is_some() {
+            return;
+        }
+        let metadata = &message["params"]["_meta"]["x-codex-turn-metadata"];
+        // Sent as an object; a JSON string of one is read the same way.
+        let parsed = metadata.as_str().and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let Some(workspaces) = parsed.as_ref().unwrap_or(metadata)["workspaces"].as_object().cloned() else { return };
+        let mut folders = workspaces.keys().filter(|path| Path::new(path).is_absolute() && Path::new(path).is_dir());
+        let (Some(folder), None) = (folders.next(), folders.next()) else { return };
+        {
+            let mut workspace = self.workspace.lock().unwrap();
+            if workspace.as_deref() == Some(folder.as_str()) {
+                return;
+            }
+            *workspace = Some(folder.clone());
+        }
+        eprintln!("endeavor: this session's project folder is {folder}, as Codex names it");
+        self.update_target(machines::LOCAL, |t| t.told = None);
     }
 
     fn handle(self: &Arc<Self>, line: &str) {
@@ -925,6 +960,9 @@ impl Relay {
             return;
         }
         let tool = (message["method"] == "tools/call").then(|| crate::mcp::current_name(message["params"]["name"].as_str().unwrap_or_default()).to_owned());
+        if tool.is_some() {
+            self.learn_workspace(&message);
+        }
         if let Some(tool) = tool.as_deref().filter(|tool| crate::mcp::MACHINE_NAMES.contains(tool)) {
             return self.machine_tool(&message, tool, deadline);
         }
