@@ -285,7 +285,7 @@ the machine's home folder.
 - The skills were tried in short Claude Code runs only.
 
 Known gaps are tracked as [GitHub issues](https://github.com/jowch/EndeavorMCP/issues).
-Something got in your way? [Tell us](https://jowch.github.io/Endeavor/feedback/?source=plugin&agent=plugin),
+Something got in your way? [Tell us](https://jowch.github.io/Endeavor/feedback/?source=plugin),
 with no account, or open an issue here.
 
 ## Without a plugin

@@ -36,7 +36,7 @@ body:
     id: agent
     attributes:
       label: Agent
-      description: "claude, codex, antigravity, or plugin if you used the plugin without the app"
+      description: "claude, codex or antigravity"
   - type: input
     id: source
     attributes:

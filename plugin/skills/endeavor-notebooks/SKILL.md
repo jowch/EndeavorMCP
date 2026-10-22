@@ -68,4 +68,4 @@ For any other error code or warning, see [reference/errors.md](reference/errors.
 
 ## Feedback
 
-If the user wants to report a problem with Endeavor or say what got in their way, give them this link: https://jowch.github.io/Endeavor/feedback/?source=plugin&agent=plugin. It offers a short form that needs no account, or a GitHub issue. Don't fill in or send either yourself.
+If the user wants to report a problem with Endeavor or say what got in their way, give them this link, with your own agent's name at the end (`claude`, `codex` or `antigravity`): https://jowch.github.io/Endeavor/feedback/?source=plugin&agent=claude. It offers a short form that needs no account, or a GitHub issue. Don't fill in or send either yourself.
