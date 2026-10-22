@@ -201,6 +201,12 @@ Known gaps:
   nobody has used for a day (`unpack`, `lease`). Folders unpacked before this
   have no `in-use` file and stay. The app still has to hold a `lease` on its
   plugin folder while Claude Code runs from it.
+- Older builds on a server (`~/.cache/endeavor/<build>/`) and in the plugin's
+  `bin/<key>/` are removed after a week unused (`old_builds`,
+  [#97](https://github.com/jowch/EndeavorMCP/issues/97)). Checked on Linux
+  with a fake server folder and plugin folder, not on a real cluster. A server
+  where `squeue` doesn't answer keeps all of them. The plugin's folder stays
+  after an uninstall.
 
 Next:
 

@@ -274,7 +274,7 @@ pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<Pa
 
 /// In each unpacked folder: whoever uses the folder holds a shared lock on
 /// it (`Lease`), and its time is when the folder was last unpacked or used.
-const IN_USE: &str = "in-use";
+pub(crate) const IN_USE: &str = "in-use";
 
 /// How long an unused folder is kept after its last use. The lock alone may
 /// not show: a cache in a home folder shared by a cluster's nodes may have
