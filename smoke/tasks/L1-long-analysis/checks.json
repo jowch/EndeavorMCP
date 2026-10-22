@@ -1,0 +1,11 @@
+{
+  "about": "A long analysis in one session: twelve messages from loading a 96-well growth plate to a written summary, with plots along the way. Measures what a real-sized session costs: requests, context at the end, and the largest replies. Tags: new_notebook, plots, size, long.",
+  "checks": [
+    { "check": "notebooks", "count": 1 },
+    { "check": "no_errored_cells" },
+    { "check": "code_contains", "texts": ["growth.csv"] },
+    { "check": "called", "tool": "view_cell_output" },
+    { "check": "final_message_contains_any", "texts": ["summary", "Summary"], "soft": true },
+    { "check": "reproducible" }
+  ]
+}

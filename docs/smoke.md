@@ -20,6 +20,7 @@ scripts/smoke.sh                       # every task in smoke/tasks
 scripts/smoke.sh --only N1-new,N4-long-run
 scripts/smoke.sh --model claude-haiku-4-5    # a model other than the agent's default
 scripts/smoke.sh --skip-r              # on a computer known to have no R
+scripts/smoke.sh --long                # the long tasks too (below)
 ```
 
 The script builds `endeavor` and `endeavor-smoke`, then runs the tasks one at
@@ -59,8 +60,9 @@ Each task is a folder in `smoke/tasks/`:
 
 - `prompt.md`: what the user asks, in a user's words.
 - `followup.md` (optional): what the user asks next, in the same session,
-  sent only once the agent's answer to the first has ended. An attempt where
-  the agent answered fewer messages than it was sent fails.
+  each message sent only once the agent's answer to the one before has
+  ended. A line of `---` alone separates two messages. An attempt where the
+  agent answered fewer messages than it was sent fails.
 - `checks.json`: what decides pass or fail.
 - `project/` (optional): files the project folder starts with.
 - `setup.json` (optional): `{ "open": ["analysis.jl"] }` opens those
@@ -69,7 +71,9 @@ Each task is a folder in `smoke/tasks/`:
   empty depot of its own, for a first install. It is that folder alone: not
   the user's `~/.julia`, which may have the packages already.
   `{ "ssh": true }` gives the task a server (below). `{ "r": true }` marks an
-  R task, which needs R (above).
+  R task, which needs R (above). `{ "minutes": 75 }` lets the agent run that
+  long instead of 20 minutes. `{ "long": true }` marks a long task, which
+  runs only with `--long` or when `--only` names it.
 - `inject.json` (optional): a second person working in the same notebook.
   It names a moment, the first time the agent calls one of `tools` (`"when":
   "before"` the call reaches the server or `"after"` its reply), and the calls
@@ -97,7 +101,7 @@ depot, so a notebook whose packages weren't saved in its file can still pass.
 
 Before the first task, the runner warms the shared depot: it opens
 `smoke/warm/warm.jl`, which loads the packages the tasks' notebooks reach for
-(DataFrames, Plots), so no task passes or fails on whether an earlier one
+(CSV, DataFrames, Plots), so no task passes or fails on whether an earlier one
 installed them. On a new machine this takes several minutes. N9 is the one
 task with an empty depot of its own, for a first install. When an R task is
 to run and R is there, it also opens `smoke/warm/warm.R`, so Ember's first
@@ -134,7 +138,7 @@ tools or the skills can be compared before and after, per task and model:
 | `requests` | the model requests Claude made, one per step of its turn |
 | `input_tokens` | what those requests read, added up, cached or not. Each request reads the whole conversation so far, so this grows with both the number of requests and what stays in the conversation (the skill, tool replies) |
 | `context_tokens` | the conversation's size at the last request |
-| `output_tokens` | what the model wrote, its thinking included |
+| `output_tokens` | what the model wrote, its thinking included, from Claude's last result (a message's own usage counts only its first part) |
 | `reply_bytes` | the size of the notebook tools' replies, from the proxy's log, apart from pictures. It doesn't depend on the agent, so it compares across agents too |
 
 Requests and input tokens come from Claude's own usage reports; another
@@ -146,6 +150,12 @@ few hundred tokens. To compare two runs:
 ```sh
 jq -r '.tasks[] | [.task, .first.requests, .first.input_tokens, .first.reply_bytes] | @tsv' target/smoke/<run>/summary.json
 ```
+
+To see how one attempt's context filled, message by message, and what filled
+it (each tool's replies, the agent's own code and thinking, pictures, the
+skill text), run `scripts/smoke-timeline.py target/smoke/<run>/<task>/attempt-1`.
+It needs numpy. The shares are estimates: a fit of each request's growth
+against what arrived before it.
 
 ## Server tasks
 
@@ -224,6 +234,7 @@ something subtle, make it soft.
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
 | `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: the agent waits through it and reports the table (#58) |
 | `N10-big-notebook` | change one value in an open notebook of 42 cells and report a count | what a larger notebook costs: reads, and each change's reply |
+| `L1-long-analysis` (long) | a 96-well growth plate, from loading the data to a written summary, in twelve messages with plots; the plate has a failed well, a contaminated one, a saturated reading and gaps | what a real-sized session costs: requests, context at the end, and which replies fill it. About 100 requests and 18 minutes with Claude Code's default model, so it runs only with `--long` |
 | `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
 | `R2-first-package` | a dplyr table and its mean in a new R notebook | R's first package install: the agent waits through it and doesn't run the cells again; when the install outlasts a waited run, the tools say R is getting dplyr ready (#78) |
 | `M1-machine` | add my server and compute something in a notebook there; then "yes, install it" | `add_machine`'s `needs_install`: the agent asks first and installs only after the yes, then works on the server |
