@@ -42,8 +42,13 @@ are then missing.
 agy plugin install https://github.com/jowch/EndeavorMCP/tree/main/antigravity-plugin
 ```
 
-On Windows, Antigravity needs Git for Windows' `bin` folder on the PATH, and
-Codex isn't supported.
+Codex and Antigravity don't tell the plugin the project folder, so notebook
+paths must be absolute. Under `codex exec`, every tool that changes something
+fails until the plugin's server is approved in `~/.codex/config.toml`
+([how](https://github.com/jowch/EndeavorMCP#install)).
+
+On Windows, Antigravity needs Git for Windows' `bin` folder on the PATH,
+Codex isn't supported, and the Claude Code plugin hasn't been tried yet.
 
 **Check that it worked.** `claude plugin list` (or `codex plugin list`) shows
 `endeavor@endeavor` enabled. The tools load when a session starts, so ask the
