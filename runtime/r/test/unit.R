@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "structure_error")
+wanted <- c("%||%", "package_step", "structure_error", "snapshot_cell", "output_text", "cap_text", "TEXT_MAX", "cell_notes")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -80,6 +80,13 @@ d <- A$structure_error(list(kind = "missing_package", message = "there is no pac
 check("a missing package with no header fix: no fixes", is.null(d$fixes))
 d <- A$structure_error(list(kind = "error", message = "boom", fixes = "Do this"))
 check("another error keeps its fixes and reads as runtime", identical(d$kind, "runtime") && identical(unclass(d$fixes), "Do this"))
+
+# ---- snapshot_cell ----
+view <- function(...) modifyList(list(id = "c", code = "x <- 1", kind = "code", status = "success", errors = list(), runtime = 0.1, last_run = 100, disabled = FALSE, disabled_by = NA_character_), list(...))
+check("a cell that runs: not off", isFALSE(A$snapshot_cell(view())$off))
+check("a disabled cell: off", isTRUE(A$snapshot_cell(view(disabled = TRUE))$off))
+check("a cell downstream of a disabled one: off, though it ran before", isTRUE(A$snapshot_cell(view(disabled_by = "d"))$off))
+check("an Ember without disabled_by: not off", isFALSE(A$snapshot_cell(view(disabled_by = NULL))$off))
 
 cat(sprintf("\n%d passed, %d failed\n", passed, failed))
 if (failed > 0) quit(status = 1)

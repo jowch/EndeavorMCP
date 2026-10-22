@@ -24,13 +24,15 @@ struct FakeCell {
     hidden: bool,
     stale: bool,
     not_run: bool,
+    /// Ember's disabled cells and their dependents, which never run.
+    off: bool,
     /// Ember's notes on its last run, "kind::text".
     notes: Vec<String>,
 }
 
 impl FakeCell {
     fn new(id: &str, code: &str) -> FakeCell {
-        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, notes: Vec::new() }
+        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, off: false, notes: Vec::new() }
     }
 
     /// What `a, b = 1, 2` defines, and the names the rest of the code uses.
@@ -134,7 +136,7 @@ impl Engine {
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
                 "last_run": c.last_run, "runtime": 0, "output": c.output, "error": if c.errored { json!({ "msg": c.output }) } else { Value::Null }, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
-                "stale": c.stale, "not_run": c.not_run, "notes": c.notes,
+                "stale": c.stale, "not_run": c.not_run, "off": c.off, "notes": c.notes,
             })).collect::<Vec<_>>(),
         })
     }
@@ -351,7 +353,7 @@ impl Engine {
                     }
                 } else if nb.autorun {
                     let mut names = defined.clone();
-                    for cell in nb.cells.iter_mut().filter(|c| !cells.contains(&c.id) && !c.not_run && c.last_run > 0.0) {
+                    for cell in nb.cells.iter_mut().filter(|c| !cells.contains(&c.id) && !c.not_run && !c.off && c.last_run > 0.0) {
                         let (defs, refs) = cell.analysis();
                         if refs.iter().any(|name| names.contains(name)) {
                             names.extend(defs);
@@ -753,6 +755,29 @@ fn a_run_names_the_dependents_it_reruns_and_a_waited_one_reports_them() {
     s.seconds(1.0);
     let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 4", "run_after": true })).unwrap();
     assert_eq!(edited["execution"].get("will_run"), None, "{edited}");
+}
+
+#[test]
+fn a_disabled_dependent_or_a_dependent_of_one_is_not_named_as_what_will_run() {
+    // Ember never runs a disabled cell, or a cell downstream of one (its
+    // `graph$off`), though the graph still links them. A run doesn't name them
+    // as what will follow, and a read of one doesn't wait for the run (#232).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1"), ("33333333-3333-3333-3333-333333333333", "z = y + 1"), ("44444444-4444-4444-4444-444444444444", "w = x + 1")]);
+    let (z, w) = ("33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444");
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.engine.with(NB, |nb| {
+        nb.autorun = true;
+        // Y disabled, and z off because it reads Y.
+        nb.cells[1].off = true;
+        nb.cells[2].off = true;
+    });
+    s.seconds(1.0);
+    s.read("", NB, X);
+    let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 2", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"]["will_run"], json!([w]), "{edited}");
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": z })).unwrap();
+    assert_eq!(read["output"], "ran z = y + 1", "the off cell kept its output: {read}");
 }
 
 #[test]

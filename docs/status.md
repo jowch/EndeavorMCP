@@ -232,7 +232,10 @@ Next:
   agent's run, until those finish (#151; interface 12). That includes a cell that
   read a name the run's cells dropped (a rename), which Ember reruns though the
   graph no longer links it; the adapter names such cells to the core, for
-  `will_run` and the waited run's cells (#228). A waited `submit_changes` with
+  `will_run` and the waited run's cells (#228). A disabled cell, or one
+  downstream of it, never reruns, so `will_run` leaves it out, and a read of it
+  doesn't wait for the run: R's snapshot marks it `off`, and Pluto's tools hide
+  such cells (#232). A waited `submit_changes` with
   nothing staged reports the cells that ran while it waited, and `errored` if one failed (#171; interface 14).
   `allow_execution`'s run of the notebook is the agent's run too, so a read or a waited submit
   right after it waits for it, in both engines (#170; interface 15). A read whose

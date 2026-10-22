@@ -282,7 +282,9 @@ snapshot_cell <- function(v) {
     # Ember knows these itself: a result made before an ancestor last ran, and a
     # cell that hasn't run since the notebook started (a restart leaves all so).
     stale = isTRUE(v$stale),
-    not_run = identical(v$status, "not_run") && identical(v$kind, "code"))
+    not_run = identical(v$status, "not_run") && identical(v$kind, "code"),
+    # A disabled cell, or one downstream of it, that Ember won't run (#232).
+    off = isTRUE(v$disabled) || !is.na(v$disabled_by %||% NA_character_))
   if (errored) {
     e <- if (length(v$errors) > 0) v$errors[[1]] else list(kind = "interrupted", message = "The run was interrupted.")
     d$error <- structure_error(e)

@@ -427,7 +427,7 @@ impl Call<'_> {
             // none). In lazy mode they go stale instead.
             if !nb.lazy {
                 let dependents = dependents_of(&cells);
-                will_run = nb.order.iter().filter(|id| dependents.contains(*id) && !cells.contains(id) && nb.cells.get(*id).is_some_and(|c| !c.not_run && !c.hidden)).cloned().collect();
+                will_run = nb.order.iter().filter(|id| dependents.contains(*id) && !cells.contains(id) && nb.cells.get(*id).is_some_and(|c| !c.not_run && !c.off && !c.hidden)).cloned().collect();
             }
         }
         // A run of these cells was accepted: they are no longer staged, whether or not they have finished.
