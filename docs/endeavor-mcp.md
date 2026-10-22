@@ -416,9 +416,13 @@ no notebook is open, else keeps it and tells the agent once; `serve` and
 `build` and `interface` the helper's `Ready` carries (`RuntimeInfo` has both,
 and `RuntimeInfo::usable_as_is` applies the rule). The helper on the machine
 (`endeavor connect`, outside a Slurm job) replaces one that is older (a lower
-number, or none) when no notebook is open in it: it stops it, leaves the note
-for the clients still attached, starts its own build's, and says so in a
-progress line (`runtime::find_or_start`, #226). A newer one, one with a
+number, or none) when no notebook is open in it: once it has found Julia and
+all else its own start needs, it looks again, stops it, leaves the note for
+the clients still attached, starts its own build's, and says so in a
+progress line (`runtime::find_or_start`, #226). If its own start can't go
+ahead (no Julia, an install the user didn't allow), the older one is used as
+it is. "No notebook open" is a count just before the stop: a notebook another
+session opens in that moment is cut off. A newer one, one with a
 notebook open, and one in a Slurm job are kept, and are never stopped for the
 agent, only told of once, and `client::Session` reports them as trouble. So
 two versions that share a state folder never take turns stopping each

@@ -262,12 +262,13 @@ fn ready_says_the_build_and_interface_the_runtime_recorded_and_none_for_a_record
     assert_eq!((build, interface), (None, None));
 }
 
-/// The next message after any progress lines, and those lines.
+/// The next message after any progress lines and the Julia found, and those lines.
 fn after_lines(helper: &Helper) -> (ToApp, Vec<String>) {
     let mut lines = Vec::new();
     loop {
         match helper.next() {
             ToApp::Progress { line } => lines.push(line),
+            ToApp::Found { .. } => {}
             other => return (other, lines),
         }
     }
@@ -277,16 +278,37 @@ fn after_lines(helper: &Helper) -> (ToApp, Vec<String>) {
 fn a_runtime_an_older_version_started_with_no_notebook_open_is_stopped_for_this_version() {
     // No interface recorded, as a build from before it was: an older version's, without R notebooks (#226).
     let dir = state_dir("older-idle");
-    let runtime = FakeRuntime::listing(&dir, "labbox3", serde_json::json!({ "launcher": "process", "build": "0.1.0-0ld" }), Duration::ZERO, "[]");
+    let older = FakeRuntime::listing(&dir, "labbox3", serde_json::json!({ "launcher": "process", "build": "0.1.0-0ld" }), Duration::ZERO, "[]");
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let mut helper = Helper::start_with(&dir, &["--any-node", "--julia", julia.to_str().unwrap()], &[]);
+    helper.hello();
+    helper.request_start(None, false);
+    let (answer, lines) = after_lines(&helper);
+    assert!(lines.iter().any(|line| line.contains("was started by an older version, and no notebook is open in it; stopping it")), "{lines:?} {answer:?}");
+    let ToApp::Ready { pid, reattached: false, .. } = answer else { panic!("expected this version's own runtime: {answer:?}") };
+    assert_ne!(pid, older.pid);
+    common::wait_for("the older runtime to end", || !older.alive());
+    assert!(std::fs::read_to_string(dir.join("stopped")).unwrap().ends_with(" connection"), "the note for its other clients is kept");
+    let stop = helper.request_stop();
+    assert_eq!(helper.after_progress(), ToApp::Stopped { id: stop });
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn an_older_versions_runtime_is_kept_when_this_version_cant_start() {
+    let dir = state_dir("older-no-julia");
+    let older = FakeRuntime::listing(&dir, "labbox3", serde_json::json!({ "launcher": "process", "build": "0.1.0-0ld" }), Duration::ZERO, "[]");
     let helper = Helper::start(&dir, &["--any-node"]);
     helper.hello();
     helper.request_start(None, false);
     let (answer, lines) = after_lines(&helper);
-    assert!(lines.iter().any(|line| line.contains("was started by an older version, and no notebook is open in it; stopping it")), "{lines:?}");
-    common::wait_for("the older runtime to end", || !runtime.alive());
-    // This version's start goes on, and here it finds no Julia.
-    assert!(!matches!(answer, ToApp::Ready { .. }), "{answer:?}");
-    assert!(!dir.join("runtime.json").exists() || common::read_json(&dir.join("runtime.json"))["pid"] != runtime.pid, "the older one's record is gone");
+    assert!(matches!(answer, ToApp::Ready { pid, reattached: true, .. } if pid == older.pid), "{answer:?}");
+    assert!(lines.iter().any(|line| line.contains("couldn't start here, so the older version's runtime")), "{lines:?}");
+    assert!(lines.iter().all(|line| !line.contains("stopping it")), "{lines:?}");
+    assert!(older.alive(), "no Julia for this version: the older one is better than none");
 }
 
 #[test]

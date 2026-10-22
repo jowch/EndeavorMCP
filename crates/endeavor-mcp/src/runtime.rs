@@ -206,16 +206,10 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
         let looked_at = Instant::now();
         // Before the look: a core that records itself and lets go in between is then found by the look.
         let starting = lock_state(dir).is_held();
+        // An older version's runtime this call replaces once its own start is ready to go.
+        let mut older = false;
         match look(dir, want.args.any_node, true) {
-            Looked::Running(state, port) if !starting && !replaced && replaces(want, &state, port) => {
-                replaced = true;
-                hooks.progress(format!("Endeavor here (pid {}) was started by an older version, and no notebook is open in it; stopping it so that this version starts.", state.pid));
-                match end(dir, want.args.any_node, stopped::How::Connection, false, want.events) {
-                    // On to the start below, with the lock still held, and the note for the clients still attached to it kept.
-                    Ended::Stopped(_) | Ended::NotRunning => {}
-                    _ => continue,
-                }
-            }
+            Looked::Running(state, port) if !starting && !replaced && replaces(want, &state, port) => (replaced, older) = (true, true),
             Looked::Running(state, port) => return Outcome::Ready(up(want, state, port, None)),
             unusable @ (Looked::OtherNode(_) | Looked::Older(_)) => return Outcome::Unusable(unusable),
             // Never a second runtime beside one that is alive: both would open the same notebooks.
@@ -251,24 +245,38 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
         if !replaced {
             stopped::clear(dir);
         }
-        let runtime_dir = match (want.runtime)() {
-            Ok(dir) => dir,
-            Err(e) => return Outcome::Failed(e),
+        let (runtime_dir, julia, token) = match prepare(want, hooks) {
+            Ok(prepared) => prepared,
+            // The older runtime is kept rather than leave none.
+            Err(outcome) if older && !matches!(outcome, Outcome::Cancelled) => {
+                return match look(dir, want.args.any_node, true) {
+                    Looked::Running(state, port) => {
+                        hooks.progress(format!("This version couldn't start here, so the older version's runtime (pid {}) is used as it is.", state.pid));
+                        Outcome::Ready(up(want, state, port, None))
+                    }
+                    _ => outcome,
+                };
+            }
+            Err(outcome) => return outcome,
         };
-        // Found here unless the core finds it when it's first needed.
-        let found = match want.args.julia_when_needed {
-            true if want.engine != wire::ENGINE_PLUTO => return Outcome::Failed(unknown_engine(want.engine)),
-            true => None,
-            false => match find_julia(&want.args.julia, want.engine, want.install, hooks) {
-                Ok(julia) => Some(julia),
-                Err(outcome) => return outcome,
-            },
-        };
-        let julia = crate::julia_flags(want.args, found.as_deref(), want.install);
-        let token = match crate::token(dir) {
-            Ok(token) => token,
-            Err(e) => return Outcome::Failed(e),
-        };
+        if older {
+            // Looked at again: finding or installing Julia can take minutes, and a notebook may have been opened meanwhile.
+            match look(dir, want.args.any_node, true) {
+                Looked::Running(state, port) if replaces(want, &state, port) => {
+                    hooks.progress(format!("Endeavor here (pid {}) was started by an older version, and no notebook is open in it; stopping it so that this version starts.", state.pid));
+                    match end(dir, want.args.any_node, stopped::How::Connection, false, want.events) {
+                        // On to the start below, with the lock still held, and the note for the clients still attached to it kept.
+                        Ended::Stopped(_) | Ended::NotRunning => {}
+                        // Looked at again, and used as it is.
+                        _ => continue,
+                    }
+                }
+                // It went by itself meanwhile.
+                Looked::NotRunning | Looked::Dead(_) => {}
+                // Kept, or something else is there now: looked at again, and used as it is.
+                _ => continue,
+            }
+        }
         let child = match crate::start(want.args, &runtime_dir, &julia, &token) {
             Ok(child) => child,
             Err(e) => return Outcome::Failed(e),
@@ -286,11 +294,29 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
     }
 }
 
+/// What a start needs before it spawns the core: the runtime folder, Julia's flags and the token.
+// `Outcome` is large, as `find_julia`'s error is; this runs once per start.
+#[allow(clippy::result_large_err)]
+fn prepare(want: &Want, hooks: &mut dyn Hooks) -> Result<(PathBuf, Vec<String>, String), Outcome> {
+    let runtime_dir = (want.runtime)().map_err(Outcome::Failed)?;
+    // Found here unless the core finds it when it's first needed.
+    let found = match want.args.julia_when_needed {
+        true if want.engine != wire::ENGINE_PLUTO => return Err(Outcome::Failed(unknown_engine(want.engine))),
+        true => None,
+        false => Some(find_julia(&want.args.julia, want.engine, want.install, hooks)?),
+    };
+    let julia = crate::julia_flags(want.args, found.as_deref(), want.install);
+    let token = crate::token(&want.args.state_dir).map_err(Outcome::Failed)?;
+    Ok((runtime_dir, julia, token))
+}
+
 /// Whether `want` replaces the runtime `state` records, which answers on `port`: it asks for that, the
 /// runtime offers an older interface than this build's or says none (so it is an older version's, which
 /// may lack what this one has, R notebooks among them), and no notebook is open in it. A newer one is
 /// left alone, so two versions that share a state folder never take turns stopping each other's; so is
-/// one whose notebooks can't be counted.
+/// one whose notebooks can't be counted. "No notebook open" is a count taken just before the stop, not
+/// a guarantee: the start lock doesn't hold back the calls of clients already attached to it, so a
+/// notebook another session opens between the count and the stop is cut off (its file is on disk).
 fn replaces(want: &Want, state: &State, port: u16) -> bool {
     want.replace_older
         && !state.usable_as_is()

@@ -895,8 +895,9 @@ impl Relay {
         }
         if let Some(tool) = tool
             && crate::mcp::refuses_r_for_want_of_it(tool, &message["params"]["arguments"], &parsed["result"])
+            && let Some(text) = self.no_r_text()
         {
-            parsed["result"] = tool_error(&self.no_r_text(), false);
+            parsed["result"] = tool_error(&text, false);
             changed = true;
         }
         if let Some(notice) = self.notice.lock().unwrap().take() {
@@ -910,14 +911,19 @@ impl Relay {
     }
 
     /// What the agent is told when the session's runtime is from before R notebooks and refused an R
-    /// notebook's path (`mcp::refuses_r_for_want_of_it`).
-    fn no_r_text(&self) -> String {
+    /// notebook's path (`mcp::refuses_r_for_want_of_it`); none when the runtime is known to offer this
+    /// build's interface, whose refusal stands as it is.
+    fn no_r_text(&self) -> Option<String> {
         let machine = self.current();
+        let status = if machine.is_local() { Some(self.local.status()) } else { self.connections.status(&machine.id) };
+        if status.as_ref().and_then(|status| status.state.runtime()).is_some_and(|runtime| runtime.usable_as_is()) {
+            return None;
+        }
         let place = if machine.is_local() { "this computer" } else { machine.name.as_str() };
         let cluster = !machine.is_local() && self.connections.get(&machine.id).is_some_and(|session| session.cluster());
         let id = &machine.id;
         let restart = format!("Ask the user whether to stop it, since stopping it closes its notebooks. To stop it, call `stop_machine` with machine \"{id}\"; then `use_machine` with machine \"{id}\" starts this version.{}", cluster_clause(cluster));
-        crate::no_r_text(place, &restart)
+        Some(crate::no_r_text(place, &restart))
     }
 
     /// The status's fields that only the front knows: the machine, its job and the runtime's own port, and

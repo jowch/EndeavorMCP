@@ -67,7 +67,9 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   replaces an older version's runtime that has no notebook open with its own
   build's, and a refusal of an R notebook's path by a runtime from before R
   notebooks ("must end in .jl") reaches the agent as why, and how to restart
-  it, from the front and from the app's relay (`client::Listener`).
+  it, from the front and from the app's relay (`client::Listener`). A kept
+  older runtime still isn't told to the app's agent up front, and a pathless
+  `new_notebook` in an R session on one makes a Pluto notebook (#239).
 - The status tool is `session_status` since 2026-10-10 (interface 2); it was
   `pluto_session_status`, a name that told agents every notebook is Pluto's.
   The old name ran the tool, unlisted, for one release (`mcp::RENAMED_TOOLS`);

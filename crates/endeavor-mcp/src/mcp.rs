@@ -114,6 +114,9 @@ pub(crate) fn names_r_notebook(tool: &str, arguments: &Value) -> bool {
 /// before R notebooks refusing an R notebook's path. Such a core takes only `.jl` paths and says so
 /// ("must end in .jl") without a word about R, so the agent can't tell why (#226). A core with R
 /// notebooks never answers an R path that way: it hands the path to R, which says what is missing.
+/// That rests on the order in `new_notebook` (`tools.rs`): a current core on Windows also says "must
+/// end in .jl" with no "or .R", but only for a path R doesn't claim, since R paths go to R first. The
+/// callers also check that the runtime is another build's where they can tell.
 pub(crate) fn refuses_r_for_want_of_it(tool: &str, arguments: &Value, result: &Value) -> bool {
     names_r_notebook(tool, arguments)
         && result["isError"] == true
