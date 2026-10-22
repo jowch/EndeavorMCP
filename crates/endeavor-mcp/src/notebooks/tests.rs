@@ -779,12 +779,11 @@ fn a_disabled_dependent_or_a_dependent_of_one_is_not_named_as_what_will_run() {
     let edited = s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = linger()", "run_after": true })).unwrap();
     assert_eq!(edited["execution"]["will_run"], json!([w]), "{edited}");
     let read = |cell: &str, began: Instant| super::tools::tool_json(s.notebooks.tool("7", "read_cell", &json!({ "notebook_id": NB, "cell_id": cell }), &Folder::Process, began).unwrap());
-    let began = Instant::now();
-    assert_eq!(read(z, began)["output"], "ran z = y + 1", "the off cell kept its output");
-    assert!(began.elapsed() < Duration::from_secs(1), "a read of an off cell doesn't wait for the run");
+    // A read that waits for the run, which doesn't end, runs out and says so in a `message`.
     let began = Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
-    read(w, began);
-    assert!(began.elapsed() >= Duration::from_secs(44), "a read of the dependent that will run waits for it");
+    let off = read(z, began);
+    assert!(off["output"] == "ran z = y + 1" && off.get("message").is_none(), "a read of an off cell doesn't wait for the run: {off}");
+    assert!(read(w, began).get("message").is_some(), "a read of the dependent that will run waits for it");
 }
 
 #[test]
