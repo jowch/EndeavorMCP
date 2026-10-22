@@ -387,7 +387,8 @@ fn a_refusal_of_an_r_path_by_a_runtime_without_r_notebooks_says_why_and_how_to_g
     assert_eq!(said["error"], "unsupported");
     let said = said["message"].as_str().unwrap();
     assert!(said.starts_with("Endeavor on this computer was started by an older version, which has no R notebooks"), "{said}");
-    assert!(said.contains("call `stop_machine` with machine \"local\"; then `use_machine` with machine \"local\" starts this version."), "{said}");
+    assert!(said.contains("Don't stop it yourself: tell the user, and ask whether to restart it"), "{said}");
+    assert!(said.ends_with("Only if the user says yes, call `stop_machine` with machine \"local\", then `use_machine` with machine \"local\"."), "{said}");
 
     let julia = json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "new_notebook", "arguments": { "path": "/w/a.txt" } } });
     let reply = json!({ "jsonrpc": "2.0", "id": 4, "result": tool_error("ArgumentError: invalid_path::Notebook path must end in .jl: '/w/a.txt'", false) }).to_string();

@@ -922,7 +922,9 @@ impl Relay {
         let place = if machine.is_local() { "this computer" } else { machine.name.as_str() };
         let cluster = !machine.is_local() && self.connections.get(&machine.id).is_some_and(|session| session.cluster());
         let id = &machine.id;
-        let restart = format!("Ask the user whether to stop it, since stopping it closes its notebooks. To stop it, call `stop_machine` with machine \"{id}\"; then `use_machine` with machine \"{id}\" starts this version.{}", cluster_clause(cluster));
+        // No call the agent could take as the remedy: a kept runtime has a notebook open, often this session's own,
+        // which `stop_machine`'s check of other sessions doesn't count.
+        let restart = format!("Don't stop it yourself: tell the user, and ask whether to restart it, which closes the notebooks open in it. Only if the user says yes, call `stop_machine` with machine \"{id}\", then `use_machine` with machine \"{id}\".{}", cluster_clause(cluster));
         Some(crate::no_r_text(place, &restart))
     }
 
