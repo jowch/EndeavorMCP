@@ -262,13 +262,24 @@ impl Call<'_> {
 
     /// The owner reads a cell's code (it counts as reading it before an edit).
     fn record_read(&self, id: &str, cell: &str, code: &str) {
+        self.record_read_of(id, cell, code, true);
+    }
+
+    /// As `record_read`; `sent` is false when the reply left the code out. That read still counts
+    /// before an edit, but not as the agent having been given the code: else reads every few calls
+    /// would keep code it lost to a compaction "unchanged" for good.
+    fn record_read_of(&self, id: &str, cell: &str, code: &str, sent: bool) {
         let mut state = self.nbs.state.lock().unwrap();
         state.seq += 1;
         let seq = state.seq;
         let calls = state.calls.get(self.owner).copied().unwrap_or(0);
         let notebook = state.notebooks.entry(id.to_owned()).or_default();
-        notebook.reads.insert((self.owner.to_owned(), cell.to_owned()), (code.to_owned(), seq));
-        notebook.read_at.insert((self.owner.to_owned(), cell.to_owned()), calls);
+        let key = (self.owner.to_owned(), cell.to_owned());
+        let at = match notebook.reads.get(&key) {
+            Some((read, _, at)) if !sent && read == code => *at,
+            _ => calls,
+        };
+        notebook.reads.insert(key, (code.to_owned(), seq, at));
     }
 
     /// The code of `cell` that this session read or wrote within its last `RECENT_CALLS` calls, if any:
@@ -280,8 +291,8 @@ impl Call<'_> {
         let key = (self.owner.to_owned(), cell.to_owned());
         let now = state.calls.get(self.owner).copied().unwrap_or(0);
         let notebook = state.notebooks.get(id)?;
-        let at = notebook.read_at.get(&key)?;
-        (now.saturating_sub(*at) <= RECENT_CALLS).then(|| notebook.reads.get(&key).map(|(code, _)| code.clone())).flatten()
+        let (code, _, at) = notebook.reads.get(&key)?;
+        (now.saturating_sub(*at) <= RECENT_CALLS).then(|| code.clone())
     }
 
     /// The owner changed a cell through the tools.
@@ -299,7 +310,7 @@ impl Call<'_> {
         let read = state.notebooks.get(&nb.id).and_then(|n| n.reads.get(&(self.owner.to_owned(), cell.to_owned())));
         match read {
             None => Err(argument_error(&format!("read_required::Call read_cell or read_notebook_code before editing cell {cell}"))),
-            Some((code, _)) if *code != nb.cells[cell].code => Err(argument_error(&format!("stale_read::Cell {cell} changed since last read; call read_cell again"))),
+            Some((code, _, _)) if *code != nb.cells[cell].code => Err(argument_error(&format!("stale_read::Cell {cell} changed since last read; call read_cell again"))),
             Some(_) => Ok(()),
         }
     }
@@ -332,7 +343,7 @@ impl Call<'_> {
         let unread: HashSet<String> = {
             let state = self.nbs.state.lock().unwrap();
             let Some(notebook) = state.notebooks.get(&nb.id) else { return Ok(None) };
-            let read_seq = |cell: &String| notebook.reads.get(&(self.owner.to_owned(), cell.clone())).map_or(0, |(_, seq)| *seq);
+            let read_seq = |cell: &String| notebook.reads.get(&(self.owner.to_owned(), cell.clone())).map_or(0, |(_, seq, _)| *seq);
             notebook.changes.iter().filter(|(cell, ch)| other_owner(ch, self.owner) && ch.seq > read_seq(cell)).map(|(cell, _)| cell.clone()).collect()
         };
         if unread.is_empty() {
@@ -790,10 +801,10 @@ impl Call<'_> {
         let include_code = bool_arg(self.args, "include_code", false)?;
         // Code this session read or wrote a few calls ago, unchanged since, isn't sent again: an agent
         // that reads each cell it just ran gets its own code back each time, a tenth of a long session.
-        let has_it = self.recent_read(&nb.id, &cell).is_some_and(|read| read == code);
-        self.record_read(&nb.id, &cell, &code);
+        let left_out = !include_code && self.recent_read(&nb.id, &cell).is_some_and(|read| read == code);
+        self.record_read_of(&nb.id, &cell, &code, !left_out);
         let mut out = self.cell_json(&nb, &cell);
-        if has_it && !include_code {
+        if left_out {
             out.remove("code");
             out.insert("code_unchanged".into(), json!(true));
             // Which code it means, so the app keeps its copy only if it is that one.

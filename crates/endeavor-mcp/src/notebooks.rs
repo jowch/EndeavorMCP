@@ -138,10 +138,9 @@ struct NotebookState {
     /// the tools or not.
     user_runs: HashMap<String, (f64, f64)>,
     /// What each agent session last read of each cell: (owner, cell) => (code,
-    /// seq). Per owner, so one session's reads and edits aren't another's.
-    reads: HashMap<(String, String), (String, u64)>,
-    /// The session's call count (`State::calls`) at each of those reads.
-    read_at: HashMap<(String, String), u64>,
+    /// seq, the session's call count (`State::calls`) when it was last sent that
+    /// code). Per owner, so one session's reads and edits aren't another's.
+    reads: HashMap<(String, String), (String, u64, u64)>,
     /// Which session last changed each cell through the tools, and when.
     changes: HashMap<String, Change>,
     /// The runs sessions started that haven't ended (`run_finished`), each with its cells that
@@ -168,7 +167,7 @@ const ENDED_KEPT: usize = 64;
 impl NotebookState {
     /// Whether a session read or changed one of its cells after the state's `seq` was `since`.
     fn touched_after(&self, since: u64) -> bool {
-        self.reads.values().map(|(_, seq)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
+        self.reads.values().map(|(_, seq, _)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
     }
 
     /// Code that changed without the agent's tools writing it was changed by

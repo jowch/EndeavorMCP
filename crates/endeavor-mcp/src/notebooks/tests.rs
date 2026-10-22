@@ -997,6 +997,15 @@ fn adding_moving_folding_and_deleting_cells() {
     }
     let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap();
     assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
+    // A read that left the code out doesn't count as sending it: reads every few calls don't keep it out for good.
+    let calls = |n| for _ in 0..n {
+        s.call("", "list_notebooks", json!({})).unwrap();
+    };
+    calls(7);
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap()["code_unchanged"], true);
+    calls(7);
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": "" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": a, "folded": "yes" })), "invalid_argument");
