@@ -8,6 +8,11 @@ Claude's transcript it prints, for each user message, the requests it took and
 the context at its first and last; then what is in the context at the end, by
 source; then the largest single items.
 
+When Claude Code compacted the conversation, the earlier part is gone from
+the context: the fit leaves out the step across each compaction, the table
+of the end context counts only what came after the last one, and an item
+before it counts as re-read only until it.
+
 The context of each request comes from Claude's own usage. What filled it is
 estimated: the growth between two requests is the agent's last message (the
 code and text it wrote, and its thinking, which the transcript holds only as a
@@ -37,6 +42,7 @@ def main():
     names = {}
     reqs = []  # turn, ctx, items: what this request added for the next [(kind, source, size, label)]
     turn, seen = 1, None  # each user message ends with a result event
+    compacted = []  # the number of requests made before each compaction
     for line in open(os.path.join(attempt, "transcript.jsonl")):
         try:
             e = json.loads(line)
@@ -45,6 +51,8 @@ def main():
         t = e.get("type")
         if t == "result":
             turn += 1
+        elif t == "system" and e.get("subtype") == "compact_boundary":
+            compacted.append(len(reqs))
         elif t == "assistant":
             m = e["message"]
             if m["id"] != seen:
@@ -81,12 +89,24 @@ def main():
                     kind = "skill text" if c["text"].startswith("Base directory for this skill") else "user message"
                     reqs[-1]["items"].append(("reply", kind, len(c["text"]), c["text"].split("\n")[0][-60:]))
     n = len(reqs)
-    X = np.array([[sum(s for k, _, s, _ in r["items"] if k == kind) for kind in KINDS] + [1] for r in reqs[:-1]], float)
-    y = np.diff([r["ctx"] for r in reqs])
+    # A compaction Claude Code didn't report still shows as the context shrinking by a lot.
+    for k in range(1, n):
+        if reqs[k]["ctx"] < reqs[k - 1]["ctx"] - 5000 and not any(c == k for c in compacted):
+            compacted.append(k)
+    compacted = sorted(set(c for c in compacted if 0 < c < n))
+    # The requests of each stretch between compactions: request k's items reach request k + 1 only within one.
+    starts = [0] + compacted
+    ends = compacted + [n]
+    segment_end = {k: e for b, e in zip(starts, ends) for k in range(b, e)}
+    pairs = [k for k in range(n - 1) if k + 1 < segment_end[k]]
+    X = np.array([[sum(s for k_, _, s, _ in reqs[k]["items"] if k_ == kind) for kind in KINDS] + [1] for k in pairs], float)
+    y = np.array([reqs[k + 1]["ctx"] - reqs[k]["ctx"] for k in pairs], float)
     coef = np.linalg.lstsq(X, y, rcond=None)[0]
     r2 = 1 - ((y - X @ coef) ** 2).sum() / ((y - y.mean()) ** 2).sum()
     rate = dict(zip(KINDS, coef))
-    print(f"{n} requests; context {reqs[0]['ctx']} at the first, {reqs[-1]['ctx']} at the last; input volume {sum(r['ctx'] for r in reqs)}")
+    print(f"{n} requests; context {reqs[0]['ctx']} at the first, {reqs[-1]['ctx']} at the last, {max(r['ctx'] for r in reqs)} at most; input volume {sum(r['ctx'] for r in reqs)}")
+    if compacted:
+        print(f"Compacted {len(compacted)} time(s), before request(s) {', '.join(str(c + 1) for c in compacted)}: the end context below is what came after the last one")
     print(f"Fit (R² {r2:.2f}): {rate['written']:.2f} tokens per character the agent wrote, {rate['reply']:.2f} per reply character, {rate['picture']:.0f} per picture, {rate['thinking']:.2f} per thinking-signature character, {coef[-1]:.0f} per request besides\n")
     print("| Message | Requests | Context at its first | at its last |")
     print("|---|---|---|---|")
@@ -97,20 +117,26 @@ def main():
         print(f"| {t} | {len(ctxs)} | {ctxs[0]} | {ctxs[-1]} |")
     tokens, count, weighted, singles = collections.Counter(), collections.Counter(), collections.Counter(), []
     vol = sum(r["ctx"] for r in reqs)
-    for k, r in enumerate(reqs[:-1]):
-        later = n - 1 - k  # requests that read it again
-        for kind, src, size, label in r["items"]:
+    last = starts[-1]
+    for k in pairs:
+        later = segment_end[k] - 1 - k  # requests that read it again
+        for kind, src, size, label in reqs[k]["items"]:
             tk = rate[kind] * size
-            tokens[src] += tk
-            count[src] += 1
             weighted[src] += tk * later
             singles.append((tk, k + 1, src, size, label))
+            if k >= last:
+                tokens[src] += tk
+                count[src] += 1
     end = reqs[-1]["ctx"]
+    base = reqs[last]["ctx"]
+    rest = end - base - sum(tokens.values())
     print(f"\n| Source | Items | Tokens in the end context | Share of it | Share of input volume |")
     print("|---|---|---|---|---|")
-    print(f"| first request (agent's system prompt, tools) | 1 | {reqs[0]['ctx']} | {100 * reqs[0]['ctx'] / end:.1f}% | {100 * reqs[0]['ctx'] * n / vol:.1f}% |")
+    first = "first request (agent's system prompt, tools)" if not compacted else "first request after the last compaction (system prompt, tools, the summary)"
+    print(f"| {first} | 1 | {base} | {100 * base / end:.1f}% | {100 * sum(reqs[b]['ctx'] * (e - b) for b, e in zip(starts, ends)) / vol:.1f}% |")
     for src, tk in tokens.most_common():
         print(f"| {src} | {count[src]} | {tk:.0f} | {100 * tk / end:.1f}% | {100 * weighted[src] / vol:.1f}% |")
+    print(f"| unattributed (the fit's remainder) | | {rest:.0f} | {100 * rest / end:.1f}% | |")
     print(f"\nLargest single items (estimated tokens, the request that first read it):")
     for tk, k, src, size, label in sorted(singles, reverse=True)[:top]:
         print(f"  {tk:7.0f}  req {k:3d}  {src:32s} {size:6d}  {label}")

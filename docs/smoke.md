@@ -72,8 +72,10 @@ Each task is a folder in `smoke/tasks/`:
   the user's `~/.julia`, which may have the packages already.
   `{ "ssh": true }` gives the task a server (below). `{ "r": true }` marks an
   R task, which needs R (above). `{ "minutes": 75 }` lets the agent run that
-  long instead of 20 minutes. `{ "long": true }` marks a long task, which
-  runs only with `--long` or when `--only` names it.
+  long instead of 20 minutes (a whole number; anything else fails the
+  attempt). `{ "long": true }` marks a long task, which runs only with
+  `--long` or when `--only` names it, and isn't run again after a failure
+  unless `--retries` is given.
 - `inject.json` (optional): a second person working in the same notebook.
   It names a moment, the first time the agent calls one of `tools` (`"when":
   "before"` the call reaches the server or `"after"` its reply), and the calls
@@ -138,7 +140,8 @@ tools or the skills can be compared before and after, per task and model:
 | `requests` | the model requests Claude made, one per step of its turn |
 | `input_tokens` | what those requests read, added up, cached or not. Each request reads the whole conversation so far, so this grows with both the number of requests and what stays in the conversation (the skill, tool replies) |
 | `context_tokens` | the conversation's size at the last request |
-| `output_tokens` | what the model wrote, its thinking included, from Claude's last result (a message's own usage counts only its first part) |
+| `output_tokens` | what the model wrote, its thinking included, from Claude's last result (a message's own usage counts only its first part). It includes any other model Claude Code called on the side, which `requests` and `input_tokens` don't |
+| `compactions` | how many times Claude Code compacted the conversation. A run that compacted can't be compared with one that didn't |
 | `reply_bytes` | the size of the notebook tools' replies, from the proxy's log, apart from pictures. It doesn't depend on the agent, so it compares across agents too |
 
 Requests and input tokens come from Claude's own usage reports; another
@@ -155,7 +158,8 @@ To see how one attempt's context filled, message by message, and what filled
 it (each tool's replies, the agent's own code and thinking, pictures, the
 skill text), run `scripts/smoke-timeline.py target/smoke/<run>/<task>/attempt-1`.
 It needs numpy. The shares are estimates: a fit of each request's growth
-against what arrived before it.
+against what arrived before it. After a compaction it counts only what came
+after the last one.
 
 ## Server tasks
 

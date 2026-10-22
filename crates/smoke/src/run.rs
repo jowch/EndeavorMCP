@@ -85,13 +85,14 @@ struct Options {
     /// An R task shows as skipped on a computer without R, instead of failing.
     skip_r: bool,
     depot: Option<String>,
-    retries: u32,
+    /// Runs after a failed first one; if not given, 2, and none for a long task.
+    retries: Option<u32>,
     /// Run the long tasks too (`"long": true` in their `setup.json`), which otherwise run only when `--only` names them.
     long: bool,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
-    let mut o = Options { only: None, out: None, julia: std::env::var("ENDEAVOR_E2E_JULIA").unwrap_or_else(|_| "auto".into()), r: std::env::var("ENDEAVOR_E2E_R").unwrap_or_else(|_| "auto".into()), skip_r: false, depot: None, retries: 2, long: false };
+    let mut o = Options { only: None, out: None, julia: std::env::var("ENDEAVOR_E2E_JULIA").unwrap_or_else(|_| "auto".into()), r: std::env::var("ENDEAVOR_E2E_R").unwrap_or_else(|_| "auto".into()), skip_r: false, depot: None, retries: None, long: false };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let mut value = || it.next().cloned().ok_or(format!("{arg} needs a value"));
@@ -103,7 +104,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--skip-r" => o.skip_r = true,
             "--long" => o.long = true,
             "--depot" => o.depot = Some(value()?),
-            "--retries" => o.retries = value()?.parse().map_err(|e| format!("--retries: {e}"))?,
+            "--retries" => o.retries = Some(value()?.parse().map_err(|e| format!("--retries: {e}"))?),
             "--model" => MODEL.set(value()?).map_err(|_| "--model given twice".to_owned())?,
             _ => return Err(format!("unknown argument {arg}")),
         }
@@ -176,7 +177,7 @@ pub fn main(args: &[String]) -> i32 {
     if let Some(only) = &o.only {
         tasks.retain(|t| only.iter().any(|id| t.file_name().is_some_and(|n| n == id.as_str())));
     } else if !o.long {
-        tasks.retain(|t| std::fs::read_to_string(t.join("setup.json")).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).is_none_or(|s| s["long"] != true));
+        tasks.retain(|t| !long_task(t));
     }
     if tasks.is_empty() {
         eprintln!("endeavor-smoke: no tasks to run");
@@ -218,7 +219,9 @@ pub fn main(args: &[String]) -> i32 {
             attempts.push(result);
             // A first run that passes is enough; one that fails runs `retries` more times.
             // A task known to fail runs once: its retries would only say so again.
-            if (n == 1 && passed) || n as u32 > o.retries || expected_failure(task).is_some() {
+            // A long one runs once unless `--retries` says otherwise: each run is an hour and dollars.
+            let retries = o.retries.unwrap_or(if long_task(task) { 0 } else { 2 });
+            if (n == 1 && passed) || n as u32 > retries || expected_failure(task).is_some() {
                 break;
             }
         }
@@ -278,6 +281,12 @@ fn expected_failure(task: &Path) -> Option<String> {
     specs["expected_to_fail"].as_str().map(str::to_owned)
 }
 
+/// Whether a task is long: `"long": true` in its setup.json. A setup.json that doesn't parse leaves the task in.
+fn long_task(task: &Path) -> bool {
+    let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    setup["long"] == true
+}
+
 /// Whether a task is about R notebooks: `"r": true` in its setup.json.
 fn r_task(task: &Path) -> bool {
     let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
@@ -335,6 +344,9 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     }
     let specs: Value = std::fs::read_to_string(task.join("checks.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({ "checks": [] }));
     let mut problems: Vec<String> = Vec::new();
+    if !setup["minutes"].is_null() && setup["minutes"].as_u64().is_none() {
+        problems.push(format!("setup.json: minutes must be a whole number, not {}", setup["minutes"]));
+    }
     let server = if ssh {
         match crate::ssh::start(work) {
             Ok(server) => Some(server),
@@ -401,6 +413,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
             "context_tokens": agent.tokens.context,
             "input_tokens": agent.tokens.input,
             "output_tokens": agent.tokens.output,
+            "compactions": agent.compactions,
             "reply_bytes": calls.iter().map(|c| c.reply_bytes).sum::<usize>(),
         },
         "model": agent.model,
@@ -488,6 +501,8 @@ struct AgentRun {
     turns: Option<u64>,
     cost_usd: Option<f64>,
     tokens: Tokens,
+    /// How many times Claude Code compacted the conversation: a run that did can't be compared with one that didn't.
+    compactions: u64,
     problem: Option<String>,
 }
 
@@ -599,6 +614,7 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
     let mut last_message: Option<String> = None;
     for event in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         match event["type"].as_str() {
+            Some("system") if event["subtype"] == "compact_boundary" => run.compactions += 1,
             Some("system") if event["subtype"] == "init" => {
                 run.model = run.model.take().or_else(|| event["model"].as_str().map(str::to_owned));
                 let ours = event["mcp_servers"].as_array().into_iter().flatten().find(|s| s["name"] == "plugin:endeavor:endeavor");
@@ -702,15 +718,15 @@ fn thousands(n: &Value) -> String {
 fn summary_md(summary: &Value) -> String {
     let models: Vec<&str> = summary["models"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let models = if models.is_empty() { "unknown".to_owned() } else { models.join(", ") };
-    let mut md = format!("# Smoke run at {}\n\nAgent: {}\n\nModels: {models}\n\n| Task | Status | Failed attempts | Tool calls | Tool errors | Time | Cost | Requests | Input tokens | Output tokens | Tool replies |\n|---|---|---|---|---|---|---|---|---|---|---|\n", summary["commit"].as_str().unwrap_or("?"), summary["agent"].as_str().unwrap_or("?"));
+    let mut md = format!("# Smoke run at {}\n\nAgent: {}\n\nModels: {models}\n\n| Task | Status | Failed attempts | Tool calls | Tool errors | Time | Cost | Requests | Input tokens | Output tokens | Compactions | Tool replies |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n", summary["commit"].as_str().unwrap_or("?"), summary["agent"].as_str().unwrap_or("?"));
     for r in summary["tasks"].as_array().into_iter().flatten() {
         let m = &r["first"];
         if r["attempts"] == 0 {
-            md += &format!("| {} | {} | 0/0 | | | | | | | | |\n", r["task"].as_str().unwrap_or_default(), r["status"].as_str().unwrap_or_default());
+            md += &format!("| {} | {} | 0/0 | | | | | | | | | |\n", r["task"].as_str().unwrap_or_default(), r["status"].as_str().unwrap_or_default());
             continue;
         }
         md += &format!(
-            "| {} | {} | {}/{} | {} | {} | {:.0} s | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {}/{} | {} | {} | {:.0} s | {} | {} | {} | {} | {} | {} |\n",
             r["task"].as_str().unwrap_or_default(),
             r["status"].as_str().unwrap_or_default(),
             r["failed"],
@@ -722,6 +738,7 @@ fn summary_md(summary: &Value) -> String {
             m["requests"],
             thousands(&m["input_tokens"]),
             thousands(&m["output_tokens"]),
+            m["compactions"].as_u64().map_or("?".into(), |c| c.to_string()),
             m["reply_bytes"].as_u64().map_or("?".into(), |b| format!("{:.1} KB", b as f64 / 1000.0)),
         );
     }
