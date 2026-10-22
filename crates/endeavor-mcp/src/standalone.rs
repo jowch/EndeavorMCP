@@ -379,11 +379,12 @@ impl Hooks for Saying<'_> {
 }
 
 /// The runtime running from the state folder, or a new one, once it answers (`runtime::find_or_start`).
+/// One of an older version is kept here: the front decides whether to stop it (`target::Local::other_build`).
 /// `progress` hears the start's log; `cancelled` ends a start early, and a runtime that was starting with it.
 fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Up, String> {
     let args = runtime_args(options, exit_idle);
     let (events, _) = mpsc::channel();
-    let want = Want { args: &args, engine: wire::ENGINE_PLUTO, install: true, runtime: &|| unpack_runtime(&options.cache), events: &events, attach_only: false };
+    let want = Want { args: &args, engine: wire::ENGINE_PLUTO, install: true, runtime: &|| unpack_runtime(&options.cache), events: &events, attach_only: false, replace_older: false };
     match runtime::find_or_start(&want, &mut Saying { progress, cancelled }) {
         Outcome::Ready(up) => Ok(up),
         Outcome::Unusable(Looked::OtherNode(state)) => Err(runtime::other_node_text(&state.node)),

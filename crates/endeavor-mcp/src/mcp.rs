@@ -105,6 +105,21 @@ pub fn runs_code(tool: &str, arguments: &Value) -> bool {
     }
 }
 
+/// Whether a call to `tool` with `arguments` makes or opens an R notebook, by its path.
+pub(crate) fn names_r_notebook(tool: &str, arguments: &Value) -> bool {
+    matches!(tool, "new_notebook" | "open_notebook") && arguments["path"].as_str().is_some_and(|path| crate::notebooks::engines::of_path(path) == wire::backend::Backend::Ember)
+}
+
+/// Whether `result`, a runtime's answer to the agent's call to `tool` with `arguments`, is a core from
+/// before R notebooks refusing an R notebook's path. Such a core takes only `.jl` paths and says so
+/// ("must end in .jl") without a word about R, so the agent can't tell why (#226). A core with R
+/// notebooks never answers an R path that way: it hands the path to R, which says what is missing.
+pub(crate) fn refuses_r_for_want_of_it(tool: &str, arguments: &Value, result: &Value) -> bool {
+    names_r_notebook(tool, arguments)
+        && result["isError"] == true
+        && result["content"].as_array().is_some_and(|content| content.iter().any(|c| c["text"].as_str().is_some_and(|text| text.contains("must end in .jl") && !text.contains("or .R"))))
+}
+
 /// Whether a call to `tool` changes the notebook: what Manual asks about
 /// even when runs don't ask.
 pub fn changes_notebook(tool: &str) -> bool {
@@ -1217,6 +1232,22 @@ mod tests {
         tools.iter_mut().for_each(without_descriptions);
         let digest = <sha2::Sha256 as sha2::Digest>::digest(serde_json::to_string(&tools).unwrap());
         digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn only_a_refusal_of_an_r_path_by_a_core_without_r_notebooks_is_one_for_want_of_them() {
+        let refused = |text: &str| json!({ "content": [{ "type": "text", "text": text }], "isError": true });
+        let old = refused(r#"{"error":"invalid_path","message":"Notebook path must end in .jl: '/w/a.R'"}"#);
+        let r = json!({ "path": "/w/a.R" });
+        assert!(refuses_r_for_want_of_it("new_notebook", &r, &old));
+        assert!(refuses_r_for_want_of_it("open_notebook", &json!({ "path": "/w/a.r" }), &old));
+        assert!(!refuses_r_for_want_of_it("new_notebook", &json!({ "path": "/w/a.jl" }), &old), "not an R path");
+        assert!(!refuses_r_for_want_of_it("move_notebook", &r, &old), "not a new or opened notebook");
+        assert!(!refuses_r_for_want_of_it("new_notebook", &json!({}), &old), "no path");
+        let now = refused(r#"{"error":"invalid_path","message":"Notebook path must end in .jl (Julia) or .R (R): '/w/a.Rx'"}"#);
+        assert!(!refuses_r_for_want_of_it("new_notebook", &r, &now), "a core with R notebooks");
+        assert!(!refuses_r_for_want_of_it("new_notebook", &r, &refused("unsupported::R notebooks aren't running in this runtime")));
+        assert!(!refuses_r_for_want_of_it("new_notebook", &r, &json!({ "content": [{ "type": "text", "text": "must end in .jl" }], "isError": false })), "not an error");
     }
 
     #[test]

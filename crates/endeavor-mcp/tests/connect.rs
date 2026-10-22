@@ -45,12 +45,17 @@ impl FakeRuntime {
         FakeRuntime::start_as(dir, node, serde_json::json!({ "launcher": "slurm", "job": job }), Duration::ZERO)
     }
 
-    fn start_as(dir: &Path, node: &str, mut state: serde_json::Value, delay: Duration) -> FakeRuntime {
+    fn start_as(dir: &Path, node: &str, state: serde_json::Value, delay: Duration) -> FakeRuntime {
+        FakeRuntime::listing(dir, node, state, delay, TWO_NOTEBOOKS)
+    }
+
+    /// One whose `list_notebooks` answers `notebooks`, a JSON list.
+    fn listing(dir: &Path, node: &str, mut state: serde_json::Value, delay: Duration, notebooks: &'static str) -> FakeRuntime {
         let process = Command::new("sleep").arg("600").process_group(0).spawn().unwrap();
         let pid = process.id();
         let process = Arc::new(Mutex::new(process));
         let p = process.clone();
-        let port = serve(move |socket| one_port(socket, &p, delay));
+        let port = serve(move |socket| one_port(socket, &p, delay, notebooks));
         let fields = serde_json::json!({ "node": node, "pid": pid, "port": port, "token": TOKEN });
         state.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
@@ -87,7 +92,10 @@ fn serve(handle: impl Fn(TcpStream) + Send + Sync + 'static) -> u16 {
     port
 }
 
-fn one_port(mut socket: TcpStream, process: &Mutex<Child>, delay: Duration) {
+/// What a stand-in runtime's `list_notebooks` answers unless a test says otherwise: two notebooks are open.
+const TWO_NOTEBOOKS: &str = r#"[{"path":"a.jl"},{"path":"b.jl"}]"#;
+
+fn one_port(mut socket: TcpStream, process: &Mutex<Child>, delay: Duration, notebooks: &str) {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let (mut request, mut auth, mut length) = (String::new(), String::new(), 0);
     reader.read_line(&mut request).unwrap();
@@ -123,7 +131,8 @@ fn one_port(mut socket: TcpStream, process: &Mutex<Child>, delay: Duration) {
         let _ = process.wait();
     }
     if String::from_utf8_lossy(&body).contains("list_notebooks") {
-        let _ = write!(socket, "HTTP/1.1 200 OK\r\n\r\n{}", r#"{"result":{"content":[{"text":"[{\"path\":\"a.jl\"},{\"path\":\"b.jl\"}]"}]}}"#);
+        let reply = serde_json::json!({ "result": { "content": [{ "text": notebooks }] } });
+        let _ = write!(socket, "HTTP/1.1 200 OK\r\n\r\n{reply}");
         return;
     }
     let _ = write!(socket, "HTTP/1.1 200 OK\r\n\r\n{{\"said\":{:?}}}", request.trim_end());
@@ -251,6 +260,58 @@ fn ready_says_the_build_and_interface_the_runtime_recorded_and_none_for_a_record
     let helper = Helper::start(&dir, &["--any-node"]);
     let ToApp::Ready { build, interface, .. } = helper.start_runtime() else { panic!("expected Ready") };
     assert_eq!((build, interface), (None, None));
+}
+
+/// The next message after any progress lines, and those lines.
+fn after_lines(helper: &Helper) -> (ToApp, Vec<String>) {
+    let mut lines = Vec::new();
+    loop {
+        match helper.next() {
+            ToApp::Progress { line } => lines.push(line),
+            other => return (other, lines),
+        }
+    }
+}
+
+#[test]
+fn a_runtime_an_older_version_started_with_no_notebook_open_is_stopped_for_this_version() {
+    // No interface recorded, as a build from before it was: an older version's, without R notebooks (#226).
+    let dir = state_dir("older-idle");
+    let runtime = FakeRuntime::listing(&dir, "labbox3", serde_json::json!({ "launcher": "process", "build": "0.1.0-0ld" }), Duration::ZERO, "[]");
+    let helper = Helper::start(&dir, &["--any-node"]);
+    helper.hello();
+    helper.request_start(None, false);
+    let (answer, lines) = after_lines(&helper);
+    assert!(lines.iter().any(|line| line.contains("was started by an older version, and no notebook is open in it; stopping it")), "{lines:?}");
+    common::wait_for("the older runtime to end", || !runtime.alive());
+    // This version's start goes on, and here it finds no Julia.
+    assert!(!matches!(answer, ToApp::Ready { .. }), "{answer:?}");
+    assert!(!dir.join("runtime.json").exists() || common::read_json(&dir.join("runtime.json"))["pid"] != runtime.pid, "the older one's record is gone");
+}
+
+#[test]
+fn a_runtime_an_older_version_started_is_kept_while_a_notebook_is_open_and_a_newer_one_always() {
+    let dir = state_dir("older-open");
+    let older = FakeRuntime::start_as(&dir, "labbox3", serde_json::json!({ "launcher": "process", "build": "0.1.0-0ld", "interface": 1 }), Duration::ZERO);
+    let mut helper = Helper::start(&dir, &["--any-node"]);
+    helper.hello();
+    helper.request_start(None, false);
+    let (answer, lines) = after_lines(&helper);
+    assert!(matches!(answer, ToApp::Ready { reattached: true, interface: Some(1), .. }), "{answer:?}");
+    assert!(lines.iter().all(|line| !line.contains("older version")), "{lines:?}");
+    assert!(older.alive(), "its notebooks stay open");
+    helper.stdin.0.lock().unwrap().take();
+    let _ = helper.process.wait();
+    older.kill();
+
+    let dir = state_dir("newer-idle");
+    let newer = FakeRuntime::listing(&dir, "labbox3", serde_json::json!({ "launcher": "process", "build": "9.9.9-new", "interface": u32::MAX }), Duration::ZERO, "[]");
+    let helper = Helper::start(&dir, &["--any-node"]);
+    helper.hello();
+    helper.request_start(None, false);
+    let (answer, _) = after_lines(&helper);
+    assert!(matches!(answer, ToApp::Ready { reattached: true, .. }), "a newer version's runtime is used, idle or not: {answer:?}");
+    assert!(newer.alive());
 }
 
 #[test]
