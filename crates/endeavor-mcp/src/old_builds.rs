@@ -116,11 +116,14 @@ pub(crate) fn hold_own_folder(place: Option<&Place>) {
         let path = folder.join(standalone::IN_USE);
         let marker = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).ok()?;
         let started = std::time::Instant::now();
-        while marker.try_lock_shared().is_err() {
-            if started.elapsed() > LOCK_WAIT {
-                return None;
+        // Only a lock someone holds is waited for: a filesystem without locks (NFS mounted nolock,
+        // Lustre without flock) fails at once, and then no lease is held, and no build is removed there.
+        loop {
+            match marker.try_lock_shared() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => return None,
             }
-            std::thread::sleep(Duration::from_millis(50));
         }
         if !same_file(&marker, &path) {
             eprintln!("endeavor: this build ({}) was being removed as it started, as one unused for a week. Run it again, and it is installed again.", folder.display());

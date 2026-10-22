@@ -209,7 +209,10 @@ Known gaps:
   cluster's, not from a state folder given as a path elsewhere. Checked on
   Linux with a fake server folder and plugin folder, not on a real cluster. A server
   where `squeue` doesn't answer keeps all of them. The plugin's folder stays
-  after an uninstall.
+  after an uninstall. On a home folder without file locks (NFS mounted
+  `nolock`, Lustre without `flock`), no lease can be taken or tested, so a
+  build from this version on stays there for good; only builds from before
+  leases are removed, by the other rules.
 
 Next:
 
