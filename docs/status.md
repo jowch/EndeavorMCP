@@ -225,11 +225,14 @@ Next:
   in every tool that takes a cell id (Ember #82, interface 20). An agent can restart a notebook with
   `restart_notebook`, as the page's Restart does (#202, interface 21). The notes Ember shows under a cell's last run (`changed_in_place`, `settings_found`, `load_note`) reach the agent: as `warnings` on the run that made them, and as `notes` in `read_cell` (#207, interface 22). The tools also show an R notebook's `package_date`, and `preview_package_update` and
   `apply_package_update` move it, as the Packages tab's Update does: Ember's
-  `preview_date()`, then its `set_date()` (#201, interface 23). R's adapter
+  `preview_date()`, then its `set_date()` (#201, interface 23). A waited run counts the dependents that reran with it as its own cells, so a dependent that failed makes it `errored`, and a run not waited for names the dependents it will rerun in `execution.will_run` (#192, interface 24). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the
-  agent's run, until those finish (#151; interface 12). A waited `submit_changes` with
+  agent's run, until those finish (#151; interface 12). That includes a cell that
+  read a name the run's cells dropped (a rename), which Ember reruns though the
+  graph no longer links it; the adapter names such cells to the core, for
+  `will_run` and the waited run's cells (#228). A waited `submit_changes` with
   nothing staged reports the cells that ran while it waited, and `errored` if one failed (#171; interface 14).
   `allow_execution`'s run of the notebook is the agent's run too, so a read or a waited submit
   right after it waits for it, in both engines (#170; interface 15). A read whose

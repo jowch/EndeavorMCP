@@ -156,6 +156,9 @@ struct Started {
     owner: String,
     run: Option<String>,
     cells: HashSet<String>,
+    /// The dependents it will rerun (`execution.will_run`), with when each last ran: the
+    /// engine queues one only once its parent's result is in, so until then it looks idle.
+    follows: HashMap<String, f64>,
 }
 
 const ENDED_KEPT: usize = 64;
@@ -1308,6 +1311,14 @@ impl Notebooks {
             state.started.retain(|started| (started.run.is_some() && busy) || !started.cells.is_empty());
             state.started.iter().any(|started| started.owner == owner)
         })
+    }
+
+    /// Whether `cell` is a dependent a run `owner` started will rerun and hasn't yet: one the
+    /// engine hasn't queued yet looks idle, though it will run (#192). Asked once
+    /// `own_run_going` has said the run is still going.
+    fn own_run_will_run(&self, owner: &str, nb: &Snapshot, cell: &str) -> bool {
+        let Some(c) = nb.cells.get(cell) else { return false };
+        self.with_state(&nb.id, |state| state.started.iter().any(|started| started.owner == owner && started.follows.get(cell).is_some_and(|last| c.last_run == *last)))
     }
 
     /// The notebooks where runs `owner` started may still be going (`stop_for` checks): what the

@@ -554,6 +554,9 @@ run <- function(rec, cells, wait, timeout) {
   }
   ids <- union(cells, r$queued)
   readers <- old_readers(rec, ids)
+  # The core adds these to the graph's dependents, for `will_run` and the cells
+  # a waited run reports.
+  result$dependents <- I(readers)
   if (!isTRUE(wait)) {
     result$run <- watch_run(rec, cells, ids, readers)
     return(result)
