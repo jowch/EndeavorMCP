@@ -140,6 +140,8 @@ struct NotebookState {
     /// What each agent session last read of each cell: (owner, cell) => (code,
     /// seq). Per owner, so one session's reads and edits aren't another's.
     reads: HashMap<(String, String), (String, u64)>,
+    /// The session's call count (`State::calls`) at each of those reads.
+    read_at: HashMap<(String, String), u64>,
     /// Which session last changed each cell through the tools, and when.
     changes: HashMap<String, Change>,
     /// The runs sessions started that haven't ended (`run_finished`), each with its cells that
@@ -242,6 +244,8 @@ struct State {
     /// makes a call; dropped with its binding, or `SESSION_KEPT` after its
     /// last call or its binding (and then its binding goes too).
     seen: HashMap<String, Seen>,
+    /// How many notebook tool calls each session has made: a read is recent for `RECENT_CALLS` of them.
+    calls: HashMap<String, u64>,
 }
 
 struct Seen {
@@ -588,7 +592,7 @@ impl Notebooks {
             starting: Mutex::default(),
             notices: Mutex::default(),
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new(), calls: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),

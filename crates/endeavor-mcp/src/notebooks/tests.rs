@@ -991,6 +991,12 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
     // Another session hasn't read it, so it gets the code.
     assert_eq!(s.call("9", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap()["code"], "a = 1");
+    // A read more than ten of the session's calls ago may have left the agent's context: the code comes again.
+    for _ in 0..11 {
+        s.call("", "list_notebooks", json!({})).unwrap();
+    }
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": "" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": a, "folded": "yes" })), "invalid_argument");

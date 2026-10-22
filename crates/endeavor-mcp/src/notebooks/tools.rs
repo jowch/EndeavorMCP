@@ -44,6 +44,9 @@ pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has
 /// How much of each output's text a change's receipt carries; `read_cell` has
 /// the rest.
 const RECEIPT_TEXT_MAX: usize = 2_000;
+/// How many of a session's calls a read or write of a cell counts as recent: within them, `read_cell`
+/// leaves out code it hasn't changed (`code_unchanged`), as the agent still has it.
+const RECENT_CALLS: u64 = 10;
 
 /// A tool's result: JSON, or a PNG with JSON describing it.
 pub enum Reply {
@@ -63,6 +66,7 @@ impl Notebooks {
     /// `tool` for a caller that can hang up: `gone` says it has, which ends a
     /// wait in the call early.
     pub fn tool_watched(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant, gone: &dyn Fn() -> bool) -> Result<Reply, String> {
+        *self.state.lock().unwrap().calls.entry(owner.to_owned()).or_default() += 1;
         let t = Call { nbs: self, owner, args, began, gone };
         let result = match name {
             "list_notebooks" => t.list_notebooks(),
@@ -261,14 +265,23 @@ impl Call<'_> {
         let mut state = self.nbs.state.lock().unwrap();
         state.seq += 1;
         let seq = state.seq;
+        let calls = state.calls.get(self.owner).copied().unwrap_or(0);
         let notebook = state.notebooks.entry(id.to_owned()).or_default();
         notebook.reads.insert((self.owner.to_owned(), cell.to_owned()), (code.to_owned(), seq));
+        notebook.read_at.insert((self.owner.to_owned(), cell.to_owned()), calls);
     }
 
-    /// The code of `cell` that this session last read or wrote, if any.
-    fn last_read(&self, id: &str, cell: &str) -> Option<String> {
+    /// The code of `cell` that this session read or wrote within its last `RECENT_CALLS` calls, if any:
+    /// what its agent can be taken to still have. An older read may have left the agent's context (a
+    /// compaction, old tool results cleared), and an agent that is told it has code it lost edits
+    /// from memory.
+    fn recent_read(&self, id: &str, cell: &str) -> Option<String> {
         let state = self.nbs.state.lock().unwrap();
-        state.notebooks.get(id).and_then(|n| n.reads.get(&(self.owner.to_owned(), cell.to_owned()))).map(|(code, _)| code.clone())
+        let key = (self.owner.to_owned(), cell.to_owned());
+        let now = state.calls.get(self.owner).copied().unwrap_or(0);
+        let notebook = state.notebooks.get(id)?;
+        let at = notebook.read_at.get(&key)?;
+        (now.saturating_sub(*at) <= RECENT_CALLS).then(|| notebook.reads.get(&key).map(|(code, _)| code.clone())).flatten()
     }
 
     /// The owner changed a cell through the tools.
@@ -775,9 +788,9 @@ impl Call<'_> {
         let ran_out = (waits(&nb) && waited.elapsed() >= Duration::from_millis(500)).then(|| self.began.elapsed().as_secs());
         let Some(code) = nb.cells.get(&cell).map(|c| c.code.clone()) else { return Err(key_error(&format!("cell_not_found::No cell with id '{cell}' in notebook"))) };
         let include_code = bool_arg(self.args, "include_code", false)?;
-        // Code this session last read or wrote, unchanged since, isn't sent again: an agent that
-        // reads each cell it just ran gets its own code back each time, a tenth of a long session.
-        let has_it = self.last_read(&nb.id, &cell).is_some_and(|read| read == code);
+        // Code this session read or wrote a few calls ago, unchanged since, isn't sent again: an agent
+        // that reads each cell it just ran gets its own code back each time, a tenth of a long session.
+        let has_it = self.recent_read(&nb.id, &cell).is_some_and(|read| read == code);
         self.record_read(&nb.id, &cell, &code);
         let mut out = self.cell_json(&nb, &cell);
         if has_it && !include_code {
@@ -1592,18 +1605,18 @@ fn exited_message(language: &str, cell: Option<&str>) -> String {
 }
 
 /// A flag argument: a Bool, or refused.
-/// The first 12 hex digits of the code's SHA-256 (Endeavor's `celldiff::code_sha` is the same).
-fn code_sha(code: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(code.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect()
-}
-
 fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
     match args.get(name) {
         None => Ok(default),
         Some(Value::Bool(flag)) => Ok(*flag),
         Some(_) => Err(argument_error(&format!("invalid_argument::{name} must be a boolean"))),
     }
+}
+
+/// The first 12 hex digits of the code's SHA-256 (Endeavor's `celldiff::code_sha` is the same).
+fn code_sha(code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(code.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 /// An edit's `folded`: a Bool, or left out (or null) to keep the cell's fold as it is.
