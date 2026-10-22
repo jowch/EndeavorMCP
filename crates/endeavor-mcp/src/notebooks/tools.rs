@@ -265,6 +265,12 @@ impl Call<'_> {
         notebook.reads.insert((self.owner.to_owned(), cell.to_owned()), (code.to_owned(), seq));
     }
 
+    /// The code of `cell` that this session last read or wrote, if any.
+    fn last_read(&self, id: &str, cell: &str) -> Option<String> {
+        let state = self.nbs.state.lock().unwrap();
+        state.notebooks.get(id).and_then(|n| n.reads.get(&(self.owner.to_owned(), cell.to_owned()))).map(|(code, _)| code.clone())
+    }
+
     /// The owner changed a cell through the tools.
     fn note_changed(&self, id: &str, cell: &str) {
         let mut state = self.nbs.state.lock().unwrap();
@@ -768,8 +774,18 @@ impl Call<'_> {
         // the read didn't wait.
         let ran_out = (waits(&nb) && waited.elapsed() >= Duration::from_millis(500)).then(|| self.began.elapsed().as_secs());
         let Some(code) = nb.cells.get(&cell).map(|c| c.code.clone()) else { return Err(key_error(&format!("cell_not_found::No cell with id '{cell}' in notebook"))) };
+        let include_code = bool_arg(self.args, "include_code", false)?;
+        // Code this session last read or wrote, unchanged since, isn't sent again: an agent that
+        // reads each cell it just ran gets its own code back each time, a tenth of a long session.
+        let has_it = self.last_read(&nb.id, &cell).is_some_and(|read| read == code);
         self.record_read(&nb.id, &cell, &code);
         let mut out = self.cell_json(&nb, &cell);
+        if has_it && !include_code {
+            out.remove("code");
+            out.insert("code_unchanged".into(), json!(true));
+            // Which code it means, so the app keeps its copy only if it is that one.
+            out.insert("code_sha".into(), json!(code_sha(&code)));
+        }
         if let Some(text) = self.output_text(&nb, &cell)? {
             out.insert("output_text".into(), json!(text));
         }
@@ -908,9 +924,13 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, "", &code);
         let ran = self.run_or_stage(&added, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), ran, None)?;
-        // With its code: the app learns a new cell's code from this reply
-        // (Endeavor's `CellCodes::observe`), since the call had no id for it.
-        receipt.extend(self.cell_json(&after, &cell));
+        // Its code only if the engine changed what the agent sent: the agent has it, and the app
+        // takes it from the call too.
+        let mut added = self.cell_json(&after, &cell);
+        if self.args.get("code").and_then(Value::as_str) == Some(code.as_str()) {
+            added.remove("code");
+        }
+        receipt.extend(added);
         Ok(Value::Object(receipt))
     }
 
@@ -1572,6 +1592,12 @@ fn exited_message(language: &str, cell: Option<&str>) -> String {
 }
 
 /// A flag argument: a Bool, or refused.
+/// The first 12 hex digits of the code's SHA-256 (Endeavor's `celldiff::code_sha` is the same).
+fn code_sha(code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(code.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect()
+}
+
 fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
     match args.get(name) {
         None => Ok(default),
