@@ -66,6 +66,9 @@ struct FakeNotebook {
     runs_first: Vec<String>,
     /// Ember's lazy mode: a run marks its dependents stale instead of running them.
     lazy: bool,
+    /// Autorun as the engines do it: a run reruns its dependents that have run
+    /// before, after its own cells. Off unless a test turns it on.
+    autorun: bool,
     /// An R notebook's snapshot date, and the date of its ready preview of a move.
     package_date: Option<String>,
     previewed: Option<String>,
@@ -100,7 +103,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy: false, package_date: None, previewed: None });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy: false, autorun: false, package_date: None, previewed: None });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -200,7 +203,7 @@ impl Engine {
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
                 // A file named for it is in Ember's lazy mode.
                 let lazy = method == "open" && path.contains("lazy");
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy, package_date: None, previewed: None });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy, autorun: false, package_date: None, previewed: None });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed, "lazy": lazy }));
             }
             _ => {}
@@ -342,6 +345,17 @@ impl Engine {
                 if nb.lazy {
                     for cell in nb.cells.iter_mut().filter(|c| !cells.contains(&c.id) && c.analysis().1.iter().any(|name| defined.contains(name))) {
                         cell.stale = true;
+                    }
+                } else if nb.autorun {
+                    let mut names = defined.clone();
+                    for cell in nb.cells.iter_mut().filter(|c| !cells.contains(&c.id) && !c.not_run && c.last_run > 0.0) {
+                        let (defs, refs) = cell.analysis();
+                        if refs.iter().any(|name| names.contains(name)) {
+                            names.extend(defs);
+                            cell.last_run = now;
+                            cell.errored = cell.code.contains("error(");
+                            cell.output = if cell.errored { "boom".into() } else { format!("ran {}", cell.code) };
+                        }
                     }
                 }
                 let mut reply = json!({ "accepted": true, "process_status": "ready" });
@@ -688,6 +702,43 @@ fn a_run_in_lazy_mode_says_so_and_names_the_stale_cells() {
     let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
     assert!(ran.get("stale_cells").is_none() && !ran["warnings"].to_string().contains("lazy_mode"), "{ran}");
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0].get("on_cell_change"), None);
+}
+
+#[test]
+fn a_run_names_the_dependents_it_reruns_and_a_waited_one_reports_them() {
+    // Autorun reruns a run's dependents after its cells. A waited run lists
+    // the ones that reran as its own, so a dependent that still fails makes it
+    // `errored`; a run not waited for names the ones it will rerun (#192).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1"), ("33333333-3333-3333-3333-333333333333", "z = error(y)"), ("44444444-4444-4444-4444-444444444444", "w = y"), ("55555555-5555-5555-5555-555555555555", "v = 2")]);
+    let (z, w, v) = ("33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444", "55555555-5555-5555-5555-555555555555");
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.engine.with(NB, |nb| {
+        nb.autorun = true;
+        // w hasn't run since the notebook started, so Ember's autorun skips it.
+        nb.cells[3].not_run = true;
+    });
+    s.seconds(1.0);
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 2");
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["affected_cells"], json!([X, Y, z]), "{ran}");
+    assert_eq!(ran["execution"]["status"], "errored", "a dependent that failed fails the run: {ran}");
+    let changed: Vec<&str> = ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| c["cell_id"].as_str().unwrap()).collect();
+    assert_eq!(changed, [X, Y, z], "{ran}");
+    assert_eq!(ran["execution"].get("will_run"), None, "{ran}");
+
+    // Not waited for: the result names what will follow, not v (no dependent) or w (never ran).
+    s.seconds(1.0);
+    let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 3", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"]["will_run"], json!([Y, z]), "{edited}");
+    assert!(!edited["execution"]["will_run"].to_string().contains(v) && !edited["execution"]["will_run"].to_string().contains(w));
+
+    // In lazy mode nothing follows: the dependents go stale.
+    s.engine.with(NB, |nb| nb.lazy = true);
+    s.seconds(1.0);
+    let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 4", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"].get("will_run"), None, "{edited}");
 }
 
 #[test]
@@ -1330,6 +1381,35 @@ fn a_read_of_a_dependent_still_running_in_the_sessions_run_waits_for_it() {
         assert!(began.elapsed() < Duration::from_secs(1), "the run ended (wait_for_completion {wait})");
         s.engine.with(NB, |nb| nb.cells[1].running = false);
     }
+}
+
+#[test]
+fn a_read_of_a_dependent_the_sessions_run_will_rerun_waits_for_it_before_it_is_queued() {
+    // The engine queues a dependent only once its parent's result is in, so
+    // right after an edit's run it looks idle with its old output (#192).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1")]);
+    s.call("7", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.seconds(1.0);
+    s.read("7", NB, X);
+    let edited = s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = linger()", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"]["will_run"], json!([Y]), "{edited}");
+    let read = |began: Instant| super::tools::tool_json(s.notebooks.tool("7", "read_cell", &json!({ "notebook_id": NB, "cell_id": Y }), &Folder::Process, began).unwrap());
+    let began = Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+    assert_eq!(read(began)["running"], false);
+    assert!(began.elapsed() >= Duration::from_secs(44), "waited for the dependent though it isn't queued yet");
+
+    // Once it has run, or the run has ended, a read doesn't wait.
+    s.engine.with(NB, |nb| nb.cells[1].last_run += 1.0);
+    let began = Instant::now();
+    read(began);
+    assert!(began.elapsed() < Duration::from_secs(1), "it ran");
+    s.engine.with(NB, |nb| nb.cells[1].last_run -= 1.0);
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [X] } }));
+    s.engine.with(NB, |nb| nb.cells[0].running = false);
+    let began = Instant::now();
+    read(began);
+    assert!(began.elapsed() < Duration::from_secs(1), "the run ended");
 }
 
 #[test]
