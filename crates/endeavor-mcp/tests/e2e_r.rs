@@ -456,6 +456,19 @@ fn an_r_notebook_through_the_runtime() {
         assert!(waited["execution"]["status"] == "errored" && ran(&waited), "{waited}");
         let failed = waited["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == down).cloned();
         assert!(failed.is_some_and(|c| c["output_summary"].as_str().unwrap().contains("boom")), "{waited}");
+        // A rename: the graph no longer links the dependent to `up`, but Ember reruns it, as it
+        // read the name `up` dropped, and it fails. The run goes on until it has (#228).
+        let gone = |read: &Value| read["running"] == false && read["errored"] == true && read["output"].as_str().unwrap().contains("object 'a' not found");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "b <- 1" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        let read = output(&mut agent);
+        assert!(gone(&read), "the waited submit waited for the old name's reader: {read}");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "restored");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "c <- 1", "run_after": true }));
+        let read = output(&mut agent);
+        assert!(gone(&read), "the read waited for the old name's reader: {read}");
     });
 
     step("allow_execution's run of the notebook is the agent's: a waited submit waits for it (#170)", || {
