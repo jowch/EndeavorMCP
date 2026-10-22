@@ -652,10 +652,12 @@ fn edits_are_staged_until_they_run_however_they_run() {
     let receipt = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     assert_eq!(receipt["execution"]["status"], "running");
     assert_eq!(receipt["warnings"], json!(["async_execution::cells running; read them for the result"]));
+    // An edit made once the cell has finished, before the engine says the run ended, ran in
+    // no run: the run's end leaves it staged (#231).
     s.seconds(1.0);
     s.edit("", NB, X, "x = 12");
     s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
-    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([]));
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([X]));
     s.seconds(1.0);
     s.edit("", NB, X, "x = 13");
     s.seconds(1.0);
