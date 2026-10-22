@@ -356,13 +356,13 @@ impl Call<'_> {
             return Err(argument_error(&format!("process_exited::{}", exited_message(super::engines::language(super::engines::of_path(&nb.path)), cell.as_deref()))));
         }
         // The cells that depend on `cells`, which autorun reruns: those the graph links to them,
-        // and those the engine says it reruns besides (`dependents`): Ember reruns the readers
-        // of a name a cell's last run defined, which the graph no longer links once the cell
-        // drops the name (#228). The run is under way by now, so a graph that can't be read
-        // leaves only the engine's.
+        // and those the engine says it reruns besides (`dependents`), less the ancestors it
+        // runs first: Ember reruns the readers of a name a cell's last run defined, which the
+        // graph no longer links once the cell drops the name (#228). The run is under way by
+        // now, so a graph that can't be read leaves only the engine's.
         let dependents_of = |cells: &[String]| -> HashSet<String> {
             let mut out = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(cells)).unwrap_or_default();
-            out.extend(ids("dependents"));
+            out.extend(ids("dependents").into_iter().filter(|id| !upstream.contains(id)));
             out
         };
         let mut warnings = Vec::new();

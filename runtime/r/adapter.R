@@ -487,7 +487,9 @@ run_cells_of <- function(rec, ids, readers = character()) {
 # links them to the cell, so `run_cells_of` alone would call the run over
 # before they ran (#228). Read before the run's results come in, while
 # `results` still holds the old names. A cell that has never run isn't rerun.
-old_readers <- function(rec, ids) {
+# `cells` (the run's own) are left out; a reader Ember already queued with
+# them, as it does one in a definition clash, is kept, so the core reports it.
+old_readers <- function(rec, ids, cells = ids) {
   state <- notebook_state(rec$nb)
   if (!identical(state$file$header$on_cell_change, "autorun")) return(character())
   g <- dependency_graph(rec$nb)
@@ -511,7 +513,7 @@ old_readers <- function(rec, ids) {
       todo <- c(todo, setdiff(reached, seen))
     }
   }
-  Filter(function(cid) !is.null(state$results[[cid]]), setdiff(out, ids))
+  Filter(function(cid) !is.null(state$results[[cid]]), setdiff(out, cells))
 }
 
 # A run is over when none of its cells, or of the cells that depend on them
@@ -547,16 +549,20 @@ run <- function(rec, cells, wait, timeout) {
     if (result$accepted && isTRUE(wait)) result[c("completed", "timed_out")] <- list(I(character()), I(character()))
     return(result)
   }
+  # Read before the run as well: a cell Ember skips (one in a definition clash)
+  # loses its names in run_cells() itself, as it queues their readers.
+  before <- old_readers(rec, cells)
   r <- run_cells(rec$nb, cells, wait = FALSE)
   if (!isTRUE(r$accepted)) {
     result$accepted <- FALSE
     return(result)
   }
   ids <- union(cells, r$queued)
-  readers <- old_readers(rec, ids)
+  readers <- union(before, old_readers(rec, ids, cells))
   # The core adds these to the graph's dependents, for `will_run` and the cells
-  # a waited run reports.
-  result$dependents <- I(readers)
+  # a waited run reports. Ember's queue holds them too, with the ancestors it
+  # runs first, which the core leaves out.
+  result$dependents <- I(union(readers, setdiff(r$queued, cells)))
   if (!isTRUE(wait)) {
     result$run <- watch_run(rec, cells, ids, readers)
     return(result)
