@@ -9,6 +9,10 @@
 //! - no one holds a lease on it, and it hasn't been used for `KEEP_UNUSED` (a build from before
 //!   leases counts from when it was installed);
 //! - no process here runs from it, or names a file in it (Julia's `--project`);
+//! - on a server, no runtime record names it (`runtime.json`, in the state folders `record_folders` lists): a
+//!   runtime on another login node, or in a job, runs from the build that started it. A record from
+//!   this computer whose process is gone doesn't count, and one from before builds were recorded keeps
+//!   them all;
 //! - on a server, no Slurm job of the user's that is waiting or running starts from it (the job
 //!   script names the build's binary). A server where `squeue` doesn't answer is left alone.
 //!
@@ -114,8 +118,8 @@ pub(crate) fn hold_own_folder(place: Option<&Place>) {
 pub(crate) fn tidy(place: Option<Place>) {
     let Some(place) = place else { return };
     std::thread::spawn(move || {
-        let slurm = matches!(place, Place::Server { .. });
-        remove_unused(&place, SystemTime::now(), &|| in_use_texts(slurm));
+        let server = matches!(place, Place::Server { .. });
+        remove_unused(&place, SystemTime::now(), &|| in_use_texts(server, place.base(), &record_folders(place.base(), &paths::Env::here())));
     });
 }
 
@@ -185,12 +189,41 @@ fn names(texts: &[String], folder: &Path) -> bool {
     })
 }
 
-/// What the processes here, and on a server the user's Slurm jobs, name; None if that can't be
-/// told.
-fn in_use_texts(slurm: bool) -> Option<Vec<String>> {
+/// What the processes here name, and on a server the runtimes recorded in `folders` and the user's
+/// Slurm jobs; None if that can't be told. (The plugin's folders are named by release key, not by
+/// the build a record names, and its runtimes run on this computer, where their processes show.)
+fn in_use_texts(server: bool, base: &Path, folders: &[PathBuf]) -> Option<Vec<String>> {
     let mut texts = processes()?;
-    if slurm {
+    if server {
+        texts.extend(recorded(folders, base, &crate::hostname())?);
         texts.extend(job_scripts()?);
+    }
+    Some(texts)
+}
+
+/// The state folders a runtime from a build in `base` may be recorded in: each folder in `base` (the
+/// app names a server's state folder there), each login node's `serve` folder, and the cluster's.
+/// A state folder given as a path outside these isn't looked at.
+pub(crate) fn record_folders(base: &Path, env: &paths::Env) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(base).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    if let Some(nodes) = env.state_dir().parent() {
+        folders.extend(std::fs::read_dir(nodes).into_iter().flatten().flatten().map(|e| e.path()));
+    }
+    folders.push(env.cluster_state_dir());
+    folders
+}
+
+/// The build folders in `base` that the runtimes recorded in `folders` run from; None if one of them
+/// may be running and its record doesn't say which build started it. A record from `host` whose
+/// process is gone is left out.
+pub(crate) fn recorded(folders: &[PathBuf], base: &Path, host: &str) -> Option<Vec<String>> {
+    let mut texts = Vec::new();
+    for folder in folders {
+        let Some(state) = crate::read_state(folder) else { continue };
+        if state.node == host && !crate::pid_alive(state.pid, state.started, state.boot.as_deref()) {
+            continue;
+        }
+        texts.push(base.join(state.build?).display().to_string());
     }
     Some(texts)
 }

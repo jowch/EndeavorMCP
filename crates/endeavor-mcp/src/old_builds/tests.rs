@@ -180,3 +180,50 @@ fn a_running_process_that_names_a_file_in_a_folder_is_seen() {
     let _ = child.wait();
     assert!(seen, "{folder:?} isn't among the processes");
 }
+
+/// A `runtime.json` in `folder` for a runtime on `node` with `pid`, from `build` if one is given.
+fn record(folder: &Path, node: &str, pid: u32, build: Option<&str>) {
+    std::fs::create_dir_all(folder).unwrap();
+    let mut state = serde_json::json!({ "launcher": "process", "node": node, "pid": pid, "token": "t" });
+    if let Some(build) = build {
+        state["build"] = build.into();
+    }
+    std::fs::write(folder.join("runtime.json"), state.to_string()).unwrap();
+}
+
+#[test]
+fn a_build_a_runtime_record_names_stays_wherever_the_runtime_runs() {
+    let dir = scratch("records");
+    let base = dir.join("cache/endeavor");
+    let place = Place::Server { base: base.clone(), own: "0.1.0-own".into() };
+    for name in ["0.1.0-own", "0.1.0-other-node", "0.1.0-here", "0.1.0-gone"] {
+        server_build(&base, name, false);
+    }
+    let serve = dir.join("state/endeavor/serve");
+    // A runtime on another login node, which this one can't see; one alive here; one here that ended without removing its record.
+    record(&serve.join("login2"), "login2", 4242, Some("0.1.0-other-node"));
+    record(&base.join("cluster-1"), "login1", std::process::id(), Some("0.1.0-here"));
+    record(&serve.join("login1"), "login1", 0, Some("0.1.0-gone"));
+    let folders = vec![serve.join("login1"), serve.join("login2"), base.join("cluster-1"), dir.join("state/endeavor/cluster")];
+    let texts = recorded(&folders, &base, "login1").unwrap();
+    let mut removed = remove_unused(&place, SystemTime::now() + 8 * DAY, &|| Some(texts.clone()));
+    removed.sort();
+    assert_eq!(removed, ["0.1.0-gone"]);
+
+    // A record from before builds were recorded may be any of them.
+    record(&serve.join("login3"), "login3", 4242, None);
+    assert_eq!(recorded(&[serve.join("login3")], &base, "login1"), None);
+}
+
+#[test]
+fn the_record_folders_are_the_roots_folders_each_nodes_and_the_clusters() {
+    let dir = scratch("record-folders");
+    let base = dir.join("cache/endeavor");
+    std::fs::create_dir_all(base.join("cluster-1")).unwrap();
+    let env = paths::Env { home: dir.clone(), node: "login1".into(), ..paths::Env::default() };
+    std::fs::create_dir_all(env.state_dir().with_file_name("login2")).unwrap();
+    let folders = record_folders(&base, &env);
+    for folder in [base.join("cluster-1"), env.state_dir().with_file_name("login2"), env.cluster_state_dir()] {
+        assert!(folders.contains(&folder), "{folder:?} not in {folders:?}");
+    }
+}

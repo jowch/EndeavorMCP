@@ -113,8 +113,9 @@ Other installs update the way they were installed:
   with the plugin. `endeavor update` refuses to replace it.
 
 The older builds in those two folders are removed once nothing has used them
-for a week: no process here runs from one, and on a server no Slurm job of
-yours waits or runs from one. `endeavor connect` looks when it starts on a
+for a week: no process here runs from one, and on a server no runtime
+record names one (a runtime on another login node or in a job) and no Slurm
+job of yours waits or runs from one. `endeavor connect` looks when it starts on a
 server, and `mcp` and `serve` look when they start from the plugin's folder.
 Each `endeavor` that runs from one of them marks its folder as used every
 hour, so a cluster's other login nodes keep theirs too. Uninstalling a

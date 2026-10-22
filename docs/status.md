@@ -203,8 +203,11 @@ Known gaps:
   plugin folder while Claude Code runs from it.
 - Older builds on a server (`~/.cache/endeavor/<build>/`) and in the plugin's
   `bin/<key>/` are removed after a week unused (`old_builds`,
-  [#97](https://github.com/jowch/EndeavorMCP/issues/97)). Checked on Linux
-  with a fake server folder and plugin folder, not on a real cluster. A server
+  [#97](https://github.com/jowch/EndeavorMCP/issues/97)). A server build a
+  runtime record names stays, wherever that runtime runs; records are read
+  from the server root's folders, each node's `serve` folder and the
+  cluster's, not from a state folder given as a path elsewhere. Checked on
+  Linux with a fake server folder and plugin folder, not on a real cluster. A server
   where `squeue` doesn't answer keeps all of them. The plugin's folder stays
   after an uninstall.
 
