@@ -227,3 +227,17 @@ fn the_record_folders_are_the_roots_folders_each_nodes_and_the_clusters() {
         assert!(folders.contains(&folder), "{folder:?} not in {folders:?}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_marker_whose_folder_was_moved_away_is_told_from_one_still_there() {
+    let base = scratch("moved");
+    let folder = server_build(&base, "0.1.0-a", true);
+    let path = folder.join(standalone::IN_USE);
+    let marker = std::fs::File::open(&path).unwrap();
+    assert!(same_file(&marker, &path));
+    std::fs::rename(&folder, base.join("0.1.0-a.removing.1")).unwrap();
+    assert!(!same_file(&marker, &path), "gone");
+    server_build(&base, "0.1.0-a", true);
+    assert!(!same_file(&marker, &path), "installed again: another file");
+}

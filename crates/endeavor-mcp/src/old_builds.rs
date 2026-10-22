@@ -17,8 +17,10 @@
 //!   script names the build's binary). A server where `squeue` doesn't answer is left alone.
 //!
 //! The time covers what this computer can't see: a cluster's other login nodes, whose processes
-//! and locks don't show here, keep marking a folder they use. A folder is moved aside before it is
-//! removed, so a removal cut short leaves `<name>.removing.<pid>`, which the next look removes.
+//! and locks don't show here, keep marking a folder they use. A mark is the marking node's time, so
+//! this relies on the nodes' clocks being within days of each other (a mark in the future counts as
+//! now). A folder is moved aside before it is removed, so a removal cut short leaves
+//! `<name>.removing.<pid>`, which the next look removes.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -101,17 +103,47 @@ impl Place {
 
 static OWN: OnceLock<Option<standalone::Lease>> = OnceLock::new();
 
+/// How long a start waits for its folder's lock while another build's `remove_unused` holds it.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+
 /// Hold a lease on the folder this binary runs from, for as long as it runs, if it is one of the
-/// two kinds (`Place`).
+/// two kinds (`Place`). If another build removed the folder as this one started (it held the lock
+/// while it moved the folder), say so and exit: the bootstrap or the launcher installs it again on
+/// the next start.
 pub(crate) fn hold_own_folder(place: Option<&Place>) {
     OWN.get_or_init(|| {
         let folder = place?.base().join(place?.own());
-        let marker = folder.join(standalone::IN_USE);
-        if !marker.exists() {
-            std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&marker).ok()?;
+        let path = folder.join(standalone::IN_USE);
+        let marker = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).ok()?;
+        let started = std::time::Instant::now();
+        while marker.try_lock_shared().is_err() {
+            if started.elapsed() > LOCK_WAIT {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        standalone::lease(&folder)
+        if !same_file(&marker, &path) {
+            eprintln!("endeavor: this build ({}) was being removed as it started, as one unused for a week. Run it again, and it is installed again.", folder.display());
+            std::process::exit(1);
+        }
+        Some(standalone::lease_locked(marker))
     });
+}
+
+/// Whether `path` is still the file `file` was opened as: the folder holding it wasn't moved away.
+#[cfg(unix)]
+fn same_file(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::metadata(path)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
+/// On Windows a folder with a running binary in it can't be moved, so it is still there.
+#[cfg(windows)]
+fn same_file(_file: &std::fs::File, _path: &Path) -> bool {
+    true
 }
 
 /// Look for other builds to remove, in a thread of its own, so that nothing waits for it.
@@ -260,7 +292,10 @@ pub(crate) fn processes() -> Option<Vec<String>> {
     Some(Vec::new())
 }
 
-/// The scripts of the user's Slurm jobs named endeavor that wait or run: what they start. Empty
+/// The scripts of the user's Slurm jobs named endeavor that wait or run: what they start. `%o` is the
+/// script's path, `job.sh` in a state folder, read as it is now; Slurm runs the copy it took when the
+/// job was submitted. The two agree because a state folder has one job at a time (`slurm::attach`
+/// reuses a waiting one), and a new submission writes `job.sh` again only once that job is gone. Empty
 /// where there's no Slurm; None if `squeue` doesn't answer or a script can't be read.
 fn job_scripts() -> Option<Vec<String>> {
     if !wire::slurm::has("squeue") {

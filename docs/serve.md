@@ -118,7 +118,10 @@ record names one (a runtime on another login node or in a job) and no Slurm
 job of yours waits or runs from one. `endeavor connect` looks when it starts on a
 server, and `mcp` and `serve` look when they start from the plugin's folder.
 Each `endeavor` that runs from one of them marks its folder as used every
-hour, so a cluster's other login nodes keep theirs too. Uninstalling a
+hour, so a cluster's other login nodes keep theirs too. The plugins of two
+agents that pin different builds share that folder: a build you haven't used
+for a week is removed, and the plugin that pins it downloads it again at its
+next start, which needs the network. Uninstalling a
 plugin can't run anything, so the plugin's folder stays after an uninstall;
 remove `~/.local/share/endeavor/bin/` by hand.
 

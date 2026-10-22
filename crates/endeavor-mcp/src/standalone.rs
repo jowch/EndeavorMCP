@@ -324,6 +324,11 @@ pub struct Lease {
 pub fn lease(dir: &Path) -> Option<Lease> {
     let marker = std::fs::OpenOptions::new().read(true).write(true).open(dir.join(IN_USE)).ok()?;
     marker.try_lock_shared().ok()?;
+    Some(lease_locked(marker))
+}
+
+/// A `Lease` on `marker`, an `IN_USE` file this process holds a shared lock on.
+pub(crate) fn lease_locked(marker: std::fs::File) -> Lease {
     let marker = Arc::new(marker);
     let _ = marker.set_modified(SystemTime::now());
     let held = Arc::downgrade(&marker);
@@ -334,7 +339,7 @@ pub fn lease(dir: &Path) -> Option<Lease> {
             let _ = marker.set_modified(SystemTime::now());
         }
     });
-    Some(Lease { _marker: marker })
+    Lease { _marker: marker }
 }
 
 fn runtime_args(options: &Options, exit_idle: bool) -> Args {
