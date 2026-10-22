@@ -45,12 +45,13 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// runtime with the same number as it is, and treats one with another number (or none) as another
 /// build's. Two builds with one number must take each other's calls both ways: a newer front meets
 /// an older core as often as the reverse, and lists its own build's tools. So raise it with any
-/// change to those, additions included (a tool, an argument, a call, a field), and with a change in
-/// what one returns or does while its arguments stay the same. Descriptions and changes inside the
-/// core don't count. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
+/// change to those that a caller of the build before would get wrong, additions included (a tool, an
+/// argument, a call), and with a change in what one returns or does while its arguments stay the same.
+/// A field of the record that older callers ignore, and that a newer one does without when it's
+/// missing, doesn't count (`network`); nor do descriptions and changes inside the core. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 24;
+pub const INTERFACE: u32 = 25;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -313,7 +314,7 @@ enum Stop {
 }
 
 /// Write `runtime.json` for the helper: the core's pid and its one `port`, its launcher, node and
-/// job, its tokens, and whether it ends itself when idle.
+/// job, its tokens, whether it ends itself when idle, and the network settings it was started with.
 fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_token: &str) -> Result<(), String> {
     // A Slurm job's id, so a reconnect can find the job with squeue.
     let job = if launcher == "slurm" { std::env::var("SLURM_JOB_ID").unwrap_or_default() } else { String::new() };
@@ -323,7 +324,7 @@ fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_tok
     let mut state = json!({
         "launcher": launcher, "node": crate::hostname(), "job": job,
         "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": bridge.token, "page_token": page_token, "exits_when_idle": bridge.notebooks.exits_when_idle,
-        "interface": INTERFACE,
+        "interface": INTERFACE, "network": crate::network_settings(),
     });
     if let Some(standalone) = &bridge.standalone {
         state["folder"] = standalone.folder.clone().into();

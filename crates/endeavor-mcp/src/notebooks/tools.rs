@@ -202,13 +202,16 @@ fn other_owner(change: &Change, owner: &str) -> bool {
 }
 
 /// What a run did, for its receipt.
+#[derive(Default)]
 struct Ran {
     warnings: Vec<String>,
-    /// The cells it ran.
+    /// The cells it ran, a waited run's dependents that reran with them too.
     cells: Vec<String>,
     /// A waited run whose wait ended with it unfinished: its cells and their
     /// dependents, which may still be running. Empty otherwise.
     going: Vec<String>,
+    /// A run not waited for: the dependents it will rerun after its cells (#192).
+    will_run: Vec<String>,
 }
 
 /// One tool call: who makes it and its arguments.
@@ -369,6 +372,12 @@ impl Call<'_> {
         // plan, so it misses an ancestor still running when the wait ends (it
         // stays staged) and counts one the user ran during the wait.
         let mut also = Vec::new();
+        // The dependents that reran with a waited run, as autorun reruns them: the
+        // run's cells too, so its receipt shows their outputs and errors (#192).
+        // Known the same way, from what ran, so it misses one still running when
+        // the wait ends (that one is in `going`) and counts one the user ran during it.
+        let mut reran = Vec::new();
+        let mut dependents = HashSet::new();
         if reply["accepted"] == true && wait {
             let now = self.nbs.snapshot(&nb.id)?;
             also = upstream
@@ -383,7 +392,21 @@ impl Call<'_> {
             if !also.is_empty() {
                 cells = nb.order.iter().filter(|id| also.contains(id) || needed.contains(id)).chain(targets).cloned().collect();
             }
+            // The run is under way by now, so a graph that can't be read leaves the lists empty
+            // rather than failing the call.
+            dependents = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(&cells)).unwrap_or_default();
+            reran = nb
+                .order
+                .iter()
+                .filter(|id| dependents.contains(*id) && !cells.contains(id))
+                .filter(|id| match (nb.cells.get(*id), now.cells.get(*id)) {
+                    (Some(before), Some(after)) => !(after.running || after.queued) && after.last_run > before.last_run,
+                    _ => false,
+                })
+                .cloned()
+                .collect();
         }
+        let mut will_run = Vec::new();
         let mut going = Vec::new();
         if reply["accepted"] != true {
             let status = reply["process_status"].as_str().unwrap_or_default();
@@ -396,12 +419,17 @@ impl Call<'_> {
             // The run's own cells, which the receipt looks at after the wait: its
             // cells and the cells that depend on them.
             if !ids("timed_out").is_empty() {
-                let graph = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() })?;
-                let dependents = graph.downstream_of(&cells);
                 going = nb.order.iter().filter(|id| cells.contains(*id) || dependents.contains(*id)).cloned().collect();
             }
         } else {
             warnings.push("async_execution::cells running; read them for the result".into());
+            // The dependents autorun reruns after these cells: those that have run
+            // since the notebook started, as Ember skips one that hasn't (Pluto has
+            // none). In lazy mode they go stale instead.
+            if !nb.lazy {
+                let dependents = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(&cells)).unwrap_or_default();
+                will_run = nb.order.iter().filter(|id| dependents.contains(*id) && !cells.contains(id) && nb.cells.get(*id).is_some_and(|c| !c.not_run && !c.hidden)).cloned().collect();
+            }
         }
         // A run of these cells was accepted: they are no longer staged, whether or not they have finished.
         if reply["accepted"] == true {
@@ -416,7 +444,8 @@ impl Call<'_> {
                 // A run the engine named goes on until its `run_finished`, the cells that depend
                 // on its cells too, even once its own cells have finished.
                 if !self.owner.is_empty() && !ended && (run.is_some() || !unfinished.is_empty()) {
-                    state.started.push(Started { owner: self.owner.to_owned(), run, cells: unfinished });
+                    let follows = will_run.iter().filter_map(|id| Some((id.clone(), nb.cells.get(id)?.last_run))).collect();
+                    state.started.push(Started { owner: self.owner.to_owned(), run, cells: unfinished, follows });
                 }
                 for cell in &cells {
                     state.pending.remove(cell);
@@ -431,7 +460,8 @@ impl Call<'_> {
         if !also.is_empty() {
             warnings.push(format!("also_ran::Also ran {}: cells this run needs that were edited or stale since they last ran.", also.join(", ")));
         }
-        Ok(Ran { warnings, cells, going })
+        cells.extend(reran);
+        Ok(Ran { warnings, cells, going, will_run })
     }
 
     /// An edit's run_after: the edit stands either way, but a run that
@@ -444,7 +474,7 @@ impl Call<'_> {
             return self.run(nb, &cells, false);
         }
         self.mark_pending(&nb.id, &cells);
-        Ok(Ran { warnings: conflict.map(|c| vec![format!("{c} The edit is staged, not run.")]).unwrap_or_default(), cells: Vec::new(), going: Vec::new() })
+        Ok(Ran { warnings: conflict.map(|c| vec![format!("{c} The edit is staged, not run.")]).unwrap_or_default(), ..Default::default() })
     }
 
     /// Whether `targets` have all run since the user's run reached them
@@ -503,12 +533,12 @@ impl Call<'_> {
 
     /// What every change reports: the notebook's order and run state after it.
     fn receipt(&self, id: &str, mutation: Value, cells_run: &[String], warnings: Vec<String>, status: Option<&str>) -> Result<(Map<String, Value>, Snapshot), String> {
-        self.receipt_of_run(id, mutation, Ran { warnings, cells: cells_run.to_vec(), going: Vec::new() }, status)
+        self.receipt_of_run(id, mutation, Ran { warnings, cells: cells_run.to_vec(), ..Default::default() }, status)
     }
 
     /// `receipt` for a run.
     fn receipt_of_run(&self, id: &str, mutation: Value, ran: Ran, status: Option<&str>) -> Result<(Map<String, Value>, Snapshot), String> {
-        let Ran { mut warnings, cells: cells_run, going } = ran;
+        let Ran { mut warnings, cells: cells_run, going, will_run } = ran;
         let cells_run = &cells_run[..];
         let nb = self.nbs.snapshot(id)?;
         // The cells of a run that ran out of its wait that are running now, read
@@ -573,6 +603,9 @@ impl Call<'_> {
         let Value::Object(mut receipt) = receipt else { unreachable!() };
         if !still_running.is_empty() {
             receipt["execution"]["still_running"] = json!(still_running);
+        }
+        if !will_run.is_empty() {
+            receipt["execution"]["will_run"] = json!(will_run);
         }
         // In lazy mode the run's dependents don't run: they're marked stale,
         // which the agent wouldn't otherwise learn until it read them (#196).
@@ -722,7 +755,7 @@ impl Call<'_> {
         // (Asked on every read, so that a run seen to end is forgotten.)
         let waits = |nb: &Snapshot| {
             let own = self.nbs.own_run_going(self.owner, nb);
-            nb.cells.get(&cell).is_some_and(|c| (c.queued && nb.installing()) || ((c.running || c.queued) && own))
+            nb.cells.get(&cell).is_some_and(|c| (c.queued && nb.installing()) || ((c.running || c.queued) && own)) || (own && self.nbs.own_run_will_run(self.owner, nb, &cell))
         };
         let waited = Instant::now();
         let deadline = waited + self.wait_left().saturating_sub(Duration::from_secs(1));
@@ -957,7 +990,7 @@ impl Call<'_> {
             if wait == true {
                 let (ran, going) = self.wait_for_own_run(&nb)?;
                 let status = ran.is_empty().then_some("completed");
-                return Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, Ran { warnings: Vec::new(), cells: ran, going }, status)?.0));
+                return Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, Ran { cells: ran, going, ..Default::default() }, status)?.0));
             }
             return Ok(Value::Object(self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?.0));
         }
@@ -1326,7 +1359,7 @@ impl Call<'_> {
                 let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
                 state.ended.retain(|r| Some(r) != run.as_ref());
                 if !self.owner.is_empty() && !ended {
-                    state.started.push(Started { owner: self.owner.to_owned(), run, cells: nb.order.iter().cloned().collect() });
+                    state.started.push(Started { owner: self.owner.to_owned(), run, cells: nb.order.iter().cloned().collect(), follows: HashMap::new() });
                 }
             });
             result["run_warnings"] = json!(["async_execution::allow_execution queued non-blocking notebook run; poll read_cell for completion"]);
@@ -1397,7 +1430,7 @@ impl Call<'_> {
             Backend::Pluto => {
                 self.nbs.with_state(&nb.id, |state| {
                     if !self.owner.is_empty() {
-                        state.started.push(Started { owner: self.owner.to_owned(), run: None, cells: nb.order.iter().cloned().collect() });
+                        state.started.push(Started { owner: self.owner.to_owned(), run: None, cells: nb.order.iter().cloned().collect(), follows: HashMap::new() });
                     }
                 });
                 if running.is_empty() {

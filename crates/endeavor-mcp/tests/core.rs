@@ -174,7 +174,7 @@ fn starts_julia_and_writes_its_own_runtime_json() {
     assert!(core.port != bridge.port && core.port != bridge.pluto_port, "the core's own port");
     let mut keys: Vec<&str> = state.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort();
-    assert_eq!(keys, ["boot", "build", "exits_when_idle", "interface", "job", "launcher", "node", "page_token", "pid", "port", "started", "token"], "nothing of Pluto's");
+    assert_eq!(keys, ["boot", "build", "exits_when_idle", "interface", "job", "launcher", "network", "node", "page_token", "pid", "port", "started", "token"], "nothing of Pluto's");
     assert_eq!(state["page_token"].as_str(), Some(PAGES), "the pages' token, kept in the state folder");
     assert_eq!(state["exits_when_idle"], false, "started without ENDEAVOR_EXIT_IDLE");
     assert_eq!((state["token"].as_str(), state["launcher"].as_str()), (Some(TOKEN), Some("process")));

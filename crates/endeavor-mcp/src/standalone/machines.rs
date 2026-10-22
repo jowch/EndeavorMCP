@@ -760,6 +760,9 @@ impl Relay {
                     OtherBuild::Kept(notice) => self.add_notice(notice),
                     OtherBuild::Fine => {}
                 }
+                if let Some(notice) = self.local.network_differs(runtime) {
+                    self.add_notice(notice);
+                }
             } else if let Some(notice) = self.machine_other_build(&target, runtime, provider.cluster()) {
                 self.add_notice(notice);
             }

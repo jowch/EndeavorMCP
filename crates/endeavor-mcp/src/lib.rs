@@ -177,6 +177,8 @@ struct State {
     no_folder: bool,
     /// Whether it ends itself when idle; none for a record from before this was written.
     exits_when_idle: Option<bool>,
+    /// The network settings it was started with (`network_settings`); none for a record from before they were written.
+    network: Option<serde_json::Map<String, Value>>,
 }
 
 impl State {
@@ -1321,7 +1323,26 @@ fn parse_state(v: &Value) -> Option<State> {
         folder: text("folder"),
         no_folder: v["no_folder"].as_bool().unwrap_or(false),
         exits_when_idle: v["exits_when_idle"].as_bool(),
+        network: v["network"].as_object().cloned(),
     })
+}
+
+/// The variables that decide how a runtime's downloads reach the network, package installs among them.
+/// A runtime keeps the values of the session that started it (#93).
+pub(crate) const NETWORK_VARS: [&str; 11] = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE"];
+
+/// This process's network settings (`NETWORK_VARS`), as `runtime.json` records them: each variable that is
+/// set, with a short hash of its value. Not the value, since a proxy's address can carry a password.
+pub(crate) fn network_settings() -> serde_json::Map<String, Value> {
+    use sha2::{Digest, Sha256};
+    NETWORK_VARS
+        .iter()
+        .filter_map(|name| {
+            let value = std::env::var_os(name)?;
+            let digest = Sha256::digest(value.as_encoded_bytes());
+            Some((name.to_string(), Value::from(digest[..8].iter().map(|b| format!("{b:02x}")).collect::<String>())))
+        })
+        .collect()
 }
 
 /// Remove `runtime.json` if it still describes the runtime `pid`, which started at `started` when that

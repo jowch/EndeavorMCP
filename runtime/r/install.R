@@ -50,9 +50,12 @@ failed <- strsplit(state$Failed, " ", fixed = TRUE)[[1]]
 # too, so it gets the build chosen here even if the index changes meanwhile.
 # NULL when ember isn't listed (or a repository didn't answer, which R only
 # warns about), NA when R couldn't ask.
+# `reached` when one of them answered with an index.
 options(timeout = 20)
+reached <- FALSE
 newest <- function(where) tryCatch({
   listed <- suppressWarnings(available.packages(contriburl = where$contriburl, type = where$type, fields = "SHA256"))
+  if (nrow(listed)) reached <<- TRUE
   if ("ember" %in% rownames(listed)) listed["ember", , drop = FALSE]
 }, error = function(e) {
   message(conditionMessage(e))
@@ -70,12 +73,22 @@ if (length(args) > 2 && nzchar(args[[3]]) && binary != "source" && startsWith(R.
   tools_here <- suppressWarnings(system2("xcode-select", "-p", stdout = FALSE, stderr = FALSE)) == 0
   if (installed(state$Current) && !tools_here) places <- Filter(function(where) where$type != "source", places)
 }
+# Where outbound connections hang rather than being refused, as on some compute
+# nodes, each place waits out the timeout, and R would start that much later each
+# time. So when none answered within the last hour, `unreachable` says so, and
+# with an Ember installed R starts with it without asking again (#90).
+unreachable <- file.path(folder, "unreachable")
+if (installed(state$Current) && file.exists(unreachable) && difftime(Sys.time(), file.mtime(unreachable), units = "hours") < 1) {
+  message("Ember's repositories didn't answer within the last hour; R notebooks use the installed Ember, ", state$Current, ".")
+  quit(status = 0)
+}
 for (where in places) {
   listed <- newest(where)
   if (!is.null(listed)) break
 }
 type <- where$type
 build <- if (is.matrix(listed)) listed[1, ]
+if (reached) unlink(unreachable) else if (installed(state$Current)) invisible(file.create(unreachable))
 if (is.null(build)) {
   if (installed(state$Current)) {
     message("Couldn't reach Ember's repositories, or they list no Ember for this R; R notebooks use the installed Ember, ", state$Current, ".")
@@ -112,8 +125,10 @@ fail <- function(why, blame = TRUE) {
 }
 
 # Ember's dependencies, all the way down, that this R can't load: missing ones,
-# and ones in a library that were built for another R. They go into `deps`,
-# which comes first, so a broken copy elsewhere is shadowed.
+# ones in a library that were built for another R, and ones that load but are
+# older than Ember or a package in the tree needs (#90): `install.packages`
+# brings a newer one along only for the packages it installs. They go into `deps`, which
+# comes first, so a broken or old copy elsewhere is shadowed.
 options(timeout = max(600, getOption("timeout")), Ncpus = max(1L, parallel::detectCores() - 1L))
 dir.create(deps, showWarnings = FALSE)
 .libPaths(c(deps, .libPaths()))
@@ -122,7 +137,31 @@ direct <- unique(unlist(lapply(c("Depends", "Imports", "LinkingTo"), function(fi
 on_cran <- tryCatch(available.packages(repos = cran), error = function(e) fail(paste("Couldn't reach CRAN:", conditionMessage(e)), blame = FALSE))
 tree <- unique(c(direct, unlist(tools::package_dependencies(direct, db = on_cran, which = c("Depends", "Imports", "LinkingTo"), recursive = TRUE))))
 tree <- setdiff(tree, c("R", rownames(installed.packages(priority = "base"))))
-loads <- function(pkg) suppressWarnings(requireNamespace(pkg, quietly = TRUE))
+# The lowest version of each package that Ember and the tree, as CRAN lists
+# it, ask for with `>=` or `>`.
+wanted <- list()
+needs <- function(field) {
+  if (is.na(field)) return()
+  for (dep in strsplit(field, ",", fixed = TRUE)[[1]]) {
+    parts <- regmatches(dep, regexec("^\\s*([[:alnum:].]+)\\s*\\(\\s*>=?\\s*([^) ]+)\\s*\\)", dep))[[1]]
+    if (length(parts) == 3 && parts[[2]] %in% tree) {
+      known <- wanted[[parts[[2]]]]
+      if (is.null(known) || package_version(parts[[3]]) > known) wanted[[parts[[2]]]] <<- package_version(parts[[3]])
+    }
+  }
+}
+for (field in c("Depends", "Imports", "LinkingTo")) {
+  needs(build[[field]])
+  for (pkg in intersect(tree, rownames(on_cran))) needs(on_cran[pkg, field])
+}
+# The version R would load, read from its DESCRIPTION: a namespace loaded
+# here may be an older copy than the one just installed.
+too_old <- function(pkg) {
+  if (is.null(wanted[[pkg]])) return(FALSE)
+  found <- suppressWarnings(packageDescription(pkg, lib.loc = .libPaths(), fields = "Version"))
+  !is.na(found) && package_version(found) < wanted[[pkg]]
+}
+loads <- function(pkg) !too_old(pkg) && suppressWarnings(requireNamespace(pkg, quietly = TRUE))
 missing <- tree[!vapply(tree, loads, logical(1))]
 if (length(missing)) {
   message("Installing ", paste(missing, collapse = ", "), " for R notebooks")

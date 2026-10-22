@@ -91,6 +91,14 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   through `/adapter` either. A client meeting a runtime from before sends the bearer token to its
   pages, which that runtime still takes. An older app that attaches to a newer
   runtime gets its pages refused until Julia restarts from the app's build.
+- A session that attaches to the runtime on this computer is told once when
+  that runtime was started with other network settings (#93, 2026-10-17).
+  `runtime.json` records a short hash of each proxy and CA bundle variable
+  that is set (`network`), not its value. A runtime still downloads with the
+  settings of the session that started it; the notice says so, and says that
+  stopping it lets the next call start one with this session's. The record
+  gained a field that older callers ignore, so the interface stays 23
+  (endeavor-mcp.md, "A runtime started with other network settings").
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
   SHA-256 and keeps it (tested against a fake release; the wiring is
@@ -217,8 +225,8 @@ Next:
   in every tool that takes a cell id (Ember #82, interface 20). An agent can restart a notebook with
   `restart_notebook`, as the page's Restart does (#202, interface 21). The notes Ember shows under a cell's last run (`changed_in_place`, `settings_found`, `load_note`) reach the agent: as `warnings` on the run that made them, and as `notes` in `read_cell` (#207, interface 22). The tools also show an R notebook's `package_date`, and `preview_package_update` and
   `apply_package_update` move it, as the Packages tab's Update does: Ember's
-  `preview_date()`, then its `set_date()` (#201, interface 23). `set_input` sets an input from emberui (Ember #36),
-  as moving its widget does, and `read_cell` lists a cell's inputs (interface 24). R's adapter
+  `preview_date()`, then its `set_date()` (#201, interface 23). A waited run counts the dependents that reran with it as its own cells, so a dependent that failed makes it `errored`, and a run not waited for names the dependents it will rerun in `execution.will_run` (#192, interface 24). `set_input` sets an input from emberui (Ember #36),
+  as moving its widget does, and `read_cell` lists a cell's inputs (interface 25). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the
@@ -270,14 +278,15 @@ Next:
   Each time the core starts R, `runtime/r/install.R` installs it, or updates it
   when there's a newer build, into `~/.cache/endeavor/r/ember`
   (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
-  the SHA256 of its file, and one with any package Ember needs that R lacks or can't load.
+  the SHA256 of its file, and one with any package Ember needs that R lacks, can't load,
+  or has at a version older than Ember or a package it needs asks for (#90).
   The call waits up to 30 seconds for that. The first install then returns
   `r_installing` until it's done, and each call made meanwhile waits up to 30
   seconds for it too, as the answer says (#175: before, only the call that started
   it waited, and agents looped). An install that fails, of Ember or of
   Endeavor's own R, is what every call is told for a minute; the call after that
   tries again (#183: before, each call after a failure started a new install). An
-  update goes on while R starts with the installed Ember. Offline, R starts with the installed Ember. A build that fails to
+  update goes on while R starts with the installed Ember. Offline, R starts with the installed Ember, and for an hour after none of Ember's repositories answered it doesn't ask them again: where connections hang rather than being refused, each place waited 20 s at every start (#90). A build that fails to
   install or load, or that R's adapter doesn't start with, isn't tried again;
   R starts with the build before it, and the agent gets an `ember_previous`
   warning. A `--r-library` is used as it is, never updated. The E2E workflow's
