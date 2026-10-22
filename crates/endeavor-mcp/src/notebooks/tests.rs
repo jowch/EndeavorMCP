@@ -64,6 +64,9 @@ struct FakeNotebook {
     /// Cells the next run runs before its own, not naming them in its reply, as
     /// Ember runs an ancestor whose code changed since it last ran.
     runs_first: Vec<String>,
+    /// Cells the next run reruns besides its graph dependents, naming them in its reply's
+    /// `dependents`, as Ember reruns the readers of a name a cell dropped (#228).
+    reruns_besides: Vec<String>,
     /// Ember's lazy mode: a run marks its dependents stale instead of running them.
     lazy: bool,
     /// Autorun as the engines do it: a run reruns its dependents that have run
@@ -103,7 +106,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy: false, autorun: false, package_date: None, previewed: None });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), reruns_besides: Vec::new(), lazy: false, autorun: false, package_date: None, previewed: None });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -203,7 +206,7 @@ impl Engine {
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
                 // A file named for it is in Ember's lazy mode.
                 let lazy = method == "open" && path.contains("lazy");
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy, autorun: false, package_date: None, previewed: None });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), reruns_besides: Vec::new(), lazy, autorun: false, package_date: None, previewed: None });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed, "lazy": lazy }));
             }
             _ => {}
@@ -358,7 +361,16 @@ impl Engine {
                         }
                     }
                 }
+                let besides = std::mem::take(&mut nb.reruns_besides);
+                for cell in nb.cells.iter_mut().filter(|c| besides.contains(&c.id)) {
+                    cell.last_run = now;
+                    cell.errored = cell.code.contains("error(");
+                    cell.output = if cell.errored { "boom".into() } else { format!("ran {}", cell.code) };
+                }
                 let mut reply = json!({ "accepted": true, "process_status": "ready" });
+                if !besides.is_empty() {
+                    reply["dependents"] = json!(besides);
+                }
                 if params["wait"] == true {
                     self.waits.lock().unwrap().push(params["timeout"].as_f64().unwrap());
                     reply["completed"] = json!(finishing);
@@ -741,6 +753,28 @@ fn a_run_names_the_dependents_it_reruns_and_a_waited_one_reports_them() {
     s.seconds(1.0);
     let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 4", "run_after": true })).unwrap();
     assert_eq!(edited["execution"].get("will_run"), None, "{edited}");
+}
+
+#[test]
+fn a_dependent_the_engine_reruns_beyond_the_graph_is_named_and_reported() {
+    // A rename: Y read the name X dropped, so the graph no longer links them, but
+    // Ember reruns Y, and the runtime names it in the run's `dependents` (#228).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = error(x)")]);
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.engine.with(NB, |nb| nb.autorun = true);
+    s.seconds(1.0);
+    s.read("", NB, X);
+    s.edit("", NB, X, "b = 1");
+    s.engine.with(NB, |nb| nb.reruns_besides = vec![Y.into()]);
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["affected_cells"], json!([X, Y]), "{ran}");
+    assert_eq!(ran["execution"]["status"], "errored", "{ran}");
+
+    s.seconds(1.0);
+    s.engine.with(NB, |nb| nb.reruns_besides = vec![Y.into()]);
+    let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "c = 1", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"]["will_run"], json!([Y]), "{edited}");
 }
 
 #[test]

@@ -355,6 +355,16 @@ impl Call<'_> {
             let cell = ids("exited").first().map(|id| graph.and_then(|g| g.name(id)).unwrap_or_else(|| id.clone()));
             return Err(argument_error(&format!("process_exited::{}", exited_message(super::engines::language(super::engines::of_path(&nb.path)), cell.as_deref()))));
         }
+        // The cells that depend on `cells`, which autorun reruns: those the graph links to them,
+        // and those the engine says it reruns besides (`dependents`), less the ancestors it
+        // runs first: Ember reruns the readers of a name a cell's last run defined, which the
+        // graph no longer links once the cell drops the name (#228). The run is under way by
+        // now, so a graph that can't be read leaves only the engine's.
+        let dependents_of = |cells: &[String]| -> HashSet<String> {
+            let mut out = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(cells)).unwrap_or_default();
+            out.extend(ids("dependents").into_iter().filter(|id| !upstream.contains(id)));
+            out
+        };
         let mut warnings = Vec::new();
         // Cells the targets need that the engine ran first, as Ember does one
         // edited since it last ran (a staged edit) or stale (an ancestor ran
@@ -383,9 +393,7 @@ impl Call<'_> {
             if !also.is_empty() {
                 cells = nb.order.iter().filter(|id| also.contains(id) || needed.contains(id)).chain(targets).cloned().collect();
             }
-            // The run is under way by now, so a graph that can't be read leaves the lists empty
-            // rather than failing the call.
-            dependents = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(&cells)).unwrap_or_default();
+            dependents = dependents_of(&cells);
             reran = nb
                 .order
                 .iter()
@@ -418,7 +426,7 @@ impl Call<'_> {
             // since the notebook started, as Ember skips one that hasn't (Pluto has
             // none). In lazy mode they go stale instead.
             if !nb.lazy {
-                let dependents = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(&cells)).unwrap_or_default();
+                let dependents = dependents_of(&cells);
                 will_run = nb.order.iter().filter(|id| dependents.contains(*id) && !cells.contains(id) && nb.cells.get(*id).is_some_and(|c| !c.not_run && !c.hidden)).cloned().collect();
             }
         }

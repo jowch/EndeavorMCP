@@ -472,27 +472,64 @@ run_id <- function() {
 
 # The cells a run of `ids` covers: in autorun, the cells downstream of them,
 # which Ember queues as each result comes in (in the same step, so a run never
-# looks over between a cell and its dependents). In lazy mode they don't run.
-run_cells_of <- function(rec, ids) {
+# looks over between a cell and its dependents), and `readers` (`old_readers`).
+# In lazy mode they don't run.
+run_cells_of <- function(rec, ids, readers = character()) {
   state <- notebook_state(rec$nb)
   if (!identical(state$file$header$on_cell_change, "autorun")) return(ids)
   g <- dependency_graph(rec$nb)
-  unique(c(ids, unlist(lapply(intersect(ids, names(g$downstream)), function(id) downstream(g, id, transitive = TRUE)), use.names = FALSE)))
+  unique(c(ids, unlist(lapply(intersect(ids, names(g$downstream)), function(id) downstream(g, id, transitive = TRUE)), use.names = FALSE), readers))
+}
+
+# The cells that read a name the last run of one of `ids` defined, and those
+# downstream of them, in autorun. When a run drops a name (a rename), Ember
+# reruns its readers too, and they fail as in plain R, but the graph no longer
+# links them to the cell, so `run_cells_of` alone would call the run over
+# before they ran (#228). Read before the run's results come in, while
+# `results` still holds the old names. A cell that has never run, or a
+# disabled one (`graph$off`), isn't rerun.
+# `cells` (the run's own) are left out; a reader Ember already queued with
+# them, as it does one in a definition clash, is kept, so the core reports it.
+old_readers <- function(rec, ids, cells = ids) {
+  state <- notebook_state(rec$nb)
+  if (!identical(state$file$header$on_cell_change, "autorun")) return(character())
+  g <- dependency_graph(rec$nb)
+  out <- character()
+  todo <- ids
+  seen <- character()
+  while (length(todo) > 0) {
+    id <- todo[[1]]
+    todo <- todo[-1]
+    if (id %in% seen) next
+    seen <- c(seen, id)
+    names <- state$results[[id]]$defined %||% character()
+    if (length(names) == 0) next
+    readers <- Filter(function(cid) {
+      c <- g$cells[[cid]]
+      !identical(cid, id) && length(intersect(names, setdiff(c$references, c$masked_none))) > 0
+    }, g$ids)
+    for (r in readers) {
+      reached <- c(r, downstream(g, r, transitive = TRUE))
+      out <- union(out, reached)
+      todo <- c(todo, setdiff(reached, seen))
+    }
+  }
+  Filter(function(cid) !is.null(state$results[[cid]]) && !(cid %in% names(g$off)), setdiff(out, cells))
 }
 
 # A run is over when none of its cells, or of the cells that depend on them
 # (`run_cells_of`), is left, its R ended, or the notebook shut down.
-run_over <- function(rec, ids) {
+run_over <- function(rec, ids, readers = character()) {
   if (!registered(rec)) return(TRUE)
   state <- notebook_state(rec$nb)
-  identical(state$worker$status, "stopped") || length(unfinished(state, run_cells_of(rec, ids))) == 0
+  identical(state$worker$status, "stopped") || length(unfinished(state, run_cells_of(rec, ids, readers))) == 0
 }
 
 # Once a run nobody waits for ends, `run_finished` names it (`run`) and says
 # which of its cells finished.
-watch_run <- function(rec, cells, ids, run = run_id()) {
+watch_run <- function(rec, cells, ids, readers = character(), run = run_id()) {
   check <- function() {
-    if (!run_over(rec, ids)) return(later::later(check, 0.2))
+    if (!run_over(rec, ids, readers)) return(later::later(check, 0.2))
     done <- if (registered(rec)) setdiff(cells, unfinished(notebook_state(rec$nb), cells)) else cells
     notify("run_finished", list(notebook_id = rec$id, run = run, cells = I(done)))
   }
@@ -519,14 +556,21 @@ run <- function(rec, cells, wait, timeout) {
     return(result)
   }
   ids <- union(cells, r$queued)
+  readers <- old_readers(rec, ids, cells)
+  # The core adds these to the graph's dependents, for `will_run` and the cells
+  # a waited run reports. Ember's queue holds them too, with the ancestors it
+  # runs first, which the core leaves out. A cell Ember skips (one in a
+  # definition clash) loses its names in run_cells() itself, which queues
+  # their readers there, so `old_readers` can't find those.
+  result$dependents <- I(union(readers, setdiff(r$queued, cells)))
   if (!isTRUE(wait)) {
-    result$run <- watch_run(rec, cells, ids)
+    result$run <- watch_run(rec, cells, ids, readers)
     return(result)
   }
   deadline <- Sys.time() + as.numeric(timeout %||% 60)
   promise(function(resolve, reject) {
     check <- function() {
-      over <- run_over(rec, ids)
+      over <- run_over(rec, ids, readers)
       if (!over && Sys.time() < deadline) return(later::later(check, 0.05))
       if (!registered(rec)) {
         result$completed <- I(cells)
@@ -539,7 +583,7 @@ run <- function(rec, cells, wait, timeout) {
       if (!is.null(exited)) result$exited <- I(exited)
       result$completed <- I(setdiff(cells, unfinished(state, cells)))
       result$timed_out <- I(if (over) unfinished(state, cells) else unfinished(state, names(state$cells)))
-      if (!over) result$run <- watch_run(rec, cells, ids)
+      if (!over) result$run <- watch_run(rec, cells, ids, readers)
       resolve(result)
     }
     check()
@@ -567,7 +611,7 @@ allow <- function(rec, run_all) {
 # Run every cell; the run's name, if it goes on.
 run_everything <- function(rec) {
   r <- run_cells(rec$nb, NULL, wait = FALSE)
-  if (isTRUE(r$accepted) && length(r$queued) > 0) watch_run(rec, r$queued, r$queued)
+  if (isTRUE(r$accepted) && length(r$queued) > 0) watch_run(rec, r$queued, r$queued, old_readers(rec, r$queued))
 }
 
 # Ember's restart: a new R, every cell left not run (Pluto's runs them all).

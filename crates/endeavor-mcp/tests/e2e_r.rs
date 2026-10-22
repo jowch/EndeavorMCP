@@ -465,6 +465,31 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(edited["execution"]["will_run"], json!([down]), "{edited}");
         let read = output(&mut agent);
         assert!(read["running"] == false && read["output"].as_str().unwrap().contains('2'), "{read}");
+        // A rename: the graph no longer links the dependent to `up`, but Ember reruns it, as it
+        // read the name `up` dropped, and it fails. The run goes on until it has, and reports it (#228).
+        let gone = |read: &Value| read["running"] == false && read["errored"] == true && read["output"].as_str().unwrap().contains("object 'a' not found");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "b <- 1" }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["execution"]["status"] == "errored" && waited["affected_cells"] == json!([up, down]), "{waited}");
+        let read = output(&mut agent);
+        assert!(gone(&read), "the waited submit waited for the old name's reader: {read}");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "restored");
+        let edited = agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "c <- 1", "run_after": true }));
+        assert_eq!(edited["execution"]["will_run"], json!([down]), "{edited}");
+        let read = output(&mut agent);
+        assert!(gone(&read), "the read waited for the old name's reader: {read}");
+        // A rename into a name another cell defines: Ember queues the reader with the run's
+        // cells, and the waited run reports it too.
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
+        agent.ok("add_cell", json!({ "notebook_id": id, "code": "z <- 5", "after_cell_id": down }));
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "restored");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "z <- 1" }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["affected_cells"].as_array().unwrap().contains(&down), "{waited}");
+        assert!(gone(&output(&mut agent)), "the reader reran");
     });
 
     step("allow_execution's run of the notebook is the agent's: a waited submit waits for it (#170)", || {
