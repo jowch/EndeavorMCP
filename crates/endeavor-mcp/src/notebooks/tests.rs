@@ -765,19 +765,44 @@ fn a_disabled_dependent_or_a_dependent_of_one_is_not_named_as_what_will_run() {
     let s = setup();
     s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1"), ("33333333-3333-3333-3333-333333333333", "z = y + 1"), ("44444444-4444-4444-4444-444444444444", "w = x + 1")]);
     let (z, w) = ("33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444");
-    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.call("7", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    // Not autorun, so the fake doesn't rerun w at once: Ember queues it once x's result is in.
+    // The calls are a session's ("7"), whose own run a read waits for.
     s.engine.with(NB, |nb| {
-        nb.autorun = true;
         // Y disabled, and z off because it reads Y.
         nb.cells[1].off = true;
         nb.cells[2].off = true;
     });
     s.seconds(1.0);
+    s.read("7", NB, X);
+    // linger() keeps the run going, so a read that waited for it would take the read's whole cap.
+    let edited = s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = linger()", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"]["will_run"], json!([w]), "{edited}");
+    let read = |cell: &str, began: Instant| super::tools::tool_json(s.notebooks.tool("7", "read_cell", &json!({ "notebook_id": NB, "cell_id": cell }), &Folder::Process, began).unwrap());
+    let began = Instant::now();
+    assert_eq!(read(z, began)["output"], "ran z = y + 1", "the off cell kept its output");
+    assert!(began.elapsed() < Duration::from_secs(1), "a read of an off cell doesn't wait for the run");
+    let began = Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+    read(w, began);
+    assert!(began.elapsed() >= Duration::from_secs(44), "a read of the dependent that will run waits for it");
+}
+
+#[test]
+fn lazy_mode_doesnt_list_an_off_cell_as_stale_to_run() {
+    // Ember marks a disabled cell's readers stale like any other, but it won't
+    // run them while they're off, so `stale_cells` doesn't ask for it (#232).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1"), ("33333333-3333-3333-3333-333333333333", "z = x + 2")]);
+    let z = "33333333-3333-3333-3333-333333333333";
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.engine.with(NB, |nb| {
+        nb.lazy = true;
+        nb.cells[1].off = true;
+    });
+    s.seconds(1.0);
     s.read("", NB, X);
     let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 2", "run_after": true })).unwrap();
-    assert_eq!(edited["execution"]["will_run"], json!([w]), "{edited}");
-    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": z })).unwrap();
-    assert_eq!(read["output"], "ran z = y + 1", "the off cell kept its output: {read}");
+    assert_eq!(edited["stale_cells"], json!([z]), "{edited}");
 }
 
 #[test]

@@ -616,7 +616,7 @@ impl Call<'_> {
                 .order
                 .iter()
                 .filter(|id| !cells_run.contains(id) && !pending.contains(id))
-                .filter(|id| nb.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden))
+                .filter(|id| nb.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden && !c.off))
                 .collect();
             if !stale_cells.is_empty() {
                 receipt["warnings"].as_array_mut().unwrap().push(json!(
