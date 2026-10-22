@@ -1,8 +1,74 @@
 # EndeavorMCP
 
-A plugin that lets an AI coding agent edit and run live Pluto (Julia)
-notebooks. You watch the same notebook in a browser. It runs on your computer,
-or on a server or Slurm cluster that you reach over ssh.
+A plugin that lets an AI coding agent (Claude Code, Codex or Antigravity)
+edit and run live notebooks: Julia, in Pluto, and R, in
+[Ember](https://github.com/jowch/Ember). R notebooks don't run on Windows yet,
+and Python, through marimo, is coming soon. You watch the same notebook in a
+browser. It runs on your computer, or on a server or Slurm cluster that you
+reach over ssh. It is the notebook side of
+[Endeavor](https://jowch.github.io/Endeavor/), a desktop app for analyzing
+data with an agent, reproducibly, and works without the app.
+
+<!-- agent-install: start. A copy of Endeavor's site/agent-install.md; edit it there and run site/scripts/agent-install.mjs. -->
+<details>
+<summary><strong>Installing with an agent?</strong> The commands for Claude Code, Codex and Antigravity.</summary>
+
+To use Endeavor from an agent you already run, install the EndeavorMCP
+plugin into it. The plugin gives the agent Endeavor's notebook tools: live
+Julia and R notebooks that it edits and runs while you watch in a browser.
+The Endeavor desktop app is a separate download that a person installs:
+[Install Endeavor](https://jowch.github.io/Endeavor/install/).
+
+**Claude Code:**
+
+```sh
+claude plugin marketplace add jowch/EndeavorMCP
+claude plugin install endeavor@endeavor
+```
+
+**Codex:**
+
+```sh
+codex plugin marketplace add jowch/EndeavorMCP
+codex plugin add endeavor@endeavor
+```
+
+**Antigravity** (the `agy` command line; tested less than the other two).
+Give the URL of the `antigravity-plugin` folder, as here. The repository's own
+URL installs the Claude Code plugin over this one, and the notebook tools
+are then missing.
+
+```sh
+agy plugin install https://github.com/jowch/EndeavorMCP/tree/main/antigravity-plugin
+```
+
+Codex and Antigravity don't tell the plugin the project folder, so notebook
+paths must be absolute. Under `codex exec`, every tool that changes something
+fails until the plugin's server is approved in `~/.codex/config.toml`
+([how](https://github.com/jowch/EndeavorMCP#install)).
+
+On Windows, Antigravity needs Git for Windows' `bin` folder on the PATH,
+Codex isn't supported, and the Claude Code plugin hasn't been tried yet.
+
+**Check that it worked.** `claude plugin list` (or `codex plugin list`) shows
+`endeavor@endeavor` enabled. The tools load when a session starts, so ask the
+user to start a new session in the folder for their notebooks. There, the
+`endeavor` server's `session_status` tool answers without starting anything.
+Its first start downloads the `endeavor` program (about 5 MB); if the tools
+don't appear, reconnect the server (`/mcp` in Claude Code).
+
+**Update an old plugin.** Claude Code: `claude plugin marketplace update
+endeavor`, then `claude plugin update endeavor@endeavor`. Codex: `codex plugin
+marketplace upgrade endeavor`. Antigravity: run the install line again. Then
+start a new session. A notebook runtime that is already running keeps its old
+build until it stops ([Update and remove](https://github.com/jowch/EndeavorMCP#update-and-remove)).
+
+More detail for each agent is in
+[EndeavorMCP's README](https://github.com/jowch/EndeavorMCP#install). The same
+text for agents is at <https://jowch.github.io/Endeavor/llms.txt>.
+
+</details>
+<!-- agent-install: end -->
 
 ## Install
 
@@ -60,7 +126,8 @@ Without the plugin, Codex can run `endeavor mcp` as an MCP server instead
 ([serve.md](docs/serve.md#on-the-same-machine-the-stdio-form)); it then starts
 the server in the folder Codex was started in. This was tried on Linux with
 Codex 0.161.0 through `codex exec`, installing the plugin from a local copy of
-this repository (the `owner/repo` form above was not run).
+this repository. The `owner/repo` form above installs it too (Codex 0.163.0 on
+Linux).
 
 **Antigravity** (the `agy` command line; tried with agy 1.3.2 on Windows 10
 only):
@@ -262,8 +329,8 @@ A server you used has `~/.cache/endeavor/` and `~/.local/state/endeavor/` too.
 
 ## In this repository
 
-The notebook tools of [Endeavor](https://github.com/jowch/Endeavor), a macOS
-app with a Claude Code agent beside a live Pluto notebook, which uses the same
+The notebook tools of [Endeavor](https://github.com/jowch/Endeavor), a desktop
+app with an agent beside a live Julia or R notebook, which uses the same
 `endeavor` binary.
 
 - `crates/endeavor-mcp/`: the `endeavor` binary and its MCP server.
