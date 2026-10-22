@@ -50,7 +50,7 @@ const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Endeavor here and pri
 
 options:
   --folder DIR         where new notebooks go (default: the current folder)
-  --no-folder          the agent is not told a project folder: its notebook paths must be absolute [mcp]
+  --no-folder          the agent is not told a project folder: its notebook paths must be absolute, unless a call names one as Codex's do [mcp]
   --port PORT          the port to listen on, on 127.0.0.1 (default: a free one) [serve, mcp]
   --host-tools         give every agent session list_folder, read_file and run_shell here [serve]
   --skills plugin      the agent has Endeavor's skills from its plugin [mcp]

@@ -993,8 +993,8 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
 /// The `path` descriptions of the tools that take one, in a front without a project folder: the usual
 /// ones say relative paths go in the session's folder, and that a name is generated there.
 const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl` for a Julia notebook or `.R` for an R notebook (not on Windows). The file must not exist yet and its folder must. \
-Required on this computer: this server was not told the project folder, so it can't choose one. \
-A relative path starts in the project folder when the client names that folder with the call, as Codex does; otherwise it is refused. \
+Required on this computer: this server was not told the project folder, so it can't choose one unless the client names it with the call, as Codex does. \
+A relative path starts in that folder, and without it is refused. \
 On a server after `use_machine`, a relative path starts in the session's folder there.";
 const NO_FOLDER_OPEN: &str = "The notebook file, as an absolute path: this server was not told the project folder. \
 A relative path starts in the project folder when the client names that folder with the call, as Codex does; otherwise it is refused. \

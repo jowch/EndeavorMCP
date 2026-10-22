@@ -263,8 +263,9 @@ process's working folder, which is the plugin's cache folder.
   is an absolute path to a folder that exists, and it also accepts the object
   sent as a JSON string. From then on that folder is the session's `In(dir)` on
   this computer, as if `--folder` had named it, and the runtime is told it
-  before the call goes on. A call that names no folder keeps the one learned; a
-  later call naming another single folder replaces it. With `--folder` the
+  before the call goes on. A call that names no single folder (none, or
+  several) keeps the one learned; a later call naming another single folder
+  replaces it. With `--folder` the
   field is ignored. Under a client that sends nothing, everything below holds.
 - **The runtime is told, and works in the home folder.** On this computer the
   front sends `endeavor/set_session_folder` `{owner, no_folder: true}` where a
