@@ -467,10 +467,7 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["running"] == false && read["output"].as_str().unwrap().contains('2'), "{read}");
         // A rename: the graph no longer links the dependent to `up`, but Ember reruns it, as it
         // read the name `up` dropped, and it fails. The run goes on until it has, and reports it (#228).
-        // Each edit after a run not waited for first waits for that run to end: an edit made
-        // before its `run_finished` arrives can lose its place in pending_run (#231).
         let gone = |read: &Value| read["running"] == false && read["errored"] == true && read["output"].as_str().unwrap().contains("object 'a' not found");
-        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "b <- 1" }));
         let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
         assert!(waited["execution"]["status"] == "errored" && waited["affected_cells"] == json!([up, down]), "{waited}");
@@ -485,7 +482,6 @@ fn an_r_notebook_through_the_runtime() {
         assert!(gone(&read), "the read waited for the old name's reader: {read}");
         // A rename into a name another cell defines: Ember queues the reader with the run's
         // cells, and the waited run reports it too.
-        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
         agent.ok("add_cell", json!({ "notebook_id": id, "code": "z <- 5", "after_cell_id": down }));
         agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
