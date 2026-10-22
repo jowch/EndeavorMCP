@@ -38,7 +38,8 @@ fn recorded_pid(state: &Path) -> Option<i32> {
     serde_json::from_str::<Value>(&text).ok()?["pid"].as_i64().map(|p| p as i32).filter(|&p| p > 1)
 }
 
-/// Whatever happens, no Julia stays behind.
+/// Whatever happens, no Julia stays behind. A failed test prints the runtime's
+/// log first, as the next run starts a fresh one (#236).
 struct Cleanup {
     state: PathBuf,
     children: Vec<Child>,
@@ -46,6 +47,10 @@ struct Cleanup {
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            let log = self.state.join("runtime.log");
+            eprintln!("── the runtime's log, {}:\n{}", log.display(), std::fs::read_to_string(&log).unwrap_or_else(|e| format!("(not read: {e})")));
+        }
         for child in &mut self.children {
             let _ = child.kill();
             let _ = child.wait();
