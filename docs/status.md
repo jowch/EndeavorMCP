@@ -59,10 +59,17 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   `endeavor update` say when the running Julia doesn't (`update` reads the new
   binary's number; it compares builds with a binary from before the line was
   printed). A machine's runtime is checked too, since 2026-10-09: the helper's
-  `Ready` carries its build and interface, the front tells the agent once and
-  never stops it, `session_status` says it every time (`other_version`,
+  `Ready` carries its build and interface, the front tells the agent once,
+  `session_status` says it every time (`other_version`,
   since 2026-10-09), and `client::Session` reports it as trouble (serve.md,
-  "Update it"; endeavor-mcp.md, "A runtime from another build").
+  "Update it"; endeavor-mcp.md, "A runtime from another build"). Since
+  2026-10-22 (#226) the helper (`endeavor connect`, not in a Slurm job)
+  replaces an older version's runtime that has no notebook open with its own
+  build's, and a refusal of an R notebook's path by a runtime from before R
+  notebooks ("must end in .jl") reaches the agent as why, and how to restart
+  it, from the front and from the app's relay (`client::Listener`). A kept
+  older runtime still isn't told to the app's agent up front, and a pathless
+  `new_notebook` in an R session on one makes a Pluto notebook (#239).
 - The status tool is `session_status` since 2026-10-10 (interface 2); it was
   `pluto_session_status`, a name that told agents every notebook is Pluto's.
   The old name ran the tool, unlisted, for one release (`mcp::RENAMED_TOOLS`);

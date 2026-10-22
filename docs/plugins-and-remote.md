@@ -550,8 +550,13 @@ and then `use_machine` starts this version; `session_status` says it again
 every time (`other_version`, with the build in `runtime_build`), and
 `client::Session` reports the same as trouble (`Config::on_event`). The front answers the tool list from its own build, so
 a tool or argument newer than the runtime fails with the runtime's own error.
-A machine's runtime is never stopped for the agent, unlike an idle one on
-this computer: on a cluster that gives up the job's allocation. Only a
+The front never stops a machine's runtime for the agent, unlike an idle one
+on this computer: on a cluster that gives up the job's allocation. The helper
+there does stop one that an older version started (outside a Slurm job) when
+no notebook is open in it, and starts its own build's in its place, so a
+machine that was idle since the last update runs this version (#226). A
+runtime from before R notebooks refuses an R notebook's path with "must end
+in .jl"; the front tells the agent why instead, and how to restart it. Only a
 runtime from before one port per runtime is refused, as built.
 
 **`serve` in a job you submitted yourself** is recorded under the compute

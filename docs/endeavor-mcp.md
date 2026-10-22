@@ -414,8 +414,23 @@ is treated as before: a front stops it if it started it in the background and
 no notebook is open, else keeps it and tells the agent once; `serve` and
 `status` tell the user. A machine's runtime is checked the same way, from the
 `build` and `interface` the helper's `Ready` carries (`RuntimeInfo` has both,
-and `RuntimeInfo::usable_as_is` applies the rule); it is never stopped for the
-agent, only told of once, and `client::Session` reports it as trouble.
+and `RuntimeInfo::usable_as_is` applies the rule). The helper on the machine
+(`endeavor connect`, outside a Slurm job) replaces one that is older (a lower
+number, or none) when no notebook is open in it: once it has found Julia and
+all else its own start needs, it looks again, stops it, leaves the note for
+the clients still attached, starts its own build's, and says so in a
+progress line (`runtime::find_or_start`, #226). If its own start can't go
+ahead (no Julia, an install the user didn't allow), the older one is used as
+it is. "No notebook open" is a count just before the stop: a notebook another
+session opens in that moment is cut off. A newer one, one with a
+notebook open, and one in a Slurm job are kept, and are never stopped for the
+agent, only told of once, and `client::Session` reports them as trouble. So
+two versions that share a state folder never take turns stopping each
+other's. A runtime from before R notebooks answers an R notebook's path with
+"must end in .jl" and nothing about R; the front, and for the app the relay
+(`client::Listener`, through `serve_guarded`), give the agent why in its
+place: that runtime is an older version's, with no R notebooks, and how to
+restart it (`mcp::refuses_r_for_want_of_it`).
 While the session uses such a runtime that was kept, here or on a machine,
 `session_status` says so every time (not for an idle one here that the
 next call that may start a runtime stops), for an agent that no longer has
