@@ -1554,6 +1554,43 @@ fn a_runtime_of_another_build_with_a_notebook_open_is_kept_and_the_agent_is_told
 }
 
 #[test]
+fn a_front_whose_network_settings_differ_from_the_runtimes_is_told_once_by_name_and_one_with_the_same_settings_is_not() {
+    let place = Place::new("network-settings");
+    let path = local_notebook(&place, "net.jl");
+    let starter = [("HTTPS_PROXY", "http://me:secret@127.0.0.1:41001"), ("NO_PROXY", "localhost")];
+    let mut first = start_front(&place, &starter);
+    first.initialize();
+    first.ok("open_notebook", json!({ "path": path }));
+    let runtime = place.local_runtime().expect("started by the call");
+    let record = read_record(&place.local_state);
+    assert!(record["network"]["HTTPS_PROXY"].is_string() && record["network"]["NO_PROXY"].is_string() && record["network"].get("HTTP_PROXY").is_none(), "{record}");
+    assert!(!record.to_string().contains("secret") && !record.to_string().contains("41001"), "values aren't recorded: {record}");
+    let (_, said) = first.contents("list_notebooks", json!({}));
+    assert_eq!(said.len(), 1, "the session that started it is told nothing: {said:?}");
+
+    // Same settings: nothing to say.
+    let mut same = start_front(&place, &starter);
+    same.initialize();
+    let (_, said) = same.contents("list_notebooks", json!({}));
+    assert_eq!(said.len(), 1, "{said:?}");
+    same.finish();
+
+    // Another proxy, and one more variable set: both named, once, and the values never.
+    let mut other = start_front(&place, &[("HTTPS_PROXY", "http://127.0.0.1:41002"), ("NO_PROXY", "localhost"), ("SSL_CERT_FILE", "/etc/ca.pem")]);
+    other.initialize();
+    let (failed, said) = other.contents("list_notebooks", json!({}));
+    assert!(!failed && said[0][0]["path"] == path.as_str(), "{said:?}");
+    let notice = said[1].as_str().unwrap_or_default();
+    assert!(notice.starts_with("Note: Endeavor on this computer was started by another session, with other network settings than this session's (HTTPS_PROXY, SSL_CERT_FILE). Its downloads, package installs among them, use that session's settings."), "{notice}");
+    assert!(notice.contains("`stop_machine` with machine \"local\"") && !notice.contains("41002") && !notice.contains("ca.pem"), "{notice}");
+    let (_, again) = other.contents("list_notebooks", json!({}));
+    assert_eq!(again.len(), 1, "said once: {again:?}");
+    assert_eq!(place.local_runtime(), Some(runtime), "kept");
+    other.finish();
+    first.finish();
+}
+
+#[test]
 fn a_front_that_attaches_through_list_notebooks_says_where_the_notebooks_are() {
     let place = Place::new("lazy-attach");
     let path = local_notebook(&place, "attach.jl");

@@ -3,7 +3,8 @@
 //! answers the agent's tool calls the app won't let that runtime carry out,
 //! passing everything else through unchanged. And where the app can draw a
 //! notebook, it shows the agent a cell's output as the notebook draws it when
-//! the runtime has no picture of it (`Snapshot`).
+//! the runtime has no picture of it (`Snapshot`). On a runtime from before R
+//! notebooks, it says why an R notebook's path is refused.
 
 use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
@@ -27,8 +28,10 @@ pub type Snapshot = dyn Fn(&str, &str, &str) -> Option<String> + Send + Sync;
 /// calls and event stream, Pluto's page and its WebSocket, and the agent's
 /// other messages) passes through as it is, and the requests after it on the
 /// same connection are checked the same way. With `snapshot`, a `view_cell_output`
-/// the runtime has no picture for gets the snapshot instead (`relay_view`).
-pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&str, &str, &Value) -> Option<String>, snapshot: Option<&Snapshot>) -> io::Result<()> {
+/// the runtime has no picture for gets the snapshot instead (`relay_result`). With
+/// `no_r`, a runtime's refusal of an R notebook's path for want of R notebooks
+/// (`mcp::refuses_r_for_want_of_it`), which says only that the path must end in .jl, gets its text instead.
+pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&str, &str, &Value) -> Option<String>, snapshot: Option<&Snapshot>, no_r: Option<&dyn Fn() -> String>) -> io::Result<()> {
     let mut client = wire::Shared::new(client);
     let mut reader = BufReader::new(client.clone());
     let mut to_runtime = wire::Shared::new(upstream);
@@ -53,23 +56,32 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
                 }
                 continue;
             }
-            let view = snapshot.filter(|_| message["method"] == "tools/call" && !message["id"].is_null() && params["name"] == "view_cell_output");
+            let call = message["method"] == "tools/call" && !message["id"].is_null();
+            let (tool, arguments) = (params["name"].as_str().unwrap_or_default(), params.get("arguments").unwrap_or(&Value::Null));
+            let view = snapshot.filter(|_| call && tool == "view_cell_output");
+            let no_r = no_r.filter(|_| call && crate::mcp::names_r_notebook(tool, arguments));
             request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Transfer-Encoding") && !name.eq_ignore_ascii_case("Content-Length"));
             request.headers.push(("Content-Length".into(), body.len().to_string()));
-            if view.is_some() {
+            if view.is_some() || no_r.is_some() {
                 // Only a call that waits on the user streams its answer; this keeps the answer one JSON body even so.
                 request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Accept"));
                 request.headers.push(("Accept".into(), "application/json".into()));
             }
             request.write_to(&mut to_runtime)?;
             to_runtime.write_all(&body)?;
-            if let Some(snapshot) = view {
-                let arguments = params.get("arguments").unwrap_or(&Value::Null);
-                if !relay_view(&request, &mut client, &mut from_runtime, &|result| {
+            let instead = |result: &Value| -> Option<Value> {
+                if let Some(snapshot) = view
+                    && snapshot_may_help(result)
+                {
                     let cell = &arguments["cell_id"];
                     let (notebook, cell) = (uuid_value(&arguments["notebook_id"])?, uuid_value(cell).or_else(|| short_cell_id(cell))?);
-                    screenshot_result(&cell, snapshot(&session, &notebook, &cell)?, result)
-                })? {
+                    return screenshot_result(&cell, snapshot(&session, &notebook, &cell)?, result);
+                }
+                let no_r = no_r.filter(|_| crate::mcp::refuses_r_for_want_of_it(tool, arguments, result))?;
+                Some(tool_error(&no_r(), false))
+            };
+            if view.is_some() || no_r.is_some() {
+                if !relay_result(&request, &mut client, &mut from_runtime, &instead)? {
                     return Ok(());
                 }
                 continue;
@@ -82,10 +94,9 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
     Ok(())
 }
 
-/// Pass on the runtime's answer to a `view_cell_output`, unless `snapshot_may_help` and `snapshot`
-/// gives a result with a picture in place of the runtime's: then the answer is that. Whether the client connection can carry
-/// another request.
-fn relay_view(request: &Head, client: &mut wire::Shared, from_runtime: &mut BufReader<wire::Shared>, snapshot: &dyn Fn(&Value) -> Option<Value>) -> io::Result<bool> {
+/// Pass on the runtime's answer to a tool call, unless `instead` gives a result in place of the
+/// runtime's: then the answer is that. Whether the client connection can carry another request.
+fn relay_result(request: &Head, client: &mut wire::Shared, from_runtime: &mut BufReader<wire::Shared>, instead: &dyn Fn(&Value) -> Option<Value>) -> io::Result<bool> {
     let mut response = loop {
         let response = Head::read(from_runtime)?.ok_or(io::ErrorKind::UnexpectedEof)?;
         // `100 Continue` comes before the real response; the client sent its whole body already.
@@ -99,8 +110,7 @@ fn relay_view(request: &Head, client: &mut wire::Shared, from_runtime: &mut BufR
     let json = response.header("Content-Type").is_some_and(|t| t.starts_with("application/json"));
     if response.status() == 200 && json
         && let Ok(mut message) = serde_json::from_slice::<Value>(&body)
-        && snapshot_may_help(&message["result"])
-        && let Some(result) = snapshot(&message["result"])
+        && let Some(result) = instead(&message["result"])
     {
         message["result"] = result;
         body = to_json(&message).into_bytes();
@@ -150,7 +160,7 @@ mod tests {
         let upstream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         std::thread::spawn(move || {
             let refuse = |session: &str, tool: &str, _: &Value| (session == "7" && tool == "execute_cell").then(|| "ArgumentError: older_runtime::No runs.".to_owned());
-            let _ = serve_guarded(accepted, upstream, &refuse, None);
+            let _ = serve_guarded(accepted, upstream, &refuse, None, None);
         });
         (client, seen)
     }
@@ -268,7 +278,7 @@ mod tests {
                 asked_tx.send(format!("{session} {notebook} {cell}")).unwrap();
                 (cell != UNDRAWN).then(|| "c25hcHNob3Q=".to_owned())
             };
-            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, Some(&snapshot));
+            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, Some(&snapshot), None);
         });
         (client, accepts, asked)
     }
@@ -322,5 +332,59 @@ mod tests {
         assert_eq!(asked.try_recv().unwrap(), format!("7 {NOTEBOOK} {UNDRAWN}"));
         assert_eq!(undrawn["isError"], true);
         assert!(undrawn["content"][0]["text"].as_str().unwrap().contains("has no PNG rendering"));
+    }
+
+    /// A runtime from before R notebooks: it answers a new or opened notebook's path that doesn't end in
+    /// .jl as such a core did, and any other call with an empty list. A client connected to it through
+    /// `serve_guarded`, with `no_r` if `older`.
+    fn without_r(older: bool) -> TcpStream {
+        let runtime = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = runtime.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (socket, _) = runtime.accept().unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut socket = socket;
+            while let Ok(Some(request)) = Head::read(&mut reader) {
+                let body = http::read_body(&mut reader, request.request_body().unwrap()).unwrap();
+                let message: Value = serde_json::from_slice(&body).unwrap();
+                let path = message["params"]["arguments"]["path"].as_str().unwrap_or_default();
+                let result = if path.is_empty() || path.ends_with(".jl") {
+                    json!({ "content": [{ "type": "text", "text": "[]" }], "isError": false })
+                } else {
+                    tool_error(&format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{path}'"), false)
+                };
+                let reply = to_json(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
+                http::respond(&mut socket, "200 OK", Some("application/json"), reply.as_bytes(), true).unwrap();
+            }
+        });
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(front.local_addr().unwrap()).unwrap();
+        let (accepted, _) = front.accept().unwrap();
+        let upstream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        std::thread::spawn(move || {
+            let no_r = || "unsupported::No R here; restart it.".to_owned();
+            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, None, older.then_some(&no_r as &dyn Fn() -> String));
+        });
+        client
+    }
+
+    fn call_tool(client: &mut TcpStream, tool: &str, path: &str) -> Value {
+        let call = json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": tool, "arguments": { "path": path } } }).to_string();
+        let reply = post(client, "/mcp", "7", &call);
+        let reply: Value = serde_json::from_str(reply.strip_prefix("200 ").unwrap()).unwrap();
+        assert_eq!(reply["id"], 9);
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_runtime_from_before_r_notebooks_that_refuses_an_r_path_is_said_to_have_none() {
+        let mut client = without_r(true);
+        assert_eq!(call_tool(&mut client, "new_notebook", "/work/a.R"), json!({ "error": "unsupported", "message": "No R here; restart it." }));
+        assert_eq!(call_tool(&mut client, "open_notebook", "/work/b.r"), json!({ "error": "unsupported", "message": "No R here; restart it." }), "on the same connection");
+        assert_eq!(call_tool(&mut client, "new_notebook", "/work/c.jl"), json!([]), "a Julia path passes");
+        assert_eq!(call_tool(&mut client, "new_notebook", "/work/d.txt")["message"], "Notebook path must end in .jl: '/work/d.txt'", "and so does a path of no notebook's");
+
+        let mut client = without_r(false);
+        assert_eq!(call_tool(&mut client, "new_notebook", "/work/a.R")["message"], "Notebook path must end in .jl: '/work/a.R'", "a runtime of this build's interface answers as it does");
     }
 }

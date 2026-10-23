@@ -114,6 +114,8 @@ pub(super) struct Local {
     options: Options,
     state: Arc<(Mutex<Phase>, Condvar)>,
     builds: Mutex<Builds>,
+    /// The runtime whose network settings were checked (`network_differs`).
+    network_checked: Mutex<Option<u32>>,
 }
 
 /// What `Local::other_build` has done so far.
@@ -152,7 +154,7 @@ enum Phase {
 
 impl Local {
     pub(super) fn new(options: Options) -> Local {
-        Local { options, state: Arc::new((Mutex::new(Phase::Idle), Condvar::new())), builds: Mutex::default() }
+        Local { options, state: Arc::new((Mutex::new(Phase::Idle), Condvar::new())), builds: Mutex::default(), network_checked: Mutex::default() }
     }
 
     /// This front lists its own build's tools, and the runtime it found running here (`runtime`) runs the
@@ -190,6 +192,23 @@ impl Local {
         }
         builds.kept = Some(runtime.pid);
         OtherBuild::Kept(other_build_notice(LOCAL, LOCAL, state.interface, open))
+    }
+
+    /// What to tell the agent, once per runtime, when the runtime it found running here (`runtime`) was
+    /// started with other network settings than this session's (`crate::network_settings`): the runtime's
+    /// downloads, package installs among them, use the settings of the session that started it (#93). None
+    /// for a runtime this session started, or one whose record doesn't say.
+    pub(super) fn network_differs(&self, runtime: &RuntimeInfo) -> Option<String> {
+        let mut checked = self.network_checked.lock().unwrap();
+        if !runtime.reattached || *checked == Some(runtime.pid) {
+            return None;
+        }
+        let state = crate::read_state(&self.options.state_dir).filter(|state| state.pid as u32 == runtime.pid)?;
+        *checked = Some(runtime.pid);
+        let recorded = state.network?;
+        let ours = crate::network_settings();
+        let differ: Vec<&str> = crate::NETWORK_VARS.iter().copied().filter(|name| recorded.get(*name) != ours.get(*name)).collect();
+        (!differ.is_empty()).then(|| network_notice(&differ))
     }
 
     /// Whether `pid` is a runtime of another build that `other_build` kept. One it left for a call that may
@@ -268,6 +287,15 @@ pub(super) fn other_build_notice(name: &str, id: &str, interface: Option<u32>, o
     let place = if name == LOCAL { "this computer" } else { name };
     let open = open.filter(|n| *n > 0).map_or(String::new(), |n| format!(" It has {n} notebook{} open.", if n == 1 { "" } else { "s" }));
     format!("Note: {}", crate::other_version_text(place, id, interface, &open))
+}
+
+/// What the agent is told when the runtime here was started with other values of the network variables `differ`.
+/// Names only: a proxy's address can carry a password.
+pub(super) fn network_notice(differ: &[&str]) -> String {
+    format!(
+        "Note: Endeavor on this computer was started by another session, with other network settings than this session's ({}). Its downloads, package installs among them, use that session's settings. If one fails to reach the network, ask the user whether to stop Endeavor, since stopping it closes its notebooks. To stop it, call `stop_machine` with machine \"{LOCAL}\"; the next notebook call then starts it with this session's settings.",
+        differ.join(", ")
+    )
 }
 
 /// A runtime that was found or started, as the session uses it. The user is told on stderr where the

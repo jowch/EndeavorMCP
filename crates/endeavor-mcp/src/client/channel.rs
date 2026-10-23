@@ -387,7 +387,7 @@ impl Channel {
                 Ok(ToApp::Ready { node, pid, token, page_token, reattached, job, port, build, interface, .. }) => {
                     let page_token = page_token.unwrap_or_else(|| token.clone());
                     *self.listener.lock().unwrap() = Some(listener.clone());
-                    listener.attach(self.mux.clone(), token.clone(), build.is_some() || interface.is_some());
+                    listener.attach(self.mux.clone(), token.clone(), build.is_some() || interface.is_some(), !crate::usable_as_is(build.as_deref(), interface));
                     // A helper that ended as this start heard `Ready` may have found no listener to
                     // tell, or told it before this attach: the listener says it is away all the same.
                     if self.mux.has_ended() {

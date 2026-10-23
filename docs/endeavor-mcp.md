@@ -230,8 +230,9 @@ nothing is running.
 
 `endeavor mcp --no-folder` (it excludes `--folder`, and only `mcp` takes it) is
 for an agent that cannot tell the server its project folder, as Codex's plugin
-cannot. On this computer such a session resolves no relative path: nothing is
-ever taken from the process's working folder, which is the plugin's cache folder.
+cannot. On this computer such a session resolves no relative path until a call
+names the project folder (Codex's do, below): nothing is ever taken from the
+process's working folder, which is the plugin's cache folder.
 
 - **The rule is one function.** `notebooks::requested_path` resolves a path the
   agent gave against the session's `Folder`: `In(dir)`, `Process` (the app's
@@ -252,8 +253,20 @@ ever taken from the process's working folder, which is the plugin's cache folder
   the call, so a refused call starts no runtime. The runtime calls it in the
   same place, after `check_arguments` and before `note_call`, so a refused call
   asks the user nothing, starts nothing, makes no file and is not the session's
-  activity. The front's tool list adds one sentence to the `path` descriptions of
-  `open_notebook` and `new_notebook`: on this computer give an absolute path.
+  activity. The front's tool list adds two sentences to the `path` descriptions of
+  `open_notebook` and `new_notebook`: on this computer give an absolute path,
+  unless the client names the project folder with the call, as Codex does.
+- **Codex's workspace, when it names one.** Each `tools/call` from Codex
+  carries `_meta["x-codex-turn-metadata"].workspaces`, an object keyed by the
+  turn's workspace paths. It is undocumented, so the front reads it with care
+  (`Relay::learn_workspace`, #99): it takes the folder only when exactly one key
+  is an absolute path to a folder that exists, and it also accepts the object
+  sent as a JSON string. From then on that folder is the session's `In(dir)` on
+  this computer, as if `--folder` had named it, and the runtime is told it
+  before the call goes on. A call that names no single folder (none, or
+  several) keeps the one learned; a later call naming another single folder
+  replaces it. With `--folder` the
+  field is ignored. Under a client that sends nothing, everything below holds.
 - **The runtime is told, and works in the home folder.** On this computer the
   front sends `endeavor/set_session_folder` `{owner, no_folder: true}` where a
   session with a folder gets `{owner, folder}`; the runtime then holds `Unknown`
@@ -401,8 +414,23 @@ is treated as before: a front stops it if it started it in the background and
 no notebook is open, else keeps it and tells the agent once; `serve` and
 `status` tell the user. A machine's runtime is checked the same way, from the
 `build` and `interface` the helper's `Ready` carries (`RuntimeInfo` has both,
-and `RuntimeInfo::usable_as_is` applies the rule); it is never stopped for the
-agent, only told of once, and `client::Session` reports it as trouble.
+and `RuntimeInfo::usable_as_is` applies the rule). The helper on the machine
+(`endeavor connect`, outside a Slurm job) replaces one that is older (a lower
+number, or none) when no notebook is open in it: once it has found Julia and
+all else its own start needs, it looks again, stops it, leaves the note for
+the clients still attached, starts its own build's, and says so in a
+progress line (`runtime::find_or_start`, #226). If its own start can't go
+ahead (no Julia, an install the user didn't allow), the older one is used as
+it is. "No notebook open" is a count just before the stop: a notebook another
+session opens in that moment is cut off. A newer one, one with a
+notebook open, and one in a Slurm job are kept, and are never stopped for the
+agent, only told of once, and `client::Session` reports them as trouble. So
+two versions that share a state folder never take turns stopping each
+other's. A runtime from before R notebooks answers an R notebook's path with
+"must end in .jl" and nothing about R; the front, and for the app the relay
+(`client::Listener`, through `serve_guarded`), give the agent why in its
+place: that runtime is an older version's, with no R notebooks, and how to
+restart it (`mcp::refuses_r_for_want_of_it`).
 While the session uses such a runtime that was kept, here or on a machine,
 `session_status` says so every time (not for an idle one here that the
 next call that may start a runtime stops), for an agent that no longer has
@@ -414,13 +442,32 @@ leaves build keys out, since an agent passes it on to the user.
 line `interface <n>`) and compares the build only with a binary from before
 that line was printed. Two builds with one number must
 take each other's calls both ways, since a newer front meets an older core as
-often as the reverse. So the number goes up with any change to what it covers,
-additions included, and with a change in what a call returns or does while its
-arguments stay the same; descriptions and changes inside the core don't count.
+often as the reverse. So the number goes up with any change to what it covers
+that a caller of the build before would get wrong, additions included, and with
+a change in what a call returns or does while its arguments stay the same. A
+record field that older callers ignore, and that a newer one does without when
+it's missing (`network`), doesn't count; nor do descriptions and changes inside
+the core.
 Tests in `mcp.rs` hold a fingerprint of the notebook tools' names and
 arguments (descriptions left out), and the lists of the app's `/endeavor/call`
 methods and of `runtime.json`'s fields, and fail when they change. Nothing
 catches a change in what a call or the events stream returns.
+
+**A runtime started with other network settings.** A runtime keeps the
+environment of the session that started it, and later sessions share it
+(#93). A proxy that only lived as long as that session then breaks every
+download, package installs among them, and nothing said why. So
+`runtime.json` records the network variables it was started with
+(`network`: `NETWORK_VARS`, the proxy and CA bundle variables). For each one
+that is set, it records a short hash of the value and never the value,
+since a proxy's address can carry a password. A front that attaches to a
+runtime it didn't start compares that with its own. When they differ, it
+tells the agent once, naming the variables, that the runtime's downloads use
+the other session's settings, and that stopping it (`stop_machine` "local")
+lets the next call start one with this session's. A record without
+`network`, from an earlier build, is not compared. Only this computer's
+runtime is checked: a machine's runtime has the environment of its own
+login, not this session's.
 
 ## The machine tools
 

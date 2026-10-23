@@ -177,6 +177,8 @@ struct State {
     no_folder: bool,
     /// Whether it ends itself when idle; none for a record from before this was written.
     exits_when_idle: Option<bool>,
+    /// The network settings it was started with (`network_settings`); none for a record from before they were written.
+    network: Option<serde_json::Map<String, Value>>,
 }
 
 impl State {
@@ -217,6 +219,12 @@ pub(crate) fn other_version_text(place: &str, machine: &str, interface: Option<u
         "Endeavor on {place} was started by {} version, and it keeps running as it is.{open} Some notebook tools may not work as described, or may be refused. If that happens, ask the user whether to stop it, since stopping it closes its notebooks. To stop it, call `stop_machine` with machine \"{machine}\"; then `use_machine` with machine \"{machine}\" starts this version.",
         which_version(interface, Some(core::INTERFACE))
     )
+}
+
+/// What the agent is told in place of a refusal of an R notebook's path by a runtime on `place` from
+/// before R notebooks (`mcp::refuses_r_for_want_of_it`); `restart` says how this version gets there.
+pub(crate) fn no_r_text(place: &str, restart: &str) -> String {
+    format!("unsupported::Endeavor on {place} was started by an older version, which has no R notebooks, so it can't make or open this one. This version has them; the older one keeps running until it is restarted. {restart}")
 }
 
 /// Why a runtime from a build before one port per runtime can't be used.
@@ -861,7 +869,8 @@ fn lock_stop(dir: &Path, inbox: &mut Inbox, limit: Duration) -> Result<File, Str
 fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, engine: &str, install: bool, attach_only: bool) -> Result<Attached, Unstarted> {
     let mut client = Client::new(args, mux, inbox, parts);
     client.hear_kept()?;
-    let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events, attach_only };
+    // A process's runtime only: on a cluster (`slurm::attach`) a new one would wait in the queue again.
+    let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events, attach_only, replace_older: !attach_only };
     match runtime::find_or_start(&want, &mut client) {
         Outcome::Ready(Up { state, port, runtime, started }) => Ok(Attached { how: How::Process(runtime, port), state, reattached: !started }),
         other => Err(client.unstarted(other)),
@@ -1321,7 +1330,26 @@ fn parse_state(v: &Value) -> Option<State> {
         folder: text("folder"),
         no_folder: v["no_folder"].as_bool().unwrap_or(false),
         exits_when_idle: v["exits_when_idle"].as_bool(),
+        network: v["network"].as_object().cloned(),
     })
+}
+
+/// The variables that decide how a runtime's downloads reach the network, package installs among them.
+/// A runtime keeps the values of the session that started it (#93).
+pub(crate) const NETWORK_VARS: [&str; 11] = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE"];
+
+/// This process's network settings (`NETWORK_VARS`), as `runtime.json` records them: each variable that is
+/// set, with a short hash of its value. Not the value, since a proxy's address can carry a password.
+pub(crate) fn network_settings() -> serde_json::Map<String, Value> {
+    use sha2::{Digest, Sha256};
+    NETWORK_VARS
+        .iter()
+        .filter_map(|name| {
+            let value = std::env::var_os(name)?;
+            let digest = Sha256::digest(value.as_encoded_bytes());
+            Some((name.to_string(), Value::from(digest[..8].iter().map(|b| format!("{b:02x}")).collect::<String>())))
+        })
+        .collect()
 }
 
 /// Remove `runtime.json` if it still describes the runtime `pid`, which started at `started` when that

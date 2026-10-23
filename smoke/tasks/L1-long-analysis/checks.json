@@ -1,0 +1,15 @@
+{
+  "about": "A long analysis in one session: twelve messages from loading a 96-well growth plate to a written summary, with plots along the way. Measures what a real-sized session costs: requests, context at the end, and the largest replies. The soft checks say the analysis was done, so that a cheaper run after a change isn't only a lazier one: the failed well (C07), the contaminated one (E10) and the saturated reading (B03) were found, and the redo used the new window. Tags: new_notebook, plots, size, long.",
+  "checks": [
+    { "check": "notebooks", "count": 1 },
+    { "check": "no_errored_cells" },
+    { "check": "code_contains", "texts": ["growth.csv"] },
+    { "check": "called", "tool": "view_cell_output" },
+    { "check": "reproducible" },
+    { "check": "any_of", "soft": true, "checks": [{ "check": "code_contains", "texts": ["C07"] }, { "check": "output_contains", "texts": ["C07"] }] },
+    { "check": "any_of", "soft": true, "checks": [{ "check": "code_contains", "texts": ["E10"] }, { "check": "output_contains", "texts": ["E10"] }] },
+    { "check": "any_of", "soft": true, "checks": [{ "check": "code_contains", "texts": ["B03"] }, { "check": "output_contains", "texts": ["B03"] }] },
+    { "check": "code_contains", "soft": true, "texts": ["0.05", "0.3"] },
+    { "check": "final_message_contains_any", "texts": ["summary", "Summary"], "soft": true }
+  ]
+}

@@ -9,7 +9,7 @@
 //! fresh snapshot each time it tells the app anything. A notebook's state goes
 //! when it shuts down, except its entry in `idle_stopped`.
 
-mod engines;
+pub(crate) mod engines;
 
 mod r;
 mod tools;
@@ -138,8 +138,9 @@ struct NotebookState {
     /// the tools or not.
     user_runs: HashMap<String, (f64, f64)>,
     /// What each agent session last read of each cell: (owner, cell) => (code,
-    /// seq). Per owner, so one session's reads and edits aren't another's.
-    reads: HashMap<(String, String), (String, u64)>,
+    /// seq, the session's call count (`State::calls`) when it was last sent that
+    /// code). Per owner, so one session's reads and edits aren't another's.
+    reads: HashMap<(String, String), (String, u64, u64)>,
     /// Which session last changed each cell through the tools, and when.
     changes: HashMap<String, Change>,
     /// The runs sessions started that haven't ended (`run_finished`), each with its cells that
@@ -156,6 +157,9 @@ struct Started {
     owner: String,
     run: Option<String>,
     cells: HashSet<String>,
+    /// The dependents it will rerun (`execution.will_run`), with when each last ran: the
+    /// engine queues one only once its parent's result is in, so until then it looks idle.
+    follows: HashMap<String, f64>,
 }
 
 const ENDED_KEPT: usize = 64;
@@ -163,7 +167,7 @@ const ENDED_KEPT: usize = 64;
 impl NotebookState {
     /// Whether a session read or changed one of its cells after the state's `seq` was `since`.
     fn touched_after(&self, since: u64) -> bool {
-        self.reads.values().map(|(_, seq)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
+        self.reads.values().map(|(_, seq, _)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
     }
 
     /// Code that changed without the agent's tools writing it was changed by
@@ -239,6 +243,8 @@ struct State {
     /// makes a call; dropped with its binding, or `SESSION_KEPT` after its
     /// last call or its binding (and then its binding goes too).
     seen: HashMap<String, Seen>,
+    /// How many notebook tool calls each session has made: a read is recent for `RECENT_CALLS` of them.
+    calls: HashMap<String, u64>,
 }
 
 struct Seen {
@@ -394,6 +400,9 @@ struct Cell {
     /// restart leaves every cell so). Pluto's are always false.
     stale: bool,
     not_run: bool,
+    /// A cell the engine won't run until something changes: Ember's disabled
+    /// cells and their dependents (`graph$off`). Pluto's are `hidden` (#232).
+    off: bool,
     /// The notes the engine shows under the cell after its last run, each
     /// "kind::text" like a tool warning: Ember's `changed_in_place`,
     /// `settings_found` and `load_note` (#207). Pluto has none.
@@ -428,6 +437,7 @@ impl Snapshot {
                 markdown: flag(&c["markdown"]),
                 stale: flag(&c["stale"]),
                 not_run: flag(&c["not_run"]),
+                off: flag(&c["off"]),
                 notes: c["notes"].as_array().map(|a| a.iter().filter_map(text).collect()).unwrap_or_default(),
             };
             Some((text(&c["cell_id"])?, cell))
@@ -585,7 +595,7 @@ impl Notebooks {
             starting: Mutex::default(),
             notices: Mutex::default(),
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new(), calls: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),
@@ -747,15 +757,14 @@ impl Notebooks {
                 }
                 true
             }
-            // A run the tools didn't wait for ended: the cells it finished are no longer
-            // pending, and none of its cells is a session's run that its Stop interrupts, even
-            // one that a later run (a restart's) queued again before it ended.
+            // A run the tools didn't wait for ended: none of its cells is a session's run that
+            // its Stop interrupts, even one that a later run (a restart's) queued again before it
+            // ended. Its cells stay as staged as they are: a staged cell stops being staged once
+            // it has run since its edit (`pending_run`), so an edit made after a cell finished
+            // but before this came stays staged (#231).
             "run_finished" => {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
                     let finished: Vec<&str> = params["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-                    for cell in &finished {
-                        notebook.pending.remove(*cell);
-                    }
                     match params["run"].as_str() {
                         Some(run) => {
                             let before = notebook.started.len();
@@ -1308,6 +1317,14 @@ impl Notebooks {
             state.started.retain(|started| (started.run.is_some() && busy) || !started.cells.is_empty());
             state.started.iter().any(|started| started.owner == owner)
         })
+    }
+
+    /// Whether `cell` is a dependent a run `owner` started will rerun and hasn't yet: one the
+    /// engine hasn't queued yet looks idle, though it will run (#192). Asked once
+    /// `own_run_going` has said the run is still going.
+    fn own_run_will_run(&self, owner: &str, nb: &Snapshot, cell: &str) -> bool {
+        let Some(c) = nb.cells.get(cell) else { return false };
+        self.with_state(&nb.id, |state| state.started.iter().any(|started| started.owner == owner && started.follows.get(cell).is_some_and(|last| c.last_run == *last)))
     }
 
     /// The notebooks where runs `owner` started may still be going (`stop_for` checks): what the
