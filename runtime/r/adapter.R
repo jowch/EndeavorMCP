@@ -767,9 +767,12 @@ preview_package <- function(rec, package, version, timeout) {
     }
     check()
   }), function(...) {
-    if (registered(rec) && update_pending(notebook_state(rec$nb), package)) {
-      return(list(date = NA_character_, asked = NA_character_, current_date = notebook_state(rec$nb)$file$header$snapshot,
-                  status = "fetching", changes = rows(NULL), problems = rows(NULL), message = NULL))
+    state <- if (registered(rec)) notebook_state(rec$nb)
+    blocked <- if (!is.null(state)) update_blocked(state, package)
+    pending <- !is.null(state) && update_pending(state, package)
+    if (!is.null(blocked) || pending) {
+      return(list(date = NA_character_, asked = NA_character_, current_date = state$file$header$snapshot,
+                  status = if (pending) "fetching" else "failed", changes = rows(NULL), problems = rows(NULL), message = blocked))
     }
     tryCatch(preview_update(rec$nb, package, version, wait = FALSE),
              ember_refused = function(e) argument_error("not_updatable", conditionMessage(e)))
@@ -780,13 +783,29 @@ preview_package <- function(rec, package, version, timeout) {
 
 # Whether `package` is one the notebook's code names that its lock doesn't
 # have yet because resolution hasn't caught up (Ember's `wanted_cache`
-# against `resolved_for`, packages-core.R). FALSE when Ember doesn't say.
+# against `resolved_for`, packages-core.R), while it still can: not once a
+# package index failed to come (`update_blocked()`). FALSE when Ember
+# doesn't say. Those fields aren't Ember's documented state; this goes once
+# Ember holds the preview itself (jowch/Ember#419).
 update_pending <- function(state, package) {
   p <- state$packages
   wanted <- p$wanted_cache
-  if (is.null(wanted) || !package %in% wanted) return(FALSE)
+  if (is.null(wanted) || !package %in% wanted || !is.null(update_blocked(state, package))) return(FALSE)
   locked <- state$file$lock$entries$name %||% character()
   !package %in% locked && !setequal(wanted, p$resolved_for %||% character())
+}
+
+# Why the lock can't come to have `package`, which the code names: the
+# messages of the package indexes that failed. NULL when none did, or the
+# lock has it.
+update_blocked <- function(state, package) {
+  p <- state$packages
+  if (is.null(p$wanted_cache) || !package %in% p$wanted_cache) return(NULL)
+  if (package %in% (state$file$lock$entries$name %||% character())) return(NULL)
+  failed <- Filter(function(slot) identical(slot$status, "failed"), p$indexes %||% list())
+  if (length(failed) == 0) return(NULL)
+  said <- unlist(lapply(failed, function(slot) slot$message), use.names = FALSE)
+  paste(c(sprintf("%s isn't in the notebook's lock yet, and the package index it needs didn't come.", package), said), collapse = " ")
 }
 
 # Ember's set_date(): apply the preview for `date`, refused unless it is
