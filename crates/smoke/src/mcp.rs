@@ -10,6 +10,16 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+/// The harness's `endeavor mcp`. Each is a session of its own: the proxy starts the
+/// second person's from inside the agent's MCP server, whose `CLAUDE_CODE_SESSION_ID`
+/// would make it the agent's own session (#176), so its edits wouldn't count as
+/// another session's and N5's `stale_read` and N6's `run_conflict` never came (#248).
+fn command(endeavor: &Path, work: &Path, folder: &Path) -> Command {
+    let mut c = Command::new(endeavor);
+    c.arg("mcp").arg("--folder").arg(folder).args(crate::run::runtime_args(work)).envs(crate::run::runtime_env(work)).env_remove("CLAUDE_CODE_SESSION_ID");
+    c
+}
+
 pub struct Session {
     child: Child,
     stdin: ChildStdin,
@@ -19,12 +29,7 @@ pub struct Session {
 
 impl Session {
     pub fn start(endeavor: &Path, work: &Path, folder: &Path) -> Result<Session, String> {
-        let mut child = Command::new(endeavor)
-            .arg("mcp")
-            .arg("--folder")
-            .arg(folder)
-            .args(crate::run::runtime_args(work))
-            .envs(crate::run::runtime_env(work))
+        let mut child = command(endeavor, work, folder)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -172,5 +177,16 @@ pub fn wait_until_done(session: &mut Session, id: &str, limit: Duration) -> Resu
             return Err(format!("cells still running after {} s", limit.as_secs()));
         }
         std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn a_harness_session_is_not_the_agents() {
+        let c = super::command(Path::new("endeavor"), Path::new("/work"), Path::new("/project"));
+        assert!(c.get_envs().any(|(k, v)| k == "CLAUDE_CODE_SESSION_ID" && v.is_none()));
     }
 }
