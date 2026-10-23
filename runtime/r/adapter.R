@@ -756,12 +756,37 @@ preview_package <- function(rec, package, version, timeout) {
   ask <- list(name = package, version = version)
   current <- function() update_proposal(package_status(rec$nb)$proposal, ask)
   prop <- if (identical(rec$update_ask, ask)) current()
-  if (is.null(prop) || identical(prop$status, "failed")) {
+  if (!is.null(prop) && !identical(prop$status, "failed")) return(wait_preview(rec, current, NA_character_, timeout))
+  # Ember refuses a package its lock doesn't have yet, as when the notebook
+  # has just opened or a cell added it: wait for the lock first.
+  deadline <- Sys.time() + as.numeric(timeout %||% 60)
+  promises::then(promise(function(resolve, reject) {
+    check <- function() {
+      if (registered(rec) && update_pending(notebook_state(rec$nb), package) && Sys.time() < deadline) return(later::later(check, 0.1))
+      resolve(TRUE)
+    }
+    check()
+  }), function(...) {
+    if (registered(rec) && update_pending(notebook_state(rec$nb), package)) {
+      return(list(date = NA_character_, asked = NA_character_, current_date = notebook_state(rec$nb)$file$header$snapshot,
+                  status = "fetching", changes = rows(NULL), problems = rows(NULL), message = NULL))
+    }
     tryCatch(preview_update(rec$nb, package, version, wait = FALSE),
              ember_refused = function(e) argument_error("not_updatable", conditionMessage(e)))
     rec$update_ask <- ask
-  }
-  wait_preview(rec, current, NA_character_, timeout)
+    wait_preview(rec, current, NA_character_, max(0, as.numeric(difftime(deadline, Sys.time(), units = "secs"))))
+  })
+}
+
+# Whether `package` is one the notebook's code names that its lock doesn't
+# have yet because resolution hasn't caught up (Ember's `wanted_cache`
+# against `resolved_for`, packages-core.R). FALSE when Ember doesn't say.
+update_pending <- function(state, package) {
+  p <- state$packages
+  wanted <- p$wanted_cache
+  if (is.null(wanted) || !package %in% wanted) return(FALSE)
+  locked <- state$file$lock$entries$name %||% character()
+  !package %in% locked && !setequal(wanted, p$resolved_for %||% character())
 }
 
 # Ember's set_date(): apply the preview for `date`, refused unless it is

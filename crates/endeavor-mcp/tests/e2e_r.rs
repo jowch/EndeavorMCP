@@ -617,6 +617,20 @@ fn an_r_notebook_through_the_runtime() {
         assert!(newest["status"] == "failed" && newest["reason"].as_str().unwrap().contains("already at"), "{newest}");
         let never = pin(&mut agent, Some("0.0.1"));
         assert_eq!(never["status"], "failed", "{never}");
+        // A package a cell has just added isn't in the lock until Ember resolves it: the preview
+        // waits for that rather than calling it not the notebook's (#267).
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        agent.ok("add_cell", json!({ "notebook_id": id, "code": "library(mime)", "after_cell_id": lib }));
+        let args = json!({ "notebook_id": id, "package": "mime", "version": "0.12" });
+        let started = Instant::now();
+        let added = loop {
+            let p = agent.ok("preview_package_update", args.clone());
+            if p["status"] != "fetching" {
+                break p;
+            }
+            assert!(started.elapsed() < Duration::from_secs(300), "mime's date never came: {p}");
+        };
+        assert!(added["status"] == "ready" && added["changes"].as_array().unwrap().iter().any(|c| c["name"] == "mime" && c["to"] == "0.12"), "{added}");
         let (refused, said) = agent.call("preview_package_update", json!({ "notebook_id": id, "package": "notapackage" }));
         assert!(refused && said.to_string().contains("not_updatable"), "{said}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "a package's preview changes nothing");
