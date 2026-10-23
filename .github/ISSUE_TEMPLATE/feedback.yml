@@ -1,0 +1,44 @@
+# A copy of Endeavor's .github/ISSUE_TEMPLATE/feedback.yml: the same questions and
+# details as the Tally form on Endeavor's feedback page. The fields are listed in
+# Endeavor's site/feedback-fields.md; change them there and copy this file.
+name: Something got in your way
+description: Trying Endeavor or its plugin, and something stopped you, confused you or took too long.
+title: "Got in my way: "
+labels: ["feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying Endeavor. A few lines is plenty.
+
+        This is public. Before you paste anything, take out passwords, the value after `token=` or `secret=` in any link or log line, server names, user names, folder paths and data. Rather not post in public, or no GitHub account? Use the form at https://jowch.github.io/Endeavor/feedback/ instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, or what got in your way?
+    validations:
+      required: true
+  - type: input
+    id: trying
+    attributes:
+      label: What were you trying to do?
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      description: "The app fills this in. Otherwise: Settings ▸ About in the app, or the first line of `endeavor --version` for the plugin."
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: "macos, windows or linux"
+  - type: input
+    id: agent
+    attributes:
+      label: Agent
+      description: "claude, codex or antigravity"
+  - type: input
+    id: source
+    attributes:
+      label: From
+      description: "app, site or plugin"
