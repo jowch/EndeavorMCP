@@ -117,7 +117,8 @@ pub fn notebooks(session: &mut Session) -> Result<Vec<Notebook>, String> {
         let code = session.tool("read_notebook_code", json!({ "notebook_id": id, "order": "visual", "include_markdown": true }))?;
         let mut cells = Vec::new();
         for cell in code["cell_ids"].as_array().cloned().unwrap_or_default() {
-            let read = session.tool("read_cell", json!({ "notebook_id": id, "cell_id": cell }))?;
+            // The code was just read above, so read_cell would leave it out without include_code.
+            let read = session.tool("read_cell", json!({ "notebook_id": id, "cell_id": cell, "include_code": true }))?;
             let output = read["output_text"].as_str().or(read["output"].as_str()).unwrap_or_default().to_owned();
             cells.push(Cell {
                 id: cell.as_str().unwrap_or_default().to_owned(),
