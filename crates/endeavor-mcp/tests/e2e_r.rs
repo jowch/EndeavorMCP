@@ -589,6 +589,52 @@ fn an_r_notebook_through_the_runtime() {
         assert!(again["changes"].as_array().unwrap().iter().any(|c| c["name"] == "base64enc"), "{again}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "the refused apply moved nothing");
 
+        // One package pinned to an older version (#266): Ember finds the date, the last day jsonlite
+        // 1.8.8 was current, and nothing changes yet. A version CRAN never released has no date,
+        // and a package that isn't in the notebook is refused.
+        let pin = |agent: &mut Agent, version: Option<&str>| {
+            let mut args = json!({ "notebook_id": id, "package": "jsonlite" });
+            if let Some(version) = version {
+                args["version"] = json!(version);
+            }
+            let started = Instant::now();
+            loop {
+                let p = agent.ok("preview_package_update", args.clone());
+                if p["status"] != "fetching" {
+                    return p;
+                }
+                assert!(started.elapsed() < Duration::from_secs(300), "the release dates never came: {p}");
+            }
+        };
+        let pinned = pin(&mut agent, Some("1.8.8"));
+        assert_eq!(pinned["status"], "ready", "{pinned}");
+        let day = pinned["date"].as_str().unwrap();
+        assert!(("2023-12-04".."2024-10-01").contains(&day), "jsonlite 1.8.8 was current then: {pinned}");
+        assert!(pinned["changes"].as_array().unwrap().iter().any(|c| c["name"] == "jsonlite" && c["to"] == "1.8.8"), "{pinned}");
+        assert!(pinned["message"].as_str().unwrap().contains("moves every package"), "{pinned}");
+        // No version is CRAN's newest, not the pin just previewed: the notebook already has it.
+        let newest = pin(&mut agent, None);
+        assert!(newest["status"] == "failed" && newest["reason"].as_str().unwrap().contains("already at"), "{newest}");
+        let never = pin(&mut agent, Some("0.0.1"));
+        assert_eq!(never["status"], "failed", "{never}");
+        // A package a cell has just added isn't in the lock until Ember resolves it: the preview
+        // waits for that rather than calling it not the notebook's (#267).
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        agent.ok("add_cell", json!({ "notebook_id": id, "code": "library(mime)", "after_cell_id": lib }));
+        let args = json!({ "notebook_id": id, "package": "mime", "version": "0.12" });
+        let started = Instant::now();
+        let added = loop {
+            let p = agent.ok("preview_package_update", args.clone());
+            if p["status"] != "fetching" {
+                break p;
+            }
+            assert!(started.elapsed() < Duration::from_secs(300), "mime's date never came: {p}");
+        };
+        assert!(added["status"] == "ready" && added["changes"].as_array().unwrap().iter().any(|c| c["name"] == "mime" && c["to"] == "0.12"), "{added}");
+        let (refused, said) = agent.call("preview_package_update", json!({ "notebook_id": id, "package": "notapackage" }));
+        assert!(refused && said.to_string().contains("not_updatable"), "{said}");
+        assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "a package's preview changes nothing");
+
         // A day not published yet is previewed at the newest one that is (#247). Tomorrow never is.
         let ahead = tomorrow();
         let unpublished = preview(&mut agent, Some(&ahead));
@@ -630,6 +676,20 @@ fn an_r_notebook_through_the_runtime() {
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "F" }));
         assert!(read["notes"][0].as_str().is_some_and(|n| n.starts_with("changed_in_place::Changed box in place")), "{read}");
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "E" })).get("notes"), None);
+    });
+
+    step("an install call doesn't run: the lock answers it, and the cell's note says so (Ember #79, #125)", || {
+        std::fs::write(folder.join("install.R"), "### An Ember notebook ###\n\n# %% id=G\ninstall.packages(\"jsonlite\")\n1 + 1\n\n# /// cell order\n# G\n# ///\n").unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "install.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        agent.ok("allow_execution", json!({ "notebook_id": id }));
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": "G", "wait_for_completion": true }));
+        assert!(ran["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("from_lock::Cell G: Install calls don't run in Ember: it installs jsonlite from the notebook's lock")), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "G" }));
+        assert!(read["output"].as_str().is_some_and(|o| o.contains("[1] 2")), "the cell ran past the call: {read}");
+        assert!(read["notes"][0].as_str().is_some_and(|n| n.starts_with("from_lock::") && n.contains("preview_package_update")), "{read}");
     });
 
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {
