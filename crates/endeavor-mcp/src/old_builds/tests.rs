@@ -184,7 +184,8 @@ fn a_running_process_that_names_a_file_in_a_folder_is_seen() {
 /// A `runtime.json` in `folder` for a runtime on `node` with `pid`, from `build` if one is given.
 fn record(folder: &Path, node: &str, pid: u32, build: Option<&str>) {
     std::fs::create_dir_all(folder).unwrap();
-    let mut state = serde_json::json!({ "launcher": "process", "node": node, "pid": pid, "token": "t" });
+    // With this process's start time, which Windows needs to count a pid as alive; for another pid it doesn't match, as for a process that ended.
+    let mut state = serde_json::json!({ "launcher": "process", "node": node, "pid": pid, "token": "t", "started": crate::own_start_time() });
     if let Some(build) = build {
         state["build"] = build.into();
     }

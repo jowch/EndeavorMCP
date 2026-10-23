@@ -189,7 +189,7 @@ pub(crate) fn remove_unused(place: &Place, now: SystemTime, in_use: &dyn Fn() ->
         if name == place.own() || kept.contains(&name) || !place.is_build(&path) {
             continue;
         }
-        let marker = std::fs::OpenOptions::new().read(true).write(true).open(path.join(standalone::IN_USE)).ok();
+        let mut marker = std::fs::OpenOptions::new().read(true).write(true).open(path.join(standalone::IN_USE)).ok();
         // Without a marker the build is from before leases, and its folder's time is when it was installed.
         let used = match &marker {
             Some(marker) => marker.metadata().and_then(|m| m.modified()).ok().map(|t| now.duration_since(t).unwrap_or_default()),
@@ -203,7 +203,12 @@ pub(crate) fn remove_unused(place: &Place, now: SystemTime, in_use: &dyn Fn() ->
             continue;
         }
         let trash = base.join(format!("{name}.removing.{}", std::process::id()));
-        // The lock, if taken, is held until the folder has moved, so a process starting from it meanwhile isn't told it may.
+        // On Unix the lock, if taken, is held until the folder has moved, so a process starting from it meanwhile
+        // isn't told it may (`hold_own_folder`). Windows won't move a folder with a file open in it; there a
+        // binary running from the folder keeps it from moving instead.
+        if cfg!(windows) {
+            marker = None;
+        }
         if std::fs::rename(&path, &trash).is_ok() {
             drop(marker);
             let _ = std::fs::remove_dir_all(&trash);
