@@ -9,11 +9,15 @@
     "name": "list_notebooks"
   },
   {
-    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run; in an R notebook also a result made before a cell it depends on last ran). An R notebook's cell that hasn't run since the notebook opened or restarted has `not_run`. Counts as the read an edit needs. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`. A read of a cell that a run you started is running or will run waits up to 45 seconds for it to finish, so read it again only if it is still `running`; its `message` then says how long it waited. While packages install, a queued cell's read waits up to 45 seconds too, then has `packages` (the step, the packages, how long so far, the last line of the package log) and a `message` saying what to do.",
+    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run; in an R notebook also a result made before a cell it depends on last ran). An R notebook's cell that hasn't run since the notebook opened or restarted has `not_run`. Counts as the read an edit needs. If the code is what this session read or wrote in its last few calls, it is left out and `code_unchanged` is true; pass `include_code=true` to get it anyway. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`. A read of a cell that a run you started is running or will run waits up to 45 seconds for it to finish, so read it again only if it is still `running`; its `message` then says how long it waited. While packages install, a queued cell's read waits up to 45 seconds too, then has `packages` (the step, the packages, how long so far, the last line of the package log) and a `message` saying what to do.",
     "inputSchema": {
       "properties": {
         "cell_id": {
           "type": "string"
+        },
+        "include_code": {
+          "description": "Send the code even when it is unchanged since this session last read or wrote it. Default: false.",
+          "type": "boolean"
         },
         "notebook_id": {
           "type": "string"
@@ -28,7 +32,7 @@
     "name": "read_cell"
   },
   {
-    "description": "See a cell's output as an image (PNG). Use it to check what a plot or figure looks like; `read_cell` only describes images. The call waits while cells run. It also works for an HTML output (a widget, an interactive plot) whose value has an image form or whose HTML holds the picture. `read_cell` points to this tool when the HTML holds one; for other HTML it is worth a try. In safe preview it works only for an output that is already an image or HTML that holds one. Fails with `no_image` when the output has no image form (text, Markdown, most HTML): use `read_cell` for those.",
+    "description": "See a cell's output as an image (PNG). Use it to check what a plot or figure looks like; `read_cell` only describes images. The call waits while cells run. It also works for an HTML output (a widget, an interactive plot) whose value has an image form or whose HTML holds the picture. In the Endeavor app on a Mac, while a Pluto notebook's pane is on screen, other HTML and WebGL outputs come back as the notebook draws them (`source: \"screenshot\"`). `read_cell` points to this tool when the HTML holds a picture; for other HTML it is worth a try. In safe preview it works only for an output that is already an image or HTML that holds one. Fails with `no_image` when the output has no image form (text, Markdown, and other HTML unless the Mac app took a picture of it): use `read_cell` for those.",
     "inputSchema": {
       "properties": {
         "cell_id": {

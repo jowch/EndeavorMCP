@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "structure_error", "cell_notes")
+wanted <- c("%||%", "package_step", "structure_error", "snapshot_cell", "output_text", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -89,6 +89,23 @@ check("install calls that didn't run: one note naming their packages, and the ag
         grepl("call preview_package_update", n, fixed = TRUE))
 check("an install call that names no package: the note says packages",
       grepl("it installs packages from", A$cell_notes(list(from_lock = "")), fixed = TRUE))
+
+# ---- snapshot_cell ----
+view <- function(...) modifyList(list(id = "c", code = "x <- 1", kind = "code", status = "success", errors = list(), runtime = 0.1, last_run = 100, disabled = FALSE, disabled_by = NA_character_), list(...))
+check("a cell that runs: not off", isFALSE(A$snapshot_cell(view())$off))
+check("a disabled cell: off", isTRUE(A$snapshot_cell(view(disabled = TRUE))$off))
+check("a cell downstream of a disabled one: off, though it ran before", isTRUE(A$snapshot_cell(view(disabled_by = "d"))$off))
+check("an Ember without disabled_by: not off", isFALSE(A$snapshot_cell(view(disabled_by = NULL))$off))
+
+# ---- date_proposal ----
+# A preview of a day not published yet moved back to the newest that is (#247).
+moved <- list(date = "2026-10-22", asked = "2026-10-23", status = "ready")
+check("a preview moved back is found by the day asked for", identical(A$date_proposal(moved, "2026-10-23"), moved))
+check("  and by the day it moved to", identical(A$date_proposal(moved, "2026-10-22"), moved))
+check("  but not by another day", is.null(A$date_proposal(moved, "2026-10-21")))
+check("a proposal with no `asked` (an older Ember) is found by its date",
+      identical(A$date_proposal(list(date = "2026-10-22"), "2026-10-22"), list(date = "2026-10-22")))
+check("no proposal: NULL", is.null(A$date_proposal(NULL, "2026-10-22")))
 
 cat(sprintf("\n%d passed, %d failed\n", passed, failed))
 if (failed > 0) quit(status = 1)

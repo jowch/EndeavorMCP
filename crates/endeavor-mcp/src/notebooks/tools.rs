@@ -44,6 +44,9 @@ pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has
 /// How much of each output's text a change's receipt carries; `read_cell` has
 /// the rest.
 const RECEIPT_TEXT_MAX: usize = 2_000;
+/// How many of a session's calls a read or write of a cell counts as recent: within them, `read_cell`
+/// leaves out code it hasn't changed (`code_unchanged`), as the agent still has it.
+const RECENT_CALLS: u64 = 10;
 
 /// A tool's result: JSON, or a PNG with JSON describing it.
 pub enum Reply {
@@ -63,6 +66,7 @@ impl Notebooks {
     /// `tool` for a caller that can hang up: `gone` says it has, which ends a
     /// wait in the call early.
     pub fn tool_watched(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant, gone: &dyn Fn() -> bool) -> Result<Reply, String> {
+        *self.state.lock().unwrap().calls.entry(owner.to_owned()).or_default() += 1;
         let t = Call { nbs: self, owner, args, began, gone };
         let result = match name {
             "list_notebooks" => t.list_notebooks(),
@@ -258,11 +262,37 @@ impl Call<'_> {
 
     /// The owner reads a cell's code (it counts as reading it before an edit).
     fn record_read(&self, id: &str, cell: &str, code: &str) {
+        self.record_read_of(id, cell, code, true);
+    }
+
+    /// As `record_read`; `sent` is false when the reply left the code out. That read still counts
+    /// before an edit, but not as the agent having been given the code: else reads every few calls
+    /// would keep code it lost to a compaction "unchanged" for good.
+    fn record_read_of(&self, id: &str, cell: &str, code: &str, sent: bool) {
         let mut state = self.nbs.state.lock().unwrap();
         state.seq += 1;
         let seq = state.seq;
+        let calls = state.calls.get(self.owner).copied().unwrap_or(0);
         let notebook = state.notebooks.entry(id.to_owned()).or_default();
-        notebook.reads.insert((self.owner.to_owned(), cell.to_owned()), (code.to_owned(), seq));
+        let key = (self.owner.to_owned(), cell.to_owned());
+        let at = match notebook.reads.get(&key) {
+            Some((read, _, at)) if !sent && read == code => *at,
+            _ => calls,
+        };
+        notebook.reads.insert(key, (code.to_owned(), seq, at));
+    }
+
+    /// The code of `cell` that this session read or wrote within its last `RECENT_CALLS` calls, if any:
+    /// what its agent can be taken to still have. An older read may have left the agent's context (a
+    /// compaction, old tool results cleared), and an agent that is told it has code it lost edits
+    /// from memory.
+    fn recent_read(&self, id: &str, cell: &str) -> Option<String> {
+        let state = self.nbs.state.lock().unwrap();
+        let key = (self.owner.to_owned(), cell.to_owned());
+        let now = state.calls.get(self.owner).copied().unwrap_or(0);
+        let notebook = state.notebooks.get(id)?;
+        let (code, _, at) = notebook.reads.get(&key)?;
+        (now.saturating_sub(*at) <= RECENT_CALLS).then(|| code.clone())
     }
 
     /// The owner changed a cell through the tools.
@@ -280,7 +310,7 @@ impl Call<'_> {
         let read = state.notebooks.get(&nb.id).and_then(|n| n.reads.get(&(self.owner.to_owned(), cell.to_owned())));
         match read {
             None => Err(argument_error(&format!("read_required::Call read_cell or read_notebook_code before editing cell {cell}"))),
-            Some((code, _)) if *code != nb.cells[cell].code => Err(argument_error(&format!("stale_read::Cell {cell} changed since last read; call read_cell again"))),
+            Some((code, _, _)) if *code != nb.cells[cell].code => Err(argument_error(&format!("stale_read::Cell {cell} changed since last read; call read_cell again"))),
             Some(_) => Ok(()),
         }
     }
@@ -313,7 +343,7 @@ impl Call<'_> {
         let unread: HashSet<String> = {
             let state = self.nbs.state.lock().unwrap();
             let Some(notebook) = state.notebooks.get(&nb.id) else { return Ok(None) };
-            let read_seq = |cell: &String| notebook.reads.get(&(self.owner.to_owned(), cell.clone())).map_or(0, |(_, seq)| *seq);
+            let read_seq = |cell: &String| notebook.reads.get(&(self.owner.to_owned(), cell.clone())).map_or(0, |(_, seq, _)| *seq);
             notebook.changes.iter().filter(|(cell, ch)| other_owner(ch, self.owner) && ch.seq > read_seq(cell)).map(|(cell, _)| cell.clone()).collect()
         };
         if unread.is_empty() {
@@ -355,6 +385,16 @@ impl Call<'_> {
             let cell = ids("exited").first().map(|id| graph.and_then(|g| g.name(id)).unwrap_or_else(|| id.clone()));
             return Err(argument_error(&format!("process_exited::{}", exited_message(super::engines::language(super::engines::of_path(&nb.path)), cell.as_deref()))));
         }
+        // The cells that depend on `cells`, which autorun reruns: those the graph links to them,
+        // and those the engine says it reruns besides (`dependents`), less the ancestors it
+        // runs first: Ember reruns the readers of a name a cell's last run defined, which the
+        // graph no longer links once the cell drops the name (#228). The run is under way by
+        // now, so a graph that can't be read leaves only the engine's.
+        let dependents_of = |cells: &[String]| -> HashSet<String> {
+            let mut out = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(cells)).unwrap_or_default();
+            out.extend(ids("dependents").into_iter().filter(|id| !upstream.contains(id)));
+            out
+        };
         let mut warnings = Vec::new();
         // Cells the targets need that the engine ran first, as Ember does one
         // edited since it last ran (a staged edit) or stale (an ancestor ran
@@ -383,9 +423,7 @@ impl Call<'_> {
             if !also.is_empty() {
                 cells = nb.order.iter().filter(|id| also.contains(id) || needed.contains(id)).chain(targets).cloned().collect();
             }
-            // The run is under way by now, so a graph that can't be read leaves the lists empty
-            // rather than failing the call.
-            dependents = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(&cells)).unwrap_or_default();
+            dependents = dependents_of(&cells);
             reran = nb
                 .order
                 .iter()
@@ -418,8 +456,8 @@ impl Call<'_> {
             // since the notebook started, as Ember skips one that hasn't (Pluto has
             // none). In lazy mode they go stale instead.
             if !nb.lazy {
-                let dependents = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(&cells)).unwrap_or_default();
-                will_run = nb.order.iter().filter(|id| dependents.contains(*id) && !cells.contains(id) && nb.cells.get(*id).is_some_and(|c| !c.not_run && !c.hidden)).cloned().collect();
+                let dependents = dependents_of(&cells);
+                will_run = nb.order.iter().filter(|id| dependents.contains(*id) && !cells.contains(id) && nb.cells.get(*id).is_some_and(|c| !c.not_run && !c.off && !c.hidden)).cloned().collect();
             }
         }
         // A run of these cells was accepted: they are no longer staged, whether or not they have finished.
@@ -608,7 +646,7 @@ impl Call<'_> {
                 .order
                 .iter()
                 .filter(|id| !cells_run.contains(id) && !pending.contains(id))
-                .filter(|id| nb.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden))
+                .filter(|id| nb.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden && !c.off))
                 .collect();
             if !stale_cells.is_empty() {
                 receipt["warnings"].as_array_mut().unwrap().push(json!(
@@ -760,8 +798,18 @@ impl Call<'_> {
         // the read didn't wait.
         let ran_out = (waits(&nb) && waited.elapsed() >= Duration::from_millis(500)).then(|| self.began.elapsed().as_secs());
         let Some(code) = nb.cells.get(&cell).map(|c| c.code.clone()) else { return Err(key_error(&format!("cell_not_found::No cell with id '{cell}' in notebook"))) };
-        self.record_read(&nb.id, &cell, &code);
+        let include_code = bool_arg(self.args, "include_code", false)?;
+        // Code this session read or wrote a few calls ago, unchanged since, isn't sent again: an agent
+        // that reads each cell it just ran gets its own code back each time, a tenth of a long session.
+        let left_out = !include_code && self.recent_read(&nb.id, &cell).is_some_and(|read| read == code);
+        self.record_read_of(&nb.id, &cell, &code, !left_out);
         let mut out = self.cell_json(&nb, &cell);
+        if left_out {
+            out.remove("code");
+            out.insert("code_unchanged".into(), json!(true));
+            // Which code it means, so the app keeps its copy only if it is that one.
+            out.insert("code_sha".into(), json!(code_sha(&code)));
+        }
         if let Some(text) = self.output_text(&nb, &cell)? {
             out.insert("output_text".into(), json!(text));
         }
@@ -900,9 +948,13 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, "", &code);
         let ran = self.run_or_stage(&added, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), ran, None)?;
-        // With its code: the app learns a new cell's code from this reply
-        // (Endeavor's `CellCodes::observe`), since the call had no id for it.
-        receipt.extend(self.cell_json(&after, &cell));
+        // Its code only if the engine changed what the agent sent: the agent has it, and the app
+        // takes it from the call too.
+        let mut added = self.cell_json(&after, &cell);
+        if self.args.get("code").and_then(Value::as_str) == Some(code.as_str()) {
+            added.remove("code");
+        }
+        receipt.extend(added);
         Ok(Value::Object(receipt))
     }
 
@@ -1449,7 +1501,8 @@ impl Call<'_> {
     /// Ember's preview of moving an R notebook's snapshot date, which its package versions come
     /// from (#201): what would change, with nothing changed yet. Without `date` it is today, the
     /// page's "Update" (the newest packages). Fetching that date's index can take a while, so it
-    /// is waited for within the call.
+    /// is waited for within the call. A day not published yet is previewed at the newest day that
+    /// is, and the result's `date` is that day.
     fn preview_package_update(&self) -> Result<Value, String> {
         let nb = self.r_notebook()?;
         let date = self.args.get("date").cloned().unwrap_or(Value::Null);
@@ -1462,12 +1515,19 @@ impl Call<'_> {
         if reason.is_string() {
             result["reason"] = reason;
         }
+        // A day not published yet is previewed at the newest one that is, an earlier `date` (#247).
+        let asked = result.as_object_mut().and_then(|r| r.remove("asked"));
+        let earlier = asked.as_ref().is_some_and(|a| a.is_string() && *a != result["date"]);
         let none = result["changes"].as_array().is_none_or(Vec::is_empty);
-        result["message"] = json!(match result["status"].as_str() {
+        let said = match result["status"].as_str() {
             Some("ready") if none => "Nothing would change: every package is already at its version for this date.",
             Some("ready") => "Nothing has changed yet. Tell the user what would change; apply_package_update with this date applies it.",
             Some("failed") => "This date can't be used, and the notebook is unchanged: `problems` says why.",
             _ => "The package index for this date is still being fetched. Call again with the same date to wait for it.",
+        };
+        result["message"] = json!(match (earlier, result["status"].as_str()) {
+            (true, Some("ready")) => format!("{} isn't published yet, so this is the newest day that is, {}. {said}", asked.unwrap().as_str().unwrap(), result["date"].as_str().unwrap_or("")),
+            _ => said.to_owned(),
         });
         result["notebook_id"] = json!(nb.id);
         Ok(result)
@@ -1570,6 +1630,12 @@ fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
         Some(Value::Bool(flag)) => Ok(*flag),
         Some(_) => Err(argument_error(&format!("invalid_argument::{name} must be a boolean"))),
     }
+}
+
+/// The first 12 hex digits of the code's SHA-256 (Endeavor's `celldiff::code_sha` is the same).
+fn code_sha(code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(code.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 /// An edit's `folded`: a Bool, or left out (or null) to keep the cell's fold as it is.

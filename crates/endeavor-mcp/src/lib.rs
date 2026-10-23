@@ -221,6 +221,12 @@ pub(crate) fn other_version_text(place: &str, machine: &str, interface: Option<u
     )
 }
 
+/// What the agent is told in place of a refusal of an R notebook's path by a runtime on `place` from
+/// before R notebooks (`mcp::refuses_r_for_want_of_it`); `restart` says how this version gets there.
+pub(crate) fn no_r_text(place: &str, restart: &str) -> String {
+    format!("unsupported::Endeavor on {place} was started by an older version, which has no R notebooks, so it can't make or open this one. This version has them; the older one keeps running until it is restarted. {restart}")
+}
+
 /// Why a runtime from a build before one port per runtime can't be used.
 pub const OLDER_RUNTIME: &str = "Julia here was started by an older version of Endeavor, which this version can't connect to. Restart Julia to use it.";
 
@@ -863,7 +869,8 @@ fn lock_stop(dir: &Path, inbox: &mut Inbox, limit: Duration) -> Result<File, Str
 fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, engine: &str, install: bool, attach_only: bool) -> Result<Attached, Unstarted> {
     let mut client = Client::new(args, mux, inbox, parts);
     client.hear_kept()?;
-    let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events, attach_only };
+    // A process's runtime only: on a cluster (`slurm::attach`) a new one would wait in the queue again.
+    let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events, attach_only, replace_older: !attach_only };
     match runtime::find_or_start(&want, &mut client) {
         Outcome::Ready(Up { state, port, runtime, started }) => Ok(Attached { how: How::Process(runtime, port), state, reattached: !started }),
         other => Err(client.unstarted(other)),

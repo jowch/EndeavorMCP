@@ -38,7 +38,8 @@ fn recorded_pid(state: &Path) -> Option<i32> {
     serde_json::from_str::<Value>(&text).ok()?["pid"].as_i64().map(|p| p as i32).filter(|&p| p > 1)
 }
 
-/// Whatever happens, no Julia stays behind.
+/// Whatever happens, no Julia stays behind. A failed test prints the runtime's
+/// log first, as the next run starts a fresh one (#236).
 struct Cleanup {
     state: PathBuf,
     children: Vec<Child>,
@@ -46,6 +47,10 @@ struct Cleanup {
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            let log = self.state.join("runtime.log");
+            eprintln!("── the runtime's log, {}:\n{}", log.display(), std::fs::read_to_string(&log).unwrap_or_else(|e| format!("(not read: {e})")));
+        }
         for child in &mut self.children {
             let _ = child.kill();
             let _ = child.wait();
@@ -156,6 +161,21 @@ impl Agent {
         assert!(!failed, "{name}({arguments}): {result}");
         result
     }
+}
+
+/// Tomorrow in UTC as YYYY-MM-DD: a day Package Manager hasn't published (days to a civil date,
+/// after Howard Hinnant's `civil_from_days`).
+fn tomorrow() -> String {
+    let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 / 86400 + 1;
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
 }
 
 fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
@@ -465,6 +485,31 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(edited["execution"]["will_run"], json!([down]), "{edited}");
         let read = output(&mut agent);
         assert!(read["running"] == false && read["output"].as_str().unwrap().contains('2'), "{read}");
+        // A rename: the graph no longer links the dependent to `up`, but Ember reruns it, as it
+        // read the name `up` dropped, and it fails. The run goes on until it has, and reports it (#228).
+        let gone = |read: &Value| read["running"] == false && read["errored"] == true && read["output"].as_str().unwrap().contains("object 'a' not found");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "b <- 1" }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["execution"]["status"] == "errored" && waited["affected_cells"] == json!([up, down]), "{waited}");
+        let read = output(&mut agent);
+        assert!(gone(&read), "the waited submit waited for the old name's reader: {read}");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "restored");
+        let edited = agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "c <- 1", "run_after": true }));
+        assert_eq!(edited["execution"]["will_run"], json!([down]), "{edited}");
+        let read = output(&mut agent);
+        assert!(gone(&read), "the read waited for the old name's reader: {read}");
+        // A rename into a name another cell defines: Ember queues the reader with the run's
+        // cells, and the waited run reports it too.
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
+        agent.ok("add_cell", json!({ "notebook_id": id, "code": "z <- 5", "after_cell_id": down }));
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "restored");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "z <- 1" }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["affected_cells"].as_array().unwrap().contains(&down), "{waited}");
+        assert!(gone(&output(&mut agent)), "the reader reran");
     });
 
     step("allow_execution's run of the notebook is the agent's: a waited submit waits for it (#170)", || {
@@ -494,7 +539,8 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(read["code"], "n + 1", "{read}");
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code"], "n <- 1");
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": "A", "code": "n <- 41" }));
-        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code"], "n <- 41");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code_unchanged"], true, "the code it just wrote isn't sent again");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A", "include_code": true }))["code"], "n <- 41");
         let (failed, missing) = agent.call("read_cell", json!({ "notebook_id": id, "cell_id": "C" }));
         assert!(failed, "{missing}");
     });
@@ -542,6 +588,13 @@ fn an_r_notebook_through_the_runtime() {
         let again = preview(&mut agent, Some("2024-06-03"));
         assert!(again["changes"].as_array().unwrap().iter().any(|c| c["name"] == "base64enc"), "{again}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "the refused apply moved nothing");
+
+        // A day not published yet is previewed at the newest one that is (#247). Tomorrow never is.
+        let ahead = tomorrow();
+        let unpublished = preview(&mut agent, Some(&ahead));
+        assert_eq!(unpublished["status"], "ready", "{unpublished}");
+        assert!(unpublished["date"].as_str().unwrap() < ahead.as_str(), "{unpublished}");
+        assert!(unpublished["message"].as_str().unwrap().contains("isn't published yet"), "{unpublished}");
 
         // Updating is today's date: applied, the file's date moves and the cell sees the version the preview named.
         let today = preview(&mut agent, None);

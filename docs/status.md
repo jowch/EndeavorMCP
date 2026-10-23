@@ -59,10 +59,17 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   `endeavor update` say when the running Julia doesn't (`update` reads the new
   binary's number; it compares builds with a binary from before the line was
   printed). A machine's runtime is checked too, since 2026-10-09: the helper's
-  `Ready` carries its build and interface, the front tells the agent once and
-  never stops it, `session_status` says it every time (`other_version`,
+  `Ready` carries its build and interface, the front tells the agent once,
+  `session_status` says it every time (`other_version`,
   since 2026-10-09), and `client::Session` reports it as trouble (serve.md,
-  "Update it"; endeavor-mcp.md, "A runtime from another build").
+  "Update it"; endeavor-mcp.md, "A runtime from another build"). Since
+  2026-10-22 (#226) the helper (`endeavor connect`, not in a Slurm job)
+  replaces an older version's runtime that has no notebook open with its own
+  build's, and a refusal of an R notebook's path by a runtime from before R
+  notebooks ("must end in .jl") reaches the agent as why, and how to restart
+  it, from the front and from the app's relay (`client::Listener`). A kept
+  older runtime still isn't told to the app's agent up front, and a pathless
+  `new_notebook` in an R session on one makes a Pluto notebook (#239).
 - The status tool is `session_status` since 2026-10-10 (interface 2); it was
   `pluto_session_status`, a name that told agents every notebook is Pluto's.
   The old name ran the tool, unlisted, for one release (`mcp::RENAMED_TOOLS`);
@@ -74,7 +81,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   (`pluto_multi_expression`, `pluto_not_running`) keep their names: they are
   Pluto's rules and say so.
 - The app can put back what an agent's turn changed since 2026-10-16
-  (interface 10, Endeavor #79): `endeavor/restore_cells` sets the turn's edited
+  (interface 18, Endeavor #79): `endeavor/restore_cells` sets the turn's edited
   cells back to their earlier code and deletes the cells it added, all or
   nothing, and only if every cell still has the code the turn left. Nothing
   runs; the code is the user's, a cell whose code isn't what last ran shows
@@ -225,11 +232,17 @@ Next:
   in every tool that takes a cell id (Ember #82, interface 20). An agent can restart a notebook with
   `restart_notebook`, as the page's Restart does (#202, interface 21). The notes Ember shows under a cell's last run (`changed_in_place`, `settings_found`, `load_note`) reach the agent: as `warnings` on the run that made them, and as `notes` in `read_cell` (#207, interface 22). The tools also show an R notebook's `package_date`, and `preview_package_update` and
   `apply_package_update` move it, as the Packages tab's Update does: Ember's
-  `preview_date()`, then its `set_date()` (#201, interface 23). A waited run counts the dependents that reran with it as its own cells, so a dependent that failed makes it `errored`, and a run not waited for names the dependents it will rerun in `execution.will_run` (#192, interface 24). A package that isn't on CRAN or Bioconductor is named with an install call in a cell, as users do (Ember #79): the call doesn't run, and its cell gets a `from_lock` note, which reaches the agent like the others (#125, interface 25). R's adapter
+  `preview_date()`, then its `set_date()` (#201, interface 23). A day Package Manager hasn't published yet (today, early in the day in UTC) is previewed at the newest day it has, and the preview's `date` and message say which (#247). A waited run counts the dependents that reran with it as its own cells, so a dependent that failed makes it `errored`, and a run not waited for names the dependents it will rerun in `execution.will_run` (#192, interface 24). Code the agent already has isn't sent again: `add_cell`'s reply leaves out the code it was sent, and `read_cell` leaves out code that is what this session read or wrote within its last ten calls, with `code_unchanged` and `code_sha` (12 hex of its SHA-256) instead; `include_code=true` gets it anyway (interface 25). In a long analysis that text was about a tenth of the agent's context. A package that isn't on CRAN or Bioconductor is named with an install call in a cell, as users do (Ember #79): the call doesn't run, and its cell gets a `from_lock` note, which reaches the agent like the others (#125, interface 26). R's adapter
   names each run, as Pluto's does, and in autorun counts the cells downstream of
   the run's cells as part of it, since Ember queues each one as its parent's
   result comes in. So a run goes on, and `read_cell` waits for a dependent of the
-  agent's run, until those finish (#151; interface 12). A waited `submit_changes` with
+  agent's run, until those finish (#151; interface 12). That includes a cell that
+  read a name the run's cells dropped (a rename), which Ember reruns though the
+  graph no longer links it; the adapter names such cells to the core, for
+  `will_run` and the waited run's cells (#228). A disabled cell, or one
+  downstream of it, never reruns, so `will_run` and lazy mode's `stale_cells`
+  leave it out, and a read of it doesn't wait for the run: R's snapshot marks it `off`, and Pluto's tools hide
+  such cells (#232). A waited `submit_changes` with
   nothing staged reports the cells that ran while it waited, and `errored` if one failed (#171; interface 14).
   `allow_execution`'s run of the notebook is the agent's run too, so a read or a waited submit
   right after it waits for it, in both engines (#170; interface 15). A read whose
