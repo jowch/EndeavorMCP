@@ -266,6 +266,35 @@ output_text <- function(view) {
   cap_text(paste(parts, collapse = "\n"))
 }
 
+# knitr's inline-code pattern, as Ember matches it (text-cells.R), one line at a time.
+INLINE_SPAN <- "(?<!(^``))(?<!(\\n``))`r[ #]([^`]+)\\s*`"
+
+# A text cell's output: its prose without the `#'` prefixes, each `r expr` span replaced by
+# its value, as the page shows it. Spans stay as written while there are no values for this
+# code (not run yet, or edited since), so the prose still reads (#270).
+text_output <- function(v) {
+  lines <- strsplit(v$code %||% "", "\n", fixed = TRUE)[[1]]
+  out <- v$output
+  values <- if (!is.null(out) && identical(out$mime, "application/vnd.ember.inline") && !isTRUE(v$code_differs)) {
+    unlist(out$data$values)
+  }
+  k <- 0L
+  body <- vapply(lines, function(line) {
+    if (!grepl("^#+'", line)) return(line)
+    line <- sub("^#+'[ ]?", "", line)
+    m <- gregexpr(INLINE_SPAN, line, perl = TRUE)[[1]]
+    if (is.null(values) || m[[1]] == -1) return(line)
+    found <- regmatches(line, list(m))[[1]]
+    shown <- vapply(seq_along(found), function(i) {
+      k <<- k + 1L
+      if (k <= length(values)) values[[k]] else found[[i]]
+    }, character(1))
+    regmatches(line, list(m)) <- list(shown)
+    line
+  }, character(1), USE.NAMES = FALSE)
+  cap_text(paste(body, collapse = "\n"))
+}
+
 snapshot_cell <- function(v) {
   errored <- length(v$errors) > 0 || isTRUE(v$status %in% c("error", "interrupted"))
   runtime <- v$runtime %||% 0
@@ -289,8 +318,10 @@ snapshot_cell <- function(v) {
     e <- if (length(v$errors) > 0) v$errors[[1]] else list(kind = "interrupted", message = "The run was interrupted.")
     d$error <- structure_error(e)
     d$output <- d$error$msg
-  } else {
+  } else if (identical(v$kind, "code")) {
     d$output <- output_text(v)
+  } else {
+    d$output <- text_output(v)
   }
   d$notes <- I(cell_notes(v))
   d
