@@ -81,6 +81,15 @@ check("a missing package with no header fix: no fixes", is.null(d$fixes))
 d <- A$structure_error(list(kind = "error", message = "boom", fixes = "Do this"))
 check("another error keeps its fixes and reads as runtime", identical(d$kind, "runtime") && identical(unclass(d$fixes), "Do this"))
 
+# ---- cell_notes ----
+check("no notes: none", length(A$cell_notes(list())) == 0)
+n <- A$cell_notes(list(from_lock = c("mypkg", "", "other")))
+check("install calls that didn't run: one note naming their packages, and the agent's way to a newer version",
+      length(n) == 1 && startsWith(n, "from_lock::Install calls don't run in Ember: it installs mypkg, other from the notebook's lock") &&
+        grepl("call preview_package_update", n, fixed = TRUE))
+check("an install call that names no package: the note says packages",
+      grepl("it installs packages from", A$cell_notes(list(from_lock = "")), fixed = TRUE))
+
 # ---- snapshot_cell ----
 view <- function(...) modifyList(list(id = "c", code = "x <- 1", kind = "code", status = "success", errors = list(), runtime = 0.1, last_run = 100, disabled = FALSE, disabled_by = NA_character_), list(...))
 check("a cell that runs: not off", isFALSE(A$snapshot_cell(view())$off))
