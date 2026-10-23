@@ -296,7 +296,7 @@ snapshot_cell <- function(v) {
   d
 }
 
-# The notes Ember's page shows under a cell after its last run, worded as the
+# The notes Ember's page shows under a cell, from its last run or its code, worded as the
 # page words them (Ember's lang/english.json), each "kind::text" like a tool
 # warning (#207). `changed_in_place`: the run changed, by reference, a value
 # another cell defines, so the cells that read it didn't rerun.
