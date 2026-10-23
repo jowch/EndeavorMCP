@@ -446,6 +446,30 @@ fn an_r_notebook_through_the_runtime() {
         assert!(read["output"].as_str().unwrap().starts_with("Warning: careful"), "{read}");
     });
 
+    step("a text cell reads as its prose with its inline values, and a notebook with no packages previews as such (#270, #269)", || {
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let made = agent.ok("new_notebook", json!({ "path": "prose.R" }));
+        let (id, cell) = (made["notebook_id"].as_str().unwrap().to_owned(), made["cell_ids"][0].clone());
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "x <- 21" }));
+        let text = agent.ok("add_cell", json!({ "notebook_id": id, "code": "#' ## Result\n#'\n#' Twice is `r x * 2`, not `r x`.", "after_cell_id": cell }))["cell_id"].clone();
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        common::wait_for("the text cell's values", || agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": text }))["output"].as_str().is_some_and(|o| o.contains("42")));
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": text }));
+        assert_eq!(read["output"], "## Result\n\nTwice is 42, not 21.", "{read}");
+
+        let started = Instant::now();
+        let empty = loop {
+            let p = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2025-01-15" }));
+            if p["status"] != "fetching" {
+                break p;
+            }
+            assert!(started.elapsed() < Duration::from_secs(300), "the index never came: {p}");
+        };
+        assert!(empty["status"] == "ready" && empty["message"].as_str().unwrap().starts_with("The notebook has no packages yet"), "{empty}");
+        assert_eq!(empty.get("packages"), None, "{empty}");
+    });
+
     step("a run goes on through the dependents Ember queues: a read or a waited submit waits for them (#151) and says if one failed (#171)", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();
@@ -573,6 +597,10 @@ fn an_r_notebook_through_the_runtime() {
         assert!(bad, "a date that isn't a day is refused");
         let (refused, said) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2026-06-02" }));
         assert!(refused && said.to_string().contains("no_preview"), "{said}");
+
+        // At its own date nothing would change, and the notebook is seen to have packages (#269).
+        let same = preview(&mut agent, Some("2026-06-01"));
+        assert!(same["status"] == "ready" && same["message"].as_str().unwrap().starts_with("Nothing would change: every package"), "{same}");
 
         // Two years back, jsonlite was older: the preview says so, and nothing changes.
         let old = preview(&mut agent, Some("2024-06-03"));

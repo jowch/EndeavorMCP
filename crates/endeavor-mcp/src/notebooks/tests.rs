@@ -266,6 +266,13 @@ impl Engine {
                     return Ok(json!({ "date": date, "current_date": nb.package_date, "status": "failed", "changes": [],
                         "problems": [{ "kind": "index_unavailable", "package": null, "message": "no package index for 2000-01-01" }], "message": "no index" }));
                 }
+                // Nothing changes on the 16th, for a notebook with packages and for one with none
+                // yet (`packages`, #269); 2025-01-15 is the latter's.
+                if date == "2026-10-16" || date == "2025-01-15" {
+                    nb.previewed = Some(date.clone());
+                    return Ok(json!({ "date": date, "asked": date, "current_date": nb.package_date, "status": "ready", "changes": [], "problems": [], "message": null,
+                        "packages": if date == "2025-01-15" { 0 } else { 1 } }));
+                }
                 // The 19th isn't published yet, so its preview is of the 18th (#247).
                 let asked = date.clone();
                 let date = if date == "2026-10-19" { "2026-10-18".to_owned() } else { date };
@@ -3149,6 +3156,16 @@ fn an_r_notebooks_package_date_is_shown_previewed_and_moved() {
     assert_eq!((&earlier["status"], &earlier["date"], earlier.get("asked")), (&json!("ready"), &json!("2026-10-18"), None), "{earlier}");
     assert!(earlier["message"].as_str().unwrap().starts_with("2026-10-19 isn't published yet, so this is the newest day that is, 2026-10-18."), "{earlier}");
     assert!(!preview["message"].as_str().unwrap().contains("published"), "{preview}");
+
+    // Nothing would change. With no packages yet that is said as such, with what applying still
+    // does, rather than as every package being at its version already (#269).
+    let same = s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2026-10-16" })).unwrap();
+    assert!(same["message"].as_str().unwrap().starts_with("Nothing would change: every package is already at its version"), "{same}");
+    assert_eq!(same.get("packages"), None, "{same}");
+    let empty = s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2025-01-15" })).unwrap();
+    let message = empty["message"].as_str().unwrap();
+    assert!(message.starts_with("The notebook has no packages yet, so none would change.") && message.contains("still moves the notebook's date") && message.contains("every package added later"), "{empty}");
+    assert_eq!(empty.get("packages"), None, "{empty}");
 
     // One package, pinned to an older version: the date Ember finds for it, which moves the
     // others too, and the message says to tell the user so (#266).

@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "download_step", "structure_error", "snapshot_cell", "output_text", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "update_pending", "update_blocked")
+wanted <- c("%||%", "package_step", "download_step", "structure_error", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "update_pending", "update_blocked")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -111,6 +111,23 @@ check("a cell that runs: not off", isFALSE(A$snapshot_cell(view())$off))
 check("a disabled cell: off", isTRUE(A$snapshot_cell(view(disabled = TRUE))$off))
 check("a cell downstream of a disabled one: off, though it ran before", isTRUE(A$snapshot_cell(view(disabled_by = "d"))$off))
 check("an Ember without disabled_by: not off", isFALSE(A$snapshot_cell(view(disabled_by = NULL))$off))
+
+# A text cell's output is its prose with the inline values put in, as the page shows it (#270).
+prose <- "#' ## Results\n#'\n#' The slope is `r round(b, 3)` over `r n` plates.\n#' Write `` `r x` `` to show a value."
+inline <- function(...) list(mime = "application/vnd.ember.inline", data = list(values = list(...)), text = "")
+text_view <- function(...) view(kind = "markdown", code = prose, ...)
+# Ember counts a span inside double backticks too, so the page shows a value there.
+check("a text cell that ran: its prose with each value in place of its span",
+      identical(A$snapshot_cell(text_view(output = inline("0.409", "72", "1")))$output,
+                "## Results\n\nThe slope is 0.409 over 72 plates.\nWrite `` 1 `` to show a value."))
+check("  and it is still a markdown cell", isTRUE(A$snapshot_cell(text_view(output = inline("0.409", "72", "1")))$markdown))
+check("a text cell not run yet: its prose with the spans as written",
+      identical(A$snapshot_cell(text_view())$output,
+                "## Results\n\nThe slope is `r round(b, 3)` over `r n` plates.\nWrite `` `r x` `` to show a value."))
+check("a text cell edited since its values were made: the spans as written, not old values",
+      grepl("`r round(b, 3)`", A$snapshot_cell(text_view(output = inline("0.409", "72", "1"), code_differs = TRUE))$output, fixed = TRUE))
+check("a text cell with no spans: its prose",
+      identical(A$snapshot_cell(view(kind = "markdown", code = "#' Just words."))$output, "Just words."))
 
 # ---- update_proposal ----
 ready <- function(name, version) list(status = "ready", date = "2026-04-23", update = list(name = name, version = version))
