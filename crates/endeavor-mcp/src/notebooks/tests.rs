@@ -1717,7 +1717,7 @@ fn a_run_lists_a_staged_cell_it_needs_that_the_engine_ran_first() {
     // As Ember does (#187): y needs x, whose staged edit Ember runs first. The
     // receipt lists x, with its new output, and x is no longer staged.
     let s = setup();
-    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1")]);
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1"), ("33333333-3333-3333-3333-333333333333", "z = 1 # wide table"), ("44444444-4444-4444-4444-444444444444", "w = z # wide table")]);
     s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
     s.seconds(1.0);
     s.read("", NB, X);
@@ -1729,6 +1729,13 @@ fn a_run_lists_a_staged_cell_it_needs_that_the_engine_ran_first() {
     let changed: Vec<_> = ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| (c["cell_id"].clone(), c["output_summary"].clone())).collect();
     assert_eq!(changed, vec![(json!(X), json!("ran x = 5")), (json!(Y), json!("ran y = x + 1"))]);
     assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {X}: cells this run needs that were edited or stale since they last ran.")]));
+    // A stale cell it needs that the agent didn't edit only ran along: its output's text is cut short.
+    let (z, w) = ("33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444");
+    s.seconds(1.0);
+    s.engine.with(NB, |nb| nb.runs_first = vec![z.into()]);
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": w, "wait_for_completion": true })).unwrap();
+    let text = |cell: &str| ran["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == cell).unwrap_or_else(|| panic!("{ran}"))["output_text"].as_str().unwrap().to_owned();
+    assert!(text(z).len() < 250 && text(w).len() == 600, "{ran}");
 
     // An engine that leaves it staged (Pluto): the receipt is the target's alone.
     s.seconds(1.0);
