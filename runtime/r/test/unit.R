@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "structure_error")
+wanted <- c("%||%", "package_step", "structure_error", "date_proposal")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -80,6 +80,16 @@ d <- A$structure_error(list(kind = "missing_package", message = "there is no pac
 check("a missing package with no header fix: no fixes", is.null(d$fixes))
 d <- A$structure_error(list(kind = "error", message = "boom", fixes = "Do this"))
 check("another error keeps its fixes and reads as runtime", identical(d$kind, "runtime") && identical(unclass(d$fixes), "Do this"))
+
+# ---- date_proposal ----
+# A preview of a day not published yet moved back to the newest that is (#247).
+moved <- list(date = "2026-10-22", asked = "2026-10-23", status = "ready")
+check("a preview moved back is found by the day asked for", identical(A$date_proposal(moved, "2026-10-23"), moved))
+check("  and by the day it moved to", identical(A$date_proposal(moved, "2026-10-22"), moved))
+check("  but not by another day", is.null(A$date_proposal(moved, "2026-10-21")))
+check("a proposal with no `asked` (an older Ember) is found by its date",
+      identical(A$date_proposal(list(date = "2026-10-22"), "2026-10-22"), list(date = "2026-10-22")))
+check("no proposal: NULL", is.null(A$date_proposal(NULL, "2026-10-22")))
 
 cat(sprintf("\n%d passed, %d failed\n", passed, failed))
 if (failed > 0) quit(status = 1)
