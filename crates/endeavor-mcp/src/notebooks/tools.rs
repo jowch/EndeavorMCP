@@ -1680,7 +1680,9 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
         "staged"
     } else {
         let cells: Vec<_> = cells_run.iter().filter_map(|id| nb.cells.get(id)).collect();
-        if cells.iter().any(|c| c.errored) {
+        // A cell still to run carries its last result's error until it runs, so
+        // that error isn't this run's: a run waiting at a prompt is still running.
+        if cells.iter().any(|c| c.errored && !c.running && !c.queued) {
             "errored"
         } else if cells.iter().any(|c| c.running || c.queued) {
             "running"
