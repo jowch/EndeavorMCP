@@ -589,6 +589,38 @@ fn an_r_notebook_through_the_runtime() {
         assert!(again["changes"].as_array().unwrap().iter().any(|c| c["name"] == "base64enc"), "{again}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "the refused apply moved nothing");
 
+        // One package pinned to an older version (#266): Ember finds the date, the last day jsonlite
+        // 1.8.8 was current, and nothing changes yet. A version CRAN never released has no date,
+        // and a package that isn't in the notebook is refused.
+        let pin = |agent: &mut Agent, version: Option<&str>| {
+            let mut args = json!({ "notebook_id": id, "package": "jsonlite" });
+            if let Some(version) = version {
+                args["version"] = json!(version);
+            }
+            let started = Instant::now();
+            loop {
+                let p = agent.ok("preview_package_update", args.clone());
+                if p["status"] != "fetching" {
+                    return p;
+                }
+                assert!(started.elapsed() < Duration::from_secs(300), "the release dates never came: {p}");
+            }
+        };
+        let pinned = pin(&mut agent, Some("1.8.8"));
+        assert_eq!(pinned["status"], "ready", "{pinned}");
+        let day = pinned["date"].as_str().unwrap();
+        assert!(("2023-12-04".."2024-10-01").contains(&day), "jsonlite 1.8.8 was current then: {pinned}");
+        assert!(pinned["changes"].as_array().unwrap().iter().any(|c| c["name"] == "jsonlite" && c["to"] == "1.8.8"), "{pinned}");
+        assert!(pinned["message"].as_str().unwrap().contains("moves every package"), "{pinned}");
+        // No version is CRAN's newest, not the pin just previewed: the notebook already has it.
+        let newest = pin(&mut agent, None);
+        assert!(newest["status"] == "failed" && newest["reason"].as_str().unwrap().contains("already at"), "{newest}");
+        let never = pin(&mut agent, Some("0.0.1"));
+        assert_eq!(never["status"], "failed", "{never}");
+        let (refused, said) = agent.call("preview_package_update", json!({ "notebook_id": id, "package": "notapackage" }));
+        assert!(refused && said.to_string().contains("not_updatable"), "{said}");
+        assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "a package's preview changes nothing");
+
         // A day not published yet is previewed at the newest one that is (#247). Tomorrow never is.
         let ahead = tomorrow();
         let unpublished = preview(&mut agent, Some(&ahead));

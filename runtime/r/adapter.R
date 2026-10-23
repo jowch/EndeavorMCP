@@ -694,29 +694,66 @@ date_proposal <- function(prop, date) {
 # first, so it is waited for until it is ready or failed, or `timeout` passes
 # (then `status` is still "fetching"). `date` is the day it would move to,
 # which is earlier than `asked` when that day isn't published yet.
-preview_packages <- function(rec, date, timeout) {
+# With `package`, the date is Ember's for putting that package at `version`
+# (CRAN's newest when NULL): `preview_update()`, the Packages tab's row
+# Update (#266). The other packages move with the date, as far as they must.
+preview_packages <- function(rec, date, timeout, package = NULL, version = NULL) {
+  if (!is.null(package)) return(preview_package(rec, package, version, timeout))
   date <- date_param(date)
   preview_date(rec$nb, date, wait = FALSE)
-  deadline <- Sys.time() + as.numeric(timeout %||% 60)
   current <- function() {
     prop <- date_proposal(package_status(rec$nb)$proposal, date)
-    if (identical(prop$kind %||% "date", "date")) prop
+    if (identical(prop$kind %||% "date", "date") && is.null(prop$update)) prop
   }
+  wait_preview(rec, current, date, timeout)
+}
+
+# The proposal `current()` finds, waited for until it is ready or failed or
+# `timeout` passes, as the result preview_package_update returns.
+wait_preview <- function(rec, current, asked, timeout) {
+  deadline <- Sys.time() + as.numeric(timeout %||% 60)
   promise(function(resolve, reject) {
     check <- function() {
       prop <- if (registered(rec)) current()
       done <- !is.null(prop) && prop$status %in% c("ready", "failed")
       if (!done && registered(rec) && Sys.time() < deadline) return(later::later(check, 0.1))
-      status <- if (is.null(prop)) "fetching" else prop$status
-      to <- prop$date %||% date
+      # A package's update waits for CRAN's release dates first ("dates").
+      status <- if (is.null(prop) || !prop$status %in% c("ready", "failed")) "fetching" else prop$status
+      to <- if (is.null(prop) || is.na(prop$date)) asked else prop$date
       # What the agent was shown, which the apply must match (set_package_date).
       rec$previewed <- if (identical(status, "ready")) list(date = to, changes = to_json(rows(prop$changes)))
       resolve(list(
-        date = to, asked = date, current_date = notebook_state(rec$nb)$file$header$snapshot,
+        date = to, asked = asked, current_date = notebook_state(rec$nb)$file$header$snapshot,
         status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message))
     }
     check()
   })
+}
+
+# The date for one package (`preview_update()`), previewed. A call again for
+# the same package and version, while its preview is still being made or is
+# ready, waits on that one rather than starting over.
+preview_package <- function(rec, package, version, timeout) {
+  if (!is.character(package) || length(package) != 1 || !nzchar(package)) {
+    argument_error("invalid_argument", "package must be a package name")
+  }
+  if (!is.null(version) && (!is.character(version) || length(version) != 1 || !nzchar(version))) {
+    argument_error("invalid_argument", "version must be a version, such as \"1.1.2\"")
+  }
+  mine <- function(prop) {
+    # Ember keeps the asked version, NULL for CRAN's newest, so a pin and "the newest" stay apart.
+    !is.null(prop$update) && identical(prop$update$name, package) && identical(prop$update$version, version)
+  }
+  current <- function() {
+    prop <- package_status(rec$nb)$proposal
+    if (mine(prop)) prop
+  }
+  prop <- current()
+  if (is.null(prop) || identical(prop$status, "failed")) {
+    tryCatch(preview_update(rec$nb, package, version, wait = FALSE),
+             ember_refused = function(e) argument_error("not_updatable", conditionMessage(e)))
+  }
+  wait_preview(rec, current, NA_character_, timeout)
 }
 
 # Ember's set_date(): apply the preview for `date`, refused unless it is
@@ -869,7 +906,7 @@ adapter_call <- function(method, params) {
     run = run(rec, unlist(params$cells) %||% character(), isTRUE(params$wait), params$timeout),
     interrupt = interrupt(rec),
     restart = restart(rec),
-    preview_packages = preview_packages(rec, params$date, params$timeout),
+    preview_packages = preview_packages(rec, params$date, params$timeout, params$package, params$version),
     set_package_date = set_package_date(rec, params$date),
     approve_install = approve(rec),
     allow_execution = allow(rec, isTRUE(params$run)),

@@ -1516,15 +1516,28 @@ impl Call<'_> {
     /// from (#201): what would change, with nothing changed yet. Without `date` it is today, the
     /// page's "Update" (the newest packages). Fetching that date's index can take a while, so it
     /// is waited for within the call. A day not published yet is previewed at the newest day that
-    /// is, and the result's `date` is that day.
+    /// is, and the result's `date` is that day. With `package` (and `version`, else CRAN's newest),
+    /// the date is Ember's for that package (`preview_update`, #266): the first day a newer
+    /// version was current, or the last day an older one was, so the others move as little as
+    /// they can. Every package moves with the date.
     fn preview_package_update(&self) -> Result<Value, String> {
         let nb = self.r_notebook()?;
-        let date = self.args.get("date").cloned().unwrap_or(Value::Null);
+        let arg = |name: &str| self.args.get(name).cloned().unwrap_or(Value::Null);
+        let (date, package, version) = (arg("date"), arg("package"), arg("version"));
         if !date.is_null() && !date.is_string() {
             return Err(argument_error("invalid_argument::date must be a day as YYYY-MM-DD"));
         }
+        if !package.is_null() && !package.is_string() || !version.is_null() && !version.is_string() {
+            return Err(argument_error("invalid_argument::package and version must be strings, such as \"dplyr\" and \"1.1.2\""));
+        }
+        if !version.is_null() && package.is_null() {
+            return Err(argument_error("invalid_argument::version needs package: the package to put at that version"));
+        }
+        if !date.is_null() && !package.is_null() {
+            return Err(argument_error("invalid_argument::Give date or package, not both: a package's version decides the date"));
+        }
         let timeout = self.run_wait().saturating_sub(Duration::from_secs(1)).as_secs_f64();
-        let mut result = self.nbs.call("preview_packages", json!({ "notebook_id": nb.id, "date": date, "timeout": timeout }))?;
+        let mut result = self.nbs.call("preview_packages", json!({ "notebook_id": nb.id, "date": date, "package": package, "version": version, "timeout": timeout }))?;
         let reason = result["message"].take();
         if reason.is_string() {
             result["reason"] = reason;
@@ -1535,8 +1548,11 @@ impl Call<'_> {
         let none = result["changes"].as_array().is_none_or(Vec::is_empty);
         let said = match result["status"].as_str() {
             Some("ready") if none => "Nothing would change: every package is already at its version for this date.",
+            Some("ready") if package.is_string() => "Nothing has changed yet. This date moves every package, not only this one: tell the user what else would change; apply_package_update with this date applies it.",
             Some("ready") => "Nothing has changed yet. Tell the user what would change; apply_package_update with this date applies it.",
+            Some("failed") if package.is_string() => "No package date puts this package at that version, and the notebook is unchanged: `reason` or `problems` says why.",
             Some("failed") => "This date can't be used, and the notebook is unchanged: `problems` says why.",
+            _ if package.is_string() => "The date for this package is still being worked out. Call again with the same package and version to wait for it.",
             _ => "The package index for this date is still being fetched. Call again with the same date to wait for it.",
         };
         result["message"] = json!(match (earlier, result["status"].as_str()) {
