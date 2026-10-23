@@ -330,7 +330,9 @@ cell_notes <- function(v) {
 # as running, and `read_cell` waits and tells the agent what is going on.
 # `packages` are the ones the cells wait for, `seconds` how long since this
 # adapter first saw the work, and `last_line` the installer's last line, or
-# the package it is on.
+# the package it is on. While installing, `source_builds` names the packages
+# ("name version") that build from source for want of a binary for this R
+# (Ember #19, the target's `no_binary`), when there are any.
 package_step <- function(rec, snap, state) {
   # A cell that isn't queued may name a package that isn't installed; only a run makes it wait.
   waits <- unique(unlist(lapply(snap$cells, function(c) if (isTRUE(c$queued)) c$waiting_for), use.names = FALSE))
@@ -349,8 +351,11 @@ package_step <- function(rec, snap, state) {
   lines <- lines[nzchar(lines)]
   last <- if (length(lines) > 0) utils::tail(lines, 1) else if (length(progress$current) == 1 && !is.na(progress$current)) paste("installing", progress$current) else NULL
   if (!is.null(last)) last <- substr(sub("(\\w+://)[^/[:space:]@]+@", "\\1", last), 1, 300)
-  list(step = step, packages = I(sort(as.character(waits))), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
-       last_line = last)
+  out <- list(step = step, packages = I(sort(as.character(waits))), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
+              last_line = last)
+  source_builds <- lib$no_binary
+  if (installing && length(source_builds) > 0) out$source_builds <- I(paste(names(source_builds), unname(source_builds)))
+  out
 }
 
 snapshot <- function(rec) {

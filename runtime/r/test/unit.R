@@ -33,8 +33,8 @@ check <- function(what, ok) {
 
 cell <- function(queued = FALSE, waiting_for = character()) list(queued = queued, waiting_for = waiting_for)
 snap <- function(...) list(cells = list(...))
-state <- function(status = "ready", progress = NULL, log = character()) {
-  list(packages = list(target = list(status = status, progress = progress, log = log)))
+state <- function(status = "ready", progress = NULL, log = character(), no_binary = NULL) {
+  list(packages = list(target = list(status = status, progress = progress, log = log, no_binary = no_binary)))
 }
 to_json <- function(x) as.character(jsonlite::toJSON(x, auto_unbox = TRUE, null = "null"))
 
@@ -65,6 +65,10 @@ check("no log yet: last line is the package being installed", identical(p$last_l
 p <- A$package_step(rec, snap(cell(TRUE, "dplyr")), state("installing", log = c("", "fetching https://user:tok@example.org/x.tar.gz", "  ")))
 check("last line of the log, with a URL's user and token taken out",
       identical(p$last_line, "fetching https://example.org/x.tar.gz"))
+check("  and nothing builds from source", is.null(p$source_builds))
+p <- A$package_step(rec, snap(cell(TRUE, "dplyr")), state("installing", no_binary = c(cli = "3.6.2", rlang = "1.1.4")))
+check("installing with packages that have no binary: source_builds names them with their versions",
+      identical(unclass(p$source_builds), c("cli 3.6.2", "rlang 1.1.4")))
 p <- A$package_step(rec, snap(cell(TRUE, "dplyr")), state("checking"))
 check("checking", identical(p$step, "checking"))
 check("the work ending clears the first sighting",
