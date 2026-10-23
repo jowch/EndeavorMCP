@@ -575,7 +575,7 @@ impl Call<'_> {
         // after the wait: some may have finished meanwhile.
         let still_running: Vec<String> = nb.order.iter().filter(|id| going.contains(id) && nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect();
         // A run waiting on the user's OK for a download didn't run out of time: the message says what it waits for.
-        if !still_running.is_empty() && !nb.asking() {
+        if !still_running.is_empty() && !nb.held() {
             warnings.push(format!("execution_timeout::The run was still going when the wait ended after at most {WAIT_SECONDS}s"));
         }
         let status = match status {
@@ -755,7 +755,7 @@ impl Call<'_> {
         while self.nbs.own_run_going(self.owner, &nb) {
             // An install waiting for the user's OK doesn't go on by itself: the run is still
             // going, but nothing changes until approve_install.
-            if Instant::now() >= deadline || (nb.asking() && !nb.cells.values().any(|c| c.running)) {
+            if Instant::now() >= deadline || nb.held() {
                 going = nb.order.iter().filter(|id| busy(&nb, id)).cloned().collect();
                 break;
             }
@@ -782,12 +782,13 @@ impl Call<'_> {
         // this session started is running or will run: an agent that reads it
         // at once reads it again, each read a whole request of the agent's
         // context. The user's own run, or another session's, isn't waited for,
-        // nor a queued cell while the install waits for the user's OK: only
-        // approve_install moves it on. (Asked on every read, so that a run
-        // seen to end is forgotten.)
+        // nor a queued cell once the install waits for the user's OK with
+        // nothing running (`held`): only approve_install moves it on. Cells that
+        // don't need the held packages still run, and are waited for. (Asked
+        // on every read, so that a run seen to end is forgotten.)
         let waits = |nb: &Snapshot| {
             let own = self.nbs.own_run_going(self.owner, nb);
-            nb.cells.get(&cell).is_some_and(|c| (c.running && own) || (c.queued && !nb.asking() && (nb.installing() || own))) || (own && !nb.asking() && self.nbs.own_run_will_run(self.owner, nb, &cell))
+            nb.cells.get(&cell).is_some_and(|c| (c.running && own) || (c.queued && !nb.held() && (nb.installing() || own))) || (own && !nb.held() && self.nbs.own_run_will_run(self.owner, nb, &cell))
         };
         let waited = Instant::now();
         let deadline = waited + self.wait_left().saturating_sub(Duration::from_secs(1));

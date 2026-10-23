@@ -2839,6 +2839,26 @@ fn an_r_install_waiting_for_an_ok_says_to_ask_the_user_and_nothing_waits_for_it(
     assert!(again["message"].as_str().unwrap().contains("approve_install only after they say yes"), "{again}");
     assert_eq!((&again["execution"]["status"], &again["warnings"]), (&json!("running"), &json!([])), "it didn't run out of time: {again}");
 
+    // Cells that don't need the held packages still run while Ember asks. While one runs, a read
+    // of a queued cell of the session's run waits, as with no install, and returns once it ran.
+    ember.with(R, |nb| nb.cells[0].running = true);
+    let engine = ember.clone();
+    let now = *s.clock.lock().unwrap();
+    let finish = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(600));
+        engine.with(R, |nb| {
+            nb.cells[0].running = false;
+            nb.cells[1].queued = false;
+            nb.cells[1].last_run = now;
+            nb.cells[1].output = "done".into();
+        });
+    });
+    let began = Instant::now();
+    let read = s.call("9", "read_cell", json!({ "notebook_id": R, "cell_id": Y })).unwrap();
+    finish.join().unwrap();
+    assert!(began.elapsed() >= Duration::from_millis(500), "it waited while a cell ran: {read}");
+    assert_eq!((&read["queued"], &read["output"]), (&json!(false), &json!("done")), "{read}");
+
     // The OK installs the library; asked again, nothing waits for one.
     let approved = s.call("9", "approve_install", json!({ "notebook_id": R })).unwrap();
     assert!(approved["approved"] == true && approved["message"].as_str().unwrap().contains("installs now"), "{approved}");
