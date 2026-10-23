@@ -618,5 +618,20 @@
       "type": "object"
     },
     "name": "apply_package_update"
+  },
+  {
+    "description": "R notebooks only. Say yes to a large download: an install whose Bioconductor annotation and experiment-data packages add up to more than 500 MB (Ember's default limit) stops before downloading anything, and its cells wait, queued, with `packages.step` `asking` and `packages.download` listing the packages and their sizes. Call it only after the user said yes to that download; never on your own. Refused with `nothing_to_approve` when no install is waiting for an OK, or the notebook isn't allowed to run yet. The library then installs and the queued cells run.",
+    "inputSchema": {
+      "properties": {
+        "notebook_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "notebook_id"
+      ],
+      "type": "object"
+    },
+    "name": "approve_install"
   }
 ]
