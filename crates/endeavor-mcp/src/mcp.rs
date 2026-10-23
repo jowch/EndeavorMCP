@@ -79,10 +79,10 @@ pub fn is_tool(name: &str) -> bool {
 
 /// Tools that change the notebook or run code, here or on the server. `interrupt_notebook` only
 /// stops a run, so no mode asks first, but plan mode refuses it and it stays in the session's notebook.
-pub const WRITE_TOOLS: [&str; 15] = [
+pub const WRITE_TOOLS: [&str; 16] = [
     "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
     "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell", "interrupt_notebook",
-    "restart_notebook",
+    "answer_prompt", "restart_notebook",
     "apply_package_update",
 ];
 
@@ -98,6 +98,8 @@ pub fn runs_code(tool: &str, arguments: &Value) -> bool {
         "apply_package_update" => true,
         // A shell command on a session's server.
         "run_shell" => true,
+        // An answer lets a waiting cell go on, and may say yes to a download or an overwrite.
+        "answer_prompt" => true,
         "add_cell" | "edit_cell" => arguments["run_after"].as_bool() == Some(true),
         // Opening a notebook runs nothing unless asked to.
         "open_notebook" => arguments["run_notebook"].as_bool() == Some(true),
@@ -1258,7 +1260,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (25, "01fd3616dba79573"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (26, "61a6d489291f8103"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1305,7 +1307,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (25, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (26, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

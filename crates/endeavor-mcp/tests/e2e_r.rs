@@ -413,6 +413,39 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
     });
 
+    step("readline() and menu() in a cell wait for answer_prompt, and an interrupt ends the wait (#261)", || {
+        agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
+        let asks = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "who <- readline(\"Name? \")", "after_cell_id": B }))["cell_id"].clone();
+        let began = Instant::now();
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": asks, "wait_for_completion": true }));
+        assert!(began.elapsed() < Duration::from_secs(30), "the wait ended at the prompt: {ran}");
+        assert_eq!(ran["waiting_for_input"], json!({ "cell_id": asks, "prompt": "Name? ", "choices": [] }), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        assert_eq!((&read["running"], &read["waiting_for_input"]["prompt"]), (&json!(true), &json!("Name? ")), "{read}");
+        let answered = agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": asks, "text": "Ada", "wait_for_completion": true }));
+        assert_eq!(answered["execution"]["status"], "completed", "{answered}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        assert!(read["running"] == false && read.get("waiting_for_input").is_none() && read["output"].as_str().unwrap().contains("Ada"), "{read}");
+
+        let picks = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "colour <- c(\"red\", \"blue\")[menu(c(\"red\", \"blue\"), title = \"Colour?\")]", "after_cell_id": asks }))["cell_id"].clone();
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": picks, "wait_for_completion": true }));
+        assert_eq!(ran["waiting_for_input"], json!({ "cell_id": picks, "prompt": "Selection: ", "choices": ["red", "blue"] }), "{ran}");
+        agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": picks, "text": "2", "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": picks }));
+        assert!(read["errored"] == false && read["output"].as_str().unwrap().contains("blue"), "{read}");
+
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": asks, "code": "who <- readline(\"Again? \")" }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": asks, "wait_for_completion": true }));
+        assert_eq!(ran["waiting_for_input"]["prompt"], "Again? ", "{ran}");
+        let stopped = agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        assert_eq!((&stopped["stopped"], &stopped["still_running"]), (&json!([asks]), &json!([])), "{stopped}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        assert!(read["errored"] == true && read.get("waiting_for_input").is_none(), "{read}");
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": picks }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+    });
+
     step("restart_notebook starts R fresh: a slow cell ends, and every cell is not run (#202)", || {
         agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
         let slow = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow <- { Sys.sleep(600); 1 }", "after_cell_id": B }))["cell_id"].clone();

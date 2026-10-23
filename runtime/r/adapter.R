@@ -15,8 +15,8 @@
 #
 # The methods and their replies are Adapter.jl's (`adapter_call`): status,
 # open, new, and for a notebook_id snapshot, graph, shutdown, apply, run,
-# interrupt, restart, allow_execution, move, render_text, render_png and
-# validate. Errors read as Julia shows them, which the core parses:
+# interrupt, answer, restart, allow_execution, move, render_text, render_png
+# and validate. Errors read as Julia shows them, which the core parses:
 # `ArgumentError: kind::message`, or `KeyError: key "kind::message" not found`
 # for a notebook or cell that isn't there; any other R error is
 # `r_error::message`.
@@ -293,6 +293,11 @@ snapshot_cell <- function(v) {
     d$output <- output_text(v)
   }
   d$notes <- I(cell_notes(v))
+  # A running cell waiting on `readline()`, `menu()` and the like (Ember #186):
+  # what the prompt printed and, for `menu()`, its choices. `answer` replies.
+  if (isTRUE(v$running) && !is.null(v$prompt)) {
+    d$prompt <- list(text = v$prompt$text %||% "", choices = I(as.character(unlist(v$prompt$choices))))
+  }
   d
 }
 
@@ -519,6 +524,14 @@ old_readers <- function(rec, ids, cells = ids) {
   Filter(function(cid) !is.null(state$results[[cid]]) && !(cid %in% names(g$off)), setdiff(out, cells))
 }
 
+# The cell of a run of `ids` (`run_cells_of`) waiting on a prompt, or NULL.
+# Nothing runs until it is answered or interrupted.
+prompted <- function(rec, ids, readers = character()) {
+  if (!registered(rec)) return(NULL)
+  running <- notebook_state(rec$nb)$worker$running
+  if (!is.null(running$prompt) && running$cell %in% run_cells_of(rec, ids, readers)) running$cell
+}
+
 # A run is over when none of its cells, or of the cells that depend on them
 # (`run_cells_of`), is left, its R ended, or the notebook shut down.
 run_over <- function(rec, ids, readers = character()) {
@@ -542,8 +555,10 @@ watch_run <- function(rec, cells, ids, readers = character(), run = run_id()) {
 # Run cells (Ember runs their unrun ancestors first). Not accepted in safe
 # preview or for a read-only notebook: Ember would allow execution on a run,
 # Pluto (and the user's approval) wants allow_execution for that. With
-# `wait`, a promise of the reply once the run is over or `timeout` passes;
-# none is Pluto's cleanup after a delete, which Ember doesn't need.
+# `wait`, a promise of the reply once the run is over, a cell of it waits on
+# a prompt (then `prompted` names it), or `timeout` passes; the cells still to
+# run are then `timed_out`. No cells is Pluto's cleanup after a delete, which
+# Ember doesn't need.
 run <- function(rec, cells, wait, timeout) {
   cells <- vapply(cells, function(c) check_cell(rec, c), character(1), USE.NAMES = FALSE)
   state <- notebook_state(rec$nb)
@@ -573,7 +588,8 @@ run <- function(rec, cells, wait, timeout) {
   promise(function(resolve, reject) {
     check <- function() {
       over <- run_over(rec, ids, readers)
-      if (!over && Sys.time() < deadline) return(later::later(check, 0.05))
+      asks <- if (!over) prompted(rec, ids, readers)
+      if (!over && is.null(asks) && Sys.time() < deadline) return(later::later(check, 0.05))
       if (!registered(rec)) {
         result$completed <- I(cells)
         result$timed_out <- I(character())
@@ -586,6 +602,7 @@ run <- function(rec, cells, wait, timeout) {
       result$completed <- I(setdiff(cells, unfinished(state, cells)))
       result$timed_out <- I(if (over) unfinished(state, cells) else unfinished(state, names(state$cells)))
       if (!over) result$run <- watch_run(rec, cells, ids, readers)
+      if (!is.null(asks)) result$prompted <- asks
       resolve(result)
     }
     check()
@@ -714,6 +731,16 @@ interrupt <- function(rec) {
   list(interrupted = busy)
 }
 
+# Answer the prompt `cell` waits on (Ember's answer_input()), which lets it go on.
+answer <- function(rec, cell, text) {
+  if (!is.character(text) || length(text) != 1 || is.na(text)) argument_error("invalid_argument", "text must be a string")
+  answer_input <- get0("answer_input", envir = asNamespace("ember"), mode = "function")
+  if (is.null(answer_input)) argument_error("no_prompt", "This Ember can't answer prompts; update it")
+  tryCatch(answer_input(rec$nb, text, cell = cell),
+           error = function(e) argument_error("no_prompt", sprintf("Cell %s isn't waiting for input (%s)", cell, sub("^ember: ", "", conditionMessage(e)))))
+  list(answered = TRUE)
+}
+
 # ---- Opening, moving, shutting down ------------------------------------------
 
 open_path <- function(path, run_all) {
@@ -823,6 +850,7 @@ adapter_call <- function(method, params) {
     apply = apply_ops(rec, params$ops),
     run = run(rec, unlist(params$cells) %||% character(), isTRUE(params$wait), params$timeout),
     interrupt = interrupt(rec),
+    answer = answer(rec, check_cell(rec, params$cell_id), params$text),
     restart = restart(rec),
     preview_packages = preview_packages(rec, params$date, params$timeout),
     set_package_date = set_package_date(rec, params$date),
