@@ -408,7 +408,11 @@ impl Engine {
                 }
                 Ok(reply)
             }
-            "render_text" => Ok(json!({ "text": if { let at = find(nb, &params["cell_id"]); nb.cells[at].code.contains("table") } { json!("n\tmean\n3\t2.5") } else { Value::Null } })),
+            "render_text" => Ok({
+                let at = find(nb, &params["cell_id"]);
+                let code = &nb.cells[at].code;
+                json!({ "text": if code.contains("wide table") { json!("n\t".repeat(300)) } else if code.contains("table") { json!("n\tmean\n3\t2.5") } else { Value::Null } })
+            }),
             "render_png" => Ok({
                 let at = find(nb, &params["cell_id"]);
                 let code = &nb.cells[at].code;
@@ -758,6 +762,33 @@ fn a_run_names_the_dependents_it_reruns_and_a_waited_one_reports_them() {
     s.seconds(1.0);
     let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 4", "run_after": true })).unwrap();
     assert_eq!(edited["execution"].get("will_run"), None, "{edited}");
+}
+
+#[test]
+fn a_waited_run_cuts_a_dependents_output_text_shorter_than_its_own_cells() {
+    // The agent ran X; Y reran because it reads x. Y's table is the agent's to read if it wants it.
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1 # wide table"), (Y, "y = x # wide table")]);
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.engine.with(NB, |nb| nb.autorun = true);
+    s.seconds(1.0);
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 2 # wide table");
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    let text = |cell: &str| ran["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == cell).unwrap_or_else(|| panic!("{ran}"))["output_text"].as_str().unwrap().to_owned();
+    assert_eq!(text(X), "n\t".repeat(300), "the run's own cell, in full up to 2000 bytes");
+    assert!(text(Y).starts_with(&"n\t".repeat(100)) && text(Y).ends_with("… (cut; read_cell shows more)") && text(Y).len() < 250, "{}", text(Y));
+    // A dependent that fails keeps all of its output's text, and its error.
+    s.seconds(1.0);
+    s.read("", NB, Y);
+    s.edit("", NB, Y, "y = error(x) # wide table");
+    s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.seconds(1.0);
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 3 # wide table");
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    let y = ran["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == Y).unwrap_or_else(|| panic!("{ran}")).clone();
+    assert!(y.get("error").is_some() && y.get("output_text").is_none_or(|text| *text == json!("n\t".repeat(300))), "{y}");
 }
 
 #[test]

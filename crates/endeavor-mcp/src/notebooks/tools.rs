@@ -44,6 +44,8 @@ pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has
 /// How much of each output's text a change's receipt carries; `read_cell` has
 /// the rest.
 const RECEIPT_TEXT_MAX: usize = 2_000;
+/// The same for a dependent that reran with the run's cells.
+const DEPENDENT_TEXT_MAX: usize = 200;
 /// How many of a session's calls a read or write of a cell counts as recent: within them, `read_cell`
 /// leaves out code it hasn't changed (`code_unchanged`), as the agent still has it.
 const RECENT_CALLS: u64 = 10;
@@ -215,6 +217,8 @@ struct Ran {
     going: Vec<String>,
     /// A run not waited for: the dependents it will rerun after its cells (#192).
     will_run: Vec<String>,
+    /// Of `cells`, the dependents that reran with the run's own: their output text is cut shorter.
+    reran: Vec<String>,
 }
 
 /// One tool call: who makes it and its arguments.
@@ -489,8 +493,8 @@ impl Call<'_> {
         if !also.is_empty() {
             warnings.push(format!("also_ran::Also ran {}: cells this run needs that were edited or stale since they last ran.", also.join(", ")));
         }
-        cells.extend(reran);
-        Ok(Ran { warnings, cells, going, will_run })
+        cells.extend(reran.iter().cloned());
+        Ok(Ran { warnings, cells, going, will_run, reran })
     }
 
     /// An edit's run_after: the edit stands either way, but a run that
@@ -567,7 +571,7 @@ impl Call<'_> {
 
     /// `receipt` for a run.
     fn receipt_of_run(&self, id: &str, mutation: Value, ran: Ran, status: Option<&str>) -> Result<(Map<String, Value>, Snapshot), String> {
-        let Ran { mut warnings, cells: cells_run, going, will_run } = ran;
+        let Ran { mut warnings, cells: cells_run, going, will_run, reran } = ran;
         let cells_run = &cells_run[..];
         let nb = self.nbs.snapshot(id)?;
         // The cells of a run that ran out of its wait that are running now, read
@@ -597,8 +601,11 @@ impl Call<'_> {
                 if let Some(error) = &cell.error {
                     entry["error"] = error.clone();
                 }
+                // A dependent's output is the agent's to read if it wants it: a run of a cell many others
+                // read sent back each one's table, most of a long session's run replies. Its error isn't cut.
+                let max = if reran.contains(id) && cell.error.is_none() { DEPENDENT_TEXT_MAX } else { RECEIPT_TEXT_MAX };
                 if let Some(text) = self.output_text(&nb, id)? {
-                    entry["output_text"] = json!(cut(&text, RECEIPT_TEXT_MAX));
+                    entry["output_text"] = json!(cut(&text, max));
                 }
                 Ok(entry)
             })
