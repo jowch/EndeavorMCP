@@ -1870,6 +1870,16 @@ fn view_cell_output_sends_the_png_the_engine_renders() {
     assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y}: its output (text/plain) has no PNG rendering; read_cell shows it as text")));
     s.engine.with(NB, |nb| nb.cells[0].errored = true);
     assert_eq!(view(X).err(), Some(format!("ArgumentError: no_image::Cell {X} errored; read_cell shows the error")));
+    // A cell that hasn't run yet has no output, which isn't a text output (trial 18).
+    s.engine.with(NB, |nb| nb.cells[1].queued = true);
+    assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y} is queued to run, so it has no output yet; read_cell says when it has finished")));
+    s.engine.with(NB, |nb| (nb.cells[1].queued, nb.cells[1].running) = (false, true));
+    assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y} is running, so it has no output yet; read_cell says when it has finished")));
+    s.engine.with(NB, |nb| (nb.cells[1].running, nb.cells[1].not_run) = (false, true));
+    assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y} hasn't run, so it has no output yet; run it first (execute_cell)")));
+    // While it reruns, the output it had is still there to show.
+    s.engine.with(NB, |nb| (nb.cells[1].not_run, nb.cells[1].running, nb.cells[1].output) = (false, true, "1".into()));
+    assert!(view(Y).err().unwrap().contains("has no PNG rendering"));
 }
 
 #[test]
@@ -2789,7 +2799,14 @@ fn an_r_notebooks_package_install_says_r_is_getting_them_ready() {
     let read = super::tools::tool_json(s.notebooks.tool("", "read_cell", &json!({ "notebook_id": R, "cell_id": Y }), &Folder::Process, began).unwrap());
     let message = read["message"].as_str().unwrap();
     assert!(message.starts_with("R is getting dplyr ready for this notebook (installing, 20 seconds so far)."), "{message}");
+    assert!(!message.contains("built on this computer"), "{message}");
     assert_eq!(read["packages"]["packages"], json!(["dplyr"]));
+    // Packages with no binary for this R build from source, and the agent hears so, as the Packages tab says (Ember #19).
+    ember.with(R, |nb| nb.packages.as_mut().unwrap()["source_builds"] = json!(["cli 3.6.2", "rlang 1.1.4"]));
+    let read = super::tools::tool_json(s.notebooks.tool("", "read_cell", &json!({ "notebook_id": R, "cell_id": Y }), &Folder::Process, Instant::now()).unwrap());
+    let message = read["message"].as_str().unwrap();
+    assert!(message.contains("These have no binary for this R at the notebook's package date, so they are being built on this computer: cli 3.6.2, rlang 1.1.4."), "{message}");
+    assert!(message.contains("A newer package date has binaries (preview_package_update)."), "{message}");
 }
 
 #[test]

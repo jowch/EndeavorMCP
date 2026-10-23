@@ -835,8 +835,15 @@ impl Call<'_> {
     fn view_cell_output(&self) -> Result<Reply, String> {
         let nb = self.notebook()?;
         let cell = self.cell(&nb)?;
-        if nb.cells[&cell].errored {
+        let shown = &nb.cells[&cell];
+        if shown.errored {
             return Err(argument_error(&format!("no_image::Cell {cell} errored; read_cell shows the error")));
+        }
+        // A cell that hasn't run yet has no output to render, which isn't the same as a text output.
+        if shown.output.is_empty() && (shown.running || shown.queued || shown.not_run) {
+            let then = if shown.running || shown.queued { "read_cell says when it has finished" } else { "run it first (execute_cell)" };
+            let why = if shown.running { "is running" } else if shown.queued { "is queued to run" } else { "hasn't run" };
+            return Err(argument_error(&format!("no_image::Cell {cell} {why}, so it has no output yet; {then}")));
         }
         let rendered = self.nbs.call("render_png", json!({ "notebook_id": nb.id, "cell_id": cell }))?;
         let mime = rendered["mime"].as_str().unwrap_or_default();
@@ -1626,7 +1633,16 @@ fn installing_message(nb: &Snapshot) -> String {
     let so_far = if seconds >= 90 { format!("about {} minutes", (seconds + 30) / 60) } else { format!("{seconds} seconds") };
     let last = packages["last_line"].as_str().map(|line| format!(" Last line of the package log: {line}")).unwrap_or_default();
     let language = super::engines::language(super::engines::of_path(&nb.path));
-    let what = format!("{language} is getting {which} ready for this notebook ({step}, {so_far} so far). The cells are queued and run when that is done.");
+    let mut what = format!("{language} is getting {which} ready for this notebook ({step}, {so_far} so far). The cells are queued and run when that is done.");
+    // Ember's notice that these build from source (Ember #19), as the Packages tab says it.
+    let source: Vec<&str> = packages["source_builds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    if !source.is_empty() {
+        what.push_str(&format!(
+            " These have no binary for this {language} at the notebook's package date, so they are being built on this computer: {}. \
+             That takes longer, and versions from before this {language} may not build on it. A newer package date has binaries (preview_package_update).",
+            source.join(", ")
+        ));
+    }
     if seconds >= INSTALL_USUAL_SECONDS {
         format!(
             "{what} This is taking longer than usual. Tell the user, with the last line of the package log. \

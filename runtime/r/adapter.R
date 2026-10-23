@@ -333,7 +333,9 @@ cell_notes <- function(v) {
 # the package it is on. Step `"asking"`: the install stopped before a large
 # download and waits for the user's OK (Ember #37, `approve_install()`);
 # `download` then gives the total `bytes` and each `package`, `version` and
-# `bytes` (NULL when its size isn't known).
+# `bytes` (NULL when its size isn't known). While installing, `source_builds`
+# names the packages ("name version") that build from source for want of a
+# binary for this R (Ember #19, the target's `no_binary`), when there are any.
 package_step <- function(rec, snap, state) {
   # A cell that isn't queued may name a package that isn't installed; only a run makes it wait.
   waits <- unique(unlist(lapply(snap$cells, function(c) if (isTRUE(c$queued)) c$waiting_for), use.names = FALSE))
@@ -356,6 +358,8 @@ package_step <- function(rec, snap, state) {
   out <- list(step = step, packages = I(sort(as.character(waits))), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
               last_line = last)
   if (asking) out$download <- download_step(lib$download)
+  source_builds <- lib$no_binary
+  if (installing && length(source_builds) > 0) out$source_builds <- I(paste(names(source_builds), unname(source_builds)))
   out
 }
 
