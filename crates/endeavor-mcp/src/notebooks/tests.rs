@@ -1876,7 +1876,7 @@ fn view_cell_output_sends_the_png_the_engine_renders() {
     s.engine.with(NB, |nb| (nb.cells[1].queued, nb.cells[1].running) = (false, true));
     assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y} is running, so it has no output yet; read_cell says when it has finished")));
     s.engine.with(NB, |nb| (nb.cells[1].running, nb.cells[1].not_run) = (false, true));
-    assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y} hasn't run, so it has no output yet; read_cell says when it has finished")));
+    assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y} hasn't run, so it has no output yet; run it first (execute_cell)")));
     // While it reruns, the output it had is still there to show.
     s.engine.with(NB, |nb| (nb.cells[1].not_run, nb.cells[1].running, nb.cells[1].output) = (false, true, "1".into()));
     assert!(view(Y).err().unwrap().contains("has no PNG rendering"));

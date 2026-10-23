@@ -841,8 +841,9 @@ impl Call<'_> {
         }
         // A cell that hasn't run yet has no output to render, which isn't the same as a text output.
         if shown.output.is_empty() && (shown.running || shown.queued || shown.not_run) {
+            let then = if shown.running || shown.queued { "read_cell says when it has finished" } else { "run it first (execute_cell)" };
             let why = if shown.running { "is running" } else if shown.queued { "is queued to run" } else { "hasn't run" };
-            return Err(argument_error(&format!("no_image::Cell {cell} {why}, so it has no output yet; read_cell says when it has finished")));
+            return Err(argument_error(&format!("no_image::Cell {cell} {why}, so it has no output yet; {then}")));
         }
         let rendered = self.nbs.call("render_png", json!({ "notebook_id": nb.id, "cell_id": cell }))?;
         let mime = rendered["mime"].as_str().unwrap_or_default();
