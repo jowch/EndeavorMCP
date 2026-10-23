@@ -402,7 +402,7 @@ struct Cell {
     off: bool,
     /// The notes the engine shows under the cell after its last run, each
     /// "kind::text" like a tool warning: Ember's `changed_in_place`,
-    /// `settings_found` and `load_note` (#207). Pluto has none.
+    /// `settings_found`, `load_note` (#207) and `untracked_read` (Ember #357). Pluto has none.
     notes: Vec<String>,
 }
 

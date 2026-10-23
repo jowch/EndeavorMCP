@@ -302,7 +302,10 @@ snapshot_cell <- function(v) {
 # another cell defines, so the cells that read it didn't rerun.
 # `settings_found`: the run found a global setting, so the cell became a
 # settings cell. `load_notes`: a package it loaded reset a setting a settings
-# cell sets.
+# cell sets. `untracked_reads`: the cell reads globals through `get()` on a
+# computed name, `eval()` or a function that does, so it doesn't rerun when
+# they change (Ember #357, #365). That one comes from the code, so it shows
+# before the cell runs too.
 cell_notes <- function(v) {
   names_of <- function(x) paste(sub("^\\.__C__", "class ", as.character(x)), collapse = ", ")
   notes <- character()
@@ -311,6 +314,9 @@ cell_notes <- function(v) {
   }
   if (length(v$settings_found) > 0) {
     notes <- c(notes, sprintf("settings_found::Found a global setting (%s) when this cell ran; the cells after it rerun.", names_of(v$settings_found)))
+  }
+  if (length(v$untracked_reads) > 0) {
+    notes <- c(notes, sprintf("untracked_read::Ember can't tell which variables this cell reads through %s, so it doesn't rerun when they change. Name the variables in the code, or keep the values in one list.", paste0(v$untracked_reads, "()", collapse = ", ")))
   }
   for (n in v$load_notes %||% list()) {
     notes <- c(notes, sprintf("load_note::Loading %s resets %s, which a settings cell sets. Under Rscript the setting is lost, because settings cells come first in the file. Move it into this cell, after %s loads.", n$package, n$setting, n$package))

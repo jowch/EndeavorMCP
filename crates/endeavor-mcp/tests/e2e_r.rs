@@ -631,6 +631,20 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "E" })).get("notes"), None);
     });
 
+    step("a cell that reads globals through get() on a computed name says Ember can't track them, before it runs and in its run (Ember #357)", || {
+        std::fs::write(folder.join("untracked.R"), "### An Ember notebook ###\n\n# %% id=N\nnms <- c('a', 'b')\n\n# %% id=A\nfor (s in nms) assign(s, 1)\n\n# %% id=G\nsapply(nms, function(s) get(s))\n\n# /// cell order\n# N\n# A\n# G\n# ///\n").unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "untracked.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "G" }));
+        assert!(read["notes"][0].as_str().is_some_and(|n| n.starts_with("untracked_read::Ember can't tell which variables this cell reads through get()")), "{read}");
+        agent.ok("allow_execution", json!({ "notebook_id": id }));
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": "G", "wait_for_completion": true }));
+        assert!(ran["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("untracked_read::Cell G: Ember can't tell")), "{ran}");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" })).get("notes"), None);
+    });
+
     step("in a session said to be R's, new_notebook without a path makes an R notebook", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();

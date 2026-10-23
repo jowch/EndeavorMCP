@@ -22,6 +22,7 @@ Read this when the notebook is an Ember notebook (a `.R` file). It covers what E
   - `changed_in_place`: the cell changed, by reference, a value another cell defines, such as a data.table changed with `:=` or `set()`, an environment or an R6 object. The cells that read it don't rerun, so their results and a rerun of this cell can be wrong. Make the change in the cell that defines the value.
   - `settings_found`: the run set a global setting, such as `options()`, so the cell became a settings cell and the cells after it reran.
   - `load_note`: a package the cell loaded reset a setting that a settings cell sets. Move that setting into this cell, after the package loads.
+  - `untracked_read`: the cell reads variables through `get()` on a computed name, `eval()`, or a function of yours that does (it names that function). Ember can't see which variables, so the cell doesn't rerun when they change, and can show an old result that isn't marked `stale`. This note comes from the code, so it shows before the cell runs too. Name the variables in the code, or keep the values in one list (`sites[[s]]` instead of `assign()` and `get()`).
 
 ## Errors
 
