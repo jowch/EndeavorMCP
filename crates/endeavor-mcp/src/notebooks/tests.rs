@@ -992,6 +992,9 @@ fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
     s.call("", "edit_cell", edit("x = 3")).unwrap();
     s.engine.with(NB, |nb| nb.cells[0].code = "x = 99".into());
     assert_eq!(s.call("", "edit_cell", edit("x = 4")), Err(format!("ArgumentError: stale_read::Cell {X} changed since last read; call read_cell again")));
+    // A read after someone else's change sends the code: it isn't what this session has.
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("x = 99"), &Value::Null));
     s.call("", "read_notebook_code", json!({ "notebook_id": NB })).unwrap();
     s.call("", "edit_cell", edit("x = 4")).unwrap();
     assert_eq!(s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X })), Err("KeyError: key \"code\" not found".into()));
@@ -1032,7 +1035,29 @@ fn adding_moving_folding_and_deleting_cells() {
     let add = |args: Value| s.call("", "add_cell", args);
     let first = add(json!({ "notebook_id": NB, "code": "a = 1" })).unwrap();
     let a = first["cell_id"].as_str().unwrap().to_owned();
-    assert_eq!((&first["code"], &first["code_folded"], &first["pending_run"]), (&json!("a = 1"), &json!(false), &json!([a])), "a new cell's reply has its code, for the app");
+    assert_eq!((&first["code"], &first["code_folded"], &first["pending_run"]), (&Value::Null, &json!(false), &json!([a])), "not the code the agent just sent");
+    // Read at once, the cell's code is what the agent wrote, so it isn't sent again unless asked for.
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"], &read["code_sha"]), (&Value::Null, &json!(true), &json!("b5bc1ffd9091")));
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a, "include_code": true })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
+    // Another session hasn't read it, so it gets the code.
+    assert_eq!(s.call("9", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap()["code"], "a = 1");
+    // A read more than ten of the session's calls ago may have left the agent's context: the code comes again.
+    for _ in 0..11 {
+        s.call("", "list_notebooks", json!({})).unwrap();
+    }
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
+    // A read that left the code out doesn't count as sending it: reads every few calls don't keep it out for good.
+    let calls = |n| for _ in 0..n {
+        s.call("", "list_notebooks", json!({})).unwrap();
+    };
+    calls(7);
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap()["code_unchanged"], true);
+    calls(7);
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": "" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": a, "folded": "yes" })), "invalid_argument");
@@ -1041,7 +1066,7 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!((&b["code_folded"], &b["execution"]["status"]), (&json!(true), &json!("staged")));
     let b = b["cell_id"].as_str().unwrap().to_owned();
     let c = add(json!({ "notebook_id": NB, "code": 42, "after_cell_id": a, "run_after": true })).unwrap();
-    assert_eq!((&c["code"], &c["affected_cells"], &c["execution"]["status"]), (&json!("42"), &json!([c["cell_id"]]), &json!("running")));
+    assert_eq!((&c["code"], &c["affected_cells"], &c["execution"]["status"]), (&json!("42"), &json!([c["cell_id"]]), &json!("running")), "the code as the engine has it, since it isn't what was sent");
     let c = c["cell_id"].as_str().unwrap().to_owned();
     assert_eq!(s.engine.code(NB, &c), "42");
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone(), b.clone()]);
