@@ -645,17 +645,26 @@ date_param <- function(date) {
   date
 }
 
+# Ember's proposal for `date`, or NULL. A day Package Manager hasn't
+# published yet (today, early in the day in UTC) is previewed at the newest
+# day it has: the proposal's `date` is that day, and `asked` the day asked
+# for (Ember #162, #221), so either one finds it (#247).
+date_proposal <- function(prop, date) {
+  if (!is.null(prop) && (identical(prop$date, date) || identical(prop$asked, date))) prop
+}
+
 # Ember's preview of moving the notebook's snapshot date (`preview_date()`):
 # what would change, and nothing changes yet. It may fetch that date's index
 # first, so it is waited for until it is ready or failed, or `timeout` passes
-# (then `status` is still "fetching").
+# (then `status` is still "fetching"). `date` is the day it would move to,
+# which is earlier than `asked` when that day isn't published yet.
 preview_packages <- function(rec, date, timeout) {
   date <- date_param(date)
   preview_date(rec$nb, date, wait = FALSE)
   deadline <- Sys.time() + as.numeric(timeout %||% 60)
   current <- function() {
-    prop <- package_status(rec$nb)$proposal
-    if (!is.null(prop) && identical(prop$date, date) && identical(prop$kind %||% "date", "date")) prop
+    prop <- date_proposal(package_status(rec$nb)$proposal, date)
+    if (identical(prop$kind %||% "date", "date")) prop
   }
   promise(function(resolve, reject) {
     check <- function() {
@@ -663,10 +672,11 @@ preview_packages <- function(rec, date, timeout) {
       done <- !is.null(prop) && prop$status %in% c("ready", "failed")
       if (!done && registered(rec) && Sys.time() < deadline) return(later::later(check, 0.1))
       status <- if (is.null(prop)) "fetching" else prop$status
+      to <- prop$date %||% date
       # What the agent was shown, which the apply must match (set_package_date).
-      rec$previewed <- if (identical(status, "ready")) list(date = date, changes = to_json(rows(prop$changes)))
+      rec$previewed <- if (identical(status, "ready")) list(date = to, changes = to_json(rows(prop$changes)))
       resolve(list(
-        date = date, current_date = notebook_state(rec$nb)$file$header$snapshot,
+        date = to, asked = date, current_date = notebook_state(rec$nb)$file$header$snapshot,
         status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message))
     }
     check()
@@ -681,9 +691,12 @@ preview_packages <- function(rec, date, timeout) {
 # this refuses too, and the agent previews again (#201).
 set_package_date <- function(rec, date) {
   date <- date_param(date)
-  prop <- package_status(rec$nb)$proposal
+  # The day asked for in the preview applies the day it moved to, the one
+  # Ember's set_date() takes (#247).
+  prop <- date_proposal(package_status(rec$nb)$proposal, date)
+  date <- prop$date %||% date
   shown <- rec$previewed
-  if (!is.null(prop) && identical(prop$date, date) && identical(prop$status, "ready") &&
+  if (!is.null(prop) && identical(prop$status, "ready") &&
       !(identical(shown$date, date) && identical(shown$changes, to_json(rows(prop$changes))))) {
     argument_error("no_preview", "the notebook's packages changed since the preview, so the update would change more or less than it showed. Call preview_package_update again and tell the user what it shows")
   }

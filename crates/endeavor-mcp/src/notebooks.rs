@@ -9,7 +9,7 @@
 //! fresh snapshot each time it tells the app anything. A notebook's state goes
 //! when it shuts down, except its entry in `idle_stopped`.
 
-mod engines;
+pub(crate) mod engines;
 
 mod r;
 mod tools;

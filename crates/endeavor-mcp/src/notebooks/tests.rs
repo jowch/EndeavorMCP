@@ -252,8 +252,11 @@ impl Engine {
                     return Ok(json!({ "date": date, "current_date": nb.package_date, "status": "failed", "changes": [],
                         "problems": [{ "kind": "index_unavailable", "package": null, "message": "no package index for 2000-01-01" }], "message": "no index" }));
                 }
+                // The 19th isn't published yet, so its preview is of the 18th (#247).
+                let asked = date.clone();
+                let date = if date == "2026-10-19" { "2026-10-18".to_owned() } else { date };
                 nb.previewed = Some(date.clone());
-                Ok(json!({ "date": date, "current_date": nb.package_date, "status": "ready", "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "problems": [], "message": null }))
+                Ok(json!({ "date": date, "asked": asked, "current_date": nb.package_date, "status": "ready", "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "problems": [], "message": null }))
             }
             "set_package_date" => {
                 if nb.previewed.as_deref() != params["date"].as_str() {
@@ -2981,6 +2984,12 @@ fn an_r_notebooks_package_date_is_shown_previewed_and_moved() {
     s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2026-10-18" })).unwrap();
     let waiting = s.call("9", "apply_package_update", json!({ "notebook_id": R, "date": "2026-10-18" })).unwrap();
     assert!(waiting["message"].as_str().unwrap().contains("once the user allows the notebook to run"), "{waiting}");
+
+    // A day not published yet is previewed at the newest one that is, and the message says so (#247).
+    let earlier = s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2026-10-19" })).unwrap();
+    assert_eq!((&earlier["status"], &earlier["date"], earlier.get("asked")), (&json!("ready"), &json!("2026-10-18"), None), "{earlier}");
+    assert!(earlier["message"].as_str().unwrap().starts_with("2026-10-19 isn't published yet, so this is the newest day that is, 2026-10-18."), "{earlier}");
+    assert!(!preview["message"].as_str().unwrap().contains("published"), "{preview}");
 
     // A Julia notebook has no package date.
     s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1")]);

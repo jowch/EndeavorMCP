@@ -23,7 +23,7 @@ use crate::checks::{self, Evidence};
 /// The model the agent runs (`--model`), if not its default.
 static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// How long one agent run may take before it is ended.
+/// How long one agent run may take before it is ended, unless the task's `setup.json` gives `minutes`.
 const AGENT_LIMIT: Duration = Duration::from_secs(20 * 60);
 
 /// How long the harness's own runs of a notebook (setting one up, running one again) may take.
@@ -85,11 +85,14 @@ struct Options {
     /// An R task shows as skipped on a computer without R, instead of failing.
     skip_r: bool,
     depot: Option<String>,
-    retries: u32,
+    /// Runs after a failed first one; if not given, 2, and none for a long task.
+    retries: Option<u32>,
+    /// Run the long tasks too (`"long": true` in their `setup.json`), which otherwise run only when `--only` names them.
+    long: bool,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
-    let mut o = Options { only: None, out: None, julia: std::env::var("ENDEAVOR_E2E_JULIA").unwrap_or_else(|_| "auto".into()), r: std::env::var("ENDEAVOR_E2E_R").unwrap_or_else(|_| "auto".into()), skip_r: false, depot: None, retries: 2 };
+    let mut o = Options { only: None, out: None, julia: std::env::var("ENDEAVOR_E2E_JULIA").unwrap_or_else(|_| "auto".into()), r: std::env::var("ENDEAVOR_E2E_R").unwrap_or_else(|_| "auto".into()), skip_r: false, depot: None, retries: None, long: false };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let mut value = || it.next().cloned().ok_or(format!("{arg} needs a value"));
@@ -99,8 +102,9 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--julia" => o.julia = value()?,
             "--r" => o.r = value()?,
             "--skip-r" => o.skip_r = true,
+            "--long" => o.long = true,
             "--depot" => o.depot = Some(value()?),
-            "--retries" => o.retries = value()?.parse().map_err(|e| format!("--retries: {e}"))?,
+            "--retries" => o.retries = Some(value()?.parse().map_err(|e| format!("--retries: {e}"))?),
             "--model" => MODEL.set(value()?).map_err(|_| "--model given twice".to_owned())?,
             _ => return Err(format!("unknown argument {arg}")),
         }
@@ -172,6 +176,8 @@ pub fn main(args: &[String]) -> i32 {
     tasks.sort();
     if let Some(only) = &o.only {
         tasks.retain(|t| only.iter().any(|id| t.file_name().is_some_and(|n| n == id.as_str())));
+    } else if !o.long {
+        tasks.retain(|t| !long_task(t));
     }
     if tasks.is_empty() {
         eprintln!("endeavor-smoke: no tasks to run");
@@ -213,7 +219,9 @@ pub fn main(args: &[String]) -> i32 {
             attempts.push(result);
             // A first run that passes is enough; one that fails runs `retries` more times.
             // A task known to fail runs once: its retries would only say so again.
-            if (n == 1 && passed) || n as u32 > o.retries || expected_failure(task).is_some() {
+            // A long one runs once unless `--retries` says otherwise: each run is an hour and dollars.
+            let retries = o.retries.unwrap_or(if long_task(task) { 0 } else { 2 });
+            if (n == 1 && passed) || n as u32 > retries || expected_failure(task).is_some() {
                 break;
             }
         }
@@ -273,6 +281,12 @@ fn expected_failure(task: &Path) -> Option<String> {
     specs["expected_to_fail"].as_str().map(str::to_owned)
 }
 
+/// Whether a task is long: `"long": true` in its setup.json. A setup.json that doesn't parse leaves the task in.
+fn long_task(task: &Path) -> bool {
+    let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    setup["long"] == true
+}
+
 /// Whether a task is about R notebooks: `"r": true` in its setup.json.
 fn r_task(task: &Path) -> bool {
     let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
@@ -317,12 +331,12 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     // where the packages may well be installed. Julia's own libraries are precompiled again into it.
     let depot = if setup["depot"] == "empty" { work.join("depot").display().to_string() } else { depot.to_owned() };
     let ssh = setup["ssh"] == true;
+    let limit = setup["minutes"].as_u64().map_or(AGENT_LIMIT, |m| Duration::from_secs(m * 60));
     std::fs::write(work.join("settings.json"), json!({ "julia": julia, "r": r, "depot": depot, "ssh": ssh }).to_string()).unwrap();
     if task.join("inject.json").is_file() {
         std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();
     }
-    let mut turns = vec![std::fs::read_to_string(task.join("prompt.md")).unwrap().trim().to_owned()];
-    turns.extend(std::fs::read_to_string(task.join("followup.md")).ok().map(|t| t.trim().to_owned()));
+    let mut turns = messages(&std::fs::read_to_string(task.join("prompt.md")).unwrap(), &std::fs::read_to_string(task.join("followup.md")).unwrap_or_default());
     // `{server_folder}` in a message is the folder on the server task's server where a notebook may go.
     let server_folder = crate::ssh::Folders::of(work).remote;
     for turn in &mut turns {
@@ -330,6 +344,9 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     }
     let specs: Value = std::fs::read_to_string(task.join("checks.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({ "checks": [] }));
     let mut problems: Vec<String> = Vec::new();
+    if !setup["minutes"].is_null() && setup["minutes"].as_u64().is_none() {
+        problems.push(format!("setup.json: minutes must be a whole number, not {}", setup["minutes"]));
+    }
     let server = if ssh {
         match crate::ssh::start(work) {
             Ok(server) => Some(server),
@@ -352,7 +369,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     }
 
     let began = Instant::now();
-    let agent = if problems.is_empty() { run_claude(&turns, work, &project, endeavor, exe, repo) } else { AgentRun::default() };
+    let agent = if problems.is_empty() { run_claude(&turns, work, &project, endeavor, exe, repo, limit) } else { AgentRun::default() };
     let seconds = began.elapsed().as_secs_f64();
     let calls = crate::log::calls(&work.join("mcp.jsonl"));
     let injections = crate::log::injections(&work.join("mcp.jsonl"));
@@ -396,6 +413,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
             "context_tokens": agent.tokens.context,
             "input_tokens": agent.tokens.input,
             "output_tokens": agent.tokens.output,
+            "compactions": agent.compactions,
             "reply_bytes": calls.iter().map(|c| c.reply_bytes).sum::<usize>(),
         },
         "model": agent.model,
@@ -404,6 +422,24 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         "notebooks": notebooks_json(&notebooks),
         "rerun": rerun.as_ref().map(|r| r.as_ref().map_or_else(|e| json!(e), |n| notebooks_json(n))),
     })
+}
+
+/// The user's messages: the prompt, then each of `followup.md`'s, which a line of `---` alone separates.
+fn messages(prompt: &str, followups: &str) -> Vec<String> {
+    let mut turns = vec![prompt.trim().to_owned()];
+    let mut next = String::new();
+    for line in followups.lines().chain(["---"]) {
+        if line.trim_end() == "---" {
+            if !next.trim().is_empty() {
+                turns.push(next.trim().to_owned());
+            }
+            next.clear();
+        } else {
+            next.push_str(line);
+            next.push('\n');
+        }
+    }
+    turns
 }
 
 /// The agent's notebooks run again from their files, from the top, in a
@@ -465,6 +501,8 @@ struct AgentRun {
     turns: Option<u64>,
     cost_usd: Option<f64>,
     tokens: Tokens,
+    /// How many times Claude Code compacted the conversation: a run that did can't be compared with one that didn't.
+    compactions: u64,
     problem: Option<String>,
 }
 
@@ -483,7 +521,7 @@ struct Tokens {
 /// Claude Code, headless, with the plugin from this checkout and this binary as
 /// its server. Each of `turns` is a message from the user, in one session: the
 /// next is sent once Claude's answer to the one before has ended.
-fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, exe: &Path, repo: &Path) -> AgentRun {
+fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, exe: &Path, repo: &Path, limit: Duration) -> AgentRun {
     let mut transcript = std::fs::File::create(work.join("transcript.jsonl")).unwrap();
     let stderr = std::fs::File::create(work.join("agent-stderr.txt")).unwrap();
     let spawned = Command::new("claude")
@@ -558,9 +596,9 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if began.elapsed() > AGENT_LIMIT => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if began.elapsed() > limit => {
                 let _ = child.kill();
-                problem = Some(format!("the agent ran over {} minutes and was ended", AGENT_LIMIT.as_secs() / 60));
+                problem = Some(format!("the agent ran over {} minutes and was ended", limit.as_secs() / 60));
                 break;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -576,6 +614,7 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
     let mut last_message: Option<String> = None;
     for event in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         match event["type"].as_str() {
+            Some("system") if event["subtype"] == "compact_boundary" => run.compactions += 1,
             Some("system") if event["subtype"] == "init" => {
                 run.model = run.model.take().or_else(|| event["model"].as_str().map(str::to_owned));
                 let ours = event["mcp_servers"].as_array().into_iter().flatten().find(|s| s["name"] == "plugin:endeavor:endeavor");
@@ -596,7 +635,6 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
                     run.tokens.requests += 1;
                     run.tokens.context = read;
                     run.tokens.input += read;
-                    run.tokens.output += usage["output_tokens"].as_u64().unwrap_or(0);
                 }
                 for part in event["message"]["content"].as_array().into_iter().flatten().filter(|p| p["type"] == "tool_use") {
                     run.tools.push(part["name"].as_str().unwrap_or_default().to_owned());
@@ -607,6 +645,9 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
                 run.final_message = event["result"].as_str().unwrap_or_default().to_owned();
                 run.turns = Some(run.turns.unwrap_or(0) + event["num_turns"].as_u64().unwrap_or(0));
                 run.cost_usd = event["total_cost_usd"].as_f64();
+                // A message's own usage counts its output only up to its first part, so the output is the
+                // session's so far, from here, its subagents' included.
+                run.tokens.output = event["modelUsage"].as_object().into_iter().flat_map(|m| m.values()).map(|u| u["outputTokens"].as_u64().unwrap_or(0)).sum();
                 for model in event["modelUsage"].as_object().into_iter().flat_map(|m| m.keys()) {
                     if !run.models_used.contains(model) {
                         run.models_used.push(model.clone());
@@ -677,15 +718,15 @@ fn thousands(n: &Value) -> String {
 fn summary_md(summary: &Value) -> String {
     let models: Vec<&str> = summary["models"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let models = if models.is_empty() { "unknown".to_owned() } else { models.join(", ") };
-    let mut md = format!("# Smoke run at {}\n\nAgent: {}\n\nModels: {models}\n\n| Task | Status | Failed attempts | Tool calls | Tool errors | Time | Cost | Requests | Input tokens | Output tokens | Tool replies |\n|---|---|---|---|---|---|---|---|---|---|---|\n", summary["commit"].as_str().unwrap_or("?"), summary["agent"].as_str().unwrap_or("?"));
+    let mut md = format!("# Smoke run at {}\n\nAgent: {}\n\nModels: {models}\n\n| Task | Status | Failed attempts | Tool calls | Tool errors | Time | Cost | Requests | Input tokens | Output tokens | Compactions | Tool replies |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n", summary["commit"].as_str().unwrap_or("?"), summary["agent"].as_str().unwrap_or("?"));
     for r in summary["tasks"].as_array().into_iter().flatten() {
         let m = &r["first"];
         if r["attempts"] == 0 {
-            md += &format!("| {} | {} | 0/0 | | | | | | | | |\n", r["task"].as_str().unwrap_or_default(), r["status"].as_str().unwrap_or_default());
+            md += &format!("| {} | {} | 0/0 | | | | | | | | | |\n", r["task"].as_str().unwrap_or_default(), r["status"].as_str().unwrap_or_default());
             continue;
         }
         md += &format!(
-            "| {} | {} | {}/{} | {} | {} | {:.0} s | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {}/{} | {} | {} | {:.0} s | {} | {} | {} | {} | {} | {} |\n",
             r["task"].as_str().unwrap_or_default(),
             r["status"].as_str().unwrap_or_default(),
             r["failed"],
@@ -697,6 +738,7 @@ fn summary_md(summary: &Value) -> String {
             m["requests"],
             thousands(&m["input_tokens"]),
             thousands(&m["output_tokens"]),
+            m["compactions"].as_u64().map_or("?".into(), |c| c.to_string()),
             m["reply_bytes"].as_u64().map_or("?".into(), |b| format!("{:.1} KB", b as f64 / 1000.0)),
         );
     }
@@ -782,6 +824,13 @@ mod tests {
         assert_eq!(row("N9", std::slice::from_ref(&failed), Some("#58"))["status"], "expected failure");
         assert_eq!(row("N9", &[passed], Some("#58"))["status"], "pass: #58 may be fixed");
         assert_eq!(row("N1", &[failed], None)["models"], json!(["m", "n"]));
+    }
+
+    #[test]
+    fn followups_are_one_message_each_between_lines_of_dashes() {
+        assert_eq!(messages(" Hi.\n", ""), ["Hi."]);
+        assert_eq!(messages("Hi.", "Next.\n"), ["Hi.", "Next."]);
+        assert_eq!(messages("Hi.", "Two\nlines.\n---\nThird.\r\n---\n"), ["Hi.", "Two\nlines.", "Third."]);
     }
 
     #[test]
