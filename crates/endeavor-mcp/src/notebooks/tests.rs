@@ -246,6 +246,20 @@ impl Engine {
             }
             // Ember's date preview: today ("2026-10-17") is ready with one change, 2000 has no index.
             "preview_packages" => {
+                // One package's date (#266): dplyr 1.1.2 was last current on 2023-09-02, and the
+                // date moves the other packages too; CRAN never released dplyr 0.0.1.
+                if let Some(package) = params["package"].as_str() {
+                    if package != "dplyr" {
+                        return Err(format!("ArgumentError: not_updatable::{package} is not in this notebook's packages"));
+                    }
+                    if params["version"] == "0.0.1" {
+                        nb.previewed = None;
+                        return Ok(json!({ "date": null, "asked": null, "current_date": nb.package_date, "status": "failed", "changes": [], "problems": [], "message": "CRAN has no dplyr 0.0.1" }));
+                    }
+                    nb.previewed = Some("2023-09-02".into());
+                    return Ok(json!({ "date": "2023-09-02", "asked": null, "current_date": nb.package_date, "status": "ready", "problems": [], "message": null,
+                        "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.1.2", "change": "downgraded" }, { "name": "rlang", "from": "1.1.4", "to": "1.1.1", "change": "downgraded" }] }));
+                }
                 let date = params["date"].as_str().unwrap_or("2026-10-17").to_owned();
                 if date.starts_with("2000") {
                     nb.previewed = None;
@@ -3135,6 +3149,26 @@ fn an_r_notebooks_package_date_is_shown_previewed_and_moved() {
     assert_eq!((&earlier["status"], &earlier["date"], earlier.get("asked")), (&json!("ready"), &json!("2026-10-18"), None), "{earlier}");
     assert!(earlier["message"].as_str().unwrap().starts_with("2026-10-19 isn't published yet, so this is the newest day that is, 2026-10-18."), "{earlier}");
     assert!(!preview["message"].as_str().unwrap().contains("published"), "{preview}");
+
+    // One package, pinned to an older version: the date Ember finds for it, which moves the
+    // others too, and the message says to tell the user so (#266).
+    let pinned = s.call("9", "preview_package_update", json!({ "notebook_id": R, "package": "dplyr", "version": "1.1.2" })).unwrap();
+    assert_eq!((&pinned["status"], &pinned["date"], pinned.get("asked")), (&json!("ready"), &json!("2023-09-02"), None), "{pinned}");
+    assert!(pinned["message"].as_str().unwrap().contains("moves every package"), "{pinned}");
+    let applied = s.call("9", "apply_package_update", json!({ "notebook_id": R, "date": "2023-09-02" })).unwrap();
+    assert_eq!(applied["date"], "2023-09-02", "{applied}");
+    let never = s.call("9", "preview_package_update", json!({ "notebook_id": R, "package": "dplyr", "version": "0.0.1" })).unwrap();
+    assert!(never["status"] == "failed" && never["reason"] == "CRAN has no dplyr 0.0.1" && never["message"].as_str().unwrap().contains("No package date"), "{never}");
+    let other = s.call("9", "preview_package_update", json!({ "notebook_id": R, "package": "ggplot2" })).unwrap_err();
+    assert!(other.contains("not_updatable"), "{other}");
+    for (args, says) in [
+        (json!({ "notebook_id": R, "package": "dplyr", "date": "2026-10-17" }), "not both"),
+        (json!({ "notebook_id": R, "version": "1.1.2" }), "needs package"),
+        (json!({ "notebook_id": R, "package": 1 }), "must be strings"),
+    ] {
+        let refused = s.call("9", "preview_package_update", args.clone()).unwrap_err();
+        assert!(refused.contains("invalid_argument") && refused.contains(says), "{args}: {refused}");
+    }
 
     // A Julia notebook has no package date.
     s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1")]);

@@ -581,7 +581,7 @@
     "name": "restart_notebook"
   },
   {
-    "description": "R notebooks only. An R notebook's package versions are those current on its package date (`package_date` in `list_notebooks` and `open_notebook`), so `available.packages()` in a cell lists that date's versions, not today's. This previews moving that date and changes nothing: the result has `changes` (each package's `from` and `to` versions) and any `problems`. Without `date` it previews today, which is what updating the packages means. It can take a while to fetch the date's package index; if `status` is still `fetching`, call it again with the same date.",
+    "description": "R notebooks only. An R notebook's package versions are those current on its package date (`package_date` in `list_notebooks` and `open_notebook`), so `available.packages()` in a cell lists that date's versions, not today's. This previews moving that date and changes nothing: the result has `changes` (each package's `from` and `to` versions) and any `problems`. Without `date` it previews today, which is what updating the packages means. To update one package, or pin it to a version, give `package` (and `version`) instead of `date`: the preview is of the date that puts that package at that version while moving the others as little as possible. A date moves every package, so tell the user what else changes. It can take a while to fetch the date's package index; if `status` is still `fetching`, call it again with the same arguments.",
     "inputSchema": {
       "properties": {
         "date": {
@@ -589,6 +589,14 @@
           "type": "string"
         },
         "notebook_id": {
+          "type": "string"
+        },
+        "package": {
+          "description": "A CRAN package in the notebook, to update or pin. Not with `date`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The version to put `package` at, newer or older, such as \"1.1.2\". Leave it out for CRAN's newest.",
           "type": "string"
         }
       },

@@ -694,29 +694,118 @@ date_proposal <- function(prop, date) {
 # first, so it is waited for until it is ready or failed, or `timeout` passes
 # (then `status` is still "fetching"). `date` is the day it would move to,
 # which is earlier than `asked` when that day isn't published yet.
-preview_packages <- function(rec, date, timeout) {
+# With `package`, the date is Ember's for putting that package at `version`
+# (CRAN's newest when NULL): `preview_update()`, the Packages tab's row
+# Update (#266). The other packages move with the date, as far as they must.
+preview_packages <- function(rec, date, timeout, package = NULL, version = NULL) {
+  if (!is.null(package)) return(preview_package(rec, package, version, timeout))
   date <- date_param(date)
   preview_date(rec$nb, date, wait = FALSE)
-  deadline <- Sys.time() + as.numeric(timeout %||% 60)
   current <- function() {
     prop <- date_proposal(package_status(rec$nb)$proposal, date)
-    if (identical(prop$kind %||% "date", "date")) prop
+    if (identical(prop$kind %||% "date", "date") && is.null(prop$update)) prop
   }
+  wait_preview(rec, current, date, timeout)
+}
+
+# The proposal `current()` finds, waited for until it is ready or failed or
+# `timeout` passes, as the result preview_package_update returns.
+wait_preview <- function(rec, current, asked, timeout) {
+  deadline <- Sys.time() + as.numeric(timeout %||% 60)
   promise(function(resolve, reject) {
     check <- function() {
       prop <- if (registered(rec)) current()
       done <- !is.null(prop) && prop$status %in% c("ready", "failed")
       if (!done && registered(rec) && Sys.time() < deadline) return(later::later(check, 0.1))
-      status <- if (is.null(prop)) "fetching" else prop$status
-      to <- prop$date %||% date
+      # A package's update waits for CRAN's release dates first ("dates").
+      status <- if (is.null(prop) || !prop$status %in% c("ready", "failed")) "fetching" else prop$status
+      to <- if (is.null(prop) || is.na(prop$date)) asked else prop$date
       # What the agent was shown, which the apply must match (set_package_date).
       rec$previewed <- if (identical(status, "ready")) list(date = to, changes = to_json(rows(prop$changes)))
       resolve(list(
-        date = to, asked = date, current_date = notebook_state(rec$nb)$file$header$snapshot,
+        date = to, asked = asked, current_date = notebook_state(rec$nb)$file$header$snapshot,
         status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message))
     }
     check()
   })
+}
+
+# The proposal `prop` if it is the preview this adapter asked for: `ask`,
+# the package and version (NULL for CRAN's newest) of its last
+# preview_update(). Ember replaces a newest's NULL with the version it
+# resolves before the preview is ready, so only an explicit version is
+# checked against the proposal's.
+update_proposal <- function(prop, ask) {
+  u <- prop$update
+  if (is.null(u) || is.null(ask) || !identical(u$name, ask$name)) return(NULL)
+  if (!is.null(ask$version) && !identical(u$version, ask$version)) return(NULL)
+  prop
+}
+
+# The date for one package (`preview_update()`), previewed. A call again for
+# the same package and version, while its preview is still being made or is
+# ready, waits on that one rather than starting over; a different ask (a pin,
+# then the newest) starts a new one.
+preview_package <- function(rec, package, version, timeout) {
+  if (!is.character(package) || length(package) != 1 || !nzchar(package)) {
+    argument_error("invalid_argument", "package must be a package name")
+  }
+  if (!is.null(version) && (!is.character(version) || length(version) != 1 || !nzchar(version))) {
+    argument_error("invalid_argument", "version must be a version, such as \"1.1.2\"")
+  }
+  ask <- list(name = package, version = version)
+  current <- function() update_proposal(package_status(rec$nb)$proposal, ask)
+  prop <- if (identical(rec$update_ask, ask)) current()
+  if (!is.null(prop) && !identical(prop$status, "failed")) return(wait_preview(rec, current, NA_character_, timeout))
+  # Ember refuses a package its lock doesn't have yet, as when the notebook
+  # has just opened or a cell added it: wait for the lock first.
+  deadline <- Sys.time() + as.numeric(timeout %||% 60)
+  promises::then(promise(function(resolve, reject) {
+    check <- function() {
+      if (registered(rec) && update_pending(notebook_state(rec$nb), package) && Sys.time() < deadline) return(later::later(check, 0.1))
+      resolve(TRUE)
+    }
+    check()
+  }), function(...) {
+    state <- if (registered(rec)) notebook_state(rec$nb)
+    blocked <- if (!is.null(state)) update_blocked(state, package)
+    pending <- !is.null(state) && update_pending(state, package)
+    if (!is.null(blocked) || pending) {
+      return(list(date = NA_character_, asked = NA_character_, current_date = state$file$header$snapshot,
+                  status = if (pending) "fetching" else "failed", changes = rows(NULL), problems = rows(NULL), message = blocked))
+    }
+    tryCatch(preview_update(rec$nb, package, version, wait = FALSE),
+             ember_refused = function(e) argument_error("not_updatable", conditionMessage(e)))
+    rec$update_ask <- ask
+    wait_preview(rec, current, NA_character_, max(0, as.numeric(difftime(deadline, Sys.time(), units = "secs"))))
+  })
+}
+
+# Whether `package` is one the notebook's code names that its lock doesn't
+# have yet because resolution hasn't caught up (Ember's `wanted_cache`
+# against `resolved_for`, packages-core.R), while it still can: not once a
+# package index failed to come (`update_blocked()`). FALSE when Ember
+# doesn't say. Those fields aren't Ember's documented state; this goes once
+# Ember holds the preview itself (jowch/Ember#419).
+update_pending <- function(state, package) {
+  p <- state$packages
+  wanted <- p$wanted_cache
+  if (is.null(wanted) || !package %in% wanted || !is.null(update_blocked(state, package))) return(FALSE)
+  locked <- state$file$lock$entries$name %||% character()
+  !package %in% locked && !setequal(wanted, p$resolved_for %||% character())
+}
+
+# Why the lock can't come to have `package`, which the code names: the
+# messages of the package indexes that failed. NULL when none did, or the
+# lock has it.
+update_blocked <- function(state, package) {
+  p <- state$packages
+  if (is.null(p$wanted_cache) || !package %in% p$wanted_cache) return(NULL)
+  if (package %in% (state$file$lock$entries$name %||% character())) return(NULL)
+  failed <- Filter(function(slot) identical(slot$status, "failed"), p$indexes %||% list())
+  if (length(failed) == 0) return(NULL)
+  said <- unlist(lapply(failed, function(slot) slot$message), use.names = FALSE)
+  paste(c(sprintf("%s isn't in the notebook's lock yet, and the package index it needs didn't come.", package), said), collapse = " ")
 }
 
 # Ember's set_date(): apply the preview for `date`, refused unless it is
@@ -869,7 +958,7 @@ adapter_call <- function(method, params) {
     run = run(rec, unlist(params$cells) %||% character(), isTRUE(params$wait), params$timeout),
     interrupt = interrupt(rec),
     restart = restart(rec),
-    preview_packages = preview_packages(rec, params$date, params$timeout),
+    preview_packages = preview_packages(rec, params$date, params$timeout, params$package, params$version),
     set_package_date = set_package_date(rec, params$date),
     approve_install = approve(rec),
     allow_execution = allow(rec, isTRUE(params$run)),
