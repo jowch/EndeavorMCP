@@ -333,13 +333,14 @@ snapshot_cell <- function(v) {
   # A running cell waiting on `readline()`, `menu()` and the like (Ember #186):
   # what the prompt printed and, for `menu()`, its choices. `answer` replies.
   # Its output is what this run printed so far, where a question's own text
-  # (a license, a menu's title) usually is: Ember keeps the last run's result
-  # and error on a running cell, and they say nothing about the question.
+  # (a license, a menu's title) usually is: Ember keeps the last run's result,
+  # error and notes on a running cell, and they say nothing about the question.
   if (isTRUE(v$running) && !is.null(v$prompt)) {
     d$prompt <- list(id = v$prompt$id, text = v$prompt$text %||% "", choices = I(as.character(unlist(v$prompt$choices))))
     d$errored <- FALSE
     d$error <- NULL
     d$output <- output_text(list(console = v$console))
+    d$notes <- I(character())
   }
   d
 }

@@ -124,6 +124,7 @@ asking <- A$snapshot_cell(view(running = TRUE, status = "error",
                                prompt = list(id = 2L, text = "Selection: ", choices = c("Yes", "No"))))
 check("a cell waiting at a prompt after an error: not errored, no old error", isFALSE(asking$errored) && is.null(asking[["error"]]))
 check("  its output is what this run printed, the question's text", identical(asking$output, "License: CC BY. Do you accept?\n\n1: Yes\n2: No"))
+check("  and no notes from the last run", length(A$snapshot_cell(view(running = TRUE, from_lock = "mypkg", prompt = list(id = 1L, text = "? ")))$notes) == 0)
 check("  and the prompt", identical(asking$prompt$id, 2L) && identical(unclass(asking$prompt$choices), c("Yes", "No")))
 check("a running cell not at a prompt keeps the last run's error, as before",
       isTRUE(A$snapshot_cell(view(running = TRUE, status = "error", errors = list(list(kind = "error", message = "boom"))))$errored))
