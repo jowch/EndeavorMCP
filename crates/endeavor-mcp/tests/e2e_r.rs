@@ -163,6 +163,21 @@ impl Agent {
     }
 }
 
+/// Tomorrow in UTC as YYYY-MM-DD: a day Package Manager hasn't published (days to a civil date,
+/// after Howard Hinnant's `civil_from_days`).
+fn tomorrow() -> String {
+    let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 / 86400 + 1;
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
+}
+
 fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
     let started = Instant::now();
     eprintln!("── {name}");
@@ -573,6 +588,13 @@ fn an_r_notebook_through_the_runtime() {
         let again = preview(&mut agent, Some("2024-06-03"));
         assert!(again["changes"].as_array().unwrap().iter().any(|c| c["name"] == "base64enc"), "{again}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "the refused apply moved nothing");
+
+        // A day not published yet is previewed at the newest one that is (#247). Tomorrow never is.
+        let ahead = tomorrow();
+        let unpublished = preview(&mut agent, Some(&ahead));
+        assert_eq!(unpublished["status"], "ready", "{unpublished}");
+        assert!(unpublished["date"].as_str().unwrap() < ahead.as_str(), "{unpublished}");
+        assert!(unpublished["message"].as_str().unwrap().contains("isn't published yet"), "{unpublished}");
 
         // Updating is today's date: applied, the file's date moves and the cell sees the version the preview named.
         let today = preview(&mut agent, None);

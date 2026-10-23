@@ -1501,7 +1501,8 @@ impl Call<'_> {
     /// Ember's preview of moving an R notebook's snapshot date, which its package versions come
     /// from (#201): what would change, with nothing changed yet. Without `date` it is today, the
     /// page's "Update" (the newest packages). Fetching that date's index can take a while, so it
-    /// is waited for within the call.
+    /// is waited for within the call. A day not published yet is previewed at the newest day that
+    /// is, and the result's `date` is that day.
     fn preview_package_update(&self) -> Result<Value, String> {
         let nb = self.r_notebook()?;
         let date = self.args.get("date").cloned().unwrap_or(Value::Null);
@@ -1514,12 +1515,19 @@ impl Call<'_> {
         if reason.is_string() {
             result["reason"] = reason;
         }
+        // A day not published yet is previewed at the newest one that is, an earlier `date` (#247).
+        let asked = result.as_object_mut().and_then(|r| r.remove("asked"));
+        let earlier = asked.as_ref().is_some_and(|a| a.is_string() && *a != result["date"]);
         let none = result["changes"].as_array().is_none_or(Vec::is_empty);
-        result["message"] = json!(match result["status"].as_str() {
+        let said = match result["status"].as_str() {
             Some("ready") if none => "Nothing would change: every package is already at its version for this date.",
             Some("ready") => "Nothing has changed yet. Tell the user what would change; apply_package_update with this date applies it.",
             Some("failed") => "This date can't be used, and the notebook is unchanged: `problems` says why.",
             _ => "The package index for this date is still being fetched. Call again with the same date to wait for it.",
+        };
+        result["message"] = json!(match (earlier, result["status"].as_str()) {
+            (true, Some("ready")) => format!("{} isn't published yet, so this is the newest day that is, {}. {said}", asked.unwrap().as_str().unwrap(), result["date"].as_str().unwrap_or("")),
+            _ => said.to_owned(),
         });
         result["notebook_id"] = json!(nb.id);
         Ok(result)
