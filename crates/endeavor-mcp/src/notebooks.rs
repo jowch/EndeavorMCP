@@ -481,6 +481,20 @@ impl Snapshot {
         self.packages.is_some() && self.cells.values().any(|c| c.queued)
     }
 
+    /// Whether its package step stopped before a large download and waits for the user's OK
+    /// (Ember #37): nothing installs until `approve_install`, and the cells that need the held
+    /// packages wait with it. Cells that don't need them still run (`held`).
+    fn asking(&self) -> bool {
+        self.packages.as_ref().is_some_and(|p| p["step"] == "asking")
+    }
+
+    /// Whether it is asking and nothing is running: what is left waits for the OK, so nothing
+    /// changes until `approve_install` and nothing is waited for. While a cell that doesn't need
+    /// the held packages runs, it isn't held yet.
+    fn held(&self) -> bool {
+        self.asking() && !self.cells.values().any(|c| c.running)
+    }
+
     /// What `list_notebooks` says of it; `this_session`: it's the caller's
     /// own notebook. `exited` only while its own Julia has ended by itself.
     fn summary(&self, pending_run: &[String], this_session: bool) -> Value {

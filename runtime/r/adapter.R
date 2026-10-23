@@ -266,6 +266,35 @@ output_text <- function(view) {
   cap_text(paste(parts, collapse = "\n"))
 }
 
+# knitr's inline-code pattern, as Ember matches it (text-cells.R), one line at a time.
+INLINE_SPAN <- "(?<!(^``))(?<!(\\n``))`r[ #]([^`]+)\\s*`"
+
+# A text cell's output: its prose without the `#'` prefixes, each `r expr` span replaced by
+# its value, as the page shows it. Spans stay as written while there are no values for this
+# code (not run yet, or edited since), so the prose still reads (#270).
+text_output <- function(v) {
+  lines <- strsplit(v$code %||% "", "\n", fixed = TRUE)[[1]]
+  out <- v$output
+  values <- if (!is.null(out) && identical(out$mime, "application/vnd.ember.inline") && !isTRUE(v$code_differs)) {
+    unlist(out$data$values)
+  }
+  k <- 0L
+  body <- vapply(lines, function(line) {
+    if (!grepl("^#+'", line)) return(line)
+    line <- sub("^#+'[ ]?", "", line)
+    m <- gregexpr(INLINE_SPAN, line, perl = TRUE)[[1]]
+    if (is.null(values) || m[[1]] == -1) return(line)
+    found <- regmatches(line, list(m))[[1]]
+    shown <- vapply(seq_along(found), function(i) {
+      k <<- k + 1L
+      if (k <= length(values)) values[[k]] else found[[i]]
+    }, character(1))
+    regmatches(line, list(m)) <- list(shown)
+    line
+  }, character(1), USE.NAMES = FALSE)
+  cap_text(paste(body, collapse = "\n"))
+}
+
 snapshot_cell <- function(v) {
   errored <- length(v$errors) > 0 || isTRUE(v$status %in% c("error", "interrupted"))
   runtime <- v$runtime %||% 0
@@ -289,8 +318,10 @@ snapshot_cell <- function(v) {
     e <- if (length(v$errors) > 0) v$errors[[1]] else list(kind = "interrupted", message = "The run was interrupted.")
     d$error <- structure_error(e)
     d$output <- d$error$msg
-  } else {
+  } else if (identical(v$kind, "code")) {
     d$output <- output_text(v)
+  } else {
+    d$output <- text_output(v)
   }
   d$notes <- I(cell_notes(v))
   # A running cell waiting on `readline()`, `menu()` and the like (Ember #186):
@@ -335,13 +366,19 @@ cell_notes <- function(v) {
 # as running, and `read_cell` waits and tells the agent what is going on.
 # `packages` are the ones the cells wait for, `seconds` how long since this
 # adapter first saw the work, and `last_line` the installer's last line, or
-# the package it is on.
+# the package it is on. Step `"asking"`: the install stopped before a large
+# download and waits for the user's OK (Ember #37, `approve_install()`);
+# `download` then gives the total `bytes` and each `package`, `version` and
+# `bytes` (NULL when its size isn't known). While installing, `source_builds`
+# names the packages ("name version") that build from source for want of a
+# binary for this R (Ember #19, the target's `no_binary`), when there are any.
 package_step <- function(rec, snap, state) {
   # A cell that isn't queued may name a package that isn't installed; only a run makes it wait.
   waits <- unique(unlist(lapply(snap$cells, function(c) if (isTRUE(c$queued)) c$waiting_for), use.names = FALSE))
   lib <- state$packages$target
   installing <- identical(lib$status, "installing")
-  if (length(waits) == 0 && !installing) {
+  asking <- identical(lib$status, "asking")
+  if (length(waits) == 0 && !installing && !asking) {
     rec$packages_since <- NULL
     return(NULL)
   }
@@ -349,13 +386,28 @@ package_step <- function(rec, snap, state) {
   progress <- lib$progress
   step <- if (installing) {
     if (is.numeric(progress$total) && progress$total > 1) sprintf("installing, %d of %d", as.integer(progress$done %||% 0), as.integer(progress$total)) else "installing"
-  } else if (identical(lib$status, "checking")) "checking" else "resolving"
+  } else if (asking) "asking" else if (identical(lib$status, "checking")) "checking" else "resolving"
   lines <- trimws(lib$log %||% character())
   lines <- lines[nzchar(lines)]
   last <- if (length(lines) > 0) utils::tail(lines, 1) else if (length(progress$current) == 1 && !is.na(progress$current)) paste("installing", progress$current) else NULL
   if (!is.null(last)) last <- substr(sub("(\\w+://)[^/[:space:]@]+@", "\\1", last), 1, 300)
-  list(step = step, packages = I(sort(as.character(waits))), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
-       last_line = last)
+  out <- list(step = step, packages = I(sort(as.character(waits))), seconds = round(as.numeric(difftime(Sys.time(), rec$packages_since, units = "secs"))),
+              last_line = last)
+  if (asking) out$download <- download_step(lib$download)
+  source_builds <- lib$no_binary
+  if (installing && length(source_builds) > 0) out$source_builds <- I(paste(names(source_builds), unname(source_builds)))
+  out
+}
+
+# An "asking" library's large packages (`library$download`, largest first)
+# as the step gives them.
+download_step <- function(dl) {
+  if (is.null(dl) || nrow(dl) == 0) return(list(bytes = 0, packages = I(list())))
+  list(bytes = sum(dl$bytes, na.rm = TRUE),
+       packages = I(lapply(seq_len(nrow(dl)), function(i) {
+         list(package = dl$package[[i]], version = dl$version[[i]],
+              bytes = if (is.na(dl$bytes[[i]])) NULL else dl$bytes[[i]])
+       })))
 }
 
 snapshot <- function(rec) {
@@ -546,6 +598,15 @@ run_over <- function(rec, ids, readers = character()) {
   identical(state$worker$status, "stopped") || length(unfinished(state, run_cells_of(rec, ids, readers))) == 0
 }
 
+# Whether the notebook's install stopped before a large download and waits
+# for the user's OK (Ember #37), with nothing running: nothing moves until
+# approve_install(), so a waited run returns rather than wait it out.
+waits_for_ok <- function(rec) {
+  if (!registered(rec)) return(FALSE)
+  state <- notebook_state(rec$nb)
+  identical(state$packages$target$status, "asking") && is.null(state$worker$running)
+}
+
 # Once a run nobody waits for ends, `run_finished` names it (`run`) and says
 # which of its cells finished.
 watch_run <- function(rec, cells, ids, readers = character(), run = run_id()) {
@@ -595,7 +656,7 @@ run <- function(rec, cells, wait, timeout) {
     check <- function() {
       over <- run_over(rec, ids, readers)
       asks <- if (!over) prompted(rec, ids, readers)
-      if (!over && is.null(asks) && Sys.time() < deadline) return(later::later(check, 0.05))
+      if (!over && is.null(asks) && Sys.time() < deadline && !waits_for_ok(rec)) return(later::later(check, 0.05))
       if (!registered(rec)) {
         result$completed <- I(cells)
         result$timed_out <- I(character())
@@ -681,29 +742,124 @@ date_proposal <- function(prop, date) {
 # first, so it is waited for until it is ready or failed, or `timeout` passes
 # (then `status` is still "fetching"). `date` is the day it would move to,
 # which is earlier than `asked` when that day isn't published yet.
-preview_packages <- function(rec, date, timeout) {
+# With `package`, the date is Ember's for putting that package at `version`
+# (CRAN's newest when NULL): `preview_update()`, the Packages tab's row
+# Update (#266). The other packages move with the date, as far as they must.
+preview_packages <- function(rec, date, timeout, package = NULL, version = NULL) {
+  if (!is.null(package)) return(preview_package(rec, package, version, timeout))
   date <- date_param(date)
   preview_date(rec$nb, date, wait = FALSE)
-  deadline <- Sys.time() + as.numeric(timeout %||% 60)
   current <- function() {
     prop <- date_proposal(package_status(rec$nb)$proposal, date)
-    if (identical(prop$kind %||% "date", "date")) prop
+    if (identical(prop$kind %||% "date", "date") && is.null(prop$update)) prop
   }
+  wait_preview(rec, current, date, timeout)
+}
+
+# The proposal `current()` finds, waited for until it is ready or failed or
+# `timeout` passes, as the result preview_package_update returns.
+wait_preview <- function(rec, current, asked, timeout) {
+  deadline <- Sys.time() + as.numeric(timeout %||% 60)
   promise(function(resolve, reject) {
     check <- function() {
       prop <- if (registered(rec)) current()
       done <- !is.null(prop) && prop$status %in% c("ready", "failed")
       if (!done && registered(rec) && Sys.time() < deadline) return(later::later(check, 0.1))
-      status <- if (is.null(prop)) "fetching" else prop$status
-      to <- prop$date %||% date
+      # A package's update waits for CRAN's release dates first ("dates").
+      status <- if (is.null(prop) || !prop$status %in% c("ready", "failed")) "fetching" else prop$status
+      to <- if (is.null(prop) || is.na(prop$date)) asked else prop$date
       # What the agent was shown, which the apply must match (set_package_date).
       rec$previewed <- if (identical(status, "ready")) list(date = to, changes = to_json(rows(prop$changes)))
+      # How many packages the notebook has: with none, nothing changes but the date (#269). Counted
+      # from what the code and header name and what the lock holds, not package_status, whose
+      # table is empty until they resolve. An Ember that doesn't say gives no count.
+      st <- notebook_state(rec$nb)
+      packages <- if (!is.null(st$packages$wanted_cache)) length(unique(c(st$packages$wanted_cache, st$file$lock$entries$name)))
       resolve(list(
-        date = to, asked = date, current_date = notebook_state(rec$nb)$file$header$snapshot,
-        status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message))
+        date = to, asked = asked, current_date = st$file$header$snapshot,
+        status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message,
+        packages = packages))
     }
     check()
   })
+}
+
+# The proposal `prop` if it is the preview this adapter asked for: `ask`,
+# the package and version (NULL for CRAN's newest) of its last
+# preview_update(). Ember replaces a newest's NULL with the version it
+# resolves before the preview is ready, so only an explicit version is
+# checked against the proposal's.
+update_proposal <- function(prop, ask) {
+  u <- prop$update
+  if (is.null(u) || is.null(ask) || !identical(u$name, ask$name)) return(NULL)
+  if (!is.null(ask$version) && !identical(u$version, ask$version)) return(NULL)
+  prop
+}
+
+# The date for one package (`preview_update()`), previewed. A call again for
+# the same package and version, while its preview is still being made or is
+# ready, waits on that one rather than starting over; a different ask (a pin,
+# then the newest) starts a new one.
+preview_package <- function(rec, package, version, timeout) {
+  if (!is.character(package) || length(package) != 1 || !nzchar(package)) {
+    argument_error("invalid_argument", "package must be a package name")
+  }
+  if (!is.null(version) && (!is.character(version) || length(version) != 1 || !nzchar(version))) {
+    argument_error("invalid_argument", "version must be a version, such as \"1.1.2\"")
+  }
+  ask <- list(name = package, version = version)
+  current <- function() update_proposal(package_status(rec$nb)$proposal, ask)
+  prop <- if (identical(rec$update_ask, ask)) current()
+  if (!is.null(prop) && !identical(prop$status, "failed")) return(wait_preview(rec, current, NA_character_, timeout))
+  # Ember refuses a package its lock doesn't have yet, as when the notebook
+  # has just opened or a cell added it: wait for the lock first.
+  deadline <- Sys.time() + as.numeric(timeout %||% 60)
+  promises::then(promise(function(resolve, reject) {
+    check <- function() {
+      if (registered(rec) && update_pending(notebook_state(rec$nb), package) && Sys.time() < deadline) return(later::later(check, 0.1))
+      resolve(TRUE)
+    }
+    check()
+  }), function(...) {
+    state <- if (registered(rec)) notebook_state(rec$nb)
+    blocked <- if (!is.null(state)) update_blocked(state, package)
+    pending <- !is.null(state) && update_pending(state, package)
+    if (!is.null(blocked) || pending) {
+      return(list(date = NA_character_, asked = NA_character_, current_date = state$file$header$snapshot,
+                  status = if (pending) "fetching" else "failed", changes = rows(NULL), problems = rows(NULL), message = blocked))
+    }
+    tryCatch(preview_update(rec$nb, package, version, wait = FALSE),
+             ember_refused = function(e) argument_error("not_updatable", conditionMessage(e)))
+    rec$update_ask <- ask
+    wait_preview(rec, current, NA_character_, max(0, as.numeric(difftime(deadline, Sys.time(), units = "secs"))))
+  })
+}
+
+# Whether `package` is one the notebook's code names that its lock doesn't
+# have yet because resolution hasn't caught up (Ember's `wanted_cache`
+# against `resolved_for`, packages-core.R), while it still can: not once a
+# package index failed to come (`update_blocked()`). FALSE when Ember
+# doesn't say. Those fields aren't Ember's documented state; this goes once
+# Ember holds the preview itself (jowch/Ember#419).
+update_pending <- function(state, package) {
+  p <- state$packages
+  wanted <- p$wanted_cache
+  if (is.null(wanted) || !package %in% wanted || !is.null(update_blocked(state, package))) return(FALSE)
+  locked <- state$file$lock$entries$name %||% character()
+  !package %in% locked && !setequal(wanted, p$resolved_for %||% character())
+}
+
+# Why the lock can't come to have `package`, which the code names: the
+# messages of the package indexes that failed. NULL when none did, or the
+# lock has it.
+update_blocked <- function(state, package) {
+  p <- state$packages
+  if (is.null(p$wanted_cache) || !package %in% p$wanted_cache) return(NULL)
+  if (package %in% (state$file$lock$entries$name %||% character())) return(NULL)
+  failed <- Filter(function(slot) identical(slot$status, "failed"), p$indexes %||% list())
+  if (length(failed) == 0) return(NULL)
+  said <- unlist(lapply(failed, function(slot) slot$message), use.names = FALSE)
+  paste(c(sprintf("%s isn't in the notebook's lock yet, and the package index it needs didn't come.", package), said), collapse = " ")
 }
 
 # Ember's set_date(): apply the preview for `date`, refused unless it is
@@ -728,6 +884,15 @@ set_package_date <- function(rec, date) {
   rec$previewed <- NULL
   state <- notebook_state(rec$nb)
   list(date = state$file$header$snapshot, changes = rows(changes), process_status = process_status(state))
+}
+
+# Ember's approve_install(): the user's OK for an install that stopped
+# before a large download (Ember #37). Refused when no install waits for one.
+approve <- function(rec) {
+  tryCatch(approve_install(rec$nb),
+           ember_refused = function(e) argument_error("nothing_to_approve", conditionMessage(e)))
+  state <- notebook_state(rec$nb)
+  list(approved = TRUE, process_status = process_status(state))
 }
 
 interrupt <- function(rec) {
@@ -859,8 +1024,9 @@ adapter_call <- function(method, params) {
     interrupt = interrupt(rec),
     answer = answer(rec, check_cell(rec, params$cell_id), params$text, params$prompt_id),
     restart = restart(rec),
-    preview_packages = preview_packages(rec, params$date, params$timeout),
+    preview_packages = preview_packages(rec, params$date, params$timeout, params$package, params$version),
     set_package_date = set_package_date(rec, params$date),
+    approve_install = approve(rec),
     allow_execution = allow(rec, isTRUE(params$run)),
     move = move(rec, params$path),
     render_text = render_text(rec, check_cell(rec, params$cell_id)),

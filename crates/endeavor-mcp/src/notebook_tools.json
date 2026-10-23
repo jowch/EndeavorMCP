@@ -9,7 +9,7 @@
     "name": "list_notebooks"
   },
   {
-    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run; in an R notebook also a result made before a cell it depends on last ran). An R notebook's cell that hasn't run since the notebook opened or restarted has `not_run`. Counts as the read an edit needs. If the code is what this session read or wrote in its last few calls, it is left out and `code_unchanged` is true; pass `include_code=true` to get it anyway. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`. A read of a cell that a run you started is running or will run waits up to 45 seconds for it to finish, so read it again only if it is still `running`; its `message` then says how long it waited. While packages install, a queued cell's read waits up to 45 seconds too, then has `packages` (the step, the packages, how long so far, the last line of the package log) and a `message` saying what to do.",
+    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run; in an R notebook also a result made before a cell it depends on last ran). An R notebook's cell that hasn't run since the notebook opened or restarted has `not_run`. Counts as the read an edit needs. If the code is what this session read or wrote in its last few calls, it is left out and `code_unchanged` is true; pass `include_code=true` to get it anyway. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An R notebook's text cell has its prose as `output`, with each inline value in place of its `` `r ...` `` span, as the page shows it. An errored cell has an `error` object with its `kind` and, when known, a `hint`. A read of a cell that a run you started is running or will run waits up to 45 seconds for it to finish, so read it again only if it is still `running`; its `message` then says how long it waited. While packages install, a queued cell's read waits up to 45 seconds too, then has `packages` (the step, the packages, how long so far, the last line of the package log) and a `message` saying what to do.",
     "inputSchema": {
       "properties": {
         "cell_id": {
@@ -613,7 +613,7 @@
     "name": "restart_notebook"
   },
   {
-    "description": "R notebooks only. An R notebook's package versions are those current on its package date (`package_date` in `list_notebooks` and `open_notebook`), so `available.packages()` in a cell lists that date's versions, not today's. This previews moving that date and changes nothing: the result has `changes` (each package's `from` and `to` versions) and any `problems`. Without `date` it previews today, which is what updating the packages means. It can take a while to fetch the date's package index; if `status` is still `fetching`, call it again with the same date.",
+    "description": "R notebooks only. An R notebook's package versions are those current on its package date (`package_date` in `list_notebooks` and `open_notebook`), so `available.packages()` in a cell lists that date's versions, not today's. This previews moving that date and changes nothing: the result has `changes` (each package's `from` and `to` versions) and any `problems`. Without `date` it previews today, which is what updating the packages means. To update one package, or pin it to a version, give `package` (and `version`) instead of `date`: the preview is of the date that puts that package at that version while moving the others as little as possible. A date moves every package, so tell the user what else changes. It can take a while to fetch the date's package index; if `status` is still `fetching`, call it again with the same arguments.",
     "inputSchema": {
       "properties": {
         "date": {
@@ -621,6 +621,14 @@
           "type": "string"
         },
         "notebook_id": {
+          "type": "string"
+        },
+        "package": {
+          "description": "A CRAN package in the notebook, to update or pin. Not with `date`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The version to put `package` at, newer or older, such as \"1.1.2\". Leave it out for CRAN's newest.",
           "type": "string"
         }
       },
@@ -650,5 +658,20 @@
       "type": "object"
     },
     "name": "apply_package_update"
+  },
+  {
+    "description": "R notebooks only. Say yes to a large download: an install whose Bioconductor annotation and experiment-data packages add up to more than 500 MB (Ember's default limit) stops before downloading anything, and its cells wait, queued, with `packages.step` `asking` and `packages.download` listing the packages and their sizes. Call it only after the user said yes to that download; never on your own. Refused with `nothing_to_approve` when no install is waiting for an OK, or the notebook isn't allowed to run yet. The library then installs and the queued cells run.",
+    "inputSchema": {
+      "properties": {
+        "notebook_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "notebook_id"
+      ],
+      "type": "object"
+    },
+    "name": "approve_install"
   }
 ]
