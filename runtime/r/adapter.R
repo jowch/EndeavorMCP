@@ -730,9 +730,22 @@ wait_preview <- function(rec, current, asked, timeout) {
   })
 }
 
+# The proposal `prop` if it is the preview this adapter asked for: `ask`,
+# the package and version (NULL for CRAN's newest) of its last
+# preview_update(). Ember replaces a newest's NULL with the version it
+# resolves before the preview is ready, so only an explicit version is
+# checked against the proposal's.
+update_proposal <- function(prop, ask) {
+  u <- prop$update
+  if (is.null(u) || is.null(ask) || !identical(u$name, ask$name)) return(NULL)
+  if (!is.null(ask$version) && !identical(u$version, ask$version)) return(NULL)
+  prop
+}
+
 # The date for one package (`preview_update()`), previewed. A call again for
 # the same package and version, while its preview is still being made or is
-# ready, waits on that one rather than starting over.
+# ready, waits on that one rather than starting over; a different ask (a pin,
+# then the newest) starts a new one.
 preview_package <- function(rec, package, version, timeout) {
   if (!is.character(package) || length(package) != 1 || !nzchar(package)) {
     argument_error("invalid_argument", "package must be a package name")
@@ -740,18 +753,13 @@ preview_package <- function(rec, package, version, timeout) {
   if (!is.null(version) && (!is.character(version) || length(version) != 1 || !nzchar(version))) {
     argument_error("invalid_argument", "version must be a version, such as \"1.1.2\"")
   }
-  mine <- function(prop) {
-    # Ember keeps the asked version, NULL for CRAN's newest, so a pin and "the newest" stay apart.
-    !is.null(prop$update) && identical(prop$update$name, package) && identical(prop$update$version, version)
-  }
-  current <- function() {
-    prop <- package_status(rec$nb)$proposal
-    if (mine(prop)) prop
-  }
-  prop <- current()
+  ask <- list(name = package, version = version)
+  current <- function() update_proposal(package_status(rec$nb)$proposal, ask)
+  prop <- if (identical(rec$update_ask, ask)) current()
   if (is.null(prop) || identical(prop$status, "failed")) {
     tryCatch(preview_update(rec$nb, package, version, wait = FALSE),
              ember_refused = function(e) argument_error("not_updatable", conditionMessage(e)))
+    rec$update_ask <- ask
   }
   wait_preview(rec, current, NA_character_, timeout)
 }
