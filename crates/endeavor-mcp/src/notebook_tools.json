@@ -28,7 +28,7 @@
     "name": "read_cell"
   },
   {
-    "description": "See a cell's output as an image (PNG). Use it to check what a plot or figure looks like; `read_cell` only describes images. The call waits while cells run. It also works for an HTML output (a widget, an interactive plot) whose value has an image form or whose HTML holds the picture. `read_cell` points to this tool when the HTML holds one; for other HTML it is worth a try. In safe preview it works only for an output that is already an image or HTML that holds one. Fails with `no_image` when the output has no image form (text, Markdown, most HTML): use `read_cell` for those.",
+    "description": "See a cell's output as an image (PNG). Use it to check what a plot or figure looks like; `read_cell` only describes images. The call waits while cells run. It also works for an HTML output (a widget, an interactive plot) whose value has an image form or whose HTML holds the picture. In the Endeavor app on a Mac, while the notebook pane is on screen, other HTML and WebGL outputs come back as the notebook draws them (`source: \"screenshot\"`). `read_cell` points to this tool when the HTML holds a picture; for other HTML it is worth a try. In safe preview it works only for an output that is already an image or HTML that holds one. Fails with `no_image` when the output has no image form (text, Markdown, most HTML outside the app): use `read_cell` for those.",
     "inputSchema": {
       "properties": {
         "cell_id": {
