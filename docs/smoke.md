@@ -82,6 +82,8 @@ Each task is a folder in `smoke/tasks/`:
   another Endeavor session then makes, such as reading a cell and changing
   it. The proxy holds the agent's message until they are done, so the moment
   is the same in every run. The `injected` check fails if it never came.
+  That session runs without the agent's `CLAUDE_CODE_SESSION_ID`, which
+  would make it the agent's own session rather than another one.
 
 For each task, the runner makes a fresh folder with its own runtime state and
 a copy of `project/`. It starts `claude -p` there, with this checkout's
