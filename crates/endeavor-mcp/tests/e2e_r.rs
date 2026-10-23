@@ -524,7 +524,8 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(read["code"], "n + 1", "{read}");
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code"], "n <- 1");
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": "A", "code": "n <- 41" }));
-        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code"], "n <- 41");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code_unchanged"], true, "the code it just wrote isn't sent again");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A", "include_code": true }))["code"], "n <- 41");
         let (failed, missing) = agent.call("read_cell", json!({ "notebook_id": id, "cell_id": "C" }));
         assert!(failed, "{missing}");
     });
