@@ -1014,10 +1014,21 @@ impl Call<'_> {
         let cell = self.cell(&nb)?;
         let Value::String(text) = self.arg("text")? else { return Err(argument_error("invalid_argument::text must be a string")) };
         let wait = bool_arg(self.args, "wait_for_completion", false)?;
+        let asked = match self.args.get("prompt_id") {
+            None | Some(Value::Null) => None,
+            Some(Value::Number(id)) => Some(id.clone()),
+            Some(_) => return Err(argument_error("invalid_argument::prompt_id must be a number")),
+        };
         if nb.prompted() != Some(&cell) {
             return Err(argument_error(&format!("no_prompt::Cell {cell} isn't waiting for input")));
         }
-        self.nbs.call("answer", json!({ "notebook_id": nb.id, "cell_id": cell, "text": text }))?;
+        // An answer for a question that has gone (menu() asking again, the user answering first)
+        // isn't given to the next one; Ember checks too, in case it changes before the answer lands.
+        let waiting = nb.cells[&cell].prompt.as_ref().map(|p| p["id"].clone()).unwrap_or_default();
+        if asked.as_ref().is_some_and(|id| waiting.as_f64() != id.as_f64()) {
+            return Err(argument_error(&format!("stale_prompt::Cell {cell} is asking something else now; read it and answer what it asks")));
+        }
+        self.nbs.call("answer", json!({ "notebook_id": nb.id, "cell_id": cell, "text": text, "prompt_id": asked }))?;
         let mutation = json!({ "type": "answer_prompt", "cell_id": cell });
         let ran = if wait {
             let (cells, going) = self.wait_for_own_run(&nb)?;
@@ -1636,7 +1647,7 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
 /// The prompt `cell` waits on, as the tools show it.
 fn waiting_json(nb: &Snapshot, cell: &str) -> Value {
     let prompt = nb.cells.get(cell).and_then(|c| c.prompt.clone()).unwrap_or_default();
-    json!({ "cell_id": cell, "prompt": prompt["text"].as_str().unwrap_or_default(), "choices": prompt["choices"].as_array().cloned().unwrap_or_default() })
+    json!({ "cell_id": cell, "prompt_id": prompt["id"], "prompt": prompt["text"].as_str().unwrap_or_default(), "choices": prompt["choices"].as_array().cloned().unwrap_or_default() })
 }
 
 /// What the agent is told while `cell` waits on a prompt.
@@ -1645,7 +1656,7 @@ fn prompt_message(nb: &Snapshot, cell: &str) -> String {
     let how = if menu { " (a choice's number or its text)" } else { "" };
     format!(
         "Cell {cell} is waiting for input, as R does at a console prompt: `waiting_for_input` has what it asked, and the cell's output what it printed before. \
-         Nothing runs until it is answered. Answer with answer_prompt{how}, or stop the run with interrupt_notebook. \
+         Nothing runs until it is answered. Answer with answer_prompt{how}, passing `prompt_id`, or stop the run with interrupt_notebook. \
          If the answer is the user's to give (a download, an overwrite, a choice of theirs), ask the user first."
     )
 }

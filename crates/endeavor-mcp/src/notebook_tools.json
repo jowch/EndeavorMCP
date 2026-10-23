@@ -575,6 +575,10 @@
         "notebook_id": {
           "type": "string"
         },
+        "prompt_id": {
+          "description": "`waiting_for_input.prompt_id`: the answer is refused (`stale_prompt`) if the cell is asking something else by then, such as `menu()` asking again.",
+          "type": "number"
+        },
         "text": {
           "description": "The answer, without a newline. For `menu()`, a choice's number or its exact text; \"\" is what pressing Enter sends.",
           "type": "string"

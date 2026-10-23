@@ -347,9 +347,9 @@ impl Engine {
                 for cell in nb.cells.iter_mut().filter(|c| lingering.contains(&c.id)) {
                     cell.running = true;
                     if cell.code.contains("ask()") {
-                        cell.prompt = Some(json!({ "text": "Name? ", "choices": [] }));
+                        cell.prompt = Some(json!({ "id": 1, "text": "Name? ", "choices": [] }));
                     } else if cell.code.contains("choose()") {
-                        cell.prompt = Some(json!({ "text": "Selection: ", "choices": ["Yes", "No"] }));
+                        cell.prompt = Some(json!({ "id": 2, "text": "Selection: ", "choices": ["Yes", "No"] }));
                     }
                 }
                 let first = std::mem::take(&mut nb.runs_first);
@@ -3063,7 +3063,7 @@ fn a_cell_waiting_on_a_prompt_ends_the_wait_says_what_it_asks_and_takes_an_answe
     let began = Instant::now();
     let ran = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
     assert!(began.elapsed() < Duration::from_secs(5), "the run's wait ended at the prompt");
-    assert_eq!(ran["waiting_for_input"], json!({ "cell_id": X, "prompt": "Name? ", "choices": [] }), "{ran}");
+    assert_eq!(ran["waiting_for_input"], json!({ "cell_id": X, "prompt_id": 1, "prompt": "Name? ", "choices": [] }), "{ran}");
     assert_eq!((&ran["execution"]["status"], &ran["execution"]["still_running"]), (&json!("running"), &json!([X])), "{ran}");
     let warnings = ran["warnings"].as_array().unwrap();
     assert!(warnings.iter().any(|w| w.as_str().unwrap().starts_with("waiting_for_input::")) && !warnings.iter().any(|w| w.as_str().unwrap().starts_with("execution_timeout::")), "{ran}");
@@ -3081,9 +3081,14 @@ fn a_cell_waiting_on_a_prompt_ends_the_wait_says_what_it_asks_and_takes_an_answe
     assert!(refused.contains("no_prompt::"), "{refused}");
     let refused = s.call("7", "answer_prompt", json!({ "notebook_id": NB, "cell_id": X, "text": 3 })).unwrap_err();
     assert!(refused.contains("invalid_argument::"), "{refused}");
+    // An answer for a question the cell has stopped asking isn't given to the one it asks now.
+    let answers = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "answer").count();
+    let refused = s.call("7", "answer_prompt", json!({ "notebook_id": NB, "cell_id": X, "text": "Ada", "prompt_id": 7 })).unwrap_err();
+    assert!(refused.contains("stale_prompt::"), "{refused}");
+    assert_eq!(answers(), 0, "nothing reached the engine");
 
     // The answer lets the cell finish; a waited answer reports it as a run does.
-    let answered = s.call("7", "answer_prompt", json!({ "notebook_id": NB, "cell_id": X, "text": "Ada", "wait_for_completion": true })).unwrap();
+    let answered = s.call("7", "answer_prompt", json!({ "notebook_id": NB, "cell_id": X, "text": "Ada", "prompt_id": 1, "wait_for_completion": true })).unwrap();
     assert_eq!(answered["execution"]["status"], json!("completed"), "{answered}");
     assert_eq!(answered["outputs"]["changed"][0]["output_summary"], json!("answered Ada"), "{answered}");
     assert_eq!(answered.get("waiting_for_input"), None);

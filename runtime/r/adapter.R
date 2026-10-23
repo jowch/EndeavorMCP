@@ -296,7 +296,7 @@ snapshot_cell <- function(v) {
   # A running cell waiting on `readline()`, `menu()` and the like (Ember #186):
   # what the prompt printed and, for `menu()`, its choices. `answer` replies.
   if (isTRUE(v$running) && !is.null(v$prompt)) {
-    d$prompt <- list(text = v$prompt$text %||% "", choices = I(as.character(unlist(v$prompt$choices))))
+    d$prompt <- list(id = v$prompt$id, text = v$prompt$text %||% "", choices = I(as.character(unlist(v$prompt$choices))))
   }
   d
 }
@@ -732,11 +732,12 @@ interrupt <- function(rec) {
 }
 
 # Answer the prompt `cell` waits on (Ember's answer_input()), which lets it go on.
-answer <- function(rec, cell, text) {
+# With `id`, only if it is still that prompt: not one asked since.
+answer <- function(rec, cell, text, id = NULL) {
   if (!is.character(text) || length(text) != 1 || is.na(text)) argument_error("invalid_argument", "text must be a string")
   answer_input <- get0("answer_input", envir = asNamespace("ember"), mode = "function")
   if (is.null(answer_input)) argument_error("no_prompt", "This Ember can't answer prompts; update it")
-  tryCatch(answer_input(rec$nb, text, cell = cell),
+  tryCatch(answer_input(rec$nb, text, cell = cell, id = id),
            error = function(e) argument_error("no_prompt", sprintf("Cell %s isn't waiting for input (%s)", cell, sub("^ember: ", "", conditionMessage(e)))))
   list(answered = TRUE)
 }
@@ -850,7 +851,7 @@ adapter_call <- function(method, params) {
     apply = apply_ops(rec, params$ops),
     run = run(rec, unlist(params$cells) %||% character(), isTRUE(params$wait), params$timeout),
     interrupt = interrupt(rec),
-    answer = answer(rec, check_cell(rec, params$cell_id), params$text),
+    answer = answer(rec, check_cell(rec, params$cell_id), params$text, params$prompt_id),
     restart = restart(rec),
     preview_packages = preview_packages(rec, params$date, params$timeout),
     set_package_date = set_package_date(rec, params$date),

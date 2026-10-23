@@ -419,18 +419,27 @@ fn an_r_notebook_through_the_runtime() {
         let began = Instant::now();
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": asks, "wait_for_completion": true }));
         assert!(began.elapsed() < Duration::from_secs(30), "the wait ended at the prompt: {ran}");
-        assert_eq!(ran["waiting_for_input"], json!({ "cell_id": asks, "prompt": "Name? ", "choices": [] }), "{ran}");
+        let waiting = &ran["waiting_for_input"];
+        assert_eq!((&waiting["cell_id"], &waiting["prompt"], &waiting["choices"]), (&asks, &json!("Name? "), &json!([])), "{ran}");
+        assert!(waiting["prompt_id"].is_number(), "{ran}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
         assert_eq!((&read["running"], &read["waiting_for_input"]["prompt"]), (&json!(true), &json!("Name? ")), "{read}");
-        let answered = agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": asks, "text": "Ada", "wait_for_completion": true }));
+        let answered = agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": asks, "text": "Ada", "prompt_id": waiting["prompt_id"], "wait_for_completion": true }));
         assert_eq!(answered["execution"]["status"], "completed", "{answered}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
         assert!(read["running"] == false && read.get("waiting_for_input").is_none() && read["output"].as_str().unwrap().contains("Ada"), "{read}");
 
         let picks = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "colour <- c(\"red\", \"blue\")[menu(c(\"red\", \"blue\"), title = \"Colour?\")]", "after_cell_id": asks }))["cell_id"].clone();
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": picks, "wait_for_completion": true }));
-        assert_eq!(ran["waiting_for_input"], json!({ "cell_id": picks, "prompt": "Selection: ", "choices": ["red", "blue"] }), "{ran}");
-        agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": picks, "text": "2", "wait_for_completion": true }));
+        let waiting = &ran["waiting_for_input"];
+        assert_eq!((&waiting["cell_id"], &waiting["prompt"], &waiting["choices"]), (&picks, &json!("Selection: "), &json!(["red", "blue"])), "{ran}");
+        // A wrong choice: menu() asks again, with a new prompt, so the first one's id is refused.
+        agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": picks, "text": "green", "prompt_id": waiting["prompt_id"], "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": picks }));
+        assert!(read["waiting_for_input"]["prompt_id"].is_number() && read["waiting_for_input"]["prompt_id"] != waiting["prompt_id"], "{read}");
+        let (failed, stale) = agent.call("answer_prompt", json!({ "notebook_id": notebook, "cell_id": picks, "text": "2", "prompt_id": waiting["prompt_id"] }));
+        assert!(failed && stale.to_string().contains("stale_prompt"), "{stale}");
+        agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": picks, "text": "2", "prompt_id": read["waiting_for_input"]["prompt_id"], "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": picks }));
         assert!(read["errored"] == false && read["output"].as_str().unwrap().contains("blue"), "{read}");
 
