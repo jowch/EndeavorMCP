@@ -24,13 +24,15 @@ struct FakeCell {
     hidden: bool,
     stale: bool,
     not_run: bool,
+    /// Ember's disabled cells and their dependents, which never run.
+    off: bool,
     /// Ember's notes on its last run, "kind::text".
     notes: Vec<String>,
 }
 
 impl FakeCell {
     fn new(id: &str, code: &str) -> FakeCell {
-        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, notes: Vec::new() }
+        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, off: false, notes: Vec::new() }
     }
 
     /// What `a, b = 1, 2` defines, and the names the rest of the code uses.
@@ -64,8 +66,14 @@ struct FakeNotebook {
     /// Cells the next run runs before its own, not naming them in its reply, as
     /// Ember runs an ancestor whose code changed since it last ran.
     runs_first: Vec<String>,
+    /// Cells the next run reruns besides its graph dependents, naming them in its reply's
+    /// `dependents`, as Ember reruns the readers of a name a cell dropped (#228).
+    reruns_besides: Vec<String>,
     /// Ember's lazy mode: a run marks its dependents stale instead of running them.
     lazy: bool,
+    /// Autorun as the engines do it: a run reruns its dependents that have run
+    /// before, after its own cells. Off unless a test turns it on.
+    autorun: bool,
     /// An R notebook's snapshot date, and the date of its ready preview of a move.
     package_date: Option<String>,
     previewed: Option<String>,
@@ -100,7 +108,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy: false, package_date: None, previewed: None });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), reruns_besides: Vec::new(), lazy: false, autorun: false, package_date: None, previewed: None });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -128,7 +136,7 @@ impl Engine {
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
                 "last_run": c.last_run, "runtime": 0, "output": c.output, "error": if c.errored { json!({ "msg": c.output }) } else { Value::Null }, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
-                "stale": c.stale, "not_run": c.not_run, "notes": c.notes,
+                "stale": c.stale, "not_run": c.not_run, "off": c.off, "notes": c.notes,
             })).collect::<Vec<_>>(),
         })
     }
@@ -200,7 +208,7 @@ impl Engine {
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
                 // A file named for it is in Ember's lazy mode.
                 let lazy = method == "open" && path.contains("lazy");
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), lazy, package_date: None, previewed: None });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), reruns_besides: Vec::new(), lazy, autorun: false, package_date: None, previewed: None });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed, "lazy": lazy }));
             }
             _ => {}
@@ -244,8 +252,11 @@ impl Engine {
                     return Ok(json!({ "date": date, "current_date": nb.package_date, "status": "failed", "changes": [],
                         "problems": [{ "kind": "index_unavailable", "package": null, "message": "no package index for 2000-01-01" }], "message": "no index" }));
                 }
+                // The 19th isn't published yet, so its preview is of the 18th (#247).
+                let asked = date.clone();
+                let date = if date == "2026-10-19" { "2026-10-18".to_owned() } else { date };
                 nb.previewed = Some(date.clone());
-                Ok(json!({ "date": date, "current_date": nb.package_date, "status": "ready", "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "problems": [], "message": null }))
+                Ok(json!({ "date": date, "asked": asked, "current_date": nb.package_date, "status": "ready", "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "problems": [], "message": null }))
             }
             "set_package_date" => {
                 if nb.previewed.as_deref() != params["date"].as_str() {
@@ -343,8 +354,28 @@ impl Engine {
                     for cell in nb.cells.iter_mut().filter(|c| !cells.contains(&c.id) && c.analysis().1.iter().any(|name| defined.contains(name))) {
                         cell.stale = true;
                     }
+                } else if nb.autorun {
+                    let mut names = defined.clone();
+                    for cell in nb.cells.iter_mut().filter(|c| !cells.contains(&c.id) && !c.not_run && !c.off && c.last_run > 0.0) {
+                        let (defs, refs) = cell.analysis();
+                        if refs.iter().any(|name| names.contains(name)) {
+                            names.extend(defs);
+                            cell.last_run = now;
+                            cell.errored = cell.code.contains("error(");
+                            cell.output = if cell.errored { "boom".into() } else { format!("ran {}", cell.code) };
+                        }
+                    }
+                }
+                let besides = std::mem::take(&mut nb.reruns_besides);
+                for cell in nb.cells.iter_mut().filter(|c| besides.contains(&c.id)) {
+                    cell.last_run = now;
+                    cell.errored = cell.code.contains("error(");
+                    cell.output = if cell.errored { "boom".into() } else { format!("ran {}", cell.code) };
                 }
                 let mut reply = json!({ "accepted": true, "process_status": "ready" });
+                if !besides.is_empty() {
+                    reply["dependents"] = json!(besides);
+                }
                 if params["wait"] == true {
                     self.waits.lock().unwrap().push(params["timeout"].as_f64().unwrap());
                     reply["completed"] = json!(finishing);
@@ -638,10 +669,12 @@ fn edits_are_staged_until_they_run_however_they_run() {
     let receipt = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     assert_eq!(receipt["execution"]["status"], "running");
     assert_eq!(receipt["warnings"], json!(["async_execution::cells running; read them for the result"]));
+    // An edit made once the cell has finished, before the engine says the run ended, ran in
+    // no run: the run's end leaves it staged (#231).
     s.seconds(1.0);
     s.edit("", NB, X, "x = 12");
     s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "cells": [X] } }));
-    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([]));
+    assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([X]));
     s.seconds(1.0);
     s.edit("", NB, X, "x = 13");
     s.seconds(1.0);
@@ -688,6 +721,112 @@ fn a_run_in_lazy_mode_says_so_and_names_the_stale_cells() {
     let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
     assert!(ran.get("stale_cells").is_none() && !ran["warnings"].to_string().contains("lazy_mode"), "{ran}");
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0].get("on_cell_change"), None);
+}
+
+#[test]
+fn a_run_names_the_dependents_it_reruns_and_a_waited_one_reports_them() {
+    // Autorun reruns a run's dependents after its cells. A waited run lists
+    // the ones that reran as its own, so a dependent that still fails makes it
+    // `errored`; a run not waited for names the ones it will rerun (#192).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1"), ("33333333-3333-3333-3333-333333333333", "z = error(y)"), ("44444444-4444-4444-4444-444444444444", "w = y"), ("55555555-5555-5555-5555-555555555555", "v = 2")]);
+    let (z, w, v) = ("33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444", "55555555-5555-5555-5555-555555555555");
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.engine.with(NB, |nb| {
+        nb.autorun = true;
+        // w hasn't run since the notebook started, so Ember's autorun skips it.
+        nb.cells[3].not_run = true;
+    });
+    s.seconds(1.0);
+    s.read("", NB, X);
+    s.edit("", NB, X, "x = 2");
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["affected_cells"], json!([X, Y, z]), "{ran}");
+    assert_eq!(ran["execution"]["status"], "errored", "a dependent that failed fails the run: {ran}");
+    let changed: Vec<&str> = ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| c["cell_id"].as_str().unwrap()).collect();
+    assert_eq!(changed, [X, Y, z], "{ran}");
+    assert_eq!(ran["execution"].get("will_run"), None, "{ran}");
+
+    // Not waited for: the result names what will follow, not v (no dependent) or w (never ran).
+    s.seconds(1.0);
+    let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 3", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"]["will_run"], json!([Y, z]), "{edited}");
+    assert!(!edited["execution"]["will_run"].to_string().contains(v) && !edited["execution"]["will_run"].to_string().contains(w));
+
+    // In lazy mode nothing follows: the dependents go stale.
+    s.engine.with(NB, |nb| nb.lazy = true);
+    s.seconds(1.0);
+    let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 4", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"].get("will_run"), None, "{edited}");
+}
+
+#[test]
+fn a_disabled_dependent_or_a_dependent_of_one_is_not_named_as_what_will_run() {
+    // Ember never runs a disabled cell, or a cell downstream of one (its
+    // `graph$off`), though the graph still links them. A run doesn't name them
+    // as what will follow, and a read of one doesn't wait for the run (#232).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1"), ("33333333-3333-3333-3333-333333333333", "z = y + 1"), ("44444444-4444-4444-4444-444444444444", "w = x + 1")]);
+    let (z, w) = ("33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444");
+    s.call("7", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    // Not autorun, so the fake doesn't rerun w at once: Ember queues it once x's result is in.
+    // The calls are a session's ("7"), whose own run a read waits for.
+    s.engine.with(NB, |nb| {
+        // Y disabled, and z off because it reads Y.
+        nb.cells[1].off = true;
+        nb.cells[2].off = true;
+    });
+    s.seconds(1.0);
+    s.read("7", NB, X);
+    // linger() keeps the run going, so a read that waited for it would take the read's whole cap.
+    let edited = s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = linger()", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"]["will_run"], json!([w]), "{edited}");
+    let read = |cell: &str, began: Instant| super::tools::tool_json(s.notebooks.tool("7", "read_cell", &json!({ "notebook_id": NB, "cell_id": cell }), &Folder::Process, began).unwrap());
+    // A read that waits for the run, which doesn't end, runs out and says so in a `message`.
+    let began = Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+    let off = read(z, began);
+    assert!(off["output"] == "ran z = y + 1" && off.get("message").is_none(), "a read of an off cell doesn't wait for the run: {off}");
+    assert!(read(w, began).get("message").is_some(), "a read of the dependent that will run waits for it");
+}
+
+#[test]
+fn lazy_mode_doesnt_list_an_off_cell_as_stale_to_run() {
+    // Ember marks a disabled cell's readers stale like any other, but it won't
+    // run them while they're off, so `stale_cells` doesn't ask for it (#232).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1"), ("33333333-3333-3333-3333-333333333333", "z = x + 2")]);
+    let z = "33333333-3333-3333-3333-333333333333";
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.engine.with(NB, |nb| {
+        nb.lazy = true;
+        nb.cells[1].off = true;
+    });
+    s.seconds(1.0);
+    s.read("", NB, X);
+    let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 2", "run_after": true })).unwrap();
+    assert_eq!(edited["stale_cells"], json!([z]), "{edited}");
+}
+
+#[test]
+fn a_dependent_the_engine_reruns_beyond_the_graph_is_named_and_reported() {
+    // A rename: Y read the name X dropped, so the graph no longer links them, but
+    // Ember reruns Y, and the runtime names it in the run's `dependents` (#228).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = error(x)")]);
+    s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.engine.with(NB, |nb| nb.autorun = true);
+    s.seconds(1.0);
+    s.read("", NB, X);
+    s.edit("", NB, X, "b = 1");
+    s.engine.with(NB, |nb| nb.reruns_besides = vec![Y.into()]);
+    let ran = s.call("", "submit_changes", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["affected_cells"], json!([X, Y]), "{ran}");
+    assert_eq!(ran["execution"]["status"], "errored", "{ran}");
+
+    s.seconds(1.0);
+    s.engine.with(NB, |nb| nb.reruns_besides = vec![Y.into()]);
+    let edited = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "c = 1", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"]["will_run"], json!([Y]), "{edited}");
 }
 
 #[test]
@@ -853,6 +992,9 @@ fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
     s.call("", "edit_cell", edit("x = 3")).unwrap();
     s.engine.with(NB, |nb| nb.cells[0].code = "x = 99".into());
     assert_eq!(s.call("", "edit_cell", edit("x = 4")), Err(format!("ArgumentError: stale_read::Cell {X} changed since last read; call read_cell again")));
+    // A read after someone else's change sends the code: it isn't what this session has.
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("x = 99"), &Value::Null));
     s.call("", "read_notebook_code", json!({ "notebook_id": NB })).unwrap();
     s.call("", "edit_cell", edit("x = 4")).unwrap();
     assert_eq!(s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X })), Err("KeyError: key \"code\" not found".into()));
@@ -893,7 +1035,29 @@ fn adding_moving_folding_and_deleting_cells() {
     let add = |args: Value| s.call("", "add_cell", args);
     let first = add(json!({ "notebook_id": NB, "code": "a = 1" })).unwrap();
     let a = first["cell_id"].as_str().unwrap().to_owned();
-    assert_eq!((&first["code"], &first["code_folded"], &first["pending_run"]), (&json!("a = 1"), &json!(false), &json!([a])), "a new cell's reply has its code, for the app");
+    assert_eq!((&first["code"], &first["code_folded"], &first["pending_run"]), (&Value::Null, &json!(false), &json!([a])), "not the code the agent just sent");
+    // Read at once, the cell's code is what the agent wrote, so it isn't sent again unless asked for.
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"], &read["code_sha"]), (&Value::Null, &json!(true), &json!("b5bc1ffd9091")));
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a, "include_code": true })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
+    // Another session hasn't read it, so it gets the code.
+    assert_eq!(s.call("9", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap()["code"], "a = 1");
+    // A read more than ten of the session's calls ago may have left the agent's context: the code comes again.
+    for _ in 0..11 {
+        s.call("", "list_notebooks", json!({})).unwrap();
+    }
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
+    // A read that left the code out doesn't count as sending it: reads every few calls don't keep it out for good.
+    let calls = |n| for _ in 0..n {
+        s.call("", "list_notebooks", json!({})).unwrap();
+    };
+    calls(7);
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap()["code_unchanged"], true);
+    calls(7);
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": a })).unwrap();
+    assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("a = 1"), &Value::Null));
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": "" })), "placement_required");
     assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "code": "b = a", "after_cell_id": a, "folded": "yes" })), "invalid_argument");
@@ -902,7 +1066,7 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!((&b["code_folded"], &b["execution"]["status"]), (&json!(true), &json!("staged")));
     let b = b["cell_id"].as_str().unwrap().to_owned();
     let c = add(json!({ "notebook_id": NB, "code": 42, "after_cell_id": a, "run_after": true })).unwrap();
-    assert_eq!((&c["code"], &c["affected_cells"], &c["execution"]["status"]), (&json!("42"), &json!([c["cell_id"]]), &json!("running")));
+    assert_eq!((&c["code"], &c["affected_cells"], &c["execution"]["status"]), (&json!("42"), &json!([c["cell_id"]]), &json!("running")), "the code as the engine has it, since it isn't what was sent");
     let c = c["cell_id"].as_str().unwrap().to_owned();
     assert_eq!(s.engine.code(NB, &c), "42");
     assert_eq!(s.engine.order(NB), [a.clone(), c.clone(), b.clone()]);
@@ -1330,6 +1494,35 @@ fn a_read_of_a_dependent_still_running_in_the_sessions_run_waits_for_it() {
         assert!(began.elapsed() < Duration::from_secs(1), "the run ended (wait_for_completion {wait})");
         s.engine.with(NB, |nb| nb.cells[1].running = false);
     }
+}
+
+#[test]
+fn a_read_of_a_dependent_the_sessions_run_will_rerun_waits_for_it_before_it_is_queued() {
+    // The engine queues a dependent only once its parent's result is in, so
+    // right after an edit's run it looks idle with its old output (#192).
+    let s = setup();
+    s.engine.open(NB, "/n/a.R", &[(X, "x = 1"), (Y, "y = x + 1")]);
+    s.call("7", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    s.seconds(1.0);
+    s.read("7", NB, X);
+    let edited = s.call("7", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = linger()", "run_after": true })).unwrap();
+    assert_eq!(edited["execution"]["will_run"], json!([Y]), "{edited}");
+    let read = |began: Instant| super::tools::tool_json(s.notebooks.tool("7", "read_cell", &json!({ "notebook_id": NB, "cell_id": Y }), &Folder::Process, began).unwrap());
+    let began = Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+    assert_eq!(read(began)["running"], false);
+    assert!(began.elapsed() >= Duration::from_secs(44), "waited for the dependent though it isn't queued yet");
+
+    // Once it has run, or the run has ended, a read doesn't wait.
+    s.engine.with(NB, |nb| nb.cells[1].last_run += 1.0);
+    let began = Instant::now();
+    read(began);
+    assert!(began.elapsed() < Duration::from_secs(1), "it ran");
+    s.engine.with(NB, |nb| nb.cells[1].last_run -= 1.0);
+    s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [X] } }));
+    s.engine.with(NB, |nb| nb.cells[0].running = false);
+    let began = Instant::now();
+    read(began);
+    assert!(began.elapsed() < Duration::from_secs(1), "the run ended");
 }
 
 #[test]
@@ -2816,6 +3009,12 @@ fn an_r_notebooks_package_date_is_shown_previewed_and_moved() {
     s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2026-10-18" })).unwrap();
     let waiting = s.call("9", "apply_package_update", json!({ "notebook_id": R, "date": "2026-10-18" })).unwrap();
     assert!(waiting["message"].as_str().unwrap().contains("once the user allows the notebook to run"), "{waiting}");
+
+    // A day not published yet is previewed at the newest one that is, and the message says so (#247).
+    let earlier = s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2026-10-19" })).unwrap();
+    assert_eq!((&earlier["status"], &earlier["date"], earlier.get("asked")), (&json!("ready"), &json!("2026-10-18"), None), "{earlier}");
+    assert!(earlier["message"].as_str().unwrap().starts_with("2026-10-19 isn't published yet, so this is the newest day that is, 2026-10-18."), "{earlier}");
+    assert!(!preview["message"].as_str().unwrap().contains("published"), "{preview}");
 
     // A Julia notebook has no package date.
     s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1")]);

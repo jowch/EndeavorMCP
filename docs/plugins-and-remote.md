@@ -550,8 +550,13 @@ and then `use_machine` starts this version; `session_status` says it again
 every time (`other_version`, with the build in `runtime_build`), and
 `client::Session` reports the same as trouble (`Config::on_event`). The front answers the tool list from its own build, so
 a tool or argument newer than the runtime fails with the runtime's own error.
-A machine's runtime is never stopped for the agent, unlike an idle one on
-this computer: on a cluster that gives up the job's allocation. Only a
+The front never stops a machine's runtime for the agent, unlike an idle one
+on this computer: on a cluster that gives up the job's allocation. The helper
+there does stop one that an older version started (outside a Slurm job) when
+no notebook is open in it, and starts its own build's in its place, so a
+machine that was idle since the last update runs this version (#226). A
+runtime from before R notebooks refuses an R notebook's path with "must end
+in .jl"; the front tells the agent why instead, and how to restart it. Only a
 runtime from before one port per runtime is refused, as built.
 
 **`serve` in a job you submitted yourself** is recorded under the compute
@@ -935,7 +940,7 @@ from a local copy of the repository and used through `codex exec` (below).
 | Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
 | Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add`, `codex plugin add endeavor@endeavor`, from `.agents/plugins/marketplace.json` | `agy plugin install <folder or its GitHub tree URL>` |
 | Update | `claude plugin marketplace update endeavor`, `claude plugin update endeavor@endeavor`, or the marketplace's auto-update (off by default). The manifest has no `version` on purpose: Claude Code then versions the plugin by commit, and a fixed version would keep every install on its first commit | `codex plugin marketplace upgrade endeavor`. It replaced the installed `0.1.0` copy with the new commit's files although the version stayed (codex-cli 0.162.1, 2026-10-10) | `agy plugin install` again (not checked over an existing install) |
-| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable, so notebook paths must be absolute | none: `--no-folder`, as Codex |
+| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable; the front takes the project folder from each call's metadata (#99) | none: `--no-folder`, as Codex |
 
 Each plugin folder holds `launch/endeavor-mcp.sh`, `launch/install.sh` and
 `launch/release-key`. The command is `sh` with the script as its argument, so
@@ -952,8 +957,11 @@ build's key. Nobody edits it by hand: after a push to `main` has built on every
 platform, the Helpers workflow's pin job writes that build's key to
 `scripts/release-key` and the copies and pushes the commit to `main`. Until
 then, and if a platform's build fails, the plugins keep the last complete build:
-it exists, but its embedded skills can be a few minutes older than the
-plugin's. Before this, each PR committed its own key, which went stale whenever
+it exists, but its embedded skills can be older than the plugin's (by an hour
+or two when the macOS builds queue). A run pins only a build of newer source
+than the pinned one, which its commit's "Built from" line names, so a re-run of
+an old run can't move the pin back, and merges landing while a build runs
+don't stop it from pinning. Before this, each PR committed its own key, which went stale whenever
 `main` moved, so every PR had to merge `main` and re-pin before it could merge.
 
 **What was seen with Antigravity** (agy 1.3.2, Windows 10, through `agy -p`;
@@ -1005,7 +1013,9 @@ was the documentation used to build the folder):
   So `mcp` cannot find the project folder, and the entry passes `--no-folder`
   (see [`--no-folder`](endeavor-mcp.md)). Each `tools/call` carries
   `_meta["x-codex-turn-metadata"].workspaces`, an object whose keys are workspace
-  paths; it is undocumented and not used.
+  paths. It is undocumented; the front takes the project folder from it when it
+  names exactly one, so relative paths work (see
+  [`--no-folder`](endeavor-mcp.md)).
 - Codex does not pass its own environment to a plugin's server (`ENDEAVOR_BIN`
   and `XDG_*` from the shell were absent); an `env` object in the entry is
   passed.

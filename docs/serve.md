@@ -172,7 +172,7 @@ status` shows what is running and where.
 | Option | What it does | Default |
 |---|---|---|
 | `--folder DIR` | Where new notebooks go, and where relative paths start | The current folder |
-| `--no-folder` | The agent is not told a project folder, so its notebook paths must be absolute (`mcp` only; not with `--folder`). Used by the Codex plugin | |
+| `--no-folder` | The agent is not told a project folder, so its notebook paths must be absolute, unless a call names the folder as Codex's do (`mcp` only; not with `--folder`). Used by the Codex plugin | |
 | `--port PORT` | The port on `127.0.0.1`. Fix it so your `ssh -L` line stays the same | A free port |
 | `--julia PATH` | The `julia` to use, `auto` or `own`. `own` is Endeavor's own Julia 1.12.6 only, never the one on your PATH | `auto`: your login shell's `julia` (on Windows, the first `julia.exe` on the PATH), else Endeavor's own. Endeavor's own is juliaup's channel for 1.12.6 when you have juliaup (Endeavor adds it, and on Windows installs juliaup first), else a download into `~/.cache/endeavor/` |
 | `--julia-shell LINE` | A shell line that puts `julia` on the `PATH`, such as `'module load julia/1.12'` | |

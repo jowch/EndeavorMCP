@@ -4,7 +4,7 @@
     {
       "name": "endeavor",
       "source": "./codex-plugin",
-      "description": "Live Pluto (Julia) notebooks your agent edits and runs, which you watch in a browser."
+      "description": "Live Julia (Pluto) and R (Ember) notebooks your agent edits and runs, which you watch in a browser."
     }
   ]
 }

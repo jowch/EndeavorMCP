@@ -105,6 +105,24 @@ pub fn runs_code(tool: &str, arguments: &Value) -> bool {
     }
 }
 
+/// Whether a call to `tool` with `arguments` makes or opens an R notebook, by its path.
+pub(crate) fn names_r_notebook(tool: &str, arguments: &Value) -> bool {
+    matches!(tool, "new_notebook" | "open_notebook") && arguments["path"].as_str().is_some_and(|path| crate::notebooks::engines::of_path(path) == wire::backend::Backend::Ember)
+}
+
+/// Whether `result`, a runtime's answer to the agent's call to `tool` with `arguments`, is a core from
+/// before R notebooks refusing an R notebook's path. Such a core takes only `.jl` paths and says so
+/// ("must end in .jl") without a word about R, so the agent can't tell why (#226). A core with R
+/// notebooks never answers an R path that way: it hands the path to R, which says what is missing.
+/// That rests on the order in `new_notebook` (`tools.rs`): a current core on Windows also says "must
+/// end in .jl" with no "or .R", but only for a path R doesn't claim, since R paths go to R first. The
+/// callers also check that the runtime is another build's where they can tell.
+pub(crate) fn refuses_r_for_want_of_it(tool: &str, arguments: &Value, result: &Value) -> bool {
+    names_r_notebook(tool, arguments)
+        && result["isError"] == true
+        && result["content"].as_array().is_some_and(|content| content.iter().any(|c| c["text"].as_str().is_some_and(|text| text.contains("must end in .jl") && !text.contains("or .R"))))
+}
+
 /// Whether a call to `tool` changes the notebook: what Manual asks about
 /// even when runs don't ask.
 pub fn changes_notebook(tool: &str) -> bool {
@@ -993,9 +1011,11 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
 /// The `path` descriptions of the tools that take one, in a front without a project folder: the usual
 /// ones say relative paths go in the session's folder, and that a name is generated there.
 const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl` for a Julia notebook or `.R` for an R notebook (not on Windows). The file must not exist yet and its folder must. \
-Required on this computer: this server was not told the project folder, so it can't choose one. \
+Required on this computer: this server was not told the project folder, so it can't choose one unless the client names it with the call, as Codex does. \
+A relative path starts in that folder, and without it is refused. \
 On a server after `use_machine`, a relative path starts in the session's folder there.";
 const NO_FOLDER_OPEN: &str = "The notebook file, as an absolute path: this server was not told the project folder. \
+A relative path starts in the project folder when the client names that folder with the call, as Codex does; otherwise it is refused. \
 On a server after `use_machine`, a relative path starts in the session's folder there.";
 
 /// The reply to a JSON-RPC message while the app can't reach the runtime:
@@ -1218,11 +1238,27 @@ mod tests {
     }
 
     #[test]
+    fn only_a_refusal_of_an_r_path_by_a_core_without_r_notebooks_is_one_for_want_of_them() {
+        let refused = |text: &str| json!({ "content": [{ "type": "text", "text": text }], "isError": true });
+        let old = refused(r#"{"error":"invalid_path","message":"Notebook path must end in .jl: '/w/a.R'"}"#);
+        let r = json!({ "path": "/w/a.R" });
+        assert!(refuses_r_for_want_of_it("new_notebook", &r, &old));
+        assert!(refuses_r_for_want_of_it("open_notebook", &json!({ "path": "/w/a.r" }), &old));
+        assert!(!refuses_r_for_want_of_it("new_notebook", &json!({ "path": "/w/a.jl" }), &old), "not an R path");
+        assert!(!refuses_r_for_want_of_it("move_notebook", &r, &old), "not a new or opened notebook");
+        assert!(!refuses_r_for_want_of_it("new_notebook", &json!({}), &old), "no path");
+        let now = refused(r#"{"error":"invalid_path","message":"Notebook path must end in .jl (Julia) or .R (R): '/w/a.Rx'"}"#);
+        assert!(!refuses_r_for_want_of_it("new_notebook", &r, &now), "a core with R notebooks");
+        assert!(!refuses_r_for_want_of_it("new_notebook", &r, &refused("unsupported::R notebooks aren't running in this runtime")));
+        assert!(!refuses_r_for_want_of_it("new_notebook", &r, &json!({ "content": [{ "type": "text", "text": "must end in .jl" }], "isError": false })), "not an error");
+    }
+
+    #[test]
     fn the_notebook_tools_names_and_arguments_are_those_of_the_cores_interface() {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (23, "31f3745d94f3025c"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (25, "01fd3616dba79573"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1268,8 +1304,8 @@ mod tests {
             "allow_julia_install", "allow_r_install", "answer_run", "file_info", "julia_status", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
-        let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (23, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (25, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

@@ -38,7 +38,8 @@ fn recorded_pid(state: &Path) -> Option<i32> {
     serde_json::from_str::<Value>(&text).ok()?["pid"].as_i64().map(|p| p as i32).filter(|&p| p > 1)
 }
 
-/// Whatever happens, no Julia stays behind.
+/// Whatever happens, no Julia stays behind. A failed test prints the runtime's
+/// log first, as the next run starts a fresh one (#236).
 struct Cleanup {
     state: PathBuf,
     children: Vec<Child>,
@@ -46,6 +47,10 @@ struct Cleanup {
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            let log = self.state.join("runtime.log");
+            eprintln!("── the runtime's log, {}:\n{}", log.display(), std::fs::read_to_string(&log).unwrap_or_else(|e| format!("(not read: {e})")));
+        }
         for child in &mut self.children {
             let _ = child.kill();
             let _ = child.wait();
@@ -156,6 +161,21 @@ impl Agent {
         assert!(!failed, "{name}({arguments}): {result}");
         result
     }
+}
+
+/// Tomorrow in UTC as YYYY-MM-DD: a day Package Manager hasn't published (days to a civil date,
+/// after Howard Hinnant's `civil_from_days`).
+fn tomorrow() -> String {
+    let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 / 86400 + 1;
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
 }
 
 fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
@@ -456,6 +476,40 @@ fn an_r_notebook_through_the_runtime() {
         assert!(waited["execution"]["status"] == "errored" && ran(&waited), "{waited}");
         let failed = waited["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == down).cloned();
         assert!(failed.is_some_and(|c| c["output_summary"].as_str().unwrap().contains("boom")), "{waited}");
+        // A waited run of the edit reports the dependent that reran with it, and its error (#192).
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 5" }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["execution"]["status"] == "errored" && waited["affected_cells"] == json!([up, down]), "{waited}");
+        // A run not waited for names it as what will follow.
+        let edited = agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1", "run_after": true }));
+        assert_eq!(edited["execution"]["will_run"], json!([down]), "{edited}");
+        let read = output(&mut agent);
+        assert!(read["running"] == false && read["output"].as_str().unwrap().contains('2'), "{read}");
+        // A rename: the graph no longer links the dependent to `up`, but Ember reruns it, as it
+        // read the name `up` dropped, and it fails. The run goes on until it has, and reports it (#228).
+        let gone = |read: &Value| read["running"] == false && read["errored"] == true && read["output"].as_str().unwrap().contains("object 'a' not found");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "b <- 1" }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["execution"]["status"] == "errored" && waited["affected_cells"] == json!([up, down]), "{waited}");
+        let read = output(&mut agent);
+        assert!(gone(&read), "the waited submit waited for the old name's reader: {read}");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "restored");
+        let edited = agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "c <- 1", "run_after": true }));
+        assert_eq!(edited["execution"]["will_run"], json!([down]), "{edited}");
+        let read = output(&mut agent);
+        assert!(gone(&read), "the read waited for the old name's reader: {read}");
+        // A rename into a name another cell defines: Ember queues the reader with the run's
+        // cells, and the waited run reports it too.
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
+        agent.ok("add_cell", json!({ "notebook_id": id, "code": "z <- 5", "after_cell_id": down }));
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "restored");
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "z <- 1" }));
+        let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        assert!(waited["affected_cells"].as_array().unwrap().contains(&down), "{waited}");
+        assert!(gone(&output(&mut agent)), "the reader reran");
     });
 
     step("allow_execution's run of the notebook is the agent's: a waited submit waits for it (#170)", || {
@@ -485,7 +539,8 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(read["code"], "n + 1", "{read}");
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code"], "n <- 1");
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": "A", "code": "n <- 41" }));
-        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code"], "n <- 41");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" }))["code_unchanged"], true, "the code it just wrote isn't sent again");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A", "include_code": true }))["code"], "n <- 41");
         let (failed, missing) = agent.call("read_cell", json!({ "notebook_id": id, "cell_id": "C" }));
         assert!(failed, "{missing}");
     });
@@ -533,6 +588,13 @@ fn an_r_notebook_through_the_runtime() {
         let again = preview(&mut agent, Some("2024-06-03"));
         assert!(again["changes"].as_array().unwrap().iter().any(|c| c["name"] == "base64enc"), "{again}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "the refused apply moved nothing");
+
+        // A day not published yet is previewed at the newest one that is (#247). Tomorrow never is.
+        let ahead = tomorrow();
+        let unpublished = preview(&mut agent, Some(&ahead));
+        assert_eq!(unpublished["status"], "ready", "{unpublished}");
+        assert!(unpublished["date"].as_str().unwrap() < ahead.as_str(), "{unpublished}");
+        assert!(unpublished["message"].as_str().unwrap().contains("isn't published yet"), "{unpublished}");
 
         // Updating is today's date: applied, the file's date moves and the cell sees the version the preview named.
         let today = preview(&mut agent, None);
@@ -650,9 +712,14 @@ fn an_r_notebook_through_the_runtime() {
 /// `listed` instead when given. The name install.R gives the build: the first 12 characters of the
 /// listed SHA256.
 fn stand_in_repository(repository: &Path, label: &str, broken: bool, listed: Option<&str>) -> String {
+    stand_in_importing(repository, label, broken, listed, "jsonlite")
+}
+
+/// The same, with a stand-in that imports `imports`.
+fn stand_in_importing(repository: &Path, label: &str, broken: bool, listed: Option<&str>, imports: &str) -> String {
     let source = fresh(repository.with_extension("source")).join("ember");
     std::fs::create_dir_all(source.join("R")).unwrap();
-    std::fs::write(source.join("DESCRIPTION"), format!("Package: ember\nVersion: 0.0.0.9000\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\nImports: jsonlite\nRemoteSha: {label}\n")).unwrap();
+    std::fs::write(source.join("DESCRIPTION"), format!("Package: ember\nVersion: 0.0.0.9000\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\nImports: {imports}\nRemoteSha: {label}\n")).unwrap();
     let on_load = if broken { ".onLoad <- function(...) stop(\"a broken build\")\n" } else { "" };
     std::fs::write(source.join("R/build.R"), format!("build <- function() \"{label}\"\n{on_load}")).unwrap();
     std::fs::write(source.join("NAMESPACE"), "export(build)\n").unwrap();
@@ -663,6 +730,55 @@ fn stand_in_repository(repository: &Path, label: &str, broken: bool, listed: Opt
     let index = format!("tools::write_PACKAGES('.'); p <- read.dcf('PACKAGES'); p <- cbind(p, SHA256 = '{sha}'); write.dcf(p, 'PACKAGES'); g <- gzfile('PACKAGES.gz', 'wt'); write.dcf(p, g); close(g); unlink('PACKAGES.rds')");
     assert!(Command::new("Rscript").args(["-e", &index]).current_dir(&contrib).status().unwrap().success());
     sha[..12].to_owned()
+}
+
+/// A package `name` at `version` that imports `imports`, built into the CRAN-like repository `cran`,
+/// whose index is written again.
+fn cran_package(cran: &Path, name: &str, version: &str, imports: &str) {
+    let source = fresh(cran.with_extension("source")).join(name);
+    std::fs::create_dir_all(source.join("R")).unwrap();
+    let imports = if imports.is_empty() { String::new() } else { format!("Imports: {imports}\n") };
+    std::fs::write(source.join("DESCRIPTION"), format!("Package: {name}\nVersion: {version}\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\n{imports}")).unwrap();
+    std::fs::write(source.join("R/v.R"), format!("v <- function() \"{version}\"\n")).unwrap();
+    std::fs::write(source.join("NAMESPACE"), "export(v)\n").unwrap();
+    let contrib = cran.join("src/contrib");
+    std::fs::create_dir_all(&contrib).unwrap();
+    assert!(Command::new("R").args(["CMD", "build", "--no-manual"]).arg(&source).current_dir(&contrib).stdout(Stdio::null()).status().unwrap().success());
+    assert!(Command::new("Rscript").args(["-e", "tools::write_PACKAGES('.')"]).current_dir(&contrib).status().unwrap().success());
+}
+
+/// A dependency R can load but that is older than Ember needs is installed into `deps`, where it
+/// shadows the old copy, and Ember installs (#90). Before, it was left as it was, Ember failed to load,
+/// and with no Ember installed every start tried again. (A package from CRAN that needs a newer one is
+/// already fine: `install.packages` brings the newer one along.)
+#[test]
+#[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
+fn a_dependency_too_old_for_ember_is_installed_beside_it() {
+    if !Command::new("Rscript").arg("--version").stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
+        eprintln!("SKIPPED: no Rscript on the PATH.");
+        return;
+    }
+    let work = fresh(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-r-old-dependency"));
+    let (repository, folder, cran, site) = (work.join("repository"), work.join("ember"), work.join("cran"), fresh(work.join("site")));
+    // CRAN has 2.0; the user's library has 1.0, which loads.
+    cran_package(&cran, "endeavorlow", "1.0", "");
+    let old = cran.join("src/contrib/endeavorlow_1.0.tar.gz");
+    assert!(Command::new("R").args(["CMD", "INSTALL", "--no-test-load", "-l"]).arg(&site).arg(&old).stdout(Stdio::null()).status().unwrap().success());
+    std::fs::remove_file(&old).unwrap();
+    cran_package(&cran, "endeavorlow", "2.0", "");
+    let a = stand_in_importing(&repository, "a", false, None, "endeavorlow (>= 2.0)");
+    let status = Command::new("Rscript")
+        .args(["--vanilla", concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/r/install.R")])
+        .arg(&folder)
+        .arg(format!("file://{}", repository.display()))
+        .env("ENDEAVOR_CRAN", format!("file://{}", cran.display()))
+        .env("R_LIBS", &site)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(0));
+    let libs = format!("{}:{}:{}", folder.join(&a).display(), folder.join("deps").display(), site.display());
+    let out = Command::new("Rscript").args(["-e", "cat(ember::build(), endeavorlow::v())"]).env("R_LIBS", libs).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a 2.0", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 /// The adapter's pure functions (the install status, the errors' fixes), checked by
@@ -731,6 +847,15 @@ fn ember_updates_from_its_repository_and_keeps_the_build_before() {
     });
     step("offline: the installed Ember", || {
         assert_eq!(install("https://nowhere.invalid"), (Some(0), format!("Current: {b} | Previous: {a} | Failed: {c}")));
+        assert!(folder.join("unreachable").exists());
+    });
+    step("offline within the last hour: the installed Ember, without asking again", || {
+        let e = stand_in_repository(&repository, "e", false, None);
+        assert_eq!(install(&url), (Some(0), format!("Current: {b} | Previous: {a} | Failed: {c}")));
+        let earlier = format!("Sys.setFileTime('{}', Sys.time() - 2 * 3600)", folder.join("unreachable").display());
+        assert!(Command::new("Rscript").args(["-e", &earlier]).status().unwrap().success());
+        assert_eq!(install(&url), (Some(0), format!("Current: {e} | Previous: {b} | Failed: {c}")));
+        assert!(!folder.join("unreachable").exists());
     });
 }
 

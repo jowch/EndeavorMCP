@@ -195,10 +195,11 @@ jobs:
   # because the plugins run on macOS and Windows too; otherwise the plugins
   # keep naming the last complete build. The commit touches no helper source,
   # so it doesn't start this workflow again, and a push made with the
-  # workflow's own token doesn't start CI. It pins only while main's helper
-  # source is still this build's, so a re-run of an old run can't put an older
-  # build back. A merge landing in between makes the push fail; then it starts
-  # again from the new main.
+  # workflow's own token doesn't start CI. It pins only a build of newer source
+  # than the one pinned now (the commit its "Built from" line names), so a
+  # re-run of an old run can't put an older build back; merges that land while
+  # it builds don't stop it, since their own runs pin after it. A merge landing
+  # between the fetch and the push makes the push fail; then it starts again.
   pin:
     needs: [key, build, publish]
     if: ${{ github.ref == 'refs/heads/main' && needs.build.result == 'success' && needs.publish.result == 'success' }}
@@ -216,6 +217,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
       - name: Pin the build
         env:
           KEY: ${{ needs.key.outputs.key }}
@@ -225,11 +227,13 @@ jobs:
           for try in 1 2 3 4 5; do
             git fetch -q origin main
             git checkout -q -B main origin/main
-            # A re-run of an older run, or a merge that landed meanwhile, can
-            # leave main with other helper source; its own run pins that.
-            want=$(sh scripts/helpers.sh --key)
-            if [ "$want" != "$KEY" ]; then
-              echo "main's helper source is build $want now, not $KEY; leaving the pin to that build's run."
+            # The source the current pin was built from: its "Built from"
+            # line, or the commit that set it by hand.
+            last=$(git log -1 --format=%H origin/main -- scripts/release-key)
+            from=$(git log -1 --format=%B "$last" | sed -n 's/^Built from \([0-9a-f]\{40\}\)\.$/\1/p')
+            [ -n "$from" ] || from=$last
+            if git merge-base --is-ancestor "$GITHUB_SHA" "$from"; then
+              echo "main already pins a build of $from, which isn't older than this run's $GITHUB_SHA; nothing to pin."
               exit 0
             fi
             printf '%s\n' "$KEY" > scripts/release-key
@@ -238,7 +242,7 @@ jobs:
               echo "The plugins already name build $KEY."
               exit 0
             fi
-            git commit -q -am "Plugins: pin build $KEY"
+            git commit -q -am "Plugins: pin build $KEY" -m "Built from $GITHUB_SHA."
             if git push -q origin main; then
               echo "Pinned build $KEY on main."
               exit 0

@@ -376,6 +376,26 @@ fn only_a_well_formed_answer_to_the_check_for_other_sessions_lets_a_stop_go_on()
 }
 
 #[test]
+fn a_refusal_of_an_r_path_by_a_runtime_without_r_notebooks_says_why_and_how_to_get_them() {
+    let relay = Relay::new(options(), "s".into(), Box::new(std::io::sink()));
+    let message = json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "new_notebook", "arguments": { "path": "/w/a.R" } } });
+    let refused = tool_error("ArgumentError: invalid_path::Notebook path must end in .jl: '/w/a.R'", false);
+    let reply = json!({ "jsonrpc": "2.0", "id": 4, "result": refused }).to_string();
+    let decorated: Value = serde_json::from_str(&relay.decorate(&message, Some("new_notebook"), reply)).unwrap();
+    assert_eq!(decorated["result"]["isError"], true);
+    let said: Value = serde_json::from_str(decorated["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(said["error"], "unsupported");
+    let said = said["message"].as_str().unwrap();
+    assert!(said.starts_with("Endeavor on this computer was started by an older version, which has no R notebooks"), "{said}");
+    assert!(said.contains("Don't stop it yourself: tell the user, and ask whether to restart it"), "{said}");
+    assert!(said.ends_with("Only if the user says yes, call `stop_machine` with machine \"local\", then `use_machine` with machine \"local\"."), "{said}");
+
+    let julia = json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "new_notebook", "arguments": { "path": "/w/a.txt" } } });
+    let reply = json!({ "jsonrpc": "2.0", "id": 4, "result": tool_error("ArgumentError: invalid_path::Notebook path must end in .jl: '/w/a.txt'", false) }).to_string();
+    assert_eq!(relay.decorate(&julia, Some("new_notebook"), reply.clone()), reply, "a path of no notebook's is refused as the runtime said");
+}
+
+#[test]
 fn a_notice_is_added_once_to_the_first_reply_that_answers_a_call() {
     let relay = Relay::new(options(), "s".into(), Box::new(std::io::sink()));
     *relay.notice.lock().unwrap() = Some("This project used lab, which is gone.".into());

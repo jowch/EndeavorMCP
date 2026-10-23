@@ -274,7 +274,15 @@ fn the_runtime_end_to_end() {
     }
 
     let (notebook, path, cell) = step("new notebook, add and edit a cell, run it, read its output", || {
-        let created = rt.ok(MAC, "new_notebook", json!({}));
+        // The first notebook in a new Julia process compiles for a while. If that outlasts the call,
+        // it answers `notebook_opening`, a normal result that says to make the same call again.
+        let started = Instant::now();
+        let created = loop {
+            let created = rt.ok(MAC, "new_notebook", json!({}));
+            if created["error"] != "notebook_opening" || started.elapsed() > Duration::from_secs(900) {
+                break created;
+            }
+        };
         let notebook = created["notebook_id"].as_str().unwrap_or_else(|| panic!("new_notebook: {created}")).to_owned();
         let path = created["path"].as_str().unwrap().to_owned();
         assert!(path.starts_with(mac.to_str().unwrap()) && path.ends_with(".jl"), "made in the session's folder: {path}");
@@ -285,7 +293,9 @@ fn the_runtime_end_to_end() {
         rt.ok(MAC, "edit_cell", json!({ "notebook_id": notebook, "cell_id": cell, "code": "x = 21 * 2" }));
         rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": cell, "wait_for_completion": true }));
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": cell }));
-        assert_eq!((&read["code"], &read["output"], &read["errored"]), (&json!("x = 21 * 2"), &json!("42"), &json!(false)), "{read}");
+        assert_eq!((&read["code_unchanged"], &read["output"], &read["errored"]), (&json!(true), &json!("42"), &json!(false)), "the code it just wrote isn't sent again: {read}");
+        let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": cell, "include_code": true }));
+        assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("x = 21 * 2"), &Value::Null), "{read}");
         let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "[1.5, 2.5]", "after_cell_id": cell }));
         let rich = added["cell_id"].as_str().unwrap().to_owned();
         let ran = rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": rich, "wait_for_completion": true }));
