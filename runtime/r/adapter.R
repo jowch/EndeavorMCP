@@ -230,12 +230,18 @@ cap_text <- function(text) {
 # A package the code doesn't name: Ember's fix is to add it to the header's
 # [extra_packages], which no tool does and an agent mustn't do by editing the
 # file. Naming it in the cell does the same through the tools, so that is the
-# fix the agent hears; Ember's page keeps its own wording.
+# fix the agent hears; Ember's page keeps its own wording. Ember gives that fix
+# for a missing package, and for a run error whose message names a package the
+# code can't show (Ember #184, such as tidytext asking for textdata).
+EXTRA_FIX <- "^Add ([A-Za-z][A-Za-z0-9.]*) to \\[extra_packages\\]$"
 structure_error <- function(e) {
   d <- list(kind = if (identical(e$kind, "error")) "runtime" else e$kind, msg = e$message %||% "")
   fixes <- e$fixes
   if (identical(e$kind, "missing_package") && length(e$names) == 1 && any(grepl("[extra_packages]", fixes, fixed = TRUE))) {
     fixes <- sprintf("Add `requireNamespace(\"%s\")` as the first line of this cell and run it", e$names)
+  } else if (length(fixes) > 0) {
+    named <- grepl(EXTRA_FIX, fixes)
+    fixes[named] <- sprintf("Add `requireNamespace(\"%s\")` as the first line of this cell and run it", sub(EXTRA_FIX, "\\1", fixes[named]))
   }
   if (length(fixes) > 0) d$fixes <- I(fixes)
   if (length(e$names) > 0) d$names <- I(e$names)
@@ -326,8 +332,14 @@ snapshot_cell <- function(v) {
   d$notes <- I(cell_notes(v))
   # A running cell waiting on `readline()`, `menu()` and the like (Ember #186):
   # what the prompt printed and, for `menu()`, its choices. `answer` replies.
+  # Its output is what this run printed so far, where a question's own text
+  # (a license, a menu's title) usually is: Ember keeps the last run's result
+  # and error on a running cell, and they say nothing about the question.
   if (isTRUE(v$running) && !is.null(v$prompt)) {
     d$prompt <- list(id = v$prompt$id, text = v$prompt$text %||% "", choices = I(as.character(unlist(v$prompt$choices))))
+    d$errored <- FALSE
+    d$error <- NULL
+    d$output <- output_text(list(console = v$console))
   }
   d
 }

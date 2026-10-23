@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "download_step", "structure_error", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "update_pending", "update_blocked")
+wanted <- c("%||%", "package_step", "download_step", "structure_error", "EXTRA_FIX", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "update_pending", "update_blocked")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -95,6 +95,9 @@ d <- A$structure_error(list(kind = "missing_package", message = "there is no pac
 check("a missing package with no header fix: no fixes", is.null(d$fixes))
 d <- A$structure_error(list(kind = "error", message = "boom", fixes = "Do this"))
 check("another error keeps its fixes and reads as runtime", identical(d$kind, "runtime") && identical(unclass(d$fixes), "Do this"))
+d <- A$structure_error(list(kind = "error", message = "The textdata package is required to download the AFINN lexicon.", fixes = "Add textdata to [extra_packages]"))
+check("a run error naming a package (Ember #184): the fix the tools can do (trial 20)",
+      identical(unclass(d$fixes), "Add `requireNamespace(\"textdata\")` as the first line of this cell and run it"))
 
 # ---- cell_notes ----
 check("no notes: none", length(A$cell_notes(list())) == 0)
@@ -111,6 +114,19 @@ check("a cell that runs: not off", isFALSE(A$snapshot_cell(view())$off))
 check("a disabled cell: off", isTRUE(A$snapshot_cell(view(disabled = TRUE))$off))
 check("a cell downstream of a disabled one: off, though it ran before", isTRUE(A$snapshot_cell(view(disabled_by = "d"))$off))
 check("an Ember without disabled_by: not off", isFALSE(A$snapshot_cell(view(disabled_by = NULL))$off))
+
+# A cell rerun after an error, now waiting at a prompt: Ember keeps the last run's error on it
+# while it runs. The agent sees what this run printed, not the old error (trial 20).
+asking <- A$snapshot_cell(view(running = TRUE, status = "error",
+                               errors = list(list(kind = "error", message = "textdata is required")),
+                               output = list(mime = "text/plain", text = "old value"),
+                               console = list(list(kind = "stdout", text = "License: CC BY. Do you accept?\n\n1: Yes\n2: No\n\n")),
+                               prompt = list(id = 2L, text = "Selection: ", choices = c("Yes", "No"))))
+check("a cell waiting at a prompt after an error: not errored, no old error", isFALSE(asking$errored) && is.null(asking[["error"]]))
+check("  its output is what this run printed, the question's text", identical(asking$output, "License: CC BY. Do you accept?\n\n1: Yes\n2: No"))
+check("  and the prompt", identical(asking$prompt$id, 2L) && identical(unclass(asking$prompt$choices), c("Yes", "No")))
+check("a running cell not at a prompt keeps the last run's error, as before",
+      isTRUE(A$snapshot_cell(view(running = TRUE, status = "error", errors = list(list(kind = "error", message = "boom"))))$errored))
 
 # A text cell's output is its prose with the inline values put in, as the page shows it (#270).
 prose <- "#' ## Results\n#'\n#' The slope is `r round(b, 3)` over `r n` plates.\n#' Write `` `r x` `` to show a value."

@@ -451,6 +451,14 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!((&stopped["stopped"], &stopped["still_running"]), (&json!([asks]), &json!([])), "{stopped}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
         assert!(read["errored"] == true && read.get("waiting_for_input").is_none(), "{read}");
+        // Asked again after that error: the cell reads as this run, with what it printed before the
+        // question, not as the interrupted run (trial 20).
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": asks, "code": "cat(\"The terms of use\\n\")\nwho <- readline(\"Accept? \")" }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": asks, "wait_for_completion": true }));
+        assert_eq!((&ran["waiting_for_input"]["prompt"], &ran["execution"]["status"]), (&json!("Accept? "), &json!("running")), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        assert!(read["errored"] == false && read.get("error").is_none() && read["output"].as_str().unwrap().contains("The terms of use"), "{read}");
+        agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
         agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": picks }));
         agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
     });
