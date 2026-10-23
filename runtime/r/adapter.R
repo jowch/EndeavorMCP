@@ -753,9 +753,15 @@ wait_preview <- function(rec, current, asked, timeout) {
       to <- if (is.null(prop) || is.na(prop$date)) asked else prop$date
       # What the agent was shown, which the apply must match (set_package_date).
       rec$previewed <- if (identical(status, "ready")) list(date = to, changes = to_json(rows(prop$changes)))
+      # How many packages the notebook has: with none, nothing changes but the date (#269). Counted
+      # from what the code and header name and what the lock holds, not package_status, whose
+      # table is empty until they resolve. An Ember that doesn't say gives no count.
+      st <- notebook_state(rec$nb)
+      packages <- if (!is.null(st$packages$wanted_cache)) length(unique(c(st$packages$wanted_cache, st$file$lock$entries$name)))
       resolve(list(
-        date = to, asked = asked, current_date = notebook_state(rec$nb)$file$header$snapshot,
-        status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message))
+        date = to, asked = asked, current_date = st$file$header$snapshot,
+        status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message,
+        packages = packages))
     }
     check()
   })

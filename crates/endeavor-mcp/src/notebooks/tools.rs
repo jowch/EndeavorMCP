@@ -1546,7 +1546,11 @@ impl Call<'_> {
         let asked = result.as_object_mut().and_then(|r| r.remove("asked"));
         let earlier = asked.as_ref().is_some_and(|a| a.is_string() && *a != result["date"]);
         let none = result["changes"].as_array().is_none_or(Vec::is_empty);
+        // With no packages yet there is nothing to change, but applying still moves the date, which
+        // every package added later comes from (#269). An adapter that doesn't say counts as having some.
+        let no_packages = result.as_object_mut().and_then(|r| r.remove("packages")).is_some_and(|n| n == 0);
         let said = match result["status"].as_str() {
+            Some("ready") if none && no_packages => "The notebook has no packages yet, so none would change. apply_package_update with this date still moves the notebook's date to it, and every package added later comes from that date: tell the user, since an old date can give old versions or none at all.",
             Some("ready") if none => "Nothing would change: every package is already at its version for this date.",
             Some("ready") if package.is_string() => "Nothing has changed yet. This date moves every package, not only this one: tell the user what else would change; apply_package_update with this date applies it.",
             Some("ready") => "Nothing has changed yet. Tell the user what would change; apply_package_update with this date applies it.",
