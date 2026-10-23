@@ -217,7 +217,8 @@ struct Ran {
     going: Vec<String>,
     /// A run not waited for: the dependents it will rerun after its cells (#192).
     will_run: Vec<String>,
-    /// Of `cells`, the dependents that reran with the run's own: their output text is cut shorter.
+    /// Of `cells`, the dependents that reran with the run's own, other than one edited since it last
+    /// ran: their output text is cut shorter.
     reran: Vec<String>,
 }
 
@@ -378,6 +379,8 @@ impl Call<'_> {
     /// or not.
     fn run(&self, nb: &Snapshot, targets: &[String], wait: bool) -> Result<Ran, String> {
         self.nbs.with_state(&nb.id, |state| state.prune(nb));
+        // Edited and not yet run: a dependent of these that reran is code the agent hasn't seen run.
+        let staged = self.pending_run(nb);
         let upstream = self.nbs.upstream(nb, targets)?;
         let needed: Vec<String> = upstream.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).cloned().collect();
         let mut cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
@@ -494,6 +497,7 @@ impl Call<'_> {
             warnings.push(format!("also_ran::Also ran {}: cells this run needs that were edited or stale since they last ran.", also.join(", ")));
         }
         cells.extend(reran.iter().cloned());
+        reran.retain(|id| !staged.contains(id));
         Ok(Ran { warnings, cells, going, will_run, reran })
     }
 

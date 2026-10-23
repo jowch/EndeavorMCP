@@ -778,7 +778,14 @@ fn a_waited_run_cuts_a_dependents_output_text_shorter_than_its_own_cells() {
     let text = |cell: &str| ran["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == cell).unwrap_or_else(|| panic!("{ran}"))["output_text"].as_str().unwrap().to_owned();
     assert_eq!(text(X), "n\t".repeat(300), "the run's own cell, in full up to 2000 bytes");
     assert!(text(Y).starts_with(&"n\t".repeat(100)) && text(Y).ends_with("… (cut; read_cell shows more)") && text(Y).len() < 250, "{}", text(Y));
-    // A dependent that fails keeps all of its output's text, and its error.
+    // A dependent edited since it last ran is code the agent hasn't seen run: its text is in full.
+    s.seconds(1.0);
+    s.read("", NB, Y);
+    s.edit("", NB, Y, "y = x + 1 # wide table");
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    let y = ran["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == Y).unwrap_or_else(|| panic!("{ran}")).clone();
+    assert_eq!(y["output_text"], json!("n\t".repeat(300)), "{y}");
+    // A dependent that fails keeps its error.
     s.seconds(1.0);
     s.read("", NB, Y);
     s.edit("", NB, Y, "y = error(x) # wide table");
