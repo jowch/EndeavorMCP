@@ -1,7 +1,8 @@
 //! Endeavor's skills (`plugin/skills`) for agents that don't load the
 //! Claude Code plugin: the `notebook_guide` tool serves them, and the server's
 //! MCP `instructions` say to call it first. A session whose agent loads the
-//! plugin says so with `X-Endeavor-Skills: plugin` and gets neither.
+//! plugin says so with `X-Endeavor-Skills: plugin`, gets no guide, and is told
+//! to load the skill instead.
 
 use serde_json::{Value, json};
 
@@ -27,6 +28,12 @@ const PLUTO: &str = "endeavor-notebooks/reference/pluto.md";
 /// Points an agent without the plugin's skills to the guide.
 const READ_GUIDE: &str = "Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
 how to find this session's notebook, the read-edit-run loop, and the rules for a cell.";
+
+/// Points an agent with the plugin's skills to the notebooks skill. Its
+/// description alone isn't enough: Haiku 4.5 starts on the tools without it,
+/// and then splits a cell's code wrongly and skips looking at plots (#242).
+const LOAD_SKILL: &str = "Before your first notebook tool call in a session, load the `endeavor-notebooks` skill and follow it: \
+the read-edit-run loop, the rules for what one cell may hold, and looking at a plot with `view_cell_output` before you say it is right.";
 
 /// Where the guide keeps what only the app needs, for an agent in the app without the skills.
 const APP_GUIDE: &str = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
@@ -62,9 +69,9 @@ pub fn instructions(standalone: bool, has_skills: bool, machines: bool) -> Optio
         (true, false) => format!(" {MACHINES} {MACHINES_GUIDE}"),
     };
     match (standalone, has_skills) {
-        (false, true) => None,
+        (false, true) => Some(LOAD_SKILL.to_owned()),
         (false, false) => Some(format!("{APP} {READ_GUIDE} {APP_GUIDE}")),
-        (true, true) => Some(format!("{STANDALONE}{machines_text}")),
+        (true, true) => Some(format!("{STANDALONE}{machines_text}\n\n{LOAD_SKILL}")),
         (true, false) => Some(format!("{STANDALONE}{machines_text}\n\n{READ_GUIDE}")),
     }
 }

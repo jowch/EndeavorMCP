@@ -434,5 +434,7 @@ When the user asks to open, show or look at a `.jl` or `.R` file, try `open_note
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts. \
 This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
-that the user reaches over ssh. `list_machines` only reads and is fine any time; call the other three only when the user asks."
+that the user reaches over ssh. `list_machines` only reads and is fine any time; call the other three only when the user asks.\n\n\
+Before your first notebook tool call in a session, load the `endeavor-notebooks` skill and follow it: \
+the read-edit-run loop, the rules for what one cell may hold, and looking at a plot with `view_cell_output` before you say it is right."
 }

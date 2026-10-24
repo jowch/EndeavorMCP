@@ -1360,7 +1360,8 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         assert_eq!(names(ask("tools/list", false))[0], "notebook_guide");
         assert_eq!(ask("tools/list", false)["tools"][0]["annotations"]["readOnlyHint"], true);
 
-        assert!(ask("initialize", true).get("instructions").is_none(), "Claude Code has the plugin's skills");
+        let told = ask("initialize", true)["instructions"].as_str().unwrap().to_owned();
+        assert!(told.starts_with("Before your first notebook tool call in a session, load the `endeavor-notebooks` skill") && !told.contains("notebook_guide"), "Claude Code has the plugin's skills: {told}");
         assert!(!names(ask("tools/list", true)).contains(&"notebook_guide".to_owned()));
         assert!(is_tool("notebook_guide") && is_tool("edit_cell") && is_tool("run_shell") && !is_tool("edit"));
     }
