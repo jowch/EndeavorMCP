@@ -15,8 +15,8 @@
 #
 # The methods and their replies are Adapter.jl's (`adapter_call`): status,
 # open, new, and for a notebook_id snapshot, graph, shutdown, apply, run,
-# interrupt, restart, allow_execution, move, render_text, render_png and
-# validate. Errors read as Julia shows them, which the core parses:
+# interrupt, answer, restart, allow_execution, move, render_text, render_png
+# and validate. Errors read as Julia shows them, which the core parses:
 # `ArgumentError: kind::message`, or `KeyError: key "kind::message" not found`
 # for a notebook or cell that isn't there; any other R error is
 # `r_error::message`.
@@ -230,12 +230,18 @@ cap_text <- function(text) {
 # A package the code doesn't name: Ember's fix is to add it to the header's
 # [extra_packages], which no tool does and an agent mustn't do by editing the
 # file. Naming it in the cell does the same through the tools, so that is the
-# fix the agent hears; Ember's page keeps its own wording.
+# fix the agent hears; Ember's page keeps its own wording. Ember gives that fix
+# for a missing package, and for a run error whose message names a package the
+# code can't show (Ember #184, such as tidytext asking for textdata).
+EXTRA_FIX <- "^Add ([A-Za-z][A-Za-z0-9.]*) to \\[extra_packages\\]$"
 structure_error <- function(e) {
   d <- list(kind = if (identical(e$kind, "error")) "runtime" else e$kind, msg = e$message %||% "")
   fixes <- e$fixes
   if (identical(e$kind, "missing_package") && length(e$names) == 1 && any(grepl("[extra_packages]", fixes, fixed = TRUE))) {
     fixes <- sprintf("Add `requireNamespace(\"%s\")` as the first line of this cell and run it", e$names)
+  } else if (length(fixes) > 0) {
+    named <- grepl(EXTRA_FIX, fixes)
+    fixes[named] <- sprintf("Add `requireNamespace(\"%s\")` as the first line of this cell and run it", sub(EXTRA_FIX, "\\1", fixes[named]))
   }
   if (length(fixes) > 0) d$fixes <- I(fixes)
   if (length(e$names) > 0) d$names <- I(e$names)
@@ -266,6 +272,35 @@ output_text <- function(view) {
   cap_text(paste(parts, collapse = "\n"))
 }
 
+# knitr's inline-code pattern, as Ember matches it (text-cells.R), one line at a time.
+INLINE_SPAN <- "(?<!(^``))(?<!(\\n``))`r[ #]([^`]+)\\s*`"
+
+# A text cell's output: its prose without the `#'` prefixes, each `r expr` span replaced by
+# its value, as the page shows it. Spans stay as written while there are no values for this
+# code (not run yet, or edited since), so the prose still reads (#270).
+text_output <- function(v) {
+  lines <- strsplit(v$code %||% "", "\n", fixed = TRUE)[[1]]
+  out <- v$output
+  values <- if (!is.null(out) && identical(out$mime, "application/vnd.ember.inline") && !isTRUE(v$code_differs)) {
+    unlist(out$data$values)
+  }
+  k <- 0L
+  body <- vapply(lines, function(line) {
+    if (!grepl("^#+'", line)) return(line)
+    line <- sub("^#+'[ ]?", "", line)
+    m <- gregexpr(INLINE_SPAN, line, perl = TRUE)[[1]]
+    if (is.null(values) || m[[1]] == -1) return(line)
+    found <- regmatches(line, list(m))[[1]]
+    shown <- vapply(seq_along(found), function(i) {
+      k <<- k + 1L
+      if (k <= length(values)) values[[k]] else found[[i]]
+    }, character(1))
+    regmatches(line, list(m)) <- list(shown)
+    line
+  }, character(1), USE.NAMES = FALSE)
+  cap_text(paste(body, collapse = "\n"))
+}
+
 snapshot_cell <- function(v) {
   errored <- length(v$errors) > 0 || isTRUE(v$status %in% c("error", "interrupted"))
   runtime <- v$runtime %||% 0
@@ -289,14 +324,28 @@ snapshot_cell <- function(v) {
     e <- if (length(v$errors) > 0) v$errors[[1]] else list(kind = "interrupted", message = "The run was interrupted.")
     d$error <- structure_error(e)
     d$output <- d$error$msg
-  } else {
+  } else if (identical(v$kind, "code")) {
     d$output <- output_text(v)
+  } else {
+    d$output <- text_output(v)
   }
   d$notes <- I(cell_notes(v))
+  # A running cell waiting on `readline()`, `menu()` and the like (Ember #186):
+  # what the prompt printed and, for `menu()`, its choices. `answer` replies.
+  # Its output is what this run printed so far, where a question's own text
+  # (a license, a menu's title) usually is: Ember keeps the last run's result,
+  # error and notes on a running cell, and they say nothing about the question.
+  if (isTRUE(v$running) && !is.null(v$prompt)) {
+    d$prompt <- list(id = v$prompt$id, text = v$prompt$text %||% "", choices = I(as.character(unlist(v$prompt$choices))))
+    d$errored <- FALSE
+    d$error <- NULL
+    d$output <- output_text(list(console = v$console))
+    d$notes <- I(character())
+  }
   d
 }
 
-# The notes Ember's page shows under a cell after its last run, worded as the
+# The notes Ember's page shows under a cell, from its last run or its code, worded as the
 # page words them (Ember's lang/english.json), each "kind::text" like a tool
 # warning (#207). `changed_in_place`: the run changed, by reference, a value
 # another cell defines, so the cells that read it didn't rerun.
@@ -304,6 +353,10 @@ snapshot_cell <- function(v) {
 # settings cell. `load_notes`: a package it loaded reset a setting a settings
 # cell sets. `from_lock`: the cell's install calls didn't run, since the lock
 # answers them (Ember #79); "" stands for a call that names no package.
+# `untracked_reads`: the cell reads globals through `get()` on a
+# computed name, `eval()` or a function that does, so it doesn't rerun when
+# they change (Ember #357, #365). That one comes from the code, so it shows
+# before the cell runs too.
 cell_notes <- function(v) {
   names_of <- function(x) paste(sub("^\\.__C__", "class ", as.character(x)), collapse = ", ")
   notes <- character()
@@ -312,6 +365,9 @@ cell_notes <- function(v) {
   }
   if (length(v$settings_found) > 0) {
     notes <- c(notes, sprintf("settings_found::Found a global setting (%s) when this cell ran; the cells after it rerun.", names_of(v$settings_found)))
+  }
+  if (length(v$untracked_reads) > 0) {
+    notes <- c(notes, sprintf("untracked_read::Ember can't tell which variables this cell reads through %s, so it doesn't rerun when they change. Name the variables in the code, or keep the values in one list.", paste0(v$untracked_reads, "()", collapse = ", ")))
   }
   if (length(v$from_lock) > 0) {
     named <- setdiff(as.character(v$from_lock), "")
@@ -546,6 +602,14 @@ old_readers <- function(rec, ids, cells = ids) {
   Filter(function(cid) !is.null(state$results[[cid]]) && !(cid %in% names(g$off)), setdiff(out, cells))
 }
 
+# The cell of a run of `ids` (`run_cells_of`) waiting on a prompt, or NULL.
+# Nothing runs until it is answered or interrupted.
+prompted <- function(rec, ids, readers = character()) {
+  if (!registered(rec)) return(NULL)
+  running <- notebook_state(rec$nb)$worker$running
+  if (!is.null(running$prompt) && running$cell %in% run_cells_of(rec, ids, readers)) running$cell
+}
+
 # A run is over when none of its cells, or of the cells that depend on them
 # (`run_cells_of`), is left, its R ended, or the notebook shut down.
 run_over <- function(rec, ids, readers = character()) {
@@ -578,8 +642,10 @@ watch_run <- function(rec, cells, ids, readers = character(), run = run_id()) {
 # Run cells (Ember runs their unrun ancestors first). Not accepted in safe
 # preview or for a read-only notebook: Ember would allow execution on a run,
 # Pluto (and the user's approval) wants allow_execution for that. With
-# `wait`, a promise of the reply once the run is over or `timeout` passes;
-# none is Pluto's cleanup after a delete, which Ember doesn't need.
+# `wait`, a promise of the reply once the run is over, a cell of it waits on
+# a prompt (then `prompted` names it), or `timeout` passes; the cells still to
+# run are then `timed_out`. No cells is Pluto's cleanup after a delete, which
+# Ember doesn't need.
 run <- function(rec, cells, wait, timeout) {
   cells <- vapply(cells, function(c) check_cell(rec, c), character(1), USE.NAMES = FALSE)
   state <- notebook_state(rec$nb)
@@ -609,7 +675,8 @@ run <- function(rec, cells, wait, timeout) {
   promise(function(resolve, reject) {
     check <- function() {
       over <- run_over(rec, ids, readers)
-      if (!over && Sys.time() < deadline && !waits_for_ok(rec)) return(later::later(check, 0.05))
+      asks <- if (!over) prompted(rec, ids, readers)
+      if (!over && is.null(asks) && Sys.time() < deadline && !waits_for_ok(rec)) return(later::later(check, 0.05))
       if (!registered(rec)) {
         result$completed <- I(cells)
         result$timed_out <- I(character())
@@ -622,6 +689,7 @@ run <- function(rec, cells, wait, timeout) {
       result$completed <- I(setdiff(cells, unfinished(state, cells)))
       result$timed_out <- I(if (over) unfinished(state, cells) else unfinished(state, names(state$cells)))
       if (!over) result$run <- watch_run(rec, cells, ids, readers)
+      if (!is.null(asks)) result$prompted <- asks
       resolve(result)
     }
     check()
@@ -722,9 +790,15 @@ wait_preview <- function(rec, current, asked, timeout) {
       to <- if (is.null(prop) || is.na(prop$date)) asked else prop$date
       # What the agent was shown, which the apply must match (set_package_date).
       rec$previewed <- if (identical(status, "ready")) list(date = to, changes = to_json(rows(prop$changes)))
+      # How many packages the notebook has: with none, nothing changes but the date (#269). Counted
+      # from what the code and header name and what the lock holds, not package_status, whose
+      # table is empty until they resolve. An Ember that doesn't say gives no count.
+      st <- notebook_state(rec$nb)
+      packages <- if (!is.null(st$packages$wanted_cache)) length(unique(c(st$packages$wanted_cache, st$file$lock$entries$name)))
       resolve(list(
-        date = to, asked = asked, current_date = notebook_state(rec$nb)$file$header$snapshot,
-        status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message))
+        date = to, asked = asked, current_date = st$file$header$snapshot,
+        status = status, changes = rows(prop$changes), problems = rows(prop$problems), message = prop$message,
+        packages = packages))
     }
     check()
   })
@@ -757,55 +831,13 @@ preview_package <- function(rec, package, version, timeout) {
   current <- function() update_proposal(package_status(rec$nb)$proposal, ask)
   prop <- if (identical(rec$update_ask, ask)) current()
   if (!is.null(prop) && !identical(prop$status, "failed")) return(wait_preview(rec, current, NA_character_, timeout))
-  # Ember refuses a package its lock doesn't have yet, as when the notebook
-  # has just opened or a cell added it: wait for the lock first.
-  deadline <- Sys.time() + as.numeric(timeout %||% 60)
-  promises::then(promise(function(resolve, reject) {
-    check <- function() {
-      if (registered(rec) && update_pending(notebook_state(rec$nb), package) && Sys.time() < deadline) return(later::later(check, 0.1))
-      resolve(TRUE)
-    }
-    check()
-  }), function(...) {
-    state <- if (registered(rec)) notebook_state(rec$nb)
-    blocked <- if (!is.null(state)) update_blocked(state, package)
-    pending <- !is.null(state) && update_pending(state, package)
-    if (!is.null(blocked) || pending) {
-      return(list(date = NA_character_, asked = NA_character_, current_date = state$file$header$snapshot,
-                  status = if (pending) "fetching" else "failed", changes = rows(NULL), problems = rows(NULL), message = blocked))
-    }
-    tryCatch(preview_update(rec$nb, package, version, wait = FALSE),
-             ember_refused = function(e) argument_error("not_updatable", conditionMessage(e)))
-    rec$update_ask <- ask
-    wait_preview(rec, current, NA_character_, max(0, as.numeric(difftime(deadline, Sys.time(), units = "secs"))))
-  })
-}
-
-# Whether `package` is one the notebook's code names that its lock doesn't
-# have yet because resolution hasn't caught up (Ember's `wanted_cache`
-# against `resolved_for`, packages-core.R), while it still can: not once a
-# package index failed to come (`update_blocked()`). FALSE when Ember
-# doesn't say. Those fields aren't Ember's documented state; this goes once
-# Ember holds the preview itself (jowch/Ember#419).
-update_pending <- function(state, package) {
-  p <- state$packages
-  wanted <- p$wanted_cache
-  if (is.null(wanted) || !package %in% wanted || !is.null(update_blocked(state, package))) return(FALSE)
-  locked <- state$file$lock$entries$name %||% character()
-  !package %in% locked && !setequal(wanted, p$resolved_for %||% character())
-}
-
-# Why the lock can't come to have `package`, which the code names: the
-# messages of the package indexes that failed. NULL when none did, or the
-# lock has it.
-update_blocked <- function(state, package) {
-  p <- state$packages
-  if (is.null(p$wanted_cache) || !package %in% p$wanted_cache) return(NULL)
-  if (package %in% (state$file$lock$entries$name %||% character())) return(NULL)
-  failed <- Filter(function(slot) identical(slot$status, "failed"), p$indexes %||% list())
-  if (length(failed) == 0) return(NULL)
-  said <- unlist(lapply(failed, function(slot) slot$message), use.names = FALSE)
-  paste(c(sprintf("%s isn't in the notebook's lock yet, and the package index it needs didn't come.", package), said), collapse = " ")
+  # A package the code loads that the lock doesn't have yet (the notebook
+  # has just opened, or a cell added it) isn't refused: Ember's preview
+  # waits for the lock, and fails saying why if the lock never gets it.
+  tryCatch(preview_update(rec$nb, package, version, wait = FALSE),
+           ember_refused = function(e) argument_error("not_updatable", conditionMessage(e)))
+  rec$update_ask <- ask
+  wait_preview(rec, current, NA_character_, timeout)
 }
 
 # Ember's set_date(): apply the preview for `date`, refused unless it is
@@ -846,6 +878,17 @@ interrupt <- function(rec) {
   busy <- !is.null(state$worker$running) || length(state$pending) > 0
   interrupt_notebook(rec$nb)
   list(interrupted = busy)
+}
+
+# Answer the prompt `cell` waits on (Ember's answer_input()), which lets it go on.
+# With `id`, only if it is still that prompt: not one asked since.
+answer <- function(rec, cell, text, id = NULL) {
+  if (!is.character(text) || length(text) != 1 || is.na(text)) argument_error("invalid_argument", "text must be a string")
+  answer_input <- get0("answer_input", envir = asNamespace("ember"), mode = "function")
+  if (is.null(answer_input)) argument_error("no_prompt", "This Ember can't answer prompts; update it")
+  tryCatch(answer_input(rec$nb, text, cell = cell, id = id),
+           error = function(e) argument_error("no_prompt", sprintf("Cell %s isn't waiting for input (%s)", cell, sub("^ember: ", "", conditionMessage(e)))))
+  list(answered = TRUE)
 }
 
 # ---- Opening, moving, shutting down ------------------------------------------
@@ -957,6 +1000,7 @@ adapter_call <- function(method, params) {
     apply = apply_ops(rec, params$ops),
     run = run(rec, unlist(params$cells) %||% character(), isTRUE(params$wait), params$timeout),
     interrupt = interrupt(rec),
+    answer = answer(rec, check_cell(rec, params$cell_id), params$text, params$prompt_id),
     restart = restart(rec),
     preview_packages = preview_packages(rec, params$date, params$timeout, params$package, params$version),
     set_package_date = set_package_date(rec, params$date),

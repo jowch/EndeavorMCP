@@ -9,7 +9,7 @@
     "name": "list_notebooks"
   },
   {
-    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run; in an R notebook also a result made before a cell it depends on last ran). An R notebook's cell that hasn't run since the notebook opened or restarted has `not_run`. Counts as the read an edit needs. If the code is what this session read or wrote in its last few calls, it is left out and `code_unchanged` is true; pass `include_code=true` to get it anyway. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An errored cell has an `error` object with its `kind` and, when known, a `hint`. A read of a cell that a run you started is running or will run waits up to 45 seconds for it to finish, so read it again only if it is still `running`; its `message` then says how long it waited. While packages install, a queued cell's read waits up to 45 seconds too, then has `packages` (the step, the packages, how long so far, the last line of the package log) and a `message` saying what to do.",
+    "description": "Read one cell: its code, its output, and whether it is `running`, `queued`, `errored`, `code_folded` or `stale` (edited and not yet run; in an R notebook also a result made before a cell it depends on last ran). An R notebook's cell that hasn't run since the notebook opened or restarted has `not_run`. Counts as the read an edit needs. If the code is what this session read or wrote in its last few calls, it is left out and `code_unchanged` is true; pass `include_code=true` to get it anyway. For rich values (tables, arrays, HTML), `output` only names the type and `output_text` has the value as text, cut at 16 KB. An R notebook's text cell has its prose as `output`, with each inline value in place of its `` `r ...` `` span, as the page shows it. An errored cell has an `error` object with its `kind` and, when known, a `hint`. A read of a cell that a run you started is running or will run waits up to 45 seconds for it to finish, so read it again only if it is still `running`; its `message` then says how long it waited. While packages install, a queued cell's read waits up to 45 seconds too, then has `packages` (the step, the packages, how long so far, the last line of the package log) and a `message` saying what to do.",
     "inputSchema": {
       "properties": {
         "cell_id": {
@@ -564,6 +564,38 @@
       "type": "object"
     },
     "name": "interrupt_notebook"
+  },
+  {
+    "description": "Answer the prompt a running cell waits on, as typing at R's console prompt does: `readline()`, `menu()`, `askYesNo()` and the like (R notebooks only). A waiting cell shows `waiting_for_input` (what it asked, and `menu()`'s choices) in `read_cell` and in a run's result. Nothing runs until it is answered or `interrupt_notebook` stops the run. If the answer is the user's to give (a download, an overwrite, a choice of theirs), ask the user first. Returns at once unless `wait_for_completion` is true, which waits as `execute_cell` does.",
+    "inputSchema": {
+      "properties": {
+        "cell_id": {
+          "type": "string"
+        },
+        "notebook_id": {
+          "type": "string"
+        },
+        "prompt_id": {
+          "description": "`waiting_for_input.prompt_id`: the answer is refused (`stale_prompt`) if the cell is asking something else by then, such as `menu()` asking again.",
+          "type": "number"
+        },
+        "text": {
+          "description": "The answer, without a newline. For `menu()`, a choice's number or its exact text; \"\" is what pressing Enter sends.",
+          "type": "string"
+        },
+        "wait_for_completion": {
+          "description": "Wait for the run to go on to its end, or to the next prompt, at most 45 seconds from the start of the call. Default: false.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "notebook_id",
+        "cell_id",
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "answer_prompt"
   },
   {
     "description": "Restart the notebook's process, as the Restart on the notebook's page does: every value is gone. A Julia notebook then runs every cell in the new process, including a cell that was stuck (named in `running_again`): edit such a cell first so it finishes. Read a cell to wait for the run. An R notebook's cells are left `not_run` until you run them (`run_all_cells` runs it from the top). Use it when the user asks for a fresh start, or, with the user's say-so, for an R cell that `interrupt_notebook` couldn't stop. Refused in safe preview.",

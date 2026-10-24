@@ -97,6 +97,7 @@ impl Notebooks {
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),
             "interrupt_notebook" => t.interrupt_notebook(),
+            "answer_prompt" => t.answer_prompt(),
             "restart_notebook" => t.restart_notebook(),
             "preview_package_update" => t.preview_package_update(),
             "approve_install" => t.approve_install(),
@@ -583,8 +584,12 @@ impl Call<'_> {
         // The cells of a run that ran out of its wait that are running now, read
         // after the wait: some may have finished meanwhile.
         let still_running: Vec<String> = nb.order.iter().filter(|id| going.contains(id) && nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect();
-        // A run waiting on the user's OK for a download didn't run out of time: the message says what it waits for.
-        if !still_running.is_empty() && !nb.held() {
+        // A cell of this run waiting on a prompt ends the wait at once (#261). A run waiting on
+        // the user's OK for a download didn't run out of time: the message says what it waits for.
+        let asks = nb.prompted().filter(|id| still_running.contains(id) || cells_run.contains(id)).cloned();
+        if let Some(cell) = &asks {
+            warnings.push(format!("waiting_for_input::Cell {cell} is waiting for input; the run goes on once it is answered"));
+        } else if !still_running.is_empty() && !nb.held() {
             warnings.push(format!("execution_timeout::The run was still going when the wait ended after at most {WAIT_SECONDS}s"));
         }
         let status = match status {
@@ -670,7 +675,10 @@ impl Call<'_> {
                 receipt.insert("stale_cells".into(), json!(stale_cells));
             }
         }
-        if nb.installing() || nb.asking() {
+        if let Some(cell) = &asks {
+            receipt.insert("waiting_for_input".into(), waiting_json(&nb, cell));
+            receipt.insert("message".into(), json!(prompt_message(&nb, cell)));
+        } else if nb.installing() || nb.asking() {
             receipt.insert("packages".into(), nb.packages.clone().unwrap_or_default());
             let mut message = installing_message(&nb);
             if !still_running.is_empty() {
@@ -717,6 +725,9 @@ impl Call<'_> {
         }
         if !cell.notes.is_empty() {
             out["notes"] = json!(cell.notes);
+        }
+        if cell.running && cell.prompt.is_some() {
+            out["waiting_for_input"] = waiting_json(nb, id);
         }
         let Value::Object(out) = out else { unreachable!() };
         out
@@ -766,9 +777,9 @@ impl Call<'_> {
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
         let mut going = Vec::new();
         while self.nbs.own_run_going(self.owner, &nb) {
-            // An install waiting for the user's OK doesn't go on by itself: the run is still
-            // going, but nothing changes until approve_install.
-            if Instant::now() >= deadline || nb.held() {
+            // A prompt holds the run until it is answered, and an install waiting for the
+            // user's OK doesn't go on by itself: waiting longer only spends the call.
+            if Instant::now() >= deadline || nb.prompted().is_some() || nb.held() {
                 going = nb.order.iter().filter(|id| busy(&nb, id)).cloned().collect();
                 break;
             }
@@ -801,7 +812,8 @@ impl Call<'_> {
         // on every read, so that a run seen to end is forgotten.)
         let waits = |nb: &Snapshot| {
             let own = self.nbs.own_run_going(self.owner, nb);
-            nb.cells.get(&cell).is_some_and(|c| (c.running && own) || (c.queued && !nb.held() && (nb.installing() || own))) || (own && !nb.held() && self.nbs.own_run_will_run(self.owner, nb, &cell))
+            // A cell waiting on a prompt, or behind one, waits until it is answered: not waited for.
+            nb.prompted().is_none() && (nb.cells.get(&cell).is_some_and(|c| (c.running && own) || (c.queued && !nb.held() && (nb.installing() || own))) || (own && !nb.held() && self.nbs.own_run_will_run(self.owner, nb, &cell)))
         };
         let waited = Instant::now();
         let deadline = waited + self.wait_left().saturating_sub(Duration::from_secs(1));
@@ -833,7 +845,14 @@ impl Call<'_> {
         if let Some(text) = self.output_text(&nb, &cell)? {
             out.insert("output_text".into(), json!(text));
         }
-        if nb.installing() || nb.asking() {
+        let asks = nb.prompted().filter(|asks| **asks == cell || nb.cells.get(&cell).is_some_and(|c| c.running || c.queued)).cloned();
+        if let Some(asks) = asks {
+            // The cell asking, or one queued behind it.
+            if asks != cell {
+                out.insert("waiting_for_input".into(), waiting_json(&nb, &asks));
+            }
+            out.insert("message".into(), json!(prompt_message(&nb, &asks)));
+        } else if nb.installing() || nb.asking() {
             out.insert("packages".into(), nb.packages.clone().unwrap_or_default());
             out.insert("message".into(), json!(installing_message(&nb)));
         } else if let Some(seconds) = ran_out {
@@ -1011,6 +1030,40 @@ impl Call<'_> {
             return Ok(Value::Object(self.already_ran(&nb.id, mutation, &cells)?));
         }
         let ran = self.run(&nb, &cells, wait)?;
+        Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, ran, None)?.0))
+    }
+
+    /// Answer the prompt a running cell waits on (`readline()`, `menu()` and the like, #261),
+    /// which lets the run go on; waited for as `execute_cell` waits for a run.
+    fn answer_prompt(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        let cell = self.cell(&nb)?;
+        let Value::String(text) = self.arg("text")? else { return Err(argument_error("invalid_argument::text must be a string")) };
+        let wait = bool_arg(self.args, "wait_for_completion", false)?;
+        let asked = match self.args.get("prompt_id") {
+            None | Some(Value::Null) => None,
+            Some(Value::Number(id)) => Some(id.clone()),
+            Some(_) => return Err(argument_error("invalid_argument::prompt_id must be a number")),
+        };
+        if nb.prompted() != Some(&cell) {
+            return Err(argument_error(&format!("no_prompt::Cell {cell} isn't waiting for input")));
+        }
+        // An answer for a question that has gone (menu() asking again, the user answering first)
+        // isn't given to the next one; Ember checks too, in case it changes before the answer lands.
+        let waiting = nb.cells[&cell].prompt.as_ref().map(|p| p["id"].clone()).unwrap_or_default();
+        if asked.as_ref().is_some_and(|id| waiting.as_f64() != id.as_f64()) {
+            return Err(argument_error(&format!("stale_prompt::Cell {cell} is asking something else now; read it and answer what it asks")));
+        }
+        self.nbs.call("answer", json!({ "notebook_id": nb.id, "cell_id": cell, "text": text, "prompt_id": asked }))?;
+        let mutation = json!({ "type": "answer_prompt", "cell_id": cell });
+        let ran = if wait {
+            let (cells, going) = self.wait_for_own_run(&nb)?;
+            // A run the user or another session started isn't waited for, so this cell is read as it is now.
+            let cells = if cells.is_empty() { vec![cell] } else { cells };
+            Ran { cells, going, ..Default::default() }
+        } else {
+            Ran { cells: vec![cell], warnings: vec!["async_execution::cells running; read them for the result".into()], ..Default::default() }
+        };
         Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, ran, None)?.0))
     }
 
@@ -1559,7 +1612,11 @@ impl Call<'_> {
         let asked = result.as_object_mut().and_then(|r| r.remove("asked"));
         let earlier = asked.as_ref().is_some_and(|a| a.is_string() && *a != result["date"]);
         let none = result["changes"].as_array().is_none_or(Vec::is_empty);
+        // With no packages yet there is nothing to change, but applying still moves the date, which
+        // every package added later comes from (#269). An adapter that doesn't say counts as having some.
+        let no_packages = result.as_object_mut().and_then(|r| r.remove("packages")).is_some_and(|n| n == 0);
         let said = match result["status"].as_str() {
+            Some("ready") if none && no_packages => "The notebook has no packages yet, so none would change. apply_package_update with this date still moves the notebook's date to it, and every package added later comes from that date: tell the user, since an old date can give old versions or none at all.",
             Some("ready") if none => "Nothing would change: every package is already at its version for this date.",
             Some("ready") if package.is_string() => "Nothing has changed yet. This date moves every package, not only this one: tell the user what else would change; apply_package_update with this date applies it.",
             Some("ready") => "Nothing has changed yet. Tell the user what would change; apply_package_update with this date applies it.",
@@ -1636,7 +1693,9 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
         "staged"
     } else {
         let cells: Vec<_> = cells_run.iter().filter_map(|id| nb.cells.get(id)).collect();
-        if cells.iter().any(|c| c.errored) {
+        // A cell still to run carries its last result's error until it runs, so
+        // that error isn't this run's: a run waiting at a prompt is still running.
+        if cells.iter().any(|c| c.errored && !c.running && !c.queued) {
             "errored"
         } else if cells.iter().any(|c| c.running || c.queued) {
             "running"
@@ -1650,6 +1709,23 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
 /// What the agent hears while a notebook's cells wait on a package step, in
 /// plain words: what is going on, that it is slow only the first time, and
 /// how to wait; past `INSTALL_USUAL_SECONDS`, to wait only while the log moves.
+/// The prompt `cell` waits on, as the tools show it.
+fn waiting_json(nb: &Snapshot, cell: &str) -> Value {
+    let prompt = nb.cells.get(cell).and_then(|c| c.prompt.clone()).unwrap_or_default();
+    json!({ "cell_id": cell, "prompt_id": prompt["id"], "prompt": prompt["text"].as_str().unwrap_or_default(), "choices": prompt["choices"].as_array().cloned().unwrap_or_default() })
+}
+
+/// What the agent is told while `cell` waits on a prompt.
+fn prompt_message(nb: &Snapshot, cell: &str) -> String {
+    let menu = nb.cells.get(cell).and_then(|c| c.prompt.as_ref()).and_then(|p| p["choices"].as_array()).is_some_and(|c| !c.is_empty());
+    let how = if menu { " (a choice's number or its text)" } else { "" };
+    format!(
+        "Cell {cell} is waiting for input, as R does at a console prompt: `waiting_for_input` has what it asked, and the cell's output what it printed before. \
+         Nothing runs until it is answered. Answer with answer_prompt{how}, passing `prompt_id`, or stop the run with interrupt_notebook. \
+         If the answer is the user's to give (a download, an overwrite, a choice of theirs), ask the user first."
+    )
+}
+
 fn installing_message(nb: &Snapshot) -> String {
     if nb.asking() {
         return asking_message(nb);

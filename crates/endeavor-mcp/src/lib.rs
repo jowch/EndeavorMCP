@@ -25,6 +25,7 @@ mod juliaup;
 pub mod r;
 mod mcp;
 mod notebooks;
+mod old_builds;
 pub mod paths;
 mod release;
 mod results;
@@ -286,6 +287,13 @@ pub fn run(argv: Vec<String>) -> ! {
 /// before the helper's arguments (the app: `endeavor --helper …`).
 pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
     let _ = HELPER_ARGS.set(helper_args);
+    // A binary the bootstrap script or the plugin's launcher installed keeps its folder from being
+    // removed while it runs; the ones a client starts look for other builds nothing uses (#97).
+    let place = old_builds::Place::here(helper_args);
+    old_builds::hold_own_folder(place.as_ref());
+    if matches!(argv.first().map(String::as_str), Some("connect" | "mcp" | "serve")) {
+        old_builds::tidy(place);
+    }
     match argv.first().map(String::as_str) {
         Some("askpass") => askpass::run(argv.get(1).map_or("", String::as_str)),
         Some("relay") => slurm::relay_main(&argv[1..]),

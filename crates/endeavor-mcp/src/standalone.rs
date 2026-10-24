@@ -274,7 +274,7 @@ pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<Pa
 
 /// In each unpacked folder: whoever uses the folder holds a shared lock on
 /// it (`Lease`), and its time is when the folder was last unpacked or used.
-const IN_USE: &str = "in-use";
+pub(crate) const IN_USE: &str = "in-use";
 
 /// How long an unused folder is kept after its last use. The lock alone may
 /// not show: a cache in a home folder shared by a cluster's nodes may have
@@ -324,6 +324,11 @@ pub struct Lease {
 pub fn lease(dir: &Path) -> Option<Lease> {
     let marker = std::fs::OpenOptions::new().read(true).write(true).open(dir.join(IN_USE)).ok()?;
     marker.try_lock_shared().ok()?;
+    Some(lease_locked(marker))
+}
+
+/// A `Lease` on `marker`, an `IN_USE` file this process holds a shared lock on.
+pub(crate) fn lease_locked(marker: std::fs::File) -> Lease {
     let marker = Arc::new(marker);
     let _ = marker.set_modified(SystemTime::now());
     let held = Arc::downgrade(&marker);
@@ -334,7 +339,7 @@ pub fn lease(dir: &Path) -> Option<Lease> {
             let _ = marker.set_modified(SystemTime::now());
         }
     });
-    Some(Lease { _marker: marker })
+    Lease { _marker: marker }
 }
 
 fn runtime_args(options: &Options, exit_idle: bool) -> Args {

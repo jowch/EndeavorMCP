@@ -28,11 +28,13 @@ struct FakeCell {
     off: bool,
     /// Ember's notes on its last run, "kind::text".
     notes: Vec<String>,
+    /// The prompt it waits on, as Ember's `readline()` and `menu()` do: `ask()` and `choose()` run until answered.
+    prompt: Option<Value>,
 }
 
 impl FakeCell {
     fn new(id: &str, code: &str) -> FakeCell {
-        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, off: false, notes: Vec::new() }
+        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, off: false, notes: Vec::new(), prompt: None }
     }
 
     /// What `a, b = 1, 2` defines, and the names the rest of the code uses.
@@ -136,7 +138,7 @@ impl Engine {
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
                 "last_run": c.last_run, "runtime": 0, "output": c.output, "error": if c.errored { json!({ "msg": c.output }) } else { Value::Null }, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
-                "stale": c.stale, "not_run": c.not_run, "off": c.off, "notes": c.notes,
+                "stale": c.stale, "not_run": c.not_run, "off": c.off, "notes": c.notes, "prompt": c.prompt,
             })).collect::<Vec<_>>(),
         })
     }
@@ -266,6 +268,13 @@ impl Engine {
                     return Ok(json!({ "date": date, "current_date": nb.package_date, "status": "failed", "changes": [],
                         "problems": [{ "kind": "index_unavailable", "package": null, "message": "no package index for 2000-01-01" }], "message": "no index" }));
                 }
+                // Nothing changes on the 16th, for a notebook with packages and for one with none
+                // yet (`packages`, #269); 2025-01-15 is the latter's.
+                if date == "2026-10-16" || date == "2025-01-15" {
+                    nb.previewed = Some(date.clone());
+                    return Ok(json!({ "date": date, "asked": date, "current_date": nb.package_date, "status": "ready", "changes": [], "problems": [], "message": null,
+                        "packages": if date == "2025-01-15" { 0 } else { 1 } }));
+                }
                 // The 19th isn't published yet, so its preview is of the 18th (#247).
                 let asked = date.clone();
                 let date = if date == "2026-10-19" { "2026-10-18".to_owned() } else { date };
@@ -376,10 +385,16 @@ impl Engine {
                 // with a cell using it that depends on a cell of the run.
                 let defined: Vec<String> = nb.cells.iter().filter(|c| cells.contains(&c.id)).flat_map(|c| c.analysis().0).collect();
                 let dependents: Vec<String> = nb.cells.iter().filter(|c| !cells.contains(&c.id) && c.code.contains("linger()") && c.analysis().1.iter().any(|name| defined.contains(name))).map(|c| c.id.clone()).collect();
-                let (mut lingering, finishing): (Vec<String>, Vec<String>) = cells.iter().cloned().partition(|id| nb.cells.iter().any(|c| c.id == *id && c.code.contains("linger()")));
+                let asks = |code: &str| code.contains("ask()") || code.contains("choose()");
+                let (mut lingering, finishing): (Vec<String>, Vec<String>) = cells.iter().cloned().partition(|id| nb.cells.iter().any(|c| c.id == *id && (c.code.contains("linger()") || asks(&c.code))));
                 lingering.extend(dependents);
                 for cell in nb.cells.iter_mut().filter(|c| lingering.contains(&c.id)) {
                     cell.running = true;
+                    if cell.code.contains("ask()") {
+                        cell.prompt = Some(json!({ "id": 1, "text": "Name? ", "choices": [] }));
+                    } else if cell.code.contains("choose()") {
+                        cell.prompt = Some(json!({ "id": 2, "text": "Selection: ", "choices": ["Yes", "No"] }));
+                    }
                 }
                 let first = std::mem::take(&mut nb.runs_first);
                 for cell in nb.cells.iter_mut().filter(|c| finishing.contains(&c.id) || first.contains(&c.id)) {
@@ -473,10 +488,20 @@ impl Engine {
                 for cell in nb.cells.iter_mut() {
                     cell.queued = false;
                     if cell.running && !cell.code.contains("stubborn()") {
-                        (cell.running, cell.errored, cell.output) = (false, true, "InterruptException".into());
+                        (cell.running, cell.errored, cell.output, cell.prompt) = (false, true, "InterruptException".into(), None);
                     }
                 }
                 Ok(json!({ "interrupted": busy }))
+            }
+            // Ember's answer_input(): the cell finishes with the answer.
+            "answer" => {
+                let at = find(nb, &params["cell_id"]);
+                let cell = &mut nb.cells[at];
+                if cell.prompt.take().is_none() {
+                    return Err(format!("ArgumentError: no_prompt::Cell {} isn't waiting for input", cell.id));
+                }
+                (cell.running, cell.last_run, cell.output) = (false, now, format!("answered {}", params["text"].as_str().unwrap()));
+                Ok(json!({ "answered": true }))
             }
             other => Err(format!("ArgumentError: unknown_method::Unknown adapter method: '{other}'")),
         }
@@ -3195,6 +3220,16 @@ fn an_r_notebooks_package_date_is_shown_previewed_and_moved() {
     assert!(earlier["message"].as_str().unwrap().starts_with("2026-10-19 isn't published yet, so this is the newest day that is, 2026-10-18."), "{earlier}");
     assert!(!preview["message"].as_str().unwrap().contains("published"), "{preview}");
 
+    // Nothing would change. With no packages yet that is said as such, with what applying still
+    // does, rather than as every package being at its version already (#269).
+    let same = s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2026-10-16" })).unwrap();
+    assert!(same["message"].as_str().unwrap().starts_with("Nothing would change: every package is already at its version"), "{same}");
+    assert_eq!(same.get("packages"), None, "{same}");
+    let empty = s.call("9", "preview_package_update", json!({ "notebook_id": R, "date": "2025-01-15" })).unwrap();
+    let message = empty["message"].as_str().unwrap();
+    assert!(message.starts_with("The notebook has no packages yet, so none would change.") && message.contains("still moves the notebook's date") && message.contains("every package added later"), "{empty}");
+    assert_eq!(empty.get("packages"), None, "{empty}");
+
     // One package, pinned to an older version: the date Ember finds for it, which moves the
     // others too, and the message says to tell the user so (#266).
     let pinned = s.call("9", "preview_package_update", json!({ "notebook_id": R, "package": "dplyr", "version": "1.1.2" })).unwrap();
@@ -3232,4 +3267,61 @@ fn the_apps_stop_looks_at_the_notebooks_with_the_sessions_runs() {
     assert_eq!(s.notebooks.session_runs(""), Vec::<String>::new(), "no session");
     s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [] } }));
     assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new(), "the run ended, its cell queued again or not");
+}
+
+#[test]
+fn a_cell_waiting_on_a_prompt_ends_the_wait_says_what_it_asks_and_takes_an_answer() {
+    let s = setup();
+    const Z: &str = "33333333-3333-3333-3333-333333333333";
+    s.engine.open(NB, "/n/a.R", &[(X, "name = ask()"), (Y, "z = 1"), (Z, "pick = choose()")]);
+
+    // A waited run returns as soon as its cell asks, without spending the wait, and says what it asks.
+    let began = Instant::now();
+    let ran = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    assert!(began.elapsed() < Duration::from_secs(5), "the run's wait ended at the prompt");
+    assert_eq!(ran["waiting_for_input"], json!({ "cell_id": X, "prompt_id": 1, "prompt": "Name? ", "choices": [] }), "{ran}");
+    assert_eq!((&ran["execution"]["status"], &ran["execution"]["still_running"]), (&json!("running"), &json!([X])), "{ran}");
+    let warnings = ran["warnings"].as_array().unwrap();
+    assert!(warnings.iter().any(|w| w.as_str().unwrap().starts_with("waiting_for_input::")) && !warnings.iter().any(|w| w.as_str().unwrap().starts_with("execution_timeout::")), "{ran}");
+    assert!(ran["message"].as_str().unwrap().contains("answer_prompt") && ran["message"].as_str().unwrap().contains("ask the user first"), "{ran}");
+
+    // read_cell doesn't wait on it either, and shows the prompt.
+    let began = Instant::now();
+    let read = s.call("7", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert!(began.elapsed() < Duration::from_secs(2), "no wait for a cell waiting on a prompt");
+    assert_eq!((&read["running"], &read["waiting_for_input"]["prompt"]), (&json!(true), &json!("Name? ")), "{read}");
+    assert!(read["message"].as_str().unwrap().contains("answer_prompt"), "{read}");
+
+    // Only the cell waiting can be answered.
+    let refused = s.call("7", "answer_prompt", json!({ "notebook_id": NB, "cell_id": Y, "text": "Ada" })).unwrap_err();
+    assert!(refused.contains("no_prompt::"), "{refused}");
+    let refused = s.call("7", "answer_prompt", json!({ "notebook_id": NB, "cell_id": X, "text": 3 })).unwrap_err();
+    assert!(refused.contains("invalid_argument::"), "{refused}");
+    // An answer for a question the cell has stopped asking isn't given to the one it asks now.
+    let answers = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "answer").count();
+    let refused = s.call("7", "answer_prompt", json!({ "notebook_id": NB, "cell_id": X, "text": "Ada", "prompt_id": 7 })).unwrap_err();
+    assert!(refused.contains("stale_prompt::"), "{refused}");
+    assert_eq!(answers(), 0, "nothing reached the engine");
+
+    // The answer lets the cell finish; a waited answer reports it as a run does.
+    let answered = s.call("7", "answer_prompt", json!({ "notebook_id": NB, "cell_id": X, "text": "Ada", "prompt_id": 1, "wait_for_completion": true })).unwrap();
+    assert_eq!(answered["execution"]["status"], json!("completed"), "{answered}");
+    assert_eq!(answered["outputs"]["changed"][0]["output_summary"], json!("answered Ada"), "{answered}");
+    assert_eq!(answered.get("waiting_for_input"), None);
+    let read = s.call("7", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["running"], read.get("waiting_for_input")), (&json!(false), None), "{read}");
+
+    // menu()'s choices come too, and an answer not waited for says the run goes on.
+    let ran = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": Z, "wait_for_completion": true })).unwrap();
+    assert_eq!(ran["waiting_for_input"]["choices"], json!(["Yes", "No"]), "{ran}");
+    assert!(ran["message"].as_str().unwrap().contains("a choice's number or its text"), "{ran}");
+    let answered = s.call("7", "answer_prompt", json!({ "notebook_id": NB, "cell_id": Z, "text": "1" })).unwrap();
+    assert_eq!(answered["execution"]["status"], json!("running"), "{answered}");
+
+    // An interrupt ends a cell waiting on a prompt, as any running cell.
+    s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    let stopped = s.call("7", "interrupt_notebook", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!(stopped["stopped"], json!([X]), "{stopped}");
+    let read = s.call("7", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["errored"], read.get("waiting_for_input")), (&json!(true), None), "{read}");
 }

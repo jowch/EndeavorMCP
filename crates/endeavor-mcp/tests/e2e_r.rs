@@ -413,6 +413,62 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
     });
 
+    step("readline() and menu() in a cell wait for answer_prompt, and an interrupt ends the wait (#261)", || {
+        agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
+        let asks = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "who <- readline(\"Name? \")", "after_cell_id": B }))["cell_id"].clone();
+        let began = Instant::now();
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": asks, "wait_for_completion": true }));
+        assert!(began.elapsed() < Duration::from_secs(30), "the wait ended at the prompt: {ran}");
+        let waiting = &ran["waiting_for_input"];
+        assert_eq!((&waiting["cell_id"], &waiting["prompt"], &waiting["choices"]), (&asks, &json!("Name? "), &json!([])), "{ran}");
+        assert!(waiting["prompt_id"].is_number(), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        assert_eq!((&read["running"], &read["waiting_for_input"]["prompt"]), (&json!(true), &json!("Name? ")), "{read}");
+        let answered = agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": asks, "text": "Ada", "prompt_id": waiting["prompt_id"], "wait_for_completion": true }));
+        assert_eq!(answered["execution"]["status"], "completed", "{answered}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        assert!(read["running"] == false && read.get("waiting_for_input").is_none() && read["output"].as_str().unwrap().contains("Ada"), "{read}");
+
+        let picks = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "colour <- c(\"red\", \"blue\")[menu(c(\"red\", \"blue\"), title = \"Colour?\")]", "after_cell_id": asks }))["cell_id"].clone();
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": picks, "wait_for_completion": true }));
+        let waiting = &ran["waiting_for_input"];
+        assert_eq!((&waiting["cell_id"], &waiting["prompt"], &waiting["choices"]), (&picks, &json!("Selection: "), &json!(["red", "blue"])), "{ran}");
+        // A wrong choice: menu() asks again, with a new prompt, so the first one's id is refused.
+        agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": picks, "text": "green", "prompt_id": waiting["prompt_id"], "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": picks }));
+        assert!(read["waiting_for_input"]["prompt_id"].is_number() && read["waiting_for_input"]["prompt_id"] != waiting["prompt_id"], "{read}");
+        let (failed, stale) = agent.call("answer_prompt", json!({ "notebook_id": notebook, "cell_id": picks, "text": "2", "prompt_id": waiting["prompt_id"] }));
+        assert!(failed && stale.to_string().contains("stale_prompt"), "{stale}");
+        agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": picks, "text": "2", "prompt_id": read["waiting_for_input"]["prompt_id"], "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": picks }));
+        assert!(read["errored"] == false && read["output"].as_str().unwrap().contains("blue"), "{read}");
+
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": asks, "code": "who <- readline(\"Again? \")" }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": asks, "wait_for_completion": true }));
+        assert_eq!(ran["waiting_for_input"]["prompt"], "Again? ", "{ran}");
+        let stopped = agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        assert_eq!((&stopped["stopped"], &stopped["still_running"]), (&json!([asks]), &json!([])), "{stopped}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        assert!(read["errored"] == true && read.get("waiting_for_input").is_none(), "{read}");
+        // Asked again after that error: the cell reads as this run, with what it printed before the
+        // question, not as the interrupted run (trial 20).
+        // A cell after it that failed on its last run waits in the queue with that error, which
+        // isn't this run's: the run is still running.
+        let after = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "said <- stop(\"not yet\")", "after_cell_id": asks }))["cell_id"].clone();
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": after, "wait_for_completion": true }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": after, "code": "said <- nchar(who)" }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": asks, "code": "cat(\"The terms of use\\n\")\nwho <- readline(\"Accept? \")" }));
+        let ran = agent.ok("submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        assert_eq!((&ran["waiting_for_input"]["prompt"], &ran["execution"]["status"]), (&json!("Accept? "), &json!("running")), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+        assert!(read["errored"] == false && read.get("error").is_none() && read["output"].as_str().unwrap().contains("The terms of use"), "{read}");
+        agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": after }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": picks }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
+    });
+
     step("restart_notebook starts R fresh: a slow cell ends, and every cell is not run (#202)", || {
         agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
         let slow = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow <- { Sys.sleep(600); 1 }", "after_cell_id": B }))["cell_id"].clone();
@@ -444,6 +500,30 @@ fn an_r_notebook_through_the_runtime() {
         common::wait_for("the new cell to run", || agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }))["output"].as_str().is_some_and(|o| o.contains("7")));
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
         assert!(read["output"].as_str().unwrap().starts_with("Warning: careful"), "{read}");
+    });
+
+    step("a text cell reads as its prose with its inline values, and a notebook with no packages previews as such (#270, #269)", || {
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let made = agent.ok("new_notebook", json!({ "path": "prose.R" }));
+        let (id, cell) = (made["notebook_id"].as_str().unwrap().to_owned(), made["cell_ids"][0].clone());
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "x <- 21" }));
+        let text = agent.ok("add_cell", json!({ "notebook_id": id, "code": "#' ## Result\n#'\n#' Twice is `r x * 2`, not `r x`.", "after_cell_id": cell }))["cell_id"].clone();
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        common::wait_for("the text cell's values", || agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": text }))["output"].as_str().is_some_and(|o| o.contains("42")));
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": text }));
+        assert_eq!(read["output"], "## Result\n\nTwice is 42, not 21.", "{read}");
+
+        let started = Instant::now();
+        let empty = loop {
+            let p = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2025-01-15" }));
+            if p["status"] != "fetching" {
+                break p;
+            }
+            assert!(started.elapsed() < Duration::from_secs(300), "the index never came: {p}");
+        };
+        assert!(empty["status"] == "ready" && empty["message"].as_str().unwrap().starts_with("The notebook has no packages yet"), "{empty}");
+        assert_eq!(empty.get("packages"), None, "{empty}");
     });
 
     step("a run goes on through the dependents Ember queues: a read or a waited submit waits for them (#151) and says if one failed (#171)", || {
@@ -574,6 +654,10 @@ fn an_r_notebook_through_the_runtime() {
         let (refused, said) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2026-06-02" }));
         assert!(refused && said.to_string().contains("no_preview"), "{said}");
 
+        // At its own date nothing would change, and the notebook is seen to have packages (#269).
+        let same = preview(&mut agent, Some("2026-06-01"));
+        assert!(same["status"] == "ready" && same["message"].as_str().unwrap().starts_with("Nothing would change: every package"), "{same}");
+
         // Two years back, jsonlite was older: the preview says so, and nothing changes.
         let old = preview(&mut agent, Some("2024-06-03"));
         assert_eq!(old["status"], "ready", "{old}");
@@ -676,6 +760,20 @@ fn an_r_notebook_through_the_runtime() {
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "F" }));
         assert!(read["notes"][0].as_str().is_some_and(|n| n.starts_with("changed_in_place::Changed box in place")), "{read}");
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "E" })).get("notes"), None);
+    });
+
+    step("a cell that reads globals through get() on a computed name says Ember can't track them, before it runs and in its run (Ember #357)", || {
+        std::fs::write(folder.join("untracked.R"), "### An Ember notebook ###\n\n# %% id=N\nnms <- c('a', 'b')\n\n# %% id=A\nfor (s in nms) assign(s, 1)\n\n# %% id=G\nsapply(nms, function(s) get(s))\n\n# /// cell order\n# N\n# A\n# G\n# ///\n").unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "untracked.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "G" }));
+        assert!(read["notes"][0].as_str().is_some_and(|n| n.starts_with("untracked_read::Ember can't tell which variables this cell reads through get()")), "{read}");
+        agent.ok("allow_execution", json!({ "notebook_id": id }));
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": "G", "wait_for_completion": true }));
+        assert!(ran["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("untracked_read::Cell G: Ember can't tell")), "{ran}");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" })).get("notes"), None);
     });
 
     step("an install call doesn't run: the lock answers it, and the cell's note says so (Ember #79, #125)", || {

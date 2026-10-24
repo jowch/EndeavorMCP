@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "download_step", "structure_error", "snapshot_cell", "output_text", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "update_pending", "update_blocked")
+wanted <- c("%||%", "package_step", "download_step", "structure_error", "EXTRA_FIX", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -95,6 +95,9 @@ d <- A$structure_error(list(kind = "missing_package", message = "there is no pac
 check("a missing package with no header fix: no fixes", is.null(d$fixes))
 d <- A$structure_error(list(kind = "error", message = "boom", fixes = "Do this"))
 check("another error keeps its fixes and reads as runtime", identical(d$kind, "runtime") && identical(unclass(d$fixes), "Do this"))
+d <- A$structure_error(list(kind = "error", message = "The textdata package is required to download the AFINN lexicon.", fixes = "Add textdata to [extra_packages]"))
+check("a run error naming a package (Ember #184): the fix the tools can do (trial 20)",
+      identical(unclass(d$fixes), "Add `requireNamespace(\"textdata\")` as the first line of this cell and run it"))
 
 # ---- cell_notes ----
 check("no notes: none", length(A$cell_notes(list())) == 0)
@@ -112,6 +115,37 @@ check("a disabled cell: off", isTRUE(A$snapshot_cell(view(disabled = TRUE))$off)
 check("a cell downstream of a disabled one: off, though it ran before", isTRUE(A$snapshot_cell(view(disabled_by = "d"))$off))
 check("an Ember without disabled_by: not off", isFALSE(A$snapshot_cell(view(disabled_by = NULL))$off))
 
+# A cell rerun after an error, now waiting at a prompt: Ember keeps the last run's error on it
+# while it runs. The agent sees what this run printed, not the old error (trial 20).
+asking <- A$snapshot_cell(view(running = TRUE, status = "error",
+                               errors = list(list(kind = "error", message = "textdata is required")),
+                               output = list(mime = "text/plain", text = "old value"),
+                               console = list(list(kind = "stdout", text = "License: CC BY. Do you accept?\n\n1: Yes\n2: No\n\n")),
+                               prompt = list(id = 2L, text = "Selection: ", choices = c("Yes", "No"))))
+check("a cell waiting at a prompt after an error: not errored, no old error", isFALSE(asking$errored) && is.null(asking[["error"]]))
+check("  its output is what this run printed, the question's text", identical(asking$output, "License: CC BY. Do you accept?\n\n1: Yes\n2: No"))
+check("  and no notes from the last run", length(A$snapshot_cell(view(running = TRUE, from_lock = "mypkg", prompt = list(id = 1L, text = "? ")))$notes) == 0)
+check("  and the prompt", identical(asking$prompt$id, 2L) && identical(unclass(asking$prompt$choices), c("Yes", "No")))
+check("a running cell not at a prompt keeps the last run's error, as before",
+      isTRUE(A$snapshot_cell(view(running = TRUE, status = "error", errors = list(list(kind = "error", message = "boom"))))$errored))
+
+# A text cell's output is its prose with the inline values put in, as the page shows it (#270).
+prose <- "#' ## Results\n#'\n#' The slope is `r round(b, 3)` over `r n` plates.\n#' Write `` `r x` `` to show a value."
+inline <- function(...) list(mime = "application/vnd.ember.inline", data = list(values = list(...)), text = "")
+text_view <- function(...) view(kind = "markdown", code = prose, ...)
+# Ember counts a span inside double backticks too, so the page shows a value there.
+check("a text cell that ran: its prose with each value in place of its span",
+      identical(A$snapshot_cell(text_view(output = inline("0.409", "72", "1")))$output,
+                "## Results\n\nThe slope is 0.409 over 72 plates.\nWrite `` 1 `` to show a value."))
+check("  and it is still a markdown cell", isTRUE(A$snapshot_cell(text_view(output = inline("0.409", "72", "1")))$markdown))
+check("a text cell not run yet: its prose with the spans as written",
+      identical(A$snapshot_cell(text_view())$output,
+                "## Results\n\nThe slope is `r round(b, 3)` over `r n` plates.\nWrite `` `r x` `` to show a value."))
+check("a text cell edited since its values were made: the spans as written, not old values",
+      grepl("`r round(b, 3)`", A$snapshot_cell(text_view(output = inline("0.409", "72", "1"), code_differs = TRUE))$output, fixed = TRUE))
+check("a text cell with no spans: its prose",
+      identical(A$snapshot_cell(view(kind = "markdown", code = "#' Just words."))$output, "Just words."))
+
 # ---- update_proposal ----
 ready <- function(name, version) list(status = "ready", date = "2026-04-23", update = list(name = name, version = version))
 newest <- list(name = "ggplot2", version = NULL)
@@ -124,23 +158,6 @@ check("another package's, a date's, or nothing asked: NULL",
       is.null(A$update_proposal(ready("dplyr", "1.1.2"), newest)) &&
         is.null(A$update_proposal(list(status = "ready", date = "2026-10-01"), newest)) &&
         is.null(A$update_proposal(ready("ggplot2", "4.0.3"), NULL)))
-
-# ---- update_pending ----
-opened <- list(packages = list(wanted_cache = "jsonlite", resolved_for = character()), file = list(lock = NULL))
-resolved <- list(packages = list(wanted_cache = "jsonlite", resolved_for = "jsonlite"),
-                 file = list(lock = list(entries = data.frame(name = "jsonlite", stringsAsFactors = FALSE))))
-check("a package the code names, before the lock has it: pending", A$update_pending(opened, "jsonlite"))
-check("once resolved: not pending", !A$update_pending(resolved, "jsonlite"))
-offline <- opened
-offline$packages$indexes <- list(`cran/2026-06-01` = list(status = "failed", message = "could not fetch the index for cran/2026-06-01"))
-check("an index that failed: not pending, and blocked with its message (#267)",
-      !A$update_pending(offline, "jsonlite") && grepl("could not fetch the index", A$update_blocked(offline, "jsonlite"), fixed = TRUE))
-fetching <- opened
-fetching$packages$indexes <- list(`cran/2026-06-01` = list(status = "fetching"))
-check("an index still coming: pending, not blocked", A$update_pending(fetching, "jsonlite") && is.null(A$update_blocked(fetching, "jsonlite")))
-check("a locked package isn't blocked by a failed index", is.null(A$update_blocked(within(offline, file <- resolved$file), "jsonlite")))
-check("a package the code doesn't name, or an Ember that doesn't say: not pending",
-      !A$update_pending(opened, "ggplot2") && !A$update_pending(list(packages = list(), file = list()), "jsonlite"))
 
 # ---- date_proposal ----
 # A preview of a day not published yet moved back to the newest that is (#247).
