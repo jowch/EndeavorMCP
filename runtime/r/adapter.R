@@ -921,20 +921,26 @@ set_input <- function(rec, name, value, wait, timeout) {
   if (!is.null(input)) value <- json_value(input$spec, value)
   accepted <- tryCatch(ember::set_input(rec$nb, name, value, wait = FALSE),
                        ember_refused = function(e) argument_error("input_refused", conditionMessage(e)))
+  # This call's value and outcome, by the token Ember gave the value (as its
+  # own set_input() waits): the value now with the worker is this one, since
+  # Ember refuses an R value while another is with it. Past this call, the
+  # worker may hold a page value, and the outcome may be another caller's.
+  token <- notebook_state(rec$nb)$worker$input$token
+  mine <- function(state) !is.null(token) && identical(state$worker$input$token, token)
   deadline <- Sys.time() + as.numeric(timeout %||% 60)
   promise(function(resolve, reject) {
     answered <- function() {
-      if (registered(rec) && !is.null(notebook_state(rec$nb)$worker$input) && Sys.time() < deadline) {
+      if (registered(rec) && mine(notebook_state(rec$nb)) && Sys.time() < deadline) {
         return(later::later(answered, 0.05))
       }
       state <- if (registered(rec)) notebook_state(rec$nb)
-      if (!is.null(state$worker$input)) {
+      if (mine(state)) {
         return(resolve(list(cell = accepted$cell, cells = I(character()), pending = TRUE,
                             lazy = !identical(state$file$header$on_cell_change, "autorun"),
                             accepted = TRUE, process_status = process_status(state))))
       }
       out <- state$input_outcome
-      if (is.null(out) || !identical(out$name, name)) {
+      if (is.null(out) || is.null(token) || !identical(out$token, token)) {
         return(reject(tryCatch(argument_error("input_refused", "R didn't answer; the input's value is unchanged"), error = identity)))
       }
       if (!isTRUE(out$ok)) return(reject(tryCatch(argument_error("invalid_value", out$error), error = identity)))
