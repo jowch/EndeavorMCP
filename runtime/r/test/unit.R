@@ -193,6 +193,8 @@ check("a choice whose label is the value is shown once",
 check("a bound input that isn't on its cell's last line says the user can't move it (#280)",
       identical(A$input_line(input(slider, output = FALSE)),
                 "n: slider 10 to 500, step 10, value 100 Not movable on the page: only the input on the cell's last line is. Give it its own cell, or group the cell's inputs with input_list()."))
+check("an Ember that doesn't report `output` (before Ember #446) gets no note",
+      identical(A$input_line(input(slider, output = NULL)), "n: slider 10 to 500, step 10, value 100"))
 check("an input read in another cell isn't bound, and says how to fix it",
       grepl("Not bound: read `n` in another cell.", A$input_line(input(slider, bound = FALSE, reason = "read_elsewhere")), fixed = TRUE))
 check("an input not assigned at the top of a cell has no name",
