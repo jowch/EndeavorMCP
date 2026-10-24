@@ -762,11 +762,12 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "E" })).get("notes"), None);
     });
 
-    // emberui comes from Ember's r-universe (`universe:jowch`), so this step needs it listed there.
+    // `library(emberui)` alone installs emberui from the jowch r-universe: Ember writes the
+    // `[sources]` entry itself (Ember #518), so this step needs an Ember build with that.
     step("set_input sets an input, as moving its widget does: its readers rerun, its own cell doesn't (#36)", || {
         std::fs::write(
             folder.join("inputs.R"),
-            "### An Ember notebook ###\n# /// environment\n# [sources]\n# emberui = \"universe:jowch\"\n# ///\n\n# %% id=L\nlibrary(emberui)\n\n# %% id=I\nn <- input_slider(1L, 10L, 5L)\nm <- input_select(c(A = 1, B = 2))\n\n# %% id=N\nn * 2\n\n# %% id=M\nm + 100\n\n# /// cell order\n# L\n# I\n# N\n# M\n# ///\n",
+            "### An Ember notebook ###\n\n# %% id=L\nlibrary(emberui)\n\n# %% id=I\nn <- input_slider(1L, 10L, 5L)\nm <- input_select(c(A = 1, B = 2))\n\n# %% id=N\nn * 2\n\n# %% id=M\nm + 100\n\n# /// cell order\n# L\n# I\n# N\n# M\n# ///\n",
         )
         .unwrap();
         let mut agent = Agent::new(port, &token);
