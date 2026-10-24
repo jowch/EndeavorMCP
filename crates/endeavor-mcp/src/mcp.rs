@@ -137,9 +137,10 @@ pub fn changes_notebook(tool: &str) -> bool {
 
 /// Whether the runtime holds a call to `tool` with `arguments` for the
 /// user's answer, in a session whose policy is `policy` and whose edits ask
-/// (`edits`, Manual). Nothing is held in "plan", which refuses writes.
+/// (`edits`, Manual). Nothing is held in "plan", which refuses writes. A large download
+/// (`approve_install`) is held in every other mode, Auto included: the user decides each one.
 pub fn asks_first(tool: &str, arguments: &Value, policy: &str, edits: bool) -> bool {
-    policy != "plan" && ((policy == "ask" && runs_code(tool, arguments)) || (edits && changes_notebook(tool)))
+    policy != "plan" && (tool == "approve_install" || (policy == "ask" && runs_code(tool, arguments)) || (edits && changes_notebook(tool)))
 }
 
 /// A session's policy as the app set it.
@@ -1451,6 +1452,10 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         assert!(open(true, "ask") && !open(false, "ask") && !open(true, "auto") && !open(true, "plan"), "opening asks only when it runs the notebook");
         assert!(held("move_cell", "auto", true) && !held("execute_cell", "auto", true), "Manual with runs allowed still asks before changes");
         assert!(!held("edit_cell", "plan", true), "plan refuses it instead");
+        for (policy, edits) in [("ask", false), ("ask", true), ("auto", false), ("auto", true)] {
+            assert!(held("approve_install", policy, edits), "a large download asks in {policy} (edits {edits})");
+        }
+        assert!(!held("approve_install", "plan", false));
     }
 
     #[test]
