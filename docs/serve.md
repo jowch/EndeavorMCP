@@ -112,6 +112,19 @@ Other installs update the way they were installed:
 - The copy a plugin fetched (in `~/.local/share/endeavor/bin/<key>/`) updates
   with the plugin. `endeavor update` refuses to replace it.
 
+The older builds in those two folders are removed once nothing has used them
+for a week: no process here runs from one, and on a server no runtime
+record names one (a runtime on another login node or in a job) and no Slurm
+job of yours waits or runs from one. `endeavor connect` looks when it starts on a
+server, and `mcp` and `serve` look when they start from the plugin's folder.
+Each `endeavor` that runs from one of them marks its folder as used every
+hour, so a cluster's other login nodes keep theirs too. The plugins of two
+agents that pin different builds share that folder: a build you haven't used
+for a week is removed, and the plugin that pins it downloads it again at its
+next start, which needs the network. Uninstalling a
+plugin can't run anything, so the plugin's folder stays after an uninstall;
+remove `~/.local/share/endeavor/bin/` by hand.
+
 A Julia that's already running keeps running from the build that started
 it. Another build uses it as it is when the two builds offer the same tools
 and calls. `serve` and `mcp` tell you when the running Julia came from a build
@@ -172,7 +185,7 @@ status` shows what is running and where.
 | Option | What it does | Default |
 |---|---|---|
 | `--folder DIR` | Where new notebooks go, and where relative paths start | The current folder |
-| `--no-folder` | The agent is not told a project folder, so its notebook paths must be absolute (`mcp` only; not with `--folder`). Used by the Codex plugin | |
+| `--no-folder` | The agent is not told a project folder, so its notebook paths must be absolute, unless a call names the folder as Codex's do (`mcp` only; not with `--folder`). Used by the Codex plugin | |
 | `--port PORT` | The port on `127.0.0.1`. Fix it so your `ssh -L` line stays the same | A free port |
 | `--julia PATH` | The `julia` to use, `auto` or `own`. `own` is Endeavor's own Julia 1.12.6 only, never the one on your PATH | `auto`: your login shell's `julia` (on Windows, the first `julia.exe` on the PATH), else Endeavor's own. Endeavor's own is juliaup's channel for 1.12.6 when you have juliaup (Endeavor adds it, and on Windows installs juliaup first), else a download into `~/.cache/endeavor/` |
 | `--julia-shell LINE` | A shell line that puts `julia` on the `PATH`, such as `'module load julia/1.12'` | |

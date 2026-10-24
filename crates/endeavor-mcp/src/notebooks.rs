@@ -9,7 +9,7 @@
 //! fresh snapshot each time it tells the app anything. A notebook's state goes
 //! when it shuts down, except its entry in `idle_stopped`.
 
-mod engines;
+pub(crate) mod engines;
 
 mod r;
 mod tools;
@@ -138,8 +138,9 @@ struct NotebookState {
     /// the tools or not.
     user_runs: HashMap<String, (f64, f64)>,
     /// What each agent session last read of each cell: (owner, cell) => (code,
-    /// seq). Per owner, so one session's reads and edits aren't another's.
-    reads: HashMap<(String, String), (String, u64)>,
+    /// seq, the session's call count (`State::calls`) when it was last sent that
+    /// code). Per owner, so one session's reads and edits aren't another's.
+    reads: HashMap<(String, String), (String, u64, u64)>,
     /// Which session last changed each cell through the tools, and when.
     changes: HashMap<String, Change>,
     /// The runs sessions started that haven't ended (`run_finished`), each with its cells that
@@ -166,7 +167,7 @@ const ENDED_KEPT: usize = 64;
 impl NotebookState {
     /// Whether a session read or changed one of its cells after the state's `seq` was `since`.
     fn touched_after(&self, since: u64) -> bool {
-        self.reads.values().map(|(_, seq)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
+        self.reads.values().map(|(_, seq, _)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
     }
 
     /// Code that changed without the agent's tools writing it was changed by
@@ -242,6 +243,8 @@ struct State {
     /// makes a call; dropped with its binding, or `SESSION_KEPT` after its
     /// last call or its binding (and then its binding goes too).
     seen: HashMap<String, Seen>,
+    /// How many notebook tool calls each session has made: a read is recent for `RECENT_CALLS` of them.
+    calls: HashMap<String, u64>,
 }
 
 struct Seen {
@@ -397,13 +400,19 @@ struct Cell {
     /// restart leaves every cell so). Pluto's are always false.
     stale: bool,
     not_run: bool,
-    /// The notes the engine shows under the cell after its last run, each
+    /// A cell the engine won't run until something changes: Ember's disabled
+    /// cells and their dependents (`graph$off`). Pluto's are `hidden` (#232).
+    off: bool,
+    /// The notes the engine shows under the cell, from its last run or its code, each
     /// "kind::text" like a tool warning: Ember's `changed_in_place`,
-    /// `settings_found` and `load_note` (#207). Pluto has none.
+    /// `settings_found`, `load_note` (#207) and `untracked_read` (Ember #357). Pluto has none.
     notes: Vec<String>,
     /// The inputs (emberui) the cell's last run made, one line each, as `read_cell` shows them:
     /// "n: slider 1 to 10, value 3". Pluto's have none.
     inputs: Vec<String>,
+    /// The prompt a running cell waits on, `{text, choices}`: Ember's
+    /// `readline()`, `menu()` and the like (Ember #186). Pluto has none.
+    prompt: Option<Value>,
 }
 
 impl Cell {
@@ -434,8 +443,10 @@ impl Snapshot {
                 markdown: flag(&c["markdown"]),
                 stale: flag(&c["stale"]),
                 not_run: flag(&c["not_run"]),
+                off: flag(&c["off"]),
                 notes: c["notes"].as_array().map(|a| a.iter().filter_map(text).collect()).unwrap_or_default(),
                 inputs: c["inputs"].as_array().map(|a| a.iter().filter_map(text).collect()).unwrap_or_default(),
+                prompt: c.get("prompt").filter(|p| p.is_object()).cloned(),
             };
             Some((text(&c["cell_id"])?, cell))
         });
@@ -463,9 +474,29 @@ impl Snapshot {
         cell.running || (cell.queued && (self.packages.is_some() || self.cells.values().any(|c| c.running)))
     }
 
+    /// The cell waiting on a prompt, if one is: nothing else runs until it is
+    /// answered or the run is interrupted.
+    fn prompted(&self) -> Option<&String> {
+        self.order.iter().find(|id| self.cells.get(*id).is_some_and(|c| c.running && c.prompt.is_some()))
+    }
+
     /// Whether its cells wait on a package step: one is under way and a cell is queued.
     fn installing(&self) -> bool {
         self.packages.is_some() && self.cells.values().any(|c| c.queued)
+    }
+
+    /// Whether its package step stopped before a large download and waits for the user's OK
+    /// (Ember #37): nothing installs until `approve_install`, and the cells that need the held
+    /// packages wait with it. Cells that don't need them still run (`held`).
+    fn asking(&self) -> bool {
+        self.packages.as_ref().is_some_and(|p| p["step"] == "asking")
+    }
+
+    /// Whether it is asking and nothing is running: what is left waits for the OK, so nothing
+    /// changes until `approve_install` and nothing is waited for. While a cell that doesn't need
+    /// the held packages runs, it isn't held yet.
+    fn held(&self) -> bool {
+        self.asking() && !self.cells.values().any(|c| c.running)
     }
 
     /// What `list_notebooks` says of it; `this_session`: it's the caller's
@@ -592,7 +623,7 @@ impl Notebooks {
             starting: Mutex::default(),
             notices: Mutex::default(),
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new(), calls: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),
@@ -754,15 +785,14 @@ impl Notebooks {
                 }
                 true
             }
-            // A run the tools didn't wait for ended: the cells it finished are no longer
-            // pending, and none of its cells is a session's run that its Stop interrupts, even
-            // one that a later run (a restart's) queued again before it ended.
+            // A run the tools didn't wait for ended: none of its cells is a session's run that
+            // its Stop interrupts, even one that a later run (a restart's) queued again before it
+            // ended. Its cells stay as staged as they are: a staged cell stops being staged once
+            // it has run since its edit (`pending_run`), so an edit made after a cell finished
+            // but before this came stays staged (#231).
             "run_finished" => {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
                     let finished: Vec<&str> = params["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-                    for cell in &finished {
-                        notebook.pending.remove(*cell);
-                    }
                     match params["run"].as_str() {
                         Some(run) => {
                             let before = notebook.started.len();

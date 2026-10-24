@@ -69,8 +69,9 @@ enum Upstream {
     /// No runtime yet: a connection is closed.
     None,
     /// `asks`: the runtime says its build or its interface, so it is new enough to hold a run for
-    /// the user's answer. One that says neither runs no code (`Messages::no_run_gate`).
-    Up { mux: Arc<Mux>, token: String, asks: bool },
+    /// the user's answer. One that says neither runs no code (`Messages::no_run_gate`). `other`: another
+    /// build started it, and it doesn't offer this build's interface (`crate::usable_as_is`).
+    Up { mux: Arc<Mux>, token: String, asks: bool, other: bool },
     /// The runtime was up and is being got back. A connection waits for it up
     /// to `HOLD`; then an MCP request is answered with `why`
     /// (`serve_unreachable`), and anything else closed.
@@ -133,12 +134,12 @@ impl Listener {
         let upstream = self.upstream.lock().unwrap();
         let (upstream, _) = self.changed.wait_timeout_while(upstream, HOLD, |u| matches!(u, Upstream::Away { .. })).unwrap();
         match &*upstream {
-            Upstream::Up { mux, asks, .. } => {
-                let (mux, asks) = (mux.clone(), *asks);
+            Upstream::Up { mux, asks, other, .. } => {
+                let (mux, asks, other) = (mux.clone(), *asks, *other);
                 drop(upstream);
                 // The runtime runs code unless it doesn't ask and this client holds runs for the user's answer.
                 let no_run_gate = if asks { None } else { self.messages.no_run_gate };
-                if self.refuse.is_none() && no_run_gate.is_none() && self.snapshot.get().is_none() {
+                if self.refuse.is_none() && no_run_gate.is_none() && self.snapshot.get().is_none() && !other {
                     drop(mux.open(connection));
                     return;
                 }
@@ -152,7 +153,9 @@ impl Listener {
                         }
                         self.refuse.as_ref().and_then(|refuse| refuse(session, tool, arguments))
                     };
-                    let _ = crate::serve_guarded(connection, ours, &refuse, self.snapshot.get().map(|s| &**s));
+                    let no_r = || crate::no_r_text(&self.name, &format!("Ask the user to restart Julia on {}: that closes its open notebooks, and starts this version.", self.name));
+                    let no_r: Option<&dyn Fn() -> String> = other.then_some(&no_r);
+                    let _ = crate::serve_guarded(connection, ours, &refuse, self.snapshot.get().map(|s| &**s), no_r);
                 }
             }
             Upstream::Away { token, why } => {
@@ -177,9 +180,10 @@ impl Listener {
     /// interface. A runtime that gives neither is from before runs were held for the user's answer
     /// (EndeavorMCP b0cab29) or close to it, and the listener refuses its code runs when the client
     /// asked for that (`Messages::no_run_gate`). The rule is set with the runtime, so no call reaches
-    /// it before the rule does.
-    pub(super) fn attach(&self, mux: Arc<Mux>, token: String, asks: bool) {
-        *self.upstream.lock().unwrap() = Upstream::Up { mux, token, asks };
+    /// it before the rule does. `other`: another build started it, and it doesn't offer this build's
+    /// interface; a refusal of an R notebook's path for want of R notebooks then says so (`serve_guarded`).
+    pub(super) fn attach(&self, mux: Arc<Mux>, token: String, asks: bool, other: bool) {
+        *self.upstream.lock().unwrap() = Upstream::Up { mux, token, asks, other };
         self.changed.notify_all();
     }
 

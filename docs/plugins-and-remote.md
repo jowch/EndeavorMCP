@@ -264,7 +264,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 | Sign-in | Your ssh configuration, keys and agent. No password prompt in the first version |
 | Installing on a server | Only after the user agreed. Installing the plugin is the agreement to the binary on your own computer; the helper on a server, an update of it, and Endeavor's own Julia there each need a question first, the helper's first and Julia's only if none is found (built). Looking at what is there needs none beyond the harness's prompt for the tool call. The tools take `install: true` only after the user said yes |
 | Installing the binary | The plugin does it: its launcher is the MCP command, and on first start it downloads the build the plugin pins from the GitHub release. Installing the plugin is the user's agreement to that. `scripts/install.sh` or `scripts/install.ps1`, run from the web, is the fallback (built). npm later, once there are version tags |
-| Where the plugin's binary lives | `${XDG_DATA_HOME:-~/.local/share}/endeavor/bin/<key>/endeavor`, the same for every agent and every platform (`endeavor.exe` under Git Bash on Windows), so Claude Code, Codex and Antigravity share one download. Not the helpers cache, which prunes other keys |
+| Where the plugin's binary lives | `${XDG_DATA_HOME:-~/.local/share}/endeavor/bin/<key>/endeavor`, the same for every agent and every platform (`endeavor.exe` under Git Bash on Windows), so Claude Code, Codex and Antigravity share one download. Not the helpers cache, which prunes other keys. A build there that no running `endeavor` holds and nobody has used for a week is removed when `mcp` or `serve` starts, except the newest one fetched ([#97](https://github.com/jowch/EndeavorMCP/issues/97)) |
 | Which build a plugin runs | The key in `release-key` beside the launcher: the newest build of `main` that finished on every platform, which the Helpers workflow writes on `main`. Empty or missing: the newest build |
 | Signing | Not needed for a `curl` install; wait |
 | State folder | One on each machine, yours included, for `serve`, `mcp`, the plugin and the app: the one `serve` uses today. The app stops choosing its own |
@@ -550,8 +550,13 @@ and then `use_machine` starts this version; `session_status` says it again
 every time (`other_version`, with the build in `runtime_build`), and
 `client::Session` reports the same as trouble (`Config::on_event`). The front answers the tool list from its own build, so
 a tool or argument newer than the runtime fails with the runtime's own error.
-A machine's runtime is never stopped for the agent, unlike an idle one on
-this computer: on a cluster that gives up the job's allocation. Only a
+The front never stops a machine's runtime for the agent, unlike an idle one
+on this computer: on a cluster that gives up the job's allocation. The helper
+there does stop one that an older version started (outside a Slurm job) when
+no notebook is open in it, and starts its own build's in its place, so a
+machine that was idle since the last update runs this version (#226). A
+runtime from before R notebooks refuses an R notebook's path with "must end
+in .jl"; the front tells the agent why instead, and how to restart it. Only a
 runtime from before one port per runtime is refused, as built.
 
 **`serve` in a job you submitted yourself** is recorded under the compute
@@ -935,7 +940,7 @@ from a local copy of the repository and used through `codex exec` (below).
 | Download early | a `SessionStart` hook runs `--fetch-only` | none | none |
 | Install | `claude plugin marketplace add`, `claude plugin install` | `codex plugin marketplace add`, `codex plugin add endeavor@endeavor`, from `.agents/plugins/marketplace.json` | `agy plugin install <folder or its GitHub tree URL>` |
 | Update | `claude plugin marketplace update endeavor`, `claude plugin update endeavor@endeavor`, or the marketplace's auto-update (off by default). The manifest has no `version` on purpose: Claude Code then versions the plugin by commit, and a fixed version would keep every install on its first commit | `codex plugin marketplace upgrade endeavor`. It replaced the installed `0.1.0` copy with the new commit's files although the version stayed (codex-cli 0.162.1, 2026-10-10) | `agy plugin install` again (not checked over an existing install) |
-| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable, so notebook paths must be absolute | none: `--no-folder`, as Codex |
+| Project folder | `--folder ${CLAUDE_PROJECT_DIR}` | none: `--no-folder`. Codex starts `mcp` in the plugin's cache folder and gives no project variable; the front takes the project folder from each call's metadata (#99) | none: `--no-folder`, as Codex |
 
 Each plugin folder holds `launch/endeavor-mcp.sh`, `launch/install.sh` and
 `launch/release-key`. The command is `sh` with the script as its argument, so
@@ -1008,7 +1013,9 @@ was the documentation used to build the folder):
   So `mcp` cannot find the project folder, and the entry passes `--no-folder`
   (see [`--no-folder`](endeavor-mcp.md)). Each `tools/call` carries
   `_meta["x-codex-turn-metadata"].workspaces`, an object whose keys are workspace
-  paths; it is undocumented and not used.
+  paths. It is undocumented; the front takes the project folder from it when it
+  names exactly one, so relative paths work (see
+  [`--no-folder`](endeavor-mcp.md)).
 - Codex does not pass its own environment to a plugin's server (`ENDEAVOR_BIN`
   and `XDG_*` from the shell were absent); an `env` object in the entry is
   passed.

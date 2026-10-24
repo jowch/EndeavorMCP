@@ -44,6 +44,9 @@ pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has
 /// How much of each output's text a change's receipt carries; `read_cell` has
 /// the rest.
 const RECEIPT_TEXT_MAX: usize = 2_000;
+/// How many of a session's calls a read or write of a cell counts as recent: within them, `read_cell`
+/// leaves out code it hasn't changed (`code_unchanged`), as the agent still has it.
+const RECENT_CALLS: u64 = 10;
 
 /// A tool's result: JSON, or a PNG with JSON describing it.
 pub enum Reply {
@@ -63,6 +66,7 @@ impl Notebooks {
     /// `tool` for a caller that can hang up: `gone` says it has, which ends a
     /// wait in the call early.
     pub fn tool_watched(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant, gone: &dyn Fn() -> bool) -> Result<Reply, String> {
+        *self.state.lock().unwrap().calls.entry(owner.to_owned()).or_default() += 1;
         let t = Call { nbs: self, owner, args, began, gone };
         let result = match name {
             "list_notebooks" => t.list_notebooks(),
@@ -91,8 +95,10 @@ impl Notebooks {
             "new_notebook" => t.new_notebook(folder),
             "allow_execution" => t.allow_execution(),
             "interrupt_notebook" => t.interrupt_notebook(),
+            "answer_prompt" => t.answer_prompt(),
             "restart_notebook" => t.restart_notebook(),
             "preview_package_update" => t.preview_package_update(),
+            "approve_install" => t.approve_install(),
             "apply_package_update" => t.apply_package_update(),
             "set_input" => t.set_input(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
@@ -259,11 +265,37 @@ impl Call<'_> {
 
     /// The owner reads a cell's code (it counts as reading it before an edit).
     fn record_read(&self, id: &str, cell: &str, code: &str) {
+        self.record_read_of(id, cell, code, true);
+    }
+
+    /// As `record_read`; `sent` is false when the reply left the code out. That read still counts
+    /// before an edit, but not as the agent having been given the code: else reads every few calls
+    /// would keep code it lost to a compaction "unchanged" for good.
+    fn record_read_of(&self, id: &str, cell: &str, code: &str, sent: bool) {
         let mut state = self.nbs.state.lock().unwrap();
         state.seq += 1;
         let seq = state.seq;
+        let calls = state.calls.get(self.owner).copied().unwrap_or(0);
         let notebook = state.notebooks.entry(id.to_owned()).or_default();
-        notebook.reads.insert((self.owner.to_owned(), cell.to_owned()), (code.to_owned(), seq));
+        let key = (self.owner.to_owned(), cell.to_owned());
+        let at = match notebook.reads.get(&key) {
+            Some((read, _, at)) if !sent && read == code => *at,
+            _ => calls,
+        };
+        notebook.reads.insert(key, (code.to_owned(), seq, at));
+    }
+
+    /// The code of `cell` that this session read or wrote within its last `RECENT_CALLS` calls, if any:
+    /// what its agent can be taken to still have. An older read may have left the agent's context (a
+    /// compaction, old tool results cleared), and an agent that is told it has code it lost edits
+    /// from memory.
+    fn recent_read(&self, id: &str, cell: &str) -> Option<String> {
+        let state = self.nbs.state.lock().unwrap();
+        let key = (self.owner.to_owned(), cell.to_owned());
+        let now = state.calls.get(self.owner).copied().unwrap_or(0);
+        let notebook = state.notebooks.get(id)?;
+        let (code, _, at) = notebook.reads.get(&key)?;
+        (now.saturating_sub(*at) <= RECENT_CALLS).then(|| code.clone())
     }
 
     /// The owner changed a cell through the tools.
@@ -281,7 +313,7 @@ impl Call<'_> {
         let read = state.notebooks.get(&nb.id).and_then(|n| n.reads.get(&(self.owner.to_owned(), cell.to_owned())));
         match read {
             None => Err(argument_error(&format!("read_required::Call read_cell or read_notebook_code before editing cell {cell}"))),
-            Some((code, _)) if *code != nb.cells[cell].code => Err(argument_error(&format!("stale_read::Cell {cell} changed since last read; call read_cell again"))),
+            Some((code, _, _)) if *code != nb.cells[cell].code => Err(argument_error(&format!("stale_read::Cell {cell} changed since last read; call read_cell again"))),
             Some(_) => Ok(()),
         }
     }
@@ -314,7 +346,7 @@ impl Call<'_> {
         let unread: HashSet<String> = {
             let state = self.nbs.state.lock().unwrap();
             let Some(notebook) = state.notebooks.get(&nb.id) else { return Ok(None) };
-            let read_seq = |cell: &String| notebook.reads.get(&(self.owner.to_owned(), cell.clone())).map_or(0, |(_, seq)| *seq);
+            let read_seq = |cell: &String| notebook.reads.get(&(self.owner.to_owned(), cell.clone())).map_or(0, |(_, seq, _)| *seq);
             notebook.changes.iter().filter(|(cell, ch)| other_owner(ch, self.owner) && ch.seq > read_seq(cell)).map(|(cell, _)| cell.clone()).collect()
         };
         if unread.is_empty() {
@@ -364,6 +396,16 @@ impl Call<'_> {
             let cell = ids("exited").first().map(|id| graph.and_then(|g| g.name(id)).unwrap_or_else(|| id.clone()));
             return Err(argument_error(&format!("process_exited::{}", exited_message(super::engines::language(super::engines::of_path(&nb.path)), cell.as_deref()))));
         }
+        // The cells that depend on `cells`, which autorun reruns: those the graph links to them,
+        // and those the engine says it reruns besides (`dependents`), less the ancestors it
+        // runs first: Ember reruns the readers of a name a cell's last run defined, which the
+        // graph no longer links once the cell drops the name (#228). The run is under way by
+        // now, so a graph that can't be read leaves only the engine's.
+        let dependents_of = |cells: &[String]| -> HashSet<String> {
+            let mut out = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(cells)).unwrap_or_default();
+            out.extend(ids("dependents").into_iter().filter(|id| !upstream.contains(id)));
+            out
+        };
         let mut warnings = Vec::new();
         // Cells the targets need that the engine ran first, as Ember does one
         // edited since it last ran (a staged edit) or stale (an ancestor ran
@@ -392,9 +434,7 @@ impl Call<'_> {
             if !also.is_empty() {
                 cells = nb.order.iter().filter(|id| also.contains(id) || needed.contains(id)).chain(targets).cloned().collect();
             }
-            // The run is under way by now, so a graph that can't be read leaves the lists empty
-            // rather than failing the call.
-            dependents = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(&cells)).unwrap_or_default();
+            dependents = dependents_of(&cells);
             reran = nb
                 .order
                 .iter()
@@ -427,8 +467,8 @@ impl Call<'_> {
             // since the notebook started, as Ember skips one that hasn't (Pluto has
             // none). In lazy mode they go stale instead.
             if !nb.lazy {
-                let dependents = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(&cells)).unwrap_or_default();
-                will_run = nb.order.iter().filter(|id| dependents.contains(*id) && !cells.contains(id) && nb.cells.get(*id).is_some_and(|c| !c.not_run && !c.hidden)).cloned().collect();
+                let dependents = dependents_of(&cells);
+                will_run = nb.order.iter().filter(|id| dependents.contains(*id) && !cells.contains(id) && nb.cells.get(*id).is_some_and(|c| !c.not_run && !c.off && !c.hidden)).cloned().collect();
             }
         }
         // A run of these cells was accepted: they are no longer staged, whether or not they have finished.
@@ -544,7 +584,12 @@ impl Call<'_> {
         // The cells of a run that ran out of its wait that are running now, read
         // after the wait: some may have finished meanwhile.
         let still_running: Vec<String> = nb.order.iter().filter(|id| going.contains(id) && nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect();
-        if !still_running.is_empty() {
+        // A cell of this run waiting on a prompt ends the wait at once (#261). A run waiting on
+        // the user's OK for a download didn't run out of time: the message says what it waits for.
+        let asks = nb.prompted().filter(|id| still_running.contains(id) || cells_run.contains(id)).cloned();
+        if let Some(cell) = &asks {
+            warnings.push(format!("waiting_for_input::Cell {cell} is waiting for input; the run goes on once it is answered"));
+        } else if !still_running.is_empty() && !nb.held() {
             warnings.push(format!("execution_timeout::The run was still going when the wait ended after at most {WAIT_SECONDS}s"));
         }
         let status = match status {
@@ -617,7 +662,7 @@ impl Call<'_> {
                 .order
                 .iter()
                 .filter(|id| !cells_run.contains(id) && !pending.contains(id))
-                .filter(|id| nb.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden))
+                .filter(|id| nb.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden && !c.off))
                 .collect();
             if !stale_cells.is_empty() {
                 receipt["warnings"].as_array_mut().unwrap().push(json!(
@@ -626,7 +671,10 @@ impl Call<'_> {
                 receipt.insert("stale_cells".into(), json!(stale_cells));
             }
         }
-        if nb.installing() {
+        if let Some(cell) = &asks {
+            receipt.insert("waiting_for_input".into(), waiting_json(&nb, cell));
+            receipt.insert("message".into(), json!(prompt_message(&nb, cell)));
+        } else if nb.installing() || nb.asking() {
             receipt.insert("packages".into(), nb.packages.clone().unwrap_or_default());
             let mut message = installing_message(&nb);
             if !still_running.is_empty() {
@@ -677,6 +725,9 @@ impl Call<'_> {
         if !cell.inputs.is_empty() {
             out["inputs"] = json!(cell.inputs);
         }
+        if cell.running && cell.prompt.is_some() {
+            out["waiting_for_input"] = waiting_json(nb, id);
+        }
         let Value::Object(out) = out else { unreachable!() };
         out
     }
@@ -725,7 +776,9 @@ impl Call<'_> {
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
         let mut going = Vec::new();
         while self.nbs.own_run_going(self.owner, &nb) {
-            if Instant::now() >= deadline {
+            // A prompt holds the run until it is answered, and an install waiting for the
+            // user's OK doesn't go on by itself: waiting longer only spends the call.
+            if Instant::now() >= deadline || nb.prompted().is_some() || nb.held() {
                 going = nb.order.iter().filter(|id| busy(&nb, id)).cloned().collect();
                 break;
             }
@@ -751,11 +804,15 @@ impl Call<'_> {
         // gives up long before a first install ends. So is a cell that a run
         // this session started is running or will run: an agent that reads it
         // at once reads it again, each read a whole request of the agent's
-        // context. The user's own run, or another session's, isn't waited for.
-        // (Asked on every read, so that a run seen to end is forgotten.)
+        // context. The user's own run, or another session's, isn't waited for,
+        // nor a queued cell once the install waits for the user's OK with
+        // nothing running (`held`): only approve_install moves it on. Cells that
+        // don't need the held packages still run, and are waited for. (Asked
+        // on every read, so that a run seen to end is forgotten.)
         let waits = |nb: &Snapshot| {
             let own = self.nbs.own_run_going(self.owner, nb);
-            nb.cells.get(&cell).is_some_and(|c| (c.queued && nb.installing()) || ((c.running || c.queued) && own)) || (own && self.nbs.own_run_will_run(self.owner, nb, &cell))
+            // A cell waiting on a prompt, or behind one, waits until it is answered: not waited for.
+            nb.prompted().is_none() && (nb.cells.get(&cell).is_some_and(|c| (c.running && own) || (c.queued && !nb.held() && (nb.installing() || own))) || (own && !nb.held() && self.nbs.own_run_will_run(self.owner, nb, &cell)))
         };
         let waited = Instant::now();
         let deadline = waited + self.wait_left().saturating_sub(Duration::from_secs(1));
@@ -772,12 +829,29 @@ impl Call<'_> {
         // the read didn't wait.
         let ran_out = (waits(&nb) && waited.elapsed() >= Duration::from_millis(500)).then(|| self.began.elapsed().as_secs());
         let Some(code) = nb.cells.get(&cell).map(|c| c.code.clone()) else { return Err(key_error(&format!("cell_not_found::No cell with id '{cell}' in notebook"))) };
-        self.record_read(&nb.id, &cell, &code);
+        let include_code = bool_arg(self.args, "include_code", false)?;
+        // Code this session read or wrote a few calls ago, unchanged since, isn't sent again: an agent
+        // that reads each cell it just ran gets its own code back each time, a tenth of a long session.
+        let left_out = !include_code && self.recent_read(&nb.id, &cell).is_some_and(|read| read == code);
+        self.record_read_of(&nb.id, &cell, &code, !left_out);
         let mut out = self.cell_json(&nb, &cell);
+        if left_out {
+            out.remove("code");
+            out.insert("code_unchanged".into(), json!(true));
+            // Which code it means, so the app keeps its copy only if it is that one.
+            out.insert("code_sha".into(), json!(code_sha(&code)));
+        }
         if let Some(text) = self.output_text(&nb, &cell)? {
             out.insert("output_text".into(), json!(text));
         }
-        if nb.installing() {
+        let asks = nb.prompted().filter(|asks| **asks == cell || nb.cells.get(&cell).is_some_and(|c| c.running || c.queued)).cloned();
+        if let Some(asks) = asks {
+            // The cell asking, or one queued behind it.
+            if asks != cell {
+                out.insert("waiting_for_input".into(), waiting_json(&nb, &asks));
+            }
+            out.insert("message".into(), json!(prompt_message(&nb, &asks)));
+        } else if nb.installing() || nb.asking() {
             out.insert("packages".into(), nb.packages.clone().unwrap_or_default());
             out.insert("message".into(), json!(installing_message(&nb)));
         } else if let Some(seconds) = ran_out {
@@ -792,8 +866,15 @@ impl Call<'_> {
     fn view_cell_output(&self) -> Result<Reply, String> {
         let nb = self.notebook()?;
         let cell = self.cell(&nb)?;
-        if nb.cells[&cell].errored {
+        let shown = &nb.cells[&cell];
+        if shown.errored {
             return Err(argument_error(&format!("no_image::Cell {cell} errored; read_cell shows the error")));
+        }
+        // A cell that hasn't run yet has no output to render, which isn't the same as a text output.
+        if shown.output.is_empty() && (shown.running || shown.queued || shown.not_run) {
+            let then = if shown.running || shown.queued { "read_cell says when it has finished" } else { "run it first (execute_cell)" };
+            let why = if shown.running { "is running" } else if shown.queued { "is queued to run" } else { "hasn't run" };
+            return Err(argument_error(&format!("no_image::Cell {cell} {why}, so it has no output yet; {then}")));
         }
         let rendered = self.nbs.call("render_png", json!({ "notebook_id": nb.id, "cell_id": cell }))?;
         let mime = rendered["mime"].as_str().unwrap_or_default();
@@ -912,9 +993,13 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, "", &code);
         let ran = self.run_or_stage(&added, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), ran, None)?;
-        // With its code: the app learns a new cell's code from this reply
-        // (Endeavor's `CellCodes::observe`), since the call had no id for it.
-        receipt.extend(self.cell_json(&after, &cell));
+        // Its code only if the engine changed what the agent sent: the agent has it, and the app
+        // takes it from the call too.
+        let mut added = self.cell_json(&after, &cell);
+        if self.args.get("code").and_then(Value::as_str) == Some(code.as_str()) {
+            added.remove("code");
+        }
+        receipt.extend(added);
         Ok(Value::Object(receipt))
     }
 
@@ -944,6 +1029,40 @@ impl Call<'_> {
             return Ok(Value::Object(self.already_ran(&nb.id, mutation, &cells)?));
         }
         let ran = self.run(&nb, &cells, wait)?;
+        Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, ran, None)?.0))
+    }
+
+    /// Answer the prompt a running cell waits on (`readline()`, `menu()` and the like, #261),
+    /// which lets the run go on; waited for as `execute_cell` waits for a run.
+    fn answer_prompt(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        let cell = self.cell(&nb)?;
+        let Value::String(text) = self.arg("text")? else { return Err(argument_error("invalid_argument::text must be a string")) };
+        let wait = bool_arg(self.args, "wait_for_completion", false)?;
+        let asked = match self.args.get("prompt_id") {
+            None | Some(Value::Null) => None,
+            Some(Value::Number(id)) => Some(id.clone()),
+            Some(_) => return Err(argument_error("invalid_argument::prompt_id must be a number")),
+        };
+        if nb.prompted() != Some(&cell) {
+            return Err(argument_error(&format!("no_prompt::Cell {cell} isn't waiting for input")));
+        }
+        // An answer for a question that has gone (menu() asking again, the user answering first)
+        // isn't given to the next one; Ember checks too, in case it changes before the answer lands.
+        let waiting = nb.cells[&cell].prompt.as_ref().map(|p| p["id"].clone()).unwrap_or_default();
+        if asked.as_ref().is_some_and(|id| waiting.as_f64() != id.as_f64()) {
+            return Err(argument_error(&format!("stale_prompt::Cell {cell} is asking something else now; read it and answer what it asks")));
+        }
+        self.nbs.call("answer", json!({ "notebook_id": nb.id, "cell_id": cell, "text": text, "prompt_id": asked }))?;
+        let mutation = json!({ "type": "answer_prompt", "cell_id": cell });
+        let ran = if wait {
+            let (cells, going) = self.wait_for_own_run(&nb)?;
+            // A run the user or another session started isn't waited for, so this cell is read as it is now.
+            let cells = if cells.is_empty() { vec![cell] } else { cells };
+            Ran { cells, going, ..Default::default() }
+        } else {
+            Ran { cells: vec![cell], warnings: vec!["async_execution::cells running; read them for the result".into()], ..Default::default() }
+        };
         Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, ran, None)?.0))
     }
 
@@ -1505,25 +1624,53 @@ impl Call<'_> {
     /// Ember's preview of moving an R notebook's snapshot date, which its package versions come
     /// from (#201): what would change, with nothing changed yet. Without `date` it is today, the
     /// page's "Update" (the newest packages). Fetching that date's index can take a while, so it
-    /// is waited for within the call.
+    /// is waited for within the call. A day not published yet is previewed at the newest day that
+    /// is, and the result's `date` is that day. With `package` (and `version`, else CRAN's newest),
+    /// the date is Ember's for that package (`preview_update`, #266): the first day a newer
+    /// version was current, or the last day an older one was, so the others move as little as
+    /// they can. Every package moves with the date.
     fn preview_package_update(&self) -> Result<Value, String> {
         let nb = self.r_notebook()?;
-        let date = self.args.get("date").cloned().unwrap_or(Value::Null);
+        let arg = |name: &str| self.args.get(name).cloned().unwrap_or(Value::Null);
+        let (date, package, version) = (arg("date"), arg("package"), arg("version"));
         if !date.is_null() && !date.is_string() {
             return Err(argument_error("invalid_argument::date must be a day as YYYY-MM-DD"));
         }
+        if !package.is_null() && !package.is_string() || !version.is_null() && !version.is_string() {
+            return Err(argument_error("invalid_argument::package and version must be strings, such as \"dplyr\" and \"1.1.2\""));
+        }
+        if !version.is_null() && package.is_null() {
+            return Err(argument_error("invalid_argument::version needs package: the package to put at that version"));
+        }
+        if !date.is_null() && !package.is_null() {
+            return Err(argument_error("invalid_argument::Give date or package, not both: a package's version decides the date"));
+        }
         let timeout = self.run_wait().saturating_sub(Duration::from_secs(1)).as_secs_f64();
-        let mut result = self.nbs.call("preview_packages", json!({ "notebook_id": nb.id, "date": date, "timeout": timeout }))?;
+        let mut result = self.nbs.call("preview_packages", json!({ "notebook_id": nb.id, "date": date, "package": package, "version": version, "timeout": timeout }))?;
         let reason = result["message"].take();
         if reason.is_string() {
             result["reason"] = reason;
         }
+        // A day not published yet is previewed at the newest one that is, an earlier `date` (#247).
+        let asked = result.as_object_mut().and_then(|r| r.remove("asked"));
+        let earlier = asked.as_ref().is_some_and(|a| a.is_string() && *a != result["date"]);
         let none = result["changes"].as_array().is_none_or(Vec::is_empty);
-        result["message"] = json!(match result["status"].as_str() {
+        // With no packages yet there is nothing to change, but applying still moves the date, which
+        // every package added later comes from (#269). An adapter that doesn't say counts as having some.
+        let no_packages = result.as_object_mut().and_then(|r| r.remove("packages")).is_some_and(|n| n == 0);
+        let said = match result["status"].as_str() {
+            Some("ready") if none && no_packages => "The notebook has no packages yet, so none would change. apply_package_update with this date still moves the notebook's date to it, and every package added later comes from that date: tell the user, since an old date can give old versions or none at all.",
             Some("ready") if none => "Nothing would change: every package is already at its version for this date.",
+            Some("ready") if package.is_string() => "Nothing has changed yet. This date moves every package, not only this one: tell the user what else would change; apply_package_update with this date applies it.",
             Some("ready") => "Nothing has changed yet. Tell the user what would change; apply_package_update with this date applies it.",
+            Some("failed") if package.is_string() => "No package date puts this package at that version, and the notebook is unchanged: `reason` or `problems` says why.",
             Some("failed") => "This date can't be used, and the notebook is unchanged: `problems` says why.",
+            _ if package.is_string() => "The date for this package is still being worked out. Call again with the same package and version to wait for it.",
             _ => "The package index for this date is still being fetched. Call again with the same date to wait for it.",
+        };
+        result["message"] = json!(match (earlier, result["status"].as_str()) {
+            (true, Some("ready")) => format!("{} isn't published yet, so this is the newest day that is, {}. {said}", asked.unwrap().as_str().unwrap(), result["date"].as_str().unwrap_or("")),
+            _ => said.to_owned(),
         });
         result["notebook_id"] = json!(nb.id);
         Ok(result)
@@ -1549,6 +1696,23 @@ impl Call<'_> {
         });
         Ok(result)
     }
+
+    /// The user's OK for an R notebook's install that stopped before a large download (Ember
+    /// #37's `approve_install`). The tool's description and the asking message say to call it
+    /// only after the user said yes. Refused when no install waits for one.
+    fn approve_install(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        if self.nbs.backend_of(&nb.id) != Backend::Ember {
+            return Err(argument_error("not_r_notebook::Only an R notebook asks before a large download. A Julia notebook's packages install through Pkg"));
+        }
+        let mut result = self.nbs.call("approve_install", json!({ "notebook_id": nb.id }))?;
+        self.nbs.publish();
+        result["notebook_id"] = json!(nb.id);
+        result["message"] = json!(
+            "The download is approved and the library installs now: the queued cells run once it is done, and a read of one waits for the install."
+        );
+        Ok(result)
+    }
 }
 
 /// The cell a `cell_id` argument names, refused as Julia's lookup refused it.
@@ -1572,7 +1736,9 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
         "staged"
     } else {
         let cells: Vec<_> = cells_run.iter().filter_map(|id| nb.cells.get(id)).collect();
-        if cells.iter().any(|c| c.errored) {
+        // A cell still to run carries its last result's error until it runs, so
+        // that error isn't this run's: a run waiting at a prompt is still running.
+        if cells.iter().any(|c| c.errored && !c.running && !c.queued) {
             "errored"
         } else if cells.iter().any(|c| c.running || c.queued) {
             "running"
@@ -1586,7 +1752,27 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
 /// What the agent hears while a notebook's cells wait on a package step, in
 /// plain words: what is going on, that it is slow only the first time, and
 /// how to wait; past `INSTALL_USUAL_SECONDS`, to wait only while the log moves.
+/// The prompt `cell` waits on, as the tools show it.
+fn waiting_json(nb: &Snapshot, cell: &str) -> Value {
+    let prompt = nb.cells.get(cell).and_then(|c| c.prompt.clone()).unwrap_or_default();
+    json!({ "cell_id": cell, "prompt_id": prompt["id"], "prompt": prompt["text"].as_str().unwrap_or_default(), "choices": prompt["choices"].as_array().cloned().unwrap_or_default() })
+}
+
+/// What the agent is told while `cell` waits on a prompt.
+fn prompt_message(nb: &Snapshot, cell: &str) -> String {
+    let menu = nb.cells.get(cell).and_then(|c| c.prompt.as_ref()).and_then(|p| p["choices"].as_array()).is_some_and(|c| !c.is_empty());
+    let how = if menu { " (a choice's number or its text)" } else { "" };
+    format!(
+        "Cell {cell} is waiting for input, as R does at a console prompt: `waiting_for_input` has what it asked, and the cell's output what it printed before. \
+         Nothing runs until it is answered. Answer with answer_prompt{how}, passing `prompt_id`, or stop the run with interrupt_notebook. \
+         If the answer is the user's to give (a download, an overwrite, a choice of theirs), ask the user first."
+    )
+}
+
 fn installing_message(nb: &Snapshot) -> String {
+    if nb.asking() {
+        return asking_message(nb);
+    }
     let packages = nb.packages.as_ref().cloned().unwrap_or_default();
     let names: Vec<&str> = packages["packages"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let which = if names.is_empty() { "the packages it uses".to_owned() } else { names.join(", ") };
@@ -1595,7 +1781,16 @@ fn installing_message(nb: &Snapshot) -> String {
     let so_far = if seconds >= 90 { format!("about {} minutes", (seconds + 30) / 60) } else { format!("{seconds} seconds") };
     let last = packages["last_line"].as_str().map(|line| format!(" Last line of the package log: {line}")).unwrap_or_default();
     let language = super::engines::language(super::engines::of_path(&nb.path));
-    let what = format!("{language} is getting {which} ready for this notebook ({step}, {so_far} so far). The cells are queued and run when that is done.");
+    let mut what = format!("{language} is getting {which} ready for this notebook ({step}, {so_far} so far). The cells are queued and run when that is done.");
+    // Ember's notice that these build from source (Ember #19), as the Packages tab says it.
+    let source: Vec<&str> = packages["source_builds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    if !source.is_empty() {
+        what.push_str(&format!(
+            " These have no binary for this {language} at the notebook's package date, so they are being built on this computer: {}. \
+             That takes longer, and versions from before this {language} may not build on it. A newer package date has binaries (preview_package_update).",
+            source.join(", ")
+        ));
+    }
     if seconds >= INSTALL_USUAL_SECONDS {
         format!(
             "{what} This is taking longer than usual. Tell the user, with the last line of the package log. \
@@ -1607,6 +1802,33 @@ fn installing_message(nb: &Snapshot) -> String {
              Tell the user it is installing, then wait: call read_cell on a cell that is queued, and while packages install each call waits up to {WAIT_SECONDS} seconds.{last}"
         )
     }
+}
+
+/// What the agent hears while an R notebook's install waits for an OK before a large download
+/// (Ember #37): what it would download and how much, and that the user decides. Only the user
+/// can say yes to it, so the agent asks them and doesn't wait.
+fn asking_message(nb: &Snapshot) -> String {
+    let download = nb.packages.as_ref().map(|p| p["download"].clone()).unwrap_or_default();
+    let sized = |bytes: &Value| bytes.as_f64().map(|b| if b >= 1e9 { format!("{:.1} GB", b / 1e9) } else { format!("{:.0} MB", b / 1e6) });
+    let each: Vec<String> = download["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| {
+            let name = [p["package"].as_str(), p["version"].as_str()].into_iter().flatten().collect::<Vec<_>>().join(" ");
+            match sized(&p["bytes"]) {
+                Some(size) => format!("{name} ({size})"),
+                None => format!("{name} (size unknown)"),
+            }
+        })
+        .collect();
+    let which = if each.is_empty() { "some large packages".to_owned() } else { each.join(", ") };
+    let total = sized(&download["bytes"]).map(|size| format!(", {size} in all")).unwrap_or_default();
+    format!(
+        "Before this notebook's cells can run, R has to download {which}{total}. A download this large waits for the user's OK, \
+         so nothing is installing and the cells stay queued. Ask the user whether to download it, and call approve_install only after they say yes; \
+         the page's own button does the same. Don't call read_cell to wait: nothing changes until then."
+    )
 }
 
 /// What Claude hears when a notebook's own process (`language`'s, Julia or R) ends during a run it
@@ -1626,6 +1848,12 @@ fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
         Some(Value::Bool(flag)) => Ok(*flag),
         Some(_) => Err(argument_error(&format!("invalid_argument::{name} must be a boolean"))),
     }
+}
+
+/// The first 12 hex digits of the code's SHA-256 (Endeavor's `celldiff::code_sha` is the same).
+fn code_sha(code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(code.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 /// An edit's `folded`: a Bool, or left out (or null) to keep the cell's fold as it is.

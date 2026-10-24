@@ -11,7 +11,9 @@ These come back the same way, but nothing failed and the call is not marked an e
 | `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take 10 minutes; the message says how long so far | Make the same call again |
 | `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Make the same call again |
 | `no_preview` | `apply_package_update` without a ready `preview_package_update` for that date, or the notebook's packages changed since | Preview that date again, tell the user what changes, then apply |
-| `not_r_notebook` | A package-date tool on a Julia notebook | Julia notebooks keep their package versions in their Pkg environment |
+| `not_updatable` | `preview_package_update` with a `package` that isn't in the notebook's packages, or doesn't come from CRAN | Only a CRAN package in the notebook has release dates to move to. Tell the user; a package from elsewhere changes with its install call |
+| `nothing_to_approve` | `approve_install` when no install is waiting for an OK, or in safe preview, before the notebook may run | Nothing to approve: `list_notebooks` shows what the notebook's packages are doing |
+| `not_r_notebook` | A package-date tool or `approve_install` on a Julia notebook | Julia notebooks keep their package versions in their Pkg environment |
 | `notebook_opening` | `open_notebook`, `new_notebook` or `allow_execution` took longer than one call waits: often the first notebook in a new Julia process, or a notebook leaving safe preview whose packages need installing. It goes on | Make the same call again, with the same arguments, to get its result |
 
 On a machine, a call made while Endeavor starts there, or while its Slurm job is queued, says so in plain text; it is not an error either. See the machines skill.
@@ -63,7 +65,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `execution_timeout` | A waited run was still going after 45 seconds and the call returned. The run continues; `execution.still_running` names its cells that are running, and they are no longer in `pending_run`. Read them later and do not run them again |
 | `also_ran` | The run also ran the named cells: ones your cells depend on that had never run, or (in R) that were edited or stale since they last ran. A waited run lists them in `affected_cells` and `outputs.changed` |
 | `lazy_mode` | The R notebook is in Ember's lazy mode: the cells that depend on what ran were marked stale, not rerun. `stale_cells` names every cell that is stale now; run the ones that should be current |
-| `changed_in_place`, `settings_found`, `load_note` | Ember's notes on a cell's last run, in R: see reference/ember.md. `changed_in_place` means the cells that read the named value didn't rerun, so their results may be wrong. Make the change in the cell that defines the value |
+| `changed_in_place`, `settings_found`, `load_note`, `untracked_read` | Ember's notes on a cell, from its last run or (`untracked_read`) its code, in R: see reference/ember.md. `changed_in_place` means the cells that read the named value didn't rerun, so their results may be wrong. Make the change in the cell that defines the value. `untracked_read` means the cell doesn't rerun when the variables it reads through `get()` change |
 | `already_ran` | The user ran your staged cells before your run reached them, so they were not run a second time. The outputs are from that run |
 | `ember_previous` | From opening or making an R notebook: Ember's newest build didn't work here, so R notebooks use the one before it. Mention it to the user if R notebooks act up |
 | `run_conflict` | From `add_cell` or `edit_cell` with `run_after`: the edit was made and staged, not run. Read the named cells, then `submit_changes` |
