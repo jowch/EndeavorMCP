@@ -694,14 +694,12 @@ fn serves_the_agents_mcp_messages() {
     assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#, &caller), ("HTTP/1.1 200 OK".into(), r#"{"id":"p","jsonrpc":"2.0","result":{}}"#.into()));
     // A notification gets 202 and no body.
     assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &caller), ("HTTP/1.1 202 Accepted".into(), String::new()));
+    // An agent with the plugin is told to load its skill.
     let init = mcp(&core, r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#, &[("X-Endeavor-Skills", "plugin")]);
-    assert_eq!(
-        init,
-        (
-            "HTTP/1.1 200 OK".into(),
-            format!(r#"{{"id":2,"jsonrpc":"2.0","result":{{"capabilities":{{"tools":{{}}}},"protocolVersion":"2025-06-18","serverInfo":{{"name":"endeavor-runtime","version":"{}"}}}}}}"#, env!("CARGO_PKG_VERSION"))
-        )
-    );
+    assert_eq!(init.0, "HTTP/1.1 200 OK");
+    let init: serde_json::Value = serde_json::from_str(&init.1).unwrap();
+    assert_eq!(init["result"]["serverInfo"], serde_json::json!({ "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") }));
+    assert!(init["result"]["instructions"].as_str().unwrap().starts_with("Before your first notebook tool call in a session, load the `endeavor-notebooks` skill"), "{init}");
     // An agent without Endeavor's plugin is told to read the guide, and can.
     let init: serde_json::Value = serde_json::from_str(&mcp(&core, r#"{"jsonrpc":"2.0","id":3,"method":"initialize"}"#, &[]).1).unwrap();
     assert!(init["result"]["instructions"].as_str().unwrap().contains("call `notebook_guide` once"));

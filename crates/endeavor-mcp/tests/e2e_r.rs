@@ -785,8 +785,10 @@ fn an_r_notebook_through_the_runtime() {
             assert!(started.elapsed() < Duration::from_secs(600), "the notebook never ran: {ran}");
             agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
         }
+        // Only m, on the cell's last line, can be moved on the page (EndeavorMCP #280).
+        const UNMOVABLE: &str = " Not movable on the page: only the input on the cell's last line is. Give it its own cell, or group the cell's inputs with input_list().";
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "I" }));
-        assert_eq!(read["inputs"], json!(["n: slider 1 to 10, value 5", "m: select of A = 1, B = 2, value 1"]), "{read}");
+        assert_eq!(read["inputs"], json!([format!("n: slider 1 to 10, value 5{UNMOVABLE}"), "m: select of A = 1, B = 2, value 1"]), "{read}");
         let output = read["output"].clone();
 
         let set = agent.ok("set_input", json!({ "notebook_id": id, "name": "n", "value": 7, "wait_for_completion": true }));
@@ -796,7 +798,7 @@ fn an_r_notebook_through_the_runtime() {
         let set = agent.ok("set_input", json!({ "notebook_id": id, "name": "m", "value": 2, "wait_for_completion": true }));
         assert!(set["outputs"]["changed"][0]["output_summary"].as_str().unwrap().contains("102"), "{set}");
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "I" }));
-        assert_eq!(read["inputs"], json!(["n: slider 1 to 10, value 7 (default 5)", "m: select of A = 1, B = 2, value 2 (default 1)"]), "{read}");
+        assert_eq!(read["inputs"], json!([format!("n: slider 1 to 10, value 7 (default 5){UNMOVABLE}"), "m: select of A = 1, B = 2, value 2 (default 1)"]), "{read}");
         assert_eq!(read["output"], output, "the input's own cell didn't rerun: {read}");
 
         let (refused, said) = agent.call("set_input", json!({ "notebook_id": id, "name": "n", "value": 70 }));

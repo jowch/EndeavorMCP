@@ -396,7 +396,7 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     let init: Value = serde_json::from_str(&lines[0]).unwrap();
     assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-    assert_eq!(init["result"]["instructions"], format!("{} {}", crate::guide::STANDALONE, crate::guide::MACHINES), "with the plugin's skills, what differs without the app, and the machine tools");
+    assert_eq!(init["result"]["instructions"], format!("{} {}\n\n{}", crate::guide::STANDALONE, crate::guide::MACHINES, crate::guide::LOAD_SKILL), "with the plugin's skills, what differs without the app, the machine tools, and to load the skill");
     assert!(seen.lock().unwrap().is_empty(), "the runtime saw neither");
 
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_status","arguments":{}}}"#);

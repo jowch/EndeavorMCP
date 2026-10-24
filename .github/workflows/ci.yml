@@ -5,9 +5,20 @@
 # holding it, and the PR's checks, for GitHub's default of six hours.
 name: CI
 
+# On main and on pull requests only. A push to any branch also ran here,
+# so every push to a PR's branch ran the whole matrix twice (once for the
+# push, once for the PR, in different concurrency groups), four macOS jobs
+# each time. A PR that changes only docs/ runs nothing: no job reads docs/.
+# No check is required to merge; if one ever is, a docs-only PR would wait on
+# it forever, so drop paths-ignore then.
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
   workflow_dispatch:
 
 concurrency:
