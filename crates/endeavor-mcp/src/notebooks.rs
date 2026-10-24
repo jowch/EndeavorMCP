@@ -407,6 +407,9 @@ struct Cell {
     /// "kind::text" like a tool warning: Ember's `changed_in_place`,
     /// `settings_found`, `load_note` (#207) and `untracked_read` (Ember #357). Pluto has none.
     notes: Vec<String>,
+    /// The prompt a running cell waits on, `{text, choices}`: Ember's
+    /// `readline()`, `menu()` and the like (Ember #186). Pluto has none.
+    prompt: Option<Value>,
 }
 
 impl Cell {
@@ -439,6 +442,7 @@ impl Snapshot {
                 not_run: flag(&c["not_run"]),
                 off: flag(&c["off"]),
                 notes: c["notes"].as_array().map(|a| a.iter().filter_map(text).collect()).unwrap_or_default(),
+                prompt: c.get("prompt").filter(|p| p.is_object()).cloned(),
             };
             Some((text(&c["cell_id"])?, cell))
         });
@@ -466,9 +470,29 @@ impl Snapshot {
         cell.running || (cell.queued && (self.packages.is_some() || self.cells.values().any(|c| c.running)))
     }
 
+    /// The cell waiting on a prompt, if one is: nothing else runs until it is
+    /// answered or the run is interrupted.
+    fn prompted(&self) -> Option<&String> {
+        self.order.iter().find(|id| self.cells.get(*id).is_some_and(|c| c.running && c.prompt.is_some()))
+    }
+
     /// Whether its cells wait on a package step: one is under way and a cell is queued.
     fn installing(&self) -> bool {
         self.packages.is_some() && self.cells.values().any(|c| c.queued)
+    }
+
+    /// Whether its package step stopped before a large download and waits for the user's OK
+    /// (Ember #37): nothing installs until `approve_install`, and the cells that need the held
+    /// packages wait with it. Cells that don't need them still run (`held`).
+    fn asking(&self) -> bool {
+        self.packages.as_ref().is_some_and(|p| p["step"] == "asking")
+    }
+
+    /// Whether it is asking and nothing is running: what is left waits for the OK, so nothing
+    /// changes until `approve_install` and nothing is waited for. While a cell that doesn't need
+    /// the held packages runs, it isn't held yet.
+    fn held(&self) -> bool {
+        self.asking() && !self.cells.values().any(|c| c.running)
     }
 
     /// What `list_notebooks` says of it; `this_session`: it's the caller's

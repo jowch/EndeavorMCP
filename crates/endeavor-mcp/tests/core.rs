@@ -1209,11 +1209,11 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let tools = reply["result"]["tools"].as_array().unwrap();
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), 33);
-    assert_eq!((&names[..3], &names[30..]), (&["list_notebooks", "read_cell", "view_cell_output"][..], &["list_folder", "read_file", "run_shell"][..]), "the notebook tools, then the host tools");
-    let hints: Vec<_> = tools[30..].iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
+    assert_eq!(names.len(), 35);
+    assert_eq!((&names[..3], &names[32..]), (&["list_notebooks", "read_cell", "view_cell_output"][..], &["list_folder", "read_file", "run_shell"][..]), "the notebook tools, then the host tools");
+    let hints: Vec<_> = tools[32..].iter().map(|t| t["annotations"]["readOnlyHint"].as_bool().unwrap()).collect();
     assert_eq!(hints, [true, true, false]);
-    assert_eq!(tools[32]["inputSchema"]["required"], serde_json::json!(["command"]));
+    assert_eq!(tools[34]["inputSchema"]["required"], serde_json::json!(["command"]));
     assert!(!mcp(&core, list, &[]).1.contains("list_folder"), "not on this Mac");
 
     // Answered here, and the app hears the notebooks' state after each call.
