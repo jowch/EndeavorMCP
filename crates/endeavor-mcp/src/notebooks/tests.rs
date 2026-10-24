@@ -284,7 +284,8 @@ impl Engine {
                 Ok(json!({ "date": date, "asked": asked, "current_date": nb.package_date, "status": "ready", "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "problems": [], "message": null }))
             }
             // Ember's set_input: the input is the cell assigning `name <- input_...`; "bad" is a
-            // value it doesn't allow. Its readers run (autorun) or turn stale (lazy).
+            // value it doesn't allow. Its readers run, or turn stale in lazy mode; with autorun the
+            // cells that depend on them rerun after them, as after any run.
             "set_input" => {
                 let name = params["name"].as_str().unwrap();
                 let Some(input) = nb.cells.iter().find(|c| c.code.starts_with(&format!("{name} <- input_"))).map(|c| c.id.clone()) else {
@@ -298,12 +299,24 @@ impl Engine {
                     return Ok(json!({ "accepted": true, "pending": true, "process_status": "running", "cell": input, "cells": [], "lazy": nb.lazy }));
                 }
                 let readers: Vec<String> = nb.cells.iter().filter(|c| c.id != input && c.analysis().1.iter().any(|n| n == name)).map(|c| c.id.clone()).collect();
+                let mut names: Vec<String> = Vec::new();
                 for cell in nb.cells.iter_mut().filter(|c| readers.contains(&c.id)) {
                     if nb.lazy {
                         cell.stale = true;
                     } else {
                         cell.last_run = now;
                         cell.output = format!("ran {}", cell.code);
+                        names.extend(cell.analysis().0);
+                    }
+                }
+                if nb.autorun {
+                    for cell in nb.cells.iter_mut().filter(|c| c.id != input && !readers.contains(&c.id) && !c.not_run && !c.off && c.last_run > 0.0) {
+                        let (defs, refs) = cell.analysis();
+                        if refs.iter().any(|n| names.contains(n)) {
+                            names.extend(defs);
+                            cell.last_run = now;
+                            cell.output = format!("ran {}", cell.code);
+                        }
                     }
                 }
                 let mut reply = json!({ "accepted": true, "process_status": "ready", "cell": input, "value": params["value"], "cells": readers, "lazy": nb.lazy });
@@ -3336,6 +3349,33 @@ fn set_input_sets_an_r_notebooks_input_and_reruns_or_stales_its_readers() {
     s.engine.open(NB, "/n/a.jl", &[(X, "w = 1")]);
     let julia = s.call("7", "set_input", json!({ "notebook_id": NB, "name": "w", "value": 1 })).unwrap_err();
     assert!(julia.contains("not_r_notebook"), "{julia}");
+}
+
+#[test]
+fn set_input_cuts_the_text_of_a_dependent_that_reran_unless_it_was_edited_and_not_yet_run() {
+    // y reads the input; w reads y, so w reruns after y with autorun. w's table is the agent's
+    // to read if it wants it, unless the agent edited w and hasn't run it: then it is in full.
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    const W: &str = "44444444-4444-4444-4444-444444444444";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "n <- input_slider(1, 10)"), (Y, "y = n * 2 # wide table"), (W, "w = y # wide table")]);
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    s.call("", "run_all_cells", json!({ "notebook_id": R, "wait_for_completion": true })).unwrap();
+    ember.with(R, |nb| nb.autorun = true);
+    let text = |set: &Value, cell: &str| set["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == cell).unwrap_or_else(|| panic!("{set}"))["output_text"].as_str().unwrap().to_owned();
+
+    s.seconds(1.0);
+    let set = s.call("", "set_input", json!({ "notebook_id": R, "name": "n", "value": 7, "wait_for_completion": true })).unwrap();
+    assert_eq!(text(&set, Y), "n\t".repeat(300), "a reader of the input, in full: {set}");
+    assert!(text(&set, W).ends_with("… (cut; read_cell shows more)") && text(&set, W).len() < 250, "{set}");
+
+    s.seconds(1.0);
+    s.read("", R, W);
+    s.edit("", R, W, "w = y + 1 # wide table");
+    let set = s.call("", "set_input", json!({ "notebook_id": R, "name": "n", "value": 8, "wait_for_completion": true })).unwrap();
+    assert_eq!(text(&set, W), "n\t".repeat(300), "edited and not yet run, so in full: {set}");
 }
 
 #[test]
