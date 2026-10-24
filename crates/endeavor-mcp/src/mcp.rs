@@ -79,11 +79,11 @@ pub fn is_tool(name: &str) -> bool {
 
 /// Tools that change the notebook or run code, here or on the server. `interrupt_notebook` only
 /// stops a run, so no mode asks first, but plan mode refuses it and it stays in the session's notebook.
-pub const WRITE_TOOLS: [&str; 17] = [
+pub const WRITE_TOOLS: [&str; 18] = [
     "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
     "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell", "interrupt_notebook",
     "answer_prompt", "restart_notebook",
-    "apply_package_update", "approve_install",
+    "apply_package_update", "approve_install", "set_input",
 ];
 
 /// Whether a call to `tool` with `arguments` runs code: the calls Ask to run
@@ -96,6 +96,8 @@ pub fn runs_code(tool: &str, arguments: &Value) -> bool {
         "restart_notebook" => true,
         // Moving the package date installs packages, and can restart R.
         "apply_package_update" => true,
+        // A new input value reruns the cells that read it.
+        "set_input" => true,
         // The OK for a large download installs packages and runs the cells waiting on them.
         "approve_install" => true,
         // A shell command on a session's server.
@@ -135,9 +137,10 @@ pub fn changes_notebook(tool: &str) -> bool {
 
 /// Whether the runtime holds a call to `tool` with `arguments` for the
 /// user's answer, in a session whose policy is `policy` and whose edits ask
-/// (`edits`, Manual). Nothing is held in "plan", which refuses writes.
+/// (`edits`, Manual). Nothing is held in "plan", which refuses writes. A large download
+/// (`approve_install`) is held in every other mode, Auto included: the user decides each one.
 pub fn asks_first(tool: &str, arguments: &Value, policy: &str, edits: bool) -> bool {
-    policy != "plan" && ((policy == "ask" && runs_code(tool, arguments)) || (edits && changes_notebook(tool)))
+    policy != "plan" && (tool == "approve_install" || (policy == "ask" && runs_code(tool, arguments)) || (edits && changes_notebook(tool)))
 }
 
 /// A session's policy as the app set it.
@@ -1262,7 +1265,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (32, "dd4902dc639f65ef"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (33, "03b6d0cbae71752d"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1309,7 +1312,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (32, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (33, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]
@@ -1450,6 +1453,10 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         assert!(open(true, "ask") && !open(false, "ask") && !open(true, "auto") && !open(true, "plan"), "opening asks only when it runs the notebook");
         assert!(held("move_cell", "auto", true) && !held("execute_cell", "auto", true), "Manual with runs allowed still asks before changes");
         assert!(!held("edit_cell", "plan", true), "plan refuses it instead");
+        for (policy, edits) in [("ask", false), ("ask", true), ("auto", false), ("auto", true)] {
+            assert!(held("approve_install", policy, edits), "a large download asks in {policy} (edits {edits})");
+        }
+        assert!(!held("approve_install", "plan", false));
     }
 
     #[test]

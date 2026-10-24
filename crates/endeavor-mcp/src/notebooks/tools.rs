@@ -102,6 +102,7 @@ impl Notebooks {
             "preview_package_update" => t.preview_package_update(),
             "approve_install" => t.approve_install(),
             "apply_package_update" => t.apply_package_update(),
+            "set_input" => t.set_input(),
             _ => Err(argument_error(&format!("unknown_tool::Unknown tool: '{name}'"))),
         }?;
         Ok(Reply::Json(result))
@@ -386,9 +387,18 @@ impl Call<'_> {
         let staged = self.pending_run(nb);
         let upstream = self.nbs.upstream(nb, targets)?;
         let needed: Vec<String> = upstream.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).cloned().collect();
-        let mut cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
+        let cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
         let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
         let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout }))?;
+        self.ran(nb, targets, &upstream, needed, cells, &reply, wait, &staged)
+    }
+
+    /// What a run of `cells` did, from the engine's `reply` (`run`'s, or `set_input`'s, which reruns
+    /// the cells that read an input): it records the run for the session and says what the receipt
+    /// needs. `needed` are the cells `targets` needed that had never run, which the run ran first.
+    /// `staged` are the cells edited and not yet run before the run started (`pending_run`).
+    #[allow(clippy::too_many_arguments)]
+    fn ran(&self, nb: &Snapshot, targets: &[String], upstream: &[String], needed: Vec<String>, mut cells: Vec<String>, reply: &Value, wait: bool, staged: &[String]) -> Result<Ran, String> {
         let ids = |key: &str| reply[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
         if reply.get("exited").is_some() {
             let graph = self.nbs.graph(&nb.id, GraphQuery::default()).ok();
@@ -725,6 +735,9 @@ impl Call<'_> {
         }
         if !cell.notes.is_empty() {
             out["notes"] = json!(cell.notes);
+        }
+        if !cell.inputs.is_empty() {
+            out["inputs"] = json!(cell.inputs);
         }
         if cell.running && cell.prompt.is_some() {
             out["waiting_for_input"] = waiting_json(nb, id);
@@ -1576,6 +1589,52 @@ impl Call<'_> {
             return Err(argument_error("not_r_notebook::Only an R notebook has a package date. A Julia notebook's package versions are in its Pkg environment"));
         }
         Ok(nb)
+    }
+
+    /// A new value for an R notebook's input (emberui, Ember's docs/inputs.md), as moving its
+    /// widget on the page does: Ember's `set_input()`. R checks the value against the input; in
+    /// autorun the cells that read its name rerun, as a run of those cells, and in lazy mode they
+    /// are marked stale. The input's own cell doesn't rerun, and the value isn't saved in the file.
+    fn set_input(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        if self.nbs.backend_of(&nb.id) != Backend::Ember {
+            return Err(argument_error("not_r_notebook::Only an R notebook has inputs. A Julia notebook's `@bind` widgets are set from the page"));
+        }
+        let Value::String(name) = self.arg("name")? else { return Err(argument_error("invalid_argument::name must be the name the input is assigned to")) };
+        let value = self.arg("value")?.clone();
+        let wait = bool_arg(self.args, "wait_for_completion", false)?;
+        let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
+        // Edited and not yet run, as `run` takes them before its call.
+        let staged = self.pending_run(&nb);
+        let reply = self.nbs.call("set_input", json!({ "notebook_id": nb.id, "name": name, "value": value, "wait": wait, "timeout": timeout }))?;
+        self.nbs.publish();
+        let cells: Vec<String> = reply["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+        let mutation = json!({ "type": "set_input", "name": name, "cell_id": reply["cell"], "value": reply["value"] });
+        // R reads the value only once its running cell finishes. Not read by the wait's end,
+        // it is still on its way: said so, not reported as refused (it would land anyway).
+        if reply["pending"] == true {
+            let (mut receipt, _) = self.receipt(&nb.id, mutation, &[], Vec::new(), Some("running"))?;
+            receipt.insert("pending".into(), json!(true));
+            receipt.insert("message".into(), json!(format!("`{name}` will be set when R finishes the cell it is running; then the cells that read it {}. read_cell the input's cell to see its value once it has.", if reply["lazy"] == true { "turn stale" } else { "rerun" })));
+            return Ok(Value::Object(receipt));
+        }
+        let (mut receipt, _) = if reply["lazy"] == true || cells.is_empty() {
+            self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?
+        } else {
+            let ran = self.ran(&nb, &cells, &[], Vec::new(), cells.clone(), &reply, wait, &staged)?;
+            self.receipt_of_run(&nb.id, mutation, ran, None)?
+        };
+        receipt.insert("message".into(), json!(if cells.is_empty() {
+            format!("`{name}` is set. No cell that has run reads it.")
+        } else if reply["lazy"] == true {
+            format!("`{name}` is set. The notebook is in lazy mode, so the cells that read it are stale and haven't rerun: {}. Run them to see the new value's results.", cells.join(", "))
+        } else {
+            format!("`{name}` is set, and the cells that read it rerun: {}.", cells.join(", "))
+        }));
+        if reply["lazy"] == true {
+            receipt.insert("stale_cells".into(), json!(cells));
+        }
+        Ok(Value::Object(receipt))
     }
 
     /// Ember's preview of moving an R notebook's snapshot date, which its package versions come

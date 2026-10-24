@@ -407,6 +407,9 @@ struct Cell {
     /// "kind::text" like a tool warning: Ember's `changed_in_place`,
     /// `settings_found`, `load_note` (#207) and `untracked_read` (Ember #357). Pluto has none.
     notes: Vec<String>,
+    /// The inputs (emberui) the cell's last run made, one line each, as `read_cell` shows them:
+    /// "n: slider 1 to 10, value 3". Pluto's have none.
+    inputs: Vec<String>,
     /// The prompt a running cell waits on, `{text, choices}`: Ember's
     /// `readline()`, `menu()` and the like (Ember #186). Pluto has none.
     prompt: Option<Value>,
@@ -442,6 +445,7 @@ impl Snapshot {
                 not_run: flag(&c["not_run"]),
                 off: flag(&c["off"]),
                 notes: c["notes"].as_array().map(|a| a.iter().filter_map(text).collect()).unwrap_or_default(),
+                inputs: c["inputs"].as_array().map(|a| a.iter().filter_map(text).collect()).unwrap_or_default(),
                 prompt: c.get("prompt").filter(|p| p.is_object()).cloned(),
             };
             Some((text(&c["cell_id"])?, cell))
