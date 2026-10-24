@@ -107,6 +107,11 @@ check("install calls that didn't run: one note naming their packages, and the ag
         grepl("call preview_package_update", n, fixed = TRUE))
 check("an install call that names no package: the note says packages",
       grepl("it installs packages from", A$cell_notes(list(from_lock = "")), fixed = TRUE))
+n <- A$cell_notes(list(untracked_files = c("readRDS", "read_csv")))
+check("readers given no file Ember can watch: one note naming them, worded as Ember's page words it",
+      length(n) == 1 && startsWith(n, "untracked_file::Ember can't tell which file this cell read through readRDS(), read_csv(), so it doesn't rerun when the file changes.") &&
+        grepl("Pass a file path or a file() connection", n, fixed = TRUE))
+check("no reader left unresolved: no note", length(A$cell_notes(list(untracked_files = character()))) == 0)
 
 # ---- snapshot_cell ----
 view <- function(...) modifyList(list(id = "c", code = "x <- 1", kind = "code", status = "success", errors = list(), runtime = 0.1, last_run = 100, disabled = FALSE, disabled_by = NA_character_), list(...))

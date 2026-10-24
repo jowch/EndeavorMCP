@@ -399,7 +399,10 @@ input_line <- function(i) {
 # `untracked_reads`: the cell reads globals through `get()` on a
 # computed name, `eval()` or a function that does, so it doesn't rerun when
 # they change (Ember #357, #365). That one comes from the code, so it shows
-# before the cell runs too.
+# before the cell runs too. `untracked_files`: a reader on the last run got
+# something that names no file Ember can watch, such as a connection of a
+# kind it doesn't know, so the cell doesn't rerun when that file changes
+# (Ember #380, #513).
 cell_notes <- function(v) {
   names_of <- function(x) paste(sub("^\\.__C__", "class ", as.character(x)), collapse = ", ")
   notes <- character()
@@ -411,6 +414,9 @@ cell_notes <- function(v) {
   }
   if (length(v$untracked_reads) > 0) {
     notes <- c(notes, sprintf("untracked_read::Ember can't tell which variables this cell reads through %s, so it doesn't rerun when they change. Name the variables in the code, or keep the values in one list.", paste0(v$untracked_reads, "()", collapse = ", ")))
+  }
+  if (length(v$untracked_files) > 0) {
+    notes <- c(notes, sprintf("untracked_file::Ember can't tell which file this cell read through %s, so it doesn't rerun when the file changes. Pass a file path or a file() connection, such as read.csv(file.path(dir, \"survey.csv\")).", paste0(v$untracked_files, "()", collapse = ", ")))
   }
   if (length(v$from_lock) > 0) {
     named <- setdiff(as.character(v$from_lock), "")
