@@ -32,8 +32,9 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
 /// Points an agent with the plugin's skills to the notebooks skill. Its
 /// description alone isn't enough: Haiku 4.5 starts on the tools without it,
 /// and then splits a cell's code wrongly and skips looking at plots (#242).
-const LOAD_SKILL: &str = "Before your first notebook tool call in a session, load the `endeavor-notebooks` skill and follow it: \
-the read-edit-run loop, the rules for what one cell may hold, and looking at a plot with `view_cell_output` before you say it is right.";
+/// With the skill but not the reference it still defines a name in two cells.
+const LOAD_SKILL: &str = "Before your first notebook tool call in a session, load the `endeavor-notebooks` skill, read the engine reference it names (`pluto.md` for Julia, `ember.md` for R) before you write a cell, and follow them: \
+the read-edit-run loop, the rules for what one cell may hold and for names defined in two cells, and looking at a plot with `view_cell_output` before you say it is right.";
 
 /// Where the guide keeps what only the app needs, for an agent in the app without the skills.
 const APP_GUIDE: &str = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";

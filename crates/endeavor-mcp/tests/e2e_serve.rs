@@ -435,6 +435,6 @@ Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where 
 such as the reference `app.md`: skip those parts. \
 This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
 that the user reaches over ssh. `list_machines` only reads and is fine any time; call the other three only when the user asks.\n\n\
-Before your first notebook tool call in a session, load the `endeavor-notebooks` skill and follow it: \
-the read-edit-run loop, the rules for what one cell may hold, and looking at a plot with `view_cell_output` before you say it is right."
+Before your first notebook tool call in a session, load the `endeavor-notebooks` skill, read the engine reference it names (`pluto.md` for Julia, `ember.md` for R) before you write a cell, and follow them: \
+the read-edit-run loop, the rules for what one cell may hold and for names defined in two cells, and looking at a plot with `view_cell_output` before you say it is right."
 }
