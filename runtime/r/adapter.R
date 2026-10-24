@@ -378,7 +378,11 @@ input_line <- function(i) {
   value <- sprintf(", value %s", shown(i$value))
   if (!identical(i$value, i$default)) value <- sprintf("%s (default %s)", value, shown(i$default))
   name <- if (is.null(i$name)) "" else sprintf("%s: ", i$name)
-  why <- if (isTRUE(i$bound)) "" else switch(i$reason %||% "",
+  why <- if (isTRUE(i$bound)) {
+    # Only the input on the cell's last line is its output, the widget the user can move.
+    # An Ember from before #446 doesn't report `output`: say nothing then.
+    if (!isFALSE(i$output)) "" else " Not movable on the page: only the input on the cell's last line is. Give it its own cell, or group the cell's inputs with input_list()."
+  } else switch(i$reason %||% "",
     read_elsewhere = sprintf(" Not bound: read `%s` in another cell.", i$name),
     " Not bound: assign this input to a name at the top of the cell to use it.")
   paste0(name, what, value, why)
