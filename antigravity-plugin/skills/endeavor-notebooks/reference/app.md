@@ -13,7 +13,7 @@ The user sees the notebook in a pane next to the chat. `new_notebook` and `open_
 
 The user chooses when the app asks them first, and a call that asks waits up to 45 seconds for their answer (20 for opening or creating a notebook).
 
-- **Auto:** nothing asks; calls run as you make them.
+- **Auto:** nothing asks; calls run as you make them. The one exception is `approve_install`: a large download asks the user in every mode but plan mode.
 - **Ask to run:** calls that run code ask: `execute_cell`, `submit_changes`, `run_all_cells`, `allow_execution`, `delete_cell`, `restart_notebook`, `apply_package_update`, `approve_install`, `set_input`, `run_shell`, `open_notebook` with `run_notebook=true`, and `add_cell` or `edit_cell` with `run_after=true`. Stage your edits and run once, so the user is asked once.
 - **Manual:** every change to the notebook asks too, including edits, moves, folds and `new_notebook`.
 - In every mode, `interrupt_notebook` stops a run without asking.
