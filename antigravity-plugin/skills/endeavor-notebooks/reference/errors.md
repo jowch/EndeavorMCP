@@ -38,6 +38,8 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `no_image` | The output has no image form, the cell errored, or the notebook isn't running code and the output isn't already an image or HTML that holds one | `read_cell` |
 | `image_too_large` | The image is over about 4 MB | Make the figure smaller (fewer points, lower resolution), then look again |
 | `process_exited` | The notebook's process stopped while running a cell. The file is saved; outputs are gone until cells run again | Tell the user before running the same cell again |
+| `invalid_value` | `set_input` with a value the input doesn't allow; the message says what it allows. Nothing changed | Pick a value it allows; for a dropdown, send the choice itself, not its label |
+| `input_refused` | `set_input` named no bound input, or the input's cell hasn't run since it was edited, or R is busy setting another value (one an earlier call left `pending`) | `read_cell` the input's cell: its `inputs` show the names, and whether each is bound. Run the cell first if it's stale |
 | `notebook_closed` | R ended, and the R notebooks open in it closed with it. The message says why. The file is saved; what its cells made is gone until they run again | Tell the user R ended and why. `open_notebook` opens it again and starts R; ask the user before running its cells again |
 | `host_tools` | `list_folder`, `read_file` or `run_shell` in a session that isn't on a server | Use your own file and shell tools |
 | `not_found` | `list_folder`, `read_file` or `run_shell` named a folder or file that isn't there | Check the path |

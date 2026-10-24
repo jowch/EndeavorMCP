@@ -28,13 +28,15 @@ struct FakeCell {
     off: bool,
     /// Ember's notes on its last run, "kind::text".
     notes: Vec<String>,
+    /// Its inputs, as the adapter words them.
+    inputs: Vec<String>,
     /// The prompt it waits on, as Ember's `readline()` and `menu()` do: `ask()` and `choose()` run until answered.
     prompt: Option<Value>,
 }
 
 impl FakeCell {
     fn new(id: &str, code: &str) -> FakeCell {
-        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, off: false, notes: Vec::new(), prompt: None }
+        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, off: false, notes: Vec::new(), prompt: None, inputs: Vec::new() }
     }
 
     /// What `a, b = 1, 2` defines, and the names the rest of the code uses.
@@ -138,7 +140,7 @@ impl Engine {
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
                 "last_run": c.last_run, "runtime": 0, "output": c.output, "error": if c.errored { json!({ "msg": c.output }) } else { Value::Null }, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
-                "stale": c.stale, "not_run": c.not_run, "off": c.off, "notes": c.notes, "prompt": c.prompt,
+                "stale": c.stale, "not_run": c.not_run, "off": c.off, "notes": c.notes, "prompt": c.prompt, "inputs": c.inputs,
             })).collect::<Vec<_>>(),
         })
     }
@@ -280,6 +282,36 @@ impl Engine {
                 let date = if date == "2026-10-19" { "2026-10-18".to_owned() } else { date };
                 nb.previewed = Some(date.clone());
                 Ok(json!({ "date": date, "asked": asked, "current_date": nb.package_date, "status": "ready", "changes": [{ "name": "dplyr", "from": "1.1.4", "to": "1.2.1", "change": "upgraded" }], "problems": [], "message": null }))
+            }
+            // Ember's set_input: the input is the cell assigning `name <- input_...`; "bad" is a
+            // value it doesn't allow. Its readers run (autorun) or turn stale (lazy).
+            "set_input" => {
+                let name = params["name"].as_str().unwrap();
+                let Some(input) = nb.cells.iter().find(|c| c.code.starts_with(&format!("{name} <- input_"))).map(|c| c.id.clone()) else {
+                    return Err(format!("ArgumentError: input_refused::No input is bound to `{name}`."));
+                };
+                if params["value"] == "bad" {
+                    return Err("ArgumentError: invalid_value::The value must be a number from 1 to 10.".into());
+                }
+                // R is running a cell and hasn't read the value by the wait's end.
+                if params["value"] == "late" {
+                    return Ok(json!({ "accepted": true, "pending": true, "process_status": "running", "cell": input, "cells": [], "lazy": nb.lazy }));
+                }
+                let readers: Vec<String> = nb.cells.iter().filter(|c| c.id != input && c.analysis().1.iter().any(|n| n == name)).map(|c| c.id.clone()).collect();
+                for cell in nb.cells.iter_mut().filter(|c| readers.contains(&c.id)) {
+                    if nb.lazy {
+                        cell.stale = true;
+                    } else {
+                        cell.last_run = now;
+                        cell.output = format!("ran {}", cell.code);
+                    }
+                }
+                let mut reply = json!({ "accepted": true, "process_status": "ready", "cell": input, "value": params["value"], "cells": readers, "lazy": nb.lazy });
+                if params["wait"] == true && !nb.lazy {
+                    reply["completed"] = json!(readers);
+                    reply["timed_out"] = json!([]);
+                }
+                Ok(reply)
             }
             "set_package_date" => {
                 if nb.previewed.as_deref() != params["date"].as_str() {
@@ -3253,6 +3285,56 @@ fn an_r_notebooks_package_date_is_shown_previewed_and_moved() {
     // A Julia notebook has no package date.
     s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1")]);
     let julia = s.call("7", "preview_package_update", json!({ "notebook_id": NB })).unwrap_err();
+    assert!(julia.contains("not_r_notebook"), "{julia}");
+}
+
+#[test]
+fn set_input_sets_an_r_notebooks_input_and_reruns_or_stales_its_readers() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    const Z: &str = "33333333-3333-3333-3333-333333333333";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "n <- input_slider(1, 10)"), (Y, "y = n * 2"), (Z, "z = 3")]);
+    ember.with(R, |nb| nb.cells[0].inputs = vec!["n: slider 1 to 10, value 1".into()]);
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("9", "list_notebooks", json!({})).unwrap();
+
+    // read_cell lists the cell's inputs.
+    let read = s.call("9", "read_cell", json!({ "notebook_id": R, "cell_id": X })).unwrap();
+    assert_eq!(read["inputs"], json!(["n: slider 1 to 10, value 1"]), "{read}");
+    let other = s.call("9", "read_cell", json!({ "notebook_id": R, "cell_id": Z })).unwrap();
+    assert_eq!(other.get("inputs"), None, "a cell with none has no `inputs`: {other}");
+
+    // In autorun the cells that read `n` rerun, and the receipt shows them, not the input's cell.
+    s.seconds(1.0);
+    let set = s.call("9", "set_input", json!({ "notebook_id": R, "name": "n", "value": 7, "wait_for_completion": true })).unwrap();
+    assert_eq!((&set["mutation"]["type"], &set["mutation"]["cell_id"], &set["mutation"]["value"]), (&json!("set_input"), &json!(X), &json!(7)), "{set}");
+    assert_eq!(set["affected_cells"], json!([Y]), "{set}");
+    assert_eq!(set["execution"]["status"], "completed", "{set}");
+    assert!(set["message"].as_str().unwrap().contains("rerun"), "{set}");
+    assert_eq!(ember.calls.lock().unwrap().iter().filter(|c| *c == "run").count(), 0, "Ember reruns the readers itself: no second run");
+
+    // A value the input doesn't allow, or a name with no input, is an error saying why.
+    let bad = s.call("9", "set_input", json!({ "notebook_id": R, "name": "n", "value": "bad" })).unwrap_err();
+    assert!(bad.contains("invalid_value") && bad.contains("from 1 to 10"), "{bad}");
+    let none = s.call("9", "set_input", json!({ "notebook_id": R, "name": "z", "value": 1 })).unwrap_err();
+    assert!(none.contains("input_refused"), "{none}");
+    assert!(s.call("9", "set_input", json!({ "notebook_id": R, "name": "n" })).unwrap_err().contains("value"), "value is required");
+
+    // A value R hasn't read by the wait's end, behind a running cell, is still on its way.
+    let late = s.call("9", "set_input", json!({ "notebook_id": R, "name": "n", "value": "late" })).unwrap();
+    assert_eq!((&late["pending"], &late["execution"]["status"]), (&json!(true), &json!("running")), "{late}");
+    assert!(late["message"].as_str().unwrap().contains("will be set when R finishes"), "{late}");
+
+    // In lazy mode they are marked stale, and the result names them.
+    ember.with(R, |nb| nb.lazy = true);
+    let lazy = s.call("9", "set_input", json!({ "notebook_id": R, "name": "n", "value": 3 })).unwrap();
+    assert_eq!(lazy["stale_cells"], json!([Y]), "{lazy}");
+    assert!(lazy["message"].as_str().unwrap().contains("lazy mode"), "{lazy}");
+
+    // A Julia notebook's inputs are Pluto's own.
+    s.engine.open(NB, "/n/a.jl", &[(X, "w = 1")]);
+    let julia = s.call("7", "set_input", json!({ "notebook_id": NB, "name": "w", "value": 1 })).unwrap_err();
     assert!(julia.contains("not_r_notebook"), "{julia}");
 }
 
