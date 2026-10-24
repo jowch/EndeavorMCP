@@ -403,9 +403,9 @@ struct Cell {
     /// A cell the engine won't run until something changes: Ember's disabled
     /// cells and their dependents (`graph$off`). Pluto's are `hidden` (#232).
     off: bool,
-    /// The notes the engine shows under the cell after its last run, each
+    /// The notes the engine shows under the cell, from its last run or its code, each
     /// "kind::text" like a tool warning: Ember's `changed_in_place`,
-    /// `settings_found` and `load_note` (#207). Pluto has none.
+    /// `settings_found`, `load_note` (#207) and `untracked_read` (Ember #357). Pluto has none.
     notes: Vec<String>,
     /// The prompt a running cell waits on, `{text, choices}`: Ember's
     /// `readline()`, `menu()` and the like (Ember #186). Pluto has none.

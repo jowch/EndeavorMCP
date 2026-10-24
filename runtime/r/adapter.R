@@ -345,7 +345,7 @@ snapshot_cell <- function(v) {
   d
 }
 
-# The notes Ember's page shows under a cell after its last run, worded as the
+# The notes Ember's page shows under a cell, from its last run or its code, worded as the
 # page words them (Ember's lang/english.json), each "kind::text" like a tool
 # warning (#207). `changed_in_place`: the run changed, by reference, a value
 # another cell defines, so the cells that read it didn't rerun.
@@ -353,6 +353,10 @@ snapshot_cell <- function(v) {
 # settings cell. `load_notes`: a package it loaded reset a setting a settings
 # cell sets. `from_lock`: the cell's install calls didn't run, since the lock
 # answers them (Ember #79); "" stands for a call that names no package.
+# `untracked_reads`: the cell reads globals through `get()` on a
+# computed name, `eval()` or a function that does, so it doesn't rerun when
+# they change (Ember #357, #365). That one comes from the code, so it shows
+# before the cell runs too.
 cell_notes <- function(v) {
   names_of <- function(x) paste(sub("^\\.__C__", "class ", as.character(x)), collapse = ", ")
   notes <- character()
@@ -361,6 +365,9 @@ cell_notes <- function(v) {
   }
   if (length(v$settings_found) > 0) {
     notes <- c(notes, sprintf("settings_found::Found a global setting (%s) when this cell ran; the cells after it rerun.", names_of(v$settings_found)))
+  }
+  if (length(v$untracked_reads) > 0) {
+    notes <- c(notes, sprintf("untracked_read::Ember can't tell which variables this cell reads through %s, so it doesn't rerun when they change. Name the variables in the code, or keep the values in one list.", paste0(v$untracked_reads, "()", collapse = ", ")))
   }
   if (length(v$from_lock) > 0) {
     named <- setdiff(as.character(v$from_lock), "")
