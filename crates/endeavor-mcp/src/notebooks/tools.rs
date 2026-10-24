@@ -390,14 +390,15 @@ impl Call<'_> {
         let cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
         let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
         let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout }))?;
-        self.ran(nb, targets, &upstream, needed, cells, &reply, wait)
+        self.ran(nb, targets, &upstream, needed, cells, &reply, wait, &staged)
     }
 
     /// What a run of `cells` did, from the engine's `reply` (`run`'s, or `set_input`'s, which reruns
     /// the cells that read an input): it records the run for the session and says what the receipt
     /// needs. `needed` are the cells `targets` needed that had never run, which the run ran first.
+    /// `staged` are the cells edited and not yet run before the run started (`pending_run`).
     #[allow(clippy::too_many_arguments)]
-    fn ran(&self, nb: &Snapshot, targets: &[String], upstream: &[String], needed: Vec<String>, mut cells: Vec<String>, reply: &Value, wait: bool) -> Result<Ran, String> {
+    fn ran(&self, nb: &Snapshot, targets: &[String], upstream: &[String], needed: Vec<String>, mut cells: Vec<String>, reply: &Value, wait: bool, staged: &[String]) -> Result<Ran, String> {
         let ids = |key: &str| reply[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
         if reply.get("exited").is_some() {
             let graph = self.nbs.graph(&nb.id, GraphQuery::default()).ok();
@@ -1603,6 +1604,8 @@ impl Call<'_> {
         let value = self.arg("value")?.clone();
         let wait = bool_arg(self.args, "wait_for_completion", false)?;
         let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
+        // Edited and not yet run, as `run` takes them before its call.
+        let staged = self.pending_run(&nb);
         let reply = self.nbs.call("set_input", json!({ "notebook_id": nb.id, "name": name, "value": value, "wait": wait, "timeout": timeout }))?;
         self.nbs.publish();
         let cells: Vec<String> = reply["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
@@ -1618,7 +1621,7 @@ impl Call<'_> {
         let (mut receipt, _) = if reply["lazy"] == true || cells.is_empty() {
             self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?
         } else {
-            let ran = self.ran(&nb, &cells, &[], Vec::new(), cells.clone(), &reply, wait)?;
+            let ran = self.ran(&nb, &cells, &[], Vec::new(), cells.clone(), &reply, wait, &staged)?;
             self.receipt_of_run(&nb.id, mutation, ran, None)?
         };
         receipt.insert("message".into(), json!(if cells.is_empty() {
