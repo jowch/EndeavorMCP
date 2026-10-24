@@ -820,6 +820,22 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" })).get("notes"), None);
     });
 
+    step("a reader given no file Ember can watch says Ember can't tell which file it read; a path built in code is watched and has no note (Ember #513, #264)", || {
+        std::fs::write(folder.join("data.csv"), "x\n1\n").unwrap();
+        std::fs::write(folder.join("files.R"), "### An Ember notebook ###\n\n# %% id=P\nd <- read.csv(file.path(getwd(), \"data.csv\"))\n\n# %% id=U\nv <- try(readRDS(42), silent = TRUE)\n\n# /// cell order\n# P\n# U\n# ///\n").unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "files.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        agent.ok("allow_execution", json!({ "notebook_id": id }));
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        let ran = agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
+        let warnings: Vec<&str> = ran["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).filter(|w| w.starts_with("untracked_file::")).collect();
+        assert!(warnings.len() == 1 && warnings[0].starts_with("untracked_file::Cell U: Ember can't tell which file this cell read through readRDS()"), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "U" }));
+        assert!(read["notes"][0].as_str().is_some_and(|n| n.starts_with("untracked_file::Ember can't tell which file this cell read through readRDS(), so it doesn't rerun when the file changes.")), "{read}");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "P" })).get("notes"), None);
+    });
+
     step("an install call doesn't run: the lock answers it, and the cell's note says so (Ember #79, #125)", || {
         std::fs::write(folder.join("install.R"), "### An Ember notebook ###\n\n# %% id=G\ninstall.packages(\"jsonlite\")\n1 + 1\n\n# /// cell order\n# G\n# ///\n").unwrap();
         let mut agent = Agent::new(port, &token);
