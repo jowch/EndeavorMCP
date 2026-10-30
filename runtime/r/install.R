@@ -2,11 +2,7 @@
 # it when a newer build is there. The core runs it each time it starts R for an
 # R notebook, before R's adapter:
 #
-#   Rscript --vanilla runtime/r/install.R <folder> <repository> [<mac-arm64>]
-#
-# <mac-arm64> is where Ember's CI publishes its Apple Silicon Mac builds, one
-# repository per R version (<mac-arm64>/macos-arm64-r4.6): r-universe has none
-# (Ember #66). On an Apple Silicon Mac they come first, then r-universe.
+#   Rscript --vanilla runtime/r/install.R <folder> <repository>
 #
 # <folder> holds one library per Ember build, named by the first 12 characters
 # of the SHA256 the repository lists for the file (r-universe's PACKAGES has no
@@ -44,9 +40,8 @@ installed <- function(build) nzchar(build) && dir.exists(file.path(folder, build
 state <- read_state()
 failed <- strsplit(state$Failed, " ", fixed = TRUE)[[1]]
 
-# The newest build, from the first of these places that lists one: Ember's own
-# Apple Silicon build, a binary where r-universe has one for this platform and
-# R, else the source package. Its row of the index, which the download uses
+# The newest build, from the first of these places that lists one: a binary
+# where r-universe has one for this platform and R, else the source package. Its row of the index, which the download uses
 # too, so it gets the build chosen here even if the index changes meanwhile.
 # NULL when ember isn't listed (or a repository didn't answer, which R only
 # warns about), NA when R couldn't ask.
@@ -64,11 +59,9 @@ newest <- function(where) tryCatch({
 binary <- .Platform$pkgType
 places <- list(list(contriburl = contrib.url(universe, "source"), type = "source"))
 if (binary != "source") places <- c(list(list(contriburl = contrib.url(universe, binary), type = binary)), places)
-if (length(args) > 2 && nzchar(args[[3]]) && binary != "source" && startsWith(R.version$platform, "aarch64-apple-darwin")) {
-  version <- paste(R.version$major, sub("\\..*", "", R.version$minor), sep = ".")
-  places <- c(list(list(contriburl = paste0(args[[3]], "/macos-arm64-r", version), type = binary)), places)
+if (binary != "source" && startsWith(R.version$platform, "aarch64-apple-darwin")) {
   # Without the developer tools, r-universe's source can't be built here. When
-  # Ember's own build can't be reached and an Ember is installed, trying it
+  # its binary can't be reached and an Ember is installed, trying the source
   # would only fail and say the newest Ember didn't work, so keep the installed one.
   tools_here <- suppressWarnings(system2("xcode-select", "-p", stdout = FALSE, stderr = FALSE)) == 0
   if (installed(state$Current) && !tools_here) places <- Filter(function(where) where$type != "source", places)
