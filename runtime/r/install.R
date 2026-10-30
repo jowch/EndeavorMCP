@@ -41,8 +41,9 @@ state <- read_state()
 failed <- strsplit(state$Failed, " ", fixed = TRUE)[[1]]
 
 # The newest build, from the first of these places that lists one: a binary
-# where r-universe has one for this platform and R, else the source package. Its row of the index, which the download uses
-# too, so it gets the build chosen here even if the index changes meanwhile.
+# where r-universe has one for this platform and R, else the source package.
+# Its row of the index, which the download uses too, so it gets the build
+# chosen here even if the index changes meanwhile.
 # NULL when ember isn't listed (or a repository didn't answer, which R only
 # warns about), NA when R couldn't ask.
 # `reached` when one of them answered with an index.

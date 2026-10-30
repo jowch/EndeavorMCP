@@ -303,8 +303,9 @@ Next:
   installed one Ember's own CI published as GitHub releases. An Apple
   Silicon Mac without the developer tools that has an Ember skips
   r-universe's source, which it couldn't build: when the binary can't be
-  reached it keeps its Ember and says nothing. The downloaded file must have the SHA256 the
-  index lists, or it isn't installed (and isn't counted as a failed build).
+  reached it keeps its Ember and says nothing. The downloaded file must have
+  the SHA256 the index lists, or it isn't installed (and isn't counted as a
+  failed build).
   Each time the core starts R, `runtime/r/install.R` installs it, or updates it
   when there's a newer build, into `~/.cache/endeavor/r/ember`
   (`$SCRATCH/endeavor/r/ember` on clusters; `ember` inside Endeavor's own R's folder for that R): one library per build, named by
