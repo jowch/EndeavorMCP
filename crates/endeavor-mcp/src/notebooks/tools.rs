@@ -53,8 +53,6 @@ const QUIET_NOTES: [&str; 2] = ["printed", "logged_info"];
 /// (`run_all_cells`) would otherwise send back what each one printed.
 const RUN_NOTES_MAX: usize = 10;
 const RUN_NOTES_BYTES: usize = 4_000;
-/// A run's `message` when a cell it ran logged a warning or an error.
-const LOGGED_MESSAGE: &str = "A cell logged a warning or an error (`logged_warning` or `logged_error` in `warnings`). The user sees it under the cell. When you report the result, tell the user what it says: the result may not be what it looks like.";
 /// How many of a session's calls a read or write of a cell counts as recent: within them, `read_cell`
 /// leaves out code it hasn't changed (`code_unchanged`), as the agent still has it.
 const RECENT_CALLS: u64 = 10;
@@ -650,7 +648,9 @@ impl Call<'_> {
         let finished: Vec<(&String, &Cell)> = ran.iter().filter(|id| !still_running.contains(id)).filter_map(|id| Some((id, nb.cells.get(id).filter(|c| !c.running && !c.queued)?))).collect();
         warnings.extend(run_notes(&finished, &along));
         // Haiku 4.5 read a logged warning in `warnings` and reported the result as clean (N11).
-        let logged = warnings.iter().any(|w| w.starts_with("logged_warning::") || w.starts_with("logged_error::"));
+        // The first one is quoted in the message: the agent passes on what it reads there.
+        let logged: Vec<&str> = warnings.iter().filter(|w| w.starts_with("logged_warning::") || w.starts_with("logged_error::")).map(String::as_str).collect();
+        let logged_message = logged_message(&logged);
         let pending = self.pending_run(&nb);
         // The notebook's order isn't in it: two lists of every cell's id grow
         // with the notebook and come back on every change, and an agent that
@@ -702,8 +702,8 @@ impl Call<'_> {
                 message.push_str(" Don't run the cells in `execution.still_running` again: they run once the packages are ready.");
             }
             receipt.insert("message".into(), json!(message));
-        } else if logged && still_running.is_empty() {
-            receipt.insert("message".into(), json!(LOGGED_MESSAGE));
+        } else if let Some(message) = logged_message.filter(|_| still_running.is_empty()) {
+            receipt.insert("message".into(), json!(message));
         } else if !still_running.is_empty() {
             receipt.insert(
                 "message".into(),
@@ -882,6 +882,12 @@ impl Call<'_> {
                 "This read waited {seconds} s, and the cell is still {}: the run goes on. Read it again to keep waiting, or call interrupt_notebook if the user wants it stopped.",
                 if nb.cells.get(&cell).is_some_and(|c| c.running) { "running" } else { "queued" }
             )));
+        } else if let Some(cell_now) = nb.cells.get(&cell).filter(|c| !c.running && !c.queued) {
+            // The same message as a run's, for a read of a cell that logged a warning or an error.
+            let logged: Vec<String> = cell_now.notes.iter().filter(|n| n.starts_with("logged_warning::") || n.starts_with("logged_error::")).map(|n| n.replacen("::", &format!("::Cell {cell}: "), 1)).collect();
+            if let Some(message) = logged_message(&logged.iter().map(String::as_str).collect::<Vec<_>>()) {
+                out.insert("message".into(), json!(message));
+            }
         }
         Ok(Value::Object(out))
     }
@@ -2109,4 +2115,16 @@ fn run_notes(cells: &[(&String, &Cell)], along: &[String]) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+/// A run's `message` when a cell it ran logged a warning or an error: the first, quoted, and that
+/// the user should hear it. In N11, Haiku 4.5 read such a warning in `warnings` and reported the
+/// result as clean.
+fn logged_message(logged: &[&str]) -> Option<String> {
+    let first = logged.first()?;
+    let (kind, rest) = first.split_once("::")?;
+    let (cells, text) = rest.split_once(": ")?;
+    let what = if kind == "logged_error" { "an error" } else { "a warning" };
+    let more = if logged.len() > 1 { format!(" The run's `warnings` have {} more.", logged.len() - 1) } else { String::new() };
+    Some(format!("{cells} logged {what}: \"{text}\". The user sees it under the cell. When you report the result, tell the user what it says, since the result may not be what it looks like.{more}"))
 }

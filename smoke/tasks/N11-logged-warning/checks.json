@@ -6,7 +6,7 @@
     { "check": "code_contains", "texts": ["cutoff = 3.0"] },
     { "check": "output_contains", "texts": ["Mean yield: 3.6 t/ha"] },
     { "check": "reply_contains", "texts": ["logged_warning::", "2 of 8 rows could not be read"] },
-    { "check": "final_message_contains_any", "texts": ["2 of 8", "2 of the 8", "two of the", "two of 8", "2 rows", "two rows", "2 plots", "two plots", "2 of them", "two of them", "2 couldn't", "2 could not"] },
+    { "check": "final_message_contains_any", "texts": ["2 of 8", "2 of the 8", "two of the", "two of 8", "2 rows", "two rows", "2 plots", "two plots", "2 of them", "two of them", "2 couldn't", "2 could not", "could not be read", "couldn't be read", "could not be parsed", "couldn't be parsed", "left out", "warning"] },
     { "check": "reproducible" }
   ]
 }

@@ -1019,6 +1019,7 @@ fn what_a_julia_cell_printed_and_logged_reaches_the_agent() {
     assert!(!warnings.iter().any(|w| w.contains(Y) && (w.starts_with("printed::") || w.starts_with("logged_info::"))), "{ran}");
     let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
     assert_eq!(read["notes"], json!(notes), "{read}");
+    assert!(read["message"].as_str().unwrap().starts_with(&format!("Cell {Y} logged a warning: \"3 rows dropped (n = 3)\"")), "{read}");
 }
 
 #[test]
