@@ -1013,6 +1013,7 @@ fn what_a_julia_cell_printed_and_logged_reaches_the_agent() {
         let (kind, text) = note.split_once("::").unwrap();
         assert!(warnings.contains(&format!("{kind}::Cell {X}: {text}").as_str()), "{ran}");
     }
+    assert!(ran["message"].as_str().unwrap().contains("tell the user what it says"), "{ran}");
     // The same warning on both cells is one line.
     assert!(warnings.contains(&format!("logged_warning::Cells {X}, {Y}: 3 rows dropped (n = 3)").as_str()), "{ran}");
     assert!(!warnings.iter().any(|w| w.contains(Y) && (w.starts_with("printed::") || w.starts_with("logged_info::"))), "{ran}");
