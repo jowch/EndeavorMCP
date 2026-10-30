@@ -227,3 +227,94 @@ function _cell_output_error(cell)
     cell.errored || return nothing
     return _structure_error(cell.output.body)
 end
+
+# ---------------------------------------------------------------------------
+# What a cell printed and logged (read_cell's `notes`, a run's `warnings`)
+# ---------------------------------------------------------------------------
+
+# Pluto keeps a cell's `println` and `@info`/`@warn`/`@error` in its logs, shown under
+# the cell, apart from its output. A `@warn` such as "rows dropped" the agent never sees
+# lets it report a result as clean (#257). Debug and progress-bar logs are left out.
+const _LOG_KINDS = ("Error" => "logged_error", "Warn" => "logged_warning", "Info" => "logged_info")
+const _STDOUT_LEVEL = "LogLevel(-555)" # PlutoRunner's `stdout_log_level`
+const _LOG_NOTE_MAX = 300   # bytes of one logged message
+const _LOG_NOTES_MAX = 5    # logged messages, errors and warnings first
+const _PRINTED_MAX = 1_000  # bytes of the end of what the cell printed
+
+# Without colour codes, and of a line a progress counter rewrote with `\r`, only what it shows last.
+function _no_ansi(s)
+    s = replace(s, r"\e\[[0-9;]*[A-Za-z]" => "", "\r\n" => "\n")
+    shown(line) = (parts = filter(!isempty, split(line, '\r')); isempty(parts) ? "" : String(last(parts)))
+    join((shown(line) for line in split(s, '\n')), '\n')
+end
+
+function _cut_note(s::AbstractString, max::Int)
+    s = strip(s)
+    sizeof(s) <= max && return String(s)
+    return s[1:prevind(s, max + 1)] * " … (cut at $max bytes of $(sizeof(s)))"
+end
+
+# A log's message or a keyword's value as text: Pluto renders them like outputs, `(body, mime)`.
+function _log_text(m)
+    m isa Tuple && length(m) == 2 || return nothing
+    body, mime = m
+    body isa AbstractString || return nothing
+    string(mime) == "text/plain" && return _no_ansi(body)
+    string(mime) == "text/html" && return _html_text(body)
+    return nothing
+end
+
+function _log_message(log)
+    text = something(_log_text(get(log, "msg", nothing)), "(not text)")
+    kwargs = String[]
+    for kv in get(log, "kwargs", ())
+        kv isa Union{Tuple,AbstractVector} && length(kv) == 2 || continue
+        name, value = kv
+        value = _log_text(value)
+        push!(kwargs, value === nothing ? "$name = (not text)" : "$name = $(strip(value))")
+    end
+    isempty(kwargs) ? text : "$(strip(text)) ($(join(kwargs, ", ")))"
+end
+
+"""
+    _cell_notes(cell) -> Vector{String}
+
+What the cell's last run printed and logged, each "kind::text": `logged_error`,
+`logged_warning` and `logged_info` (at most `_LOG_NOTES_MAX`, in that order, a message
+repeated given once with its count), then `printed`, the end of its `println` and
+`show` output. Reads Pluto's internals, so a Pluto release that changes them gives none.
+"""
+function _cell_notes(cell)
+    try
+        __cell_notes(cell)
+    catch
+        String[]
+    end
+end
+
+function __cell_notes(cell)
+    logs = cell.logs
+    notes = String[]
+    isempty(logs) && return notes
+    counted = Pair{String,Int}[]
+    for (level, kind) in _LOG_KINDS, log in logs
+        get(log, "level", nothing) == level || continue
+        note = "$kind::" * _cut_note(_log_message(log), _LOG_NOTE_MAX)
+        i = findfirst(p -> p.first == note, counted)
+        i === nothing ? push!(counted, note => 1) : (counted[i] = note => counted[i].second + 1)
+    end
+    for (note, n) in counted[1:min(end, _LOG_NOTES_MAX)]
+        push!(notes, n == 1 ? note : "$note (logged $n times)")
+    end
+    length(counted) > _LOG_NOTES_MAX && (notes[end] *= " ($(length(counted) - _LOG_NOTES_MAX) more messages not shown)")
+    printed = join((something(_log_text(get(log, "msg", nothing)), "") for log in logs if get(log, "level", nothing) == _STDOUT_LEVEL))
+    printed = strip(_no_ansi(printed))
+    if !isempty(printed)
+        if sizeof(printed) > _PRINTED_MAX
+            start = nextind(printed, sizeof(printed) - _PRINTED_MAX)
+            printed = "(the last $(_PRINTED_MAX) bytes of $(sizeof(printed))) …" * printed[start:end]
+        end
+        push!(notes, "printed::" * printed)
+    end
+    return notes
+end

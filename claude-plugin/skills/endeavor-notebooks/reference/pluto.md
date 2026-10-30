@@ -13,6 +13,7 @@ Read this when the notebook is a Pluto notebook (a `.jl` file). It covers what P
 ## Errors
 
 - `read_cell` gives `error.kind`: `pluto_multi_expression` (with `hint`, and `boundaries`, the positions where the statements split) or `runtime` (with `msg`, the Julia error).
+- What a cell prints (`println`) and logs (`@info`, `@warn`, `@error`) is not its output. A run's `warnings` give it as `printed::Cell <id>: text`, `logged_warning::...`, `logged_error::...` and `logged_info::...`, and `read_cell` lists it in `notes`. A `logged_warning` or `logged_error` often means the result is not what it looks like, for example rows were dropped or a fit did not converge: tell the user about it.
 - `validate_cell` checks code without changing the notebook. Its `errors[].type` is `pluto_multi_expression` or `syntax_error`. It does not check names other cells define, so it can't catch a duplicate definition.
 
 ## A usual layout

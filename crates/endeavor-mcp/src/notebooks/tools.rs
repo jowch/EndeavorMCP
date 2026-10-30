@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use super::{Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, cell_id_in, uuid_value};
+use super::{Cell, Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, cell_id_in, uuid_value};
 use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
 use wire::backend::Backend;
@@ -46,6 +46,13 @@ pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has
 const RECEIPT_TEXT_MAX: usize = 2_000;
 /// The same for a cell that ran along with the ones a run asked for (`Ran::along`).
 const DEPENDENT_TEXT_MAX: usize = 200;
+/// The notes a run's reply leaves out for a cell that only ran along, and gives after the
+/// others; `read_cell` has them.
+const QUIET_NOTES: [&str; 2] = ["printed", "logged_info"];
+/// How many notes a run's reply carries, and how many bytes of them: a run of every cell
+/// (`run_all_cells`) would otherwise send back what each one printed.
+const RUN_NOTES_MAX: usize = 10;
+const RUN_NOTES_BYTES: usize = 4_000;
 /// How many of a session's calls a read or write of a cell counts as recent: within them, `read_cell`
 /// leaves out code it hasn't changed (`code_unchanged`), as the agent still has it.
 const RECENT_CALLS: u64 = 10;
@@ -635,15 +642,15 @@ impl Call<'_> {
             .collect::<Result<_, String>>()?;
         // The notes Ember shows under a cell this run ran, such as a value
         // another cell defines changed in place, whose readers don't rerun
-        // (#207): an agent that doesn't see them reads a wrong result as right.
-        for id in ran.iter().filter(|id| !still_running.contains(id)) {
-            if let Some(cell) = nb.cells.get(id).filter(|c| !c.running && !c.queued) {
-                for note in &cell.notes {
-                    let (kind, text) = note.split_once("::").unwrap_or(("note", note));
-                    warnings.push(format!("{kind}::Cell {id}: {text}"));
-                }
-            }
-        }
+        // (#207), and what a Pluto cell printed and logged, such as a `@warn`
+        // that rows were dropped (#257): an agent that doesn't see them reads a
+        // wrong result as right.
+        let finished: Vec<(&String, &Cell)> = ran.iter().filter(|id| !still_running.contains(id)).filter_map(|id| Some((id, nb.cells.get(id).filter(|c| !c.running && !c.queued)?))).collect();
+        warnings.extend(run_notes(&finished, &along));
+        // Haiku 4.5 read a logged warning in `warnings` and reported the result as clean (N11).
+        // The first one is quoted in the message: the agent passes on what it reads there.
+        let logged: Vec<&str> = warnings.iter().filter(|w| w.starts_with("logged_warning::") || w.starts_with("logged_error::")).map(String::as_str).collect();
+        let logged_message = logged_message(&logged);
         let pending = self.pending_run(&nb);
         // The notebook's order isn't in it: two lists of every cell's id grow
         // with the notebook and come back on every change, and an agent that
@@ -694,6 +701,8 @@ impl Call<'_> {
             if !still_running.is_empty() {
                 message.push_str(" Don't run the cells in `execution.still_running` again: they run once the packages are ready.");
             }
+            receipt.insert("message".into(), json!(message));
+        } else if let Some(message) = logged_message.filter(|_| still_running.is_empty()) {
             receipt.insert("message".into(), json!(message));
         } else if !still_running.is_empty() {
             receipt.insert(
@@ -873,6 +882,12 @@ impl Call<'_> {
                 "This read waited {seconds} s, and the cell is still {}: the run goes on. Read it again to keep waiting, or call interrupt_notebook if the user wants it stopped.",
                 if nb.cells.get(&cell).is_some_and(|c| c.running) { "running" } else { "queued" }
             )));
+        } else if let Some(cell_now) = nb.cells.get(&cell).filter(|c| !c.running && !c.queued) {
+            // The same message as a run's, for a read of a cell that logged a warning or an error.
+            let logged: Vec<String> = cell_now.notes.iter().filter(|n| n.starts_with("logged_warning::") || n.starts_with("logged_error::")).map(|n| n.replacen("::", &format!("::Cell {cell}: "), 1)).collect();
+            if let Some(message) = logged_message(&logged.iter().map(String::as_str).collect::<Vec<_>>()) {
+                out.insert("message".into(), json!(message));
+            }
         }
         Ok(Value::Object(out))
     }
@@ -2077,4 +2092,53 @@ pub(super) fn tool_json(reply: Reply) -> Value {
         Reply::Json(value) => value,
         Reply::Image { meta, .. } => meta,
     }
+}
+
+/// The notes of a run's cells as the reply's warnings, "kind::Cell <id>: text". The same note on
+/// several cells (a `@warn` in a function they all call) is one line, "kind::Cells <id>, <id>:
+/// text". Logged errors come first, then warnings and Ember's notes, then `QUIET_NOTES`, which a cell that
+/// only ran along doesn't give. At most `RUN_NOTES_MAX` lines and `RUN_NOTES_BYTES`, then a
+/// `notes_cut` line.
+fn run_notes(cells: &[(&String, &Cell)], along: &[String]) -> Vec<String> {
+    let mut folded: Vec<(&str, &str, Vec<&str>)> = Vec::new();
+    for (id, cell) in cells {
+        for note in &cell.notes {
+            let (kind, text) = note.split_once("::").unwrap_or(("note", note));
+            if along.contains(id) && QUIET_NOTES.contains(&kind) {
+                continue;
+            }
+            match folded.iter_mut().find(|(k, t, _)| *k == kind && *t == text) {
+                Some((_, _, ids)) => ids.push(id),
+                None => folded.push((kind, text, vec![id])),
+            }
+        }
+    }
+    folded.sort_by_key(|(kind, _, _)| if *kind == "logged_error" { 0 } else if QUIET_NOTES.contains(kind) { 2 } else { 1 });
+    let (mut lines, mut bytes) = (Vec::new(), 0);
+    for (shown, (kind, text, ids)) in folded.iter().enumerate() {
+        let line = match &ids[..] {
+            [id] => format!("{kind}::Cell {id}: {text}"),
+            ids => format!("{kind}::Cells {}: {text}", ids.join(", ")),
+        };
+        if lines.len() == RUN_NOTES_MAX || bytes + line.len() > RUN_NOTES_BYTES {
+            let left = folded.len() - shown;
+            lines.push(format!("notes_cut::{left} more notes from this run are not shown; read_cell lists each cell's notes"));
+            break;
+        }
+        bytes += line.len();
+        lines.push(line);
+    }
+    lines
+}
+
+/// A run's `message` when a cell it ran logged a warning or an error: the first, quoted, and that
+/// the user should hear it. In N11, Haiku 4.5 read such a warning in `warnings` and reported the
+/// result as clean.
+fn logged_message(logged: &[&str]) -> Option<String> {
+    let first = logged.first()?;
+    let (kind, rest) = first.split_once("::")?;
+    let (cells, text) = rest.split_once(": ")?;
+    let what = if kind == "logged_error" { "an error" } else { "a warning" };
+    let more = if logged.len() > 1 { format!(" The run's `warnings` have {} more.", logged.len() - 1) } else { String::new() };
+    Some(format!("{cells} logged {what}: \"{text}\". The user sees it under the cell. When you report the result, tell the user what it says, since the result may not be what it looks like.{more}"))
 }
