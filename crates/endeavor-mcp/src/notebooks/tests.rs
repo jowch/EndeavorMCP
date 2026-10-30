@@ -2065,6 +2065,38 @@ fn view_cell_output_sends_the_png_the_engine_renders() {
 }
 
 #[test]
+fn view_cell_output_says_when_the_picture_is_from_an_earlier_run() {
+    // An agent viewed a plot right after edit_cell with run_after, while it reran, and couldn't
+    // tell whether the picture was the new code's (trial 25).
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "plot(x)")]);
+    s.engine.with(NB, |nb| nb.cells[0].output = "plot".into());
+    let view = |s: &Setup| match s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": X }), &Folder::Process, Instant::now()).unwrap() {
+        Reply::Image { meta, .. } => meta,
+        Reply::Json(_) => panic!("no image"),
+    };
+    assert_eq!(view(&s).get("state"), None, "a current picture says nothing more");
+    for (set, state, says) in [
+        ((true, false, false), "running", "may be from its previous run"),
+        ((false, true, false), "queued", "queued to run again"),
+        ((false, false, true), "stale", "a cell it depends on has changed"),
+    ] {
+        s.engine.with(NB, |nb| (nb.cells[0].running, nb.cells[0].queued, nb.cells[0].stale) = set);
+        let meta = view(&s);
+        assert_eq!(meta["state"], state, "{meta}");
+        assert!(meta["message"].as_str().unwrap().contains(says), "{meta}");
+        assert_eq!(meta["png_bytes"], 4, "the picture is still sent: {meta}");
+    }
+    // Edited and not yet run.
+    s.engine.with(NB, |nb| nb.cells[0].stale = false);
+    s.read("", NB, X);
+    s.edit("", NB, X, "plot(x, y)");
+    let meta = view(&s);
+    assert_eq!(meta["state"], "stale", "{meta}");
+    assert!(meta["message"].as_str().unwrap().contains("before its code was edited"), "{meta}");
+}
+
+#[test]
 fn view_cell_output_says_when_the_picture_came_from_the_html() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "widget(fig)")]);
