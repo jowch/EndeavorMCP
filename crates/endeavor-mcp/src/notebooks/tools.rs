@@ -904,6 +904,20 @@ impl Call<'_> {
         if let Some(source) = rendered["source"].as_str() {
             meta["source"] = json!(source);
         }
+        // The output of the cell's last run, while it runs again or after its code or an ancestor
+        // changed: said so, or an agent takes an old plot for its new code's (trial 25). From the
+        // state before the render, so a run that ends during it is still called running.
+        let edited = self.pending_run(&nb).contains(&cell);
+        let state = if shown.running { Some("running") } else if shown.queued { Some("queued") } else if shown.stale || edited { Some("stale") } else { None };
+        if let Some(state) = state {
+            meta["state"] = json!(state);
+            meta["message"] = json!(match state {
+                "running" => "The cell is running again, so this image may be from its previous run. read_cell says when it has finished; then view it again.",
+                "queued" => "The cell is queued to run again, so this image is from its previous run. read_cell says when it has finished; then view it again.",
+                _ if edited => "This is the output of the cell's last run, before its code was edited; run it to see the new code's output.",
+                _ => "This is the output of the cell's last run; a cell it depends on has changed since, so it is stale. Run it to see the current output.",
+            });
+        }
         Ok(Reply::Image { meta, png_base64: png.to_owned() })
     }
 
