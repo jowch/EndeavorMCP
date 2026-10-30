@@ -261,3 +261,21 @@ fn a_runtime_that_says_its_build_or_interface_runs_code_and_the_callers_rule_sti
     assert!(call(&listener, "run_shell", r#"{"command":"ls"}"#).contains("too old"));
     assert!(call(&listener, "list_notebooks", "{}").is_empty());
 }
+
+#[test]
+fn while_the_server_is_away_the_agent_can_still_ask_the_user_to_restart_it() {
+    let listener = away();
+    let (asked_tx, asked) = std::sync::mpsc::channel();
+    let asked_tx = std::sync::Mutex::new(asked_tx);
+    listener.set_restart(Box::new(move |_session, reason, _gone, _deadline| {
+        asked_tx.lock().unwrap().send(reason.to_owned()).unwrap();
+        crate::RestartAnswer::Declined
+    }));
+    let list = post(&listener, "secret", r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+    assert!(list.contains(r#""name":"request_restart""#), "{list}");
+    let call = post(&listener, "secret", r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"request_restart","arguments":{"reason":"Julia stopped."}}}"#);
+    assert_eq!(asked.try_recv().unwrap(), "Julia stopped.");
+    assert!(call.contains(r#"not_approved"#) && call.contains("lab-server"), "{call}");
+    let other = post(&listener, "secret", LIST);
+    assert!(other.contains("reconnecting by itself"), "other calls still say why: {other}");
+}

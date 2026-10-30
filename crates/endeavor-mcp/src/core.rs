@@ -1841,8 +1841,10 @@ fn julia_starting_page(why: String) -> String {
 /// runtime (`token` its bearer token), then close. The agent's MCP client
 /// gets an answer instead of a reset, which Claude Code counts toward giving
 /// up on the server for good: a tool call fails with `why`, and the rest is
-/// answered as the core would. Any other request is closed unanswered.
-pub fn serve_unreachable(client: TcpStream, token: &str, why: &str) -> io::Result<()> {
+/// answered as the core would. Any other request is closed unanswered. With
+/// `restart` (the client's hook and the place's name), the agent can still ask
+/// the user to restart the runtime (`guard::restart_call`), and `tools/list` says so.
+pub fn serve_unreachable(client: TcpStream, token: &str, why: &str, restart: Option<(&crate::guard::AskRestart, &str)>) -> io::Result<()> {
     let mut client = wire::Shared::new(client);
     let mut reader = BufReader::new(client.clone());
     let Some(request) = Head::read(&mut reader)? else { return Ok(()) };
@@ -1854,7 +1856,19 @@ pub fn serve_unreachable(client: TcpStream, token: &str, why: &str) -> io::Resul
         return http::respond(&mut client, status, Some("application/json"), body.as_bytes(), false);
     }
     if request.method() == "POST" {
-        crate::mcp::post(&request, &mut reader, &mut client, false, false, |message, _| crate::mcp::answer_unreachable(message, &request, why))?;
+        let session = request.header("X-Endeavor-Session").unwrap_or_default().to_owned();
+        crate::mcp::post(&request, &mut reader, &mut client, false, false, |message, gone| {
+            let Some(restart) = restart else { return crate::mcp::answer_unreachable(message, &request, why) };
+            if let Some(reply) = crate::guard::restart_call(message, &session, restart, gone) {
+                return Some(crate::mcp::to_json(&reply));
+            }
+            let reply = crate::mcp::answer_unreachable(message, &request, why)?;
+            let listed = (message["method"] == "tools/list").then(|| serde_json::from_str::<Value>(&reply).ok()).flatten();
+            match listed.as_ref().and_then(|r| crate::guard::with_restart_tool(&r["result"]).map(|result| (r, result))) {
+                Some((r, result)) => Some(crate::mcp::to_json(&json!({ "jsonrpc": "2.0", "id": r["id"], "result": result }))),
+                None => Some(reply),
+            }
+        })?;
     }
     Ok(())
 }

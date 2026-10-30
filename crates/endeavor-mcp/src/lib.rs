@@ -42,7 +42,7 @@ mod winproc;
 /// The wire crate, for the types in this crate's signatures (`wire::Item`, `wire::KIND_RUNTIME`, `wire::ENGINE_PLUTO`).
 pub use wire;
 pub use core::{INTERFACE as CORE_INTERFACE, serve_unreachable};
-pub use guard::{Snapshot, serve_guarded};
+pub use guard::{AskRestart, REQUEST_RESTART, RestartAnswer, Snapshot, restart_schema, serve_guarded};
 pub use mcp::{NOTEBOOK_TOOLS_JSON, asks_first, changes_notebook, is_tool, runs_code};
 pub use standalone::{Lease, lease, unpack};
 
