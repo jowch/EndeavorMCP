@@ -241,7 +241,12 @@ const _LOG_NOTE_MAX = 300   # bytes of one logged message
 const _LOG_NOTES_MAX = 5    # logged messages, errors and warnings first
 const _PRINTED_MAX = 1_000  # bytes of the end of what the cell printed
 
-_no_ansi(s) = replace(s, r"\e\[[0-9;]*[A-Za-z]" => "", "\r\n" => "\n", '\r' => '\n')
+# Without colour codes, and of a line a progress counter rewrote with `\r`, only what it shows last.
+function _no_ansi(s)
+    s = replace(s, r"\e\[[0-9;]*[A-Za-z]" => "", "\r\n" => "\n")
+    shown(line) = (parts = filter(!isempty, split(line, '\r')); isempty(parts) ? "" : String(last(parts)))
+    join((shown(line) for line in split(s, '\n')), '\n')
+end
 
 function _cut_note(s::AbstractString, max::Int)
     s = strip(s)
@@ -260,7 +265,7 @@ function _log_text(m)
 end
 
 function _log_message(log)
-    text = something(_log_text(get(log, "msg", nothing)), "")
+    text = something(_log_text(get(log, "msg", nothing)), "(not text)")
     kwargs = String[]
     for kv in get(log, "kwargs", ())
         kv isa Union{Tuple,AbstractVector} && length(kv) == 2 || continue

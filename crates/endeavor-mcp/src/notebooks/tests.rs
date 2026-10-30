@@ -1020,6 +1020,33 @@ fn what_a_julia_cell_printed_and_logged_reaches_the_agent() {
 }
 
 #[test]
+fn a_runs_notes_are_folded_and_capped() {
+    // A run of every cell would send back what each one printed, and a @warn in a function many
+    // cells call comes back once per cell: the same note is one line, warnings come first, and the
+    // reply stops at RUN_NOTES_MAX lines or RUN_NOTES_BYTES, pointing to read_cell.
+    let s = setup();
+    let ids: Vec<String> = (0..14).map(|i| format!("{i:08}-0000-0000-0000-000000000000")).collect();
+    let cells: Vec<(&str, &str)> = ids.iter().map(|id| (id.as_str(), "x")).collect();
+    s.engine.open(NB, "/n/a.jl", &cells);
+    s.engine.with(NB, |nb| {
+        for (i, c) in nb.cells.iter_mut().enumerate() {
+            c.notes = vec![format!("printed::{}", format!("line {i} ").repeat(60)), "logged_warning::2 plots have no yield recorded and were left out".into()];
+        }
+    });
+    let ran = s.call("", "run_all_cells", json!({ "notebook_id": NB, "wait_for_completion": true })).unwrap();
+    let warnings: Vec<&str> = ran["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+    let notes: Vec<&&str> = warnings.iter().filter(|w| w.starts_with("printed::") || w.starts_with("logged_")).collect();
+    assert_eq!(notes[0], &format!("logged_warning::Cells {}: 2 plots have no yield recorded and were left out", ids.join(", ")), "{ran}");
+    assert_eq!(warnings.iter().filter(|w| w.starts_with("logged_warning::")).count(), 1, "{ran}");
+    assert!(notes.len() <= 10 && notes.iter().map(|n| n.len()).sum::<usize>() <= 4_000, "{ran}");
+    let cut = warnings.iter().find(|w| w.starts_with("notes_cut::")).unwrap_or_else(|| panic!("{ran}"));
+    assert!(cut.contains("more notes from this run are not shown; read_cell"), "{cut}");
+    // Every cell's notes are still in read_cell.
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": ids[13] })).unwrap();
+    assert_eq!(read["notes"].as_array().unwrap().len(), 2, "{read}");
+}
+
+#[test]
 fn an_edit_the_user_didnt_let_run_is_kept_staged() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use super::{Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, cell_id_in, uuid_value};
+use super::{Cell, Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, cell_id_in, uuid_value};
 use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
 use wire::backend::Backend;
@@ -46,8 +46,13 @@ pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has
 const RECEIPT_TEXT_MAX: usize = 2_000;
 /// The same for a cell that ran along with the ones a run asked for (`Ran::along`).
 const DEPENDENT_TEXT_MAX: usize = 200;
-/// The notes a run's reply leaves out for a cell that only ran along; `read_cell` has them.
+/// The notes a run's reply leaves out for a cell that only ran along, and gives after the
+/// others; `read_cell` has them.
 const QUIET_NOTES: [&str; 2] = ["printed", "logged_info"];
+/// How many notes a run's reply carries, and how many bytes of them: a run of every cell
+/// (`run_all_cells`) would otherwise send back what each one printed.
+const RUN_NOTES_MAX: usize = 10;
+const RUN_NOTES_BYTES: usize = 4_000;
 /// How many of a session's calls a read or write of a cell counts as recent: within them, `read_cell`
 /// leaves out code it hasn't changed (`code_unchanged`), as the agent still has it.
 const RECENT_CALLS: u64 = 10;
@@ -640,19 +645,8 @@ impl Call<'_> {
         // (#207), and what a Pluto cell printed and logged, such as a `@warn`
         // that rows were dropped (#257): an agent that doesn't see them reads a
         // wrong result as right.
-        for id in ran.iter().filter(|id| !still_running.contains(id)) {
-            if let Some(cell) = nb.cells.get(id).filter(|c| !c.running && !c.queued) {
-                for note in &cell.notes {
-                    let (kind, text) = note.split_once("::").unwrap_or(("note", note));
-                    // What a cell that only ran along printed or logged as info is the agent's to
-                    // read: a run of a cell many others read would send back each one's (#256).
-                    if along.contains(id) && QUIET_NOTES.contains(&kind) {
-                        continue;
-                    }
-                    warnings.push(format!("{kind}::Cell {id}: {text}"));
-                }
-            }
-        }
+        let finished: Vec<(&String, &Cell)> = ran.iter().filter(|id| !still_running.contains(id)).filter_map(|id| Some((id, nb.cells.get(id).filter(|c| !c.running && !c.queued)?))).collect();
+        warnings.extend(run_notes(&finished, &along));
         let pending = self.pending_run(&nb);
         // The notebook's order isn't in it: two lists of every cell's id grow
         // with the notebook and come back on every change, and an agent that
@@ -2072,4 +2066,41 @@ pub(super) fn tool_json(reply: Reply) -> Value {
         Reply::Json(value) => value,
         Reply::Image { meta, .. } => meta,
     }
+}
+
+/// The notes of a run's cells as the reply's warnings, "kind::Cell <id>: text". The same note on
+/// several cells (a `@warn` in a function they all call) is one line, "kind::Cells <id>, <id>:
+/// text". Errors, warnings and Ember's notes come first, then `QUIET_NOTES`, which a cell that
+/// only ran along doesn't give. At most `RUN_NOTES_MAX` lines and `RUN_NOTES_BYTES`, then a
+/// `notes_cut` line.
+fn run_notes(cells: &[(&String, &Cell)], along: &[String]) -> Vec<String> {
+    let mut folded: Vec<(&str, &str, Vec<&str>)> = Vec::new();
+    for (id, cell) in cells {
+        for note in &cell.notes {
+            let (kind, text) = note.split_once("::").unwrap_or(("note", note));
+            if along.contains(id) && QUIET_NOTES.contains(&kind) {
+                continue;
+            }
+            match folded.iter_mut().find(|(k, t, _)| *k == kind && *t == text) {
+                Some((_, _, ids)) => ids.push(id),
+                None => folded.push((kind, text, vec![id])),
+            }
+        }
+    }
+    folded.sort_by_key(|(kind, _, _)| QUIET_NOTES.contains(kind));
+    let (mut lines, mut bytes) = (Vec::new(), 0);
+    for (shown, (kind, text, ids)) in folded.iter().enumerate() {
+        let line = match &ids[..] {
+            [id] => format!("{kind}::Cell {id}: {text}"),
+            ids => format!("{kind}::Cells {}: {text}", ids.join(", ")),
+        };
+        if lines.len() == RUN_NOTES_MAX || bytes + line.len() > RUN_NOTES_BYTES {
+            let left = folded.len() - shown;
+            lines.push(format!("notes_cut::{left} more notes from this run are not shown; read_cell lists each cell's notes"));
+            break;
+        }
+        bytes += line.len();
+        lines.push(line);
+    }
+    lines
 }
