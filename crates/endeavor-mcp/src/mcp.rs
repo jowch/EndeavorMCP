@@ -137,9 +137,10 @@ pub fn changes_notebook(tool: &str) -> bool {
 
 /// Whether the runtime holds a call to `tool` with `arguments` for the
 /// user's answer, in a session whose policy is `policy` and whose edits ask
-/// (`edits`, Manual). Nothing is held in "plan", which refuses writes.
+/// (`edits`, Manual). Nothing is held in "plan", which refuses writes. A large download
+/// (`approve_install`) is held in every other mode, Auto included: the user decides each one.
 pub fn asks_first(tool: &str, arguments: &Value, policy: &str, edits: bool) -> bool {
-    policy != "plan" && ((policy == "ask" && runs_code(tool, arguments)) || (edits && changes_notebook(tool)))
+    policy != "plan" && (tool == "approve_install" || (policy == "ask" && runs_code(tool, arguments)) || (edits && changes_notebook(tool)))
 }
 
 /// A session's policy as the app set it.
@@ -1264,7 +1265,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (33, "03b6d0cbae71752d"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (35, "03b6d0cbae71752d"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1311,7 +1312,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (33, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (35, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]
@@ -1362,7 +1363,8 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         assert_eq!(names(ask("tools/list", false))[0], "notebook_guide");
         assert_eq!(ask("tools/list", false)["tools"][0]["annotations"]["readOnlyHint"], true);
 
-        assert!(ask("initialize", true).get("instructions").is_none(), "Claude Code has the plugin's skills");
+        let told = ask("initialize", true)["instructions"].as_str().unwrap().to_owned();
+        assert!(told.starts_with("Before your first notebook tool call in a session, load the `endeavor-notebooks` skill") && !told.contains("notebook_guide"), "Claude Code has the plugin's skills: {told}");
         assert!(!names(ask("tools/list", true)).contains(&"notebook_guide".to_owned()));
         assert!(is_tool("notebook_guide") && is_tool("edit_cell") && is_tool("run_shell") && !is_tool("edit"));
     }
@@ -1451,6 +1453,10 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
         assert!(open(true, "ask") && !open(false, "ask") && !open(true, "auto") && !open(true, "plan"), "opening asks only when it runs the notebook");
         assert!(held("move_cell", "auto", true) && !held("execute_cell", "auto", true), "Manual with runs allowed still asks before changes");
         assert!(!held("edit_cell", "plan", true), "plan refuses it instead");
+        for (policy, edits) in [("ask", false), ("ask", true), ("auto", false), ("auto", true)] {
+            assert!(held("approve_install", policy, edits), "a large download asks in {policy} (edits {edits})");
+        }
+        assert!(!held("approve_install", "plan", false));
     }
 
     #[test]

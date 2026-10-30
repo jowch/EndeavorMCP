@@ -107,6 +107,11 @@ check("install calls that didn't run: one note naming their packages, and the ag
         grepl("call preview_package_update", n, fixed = TRUE))
 check("an install call that names no package: the note says packages",
       grepl("it installs packages from", A$cell_notes(list(from_lock = "")), fixed = TRUE))
+n <- A$cell_notes(list(untracked_files = c("readRDS", "read_csv")))
+check("readers given no file Ember can watch: one note naming them, worded as Ember's page words it",
+      length(n) == 1 && startsWith(n, "untracked_file::Ember can't tell which file this cell read through readRDS(), read_csv(), so it doesn't rerun when the file changes.") &&
+        grepl("Pass a file path or a file() connection", n, fixed = TRUE))
+check("no reader left unresolved: no note", length(A$cell_notes(list(untracked_files = character()))) == 0)
 
 # ---- snapshot_cell ----
 view <- function(...) modifyList(list(id = "c", code = "x <- 1", kind = "code", status = "success", errors = list(), runtime = 0.1, last_run = 100, disabled = FALSE, disabled_by = NA_character_), list(...))
@@ -170,8 +175,8 @@ check("a proposal with no `asked` (an older Ember) is found by its date",
 check("no proposal: NULL", is.null(A$date_proposal(NULL, "2026-10-22")))
 
 # ---- input_line ----
-input <- function(spec, value = spec$value, default = spec$value, name = "n", bound = TRUE, reason = NULL) {
-  list(name = name, bound = bound, reason = reason, spec = spec, default = default, value = value)
+input <- function(spec, value = spec$value, default = spec$value, name = "n", bound = TRUE, reason = NULL, output = bound) {
+  list(name = name, bound = bound, reason = reason, spec = spec, default = default, value = value, output = output)
 }
 slider <- list(type = "slider", value = 100, min = 10, max = 500, step = 10, label = NULL)
 check("a slider says its range, step and value",
@@ -190,6 +195,11 @@ check("a dropdown names its labels and the values to send",
 radio <- list(type = "radio", value = "a", choices = c("a", "b"), labels = c("a", "b"))
 check("a choice whose label is the value is shown once",
       identical(A$input_line(input(radio)), "n: radio of \"a\", \"b\", value \"a\""))
+check("a bound input that isn't on its cell's last line says the user can't move it (#280)",
+      identical(A$input_line(input(slider, output = FALSE)),
+                "n: slider 10 to 500, step 10, value 100 Not movable on the page: only the input on the cell's last line is. Give it its own cell, or group the cell's inputs with input_list()."))
+check("an Ember that doesn't report `output` (before Ember #446) gets no note",
+      identical(A$input_line(input(slider, output = NULL)), "n: slider 10 to 500, step 10, value 100"))
 check("an input read in another cell isn't bound, and says how to fix it",
       grepl("Not bound: read `n` in another cell.", A$input_line(input(slider, bound = FALSE, reason = "read_elsewhere")), fixed = TRUE))
 check("an input not assigned at the top of a cell has no name",

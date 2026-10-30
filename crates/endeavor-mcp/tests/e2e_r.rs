@@ -785,8 +785,10 @@ fn an_r_notebook_through_the_runtime() {
             assert!(started.elapsed() < Duration::from_secs(600), "the notebook never ran: {ran}");
             agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
         }
+        // Only m, on the cell's last line, can be moved on the page (EndeavorMCP #280).
+        const UNMOVABLE: &str = " Not movable on the page: only the input on the cell's last line is. Give it its own cell, or group the cell's inputs with input_list().";
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "I" }));
-        assert_eq!(read["inputs"], json!(["n: slider 1 to 10, value 5", "m: select of A = 1, B = 2, value 1"]), "{read}");
+        assert_eq!(read["inputs"], json!([format!("n: slider 1 to 10, value 5{UNMOVABLE}"), "m: select of A = 1, B = 2, value 1"]), "{read}");
         let output = read["output"].clone();
 
         let set = agent.ok("set_input", json!({ "notebook_id": id, "name": "n", "value": 7, "wait_for_completion": true }));
@@ -796,7 +798,7 @@ fn an_r_notebook_through_the_runtime() {
         let set = agent.ok("set_input", json!({ "notebook_id": id, "name": "m", "value": 2, "wait_for_completion": true }));
         assert!(set["outputs"]["changed"][0]["output_summary"].as_str().unwrap().contains("102"), "{set}");
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "I" }));
-        assert_eq!(read["inputs"], json!(["n: slider 1 to 10, value 7 (default 5)", "m: select of A = 1, B = 2, value 2 (default 1)"]), "{read}");
+        assert_eq!(read["inputs"], json!([format!("n: slider 1 to 10, value 7 (default 5){UNMOVABLE}"), "m: select of A = 1, B = 2, value 2 (default 1)"]), "{read}");
         assert_eq!(read["output"], output, "the input's own cell didn't rerun: {read}");
 
         let (refused, said) = agent.call("set_input", json!({ "notebook_id": id, "name": "n", "value": 70 }));
@@ -818,6 +820,22 @@ fn an_r_notebook_through_the_runtime() {
         let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": "G", "wait_for_completion": true }));
         assert!(ran["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("untracked_read::Cell G: Ember can't tell")), "{ran}");
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "A" })).get("notes"), None);
+    });
+
+    step("a reader given no file Ember can watch says Ember can't tell which file it read; a path built in code is watched and has no note (Ember #513, #264)", || {
+        std::fs::write(folder.join("data.csv"), "x\n1\n").unwrap();
+        std::fs::write(folder.join("files.R"), "### An Ember notebook ###\n\n# %% id=P\nd <- read.csv(file.path(getwd(), \"data.csv\"))\n\n# %% id=U\nv <- try(readRDS(42), silent = TRUE)\n\n# /// cell order\n# P\n# U\n# ///\n").unwrap();
+        let mut agent = Agent::new(port, &token);
+        agent.initialize();
+        let id = agent.ok("open_notebook", json!({ "path": "files.R" }))["notebook_id"].as_str().unwrap().to_owned();
+        agent.ok("allow_execution", json!({ "notebook_id": id }));
+        agent.ok("read_notebook_code", json!({ "notebook_id": id }));
+        let ran = agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
+        let warnings: Vec<&str> = ran["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).filter(|w| w.starts_with("untracked_file::")).collect();
+        assert!(warnings.len() == 1 && warnings[0].starts_with("untracked_file::Cell U: Ember can't tell which file this cell read through readRDS()"), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "U" }));
+        assert!(read["notes"][0].as_str().is_some_and(|n| n.starts_with("untracked_file::Ember can't tell which file this cell read through readRDS(), so it doesn't rerun when the file changes.")), "{read}");
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "P" })).get("notes"), None);
     });
 
     step("an install call doesn't run: the lock answers it, and the cell's note says so (Ember #79, #125)", || {
