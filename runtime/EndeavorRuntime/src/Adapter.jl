@@ -181,6 +181,8 @@ function _snapshot_cell(cell)
         # and cells Pluto comments out in the file.
         "hidden"   => _is_manifest_cell(cell.cell_id) || _is_fake_bind_shim(cell) || Pluto.must_be_commented_in_file(cell),
         "markdown" => _is_markdown_cell(cell),
+        # A running cell's logs are its current run's so far, not its last run's.
+        "notes"    => cell.running ? String[] : _cell_notes(cell),
     )
     err = _cell_output_error(cell)
     err !== nothing && (d["error"] = err)

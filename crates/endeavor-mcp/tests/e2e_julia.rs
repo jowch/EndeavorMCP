@@ -302,6 +302,15 @@ fn the_runtime_end_to_end() {
         assert_eq!(ran["outputs"]["changed"][0]["output_text"], json!("2-element Vector{Float64}:\n 1.5\n 2.5"), "a run's receipt: {ran}");
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": rich }));
         assert_eq!(read["output_text"], json!("2-element Vector{Float64}:\n 1.5\n 2.5"), "a tree output read as text: {read}");
+        // What a cell printed and logged, which Pluto keeps apart from its output (#257).
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "begin\n    println(\"fitting\")\n    @warn \"3 rows dropped\" n = 3\n    @info \"loaded\"\n    7\nend", "after_cell_id": rich }));
+        let logs = added["cell_id"].as_str().unwrap().to_owned();
+        let ran = rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": logs, "wait_for_completion": true }));
+        for wanted in [format!("logged_warning::Cell {logs}: 3 rows dropped (n = 3)"), format!("logged_info::Cell {logs}: loaded"), format!("printed::Cell {logs}: fitting")] {
+            assert!(ran["warnings"].as_array().unwrap().contains(&json!(wanted)), "a run's receipt: {wanted} in {ran}");
+        }
+        let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": logs }));
+        assert_eq!((&read["output"], &read["notes"]), (&json!("7"), &json!(["logged_warning::3 rows dropped (n = 3)", "logged_info::loaded", "printed::fitting"])), "{read}");
         (notebook, path, cell)
     });
 

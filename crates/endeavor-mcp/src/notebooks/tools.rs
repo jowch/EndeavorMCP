@@ -46,6 +46,8 @@ pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has
 const RECEIPT_TEXT_MAX: usize = 2_000;
 /// The same for a cell that ran along with the ones a run asked for (`Ran::along`).
 const DEPENDENT_TEXT_MAX: usize = 200;
+/// The notes a run's reply leaves out for a cell that only ran along; `read_cell` has them.
+const QUIET_NOTES: [&str; 2] = ["printed", "logged_info"];
 /// How many of a session's calls a read or write of a cell counts as recent: within them, `read_cell`
 /// leaves out code it hasn't changed (`code_unchanged`), as the agent still has it.
 const RECENT_CALLS: u64 = 10;
@@ -635,11 +637,18 @@ impl Call<'_> {
             .collect::<Result<_, String>>()?;
         // The notes Ember shows under a cell this run ran, such as a value
         // another cell defines changed in place, whose readers don't rerun
-        // (#207): an agent that doesn't see them reads a wrong result as right.
+        // (#207), and what a Pluto cell printed and logged, such as a `@warn`
+        // that rows were dropped (#257): an agent that doesn't see them reads a
+        // wrong result as right.
         for id in ran.iter().filter(|id| !still_running.contains(id)) {
             if let Some(cell) = nb.cells.get(id).filter(|c| !c.running && !c.queued) {
                 for note in &cell.notes {
                     let (kind, text) = note.split_once("::").unwrap_or(("note", note));
+                    // What a cell that only ran along printed or logged as info is the agent's to
+                    // read: a run of a cell many others read would send back each one's (#256).
+                    if along.contains(id) && QUIET_NOTES.contains(&kind) {
+                        continue;
+                    }
                     warnings.push(format!("{kind}::Cell {id}: {text}"));
                 }
             }

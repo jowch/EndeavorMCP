@@ -997,6 +997,29 @@ fn a_cells_notes_reach_the_agent_in_the_runs_warnings_and_in_read_cell() {
 }
 
 #[test]
+fn what_a_julia_cell_printed_and_logged_reaches_the_agent() {
+    // Pluto shows a cell's println and @warn under it, apart from its output; an agent that
+    // doesn't see a "rows dropped" warning reports the result as clean (#257). For a cell that
+    // only ran along, a run's reply keeps its errors and warnings and leaves the rest to read_cell.
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + 1")]);
+    let notes = ["logged_warning::3 rows dropped (n = 3)", "logged_info::loaded", "printed::fitting\ndone"];
+    s.engine.with(NB, |nb| nb.cells.iter_mut().for_each(|c| c.notes = notes.iter().map(|n| n.to_string()).collect()));
+    s.read("", NB, X);
+    s.engine.with(NB, |nb| nb.reruns_besides = vec![Y.into()]);
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    let warnings: Vec<&str> = ran["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+    for note in notes {
+        let (kind, text) = note.split_once("::").unwrap();
+        assert!(warnings.contains(&format!("{kind}::Cell {X}: {text}").as_str()), "{ran}");
+    }
+    assert!(warnings.contains(&format!("logged_warning::Cell {Y}: 3 rows dropped (n = 3)").as_str()), "{ran}");
+    assert!(!warnings.iter().any(|w| w.contains(Y) && (w.starts_with("printed::") || w.starts_with("logged_info::"))), "{ran}");
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    assert_eq!(read["notes"], json!(notes), "{read}");
+}
+
+#[test]
 fn an_edit_the_user_didnt_let_run_is_kept_staged() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);
