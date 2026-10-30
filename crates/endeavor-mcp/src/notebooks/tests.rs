@@ -1009,11 +1009,12 @@ fn what_a_julia_cell_printed_and_logged_reaches_the_agent() {
     s.engine.with(NB, |nb| nb.reruns_besides = vec![Y.into()]);
     let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
     let warnings: Vec<&str> = ran["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
-    for note in notes {
+    for note in &notes[1..] {
         let (kind, text) = note.split_once("::").unwrap();
         assert!(warnings.contains(&format!("{kind}::Cell {X}: {text}").as_str()), "{ran}");
     }
-    assert!(warnings.contains(&format!("logged_warning::Cell {Y}: 3 rows dropped (n = 3)").as_str()), "{ran}");
+    // The same warning on both cells is one line.
+    assert!(warnings.contains(&format!("logged_warning::Cells {X}, {Y}: 3 rows dropped (n = 3)").as_str()), "{ran}");
     assert!(!warnings.iter().any(|w| w.contains(Y) && (w.starts_with("printed::") || w.starts_with("logged_info::"))), "{ran}");
     let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
     assert_eq!(read["notes"], json!(notes), "{read}");
