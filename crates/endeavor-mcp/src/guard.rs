@@ -155,13 +155,12 @@ pub fn serve_guarded(
                 && message["params"]["name"] == REQUEST_RESTART
             {
                 // The answer can wait on the user: `mcp::reply` streams it to an agent that takes a stream.
-                crate::mcp::reply(&request, &mut client, &message, request.keeps_alive(), false, |message, gone| {
+                // The connection closes after it: once the user restarts, `upstream` leads to the runtime
+                // that stopped, and the agent's next request must come through the listener again.
+                crate::mcp::reply(&request, &mut client, &message, false, false, |message, gone| {
                     restart_call(message, &session, restart, gone).map(|reply| to_json(&reply))
                 })?;
-                if !request.keeps_alive() {
-                    return Ok(());
-                }
-                continue;
+                return Ok(());
             }
             let params = &message["params"];
             let refusal = (message["method"] == "tools/call" && !message["id"].is_null())
@@ -251,6 +250,7 @@ fn relay_result(request: &Head, client: &mut wire::Shared, from_runtime: &mut Bu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::net::TcpListener;
 
     /// A runtime that answers every request with what it was sent, and an
@@ -570,11 +570,15 @@ mod tests {
         assert_eq!(result.get("isError"), None);
         assert!(result["content"][0]["text"].as_str().unwrap().starts_with("The user restarted Endeavor on lab."));
         assert!(seen.try_recv().is_err(), "the runtime never saw it");
+        let mut rest = Vec::new();
+        assert_eq!(client.read_to_end(&mut rest).unwrap(), 0, "the connection closes after the answer: the runtime it led to may be gone");
 
+        let (mut client, seen, asked) = with_restart(RestartAnswer::Restarting);
         let no_reason = rpc(&mut client, "tools/call", json!({ "name": REQUEST_RESTART, "arguments": {} }));
         assert_eq!(no_reason["isError"], true);
         assert!(asked.try_recv().is_err(), "the user isn't asked without a reason");
 
+        let (mut client, seen, _asked) = with_restart(RestartAnswer::Restarting);
         assert_eq!(rpc(&mut client, "tools/call", json!({ "name": "read_cell", "arguments": {} }))["content"][0]["text"], "ran", "other calls pass");
         assert_eq!(seen.recv().unwrap(), "tools/call");
     }
