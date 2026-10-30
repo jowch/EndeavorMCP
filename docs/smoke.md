@@ -240,6 +240,7 @@ something subtle, make it soft.
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
 | `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: the agent waits through it and reports the table (#58) |
 | `N10-big-notebook` | change one value in an open notebook of 42 cells and report a count | what a larger notebook costs: reads, and each change's reply |
+| `N11-logged-warning` | change a cutoff in an open notebook whose filtering cell logs a `@warn` that rows were left out, and report the mean | that what a cell logs reaches the agent, and it passes a warning on (#257) |
 | `L1-long-analysis` (long) | a 96-well growth plate, from loading the data to a written summary, in twelve messages with plots; the plate has a failed well, a contaminated one, a saturated reading and gaps | what a real-sized session costs: requests, context at the end, and which replies fill it. About 100 requests and 18 minutes with Claude Code's default model, so it runs only with `--long` |
 | `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
 | `R2-first-package` | a dplyr table and its mean in a new R notebook | R's first package install: the agent waits through it and doesn't run the cells again; when the install outlasts a waited run, the tools say R is getting dplyr ready (#78) |
