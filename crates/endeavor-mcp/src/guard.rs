@@ -573,7 +573,7 @@ mod tests {
         let mut rest = Vec::new();
         assert_eq!(client.read_to_end(&mut rest).unwrap(), 0, "the connection closes after the answer: the runtime it led to may be gone");
 
-        let (mut client, seen, asked) = with_restart(RestartAnswer::Restarting);
+        let (mut client, _seen, asked) = with_restart(RestartAnswer::Restarting);
         let no_reason = rpc(&mut client, "tools/call", json!({ "name": REQUEST_RESTART, "arguments": {} }));
         assert_eq!(no_reason["isError"], true);
         assert!(asked.try_recv().is_err(), "the user isn't asked without a reason");
