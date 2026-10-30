@@ -13,6 +13,8 @@ The user sees the notebook in a pane next to the chat. `new_notebook` and `open_
 
 When a reply talks about a particular cell, link it, and the user can click to scroll the notebook to that cell: `[the outlier filter](notebook://pluto/{notebook_id}/cell/{cell_id})`, or `notebook://ember/…` in an R notebook. Use the cell's real id; the link text is yours, a few words saying what the cell does.
 
+The app names a cell, in its cards and lists, by its first line when that is a `# ` comment in words (`# Growth curves by strain`), else by the name it defines. When you add a code cell that defines no name, such as a plot or a check, start it with such a comment of at most four words, and keep it true when you change the cell.
+
 ## Approval
 
 The user chooses when the app asks them first, and a call that asks waits up to 45 seconds for their answer (20 for opening or creating a notebook).
