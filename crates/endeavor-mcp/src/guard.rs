@@ -4,10 +4,14 @@
 //! passing everything else through unchanged. And where the app can draw a
 //! notebook, it shows the agent a cell's output as the notebook draws it when
 //! the runtime has no picture of it (`Snapshot`). On a runtime from before R
-//! notebooks, it says why an R notebook's path is refused.
+//! notebooks, it says why an R notebook's path is refused. Where the client can
+//! ask the user to restart the runtime (`AskRestart`), it adds `request_restart`
+//! to the agent's tools and answers it here, so it works whatever build the
+//! runtime is, and while the runtime is gone.
 
 use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -21,6 +25,99 @@ use crate::notebooks::{screenshot_result, short_cell_id, snapshot_may_help, uuid
 /// give the agent a blank picture. In safe preview it is asked for any output, text too.
 pub type Snapshot = dyn Fn(&str, &str, &str) -> Option<String> + Send + Sync;
 
+/// The agent's tool that asks the user to restart the runtime, which the client answers (`AskRestart`).
+pub const REQUEST_RESTART: &str = "request_restart";
+
+/// Show the user an agent's request to restart the runtime and wait for their answer, given the
+/// session's key, the agent's reason, a check to call while waiting (whether the agent hung up;
+/// it also keeps the agent's wait going), and when to stop waiting. Nothing restarts unless the
+/// user agrees, in any mode: the client restarts it itself once they do.
+pub type AskRestart = dyn Fn(&str, &str, &dyn Fn() -> bool, Instant) -> RestartAnswer + Send + Sync;
+
+/// What the user did with a `request_restart`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RestartAnswer {
+    /// They pressed Restart, and the runtime is restarting.
+    Restarting,
+    /// They chose not to.
+    Declined,
+    /// Not yet, by the deadline (or the agent hung up): the question stays on their screen.
+    Unanswered,
+    /// The client can't ask now: why, as the agent reads it.
+    Unavailable(String),
+}
+
+/// `request_restart`'s entry in `tools/list`. Its words follow those for a kept older runtime
+/// (`no_r_text`'s callers): small models take a named way to stop something as a recipe, so it
+/// says plainly that only the user's yes restarts anything.
+pub fn restart_schema() -> Value {
+    json!({
+        "name": REQUEST_RESTART,
+        "description": "Ask the user whether to restart Endeavor where this session's notebook runs (on this computer or the server), which stops every notebook open there and starts them again. \
+Use it only when a restart would fix what you can't: a tool said Endeavor there was started by an older version and keeps running as it is, or Julia or R stopped unexpectedly, couldn't start, or stopped answering. \
+Not for errors in the notebook's own code, and not to start one notebook afresh (`restart_notebook` does that). \
+Don't stop or restart it any other way yourself: this shows the user your reason with a Restart button, and nothing restarts unless they press it. \
+The result says whether they restarted, declined, or haven't answered yet.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "reason": { "type": "string", "description": "Why a restart would help, in one short plain sentence for the user, such as \"Julia stopped answering while `fit` ran.\"" }
+            },
+            "required": ["reason"]
+        },
+        "annotations": { "readOnlyHint": false }
+    })
+}
+
+/// The result of a `request_restart` on `place`, from the user's answer.
+fn restart_result(answer: RestartAnswer, place: &str) -> Value {
+    match answer {
+        RestartAnswer::Restarting => json!({ "content": [{ "type": "text", "text": format!(
+            "The user restarted Endeavor on {place}. It takes a moment to start again; a notebook tool called meanwhile says so. \
+The notebooks that were running there open and run again. Then call `list_notebooks` to find this session's notebook, and `open_notebook` if it isn't open."
+        ) }] }),
+        RestartAnswer::Declined => tool_error(&format!(
+            "ArgumentError: not_approved::The user chose not to restart Endeavor on {place}, so nothing restarted. Don't ask again for the same reason, and don't stop it yourself: tell the user what won't work until it restarts."
+        ), false),
+        RestartAnswer::Unanswered => tool_error(&format!(
+            "ArgumentError: waiting_for_user::The user hasn't answered yet, so nothing restarted. The question is still on their screen, and Endeavor on {place} restarts if they press Restart. \
+Don't stop or restart it any other way: tell the user why a restart would help, and end your turn."
+        ), false),
+        RestartAnswer::Unavailable(why) => tool_error(&why, false),
+    }
+}
+
+/// How long a `request_restart` waits for the user: under the 60 seconds agents give a call.
+const RESTART_WAIT: Duration = Duration::from_secs(50);
+
+/// The reply to `message` when it is a `request_restart` call (asking the user through `restart`'s
+/// hook, on `restart`'s place) or a `tools/list` reply to add the tool to; None for anything else.
+/// `gone` is the agent's wait (`mcp::post`'s check).
+pub(crate) fn restart_call(message: &Value, session: &str, restart: (&AskRestart, &str), gone: &dyn Fn() -> bool) -> Option<Value> {
+    if message["method"] != "tools/call" || message["id"].is_null() || message["params"]["name"] != REQUEST_RESTART {
+        return None;
+    }
+    let (ask, place) = restart;
+    let reason = message["params"]["arguments"]["reason"].as_str().map(str::trim).unwrap_or_default();
+    let result = if reason.is_empty() {
+        tool_error("ArgumentError: invalid_argument::Give a `reason`: one short sentence for the user on why a restart would help.", false)
+    } else {
+        restart_result(ask(session, reason, gone, Instant::now() + RESTART_WAIT), place)
+    };
+    Some(json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }))
+}
+
+/// `tools/list`'s `result` with `request_restart` added, once.
+pub(crate) fn with_restart_tool(result: &Value) -> Option<Value> {
+    let tools = result["tools"].as_array()?;
+    if tools.iter().any(|t| t["name"] == REQUEST_RESTART) {
+        return None;
+    }
+    let mut result = result.clone();
+    result["tools"].as_array_mut()?.push(restart_schema());
+    Some(result)
+}
+
 /// Serve `client`'s requests through `upstream`, a connection to the runtime's
 /// port, one at a time. An agent's MCP tool call that `refuse` refuses, given
 /// the session's key (its `X-Endeavor-Session`), the tool and its arguments,
@@ -31,7 +128,16 @@ pub type Snapshot = dyn Fn(&str, &str, &str) -> Option<String> + Send + Sync;
 /// the runtime has no picture for gets the snapshot instead (`relay_result`). With
 /// `no_r`, a runtime's refusal of an R notebook's path for want of R notebooks
 /// (`mcp::refuses_r_for_want_of_it`), which says only that the path must end in .jl, gets its text instead.
-pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&str, &str, &Value) -> Option<String>, snapshot: Option<&Snapshot>, no_r: Option<&dyn Fn() -> String>) -> io::Result<()> {
+/// With `restart` (the client's hook and the place's name), `tools/list` gets `request_restart`, and
+/// a call to it is answered here (`restart_call`): the runtime never sees it.
+pub fn serve_guarded(
+    client: TcpStream,
+    upstream: TcpStream,
+    refuse: &dyn Fn(&str, &str, &Value) -> Option<String>,
+    snapshot: Option<&Snapshot>,
+    no_r: Option<&dyn Fn() -> String>,
+    restart: Option<(&AskRestart, &str)>,
+) -> io::Result<()> {
     let mut client = wire::Shared::new(client);
     let mut reader = BufReader::new(client.clone());
     let mut to_runtime = wire::Shared::new(upstream);
@@ -44,6 +150,19 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
             let body = http::read_body(&mut reader, request.request_body()?)?;
             let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let session = request.header("X-Endeavor-Session").unwrap_or_default().to_owned();
+            if let Some(restart) = restart
+                && message["method"] == "tools/call"
+                && message["params"]["name"] == REQUEST_RESTART
+            {
+                // The answer can wait on the user: `mcp::reply` streams it to an agent that takes a stream.
+                crate::mcp::reply(&request, &mut client, &message, request.keeps_alive(), false, |message, gone| {
+                    restart_call(message, &session, restart, gone).map(|reply| to_json(&reply))
+                })?;
+                if !request.keeps_alive() {
+                    return Ok(());
+                }
+                continue;
+            }
             let params = &message["params"];
             let refusal = (message["method"] == "tools/call" && !message["id"].is_null())
                 .then(|| refuse(&session, params["name"].as_str().unwrap_or_default(), params.get("arguments").unwrap_or(&Value::Null)))
@@ -60,9 +179,10 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
             let (tool, arguments) = (params["name"].as_str().unwrap_or_default(), params.get("arguments").unwrap_or(&Value::Null));
             let view = snapshot.filter(|_| call && tool == "view_cell_output");
             let no_r = no_r.filter(|_| call && crate::mcp::names_r_notebook(tool, arguments));
+            let list = restart.is_some() && message["method"] == "tools/list" && !message["id"].is_null();
             request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Transfer-Encoding") && !name.eq_ignore_ascii_case("Content-Length"));
             request.headers.push(("Content-Length".into(), body.len().to_string()));
-            if view.is_some() || no_r.is_some() {
+            if view.is_some() || no_r.is_some() || list {
                 // Only a call that waits on the user streams its answer; this keeps the answer one JSON body even so.
                 request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Accept"));
                 request.headers.push(("Accept".into(), "application/json".into()));
@@ -70,6 +190,9 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
             request.write_to(&mut to_runtime)?;
             to_runtime.write_all(&body)?;
             let instead = |result: &Value| -> Option<Value> {
+                if list {
+                    return with_restart_tool(result);
+                }
                 if let Some(snapshot) = view
                     && snapshot_may_help(result)
                 {
@@ -80,7 +203,7 @@ pub fn serve_guarded(client: TcpStream, upstream: TcpStream, refuse: &dyn Fn(&st
                 let no_r = no_r.filter(|_| crate::mcp::refuses_r_for_want_of_it(tool, arguments, result))?;
                 Some(tool_error(&no_r(), false))
             };
-            if view.is_some() || no_r.is_some() {
+            if view.is_some() || no_r.is_some() || list {
                 if !relay_result(&request, &mut client, &mut from_runtime, &instead)? {
                     return Ok(());
                 }
@@ -160,7 +283,7 @@ mod tests {
         let upstream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         std::thread::spawn(move || {
             let refuse = |session: &str, tool: &str, _: &Value| (session == "7" && tool == "execute_cell").then(|| "ArgumentError: older_runtime::No runs.".to_owned());
-            let _ = serve_guarded(accepted, upstream, &refuse, None, None);
+            let _ = serve_guarded(accepted, upstream, &refuse, None, None, None);
         });
         (client, seen)
     }
@@ -278,7 +401,7 @@ mod tests {
                 asked_tx.send(format!("{session} {notebook} {cell}")).unwrap();
                 (cell != UNDRAWN).then(|| "c25hcHNob3Q=".to_owned())
             };
-            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, Some(&snapshot), None);
+            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, Some(&snapshot), None, None);
         });
         (client, accepts, asked)
     }
@@ -363,7 +486,7 @@ mod tests {
         let upstream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         std::thread::spawn(move || {
             let no_r = || "unsupported::No R here; restart it.".to_owned();
-            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, None, older.then_some(&no_r as &dyn Fn() -> String));
+            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, None, older.then_some(&no_r as &dyn Fn() -> String), None);
         });
         client
     }
@@ -386,5 +509,99 @@ mod tests {
 
         let mut client = without_r(false);
         assert_eq!(call_tool(&mut client, "new_notebook", "/work/a.R")["message"], "Notebook path must end in .jl: '/work/a.R'", "a runtime of this build's interface answers as it does");
+    }
+
+    /// A runtime that answers `tools/list` with one tool and anything else with what it was sent,
+    /// as JSON, and tells `seen` the method of each message; a client connected to it through
+    /// `serve_guarded` with a restart hook that answers `answer` and tells `asked` what it was asked.
+    fn with_restart(answer: RestartAnswer) -> (TcpStream, std::sync::mpsc::Receiver<String>, std::sync::mpsc::Receiver<String>) {
+        let runtime = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = runtime.local_addr().unwrap().port();
+        let (seen_tx, seen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (socket, _) = runtime.accept().unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut socket = socket;
+            while let Ok(Some(request)) = Head::read(&mut reader) {
+                let body = http::read_body(&mut reader, request.request_body().unwrap()).unwrap();
+                let message: Value = serde_json::from_slice(&body).unwrap();
+                seen_tx.send(message["method"].as_str().unwrap_or_default().to_owned()).unwrap();
+                let result = match message["method"].as_str() {
+                    Some("tools/list") => json!({ "tools": [{ "name": "read_cell" }] }),
+                    _ => json!({ "content": [{ "type": "text", "text": "ran" }] }),
+                };
+                let reply = to_json(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
+                http::respond(&mut socket, "200 OK", Some("application/json"), reply.as_bytes(), true).unwrap();
+            }
+        });
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(front.local_addr().unwrap()).unwrap();
+        let (accepted, _) = front.accept().unwrap();
+        let upstream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (asked_tx, asked) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let asked_tx = std::sync::Mutex::new(asked_tx);
+            let ask = move |session: &str, reason: &str, _: &dyn Fn() -> bool, deadline: Instant| {
+                assert!(deadline > Instant::now(), "it waits a while");
+                asked_tx.lock().unwrap().send(format!("{session} {reason}")).unwrap();
+                answer.clone()
+            };
+            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, None, None, Some((&ask, "lab")));
+        });
+        (client, seen, asked)
+    }
+
+    fn rpc(client: &mut TcpStream, method: &str, params: Value) -> Value {
+        let message = json!({ "jsonrpc": "2.0", "id": 5, "method": method, "params": params }).to_string();
+        let reply = post(client, "/mcp", "7", &message);
+        serde_json::from_str::<Value>(reply.strip_prefix("200 ").unwrap()).unwrap()["result"].clone()
+    }
+
+    #[test]
+    fn the_agent_gets_request_restart_and_the_client_answers_it_not_the_runtime() {
+        let (mut client, seen, asked) = with_restart(RestartAnswer::Restarting);
+        let tools = rpc(&mut client, "tools/list", json!({}));
+        let names: Vec<&str> = tools["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["read_cell", REQUEST_RESTART], "added to the runtime's own");
+        assert_eq!(seen.recv().unwrap(), "tools/list");
+
+        let result = rpc(&mut client, "tools/call", json!({ "name": REQUEST_RESTART, "arguments": { "reason": " Julia stopped answering. " } }));
+        assert_eq!(asked.try_recv().unwrap(), "7 Julia stopped answering.");
+        assert_eq!(result.get("isError"), None);
+        assert!(result["content"][0]["text"].as_str().unwrap().starts_with("The user restarted Endeavor on lab."));
+        assert!(seen.try_recv().is_err(), "the runtime never saw it");
+
+        let no_reason = rpc(&mut client, "tools/call", json!({ "name": REQUEST_RESTART, "arguments": {} }));
+        assert_eq!(no_reason["isError"], true);
+        assert!(asked.try_recv().is_err(), "the user isn't asked without a reason");
+
+        assert_eq!(rpc(&mut client, "tools/call", json!({ "name": "read_cell", "arguments": {} }))["content"][0]["text"], "ran", "other calls pass");
+        assert_eq!(seen.recv().unwrap(), "tools/call");
+    }
+
+    #[test]
+    fn a_declined_or_unanswered_restart_says_not_to_stop_it_another_way() {
+        let text = |answer: RestartAnswer| {
+            let (mut client, _seen, _asked) = with_restart(answer);
+            let result = rpc(&mut client, "tools/call", json!({ "name": REQUEST_RESTART, "arguments": { "reason": "Older version." } }));
+            assert_eq!(result["isError"], true);
+            serde_json::from_str::<Value>(result["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+        let declined = text(RestartAnswer::Declined);
+        assert_eq!(declined["error"], "not_approved");
+        assert!(declined["message"].as_str().unwrap().contains("don't stop it yourself"));
+        let unanswered = text(RestartAnswer::Unanswered);
+        assert_eq!(unanswered["error"], "waiting_for_user");
+        assert!(unanswered["message"].as_str().unwrap().contains("Don't stop or restart it any other way"));
+        assert_eq!(text(RestartAnswer::Unavailable("ArgumentError: restarting::Already restarting.".into()))["message"], "Already restarting.");
+    }
+
+    #[test]
+    fn the_schema_says_only_the_user_restarts() {
+        let schema = restart_schema();
+        let description = schema["description"].as_str().unwrap();
+        assert!(description.contains("nothing restarts unless they press it"));
+        assert!(!description.contains("stop_machine"), "no other way to stop it is named");
+        assert_eq!(schema["inputSchema"]["required"], json!(["reason"]));
     }
 }

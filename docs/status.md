@@ -70,6 +70,13 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   it, from the front and from the app's relay (`client::Listener`). A kept
   older runtime still isn't told to the app's agent up front, and a pathless
   `new_notebook` in an R session on one makes a Pluto notebook (#239).
+  Since 2026-10-30 a client that sets `Listener::set_restart` (the app) gives
+  its agent `request_restart`: the listener adds it to `tools/list` and answers
+  it itself, whatever build the runtime is and while the runtime is away, by
+  asking the client, which shows the user the agent's reason with Restart
+  (`guard::AskRestart`). Nothing restarts without the user's press. The R
+  refusal then names that tool instead of telling the agent to restart Julia
+  (Endeavor #174).
 - The status tool is `session_status` since 2026-10-10 (interface 2); it was
   `pluto_session_status`, a name that told agents every notebook is Pluto's.
   The old name ran the tool, unlisted, for one release (`mcp::RENAMED_TOOLS`);
