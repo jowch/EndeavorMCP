@@ -405,7 +405,9 @@ struct Cell {
     off: bool,
     /// The notes the engine shows under the cell, from its last run or its code, each
     /// "kind::text" like a tool warning: Ember's `changed_in_place`,
-    /// `settings_found`, `load_note` (#207), `untracked_read` (Ember #357) and `untracked_file` (#264). Pluto has none.
+    /// `settings_found`, `load_note` (#207), `untracked_read` (Ember #357) and `untracked_file` (#264);
+    /// Pluto's `logged_error`, `logged_warning`, `logged_info` and `printed`, what the cell's
+    /// `@error`/`@warn`/`@info` and `println` gave (#257).
     notes: Vec<String>,
     /// The inputs (emberui) the cell's last run made, one line each, as `read_cell` shows them:
     /// "n: slider 1 to 10, value 3". Pluto's have none.

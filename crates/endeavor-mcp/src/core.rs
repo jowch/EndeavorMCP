@@ -744,10 +744,6 @@ fn ember_secret() -> Result<String, String> {
 /// it, and update it when R starts (`runtime/r/install.R`).
 pub const EMBER_REPOSITORY: &str = "https://jowch.r-universe.dev";
 
-/// Where Ember's CI publishes its Apple Silicon Mac builds, one release per R version: r-universe has
-/// none (Ember #66). `install.R` installs from them first on an Apple Silicon Mac.
-pub const EMBER_MAC_ARM64: &str = "https://github.com/jowch/Ember/releases/download";
-
 /// How long a call that starts R waits for the check for a newer Ember, or its install, before
 /// answering `r_installing`: as long as Julia's start. ENDEAVOR_TEST_EMBER_WAIT_SECS sets it in
 /// debug builds.
@@ -983,8 +979,6 @@ struct RStarter {
     ember: PathBuf,
     /// `EMBER_REPOSITORY`, or in a debug build `ENDEAVOR_TEST_EMBER_REPOSITORY`.
     repository: String,
-    /// `EMBER_MAC_ARM64`, or nothing with a test repository, which is then the only one.
-    mac_arm64: String,
     install: Arc<std::sync::Mutex<Install>>,
     /// Whether Endeavor's own R may be installed (`--install-r`, or `endeavor/allow_r_install` later),
     /// and where installing it is.
@@ -1039,8 +1033,7 @@ impl RStarter {
             r: args.r.clone(),
             library: args.r_library.clone(),
             ember: crate::paths::Env::here().ember_folder(),
-            repository: test_repository.clone().unwrap_or_else(|| EMBER_REPOSITORY.into()),
-            mac_arm64: if test_repository.is_some() { String::new() } else { EMBER_MAC_ARM64.into() },
+            repository: test_repository.unwrap_or_else(|| EMBER_REPOSITORY.into()),
             install: Arc::new(std::sync::Mutex::new(Install::Idle)),
             adapter: args.runtime.join("r").join("adapter.R"),
             state: args.state_dir.join(R_STATE),
@@ -1311,7 +1304,7 @@ impl RStarter {
         }
         drop(install);
         let install_r = self.adapter.with_file_name("install.R");
-        let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, folder, Path::new(&self.repository), Path::new(&self.mac_arm64)]);
+        let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, folder, Path::new(&self.repository)]);
         command.stdin(Stdio::null());
         self.with_mask(&mut command);
         let (state, r) = (self.install.clone(), self.r.clone());
@@ -1841,8 +1834,10 @@ fn julia_starting_page(why: String) -> String {
 /// runtime (`token` its bearer token), then close. The agent's MCP client
 /// gets an answer instead of a reset, which Claude Code counts toward giving
 /// up on the server for good: a tool call fails with `why`, and the rest is
-/// answered as the core would. Any other request is closed unanswered.
-pub fn serve_unreachable(client: TcpStream, token: &str, why: &str) -> io::Result<()> {
+/// answered as the core would. Any other request is closed unanswered. With
+/// `restart` (the client's hook and the place's name), the agent can still ask
+/// the user to restart the runtime (`guard::restart_call`), and `tools/list` says so.
+pub fn serve_unreachable(client: TcpStream, token: &str, why: &str, restart: Option<(&crate::guard::AskRestart, &str)>) -> io::Result<()> {
     let mut client = wire::Shared::new(client);
     let mut reader = BufReader::new(client.clone());
     let Some(request) = Head::read(&mut reader)? else { return Ok(()) };
@@ -1854,7 +1849,19 @@ pub fn serve_unreachable(client: TcpStream, token: &str, why: &str) -> io::Resul
         return http::respond(&mut client, status, Some("application/json"), body.as_bytes(), false);
     }
     if request.method() == "POST" {
-        crate::mcp::post(&request, &mut reader, &mut client, false, false, |message, _| crate::mcp::answer_unreachable(message, &request, why))?;
+        let session = request.header("X-Endeavor-Session").unwrap_or_default().to_owned();
+        crate::mcp::post(&request, &mut reader, &mut client, false, false, |message, gone| {
+            let Some(restart) = restart else { return crate::mcp::answer_unreachable(message, &request, why) };
+            if let Some(reply) = crate::guard::restart_call(message, &session, restart, gone) {
+                return Some(crate::mcp::to_json(&reply));
+            }
+            let reply = crate::mcp::answer_unreachable(message, &request, why)?;
+            let listed = (message["method"] == "tools/list").then(|| serde_json::from_str::<Value>(&reply).ok()).flatten();
+            match listed.as_ref().and_then(|r| crate::guard::with_restart_tool(&r["result"]).map(|result| (r, result))) {
+                Some((r, result)) => Some(crate::mcp::to_json(&json!({ "jsonrpc": "2.0", "id": r["id"], "result": result }))),
+                None => Some(reply),
+            }
+        })?;
     }
     Ok(())
 }

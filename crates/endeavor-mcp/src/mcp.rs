@@ -854,7 +854,7 @@ pub(crate) fn post(
     client: &mut wire::Shared,
     keep_alive: bool,
     issue_session: bool,
-    reply: impl FnOnce(&Value, &dyn Fn() -> bool) -> Option<String>,
+    answer_with: impl FnOnce(&Value, &dyn Fn() -> bool) -> Option<String>,
 ) -> io::Result<bool> {
     let body = http::read_body(reader, request.request_body()?)?;
     if request.header("MCP-Protocol-Version").is_some_and(|v| !SUPPORTED_VERSIONS.contains(&v)) {
@@ -865,8 +865,21 @@ pub(crate) fn post(
         http::respond(client, "400 Bad Request", None, br#"{"error":"Invalid JSON"}"#, keep_alive)?;
         return Ok(keep_alive);
     };
-    let held = Held::new(client.clone(), request, &message, keep_alive);
-    let reply = reply(&message, &|| held.waiting());
+    reply(request, client, &message, keep_alive, issue_session, answer_with)
+}
+
+/// Answer one JSON-RPC `message`, already read from `request`'s body, as `post` does.
+/// Whether the connection can carry another request.
+pub(crate) fn reply(
+    request: &Head,
+    client: &mut wire::Shared,
+    message: &Value,
+    keep_alive: bool,
+    issue_session: bool,
+    reply: impl FnOnce(&Value, &dyn Fn() -> bool) -> Option<String>,
+) -> io::Result<bool> {
+    let held = Held::new(client.clone(), request, message, keep_alive);
+    let reply = reply(message, &|| held.waiting());
     if held.streaming() {
         if let Some(reply) = reply {
             http::write_chunk(client, format!("event: message\ndata: {reply}\n\n").as_bytes())?;

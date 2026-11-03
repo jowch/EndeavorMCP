@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 use wire::relay::Mux;
 
-use crate::guard::Snapshot;
+use crate::guard::{AskRestart, Snapshot};
 
 /// How long a connection that arrives while the runtime is away waits for it
 /// to come back, so a short drop goes unnoticed.
@@ -61,6 +61,8 @@ pub struct Listener {
     refuse: Option<Refuse>,
     /// How the client draws a cell's output when the runtime has no picture of it (`set_snapshot`).
     snapshot: OnceLock<Box<Snapshot>>,
+    /// How the client asks the user to restart the runtime when the agent calls `request_restart` (`set_restart`).
+    restart: OnceLock<Box<AskRestart>>,
     messages: Messages,
 }
 
@@ -100,6 +102,7 @@ impl Listener {
             closed: AtomicBool::new(false),
             refuse,
             snapshot: OnceLock::new(),
+            restart: OnceLock::new(),
             messages,
         });
         let accepting = listener.clone();
@@ -131,6 +134,7 @@ impl Listener {
 
     fn route(&self, connection: TcpStream) {
         let _ = connection.set_nodelay(true);
+        let restart = self.restart.get().map(|r| (&**r, self.name.as_str()));
         let upstream = self.upstream.lock().unwrap();
         let (upstream, _) = self.changed.wait_timeout_while(upstream, HOLD, |u| matches!(u, Upstream::Away { .. })).unwrap();
         match &*upstream {
@@ -139,7 +143,7 @@ impl Listener {
                 drop(upstream);
                 // The runtime runs code unless it doesn't ask and this client holds runs for the user's answer.
                 let no_run_gate = if asks { None } else { self.messages.no_run_gate };
-                if self.refuse.is_none() && no_run_gate.is_none() && self.snapshot.get().is_none() && !other {
+                if self.refuse.is_none() && no_run_gate.is_none() && self.snapshot.get().is_none() && restart.is_none() && !other {
                     drop(mux.open(connection));
                     return;
                 }
@@ -153,16 +157,20 @@ impl Listener {
                         }
                         self.refuse.as_ref().and_then(|refuse| refuse(session, tool, arguments))
                     };
-                    let no_r = || crate::no_r_text(&self.name, &format!("Ask the user to restart Julia on {}: that closes its open notebooks, and starts this version.", self.name));
+                    let how = match restart {
+                        Some(_) => format!("Don't stop it yourself: call `request_restart`, which asks the user whether to restart Endeavor on {}. That closes its open notebooks, and starts this version.", self.name),
+                        None => format!("Ask the user to restart Julia on {}: that closes its open notebooks, and starts this version.", self.name),
+                    };
+                    let no_r = || crate::no_r_text(&self.name, &how);
                     let no_r: Option<&dyn Fn() -> String> = other.then_some(&no_r);
-                    let _ = crate::serve_guarded(connection, ours, &refuse, self.snapshot.get().map(|s| &**s), no_r);
+                    let _ = crate::serve_guarded(connection, ours, &refuse, self.snapshot.get().map(|s| &**s), no_r, restart);
                 }
             }
             Upstream::Away { token, why } => {
                 let (token, why) = (token.clone(), why.clone());
                 drop(upstream);
                 let _ = connection.set_read_timeout(Some(Duration::from_secs(10)));
-                let _ = crate::serve_unreachable(connection, &token, &why);
+                let _ = crate::serve_unreachable(connection, &token, &why, restart);
             }
             Upstream::None => {}
         }
@@ -174,6 +182,13 @@ impl Listener {
     /// agent hanging up during a stream (`wait_readable` isn't ported) until the wait times out.
     pub fn set_snapshot(&self, snapshot: Box<Snapshot>) {
         let _ = self.snapshot.set(snapshot);
+    }
+
+    /// From now on, the agent has `request_restart`, and `ask` shows the user its request
+    /// (`guard::AskRestart`): only the user's yes restarts anything. Set once: a later one is
+    /// ignored. Every connection then goes through the guard, as with `set_snapshot`.
+    pub fn set_restart(&self, ask: Box<AskRestart>) {
+        let _ = self.restart.set(ask);
     }
 
     /// Relay connections to `mux`'s runtime from now on. `asks`: its `Ready` gave its build or its
