@@ -56,6 +56,18 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
 - For a plot, call `view_cell_output` and look at it before you say it is right. Code that runs can still draw the wrong thing.
 - Fold cells that hold only prose (`add_cell`, `edit_cell` or `edit_cells` with `folded=true`, or `fold_cell`), so the reader sees the rendered text and not its source.
 
+## Shape the notebook
+
+The notebook is what the user keeps and shows others after this chat is gone. Write it for a reader who wasn't here. The engine runs cells by what they use, not where they are, so put each cell where a reader needs it.
+
+- Start with a prose cell: a title, the question and the data. Once there are results, add a short summary of them there, with numbers computed in the prose (see the engine reference), and keep it true as results change.
+- Then packages and data loading, then one section per step. Open each section with a short prose cell saying what it does and why.
+- Show a result as the cell's value: a table, a plot, a number in prose. Not as printed text (`println`, `cat`, banners).
+- When the user changes a choice, such as a threshold or a window, edit the cell that holds it and let its dependents rerun. Don't copy those steps into new cells. If the user wants old and new compared, compare them in one cell.
+- Give a choice the user may want to vary its own cell at the top of its section.
+- New work goes where it belongs in the story: `add_cell` after the cell it follows, `move_cell` to put a cell in place.
+- After a long stretch of work, or when the user asks to tidy up, read the notebook from the top (`read_notebook_code` with `include_markdown=true`) and offer to fix what would trip a reader: an old summary, dead ends, steps out of order. Say what you would change, and ask before deleting cells. Don't reorder a notebook the user wrote unless they ask.
+
 ## Safe preview
 
 A notebook opened from a file runs nothing until the user allows it, because its code may not be theirs (`execution_allowed` is false). Edits and `submit_changes` still stage, and the result warns `execution_blocked`: nothing ran. The warning names `allow_execution`, but call that only when the user asked you to run the notebook. Otherwise say the outputs are not current, and that they can run it from the notebook or ask you to.
