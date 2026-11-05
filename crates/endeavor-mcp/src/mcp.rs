@@ -1371,7 +1371,10 @@ mod tests {
             ask("initialize", false)["instructions"],
             "These tools edit and run a live notebook, in Julia (Pluto) or R (Ember), that the user sees in Endeavor, next to this chat. \
 Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
-how to find this session's notebook, the read-edit-run loop, and the rules for a cell. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`."
+how to find this session's notebook, the read-edit-run loop, and the rules for a cell. \
+In your replies, link each cell you talk about the first time it comes up, as `[a few words](notebook://pluto/{notebook_id}/cell/{cell_id})` \
+(`notebook://ember/...` in R), with the cell's real id: the user clicks it to scroll the notebook to that cell. \
+Start a code cell that defines no name, such as a plot or a check, with a short `# ` comment in words saying what it does; the app names the cell by it. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`."
         );
         assert_eq!(names(ask("tools/list", false))[0], "notebook_guide");
         assert_eq!(ask("tools/list", false)["tools"][0]["annotations"]["readOnlyHint"], true);

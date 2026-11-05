@@ -39,6 +39,14 @@ the read-edit-run loop, the rules for what one cell may hold and for names defin
 /// Where the guide keeps what only the app needs, for an agent in the app without the skills.
 const APP_GUIDE: &str = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
 
+/// What a runtime with the app tells every agent, with the skills or without:
+/// how to point to a cell in a reply and name one. `app.md` says it too, but
+/// agents read it for approvals and didn't link cells, so it lives here, in
+/// what is always in their context.
+const APP_REPLIES: &str = "In your replies, link each cell you talk about the first time it comes up, as `[a few words](notebook://pluto/{notebook_id}/cell/{cell_id})` \
+(`notebook://ember/...` in R), with the cell's real id: the user clicks it to scroll the notebook to that cell. \
+Start a code cell that defines no name, such as a plot or a check, with a short `# ` comment in words saying what it does; the app names the cell by it.";
+
 /// What a runtime with the app tells an agent without the skills.
 const APP: &str = "These tools edit and run a live notebook, in Julia (Pluto) or R (Ember), that the user sees in Endeavor, next to this chat.";
 
@@ -70,8 +78,8 @@ pub fn instructions(standalone: bool, has_skills: bool, machines: bool) -> Optio
         (true, false) => format!(" {MACHINES} {MACHINES_GUIDE}"),
     };
     match (standalone, has_skills) {
-        (false, true) => Some(LOAD_SKILL.to_owned()),
-        (false, false) => Some(format!("{APP} {READ_GUIDE} {APP_GUIDE}")),
+        (false, true) => Some(format!("{LOAD_SKILL} {APP_REPLIES}")),
+        (false, false) => Some(format!("{APP} {READ_GUIDE} {APP_REPLIES} {APP_GUIDE}")),
         (true, true) => Some(format!("{STANDALONE}{machines_text}\n\n{LOAD_SKILL}")),
         (true, false) => Some(format!("{STANDALONE}{machines_text}\n\n{READ_GUIDE}")),
     }
@@ -225,6 +233,14 @@ mod tests {
         let approval = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
         assert!(instructions(false, false, false).unwrap().ends_with(approval));
         assert!(!instructions(true, false, true).unwrap().contains(approval));
+    }
+
+    #[test]
+    fn every_agent_in_the_app_is_told_to_link_cells() {
+        for has_skills in [true, false] {
+            assert!(instructions(false, has_skills, false).unwrap().contains("notebook://pluto/{notebook_id}/cell/{cell_id}"), "skills: {has_skills}");
+            assert!(!instructions(true, has_skills, true).unwrap().contains("notebook://"), "no links without the app, skills: {has_skills}");
+        }
     }
 
     #[test]
