@@ -385,7 +385,10 @@ with one that isn't a port, only a runtime started by `serve` or `mcp` adds a
 it opens in a browser that has the runtime's cookie. The `mcp` front opens the
 notebook of each successful `new_notebook` and `open_notebook` in the user's
 browser with the link that sets the cookie, and adds `opened_in_browser` (false
-where it can't: in a debug build, over ssh, or on Linux without a display). It
+where it can't: in a debug build, over ssh, or on Linux without a display). Where
+it can't, a result with a `browser_url` from the runtime on this computer also has
+`browser_note`, the steps for the user: `ssh -L` from their computer and
+`endeavor open` here. It
 also takes `token=` out of a `browser_url` from an older runtime. A browser that
 opens a page without the cookie gets a page naming `endeavor open`.
 

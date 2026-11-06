@@ -293,7 +293,11 @@ first.
 never the token. When the agent makes or opens a notebook, `mcp` opens it in
 your browser itself. The agent gets the address without the token
 (`browser_url`), and `opened_in_browser` tells it whether the notebook was
-opened for you.
+opened for you. Where no browser can be opened (over ssh, or on Linux without a
+display), the result also has `browser_note`: the steps the agent passes on to
+you, which forward the port from your computer (`ssh -L`) and let your browser
+in with `endeavor open`. The agent can't forward the port itself: the forward
+starts on your computer.
 
 ## Watch the notebook in a browser
 

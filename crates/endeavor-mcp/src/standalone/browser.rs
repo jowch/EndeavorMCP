@@ -15,6 +15,41 @@ pub(crate) fn can_open(var: impl Fn(&str) -> Option<String>) -> bool {
     set("DISPLAY") || set("WAYLAND_DISPLAY")
 }
 
+/// Whether this process can show the user a browser, as `open` decides it: in a debug build, whether a
+/// test stands one in (`ENDEAVOR_TEST_BROWSER`).
+pub(crate) fn shows(var: impl Fn(&str) -> Option<String>) -> bool {
+    if cfg!(debug_assertions) {
+        return var("ENDEAVOR_TEST_BROWSER").is_some();
+    }
+    can_open(var)
+}
+
+/// Whether this process was started from an ssh login: the user sits at another computer.
+pub(crate) fn over_ssh(var: impl Fn(&str) -> Option<String>) -> bool {
+    ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"].iter().any(|name| var(name).is_some_and(|value| !value.is_empty()))
+}
+
+/// What the agent is told with a `browser_url` that the user's browser can't open yet: this computer
+/// (`host`) shows no browser, so the user is likely at another one, where `localhost:{port}` is not
+/// this runtime until they forward the port. The agent can't forward it from here: the forward starts
+/// on the user's computer. `open` lets their browser in (`endeavor open`), since the link a browser
+/// needs carries the token, which the agent never gets.
+pub(crate) fn note(host: &str, port: u16, open: &str, over_ssh: bool) -> String {
+    let reach = if over_ssh {
+        format!("The user reached {host} over ssh, so their browser reaches `browser_url` only once they forward its port.")
+    } else {
+        format!("If the user works on {host} from another computer, their browser reaches `browser_url` only once they forward its port.")
+    };
+    format!(
+        "No browser could be opened on {host}, so the notebook did not open for the user. {reach} \
+Give them these steps with the address, and don't say it is open: \
+1. On their own computer, run `ssh -L {port}:localhost:{port} {host}` (with the name they use to ssh to {host}), and keep it open. \
+2. Open `browser_url` in their browser. \
+3. If the page asks to let the browser in, run `{open}` in a terminal on {host}, and open the link it prints. \
+You can't forward the port for them: it starts on their computer."
+    )
+}
+
 /// The program and arguments that open `url` in the default browser. The URL is one argument and
 /// no shell reads it (on Windows, `start` in cmd would split it at `&`).
 pub(crate) fn command(url: &str) -> (&'static str, Vec<String>) {
@@ -116,6 +151,13 @@ mod tests {
         assert!(!took(run("exit 3"), "sh", wait), "no browser took the link");
         assert!(took(run("exit 0"), "sh", wait));
         assert!(took(run("sleep 5"), "sh", wait), "still opening it");
+    }
+
+    #[test]
+    fn the_note_says_how_to_reach_the_page() {
+        let note = note("lab3", 8456, "endeavor open --state-dir /s", true);
+        assert!(note.contains("`ssh -L 8456:localhost:8456 lab3`") && note.contains("`endeavor open --state-dir /s`") && note.contains("over ssh"), "{note}");
+        assert!(over_ssh(vars(&[("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 22")])) && !over_ssh(vars(&[("SSH_TTY", "")])));
     }
 
     #[test]

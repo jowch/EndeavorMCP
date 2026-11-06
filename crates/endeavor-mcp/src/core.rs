@@ -1945,7 +1945,7 @@ fn not_let_in(open: &str) -> String {
 /// The command that lets a browser in to this runtime (`endeavor open`), as this program and the
 /// state folder `dir` are named here: the plugin's program isn't on the PATH. On Windows in
 /// PowerShell's form (`& "C:\…\endeavor.exe" …`), since a quoted path alone is a string there.
-fn open_command(dir: &Path) -> String {
+pub(crate) fn open_command(dir: &Path) -> String {
     let quote = |text: &str| if text.is_empty() || text.contains([' ', '"', '\'', '$', '&']) { format!("\"{text}\"") } else { text.to_owned() };
     let program = std::env::current_exe().map_or_else(|_| "endeavor".to_owned(), |exe| exe.display().to_string());
     let mut words = vec![quote(&program)];
