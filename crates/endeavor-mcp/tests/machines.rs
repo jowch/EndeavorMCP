@@ -2626,6 +2626,7 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     let port = read_record(&place.local_state)["port"].as_u64().unwrap();
     let page = format!("http://localhost:{port}/edit?id={NOTEBOOK}");
     assert_eq!((first["browser_url"].as_str(), first["opened_in_browser"].clone()), (Some(page.as_str()), json!(true)), "{first}");
+    assert!(first.get("browser_note").is_none(), "the page opened, and nothing more is needed: {first}");
     let again = front.ok("open_notebook", json!({ "path": path }));
     assert_eq!(again["opened_in_browser"], true, "it was opened a moment ago: {again}");
     let lines: Vec<String> = std::fs::read_to_string(&opened).unwrap().lines().map(str::to_owned).collect();
@@ -2645,11 +2646,16 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     assert!(!out.status.success() && !stdout.contains(TOKEN) && !stderr.contains(TOKEN) && stderr.contains("in your own terminal"), "{stdout} {stderr}");
     front.finish();
 
-    // Where no browser can be opened, the agent is told so, and gives the link.
-    let mut front = place.front();
+    // Where no browser can be opened, the agent is told so, and gives the link with the steps that
+    // reach it: over ssh, the user's browser is on another computer, which needs the port forwarded.
+    let mut front = start_front(&place, &[("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")]);
     front.initialize();
     let shut = front.ok("open_notebook", json!({ "path": path }));
     assert_eq!((shut["browser_url"].as_str(), shut["opened_in_browser"].clone()), (Some(page.as_str()), json!(false)), "{shut}");
-    assert!(!shut.to_string().contains(TOKEN), "{shut}");
+    let note = shut["browser_note"].as_str().unwrap_or_default();
+    assert!(note.contains(&format!("`ssh -L {port}:localhost:{port} ")) && note.contains("over ssh") && note.contains(" open --state-dir "), "{shut}");
+    let status = front.ok("session_status", json!({}));
+    assert!(status["browser_note"].as_str().is_some_and(|n| n.contains("ssh -L")), "asked for the link again, the agent gets the steps again: {status}");
+    assert!(!shut.to_string().contains(TOKEN) && !shut.to_string().contains(&pages), "{shut}");
     front.finish();
 }
