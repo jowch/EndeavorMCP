@@ -238,6 +238,31 @@ end
         @test length(EndeavorRuntime._cap_text("é" ^ 20_000)) < 9_000
     end
 
+    # Past about 10 MB, a lazy pattern that had to cross the whole output failed every
+    # snapshot, and with it every read tool, with "PCRE.exec error: match limit exceeded" (app #193).
+    @testset "outputs of many megabytes: snapshot and render_text still read them" begin
+        big = 12_000_000
+        png = base64encode(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, zeros(UInt8, 6_000)...])
+        session, nb, cells = make_session_with_notebook("a", "b", "c", "d")
+        cells[1].output = Pluto.CellOutput(; body="<img alt='x' src='data:image/jpeg;base64,$("A" ^ big)'><p>after</p>", mime=MIME("text/html"))
+        cells[2].output = Pluto.CellOutput(; body="<script>$("x" ^ big)</script><STYLE>p{}</STYLE ><p>shown</p>", mime=MIME("text/html"))
+        cells[3].output = Pluto.CellOutput(; body="<img src='data:image/jpeg;base64,$("A" ^ big)'><img src=\"data:image/png;base64,$png\">", mime=MIME("text/html"))
+        cells[4].output = Pluto.CellOutput(; body="<p>a</p>" * "<td>1 < 2</td>" ^ 500_000 * "<script>never closed" * "y" ^ big, mime=MIME("text/html"))
+        snap = EndeavorRuntime.snapshot(nb)
+        @test startswith(snap["cells"][1]["output"], "[text/html output, ")
+        @test !occursin("view_cell_output", snap["cells"][1]["output"])
+        @test occursin("view_cell_output", snap["cells"][3]["output"])
+        @test EndeavorRuntime._embedded_png_b64(cells[3].output) == png
+        @test EndeavorRuntime.render_text(session, nb, cells[1])["text"] == "after"
+        @test EndeavorRuntime.render_text(session, nb, cells[2])["text"] == "shown"
+        text4 = EndeavorRuntime.render_text(session, nb, cells[4])["text"]
+        @test startswith(text4, "a\n1 < 2\t1 < 2") && !occursin("never closed", text4)
+        # A plot's PNG of megabytes whose src comes after a long attribute: the old search failed on it.
+        plot = base64encode(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, zeros(UInt8, 6_800_000)...])
+        figure = Pluto.CellOutput(; body="<img data-x='$("A" ^ 10_000_000)' src=\"data:image/png;base64,$plot\">", mime=MIME("text/html"))
+        @test EndeavorRuntime._embedded_png_b64(figure) == plot
+    end
+
     @testset "validation parses as Pluto does" begin
         session, nb, cells = make_session_with_notebook("x = 1")
         errors = EndeavorRuntime._parse_validation_errors(nb, cells[1], "a = 1\nb = 2")

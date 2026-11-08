@@ -70,7 +70,17 @@ function _structure_error(body)
     return d
 end
 
+# What a snapshot shows of a cell's output. One output this can't summarize mustn't
+# fail the whole snapshot, and with it `list_notebooks` and every read (app #193).
 function _serialize_output(cell)
+    try
+        __serialize_output(cell)
+    catch e
+        "[$(string(cell.output.mime)) output; it couldn't be summarized: $(first(sprint(showerror, e), 200))]"
+    end
+end
+
+function __serialize_output(cell)
     if cell.errored
         body = cell.output.body
         structured = _structure_error(body)
@@ -106,6 +116,28 @@ _is_visual(mime) = mime == MIME("image/png") || mime == MIME("image/svg+xml")
 # and the like, which would stand in for a table or a widget the agent can't see.
 const _EMBEDDED_PNG_MIN = 4_096
 
+# Big outputs and PCRE: a pattern with a lazy `.*?` or `[^>]*?` that has to cross
+# megabytes (a large JPEG data URL, a plot's `<script>`) fails with "match limit
+# exceeded" (app #193). So tags are found with short patterns and plain searches, and
+# no pattern here has to scan an unbounded stretch to give up.
+
+const _PNG_SRC = r"\bsrc\s*=\s*[\"']data:image/png;base64,([A-Za-z0-9+/=]+)[\"']"i
+
+"The `<img …>` tags of an HTML string; an unclosed last one runs to the end."
+function _img_tags(html::AbstractString)
+    s = String(html)
+    tags = SubString{String}[]
+    i = 1
+    while (at = findnext(r"<img\b"i, s, i)) !== nothing
+        gt = findnext('>', s, last(at))
+        stop = gt === nothing ? lastindex(s) : gt
+        push!(tags, SubString(s, first(at), stop))
+        stop == lastindex(s) && break
+        i = nextind(s, stop)
+    end
+    return tags
+end
+
 """
     _embedded_png_b64(output) -> Union{SubString, Nothing}
 
@@ -116,7 +148,9 @@ The base64 of the largest PNG an HTML output carries as `<img src="data:image/pn
 function _embedded_png_b64(output)
     output.mime == MIME("text/html") && output.body isa AbstractString || return nothing
     best = nothing
-    for m in eachmatch(r"<img\b[^>]*?\bsrc\s*=\s*[\"']data:image/png;base64,([A-Za-z0-9+/=]+)[\"']"i, output.body)
+    for tag in _img_tags(output.body)
+        m = match(_PNG_SRC, tag)
+        m === nothing && continue
         b64 = m.captures[1]
         (best === nothing || sizeof(b64) > sizeof(best)) && (best = b64)
     end
@@ -179,13 +213,33 @@ end
 
 const _HTML_ENTITIES = ["&nbsp;" => " ", "&lt;" => "<", "&gt;" => ">", "&quot;" => "\"", "&#39;" => "'", "&amp;" => "&"]
 
+const _SCRIPT_END = Dict("script" => r"</script\s*>"i, "style" => r"</style\s*>"i)
+
+"An HTML string without its `<script>` and `<style>` elements; an unclosed one runs to the end."
+function _without_scripts(html::AbstractString)
+    s = String(html)
+    out = IOBuffer()
+    i = 1
+    while (m = match(r"<(script|style)\b"i, s, i)) !== nothing
+        write(out, SubString(s, i, prevind(s, m.offset)))
+        ending = findnext(_SCRIPT_END[lowercase(m.captures[1])], s, m.offset)
+        ending === nothing && return String(take!(out))
+        i = nextind(s, last(ending))
+    end
+    write(out, SubString(s, i))
+    return String(take!(out))
+end
+
 "Readable text from an HTML string: rows and blocks on their own lines, table cells tab-separated."
 function _html_text(html::AbstractString)
-    s = replace(html, r"<(script|style)\b.*?</\1>"is => "")
+    s = _without_scripts(html)
     s = replace(s, r"</t[dh]>\s*"i => "\t", r"<br\s*/?>"i => "\n", r"</(tr|p|div|li|h[1-6]|pre|table|thead|tbody)>"i => "\n")
-    s = replace(s, r"<[^>]*>"s => "")
+    # `[^<>]`, so a stray `<` costs a scan to the next tag, not to the end. The cost: a tag
+    # whose attribute value holds a `<` (`title="a<b"`) leaves its start in the text. Rare.
+    s = replace(s, r"<[^<>]*>" => "")
     s = replace(s, _HTML_ENTITIES...)
-    s = replace(s, r"[ \t]+\n" => "\n", r"\n{3,}" => "\n\n")
+    s = join((rstrip(line, (' ', '\t')) for line in split(s, '\n')), '\n')
+    s = replace(s, r"\n{3,}" => "\n\n")
     return strip(s)
 end
 
