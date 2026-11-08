@@ -45,6 +45,7 @@ pub use core::{INTERFACE as CORE_INTERFACE, serve_unreachable};
 pub use guard::{AskRestart, REQUEST_RESTART, RestartAnswer, Snapshot, restart_schema, serve_guarded};
 pub use mcp::{NOTEBOOK_TOOLS_JSON, asks_first, changes_notebook, is_tool, runs_code};
 pub use standalone::{Lease, lease, unpack};
+pub use release::release_helper;
 
 /// `runtime/` (the Julia side, which Endeavor installs on servers and runs on
 /// This Mac) and `plugin/` (the skills Endeavor loads as its Claude Code

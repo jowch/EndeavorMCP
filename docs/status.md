@@ -116,7 +116,9 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
 - A Mac or Windows computer reaches a Linux server: `endeavor mcp` fetches the
   release's helper for the server's platform by the build's key, checks its
   SHA-256 and keeps it (tested against a fake release; the wiring is
-  read, not run across platforms).
+  read, not run across platforms). Endeavor's app does the same through
+  `release_helper` for a server whose helper it doesn't ship (the Windows
+  app ships none), with its own words for a build the release dropped.
 
 ## Changing this repository and the app together
 
