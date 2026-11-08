@@ -257,6 +257,10 @@ end
         @test EndeavorRuntime.render_text(session, nb, cells[2])["text"] == "shown"
         text4 = EndeavorRuntime.render_text(session, nb, cells[4])["text"]
         @test startswith(text4, "a\n1 < 2\t1 < 2") && !occursin("never closed", text4)
+        # A plot's PNG of megabytes whose src comes after a long attribute: the old search failed on it.
+        plot = base64encode(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, zeros(UInt8, 6_800_000)...])
+        figure = Pluto.CellOutput(; body="<img data-x='$("A" ^ 10_000_000)' src=\"data:image/png;base64,$plot\">", mime=MIME("text/html"))
+        @test EndeavorRuntime._embedded_png_b64(figure) == plot
     end
 
     @testset "validation parses as Pluto does" begin

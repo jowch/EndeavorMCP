@@ -234,7 +234,8 @@ end
 function _html_text(html::AbstractString)
     s = _without_scripts(html)
     s = replace(s, r"</t[dh]>\s*"i => "\t", r"<br\s*/?>"i => "\n", r"</(tr|p|div|li|h[1-6]|pre|table|thead|tbody)>"i => "\n")
-    # `[^<>]`, so a stray `<` costs a scan to the next tag, not to the end.
+    # `[^<>]`, so a stray `<` costs a scan to the next tag, not to the end. The cost: a tag
+    # whose attribute value holds a `<` (`title="a<b"`) leaves its start in the text. Rare.
     s = replace(s, r"<[^<>]*>" => "")
     s = replace(s, _HTML_ENTITIES...)
     s = join((rstrip(line, (' ', '\t')) for line in split(s, '\n')), '\n')
