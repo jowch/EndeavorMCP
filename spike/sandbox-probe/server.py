@@ -84,7 +84,9 @@ def handle(msg):
         csp = {"resourceDomains": ["https://cdn.jsdelivr.net"], "connectDomains": ["https://cdn.jsdelivr.net"]} if uri.endswith("/cdn") else None
         log(f"resources/read {uri} {len(text)} chars")
         return {"contents": [{"uri": uri, "mimeType": MIME, "text": text,
-                              "_meta": {"ui": dict({"prefersBorder": True}, **({"csp": csp} if csp else {}))}}]}
+                              "_meta": {"ui": dict({"prefersBorder": True}, **({"csp": csp} if csp else {}),
+                                                    # ask Claude to open the notebook views in the side panel
+                                                    **({"preferredDisplayMode": "fullscreen"} if uri.rsplit("/", 1)[-1] in ("loader", "live", "cdn") else {}))}}]}
     if method == "tools/call":
         name, args = params.get("name"), params.get("arguments") or {}
         log(f"tools/call {name} {json.dumps(args)[:4000]}")
