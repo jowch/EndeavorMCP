@@ -101,8 +101,11 @@ const check = (ok, what) => { console.log((ok ? "ok   " : "FAIL ") + what); if (
   page.on("pageerror", e => errors.push(e.message.slice(0, 200)));
   const calls = {};
   const firsts = {};
+  let failOnce = null;
   await page.exposeFunction("toolsCall", async params => {
     calls[params.name] = (calls[params.name] || 0) + 1;
+    // A connection that fails once, as Pluto's would if it were restarting.
+    if (failOnce === params.name) { failOnce = null; return { content: [{ type: "text", text: "not_connected: couldn't reach Pluto: Connection refused (os error 111)" }], isError: true }; }
     const t = Date.now();
     const result = (await rpc("tools/call", params)).result;
     if (calls[params.name] === 1) firsts[params.name] = [t, Date.now() - t];
@@ -154,6 +157,11 @@ window.addEventListener("message", async e => {
   check(!(calls.notebook_page || calls.notebook_socket_open), "inline, it is a card: no page loaded, no socket");
   // The user's click on the card: the host moves it.
   await page.evaluate(() => { window.allowMove = true; });
+  failOnce = "notebook_socket_open";
+  await frame.click("#endeavor-open");
+  await frame.waitForFunction(() => document.querySelector("#endeavor-card.cover") && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
+  const card = await frame.evaluate(() => [document.querySelector("#endeavor-card .note").textContent, document.querySelector("#endeavor-open").textContent]);
+  check(card[0] === "The notebook's connection dropped. Try again, or ask Claude to open it again." && card[1] === "Try again", `a failed load says so in plain words, with a way to try again: ${JSON.stringify(card)}`);
   const clicked = Date.now();
   await frame.click("#endeavor-open");
   await frame.waitForFunction(() => document.querySelectorAll("pluto-cell").length === 3, null, { timeout: 60000 });
