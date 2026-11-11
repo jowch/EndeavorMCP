@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Relay probe</title>
+<style>body{font:13px system-ui,sans-serif;padding:12px} pre{white-space:pre-wrap}</style></head>
+<body><b>Relay probe</b><pre id="out">running…</pre>
+<script type="module">
+/*APPLIB*/
+const { App } = window.McpAppLib;
+const out = document.getElementById("out");
+const app = new App({ name: "Endeavor relay probe", version: "0.0.1" }, { availableDisplayModes: ["inline", "fullscreen"] });
+await app.connect();
+const call = (name, args = {}) => app.callServerTool({ name, arguments: args }).then(r => r.structuredContent);
+const r = {};
+try {
+  // 1. sequential round trips: latency and which process answers
+  const pids = new Set(), ms = [];
+  for (let i = 0; i < 20; i++) { const t = performance.now(); const e = await call("relay_echo"); ms.push(performance.now() - t); pids.add(e.pid); }
+  ms.sort((a, b) => a - b);
+  r.seq = { n: 20, pids: [...pids], p50_ms: Math.round(ms[10]), max_ms: Math.round(ms[19]) };
+  // 2. state kept between calls
+  const key = "k" + Math.random().toString(36).slice(2);
+  await call("relay_set", { key, value: "hello" });
+  const back = []; for (let i = 0; i < 5; i++) back.push((await call("relay_get", { key })).value);
+  r.state = back;
+  // 3. a held call (a long-poll) while others run
+  const t0 = performance.now();
+  const hold = call("relay_hold", { ms: 2000 }).then(x => ({ pid: x.pid, done_ms: Math.round(performance.now() - t0) }));
+  const quick = [];
+  for (let i = 0; i < 5; i++) { const e = await call("relay_echo"); quick.push(Math.round(performance.now() - t0)); }
+  r.concurrent = { quick_done_ms: quick, hold: await hold };
+  // 4. a 1 MB reply
+  const t1 = performance.now(); const big = await call("relay_big", { n: 1000000 });
+  r.big = { chars: big.text.length, ms: Math.round(performance.now() - t1) };
+} catch (e) { r.error = String(e && e.stack || e); }
+out.textContent = JSON.stringify(r, null, 1);
+await call("probe_report", { report: "relay " + JSON.stringify(r) }).catch(() => {});
+</script></body></html>

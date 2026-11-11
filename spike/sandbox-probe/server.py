@@ -11,6 +11,7 @@ VIEW = "ui://endeavor-probe/view"
 PLUTO = "ui://endeavor-probe/pluto"
 MIME = "text/html;profile=mcp-app"
 SIZE_MB = 1.0
+MEM = {}
 
 def page(name):
     return open(os.path.join(HERE, name), encoding="utf-8").read()
@@ -49,6 +50,12 @@ TOOLS = [
     {"name": "ws_open", "title": "Relay open", "description": "Used by the live view.", "inputSchema": {"type": "object", "properties": {}}, "_meta": {"ui": {"visibility": ["app"]}}},
     {"name": "ws_send", "title": "Relay send", "description": "Used by the live view.", "inputSchema": {"type": "object", "properties": {"id": {"type": "number"}, "data": {"type": "string"}}, "required": ["id", "data"]}, "_meta": {"ui": {"visibility": ["app"]}}},
     {"name": "ws_recv", "title": "Relay receive", "description": "Used by the live view.", "inputSchema": {"type": "object", "properties": {"id": {"type": "number"}, "wait_ms": {"type": "number"}}, "required": ["id"]}, "_meta": {"ui": {"visibility": ["app"]}}},
+    {"name": "probe_relay", "title": "Test the tool relay",
+     "description": "Open a view that times calls back to this server and checks whether one server process answers them.",
+     "inputSchema": {"type": "object", "properties": {}},
+     "_meta": {"ui": {"resourceUri": "ui://endeavor-probe/relay"}, "ui/resourceUri": "ui://endeavor-probe/relay"}},
+] + [{"name": n, "title": n, "description": "Used by the relay probe view.", "inputSchema": {"type": "object", "properties": {}}, "_meta": {"ui": {"visibility": ["app"]}}}
+     for n in ("relay_echo", "relay_set", "relay_get", "relay_hold", "relay_big")] + [
     {"name": "probe_report", "title": "Probe report",
      "description": "Used by the probe views to save what they found.",
      "inputSchema": {"type": "object", "properties": {"report": {"type": "string"}}, "required": ["report"]},
@@ -63,7 +70,7 @@ def handle(msg):
     method, params = msg.get("method"), msg.get("params") or {}
     global SIZE_MB
     if method == "initialize":
-        log("initialize " + json.dumps(params)[:1500])
+        log(f"initialize pid={os.getpid()} " + json.dumps(params)[:1500])
         return {"protocolVersion": params.get("protocolVersion", "2025-06-18"),
                 "capabilities": {"tools": {}, "resources": {}},
                 "serverInfo": {"name": "endeavor-probe", "version": "0.0.1"}}
@@ -79,6 +86,7 @@ def handle(msg):
         elif uri.endswith("/loader"): text = page("loader.built.html")
         elif uri.endswith("/cdn"): text = page("cdn.built.html")
         elif uri.endswith("/live"): text = page("live.built.html")
+        elif uri.endswith("/relay"): text = page("relay.built.html")
         elif "/size/" in uri:
             base = page("view.built.html"); pad = max(0, int(float(uri.rsplit("/", 1)[1]) * 1e6) - len(base))
             text = base.replace("</body>", "<!--" + "x" * pad + "--></body>")
@@ -91,7 +99,7 @@ def handle(msg):
                                                     **({"preferredDisplayMode": "fullscreen"} if uri.rsplit("/", 1)[-1] in ("loader", "live", "cdn") else {}))}}]}
     if method == "tools/call":
         name, args = params.get("name"), params.get("arguments") or {}
-        log(f"tools/call {name} {json.dumps(args)[:4000]}")
+        log(f"tools/call {name} pid={os.getpid()} {json.dumps(args)[:4000]}")
         if name == "ws_open":
             info = json.load(open(os.path.join(HERE, "live.json")))
             i = wsrelay.ws_open("127.0.0.1", info["port"], "/?secret=" + info["secret"])
@@ -107,6 +115,13 @@ def handle(msg):
             part = full[o:o + n]
             # offsets count Python characters; the view only follows "next" (its own string length counts UTF-16 units)
             return {"content": [{"type": "text", "text": f"part at {o}"}], "structuredContent": {"total": len(full), "next": o + len(part), "text": part}}
+        if name.startswith("relay_"):
+            sc = {"pid": os.getpid()}
+            if name == "relay_set": MEM[args["key"]] = args["value"]
+            if name == "relay_get": sc["value"] = MEM.get(args["key"])
+            if name == "relay_hold": time.sleep(int(args.get("ms", 2000)) / 1000)
+            if name == "relay_big": sc["text"] = "x" * int(args.get("n", 1000000))
+            return {"content": [{"type": "text", "text": "ok"}], "structuredContent": sc}
         if name == "probe_report":
             return {"content": [{"type": "text", "text": "saved"}]}
         return {"content": [{"type": "text", "text": f"Opened the {name} view."}],
