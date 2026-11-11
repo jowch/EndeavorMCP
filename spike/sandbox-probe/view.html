@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Sandbox probe</title>
+<style>body{font:13px system-ui,sans-serif;margin:0;padding:12px} pre{white-space:pre-wrap;font:12px ui-monospace,monospace} button{margin:4px 4px 4px 0}</style>
+</head><body>
+<div><b>Endeavor sandbox probe</b></div>
+<button id="echo">Call server tool</button><button id="msg">Send a test message</button><button id="full">Side panel</button>
+<pre id="out">running…</pre>
+<script>
+window.__violations = [];
+document.addEventListener("securitypolicyviolation", e => window.__violations.push(e.violatedDirective + " " + String(e.blockedURI).slice(0, 60)));
+</script>
+<script type="module">
+/*APPLIB*/
+const { App } = window.McpAppLib;
+const out = document.getElementById("out");
+const r = {};
+const t = async (name, f) => { try { r[name] = await f(); } catch (e) { r[name] = "ERR " + (e && e.message || e); } };
+const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+const img = src => new Promise(res => { const i = new Image(); i.onload = () => res("ok"); i.onerror = () => res("blocked"); i.src = src; setTimeout(() => res("timeout"), 3000); });
+await t("origin", () => location.origin + " | " + location.href.slice(0, 60));
+await t("eval_Function", () => Function("return 'ok'")());
+await t("inline_script_element", () => { const s = document.createElement("script"); s.textContent = "window.__inl='ok'"; document.head.appendChild(s); return window.__inl || "blocked"; });
+await t("img_data", () => img("data:image/png;base64," + png));
+await t("img_blob", () => { const b = Uint8Array.from(atob(png), c => c.charCodeAt(0)); return img(URL.createObjectURL(new Blob([b], { type: "image/png" }))); });
+await t("font_data", async () => { const f = new FontFace("x", "url(data:font/woff2;base64,AAAA)"); try { await f.load(); return "ok"; } catch (e) { return "fail " + e.name; } });
+await t("localStorage", () => { localStorage.setItem("k", "v"); return localStorage.getItem("k"); });
+await t("worker_blob", () => new Promise(res => { try { const w = new Worker(URL.createObjectURL(new Blob(["postMessage('ok')"], { type: "text/javascript" }))); w.onmessage = e => res(e.data); w.onerror = () => res("blocked"); setTimeout(() => res("timeout"), 3000); } catch (e) { res("ERR " + e.message); } }));
+await t("wasm", async () => { const m = new Uint8Array([0,97,115,109,1,0,0,0]); await WebAssembly.instantiate(m); return "ok"; });
+await t("fetch_loopback", async () => { try { await fetch("http://127.0.0.1:9/"); return "reached"; } catch (e) { return "failed " + e.message; } });
+await t("webgl", () => !!document.createElement("canvas").getContext("webgl2") ? "ok" : "none");
+await t("dynamic_import_data", async () => { await import("data:text/javascript,export default 1"); return "ok"; });
+const app = new App({ name: "Endeavor probe", version: "0.0.1" }, { availableDisplayModes: ["inline", "fullscreen"] });
+app.ontoolresult = res => { r.tool_result = JSON.stringify(res).slice(0, 120); };
+await t("connect", async () => { await app.connect(); return "ok"; });
+await t("host_caps", () => JSON.stringify(app.getHostCapabilities()));
+await t("host_context", () => JSON.stringify(app.getHostContext()).slice(0, 600));
+r.violations = window.__violations.slice(0, 20);
+out.textContent = JSON.stringify(r, null, 1);
+await t("report", async () => JSON.stringify(await app.callServerTool({ name: "probe_report", arguments: { report: JSON.stringify(r) } })).slice(0, 80));
+out.textContent = JSON.stringify(r, null, 1);
+document.getElementById("echo").onclick = async () => { const res = await app.callServerTool({ name: "probe_report", arguments: { report: "button click " + Date.now() } }); out.textContent += "\nserver tool: " + JSON.stringify(res).slice(0, 100); };
+document.getElementById("msg").onclick = async () => { try { const res = await app.sendMessage({ role: "user", content: [{ type: "text", text: "Probe: this message came from the view's button." }] }); out.textContent += "\nsendMessage: " + JSON.stringify(res); } catch (e) { out.textContent += "\nsendMessage ERR " + e.message; } };
+document.getElementById("full").onclick = async () => { const res = await app.requestDisplayMode({ mode: "fullscreen" }); out.textContent += "\ndisplay mode: " + JSON.stringify(res); };
+</script>
+</body></html>
