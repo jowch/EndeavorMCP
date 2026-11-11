@@ -839,11 +839,16 @@ fn relay(options: Options) -> ! {
 /// background, at low priority, before any notebook needs them. The runtime loads
 /// EndeavorRuntimeWarm only when it's already precompiled, and an update leaves it stale: until
 /// the runtime itself got round to it (`warm_up_later`, after 30 s quiet), the first opens ran
-/// without it, about 20 s slower each (measured 2026-11-11). A runtime folder is one version, so
-/// a folder done once (`.precompiled`, with the Julia it was done for) is never done again. It
-/// never downloads Julia, and a failure costs only the speedup: the runtime still does its own.
+/// without it, about 20 s slower each (measured 2026-11-11). Only where Julia notebooks ran before
+/// (an earlier runtime's precompiled code is in the depot): someone who only opens R notebooks never
+/// needs Julia, and a first install waits for a first Julia notebook as before. A runtime folder is
+/// one version, so a folder done once (`.precompiled`, with the Julia it was done for) is never done
+/// again. It never downloads Julia, and a failure costs only the speedup: the runtime does its own.
 fn precompile_after_update(options: &Options) {
     let (cache, source, depot) = (options.cache.clone(), options.julia.clone(), options.depot.clone());
+    if !julia_ran_here(&depot) {
+        return;
+    }
     std::thread::spawn(move || {
         let Ok(runtime) = unpack_runtime(&cache) else { return };
         let Ok((julia, version)) = julia::find(&source, false, &mut |_| {}) else { return };
@@ -857,6 +862,16 @@ fn precompile_after_update(options: &Options) {
             let _ = std::fs::write(&done, key);
         }
     });
+}
+
+/// Whether an Endeavor runtime has been precompiled in `depot` (JULIA_DEPOT_PATH, whose first
+/// entry is where Julia writes), by any version: a folder only a Julia that ran our runtime makes.
+fn julia_ran_here(depot: &str) -> bool {
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let Some(first) = depot.split(sep).find(|p| !p.is_empty()) else { return false };
+    std::fs::read_dir(Path::new(first).join("compiled"))
+        .map(|versions| versions.flatten().any(|v| v.path().join("EndeavorRuntime").is_dir()))
+        .unwrap_or(false)
 }
 
 /// Julia precompiling the runtime's packages below normal priority: under `nice` where there is
