@@ -63,5 +63,6 @@ atexit(() -> rm(state; force=true))
 # Not in a Slurm job: there the warm-up's Julia and notebook worker would share the job's
 # memory limit with the user's notebooks, and running out could end one of theirs.
 warm || launcher == "slurm" || EndeavorRuntime.warm_up_later()
+EndeavorRuntime.make_page_later()
 
 wait(Condition())

@@ -348,6 +348,26 @@ function page_bundle()
     return Dict{String,Any}("pluto_version" => string(pkgversion(Pluto)), "html" => html)
 end
 
+# The page, made once: the same Pluto makes the same page. Making it takes about 1 s
+# (1.7 s on a first open, measured 2026-11-11), so the runtime makes it in the
+# background once it is ready (`make_page_later`), before a view asks for it.
+const _PAGE = Ref{Any}(nothing)
+const _PAGE_LOCK = ReentrantLock()
+
+function cached_page_bundle()
+    @lock _PAGE_LOCK begin
+        _PAGE[] === nothing && (_PAGE[] = page_bundle())
+        _PAGE[]
+    end
+end
+
+"""Make the view's page in the background (`cached_page_bundle`). The task."""
+make_page_later() = errormonitor(@async try
+    cached_page_bundle()
+catch e
+    @warn "Couldn't make the notebook view's page ahead; it is made when a view asks" exception = e
+end)
+
 # How `endeavor/shutdown` ends the process; tests replace it.
 const _SHUTDOWN = Ref{Function}(() -> exit(0))
 
