@@ -448,7 +448,10 @@ impl Socket {
                 return;
             }
             if socket.used.lock().unwrap().elapsed() >= idle {
-                return socket.close();
+                // Nobody will read what's left: free it now, not when a view next calls.
+                socket.close();
+                *socket.inbox.lock().unwrap() = Inbox::default();
+                return;
             }
         });
         Ok(socket)
