@@ -2,6 +2,8 @@
 # Endeavor sandbox probe: a throwaway stdio MCP server whose tools open MCP App
 # views that report what the host's sandbox allows. Standard library only.
 import json, os, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wsrelay
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(os.environ.get("PROBE_LOG_DIR", HERE), "report.log")
@@ -38,6 +40,13 @@ TOOLS = [
      "description": "Used by the loader view to read the notebook page in parts.",
      "inputSchema": {"type": "object", "properties": {"offset": {"type": "number"}, "size": {"type": "number"}}, "required": ["offset", "size"]},
      "_meta": {"ui": {"visibility": ["app"]}}},
+    {"name": "probe_live", "title": "Open the live notebook",
+     "description": "Open the demo Pluto notebook live, connected to its running Pluto.",
+     "inputSchema": {"type": "object", "properties": {}},
+     "_meta": {"ui": {"resourceUri": "ui://endeavor-probe/live"}, "ui/resourceUri": "ui://endeavor-probe/live"}},
+    {"name": "ws_open", "title": "Relay open", "description": "Used by the live view.", "inputSchema": {"type": "object", "properties": {}}, "_meta": {"ui": {"visibility": ["app"]}}},
+    {"name": "ws_send", "title": "Relay send", "description": "Used by the live view.", "inputSchema": {"type": "object", "properties": {"id": {"type": "number"}, "data": {"type": "string"}}, "required": ["id", "data"]}, "_meta": {"ui": {"visibility": ["app"]}}},
+    {"name": "ws_recv", "title": "Relay receive", "description": "Used by the live view.", "inputSchema": {"type": "object", "properties": {"id": {"type": "number"}, "wait_ms": {"type": "number"}}, "required": ["id"]}, "_meta": {"ui": {"visibility": ["app"]}}},
     {"name": "probe_report", "title": "Probe report",
      "description": "Used by the probe views to save what they found.",
      "inputSchema": {"type": "object", "properties": {"report": {"type": "string"}}, "required": ["report"]},
@@ -67,6 +76,7 @@ def handle(msg):
         elif uri == PLUTO: text = page("pluto.built.html")
         elif uri.endswith("/loader"): text = page("loader.built.html")
         elif uri.endswith("/cdn"): text = page("cdn.built.html")
+        elif uri.endswith("/live"): text = page("live.built.html")
         elif uri.endswith("/size"):
             base = page("view.built.html"); pad = max(0, int(SIZE_MB * 1e6) - len(base))
             text = base.replace("</body>", "<!--" + "x" * pad + "--></body>")
@@ -80,8 +90,18 @@ def handle(msg):
         log(f"tools/call {name} {json.dumps(args)[:4000]}")
         if name == "probe_size":
             SIZE_MB = float(args.get("mb", 1))
+        if name == "ws_open":
+            info = json.load(open(os.path.join(HERE, "live.json")))
+            i = wsrelay.ws_open("127.0.0.1", info["port"], "/?secret=" + info["secret"])
+            return {"content": [{"type": "text", "text": "open"}], "structuredContent": {"id": i}}
+        if name == "ws_send":
+            wsrelay.ws_send(int(args["id"]), args["data"])
+            return {"content": [{"type": "text", "text": "sent"}], "structuredContent": {"ok": True}}
+        if name == "ws_recv":
+            msgs, closed = wsrelay.ws_recv(int(args["id"]), int(args.get("wait_ms", 1500)))
+            return {"content": [{"type": "text", "text": f"{len(msgs)} messages"}], "structuredContent": {"messages": msgs, "closed": closed}}
         if name == "page_part":
-            full = page("pluto.inner.html"); o, n = int(args["offset"]), int(args["size"])
+            full = page(args.get("page", "pluto.inner.html")); o, n = int(args["offset"]), int(args["size"])
             return {"content": [{"type": "text", "text": f"part at {o}"}], "structuredContent": {"total": len(full), "text": full[o:o + n]}}
         if name == "probe_report":
             return {"content": [{"type": "text", "text": "saved"}]}
@@ -91,16 +111,22 @@ def handle(msg):
         return None
     raise KeyError(method)
 
-for raw in sys.stdin:
-    raw = raw.strip()
-    if not raw:
-        continue
-    msg = json.loads(raw)
+import threading
+OUT = threading.Lock()
+
+def serve(msg):
     try:
         result = handle(msg)
         reply = None if "id" not in msg else {"jsonrpc": "2.0", "id": msg["id"], "result": result}
     except Exception as e:
         reply = None if "id" not in msg else {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": str(e)}}
     if reply is not None:
-        sys.stdout.write(json.dumps(reply) + "\n")
-        sys.stdout.flush()
+        with OUT:
+            sys.stdout.write(json.dumps(reply) + "\n")
+            sys.stdout.flush()
+
+if __name__ == "__main__":
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if raw:
+            threading.Thread(target=serve, args=(json.loads(raw),), daemon=True).start()

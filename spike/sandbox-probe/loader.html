@@ -16,7 +16,7 @@ try {
   let html = "", offset = 0, total = 1, size = 1000000, calls = 0, fails = 0;
   while (offset < total) {
     let res;
-    try { res = await app.callServerTool({ name: "page_part", arguments: { offset, size } }); calls++; }
+    try { res = await app.callServerTool({ name: "page_part", arguments: { offset, size, page: "static.parts.json" } }); calls++; }
     catch (e) { fails++; if (size <= 50000 || fails > 6) throw e; size = Math.floor(size / 2); continue; }
     const sc = res.structuredContent;
     if (!sc || typeof sc.text !== "string") { fails++; if (size <= 50000 || fails > 6) throw new Error("no structuredContent"); size = Math.floor(size / 2); continue; }
@@ -25,22 +25,15 @@ try {
   }
   const parts = calls + " calls, last size " + size + ", fails " + fails;
   const fetched = performance.now();
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  // Pluto reads its storage at start; keep a page-local copy if the sandbox refuses it.
-  for (const el of [...doc.head.children]) {
-    if (el.tagName === "SCRIPT") continue;
-    if (el.tagName === "META" && el.httpEquiv) continue;
-    document.head.appendChild(document.importNode(el, true));
-  }
-  const scripts = [...doc.querySelectorAll("script")];
-  for (const s of scripts) s.remove();
+  const doc = JSON.parse(html);
   boot.remove();
-  for (const el of [...doc.body.childNodes]) document.body.appendChild(document.importNode(el, true));
-  for (const s of scripts) {
-    if (s.type === "importmap") continue;
+  document.head.insertAdjacentHTML("beforeend", doc.head);
+  document.body.insertAdjacentHTML("beforeend", doc.body);
+  for (const s of doc.scripts) {
+    if (s.attrs.type === "importmap") continue;
     const n = document.createElement("script");
-    for (const a of s.attributes) if (a.name !== "src" || !a.value.startsWith("data:")) n.setAttribute(a.name, a.value);
-    n.textContent = s.textContent;
+    for (const [k, v] of Object.entries(s.attrs)) if (k !== "src") n.setAttribute(k, v ?? "");
+    n.textContent = s.text;
     document.body.appendChild(n);
   }
   setTimeout(() => {

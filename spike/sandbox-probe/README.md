@@ -21,3 +21,13 @@ through the app-only tool `page_part` and builds it in place (gunzip
 `pluto.inner.html.gz` first). `probe_cdn` opens a 360 KB page that loads
 Pluto's code from cdn.jsdelivr.net (declared in `_meta.ui.csp`).
 `probe_size` with `mb` pads the probe view to that size, to find the limit.
+
+Round 3 (live): `probe_live` opens a view running Pluto's real editor. A
+WebSocket stand-in in the view carries Pluto's messages through the app-only
+tools `ws_open`, `ws_send`, `ws_recv` (long poll); `wsrelay.py` holds the
+real socket to Pluto on 127.0.0.1. Start Pluto with
+`SPIKE_DIR=$PWD julia --project=../../runtime live.jl`, wait for "ready",
+run `./make-live.sh`. `probe_loader` now reads `static.parts.json`
+(gunzip `static.parts.json.gz`), already split into head, body and scripts so the
+view never parses the big bundles as HTML. Tested here in headless Chromium:
+cells render, a slider change reruns the dependent cell in Julia.
