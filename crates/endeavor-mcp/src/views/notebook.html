@@ -43,6 +43,8 @@ let elsewhere = false;     // the result opened the notebook in a browser instea
 let fresh = false;         // the notebook opened just now, not in an earlier turn drawn again
 let failed = null;         // the tool's error, if it failed
 let loading = null;        // the page load, once started
+let drawn = false;         // whether the load put Pluto's page in, so trying again would draw it twice
+let retry = false;         // whether the card offers to try again
 const sockets = new Set(); // the relay sockets of this view
 let active = false;        // whether the notebook may talk to Pluto (shown in the panel)
 const waiters = [];        // sockets waiting for `active`
@@ -82,13 +84,41 @@ async function toPanel() {
   try { await app.requestDisplayMode({ mode: "fullscreen" }); } catch (e) {}
   update();
 }
-openButton.addEventListener("click", toPanel);
+openButton.addEventListener("click", () => {
+  if (!retry) return toPanel();
+  failed = null; retry = false; loading = null;
+  update();
+});
+
+// A load's error as the user reads it. The view's tools write theirs for Claude, after a code
+// ("not_ready: Julia isn't running"); the host's own (a timeout, say) come as they are. `retry`:
+// whether trying again can help, from the view, without Claude.
+function readable(e) {
+  const text = String(e && e.message || e || "").trim();
+  const code = (text.match(/^([a-z_]+)(::|:)/) || [])[1];
+  const again = "Ask Claude to open it again.";
+  const slow = { text: "The notebook took too long to answer. Try again.", retry: true };
+  // Julia busy (an HTTP timeout while it makes the page), not stopped.
+  if (code === "not_ready" && /didn't answer/.test(text)) return slow;
+  switch (code) {
+    case "not_open": return { text: "This notebook isn't open any more. " + again, retry: false };
+    case "not_ready": return { text: "Julia isn't running right now. " + again, retry: false };
+    case "not_connected": return { text: "Couldn't connect to the notebook. Try again, or ask Claude to open it again.", retry: true };
+    // Sockets left by views that went away: freed after a minute idle.
+    case "too_many": return { text: "Too many notebook views are open. Wait a minute, then try again.", retry: true };
+  }
+  // The host's own timeout for a tool call.
+  if (/request timed out/i.test(text)) return slow;
+  const said = text.replace(/^[a-z_]+(::|:)\s*/, "");
+  return { text: "Couldn't show the notebook" + (said ? `: ${said.length > 160 ? said.slice(0, 157) + "…" : said}` : ".") + " " + again, retry: false };
+}
 
 function update() {
   if (failed) {
     nameEl.textContent = notebook ? notebook.name : "Notebook";
     say(failed);
-    openButton.hidden = true;
+    openButton.textContent = "Try again";
+    openButton.hidden = !retry;
     return;
   }
   if (elsewhere) {
@@ -107,13 +137,21 @@ function update() {
   if (show && notebook) {
     document.documentElement.classList.remove("endeavor-inline");
     card.hidden = true;
-    if (!loading) loading = load().catch(e => { failed = String(e && e.message || e); card.hidden = false; card.className = "cover"; update(); });
+    if (!loading) loading = load().catch(e => {
+      const why = readable(e);
+      failed = why.text;
+      retry = why.retry && !drawn;
+      card.hidden = false;
+      card.className = "cover";
+      update();
+    });
     return;
   }
   // Inline: a card, with the notebook hidden if it was shown before.
   card.hidden = false;
   card.className = "";
   document.documentElement.classList.toggle("endeavor-inline", !!loading);
+  openButton.textContent = "Open the notebook";
   openButton.hidden = !canMove() || !notebook;
   say(!notebook ? "Opening…" : canMove() ? "Opens beside the chat or full screen." : "This window can't show the notebook beside the chat. Claude's desktop app can.");
 }
@@ -195,28 +233,26 @@ function closeAll() { [...sockets].forEach(s => s.close()); }
 
 // Point's ↩ passes the picks and the comment (and what ⌘↩ added) to the chat as the user's message (Claude's desktop
 // app puts it in its message box for the user to send). A host that takes no messages from views gets
-// the look without Point.
+// the look without Point. Claude's desktop app adds the text at the cursor, straight after anything the
+// user had typed, so it starts on a new paragraph.
 const asked = async res => { if (res?.isError) throw new Error("Claude's chat didn't take it"); };
 const pointHost = {
   get canSend() { return !!app.getHostCapabilities()?.message; },
-  send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(asked),
+  send: text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\n\n" + text }] }).then(asked),
 };
 
 async function load() {
   // The page in parts: a large `ui://` resource doesn't show, and the view can fetch nothing.
   // An old card's notebook may be closed by now: say so, rather than draw a page that can't connect.
-  try {
-    const probe = await call("notebook_socket_open", { notebook_id: notebook.id });
-    call("notebook_socket_close", { socket: probe.socket }).catch(() => {});
-  } catch (e) {
-    throw new Error(String(e.message).startsWith("not_open") ? "This notebook isn't open any more. Ask Claude to open it again." : e.message);
-  }
+  const probe = await call("notebook_socket_open", { notebook_id: notebook.id });
+  call("notebook_socket_close", { socket: probe.socket }).catch(() => {});
   let text = "", offset = 0, total = 1, size = 1000000;
   while (offset < total) {
     const part = await call("notebook_page", { offset, size });
     total = part.total; text += part.text; offset = part.next;
   }
   const page = JSON.parse(text);
+  drawn = true;
   window.WebSocket = RelaySocket;
   window.endeavor_notebook_id = notebook.id;
   // Pluto makes its socket's address from this; the stand-in doesn't use it.
