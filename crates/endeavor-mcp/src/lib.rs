@@ -34,6 +34,7 @@ mod slurm;
 mod standalone;
 mod stopped;
 mod update;
+mod views;
 #[cfg(unix)]
 mod unixproc;
 #[cfg(windows)]

@@ -1,0 +1,61 @@
+[
+  {
+    "name": "notebook_page",
+    "title": "Notebook page",
+    "description": "Used by the notebook view to read Pluto's page in parts.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "offset": { "type": "number", "description": "Where the part starts: 0, then the `next` of the part before." },
+        "size": { "type": "number", "description": "At most this many bytes." }
+      },
+      "required": ["offset", "size"]
+    }
+  },
+  {
+    "name": "notebook_socket_open",
+    "title": "Notebook connection",
+    "description": "Used by the notebook view to connect to the notebook's Pluto.",
+    "inputSchema": {
+      "type": "object",
+      "properties": { "notebook_id": { "type": "string", "description": "An open notebook's id." } },
+      "required": ["notebook_id"]
+    }
+  },
+  {
+    "name": "notebook_socket_send",
+    "title": "Notebook connection: send",
+    "description": "Used by the notebook view to send Pluto a message.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "socket": { "type": "number" },
+        "data": { "type": "string", "description": "The message, base64." }
+      },
+      "required": ["socket", "data"]
+    }
+  },
+  {
+    "name": "notebook_socket_recv",
+    "title": "Notebook connection: receive",
+    "description": "Used by the notebook view to receive Pluto's messages.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "socket": { "type": "number" },
+        "wait_ms": { "type": "number", "description": "How long to wait for a message, at most 1500." }
+      },
+      "required": ["socket"]
+    }
+  },
+  {
+    "name": "notebook_socket_close",
+    "title": "Notebook connection: close",
+    "description": "Used by the notebook view when it closes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": { "socket": { "type": "number" } },
+      "required": ["socket"]
+    }
+  }
+]

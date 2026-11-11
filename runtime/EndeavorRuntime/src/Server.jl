@@ -58,6 +58,11 @@ function _run_http_mcp_server(pluto_session, port::Int; listenany::Bool=false)
             resp = if method_name == "endeavor/set_folder"
                 set_folder!(sess, string(get(get(msg, "params", Dict{String,Any}()), "path", "")))
                 Dict("jsonrpc" => "2.0", "id" => id, "result" => Dict{String,Any}())
+            elseif method_name == "endeavor/page_bundle"
+                # Pluto's live editor as one page with its code inside, for a view
+                # that can load nothing from outside (an MCP App view in Claude). The
+                # view sets `window.endeavor_notebook_id` before the page's scripts run.
+                Dict("jsonrpc" => "2.0", "id" => id, "result" => page_bundle())
             elseif method_name == "endeavor/shutdown"
                 # Pluto has already saved every notebook file. Exit after this reply is out.
                 @info "Shutting down at the app's request"

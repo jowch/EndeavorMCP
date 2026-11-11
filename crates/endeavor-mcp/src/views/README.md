@@ -1,0 +1,12 @@
+# The notebook view
+
+`notebook.html` is the view a client that draws MCP App views shows for
+`open_notebook` and `new_notebook` (see `../views.rs`). The binary serves it
+with `mcp-app.js` inside.
+
+`mcp-app.js` is `dist/src/app-with-deps.js` from
+[`@modelcontextprotocol/ext-apps`](https://github.com/modelcontextprotocol/ext-apps)
+1.7.5 (MIT; the project is moving to Apache-2.0), unchanged. `views.rs` turns
+its closing `export{...}` into `window.McpAppLib={...}` so it runs inline. To
+update it, take the same file from a newer release and run
+`node scripts/notebook-view-check.cjs`.

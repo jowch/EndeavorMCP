@@ -24,6 +24,24 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   Slurm (`tests/machines.rs`), and over real ssh and Julia in `e2e_machines`.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
+- The notebook view (`views.rs`, interface 36): a client that draws MCP App
+  views (Claude Desktop and claude.ai say so in `initialize`) gets
+  `open_notebook` and `new_notebook` with a `ui://endeavor/notebook` view, and
+  no browser tab. The view is Pluto's own live editor, shown only beside the
+  chat (the Code tab's panel, after one click on its card) or full screen
+  (Claude's chat, without a click). It reaches Pluto through tools only it
+  calls: `notebook_page` reads Pluto's page, made by Julia
+  (`endeavor/page_bundle`), and `notebook_socket_*` relay Pluto's WebSocket,
+  which the core holds on loopback. Checked with
+  `scripts/notebook-view-check.cjs` ([testing.md](testing.md)) and a step of
+  `e2e_julia`. A socket no view asks about for 60 s, or with 256 MB unread,
+  closes itself; a message over 1 MB comes in parts. A card that Claude draws
+  again for an old call waits for a click. Not yet: R notebooks, the Endeavor
+  look and Point, and a notebook on a machine, which still opens in a browser
+  tab (the chat's view reaches another `endeavor mcp` process, which works on
+  this computer). A client that draws views but can't move one beside the chat
+  gets only the card. Claude ignores the documented automatic side panel for a
+  local server (checked 2026-11-11).
 - CI (`ci.yml`) builds and tests on Linux, macOS and Windows. Most integration
   tests are Unix only (their stand-in Julia is a shell script); on Windows,
   `tests/windows.rs` runs the local start with a stand-in `julia.exe`

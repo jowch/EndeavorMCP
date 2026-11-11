@@ -71,12 +71,13 @@ call `notebook_guide` with `topic` set to `endeavor-machines/SKILL.md` and follo
 /// The server's MCP `instructions` for an agent with the plugin's skills or
 /// without (`has_skills`), on a runtime with the app or without (`standalone`);
 /// `machines`: from `endeavor mcp`, which has the machine tools.
-pub fn instructions(standalone: bool, has_skills: bool, machines: bool) -> Option<String> {
+pub fn instructions(standalone: bool, has_skills: bool, machines: bool, views: bool) -> Option<String> {
     let machines_text = match (machines, has_skills) {
         (false, _) => String::new(),
         (true, true) => format!(" {MACHINES}"),
         (true, false) => format!(" {MACHINES} {MACHINES_GUIDE}"),
     };
+    let machines_text = if views { format!(" {VIEWS}{machines_text}") } else { machines_text };
     match (standalone, has_skills) {
         (false, true) => Some(format!("{LOAD_SKILL} {APP_REPLIES}")),
         (false, false) => Some(format!("{APP} {READ_GUIDE} {APP_REPLIES} {APP_GUIDE}")),
@@ -84,6 +85,10 @@ pub fn instructions(standalone: bool, has_skills: bool, machines: bool) -> Optio
         (true, false) => Some(format!("{STANDALONE}{machines_text}\n\n{READ_GUIDE}")),
     }
 }
+
+/// Said to a client that draws the notebook view (`views`), after `STANDALONE`.
+const VIEWS: &str = "In this client, `new_notebook` and `open_notebook` show the notebook in the chat instead of a browser tab (`shown_beside_chat`): \
+say that it opens beside the chat or full screen, by itself or with one click on its card, and don't give the address.";
 
 /// `tools/list`'s entry for the guide.
 pub fn schema() -> Value {
@@ -220,26 +225,28 @@ mod tests {
     #[test]
     fn only_an_agent_without_the_skills_is_pointed_at_the_machines_guide() {
         let pointer = "call `notebook_guide` with `topic` set to `endeavor-machines/SKILL.md` and follow it";
-        let with_skills = instructions(true, true, true).unwrap();
-        let without_skills = instructions(true, false, true).unwrap();
+        let with_skills = instructions(true, true, true, false).unwrap();
+        let without_skills = instructions(true, false, true, false).unwrap();
         assert!(!with_skills.contains(pointer), "{with_skills}");
         assert!(without_skills.contains(pointer), "{without_skills}");
         assert!(read(&json!({ "topic": "endeavor-machines/SKILL.md" })).is_ok(), "the topic it names");
-        assert!(!instructions(true, false, false).unwrap().contains("endeavor-machines"), "no machine tools, no pointer");
+        assert!(!instructions(true, false, false, false).unwrap().contains("endeavor-machines"), "no machine tools, no pointer");
+        assert!(instructions(true, true, true, true).unwrap().contains("shown_beside_chat"), "a client that draws the view is told of its card");
+        assert!(!instructions(true, true, true, false).unwrap().contains("shown_beside_chat"));
     }
 
     #[test]
     fn only_an_agent_in_the_app_is_pointed_at_the_app_topic() {
         let approval = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
-        assert!(instructions(false, false, false).unwrap().ends_with(approval));
-        assert!(!instructions(true, false, true).unwrap().contains(approval));
+        assert!(instructions(false, false, false, false).unwrap().ends_with(approval));
+        assert!(!instructions(true, false, true, false).unwrap().contains(approval));
     }
 
     #[test]
     fn every_agent_in_the_app_is_told_to_link_cells() {
         for has_skills in [true, false] {
-            assert!(instructions(false, has_skills, false).unwrap().contains("notebook://pluto/{notebook_id}/cell/{cell_id}"), "skills: {has_skills}");
-            assert!(!instructions(true, has_skills, true).unwrap().contains("notebook://"), "no links without the app, skills: {has_skills}");
+            assert!(instructions(false, has_skills, false, false).unwrap().contains("notebook://pluto/{notebook_id}/cell/{cell_id}"), "skills: {has_skills}");
+            assert!(!instructions(true, has_skills, true, false).unwrap().contains("notebook://"), "no links without the app, skills: {has_skills}");
         }
     }
 

@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use common::find_julia;
 use common::helper::Helper;
+use base64::Engine;
 use serde_json::{Value, json};
 use wire::files::{Reply, Request};
 use wire::{ToApp, ToHelper};
@@ -199,6 +200,27 @@ impl Runtime {
     }
 }
 
+/// A MessagePack map of short strings with an empty `body`, as Pluto's page sends its messages.
+fn msgpack(fields: &[(&str, &str)]) -> Vec<u8> {
+    let mut out = vec![0x80 | (fields.len() as u8 + 1)];
+    let string = |out: &mut Vec<u8>, s: &str| {
+        assert!(s.len() < 256);
+        if s.len() < 32 { out.push(0xa0 | s.len() as u8) } else { out.extend([0xd9, s.len() as u8]) }
+        out.extend(s.as_bytes());
+    };
+    for (key, value) in fields {
+        string(&mut out, key);
+        string(&mut out, value);
+    }
+    string(&mut out, "body");
+    out.push(0x80);
+    out
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// A step's name, and how long it took, as the run goes.
 fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
     let started = Instant::now();
@@ -353,6 +375,52 @@ fn the_runtime_end_to_end() {
         let mut pong = [0u8; 4];
         socket.read_exact(&mut pong).unwrap();
         assert_eq!(pong, [0x8A, 2, b'h', b'i'], "a pong through the core, both ways");
+    });
+
+    step("the notebook view: Pluto's page in one piece, and a socket to the notebook", || {
+        let mut view = |name: &str, arguments: Value| {
+            let reply = rt.mcp(MAC, "tools/call", json!({ "name": name, "arguments": arguments }));
+            assert_eq!(reply["result"]["isError"], false, "{name}: {reply}");
+            reply["result"]["structuredContent"].clone()
+        };
+        // `endeavor/page_bundle` uses `Pluto.generate_html`'s offline keywords: a Pluto update that
+        // changes them shows here. The core refuses a page that loads scripts from outside.
+        let (mut text, mut offset) = (String::new(), 0);
+        loop {
+            let part = view("notebook_page", json!({ "offset": offset, "size": 1_000_000 }));
+            text.push_str(part["text"].as_str().unwrap());
+            offset = part["next"].as_u64().unwrap();
+            if offset >= part["total"].as_u64().unwrap() {
+                break;
+            }
+        }
+        let page: Value = serde_json::from_str(&text).unwrap();
+        let scripts = page["scripts"].as_array().unwrap();
+        assert!(scripts.len() > 1 && scripts.iter().all(|s| s["attrs"]["src"].is_null()), "every script inline: {} scripts", scripts.len());
+        assert!(page["body"].as_str().unwrap().contains("pluto-editor"), "Pluto's editor: {}", &page["body"].as_str().unwrap()[..300.min(page["body"].as_str().unwrap().len())]);
+
+        // Pluto's own connect message, then the notebook's whole state, as the page asks for them.
+        let socket = view("notebook_socket_open", json!({ "notebook_id": notebook }))["socket"].clone();
+        let send = |view: &mut dyn FnMut(&str, Value) -> Value, kind: &str| {
+            let message = msgpack(&[("type", kind), ("client_id", "e2e"), ("request_id", kind), ("notebook_id", &notebook)]);
+            view("notebook_socket_send", json!({ "socket": socket, "data": base64::engine::general_purpose::STANDARD.encode(message) }));
+        };
+        send(&mut view, "connect");
+        send(&mut view, "reset_shared_state");
+        let mut got = Vec::new();
+        let began = Instant::now();
+        while !(contains(&got, b"\xafnotebook_exists\xc3") && contains(&got, b"x = 21 * 2")) && began.elapsed() < Duration::from_secs(60) {
+            let reply = view("notebook_socket_recv", json!({ "socket": socket, "wait_ms": 1500 }));
+            assert_ne!(reply["closed"], true, "Pluto closed the socket");
+            for m in reply["messages"].as_array().unwrap() {
+                got.extend(base64::engine::general_purpose::STANDARD.decode(m.as_str().unwrap()).unwrap());
+            }
+        }
+        assert!(contains(&got, b"\xafnotebook_exists\xc3"), "Pluto knows the notebook");
+        assert!(contains(&got, b"x = 21 * 2"), "the notebook's cells came back");
+        view("notebook_socket_close", json!({ "socket": socket }));
+        let refused = rt.mcp(MAC, "tools/call", json!({ "name": "notebook_socket_open", "arguments": { "notebook_id": "00000000-0000-0000-0000-00000000dead" } }));
+        assert_eq!(refused["result"]["isError"], true, "a notebook Pluto hasn't open: {refused}");
     });
 
     step("list_notebooks and one notebook per session", || {

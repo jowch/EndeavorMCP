@@ -338,6 +338,16 @@ function set_folder!(session, path::AbstractString)
     return true
 end
 
+# Pluto's editor page with its code inside (`offline_bundle`), for any notebook: the
+# view names the notebook in `window.endeavor_notebook_id` before the page runs, and
+# reaches Pluto through its own socket. Made from the Pluto installed here, so the
+# page always matches the server. No Binder button: nothing in the view can reach it.
+function page_bundle()
+    html = Pluto.generate_html(; offline_bundle=true, disable_ui=false,
+        notebook_id_js="window.endeavor_notebook_id", binder_url_js="undefined")
+    return Dict{String,Any}("pluto_version" => string(pkgversion(Pluto)), "html" => html)
+end
+
 # How `endeavor/shutdown` ends the process; tests replace it.
 const _SHUTDOWN = Ref{Function}(() -> exit(0))
 

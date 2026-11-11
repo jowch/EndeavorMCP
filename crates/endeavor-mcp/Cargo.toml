@@ -15,6 +15,8 @@ serde_json = "1"
 libc = "0.2"
 # The name of the cookie that lets a browser in, from the token.
 sha2 = "0.10"
+# The notebook view's socket messages and Pluto's page, which come as base64.
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 # Random bytes for the bridge token and MCP session ids (Unix reads /dev/urandom).

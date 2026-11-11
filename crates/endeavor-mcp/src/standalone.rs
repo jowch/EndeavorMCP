@@ -806,6 +806,9 @@ struct Relay {
     protocol: Mutex<Option<String>>,
     /// The runtime's `Mcp-Session-Id`, if it gives one.
     mcp_session: Mutex<Option<String>>,
+    /// The client draws MCP App views (it said so in `initialize`): notebooks show in the notebook
+    /// view beside the chat, not in a browser tab (`views`).
+    views: std::sync::atomic::AtomicBool,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -865,6 +868,7 @@ impl Relay {
             opened: Mutex::default(),
             protocol: Mutex::default(),
             mcp_session: Mutex::default(),
+            views: Default::default(),
             out: Mutex::new(out),
         }
     }
@@ -954,7 +958,11 @@ impl Relay {
             return self.write(&to_json(&json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } })));
         };
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
-        if let Some(reply) = crate::mcp::answer_locally(&message, self.options.skills_plugin, self.options.folder.is_none()) {
+        if message["method"] == "initialize" {
+            self.views.store(crate::views::client_draws_views(&message), std::sync::atomic::Ordering::SeqCst);
+        }
+        let views = self.views.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some(reply) = crate::mcp::answer_locally(&message, self.options.skills_plugin, self.options.folder.is_none(), views) {
             if message["method"] == "initialize" {
                 let negotiated: Value = serde_json::from_str(&reply).unwrap_or_default();
                 *self.protocol.lock().unwrap() = negotiated["result"]["protocolVersion"].as_str().map(str::to_owned);
@@ -1049,13 +1057,27 @@ impl Relay {
     /// browser in. Each such call opens it, so that asking the agent to open it again works, except
     /// within `REOPEN_AFTER` of opening the same one. `opened_in_browser` says whether it is open.
     fn in_browser(&self, message: &Value, tool: Option<&str>, route: &Route, reply: String) -> String {
+        // The view's replies, a receive up to a few MB: nothing here is for them.
+        if tool.is_some_and(crate::views::is_view_tool) {
+            return reply;
+        }
         let Ok(mut parsed) = serde_json::from_str::<Value>(&reply) else { return reply };
         if parsed["id"] != message["id"] || parsed["result"]["isError"] != false {
             return reply;
         }
         let Some(Value::Object(mut fields)) = parsed["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()) else { return reply };
         let Some(url) = fields.get("browser_url").and_then(Value::as_str).map(crate::mcp::without_token) else { return reply };
-        if matches!(tool, Some("new_notebook" | "open_notebook")) {
+        // A client that draws views shows a notebook on this computer beside the chat (`views`), and
+        // no tab opens. A notebook on a machine opens in a tab as before: the view's calls may reach
+        // another front, which works on this computer. `shown_at` lets a view the client draws again
+        // later (the conversation reopened) tell that it's an old one.
+        let in_view = route.host.is_none() && self.views.load(std::sync::atomic::Ordering::SeqCst) && matches!(tool, Some("new_notebook" | "open_notebook"));
+        if in_view {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+            fields.insert("opened_in_browser".into(), false.into());
+            fields.insert("shown_beside_chat".into(), true.into());
+            fields.insert("shown_at".into(), now.into());
+        } else if matches!(tool, Some("new_notebook" | "open_notebook")) {
             let key = (route.port, fields.get("notebook_id").and_then(Value::as_str).unwrap_or_default().to_owned());
             let just = self.opened.lock().unwrap().get(&key).is_some_and(|at| at.elapsed() < REOPEN_AFTER);
             let opened = just || browser::open(&crate::mcp::entry_link(&url, &route.page_token));
@@ -1067,7 +1089,7 @@ impl Relay {
         // A runtime on this computer, which shows the user no browser: the address alone won't open
         // for them. (On a machine the connection's port is on the user's computer already.)
         let var = |name: &str| std::env::var(name).ok();
-        if route.host.is_none() && !browser::shows(var) {
+        if route.host.is_none() && !in_view && !browser::shows(var) {
             let open = crate::core::open_command(&self.options.state_dir);
             fields.insert("browser_note".into(), browser::note(&crate::hostname(), route.port, &open, browser::over_ssh(var)).into());
         }

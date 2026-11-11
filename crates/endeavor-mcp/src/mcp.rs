@@ -216,6 +216,8 @@ pub struct Bridge {
     /// Told each folder a session is given, with the session's `kind` if the caller said it
     /// (`julia`, `r` or `unknown`): the core warms Julia for a Julia session's folder.
     pub on_folder: std::sync::OnceLock<OnFolder>,
+    /// What the notebook views use: Pluto's page and their sockets to Pluto (`views`).
+    pub views: crate::views::Views,
 }
 
 /// Who sent a message: the agent session's key and the server it works on,
@@ -237,6 +239,8 @@ pub struct Caller {
     pub front: bool,
     /// The front was started without a project folder, so on this computer the tools take absolute paths only.
     pub no_folder: bool,
+    /// The client draws MCP App views (`views`): the front lists the notebook view and its tools.
+    pub views: bool,
 }
 
 /// A name that goes in a header or a message: printable characters only,
@@ -254,7 +258,7 @@ impl Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
         let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
         let browser_port = request.header("X-Endeavor-Browser-Port").and_then(|port| port.trim().parse().ok()).filter(|&port| port != 0);
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false }
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false }
     }
 }
 
@@ -289,6 +293,7 @@ impl Bridge {
             shell_env,
             standalone: None,
             on_folder: std::sync::OnceLock::new(),
+            views: crate::views::Views::default(),
         }
     }
 
@@ -466,6 +471,10 @@ impl Bridge {
             }
         }
         answer(message, caller, self.standalone.is_some(), |params| {
+            // The notebook view's calls: not the session's activity, and nothing the app is told of.
+            if let Some(name) = params["name"].as_str().filter(|name| crate::views::is_view_tool(name)) {
+                return self.view_call(name, params);
+            }
             let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone, began };
             let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
@@ -475,6 +484,23 @@ impl Bridge {
             self.notebooks.publish();
             result
         })
+    }
+
+    /// A call of one of the notebook view's tools (`views`). Its result carries what the view
+    /// reads in `structuredContent`, and a line of text for a client that shows it.
+    fn view_call(&self, name: &str, params: &Value) -> Value {
+        let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        if let Err(result) = check_arguments(name, &arguments, false) {
+            return result;
+        }
+        let page = || {
+            let port = *self.julia.port.get().ok_or("not_ready: Julia isn't running")?;
+            crate::views::page_from_julia(port, &self.julia.token)
+        };
+        match self.views.call(name, &arguments, page, |id| self.notebooks.open_in_pluto(id)) {
+            Ok(result) => json!({ "content": [{ "type": "text", "text": "ok" }], "structuredContent": result, "isError": false }),
+            Err(error) => json!({ "content": [{ "type": "text", "text": error }], "isError": true }),
+        }
     }
 
     /// A `tools/call`'s result.
@@ -746,7 +772,7 @@ fn unknown_tool_result(name: &str, help: bool) -> Value {
 /// Each tool's `inputSchema` by name: the one list of the tools this build has, the machine tools included.
 static INPUT_SCHEMAS: LazyLock<HashMap<String, Value>> = LazyLock::new(|| {
     let listed = |tools: &Value| tools.as_array().cloned().unwrap_or_default();
-    let tools = [listed(&NOTEBOOK_TOOLS), listed(&MACHINE_TOOLS), host_tools::schemas(), vec![guide::schema()]];
+    let tools = [listed(&NOTEBOOK_TOOLS), listed(&MACHINE_TOOLS), host_tools::schemas(), vec![guide::schema()], crate::views::schemas()];
     (tools.into_iter().flatten())
         .filter_map(|tool| Some((tool["name"].as_str()?.to_owned(), tool["inputSchema"].clone())))
         .collect()
@@ -988,7 +1014,10 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") },
             });
-            if let Some(instructions) = guide::instructions(standalone, caller.has_skills, caller.front) {
+            if caller.views {
+                result["capabilities"]["resources"] = json!({});
+            }
+            if let Some(instructions) = guide::instructions(standalone, caller.has_skills, caller.front, caller.views) {
                 result["instructions"] = instructions.into();
             }
             ok(result)
@@ -1021,8 +1050,16 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
                 let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name) || name == "open_notebook" || (MACHINE_NAMES.contains(&name) && name != "list_machines"));
                 tool["annotations"] = json!({ "readOnlyHint": read_only });
             }
+            if caller.views {
+                crate::views::add_to(&mut tools);
+            }
             ok(json!({ "tools": tools }))
         }
+        "resources/list" if caller.views => ok(crate::views::resources_list()),
+        "resources/read" if caller.views => match crate::views::resources_read(&message["params"]) {
+            Some(read) => ok(read),
+            None => Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": "Resource not found" } }))),
+        },
         "tools/call" => ok(call(&message["params"])),
         _ => Some(method_not_found(id, &method)),
     }
@@ -1046,11 +1083,11 @@ pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> 
 }
 
 /// The reply to a message a standalone runtime's stdio relay answers itself
-/// (`initialize`, `ping`, `tools/list`), as the runtime would to an agent
+/// (`initialize`, `ping`, `tools/list`, and the notebook view's `resources/*`), as the runtime would to an agent
 /// with the plugin's skills or without (`has_skills`). None for anything else.
-pub(crate) fn answer_locally(message: &Value, has_skills: bool, no_folder: bool) -> Option<String> {
-    let local = matches!(message["method"].as_str(), Some("initialize" | "ping" | "tools/list"));
-    let caller = Caller { has_skills, front: true, no_folder, ..Caller::default() };
+pub(crate) fn answer_locally(message: &Value, has_skills: bool, no_folder: bool, views: bool) -> Option<String> {
+    let local = matches!(message["method"].as_str(), Some("initialize" | "ping" | "tools/list" | "resources/list" | "resources/read"));
+    let caller = Caller { has_skills, front: true, no_folder, views, ..Caller::default() };
     local.then(|| answer(message, &caller, true, |_| unreachable!("tools/call isn't answered locally"))).flatten()
 }
 
@@ -1251,7 +1288,7 @@ mod tests {
                 _ => {}
             }
         }
-        let mut tools: Vec<Value> = NOTEBOOK_TOOLS.as_array().unwrap().iter().map(|tool| json!({ "name": tool["name"], "inputSchema": tool["inputSchema"] })).collect();
+        let mut tools: Vec<Value> = NOTEBOOK_TOOLS.as_array().unwrap().iter().chain(crate::views::schemas().iter()).map(|tool| json!({ "name": tool["name"], "inputSchema": tool["inputSchema"] })).collect();
         tools.iter_mut().for_each(without_descriptions);
         let digest = <sha2::Sha256 as sha2::Digest>::digest(serde_json::to_string(&tools).unwrap());
         digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
@@ -1278,7 +1315,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (35, "03b6d0cbae71752d"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (36, "6737cd7cff508ee1"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1325,7 +1362,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (35, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (36, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

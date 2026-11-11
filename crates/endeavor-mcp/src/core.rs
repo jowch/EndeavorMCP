@@ -51,7 +51,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// missing, doesn't count (`network`); nor do descriptions and changes inside the core. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 35;
+pub const INTERFACE: u32 = 36;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -494,6 +494,7 @@ impl JuliaStarter {
             now.phase = match (started, now.exited) {
                 (Ok(ready), None) => {
                     // Set once: Julia ending after this ends the core, so there is never a second Ready.
+                    let _ = served.bridge.views.pluto.set((ready.pluto.port, ready.pluto.secret.clone()));
                     let _ = served.pluto.set(ready.pluto);
                     let _ = served.bridge.julia.port.set(ready.bridge_port);
                     Phase::Ready
