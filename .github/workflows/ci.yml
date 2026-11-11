@@ -46,10 +46,6 @@ jobs:
       - name: Plugin copies
         if: runner.os == 'Linux'
         run: sh scripts/plugins.sh check
-      # The notebook view's look and Point are built in Endeavor's repo (frontend/src/view.ts).
-      - name: Notebook view's copy of Endeavor's view.js
-        if: runner.os == 'Linux'
-        run: sh scripts/view-frontend.sh check
       # Only the Helpers workflow's pin job changes the pinned build, on main.
       # A PR that changes it could put a build that was never published on main.
       - name: Pinned build unchanged
@@ -67,6 +63,11 @@ jobs:
         run: cargo build --locked --workspace --all-targets
       - name: Test
         run: cargo test --locked --workspace --no-fail-fast
+      # The notebook view's look and Point are built in Endeavor's repo (frontend/src/view.ts).
+      # Last, so a copy that waits on an Endeavor PR doesn't hide the build and tests.
+      - name: Notebook view's copy of Endeavor's view.js
+        if: runner.os == 'Linux' && !cancelled()
+        run: sh scripts/view-frontend.sh check
 
   # The runtime package's own tests (runtime/EndeavorRuntime/test). The runtime
   # runs only on Linux and macOS servers, so there is no Windows job.
