@@ -902,7 +902,7 @@ fn julia_ran_here(depot: &str) -> bool {
 const PRECOMPILE_SCRIPT: &str = r#"
 using FileWatching.Pidfile: mkpidlock
 const R = ENV["ENDEAVOR_RUNTIME"]
-lock = try mkpidlock(joinpath(R, ".precompiling"); wait=false) catch; exit(0) end
+lock = try mkpidlock(joinpath(R, ".precompiling"); wait=false, stale_age=60) catch; exit(0) end
 import Pkg
 all(d -> d.source === nothing || isdir(d.source), values(Pkg.dependencies())) || exit(0)
 try
