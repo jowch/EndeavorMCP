@@ -989,6 +989,7 @@ ${comment}` : blocks.join("\n\n");
   function start(notebook, host2) {
     if (started) return;
     started = true;
+    const added = [];
     let toPage = null;
     const sent = document.createElement("div");
     sent.id = "endeavor-sent";
@@ -1012,9 +1013,20 @@ ${comment}` : blocks.join("\n\n");
       if (msg.type === "shoot") return setTimeout(() => toPage?.({ type: "shot", id: msg.id }));
       if (msg.type !== "quote" || !msg.picks.length) return;
       const text = quoteText(notebook, msg.picks, msg.comment);
+      if (msg.add) {
+        added.push(text);
+        return say(`${added.length} added. ${mac ? "\u21A9" : "Enter"} passes ${added.length === 1 ? "it" : "them"} to the chat with the next pick.`);
+      }
+      const earlier = added.splice(0);
       host2.send(`${QUOTE_NOTE}
 
-${text}`).then(() => say("Passed to the chat"), failed(msg.comment));
+${[...earlier, text].join("\n\n")}`).then(
+        () => say("Passed to the chat"),
+        (e) => {
+          added.unshift(...earlier);
+          failed(msg.comment)(e);
+        }
+      );
     });
     initTheme();
     const receive = (msg) => window.__endeavor?.receive(msg);

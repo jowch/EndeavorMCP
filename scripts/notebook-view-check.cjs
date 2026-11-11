@@ -189,13 +189,18 @@ window.addEventListener("message", async e => {
   const message = await page.evaluate(() => window.messages[0]);
   const said = message?.content?.[0]?.text || "";
   check(message?.role === "user" && said.startsWith("[Endeavor] The user quoted") && /<quote cell="squares" part="output" uri="notebook:\/\/pluto\/[^"]+\/cell\/6e6a1b70-dda7-11f1-a148-b56bbb7771a3">\n[\s\S]+\n<\/quote>\nWhy squares\?$/.test(said), `↩ sends the pick and the comment as the user's message: ${JSON.stringify(said.slice(-220))}`);
-  // ⌘↩ (Ctrl+Enter off macOS): to the chat as well, where the user adds to the message.
+  // ⌘↩ (Ctrl+Enter off macOS) keeps the pick in the view; the next ↩ passes both in one message.
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
-  await frame.locator("#annotate-bar textarea").fill("Later");
+  await frame.locator("#annotate-bar textarea").fill("First");
   await frame.locator("#annotate-bar textarea").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await new Promise(r => setTimeout(r, 500));
+  check((await page.evaluate(() => window.messages.length)) === 1, "⌘↩ passes nothing yet");
+  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
+  await frame.locator("#annotate-bar textarea").fill("Second");
+  await frame.locator("#annotate-bar textarea").press("Enter");
   await page.waitForFunction(() => window.messages.length === 2, null, { timeout: 5000 }).catch(() => {});
   const second = await page.evaluate(() => window.messages[1]?.content?.[0]?.text || "");
-  check(/Later$/.test(second) && (await page.evaluate(() => window.contexts.length)) === 0, "⌘↩ passes it to the chat too, and gives no context");
+  check(/\nFirst\n\n<quote[\s\S]*\nSecond$/.test(second) && second.split("[Endeavor]").length === 2 && (await page.evaluate(() => window.contexts.length)) === 0, "the next ↩ passes both picks in one message, under one note");
   // A send the chat refuses gives the comment back.
   await page.evaluate(() => { window.refuse = true; });
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();

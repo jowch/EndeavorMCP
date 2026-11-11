@@ -193,7 +193,7 @@ class RelaySocket {
 }
 function closeAll() { [...sockets].forEach(s => s.close()); }
 
-// Point's ↩ and ⌘↩ pass the picks and the comment to the chat as the user's message (Claude's desktop
+// Point's ↩ passes the picks and the comment (and what ⌘↩ added) to the chat as the user's message (Claude's desktop
 // app puts it in its message box for the user to send). A host that takes no messages from views gets
 // the look without Point.
 const asked = async res => { if (res?.isError) throw new Error("Claude's chat didn't take it"); };
