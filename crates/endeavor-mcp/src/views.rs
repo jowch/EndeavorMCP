@@ -9,7 +9,10 @@
 //! and in Claude Desktop's chat the agent's calls and the view's reach different fronts.
 //!
 //! A socket goes only to this runtime's own Pluto, on loopback, with Pluto's secret, as the page
-//! proxy does (`core::Served`); the view names a notebook, never an address.
+//! proxy does (`core::Served`); the view names a notebook, never an address. Opening one checks
+//! that Pluto has that notebook open, but the socket is then a whole Pluto connection, as a browser
+//! tab's is: its messages can name any notebook this Pluto has open. That is what the browser link
+//! behind the same secret gives too, and no more.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -134,8 +137,11 @@ pub struct Views {
 const IDLE: Duration = Duration::from_secs(60);
 /// A long-poll waits at most this long.
 const WAIT_MAX: Duration = Duration::from_millis(1500);
-/// What one receive returns at most, before base64.
-const RECV_BYTES: usize = 4_000_000;
+/// What one receive returns at most, before base64: a larger message comes in parts (`more`), as
+/// the page does, since a client may limit a tool result's size.
+const RECV_BYTES: usize = 1_000_000;
+/// What a socket holds for its view at most. A view that stops reading for this long is gone.
+const INBOX_BYTES: usize = 256_000_000;
 /// Sockets open at once, over all views. Each view has one; an old one goes when its view does.
 const SOCKETS_MAX: usize = 16;
 /// A page part at most.
@@ -167,9 +173,15 @@ impl Views {
                 if self.sockets.lock().unwrap().len() >= SOCKETS_MAX {
                     return Err("too_many: too many notebook views are open".into());
                 }
-                let socket = Socket::connect(port, &format!("/?secret={secret}")).map_err(|e| format!("not_connected: couldn't reach Pluto: {e}"))?;
+                let socket = Socket::connect(port, &format!("/?secret={secret}"), IDLE, INBOX_BYTES).map_err(|e| format!("not_connected: couldn't reach Pluto: {e}"))?;
+                // Counted again with the insert, under one lock: calls at the same moment stay under the cap.
+                let mut sockets = self.sockets.lock().unwrap();
+                if sockets.len() >= SOCKETS_MAX {
+                    socket.close();
+                    return Err("too_many: too many notebook views are open".into());
+                }
                 let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-                self.sockets.lock().unwrap().insert(id, socket);
+                sockets.insert(id, socket);
                 Ok(json!({ "socket": id }))
             }
             "notebook_socket_send" => {
@@ -180,11 +192,12 @@ impl Views {
             "notebook_socket_recv" => {
                 let wait = Duration::from_millis(arguments["wait_ms"].as_u64().unwrap_or(1500)).min(WAIT_MAX);
                 let socket = socket_of()?;
-                let (messages, closed) = socket.recv(wait);
-                if closed {
+                let got = socket.recv(wait);
+                if got.closed {
                     self.sockets.lock().unwrap().retain(|_, s| !Arc::ptr_eq(s, &socket));
                 }
-                Ok(json!({ "messages": messages.iter().map(|m| STANDARD.encode(m)).collect::<Vec<_>>(), "closed": closed }))
+                // `more`: the last message goes on in the next receive.
+                Ok(json!({ "messages": got.messages.iter().map(|m| STANDARD.encode(m)).collect::<Vec<_>>(), "more": got.more, "closed": got.closed }))
             }
             "notebook_socket_close" => {
                 if let Ok(socket) = socket_of() {
@@ -373,14 +386,30 @@ fn data_url(url: &str) -> Option<String> {
 /// A WebSocket client to Pluto on loopback: a reader thread fills the inbox.
 struct Socket {
     stream: Mutex<TcpStream>,
-    inbox: Mutex<VecDeque<Vec<u8>>>,
+    inbox: Mutex<Inbox>,
     arrived: Condvar,
     closed: AtomicBool,
     used: Mutex<Instant>,
 }
 
+/// Pluto's messages the view hasn't read yet, and their bytes.
+#[derive(Default)]
+struct Inbox {
+    messages: VecDeque<Vec<u8>>,
+    bytes: usize,
+}
+
+/// One receive: whole messages, except that the last goes on in the next receive when `more`.
+struct Got {
+    messages: Vec<Vec<u8>>,
+    more: bool,
+    closed: bool,
+}
+
 impl Socket {
-    fn connect(port: u16, path: &str) -> io::Result<Arc<Socket>> {
+    /// A socket that closes itself when its view hasn't asked about it for `idle`, or has left more
+    /// than `inbox_max` bytes unread: the view went away without saying so (Claude quit, say).
+    fn connect(port: u16, path: &str, idle: Duration, inbox_max: usize) -> io::Result<Arc<Socket>> {
         let mut stream = TcpStream::connect(("127.0.0.1", port))?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         let mut key = [0u8; 16];
@@ -408,11 +437,24 @@ impl Socket {
         stream.set_read_timeout(None)?;
         let socket = Arc::new(Socket { stream: Mutex::new(stream), inbox: Mutex::default(), arrived: Condvar::new(), closed: AtomicBool::new(false), used: Mutex::new(Instant::now()) });
         let reading = socket.clone();
-        std::thread::spawn(move || reading.read_all(reader));
+        std::thread::spawn(move || reading.read_all(reader, inbox_max));
+        // The watch: no view call is needed for an idle socket to close.
+        let watched = Arc::downgrade(&socket);
+        let every = (idle / 4).min(Duration::from_secs(5));
+        std::thread::spawn(move || loop {
+            std::thread::sleep(every);
+            let Some(socket) = watched.upgrade() else { return };
+            if socket.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            if socket.used.lock().unwrap().elapsed() >= idle {
+                return socket.close();
+            }
+        });
         Ok(socket)
     }
 
-    fn read_all(&self, mut reader: BufReader<TcpStream>) {
+    fn read_all(&self, mut reader: BufReader<TcpStream>, inbox_max: usize) {
         let mut message = Vec::new();
         while let Ok((fin, opcode, payload)) = read_frame(&mut reader) {
             match opcode {
@@ -424,14 +466,20 @@ impl Socket {
                 _ => {
                     message.extend_from_slice(&payload);
                     if fin {
-                        self.inbox.lock().unwrap().push_back(std::mem::take(&mut message));
+                        let mut inbox = self.inbox.lock().unwrap();
+                        inbox.bytes += message.len();
+                        inbox.messages.push_back(std::mem::take(&mut message));
+                        let over = inbox.bytes > inbox_max;
+                        drop(inbox);
                         self.arrived.notify_all();
+                        if over {
+                            break;
+                        }
                     }
                 }
             }
         }
-        self.closed.store(true, Ordering::SeqCst);
-        self.arrived.notify_all();
+        self.close();
     }
 
     fn send(&self, data: &[u8]) -> io::Result<()> {
@@ -442,13 +490,17 @@ impl Socket {
         self.write_frame(0x2, data)
     }
 
-    /// The messages that have come, waiting up to `wait` for the first; and whether the socket is
-    /// closed (with nothing more to read).
-    fn recv(&self, wait: Duration) -> (Vec<Vec<u8>>, bool) {
+    /// The messages that have come, up to `RECV_BYTES`, waiting up to `wait` for the first; and
+    /// whether the socket is closed (with nothing more to read).
+    fn recv(&self, wait: Duration) -> Got {
+        self.recv_at_most(wait, RECV_BYTES)
+    }
+
+    fn recv_at_most(&self, wait: Duration, at_most: usize) -> Got {
         *self.used.lock().unwrap() = Instant::now();
         let deadline = Instant::now() + wait;
         let mut inbox = self.inbox.lock().unwrap();
-        while inbox.is_empty() && !self.closed.load(Ordering::SeqCst) {
+        while inbox.messages.is_empty() && !self.closed.load(Ordering::SeqCst) {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
@@ -457,15 +509,24 @@ impl Socket {
         }
         let mut out = Vec::new();
         let mut bytes = 0;
-        while let Some(message) = inbox.front() {
-            if !out.is_empty() && bytes + message.len() > RECV_BYTES {
+        let mut more = false;
+        while let Some(message) = inbox.messages.front_mut() {
+            if bytes + message.len() > at_most {
+                if out.is_empty() {
+                    // Too large for one receive: its first part now, the rest next time.
+                    let rest = message.split_off(at_most);
+                    out.push(std::mem::replace(message, rest));
+                    inbox.bytes -= at_most;
+                    more = true;
+                }
                 break;
             }
             bytes += message.len();
-            out.push(inbox.pop_front().unwrap());
+            inbox.bytes -= message.len();
+            out.push(inbox.messages.pop_front().unwrap());
         }
-        let closed = inbox.is_empty() && self.closed.load(Ordering::SeqCst);
-        (out, closed)
+        let closed = inbox.messages.is_empty() && self.closed.load(Ordering::SeqCst);
+        Got { messages: out, more, closed }
     }
 
     fn close(&self) {
@@ -539,7 +600,7 @@ fn fill_random(bytes: &mut [u8]) {
     use std::hash::{BuildHasher, Hasher};
     for chunk in bytes.chunks_mut(8) {
         let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-        hasher.write_u128(Instant::now().elapsed().as_nanos());
+        hasher.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
         let value = hasher.finish().to_le_bytes();
         chunk.copy_from_slice(&value[..chunk.len()]);
     }
@@ -688,6 +749,50 @@ mod tests {
         assert_eq!(views.open_sockets(), 0, "a closed socket is dropped");
         let gone = views.call("notebook_socket_send", &json!({ "socket": socket, "data": "" }), || unreachable!(), open);
         assert!(gone.unwrap_err().starts_with("closed"));
+    }
+
+    /// Wait up to 3 s for `socket` to close.
+    fn closes(socket: &Socket) -> bool {
+        let began = Instant::now();
+        while !socket.closed.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        socket.closed.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn a_socket_no_view_asks_about_closes_itself() {
+        let socket = Socket::connect(echo_server(1), "/?secret=s", Duration::from_millis(200), INBOX_BYTES).unwrap();
+        assert!(closes(&socket), "closed with no view call");
+    }
+
+    #[test]
+    fn a_socket_whose_view_stopped_reading_closes_and_keeps_what_came() {
+        let socket = Socket::connect(echo_server(2), "/?secret=s", IDLE, 100).unwrap();
+        socket.send(&[7; 300]).unwrap();
+        assert!(closes(&socket), "over its inbox cap");
+        let got = socket.recv(Duration::ZERO);
+        assert_eq!((got.messages, got.closed), (vec![vec![7; 300]], true));
+    }
+
+    #[test]
+    fn a_large_message_comes_in_parts() {
+        let socket = Socket::connect(echo_server(1), "/?secret=s", IDLE, INBOX_BYTES).unwrap();
+        let sent: Vec<u8> = (0..250).map(|i| i as u8).collect();
+        socket.send(&sent).unwrap();
+        let mut parts = Vec::new();
+        let mut whole = Vec::new();
+        loop {
+            let got = socket.recv_at_most(Duration::from_secs(2), 100);
+            assert_eq!(got.messages.len(), 1);
+            whole.extend(&got.messages[0]);
+            parts.push(got.more);
+            if !got.more {
+                break;
+            }
+        }
+        assert_eq!((parts, whole), (vec![true, true, false], sent));
+        assert_eq!(socket.inbox.lock().unwrap().bytes, 0);
     }
 
     #[test]

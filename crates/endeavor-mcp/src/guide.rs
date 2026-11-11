@@ -87,8 +87,8 @@ pub fn instructions(standalone: bool, has_skills: bool, machines: bool, views: b
 }
 
 /// Said to a client that draws the notebook view (`views`), after `STANDALONE`.
-const VIEWS: &str = "In this client, `new_notebook` and `open_notebook` show the notebook in the chat as a card instead of a browser tab (`shown_beside_chat`): \
-say that its button opens the notebook beside the chat, and don't give the address.";
+const VIEWS: &str = "In this client, `new_notebook` and `open_notebook` show the notebook in the chat instead of a browser tab (`shown_beside_chat`): \
+say that it opens beside the chat or full screen, by itself or with one click on its card, and don't give the address.";
 
 /// `tools/list`'s entry for the guide.
 pub fn schema() -> Value {

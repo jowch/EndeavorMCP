@@ -1057,17 +1057,26 @@ impl Relay {
     /// browser in. Each such call opens it, so that asking the agent to open it again works, except
     /// within `REOPEN_AFTER` of opening the same one. `opened_in_browser` says whether it is open.
     fn in_browser(&self, message: &Value, tool: Option<&str>, route: &Route, reply: String) -> String {
+        // The view's replies, a receive up to a few MB: nothing here is for them.
+        if tool.is_some_and(crate::views::is_view_tool) {
+            return reply;
+        }
         let Ok(mut parsed) = serde_json::from_str::<Value>(&reply) else { return reply };
         if parsed["id"] != message["id"] || parsed["result"]["isError"] != false {
             return reply;
         }
         let Some(Value::Object(mut fields)) = parsed["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()) else { return reply };
         let Some(url) = fields.get("browser_url").and_then(Value::as_str).map(crate::mcp::without_token) else { return reply };
-        // A client that draws views shows the notebook beside the chat (`views`); no tab opens.
-        let in_view = self.views.load(std::sync::atomic::Ordering::SeqCst) && matches!(tool, Some("new_notebook" | "open_notebook"));
+        // A client that draws views shows a notebook on this computer beside the chat (`views`), and
+        // no tab opens. A notebook on a machine opens in a tab as before: the view's calls may reach
+        // another front, which works on this computer. `shown_at` lets a view the client draws again
+        // later (the conversation reopened) tell that it's an old one.
+        let in_view = route.host.is_none() && self.views.load(std::sync::atomic::Ordering::SeqCst) && matches!(tool, Some("new_notebook" | "open_notebook"));
         if in_view {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
             fields.insert("opened_in_browser".into(), false.into());
             fields.insert("shown_beside_chat".into(), true.into());
+            fields.insert("shown_at".into(), now.into());
         } else if matches!(tool, Some("new_notebook" | "open_notebook")) {
             let key = (route.port, fields.get("notebook_id").and_then(Value::as_str).unwrap_or_default().to_owned());
             let just = self.opened.lock().unwrap().get(&key).is_some_and(|at| at.elapsed() < REOPEN_AFTER);

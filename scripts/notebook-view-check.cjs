@@ -118,6 +118,8 @@ const context = { displayMode: "inline", availableDisplayModes: ["inline", "full
 window.modes = [];
 const send = m => frame.contentWindow.postMessage(Object.assign({ jsonrpc: "2.0" }, m), "*");
 window.sendToolResult = result => send({ method: "ui/notifications/tool-result", params: result });
+// The user closes the side pane: the view is inline again.
+window.closePane = () => { context.displayMode = "inline"; send({ method: "ui/notifications/host-context-changed", params: { displayMode: "inline" } }); };
 window.addEventListener("message", async e => {
   if (e.source !== frame.contentWindow) return;
   const m = e.data;
@@ -160,6 +162,9 @@ window.addEventListener("message", async e => {
   await frame.waitForFunction(() => /144/.test([...document.querySelectorAll("pluto-output")].map(o => o.innerText).join(" ")), null, { timeout: 20000 });
   check(true, `moving the slider ran the dependent cell again in Julia (${Date.now() - moved} ms)`);
   await page.screenshot({ path: path.join(dir, "view.png") });
+  await page.evaluate(() => window.closePane());
+  await frame.waitForFunction(() => !document.querySelector("#endeavor-card").hidden && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
+  check(true, "with the pane closed, the card and its button are back");
   console.log("screenshot " + path.join(dir, "view.png"));
   console.log("view calls " + JSON.stringify(calls));
   const at = name => firsts[name] ? `${firsts[name][0] - clicked} ms (took ${firsts[name][1]} ms)` : "never";
