@@ -46,10 +46,12 @@ pub const NAMES: [&str; 5] = ["notebook_page", "notebook_socket_open", "notebook
 const SHOWN_BY: [&str; 2] = ["open_notebook", "new_notebook"];
 
 /// The view's page: our loader with the MCP Apps SDK (`@modelcontextprotocol/ext-apps`'
-/// `app-with-deps.js`, see `views/README.md`) inside it.
+/// `app-with-deps.js`) and the Endeavor look and Point (`endeavor-view.js`, the app's
+/// `frontend/dist/view.js`) inside it. See `views/README.md`.
 static PAGE: LazyLock<String> = LazyLock::new(|| {
     let sdk = as_global(include_str!("views/mcp-app.js")).replace("</script", "<\\/script");
-    include_str!("views/notebook.html").replacen("/*MCP_APP_SDK*/", &sdk, 1)
+    let look = include_str!("views/endeavor-view.js").replace("</script", "<\\/script");
+    include_str!("views/notebook.html").replacen("/*MCP_APP_SDK*/", &sdk, 1).replacen("/*ENDEAVOR_VIEW*/", &look, 1)
 });
 
 /// The SDK's module with its closing `export{a as B,...}` made `window.McpAppLib={B:a,...}`, so
@@ -635,7 +637,8 @@ mod tests {
     fn the_view_is_one_page_with_the_sdk_inside() {
         let read = resources_read(&json!({ "uri": URI })).unwrap();
         let text = read["contents"][0]["text"].as_str().unwrap();
-        assert!(!text.contains("/*MCP_APP_SDK*/"));
+        assert!(!text.contains("/*MCP_APP_SDK*/") && !text.contains("/*ENDEAVOR_VIEW*/"));
+        assert!(text.contains("window.EndeavorView = { start }"), "the look and Point are inside");
         assert!(text.contains("availableDisplayModes"));
         assert_eq!(read["contents"][0]["mimeType"], MIME);
         assert!(resources_read(&json!({ "uri": "ui://endeavor/other" })).is_none());

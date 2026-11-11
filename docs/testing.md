@@ -194,8 +194,9 @@ Claude. It starts `endeavor mcp` as such a client, opens a notebook with a
 slider, and loads the view in a sandboxed frame whose content security
 policy lets it reach nothing but its own tools, as in Claude. Playing the
 host's side of the MCP Apps protocol, it checks that the view stays a card
-inline, opens the live notebook once moved to the panel, and that moving the
-slider runs the dependent cell again in Julia. It needs Playwright with
+inline, opens the live notebook once moved to the panel, that moving the
+slider runs the dependent cell again in Julia, and that the Endeavor look is
+on and a pick with Point reaches the chat as the user's message (↩, with what ⌘↩ added). It needs Playwright with
 Chromium (preinstalled in a cloud session) and Julia:
 
 ```sh
@@ -204,7 +205,7 @@ JULIA_DEPOT=~/.cache/endeavor/depot: node scripts/notebook-view-check.cjs
 ```
 
 It takes about a minute, and prints the times from the click to the page,
-the socket and the cells, and where its screenshot is. Claude itself is the
+the socket and the cells, and where its screenshots are. Claude itself is the
 last check: add `endeavor mcp` to `claude_desktop_config.json`, ask for a
 notebook in the chat and in the Code tab, and press the card's button.
 

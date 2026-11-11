@@ -3,7 +3,8 @@
 // `endeavor mcp` as a client that draws MCP App views would, opens a notebook, loads the view in
 // a sandboxed frame under a strict content security policy (nothing reachable but our own tools,
 // as in Claude), and plays the host's side of the MCP Apps protocol. Then it moves a slider and
-// checks that the dependent cell ran again in Julia.
+// checks that the dependent cell ran again in Julia, and points at an output with Point and checks
+// what reaches the chat.
 //
 //   node scripts/notebook-view-check.cjs [path/to/endeavor]
 //   (JULIA_DEPOT=... sets the runtime's depot, as `--depot` does)
@@ -116,6 +117,8 @@ const check = (ok, what) => { console.log((ok ? "ok   " : "FAIL ") + what); if (
 const frame = document.getElementById("view");
 const context = { displayMode: "inline", availableDisplayModes: ["inline", "fullscreen"], containerDimensions: { width: 1000, maxHeight: 850 }, platform: "desktop" };
 window.modes = [];
+window.messages = [];
+window.contexts = [];
 const send = m => frame.contentWindow.postMessage(Object.assign({ jsonrpc: "2.0" }, m), "*");
 window.sendToolResult = result => send({ method: "ui/notifications/tool-result", params: result });
 // The user closes the side pane: the view is inline again.
@@ -124,9 +127,12 @@ window.addEventListener("message", async e => {
   if (e.source !== frame.contentWindow) return;
   const m = e.data;
   if (!m || m.jsonrpc !== "2.0" || m.method === undefined) return;
-  if (m.method === "ui/initialize") return send({ id: m.id, result: { protocolVersion: m.params.protocolVersion, hostInfo: { name: "view-check", version: "0" }, hostCapabilities: { serverTools: {}, openLinks: {}, logging: {} }, hostContext: context } });
+  if (m.method === "ui/initialize") return send({ id: m.id, result: { protocolVersion: m.params.protocolVersion, hostInfo: { name: "view-check", version: "0" }, hostCapabilities: { serverTools: {}, openLinks: {}, logging: {}, message: { text: {} }, updateModelContext: { text: {} } }, hostContext: context } });
   if (m.method === "ui/notifications/initialized") { window.initialized = true; return; }
   if (m.method === "tools/call") return send({ id: m.id, result: await window.toolsCall(m.params) });
+  if (m.method === "ui/message" && window.refuse) { window.refuse = false; return send({ id: m.id, error: { code: -32000, message: "refused" } }); }
+  if (m.method === "ui/message") { window.messages.push(m.params); return send({ id: m.id, result: {} }); }
+  if (m.method === "ui/update-model-context") { window.contexts.push(m.params); return send({ id: m.id, result: {} }); }
   if (m.method === "ui/request-display-mode") {
     window.modes.push(m.params.mode);
     // As the Code tab does: a request with no click in the view is refused.
@@ -162,11 +168,55 @@ window.addEventListener("message", async e => {
   await frame.waitForFunction(() => /144/.test([...document.querySelectorAll("pluto-output")].map(o => o.innerText).join(" ")), null, { timeout: 20000 });
   check(true, `moving the slider ran the dependent cell again in Julia (${Date.now() - moved} ms)`);
   await page.screenshot({ path: path.join(dir, "view.png") });
+
+  // The Endeavor look, with Pluto's own header (the view has no app header to stand in for it).
+  const look = await frame.evaluate(() => ({
+    colours: (document.getElementById("endeavor-theme")?.textContent || "").includes("--main-bg-color"),
+    header: getComputedStyle(document.querySelector("header#pluto-nav") || document.body).display !== "none",
+    button: !!document.getElementById("endeavor-point"),
+  }));
+  check(look.colours && look.header && look.button, `the Endeavor look is on, Pluto's header shows, and so does Point's button (${JSON.stringify(look)})`);
+  // Point: the button, a click on the squares cell's output, a comment, ↩.
+  await frame.click("#endeavor-point");
+  check(await frame.evaluate(() => document.body.classList.contains("annotating")), "the button turns Point on");
+  const output = frame.locator("pluto-cell").nth(2).locator("pluto-output");
+  await output.click();
+  const what = await frame.evaluate(() => document.querySelector("#annotate-bar .status")?.textContent);
+  check(/squares/.test(what || ""), `a click picks the output (${what})`);
+  await frame.locator("#annotate-bar textarea").fill("Why squares?");
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await page.waitForFunction(() => window.messages.length === 1, null, { timeout: 5000 }).catch(() => {});
+  const message = await page.evaluate(() => window.messages[0]);
+  const said = message?.content?.[0]?.text || "";
+  check(message?.role === "user" && said.startsWith("[Endeavor] The user quoted") && /<quote cell="squares" part="output" uri="notebook:\/\/pluto\/[^"]+\/cell\/6e6a1b70-dda7-11f1-a148-b56bbb7771a3">\n[\s\S]+\n<\/quote>\nWhy squares\?$/.test(said), `↩ sends the pick and the comment as the user's message: ${JSON.stringify(said.slice(-220))}`);
+  // ⌘↩ (Ctrl+Enter off macOS) keeps the pick in the view; the next ↩ passes both in one message.
+  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
+  await frame.locator("#annotate-bar textarea").fill("First");
+  await frame.locator("#annotate-bar textarea").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await new Promise(r => setTimeout(r, 500));
+  check((await page.evaluate(() => window.messages.length)) === 1, "⌘↩ passes nothing yet");
+  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
+  await frame.locator("#annotate-bar textarea").fill("Second");
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await page.waitForFunction(() => window.messages.length === 2, null, { timeout: 5000 }).catch(() => {});
+  const second = await page.evaluate(() => window.messages[1]?.content?.[0]?.text || "");
+  check(/\nFirst\n\n<quote[\s\S]*\nSecond$/.test(second) && second.split("[Endeavor]").length === 2 && (await page.evaluate(() => window.contexts.length)) === 0, "the next ↩ passes both picks in one message, under one note");
+  // A send the chat refuses gives the comment back.
+  await page.evaluate(() => { window.refuse = true; });
+  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
+  await frame.locator("#annotate-bar textarea").fill("Try again");
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Try again", null, { timeout: 5000 }).catch(() => {});
+  check(await frame.evaluate(() => document.querySelector("#annotate-bar textarea").value === "Try again"), "a refused send puts the comment back in the box");
+  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
+  await page.screenshot({ path: path.join(dir, "point.png") });
+  await frame.locator("#annotate-bar textarea").press("Escape");
+  check(await frame.evaluate(() => !document.body.classList.contains("annotating")), "Escape leaves Point");
   await page.evaluate(() => window.closePane());
   await frame.waitForFunction(() => !document.querySelector("#endeavor-card").hidden && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
   const small = await frame.evaluate(() => document.documentElement.classList.contains("endeavor-inline") && [...document.body.children].filter(e => e.id !== "endeavor-card").every(e => getComputedStyle(e).display === "none"));
   check(small, "with the pane closed, the card and its button are back, at card size");
-  console.log("screenshot " + path.join(dir, "view.png"));
+  console.log("screenshots " + path.join(dir, "view.png") + " " + path.join(dir, "point.png"));
   console.log("view calls " + JSON.stringify(calls));
   const at = name => firsts[name] ? `${firsts[name][0] - clicked} ms (took ${firsts[name][1]} ms)` : "never";
   console.log(`after the click: first page part at ${at("notebook_page")}, socket opened at ${at("notebook_socket_open")}, cells drawn at ${cellsAt} ms`);
