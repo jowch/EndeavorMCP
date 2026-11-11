@@ -164,7 +164,8 @@ window.addEventListener("message", async e => {
   await page.screenshot({ path: path.join(dir, "view.png") });
   await page.evaluate(() => window.closePane());
   await frame.waitForFunction(() => !document.querySelector("#endeavor-card").hidden && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
-  check(true, "with the pane closed, the card and its button are back");
+  const small = await frame.evaluate(() => document.documentElement.classList.contains("endeavor-inline") && [...document.body.children].filter(e => e.id !== "endeavor-card").every(e => getComputedStyle(e).display === "none"));
+  check(small, "with the pane closed, the card and its button are back, at card size");
   console.log("screenshot " + path.join(dir, "view.png"));
   console.log("view calls " + JSON.stringify(calls));
   const at = name => firsts[name] ? `${firsts[name][0] - clicked} ms (took ${firsts[name][1]} ms)` : "never";

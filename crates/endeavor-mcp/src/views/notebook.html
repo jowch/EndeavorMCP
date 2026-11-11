@@ -7,11 +7,13 @@
 #endeavor-card .note { opacity: 0.7; }
 #endeavor-card button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
 #endeavor-card[hidden], #endeavor-card button[hidden] { display: none; }
+/* Inline after the notebook was shown: only the card, at card size; the notebook stays as it was. */
+html.endeavor-inline body > :not(#endeavor-card) { display: none !important; }
 #endeavor-card .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 #endeavor-card.cover .text { flex: 0; align-items: center; }
 </style>
 </head><body>
-<div id="endeavor-card"><div class="text"><span class="name">Notebook</span><span class="note">Opening…</span></div><button id="endeavor-open" hidden>Open beside the chat</button></div>
+<div id="endeavor-card"><div class="text"><span class="name">Notebook</span><span class="note">Opening…</span></div><button id="endeavor-open" hidden>Open the notebook</button></div>
 <script>
 // Pluto's page keeps settings in localStorage; a view whose storage is off gets one in memory.
 (function () { try { window.localStorage.length } catch (e) { const m = new Map(); const st = { getItem: k => m.has(k) ? m.get(k) : null, setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k), clear: () => m.clear(), key: i => [...m.keys()][i] ?? null, get length() { return m.size } }; Object.defineProperty(window, "localStorage", { value: st }); Object.defineProperty(window, "sessionStorage", { value: st }); } })();
@@ -44,8 +46,10 @@ const waiters = [];        // sockets waiting for `active`
 const app = new App({ name: "Endeavor notebook", version: "1" }, { availableDisplayModes: ["inline", "fullscreen"] });
 
 app.ontoolresult = result => {
+  // The tool's own text is written for Claude (it may say to call again): the card doesn't show it.
+  const unopened = "This call didn't open the notebook. Claude's reply says why.";
   if (result.isError) {
-    failed = (result.content || []).map(c => c.text || "").join(" ").trim() || "The notebook didn't open.";
+    failed = unopened;
   } else {
     let fields = result.structuredContent;
     if (!fields) { try { fields = JSON.parse(result.content?.[0]?.text || "{}"); } catch (e) { fields = {}; } }
@@ -56,8 +60,8 @@ app.ontoolresult = result => {
     } else if (fields.notebook_id) {
       elsewhere = true;
     } else {
-      // A result with no notebook: the tool answered with a problem (no such file, say).
-      failed = fields.message || fields.error || "The notebook didn't open.";
+      // A result with no notebook: Julia still starting, or no such file, say.
+      failed = unopened;
     }
   }
   update();
@@ -78,7 +82,7 @@ openButton.addEventListener("click", toPanel);
 
 function update() {
   if (failed) {
-    nameEl.textContent = "The notebook didn't open";
+    nameEl.textContent = notebook ? notebook.name : "Notebook";
     say(failed);
     openButton.hidden = true;
     return;
@@ -97,15 +101,17 @@ function update() {
   if (active) waiters.splice(0).forEach(go => go());
   if (!active) closeAll();
   if (show && notebook) {
+    document.documentElement.classList.remove("endeavor-inline");
     card.hidden = true;
     if (!loading) loading = load().catch(e => { failed = String(e && e.message || e); card.hidden = false; card.className = "cover"; update(); });
     return;
   }
-  // Inline: a card, over the notebook if it was shown before.
+  // Inline: a card, with the notebook hidden if it was shown before.
   card.hidden = false;
-  card.className = loading ? "cover" : "";
+  card.className = "";
+  document.documentElement.classList.toggle("endeavor-inline", !!loading);
   openButton.hidden = !canMove() || !notebook;
-  say(!notebook ? "Opening…" : canMove() ? "Opens beside the chat." : "This window can't show the notebook beside the chat. Claude's desktop app can.");
+  say(!notebook ? "Opening…" : canMove() ? "Opens beside the chat or full screen." : "This window can't show the notebook beside the chat. Claude's desktop app can.");
 }
 
 // Pluto's page talks to Pluto over a WebSocket; this stand-in carries the same messages through
