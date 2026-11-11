@@ -944,7 +944,10 @@ footer form#feedback { display: none !important; }
   }
 
   // src/view.ts
-  var QUOTE_NOTE = "[Endeavor] The user quoted parts of the notebook in this message, each as a <quote> followed by their comment on it. A quote's uri, notebook://pluto/{notebook_id}/cell/{cell_id}, names its cell (it is not a fetchable URL); `lines` are line numbers in the cell's code, counting from 1. `part` says what was quoted when it isn't code: `output` (text from the cell's output), `figure` (the cell's output, a picture) or `box` (a box the user drew over the notebook; `uri` lists the cells under it). No picture comes with a figure or box here: read current code and outputs with the notebook MCP tools.";
+  var FORMAT = "A quote's uri, notebook://pluto/{notebook_id}/cell/{cell_id}, names its cell (it is not a fetchable URL); `lines` are line numbers in the cell's code, counting from 1. `part` says what was quoted when it isn't code: `output` (text from the cell's output), `figure` (the cell's output, a picture) or `box` (a box the user drew over the notebook; `uri` lists the cells under it). No picture comes with a figure or box here: read current code and outputs with the notebook MCP tools.";
+  var QUOTE_NOTE = "[Endeavor] The user quoted parts of the notebook in this message, each as a <quote> followed by their comment on it. " + FORMAT;
+  var CONTEXT_NOTE = "[Endeavor] At some point in this conversation the user pointed at these parts of the notebook in the notebook view, each as a <quote> followed by their comment on it. A later message of theirs may refer to them; they are not a request on their own, and the notebook may have changed since. " + FORMAT;
+  var KEPT = 10;
   var uri = (notebook, cell) => `notebook://pluto/${notebook}/cell/${cell}`;
   function quoteBlock(notebook, pick) {
     if (pick.part === "box") return `<quote part="box" uri="${pick.cells.map((c) => uri(notebook, c)).join(" ")}"/>`;
@@ -984,7 +987,10 @@ ${comment}` : blocks.join("\n\n");
     padding: 4px 12px; border-radius: 999px; background: var(--e-hint-bg); color: var(--e-hint-text); font: 12px system-ui; }
   #endeavor-sent.shown { display: block; }
 `;
+  var started = false;
   function start(notebook, host2) {
+    if (started) return;
+    started = true;
     const added = [];
     let toPage = null;
     const sent = document.createElement("div");
@@ -994,18 +1000,34 @@ ${comment}` : blocks.join("\n\n");
       sent.textContent = text;
       sent.classList.add("shown");
       clearTimeout(hide);
-      hide = window.setTimeout(() => sent.classList.remove("shown"), 2500);
+      hide = window.setTimeout(() => sent.classList.remove("shown"), 4e3);
     };
-    const agentSays = (e) => say(`Couldn't reach Claude's chat${e instanceof Error && e.message ? `: ${e.message}` : ""}`);
+    const giveBack = (comment, why) => {
+      const box = document.querySelector("#annotate-bar textarea");
+      if (box && !box.value.trim() && comment) {
+        box.value = comment;
+        box.dispatchEvent(new Event("input"));
+      }
+      say(comment ? `${why} Your comment is back in the box.` : why);
+    };
+    const failed = (comment) => (e) => giveBack(comment, `Couldn't reach Claude's chat${e instanceof Error && e.message ? `: ${e.message}` : ""}.`);
     setHost((msg) => {
       if (msg.type === "shoot") return setTimeout(() => toPage?.({ type: "shot", id: msg.id }));
       if (msg.type !== "quote" || !msg.picks.length) return;
       const text = quoteText(notebook, msg.picks, msg.comment);
       if (msg.add) {
+        if (!host2.canAdd) return giveBack(msg.comment, `This chat can't take context from the notebook: press ${mac ? "\u21A9" : "Enter"} to send.`);
         added.push(text);
-        host2.context(`${QUOTE_NOTE}
+        added.splice(0, Math.max(0, added.length - KEPT));
+        host2.context(`${CONTEXT_NOTE}
 
-${added.join("\n\n")}`).then(() => say("Added for your next message"), agentSays);
+${added.join("\n\n")}`).then(
+          () => say("Given to Claude as context"),
+          (e) => {
+            added.pop();
+            failed(msg.comment)(e);
+          }
+        );
         return;
       }
       const earlier = added.splice(0);
@@ -1019,16 +1041,17 @@ ${[...earlier, text].join("\n\n")}`).then(
         },
         (e) => {
           added.unshift(...earlier);
-          agentSays(e);
+          failed(msg.comment)(e);
         }
       );
     });
     initTheme();
-    initAskBox();
-    initAnnotate();
     const receive = (msg) => window.__endeavor?.receive(msg);
     toPage = receive;
     receive({ type: "theme", name: "view" });
+    if (!host2.canSend) return;
+    initAskBox();
+    initAnnotate();
     const style = document.createElement("style");
     style.textContent = css3;
     document.head.append(style);

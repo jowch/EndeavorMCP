@@ -14,4 +14,5 @@ update it, take the same file from a newer release and run
 `endeavor-view.js` is the Endeavor app's `frontend/dist/view.js` (built from its
 `frontend/src/view.ts`): the Endeavor look and Point on Pluto's page. The app's
 repo is its source; change it there, then `sh scripts/view-frontend.sh sync`.
-CI fails while this copy differs from the app's `main`.
+CI fails while this copy differs from the app's `main`. Whoever merges an app
+PR that changes `dist/view.js` opens the EndeavorMCP PR that syncs it.

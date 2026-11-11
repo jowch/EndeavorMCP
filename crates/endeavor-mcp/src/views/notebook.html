@@ -193,9 +193,12 @@ class RelaySocket {
 }
 function closeAll() { [...sockets].forEach(s => s.close()); }
 
-// Point's ↩ sends the picks and the comment as the user's message; ⌘↩ gives them to Claude with the next one.
+// Point's ↩ sends the picks and the comment as the user's message; ⌘↩ gives them to Claude as context, which
+// Claude may keep for later turns too. A host that takes neither from views gets the look without Point.
 const asked = async res => { if (res?.isError) throw new Error("Claude's chat didn't take it"); };
 const pointHost = {
+  get canSend() { return !!app.getHostCapabilities()?.message; },
+  get canAdd() { return !!app.getHostCapabilities()?.updateModelContext; },
   send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(asked),
   context: text => app.updateModelContext({ content: text ? [{ type: "text", text }] : [] }).then(asked),
 };
