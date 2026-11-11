@@ -18,6 +18,10 @@ html.endeavor-inline body > :not(#endeavor-card) { display: none !important; }
 // Pluto's page keeps settings in localStorage; a view whose storage is off gets one in memory.
 (function () { try { window.localStorage.length } catch (e) { const m = new Map(); const st = { getItem: k => m.has(k) ? m.get(k) : null, setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k), clear: () => m.clear(), key: i => [...m.keys()][i] ?? null, get length() { return m.size } }; Object.defineProperty(window, "localStorage", { value: st }); Object.defineProperty(window, "sessionStorage", { value: st }); } })();
 </script>
+<script>
+// The Endeavor look and Point: Endeavor's frontend/dist/view.js (see README.md). It waits for `start`.
+/*ENDEAVOR_VIEW*/
+</script>
 <script type="module">
 /*MCP_APP_SDK*/
 // Endeavor's notebook view: Pluto's own editor, live, beside the chat.
@@ -189,6 +193,13 @@ class RelaySocket {
 }
 function closeAll() { [...sockets].forEach(s => s.close()); }
 
+// Point's ↩ sends the picks and the comment as the user's message; ⌘↩ gives them to Claude with the next one.
+const asked = async res => { if (res?.isError) throw new Error("Claude's chat didn't take it"); };
+const pointHost = {
+  send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(asked),
+  context: text => app.updateModelContext({ content: text ? [{ type: "text", text }] : [] }).then(asked),
+};
+
 async function load() {
   // The page in parts: a large `ui://` resource doesn't show, and the view can fetch nothing.
   // An old card's notebook may be closed by now: say so, rather than draw a page that can't connect.
@@ -210,6 +221,9 @@ async function load() {
   window.pluto_pluto_server_url = "https://pluto.invalid/";
   document.head.insertAdjacentHTML("beforeend", page.head);
   document.body.insertAdjacentHTML("beforeend", page.body);
+  // After Pluto's stylesheets, so the look's rules win; before any of the page's scripts, so
+  // Point's way into the chat is in hand before notebook code runs.
+  window.EndeavorView?.start(notebook.id, pointHost);
   for (const s of page.scripts) {
     if (s.attrs.type === "importmap") continue;
     const node = document.createElement("script");
