@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Notebook</title>
+<style>
+#endeavor-card { font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; align-items: center; gap: 12px; padding: 12px 14px; box-sizing: border-box; }
+#endeavor-card.cover { position: fixed; inset: 0; z-index: 2147483647; background: Canvas; color: CanvasText; justify-content: center; flex-direction: column; }
+#endeavor-card .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#endeavor-card .note { opacity: 0.7; }
+#endeavor-card button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
+#endeavor-card[hidden], #endeavor-card button[hidden] { display: none; }
+#endeavor-card .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+#endeavor-card.cover .text { flex: 0; align-items: center; }
+</style>
+</head><body>
+<div id="endeavor-card"><div class="text"><span class="name">Notebook</span><span class="note">Opening…</span></div><button id="endeavor-open" hidden>Open beside the chat</button><button id="endeavor-here" hidden>Show it here</button></div>
+<script>
+// Pluto's page keeps settings in localStorage; a view whose storage is off gets one in memory.
+(function () { try { window.localStorage.length } catch (e) { const m = new Map(); const st = { getItem: k => m.has(k) ? m.get(k) : null, setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k), clear: () => m.clear(), key: i => [...m.keys()][i] ?? null, get length() { return m.size } }; Object.defineProperty(window, "localStorage", { value: st }); Object.defineProperty(window, "sessionStorage", { value: st }); } })();
+</script>
+<script type="module">
+/*MCP_APP_SDK*/
+// Endeavor's notebook view: Pluto's own editor, live, beside the chat.
+//
+// It shows the notebook only in the side panel or full screen. Inline it is a card: it asks to
+// move on load (Claude's chat lets it) and on a click (the Code tab needs one). The view can reach
+// nothing on this computer, so Pluto's page and its WebSocket come through tools only the view
+// calls: `notebook_page` and `notebook_socket_*` (Endeavor's `views.rs`).
+const { App } = window.McpAppLib;
+const card = document.getElementById("endeavor-card");
+const nameEl = card.querySelector(".name");
+const noteEl = card.querySelector(".note");
+const openButton = document.getElementById("endeavor-open");
+const hereButton = document.getElementById("endeavor-here");
+const say = text => { noteEl.textContent = text; };
+
+let notebook = null;       // { id, name } from the tool's result
+let failed = null;         // the tool's error, if it failed
+let loading = null;        // the page load, once started
+let here = false;          // the user chose to see it inline (no panel here)
+const sockets = new Set(); // the relay sockets of this view
+let active = false;        // whether the notebook may talk to Pluto (shown in the panel)
+const waiters = [];        // sockets waiting for `active`
+
+const app = new App({ name: "Endeavor notebook", version: "1" }, { availableDisplayModes: ["inline", "fullscreen"] });
+
+app.ontoolresult = result => {
+  if (result.isError) {
+    failed = (result.content || []).map(c => c.text || "").join(" ").trim() || "The notebook didn't open.";
+  } else {
+    let fields = result.structuredContent;
+    if (!fields) { try { fields = JSON.parse(result.content?.[0]?.text || "{}"); } catch (e) { fields = {}; } }
+    if (fields.notebook_id) {
+      const path = fields.path || fields.notebook_path || "";
+      notebook = { id: fields.notebook_id, name: path ? path.split(/[\\/]/).pop() : "Notebook" };
+    }
+  }
+  update();
+};
+app.addEventListener("hostcontextchanged", () => update());
+app.onteardown = async () => { closeAll(); return {}; };
+
+const context = () => app.getHostContext() || {};
+const inPanel = () => context().displayMode === "fullscreen";
+const canMove = () => (context().availableDisplayModes || []).includes("fullscreen");
+
+async function toPanel() {
+  try { await app.requestDisplayMode({ mode: "fullscreen" }); } catch (e) {}
+  update();
+}
+openButton.addEventListener("click", toPanel);
+hereButton.addEventListener("click", () => { here = true; update(); });
+
+function update() {
+  if (failed) {
+    nameEl.textContent = "The notebook didn't open";
+    say(failed);
+    openButton.hidden = hereButton.hidden = true;
+    return;
+  }
+  if (notebook) nameEl.textContent = notebook.name;
+  const show = inPanel() || here;
+  active = show && !!notebook;
+  if (active) waiters.splice(0).forEach(go => go());
+  if (!active) closeAll();
+  if (show && notebook) {
+    card.hidden = true;
+    if (!loading) loading = load().catch(e => { failed = String(e && e.message || e); card.hidden = false; card.className = "cover"; update(); });
+    return;
+  }
+  // Inline: a card, over the notebook if it was shown before.
+  card.hidden = false;
+  card.className = loading ? "cover" : "";
+  openButton.hidden = !canMove();
+  hereButton.hidden = canMove() || !notebook;
+  say(!notebook ? "Opening…" : canMove() ? "Opens beside the chat." : "This window can't show it beside the chat.");
+}
+
+// Pluto's page talks to Pluto over a WebSocket; this stand-in carries the same messages through
+// the view's tools. It waits while the view is inline, so an inline view runs no notebook.
+const b64 = u8 => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const unb64 = t => Uint8Array.from(atob(t), c => c.charCodeAt(0));
+const call = async (name, args) => {
+  const res = await app.callServerTool({ name, arguments: args });
+  if (res.isError) throw new Error((res.content || []).map(c => c.text).join(" "));
+  return res.structuredContent || {};
+};
+class RelaySocket {
+  static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
+  constructor(url) {
+    this.url = url; this.readyState = 0; this.binaryType = "blob"; this.protocol = ""; this.extensions = ""; this.bufferedAmount = 0;
+    this._sent = Promise.resolve();
+    this._listeners = {};
+    sockets.add(this);
+    this._start();
+  }
+  async _start() {
+    if (!active) await new Promise(go => waiters.push(go));
+    if (this.readyState !== 0) return;
+    try {
+      this.id = (await call("notebook_socket_open", { notebook_id: notebook.id })).socket;
+    } catch (e) { return this._closed(); }
+    if (this.readyState !== 0) { call("notebook_socket_close", { socket: this.id }).catch(() => {}); return; }
+    this.readyState = 1;
+    this._fire("open", {});
+    this._loop();
+  }
+  async _loop() {
+    let misses = 0;
+    while (this.readyState === 1) {
+      let got;
+      try { got = await call("notebook_socket_recv", { socket: this.id, wait_ms: 1500 }); misses = 0; }
+      catch (e) { if (++misses > 3) return this._closed(); await new Promise(r => setTimeout(r, 500)); continue; }
+      for (const m of got.messages || []) if (this.readyState === 1) this._fire("message", { data: new Blob([unb64(m)]) });
+      if (got.closed) return this._closed();
+    }
+  }
+  send(data) {
+    if (this.readyState !== 1) return;
+    const bytes = data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : new TextEncoder().encode(String(data));
+    const payload = b64(bytes);
+    this._sent = this._sent.then(() => call("notebook_socket_send", { socket: this.id, data: payload })).catch(() => this._closed());
+  }
+  close() {
+    if (this.readyState === 3) return;
+    const id = this.id;
+    this._closed();
+    if (id != null) call("notebook_socket_close", { socket: id }).catch(() => {});
+  }
+  _closed() {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    sockets.delete(this);
+    this._fire("close", { code: 1006, reason: "", wasClean: false });
+  }
+  _fire(type, fields) {
+    const event = Object.assign(new Event(type), fields);
+    this["on" + type]?.(event);
+    (this._listeners[type] || []).forEach(f => f(event));
+  }
+  addEventListener(type, f) { (this._listeners[type] ||= []).push(f); }
+  removeEventListener(type, f) { this._listeners[type] = (this._listeners[type] || []).filter(g => g !== f); }
+}
+function closeAll() { [...sockets].forEach(s => s.close()); }
+
+async function load() {
+  // The page in parts: a large `ui://` resource doesn't show, and the view can fetch nothing.
+  let text = "", offset = 0, total = 1, size = 1000000;
+  while (offset < total) {
+    const part = await call("notebook_page", { offset, size });
+    total = part.total; text += part.text; offset = part.next;
+  }
+  const page = JSON.parse(text);
+  window.WebSocket = RelaySocket;
+  window.endeavor_notebook_id = notebook.id;
+  // Pluto makes its socket's address from this; the stand-in doesn't use it.
+  window.pluto_pluto_server_url = "https://pluto.invalid/";
+  document.head.insertAdjacentHTML("beforeend", page.head);
+  document.body.insertAdjacentHTML("beforeend", page.body);
+  for (const s of page.scripts) {
+    if (s.attrs.type === "importmap") continue;
+    const node = document.createElement("script");
+    for (const [k, v] of Object.entries(s.attrs)) node.setAttribute(k, v ?? "");
+    node.textContent = s.text;
+    document.body.appendChild(node);
+  }
+}
+
+await app.connect();
+update();
+// Claude's chat moves a view on load; the Code tab only on a click in it.
+if (canMove() && !inPanel()) toPanel();
+</script>
+</body></html>

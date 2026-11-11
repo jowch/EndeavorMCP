@@ -885,6 +885,10 @@ impl Relay {
     /// A runtime's reply to the agent's call, with what only the front knows: that the session is on a
     /// machine (and its job) in `session_status`, and a notice that is owed once.
     pub(super) fn decorate(&self, message: &Value, tool: Option<&str>, reply: String) -> String {
+        // The notebook view's calls (`views`) carry nothing for the agent: a notice waits for its next call.
+        if tool.is_some_and(crate::views::is_view_tool) {
+            return reply;
+        }
         let Ok(mut parsed) = serde_json::from_str::<Value>(&reply) else { return reply };
         if parsed["id"] != message["id"] || (parsed.get("result").is_none() && parsed.get("error").is_none()) {
             return reply;

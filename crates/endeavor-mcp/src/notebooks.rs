@@ -70,7 +70,7 @@ pub type Starter = Box<dyn Fn(Backend, Instant, Duration) -> Result<Arc<dyn Upst
 pub struct Julia {
     pub port: OnceLock<u16>,
     /// The engines' key the core gave Julia, not the MCP bearer token.
-    token: String,
+    pub(crate) token: String,
 }
 
 impl Julia {
@@ -838,6 +838,11 @@ impl Notebooks {
             "topology_changed" | "resync" => true,
             _ => false,
         }
+    }
+
+    /// Whether Pluto has notebook `id` open: the notebook view connects only to one it has.
+    pub fn open_in_pluto(&self, id: &str) -> bool {
+        self.snapshots().is_ok_and(|open| open.iter().any(|nb| nb.id == id && engines::of_path(&nb.path) == wire::backend::Backend::Pluto))
     }
 
     /// One call to the engine's adapter: its result, or the error it raised.
