@@ -233,11 +233,12 @@ function closeAll() { [...sockets].forEach(s => s.close()); }
 
 // Point's ↩ passes the picks and the comment (and what ⌘↩ added) to the chat as the user's message (Claude's desktop
 // app puts it in its message box for the user to send). A host that takes no messages from views gets
-// the look without Point.
+// the look without Point. Claude's desktop app adds the text at the cursor, straight after anything the
+// user had typed, so it starts on a new paragraph.
 const asked = async res => { if (res?.isError) throw new Error("Claude's chat didn't take it"); };
 const pointHost = {
   get canSend() { return !!app.getHostCapabilities()?.message; },
-  send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(asked),
+  send: text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\n\n" + text }] }).then(asked),
 };
 
 async function load() {
