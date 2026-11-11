@@ -209,8 +209,9 @@ impl Views {
 
     fn close_idle(&self) {
         let mut sockets = self.sockets.lock().unwrap();
+        // A socket Pluto closed stays until the view reads what's left and hears of the close.
         sockets.retain(|_, socket| {
-            let keep = !socket.closed.load(Ordering::SeqCst) && socket.used.lock().unwrap().elapsed() < IDLE;
+            let keep = socket.used.lock().unwrap().elapsed() < IDLE;
             if !keep {
                 socket.close();
             }
