@@ -189,13 +189,13 @@ window.addEventListener("message", async e => {
   const message = await page.evaluate(() => window.messages[0]);
   const said = message?.content?.[0]?.text || "";
   check(message?.role === "user" && said.startsWith("[Endeavor] The user quoted") && /<quote cell="squares" part="output" uri="notebook:\/\/pluto\/[^"]+\/cell\/6e6a1b70-dda7-11f1-a148-b56bbb7771a3">\n[\s\S]+\n<\/quote>\nWhy squares\?$/.test(said), `↩ sends the pick and the comment as the user's message: ${JSON.stringify(said.slice(-220))}`);
-  // ⌘↩ (Ctrl+Enter off macOS): given to Claude with the next message instead.
+  // ⌘↩ (Ctrl+Enter off macOS): to the chat as well, where the user adds to the message.
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await frame.locator("#annotate-bar textarea").fill("Later");
   await frame.locator("#annotate-bar textarea").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
-  await page.waitForFunction(() => window.contexts.length === 1, null, { timeout: 5000 }).catch(() => {});
-  const context = await page.evaluate(() => window.contexts[0]?.content?.[0]?.text || "");
-  check(/^\[Endeavor\] At some point[\s\S]*Later$/.test(context) && (await page.evaluate(() => window.messages.length)) === 1, "⌘↩ gives it to Claude as context, with no message sent");
+  await page.waitForFunction(() => window.messages.length === 2, null, { timeout: 5000 }).catch(() => {});
+  const second = await page.evaluate(() => window.messages[1]?.content?.[0]?.text || "");
+  check(/Later$/.test(second) && (await page.evaluate(() => window.contexts.length)) === 0, "⌘↩ passes it to the chat too, and gives no context");
   // A send the chat refuses gives the comment back.
   await page.evaluate(() => { window.refuse = true; });
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();

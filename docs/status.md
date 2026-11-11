@@ -38,11 +38,12 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   closes itself; a message over 1 MB comes in parts. A card that Claude draws
   again for an old call waits for a click. It has the Endeavor look and Point
   (`views/endeavor-view.js`, a copy of the app's `frontend/dist/view.js`,
-  which CI keeps equal to the app's `main`): ↩ in Point's comment bar sends
-  the picks and the comment as the user's message, ⌘↩ gives them to Claude
-  as context, which Claude may keep for later turns (MCP Apps leaves that to
-  the host). A refused send puts the comment back; a host that takes no
-  messages from views gets the look without Point. Point's figures and boxes go without a picture, which
+  which CI keeps equal to the app's `main`): ↩ or ⌘↩ in Point's comment bar
+  passes the picks and the comment to the chat as the user's message. Claude's
+  desktop app puts it in its message box for the user to send (checked
+  2026-11-11); its Code tab gave a view's context to Claude on no turn, so the
+  view doesn't use context. A refused send puts the comment back; a host that
+  takes no messages from views gets the look without Point. Point's figures and boxes go without a picture, which
   the app takes natively. Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
   tab (the chat's view reaches another `endeavor mcp` process, which works on
   this computer). A client that draws views but can't move one beside the chat
