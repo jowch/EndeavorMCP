@@ -56,6 +56,12 @@ TOOLS = [
      "_meta": {"ui": {"resourceUri": "ui://endeavor-probe/relay"}, "ui/resourceUri": "ui://endeavor-probe/relay"}},
 ] + [{"name": n, "title": n, "description": "Used by the relay probe view.", "inputSchema": {"type": "object", "properties": {}}, "_meta": {"ui": {"visibility": ["app"]}}}
      for n in ("relay_echo", "relay_set", "relay_get", "relay_hold", "relay_big")] + [
+] + [
+    {"name": f"probe_panel_{v}", "title": f"Test opening the side panel ({v})",
+     "description": f"Open a small view ({v}) that asks to open in the side panel and reports where it opened.",
+     "inputSchema": {"type": "object", "properties": {}},
+     "_meta": {"ui": {"resourceUri": f"ui://endeavor-probe/panel-{v}"}, "ui/resourceUri": f"ui://endeavor-probe/panel-{v}"}}
+    for v in ("both", "panelonly", "nolist", "nopref")] + [
     {"name": "probe_report", "title": "Probe report",
      "description": "Used by the probe views to save what they found.",
      "inputSchema": {"type": "object", "properties": {"report": {"type": "string"}}, "required": ["report"]},
@@ -87,6 +93,9 @@ def handle(msg):
         elif uri.endswith("/cdn"): text = page("cdn.built.html")
         elif uri.endswith("/live"): text = page("live.built.html")
         elif uri.endswith("/relay"): text = page("relay.built.html")
+        elif "/panel-" in uri:
+            v = uri.rsplit("-", 1)[1]
+            text = page(f"panel-{v}.built.html")
         elif "/size/" in uri:
             base = page("view.built.html"); pad = max(0, int(float(uri.rsplit("/", 1)[1]) * 1e6) - len(base))
             text = base.replace("</body>", "<!--" + "x" * pad + "--></body>")
@@ -96,7 +105,7 @@ def handle(msg):
         return {"contents": [{"uri": uri, "mimeType": MIME, "text": text,
                               "_meta": {"ui": dict({"prefersBorder": True}, **({"csp": csp} if csp else {}),
                                                     # ask Claude to open the notebook views in the side panel
-                                                    **({"preferredDisplayMode": "fullscreen"} if uri.rsplit("/", 1)[-1] in ("loader", "live", "cdn") else {}))}}]}
+                                                    **({"preferredDisplayMode": "fullscreen"} if (uri.rsplit("/", 1)[-1] in ("loader", "live", "cdn") or ("/panel-" in uri and not uri.endswith("-nopref"))) else {}))}}]}
     if method == "tools/call":
         name, args = params.get("name"), params.get("arguments") or {}
         log(f"tools/call {name} pid={os.getpid()} {json.dumps(args)[:4000]}")

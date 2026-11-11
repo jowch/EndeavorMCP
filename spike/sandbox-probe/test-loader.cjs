@@ -6,7 +6,7 @@ const { chromium } = require('playwright'); const fs = require('fs');
   const csp = "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' data:; frame-src 'none'; object-src 'none';";
   const html = fs.readFileSync('loader.built.fake.html', 'utf8').replace('<head>', `<head><meta http-equiv="Content-Security-Policy" content="${csp}">`);
   await p.setContent(`<iframe id=f sandbox="allow-scripts allow-same-origin" style="width:1000px;height:900px"></iframe>`);
-  const full = fs.readFileSync('pluto.inner.html', 'utf8');
+  const full = fs.readFileSync('static.parts.json', 'utf8');
   await p.evaluate(f => { window.__FULL = f; }, full);
   await p.$eval('#f', (f, s) => { f.srcdoc = s; }, html);
   await p.waitForTimeout(14000);
