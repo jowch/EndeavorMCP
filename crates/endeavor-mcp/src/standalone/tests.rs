@@ -561,3 +561,51 @@ fn a_claude_code_conversation_keeps_its_session_key_across_a_resume() {
     assert_eq!(session_key(None, false), None);
     assert_eq!(session_key(Some(id), true), None, "an agent started from Claude Code's shell isn't that conversation");
 }
+
+/// A scratch folder for the background-precompile tests, emptied first.
+fn precompile_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("endeavor-precompile-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn julia_ran_here_only_where_an_endeavor_runtime_was_precompiled_in_the_first_depot() {
+    let dir = precompile_dir("ran");
+    let depot = dir.join("depot");
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    assert!(!julia_ran_here(&depot.display().to_string()), "a depot that isn't there");
+    std::fs::create_dir_all(depot.join("compiled/v1.12/Pluto")).unwrap();
+    assert!(!julia_ran_here(&depot.display().to_string()), "Julia ran, but not our runtime");
+    std::fs::create_dir_all(depot.join("compiled/v1.12/EndeavorRuntime")).unwrap();
+    assert!(julia_ran_here(&depot.display().to_string()));
+    assert!(julia_ran_here(&format!("{}{sep}/elsewhere", depot.display())), "the first entry of a depot path");
+    assert!(!julia_ran_here(&format!("/elsewhere{sep}{}", depot.display())), "only the first entry is written to");
+    assert!(!julia_ran_here(&format!("{sep}{}", depot.display())), "an empty first entry");
+    assert!(!julia_ran_here(""));
+}
+
+#[test]
+fn the_background_precompile_runs_once_per_runtime_folder_and_only_where_julia_ran() {
+    let dir = precompile_dir("once");
+    let (depot, runtime) = (dir.join("depot"), dir.join("runtime"));
+    std::fs::create_dir_all(&runtime).unwrap();
+    let depot = depot.display().to_string();
+    let runs = std::cell::RefCell::new(Vec::new());
+    let try_it = || precompile_if_needed(&depot, &|| Some(runtime.clone()), &mut |r, key| runs.borrow_mut().push((r.to_path_buf(), key.to_string())));
+    try_it();
+    assert!(runs.borrow().is_empty(), "a fresh depot (a first install) starts no Julia");
+    std::fs::create_dir_all(Path::new(&depot).join("compiled/v1.12/EndeavorRuntime")).unwrap();
+    try_it();
+    assert_eq!(*runs.borrow(), vec![(runtime.clone(), format!("{depot}\n"))], "after an update it runs");
+    std::fs::write(runtime.join(".precompiled"), format!("{depot}\n")).unwrap();
+    try_it();
+    assert_eq!(runs.borrow().len(), 1, "a folder done for this depot isn't done again");
+    std::fs::write(runtime.join(".precompiled"), "/another/depot\n").unwrap();
+    try_it();
+    assert_eq!(runs.borrow().len(), 2, "one done for another depot is");
+    std::fs::write(runtime.join(".precompile-failed"), "").unwrap();
+    try_it();
+    assert_eq!(runs.borrow().len(), 2, "a failure in the last day isn't retried");
+}

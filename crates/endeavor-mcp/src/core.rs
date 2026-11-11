@@ -340,7 +340,8 @@ fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_tok
 
 /// `julia boot.jl` with the environment it reads (see runtime/boot.jl), on
 /// private ports free here (Pluto's, and Julia's bridge for the core), writing
-/// its state to `julia_state` for the core.
+/// its state to `julia_state` for the core. Its flags must keep the compile cache's key the same
+/// as `standalone::precompile_command`'s, or that background precompile is wasted.
 fn julia_command(julia: &str, runtime: &Path, depot: &str, token: &str, launcher: &str, julia_state: &Path) -> Result<Command, String> {
     let ports = free_ports()?;
     let runtime = runtime.display();
