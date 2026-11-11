@@ -32,10 +32,12 @@ TOOLS = [
      "description": "Open the demo Pluto notebook in a view that loads Pluto's page code from Pluto's public CDN.",
      "inputSchema": {"type": "object", "properties": {}},
      "_meta": {"ui": {"resourceUri": "ui://endeavor-probe/cdn"}, "ui/resourceUri": "ui://endeavor-probe/cdn"}},
-    {"name": "probe_size", "title": "Test a large view",
-     "description": "Open the probe view padded to a given size in megabytes, to find the largest view that renders.",
-     "inputSchema": {"type": "object", "properties": {"mb": {"type": "number"}}, "required": ["mb"]},
-     "_meta": {"ui": {"resourceUri": "ui://endeavor-probe/size"}, "ui/resourceUri": "ui://endeavor-probe/size"}},
+] + [
+    {"name": f"probe_size_{mb}", "title": f"Test a {mb} MB view",
+     "description": f"Open the probe view padded to {mb} MB, to find the largest view that renders.",
+     "inputSchema": {"type": "object", "properties": {}},
+     "_meta": {"ui": {"resourceUri": f"ui://endeavor-probe/size/{mb}"}, "ui/resourceUri": f"ui://endeavor-probe/size/{mb}"}}
+    for mb in (2, 4, 6)] + [
     {"name": "page_part", "title": "Page part",
      "description": "Used by the loader view to read the notebook page in parts.",
      "inputSchema": {"type": "object", "properties": {"offset": {"type": "number"}, "size": {"type": "number"}}, "required": ["offset", "size"]},
@@ -77,8 +79,8 @@ def handle(msg):
         elif uri.endswith("/loader"): text = page("loader.built.html")
         elif uri.endswith("/cdn"): text = page("cdn.built.html")
         elif uri.endswith("/live"): text = page("live.built.html")
-        elif uri.endswith("/size"):
-            base = page("view.built.html"); pad = max(0, int(SIZE_MB * 1e6) - len(base))
+        elif "/size/" in uri:
+            base = page("view.built.html"); pad = max(0, int(float(uri.rsplit("/", 1)[1]) * 1e6) - len(base))
             text = base.replace("</body>", "<!--" + "x" * pad + "--></body>")
         else: raise KeyError(uri)
         csp = {"resourceDomains": ["https://cdn.jsdelivr.net"], "connectDomains": ["https://cdn.jsdelivr.net"]} if uri.endswith("/cdn") else None
@@ -90,8 +92,6 @@ def handle(msg):
     if method == "tools/call":
         name, args = params.get("name"), params.get("arguments") or {}
         log(f"tools/call {name} {json.dumps(args)[:4000]}")
-        if name == "probe_size":
-            SIZE_MB = float(args.get("mb", 1))
         if name == "ws_open":
             info = json.load(open(os.path.join(HERE, "live.json")))
             i = wsrelay.ws_open("127.0.0.1", info["port"], "/?secret=" + info["secret"])
@@ -104,7 +104,9 @@ def handle(msg):
             return {"content": [{"type": "text", "text": f"{len(msgs)} messages"}], "structuredContent": {"messages": msgs, "closed": closed}}
         if name == "page_part":
             full = page(args.get("page", "pluto.inner.html")); o, n = int(args["offset"]), int(args["size"])
-            return {"content": [{"type": "text", "text": f"part at {o}"}], "structuredContent": {"total": len(full), "text": full[o:o + n]}}
+            part = full[o:o + n]
+            # offsets count Python characters; the view only follows "next" (its own string length counts UTF-16 units)
+            return {"content": [{"type": "text", "text": f"part at {o}"}], "structuredContent": {"total": len(full), "next": o + len(part), "text": part}}
         if name == "probe_report":
             return {"content": [{"type": "text", "text": "saved"}]}
         return {"content": [{"type": "text", "text": f"Opened the {name} view."}],

@@ -99,7 +99,7 @@ try {
     catch (e) { fails++; if (size <= 50000 || fails > 6) throw e; size = Math.floor(size / 2); continue; }
     const sc = res.structuredContent;
     if (!sc || typeof sc.text !== "string") { fails++; if (size <= 50000 || fails > 6) throw new Error("no structuredContent"); size = Math.floor(size / 2); continue; }
-    total = sc.total; html += sc.text; offset += sc.text.length;
+    total = sc.total; html += sc.text; offset = sc.next;
     say(`Loading the notebook… ${Math.round(100 * offset / total)}%`);
   }
   const parts = calls + " calls, last size " + size + ", fails " + fails;
