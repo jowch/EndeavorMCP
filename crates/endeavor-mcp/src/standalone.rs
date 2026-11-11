@@ -817,6 +817,7 @@ fn relay(options: Options) -> ! {
     let fresh = format!("stdio-{}-{}", std::process::id(), now.as_millis());
     let conversation = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
     let session = session_key(conversation.as_deref(), std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some()).unwrap_or(fresh);
+    precompile_after_update(&options);
     let relay = Arc::new(Relay::new(options, session, Box::new(io::stdout())));
     relay.target_from_project();
     let stdin = io::stdin();
@@ -832,6 +833,61 @@ fn relay(options: Options) -> ! {
     }
     relay.connections.close_all();
     std::process::exit(0)
+}
+
+/// After an install or an update, precompile the runtime and EndeavorRuntimeWarm in the
+/// background, at low priority, before any notebook needs them. The runtime loads
+/// EndeavorRuntimeWarm only when it's already precompiled, and an update leaves it stale: until
+/// the runtime itself got round to it (`warm_up_later`, after 30 s quiet), the first opens ran
+/// without it, about 20 s slower each (measured 2026-11-11). A runtime folder is one version, so
+/// a folder done once (`.precompiled`, with the Julia it was done for) is never done again. It
+/// never downloads Julia, and a failure costs only the speedup: the runtime still does its own.
+fn precompile_after_update(options: &Options) {
+    let (cache, source, depot) = (options.cache.clone(), options.julia.clone(), options.depot.clone());
+    std::thread::spawn(move || {
+        let Ok(runtime) = unpack_runtime(&cache) else { return };
+        let Ok((julia, version)) = julia::find(&source, false, &mut |_| {}) else { return };
+        let done = runtime.join(".precompiled");
+        let key = format!("{julia} {version}\n{depot}\n");
+        if std::fs::read_to_string(&done).is_ok_and(|said| said == key) {
+            return;
+        }
+        let Some(status) = precompile_command(&julia, &runtime, &depot).and_then(|mut command| command.status().ok()) else { return };
+        if status.success() {
+            let _ = std::fs::write(&done, key);
+        }
+    });
+}
+
+/// Julia precompiling the runtime's packages below normal priority: under `nice` where there is
+/// one; on Windows the process lowers its own priority class, which the precompiles it starts inherit.
+fn precompile_command(julia: &str, runtime: &Path, depot: &str) -> Option<std::process::Command> {
+    let lower = if cfg!(windows) {
+        "ccall((:SetPriorityClass, \"kernel32\"), stdcall, Cint, (Ptr{Cvoid}, UInt32), ccall((:GetCurrentProcess, \"kernel32\"), stdcall, Ptr{Cvoid}, ()), 0x00004000); "
+    } else {
+        ""
+    };
+    let script = format!("{lower}import Pkg; Pkg.instantiate(; allow_autoprecomp=false); Pkg.precompile([\"EndeavorRuntime\", \"EndeavorRuntimeWarm\"])");
+    let nice = (!cfg!(windows)).then(|| ["/usr/bin/nice", "/bin/nice"].into_iter().find(|p| Path::new(p).is_file())).flatten();
+    let mut command = match nice {
+        Some(nice) => {
+            let mut command = std::process::Command::new(nice);
+            command.args(["-n", "10", julia]);
+            command
+        }
+        None => std::process::Command::new(julia),
+    };
+    command
+        .arg("--startup-file=no")
+        .arg(format!("--project={}", runtime.display()))
+        .args(["-e", &script])
+        .env("JULIA_DEPOT_PATH", depot)
+        .env("JULIA_LOAD_PATH", if cfg!(windows) { "@;@stdlib" } else { "@:@stdlib" })
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::client::no_window(&mut command);
+    Some(command)
 }
 
 /// The session key of an agent whose client names its conversation: Claude Code gives
