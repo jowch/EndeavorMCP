@@ -97,13 +97,18 @@ function readable(e) {
   const text = String(e && e.message || e || "").trim();
   const code = (text.match(/^([a-z_]+)(::|:)/) || [])[1];
   const again = "Ask Claude to open it again.";
+  const slow = { text: "The notebook took too long to answer. Try again.", retry: true };
+  // Julia busy (an HTTP timeout while it makes the page), not stopped.
+  if (code === "not_ready" && /didn't answer/.test(text)) return slow;
   switch (code) {
     case "not_open": return { text: "This notebook isn't open any more. " + again, retry: false };
     case "not_ready": return { text: "Julia isn't running right now. " + again, retry: false };
-    case "not_connected": case "closed": return { text: "The notebook's connection dropped. Try again, or ask Claude to open it again.", retry: true };
-    case "too_many": return { text: "Too many notebook views are open. Close one, then try again.", retry: true };
+    case "not_connected": return { text: "Couldn't connect to the notebook. Try again, or ask Claude to open it again.", retry: true };
+    // Sockets left by views that went away: freed after a minute idle.
+    case "too_many": return { text: "Too many notebook views are open. Wait a minute, then try again.", retry: true };
   }
-  if (/timed? ?out/i.test(text)) return { text: "Claude's app took too long to answer. Try again.", retry: true };
+  // The host's own timeout for a tool call.
+  if (/request timed out/i.test(text)) return slow;
   const said = text.replace(/^[a-z_]+(::|:)\s*/, "");
   return { text: "Couldn't show the notebook" + (said ? `: ${said.length > 160 ? said.slice(0, 157) + "…" : said}` : ".") + " " + again, retry: false };
 }

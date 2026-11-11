@@ -161,7 +161,7 @@ window.addEventListener("message", async e => {
   await frame.click("#endeavor-open");
   await frame.waitForFunction(() => document.querySelector("#endeavor-card.cover") && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
   const card = await frame.evaluate(() => [document.querySelector("#endeavor-card .note").textContent, document.querySelector("#endeavor-open").textContent]);
-  check(card[0] === "The notebook's connection dropped. Try again, or ask Claude to open it again." && card[1] === "Try again", `a failed load says so in plain words, with a way to try again: ${JSON.stringify(card)}`);
+  check(card[0] === "Couldn't connect to the notebook. Try again, or ask Claude to open it again." && card[1] === "Try again", `a failed load says so in plain words, with a way to try again: ${JSON.stringify(card)}`);
   const clicked = Date.now();
   await frame.click("#endeavor-open");
   await frame.waitForFunction(() => document.querySelectorAll("pluto-cell").length === 3, null, { timeout: 60000 });
