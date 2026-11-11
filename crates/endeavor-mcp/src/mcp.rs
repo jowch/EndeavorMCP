@@ -1017,7 +1017,7 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
             if caller.views {
                 result["capabilities"]["resources"] = json!({});
             }
-            if let Some(instructions) = guide::instructions(standalone, caller.has_skills, caller.front) {
+            if let Some(instructions) = guide::instructions(standalone, caller.has_skills, caller.front, caller.views) {
                 result["instructions"] = instructions.into();
             }
             ok(result)
