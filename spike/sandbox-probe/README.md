@@ -15,3 +15,9 @@ Setup: `gunzip -k pluto.built.html.gz`, then add to claude_desktop_config.json:
 
 Rebuild: `make.jl` (Julia, Pluto) writes the export, `inline.py` inlines it,
 `build.py` adds the MCP Apps client (needs `applib.js`, see build.py).
+
+Round 2: `probe_loader` opens a 340 KB view that pulls the same page in parts
+through the app-only tool `page_part` and builds it in place (gunzip
+`pluto.inner.html.gz` first). `probe_cdn` opens a 360 KB page that loads
+Pluto's code from cdn.jsdelivr.net (declared in `_meta.ui.csp`).
+`probe_size` with `mb` pads the probe view to that size, to find the limit.
