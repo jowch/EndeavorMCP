@@ -2142,6 +2142,22 @@ fn read_cell_adds_the_text_form_of_rich_outputs() {
 }
 
 #[test]
+fn read_cell_cuts_a_huge_text_output_to_its_start_and_end() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "Text(join(string.(1:200_000), '\\n'))")]);
+    // 1.3 MB, as the desktop check's `Text` output: with a 3-byte character where the cuts fall.
+    let big = format!("{}€{}€{}", "a".repeat(11_999), "b".repeat(1_300_000), "c".repeat(3_998));
+    s.engine.with(NB, |nb| nb.cells[0].output = big.clone());
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let output = read["output"].as_str().unwrap();
+    assert!(output.len() < 16_200, "{}", output.len());
+    assert!(output.starts_with(&"a".repeat(11_999)) && output.ends_with(&format!("\n{}", "c".repeat(3_998))), "{output:.40}");
+    assert!(output.contains(&format!("\n… ({} bytes of this output left out here, of {})\n", big.len() - 11_999 - 3_998, big.len())), "{}", &output[11_990..12_100]);
+    s.engine.with(NB, |nb| nb.cells[0].output = "1".repeat(16_000));
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap()["output"], json!("1".repeat(16_000)), "16,000 bytes is whole");
+}
+
+#[test]
 fn a_run_receipt_has_the_text_form_of_rich_outputs() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "table")]);

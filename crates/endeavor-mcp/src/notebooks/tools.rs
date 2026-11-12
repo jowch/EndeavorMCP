@@ -44,6 +44,11 @@ pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has
 /// How much of each output's text a change's receipt carries; `read_cell` has
 /// the rest.
 const RECEIPT_TEXT_MAX: usize = 2_000;
+/// How much of a text output `read_cell` and receipts carry, as the runtime cuts an
+/// output's text form (`_TEXT_MAX` in `Output.jl`): a `Text` of 200,000 lines is 1.3 MB.
+const OUTPUT_MAX: usize = 16_000;
+/// Of that, how much comes from the output's end, where a long print's result is.
+const OUTPUT_END: usize = 4_000;
 /// The same for a cell that ran along with the ones a run asked for (`Ran::along`).
 const DEPENDENT_TEXT_MAX: usize = 200;
 /// The notes a run's reply leaves out for a cell that only ran along, and gives after the
@@ -734,7 +739,7 @@ impl Call<'_> {
         let cell = &nb.cells[id];
         let stale = cell.stale || self.pending_run(nb).iter().any(|p| p == id);
         let mut out = json!({
-            "cell_id": id, "code": cell.code, "output": cell.output, "errored": cell.errored,
+            "cell_id": id, "code": cell.code, "output": cut_middle(&cell.output, OUTPUT_MAX, OUTPUT_END), "errored": cell.errored,
             "running": cell.running, "queued": cell.queued, "code_folded": cell.folded, "stale": stale,
         });
         if let Some(error) = &cell.error {
@@ -2089,6 +2094,17 @@ pub(super) fn cut(text: &str, max: usize) -> String {
     }
     let end = (0..=max).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
     format!("{}\n… (cut; read_cell shows more)", &text[..end])
+}
+
+/// `text` cut to about `max` bytes at character boundaries, keeping its start and its last
+/// `end` bytes, saying how much was left out.
+pub(super) fn cut_middle(text: &str, max: usize, end: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let head = (0..=max - end).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+    let tail = (text.len() - end..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len());
+    format!("{}\n… ({} bytes of this output left out here, of {})\n{}", &text[..head], tail - head, text.len(), &text[tail..])
 }
 
 /// How `view_cell_output` says an output has no PNG form, and how the runtime says it couldn't ask
