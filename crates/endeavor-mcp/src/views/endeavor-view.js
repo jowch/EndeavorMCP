@@ -117,6 +117,144 @@
     return m ? rest.slice(m[0].length).trimEnd().replace(/"+$/, "") : null;
   }
 
+  // src/status.ts
+  function phaseOf(entry) {
+    if (!entry) return "waiting";
+    if (entry.success === false) return "failed";
+    if (entry.finished_at != null) return "done";
+    if (entry.started_at != null) return "busy";
+    return "waiting";
+  }
+  var ansi = /\x1b\[[0-9;]*m/g;
+  function parsePkgLog(log) {
+    const precompiled = [];
+    const failed = [];
+    const added = [];
+    let inManifest = false;
+    for (const raw of log.replace(ansi, "").split("\n")) {
+      const line = raw.trimEnd();
+      const mark = line.match(/^\s*(?:[\d.]+\s*ms)?\s*([✓✗])\s+([\w.]+)/);
+      if (mark) (mark[1] === "\u2713" ? precompiled : failed).push(mark[2]);
+      if (/^\s*Updating\s+`.*Manifest\.toml`/.test(line)) {
+        inManifest = true;
+        continue;
+      }
+      const entry = line.match(/\[[0-9a-f]{8}\]\s+(\+)?\s*([\w.]+)/);
+      if (!entry) inManifest = false;
+      else if (inManifest && entry[1]) added.push(entry[2]);
+    }
+    return { precompiled, failed, added };
+  }
+  function importedPackages(codes) {
+    const names = [];
+    for (const code of codes) {
+      for (const line of code.split("\n")) {
+        const m = line.match(/^\s*(?:using|import)\s+([^#]+)/);
+        if (!m) continue;
+        const list = m[1].split(":")[0];
+        for (const part of list.split(",")) {
+          const name = part.trim().split(/[.\s]/)[0];
+          if (/^[A-Za-z_]\w*$/.test(name) && !["Base", "Core", "Main"].includes(name) && !names.includes(name)) names.push(name);
+        }
+      }
+    }
+    return names;
+  }
+  function prettyTime(ns) {
+    if (ns < 1e3) return `${Math.round(ns)} ns`;
+    if (ns < 1e6) return `${Math.round(ns / 1e3)} \xB5s`;
+    if (ns < 1e9) return `${Math.round(ns / 1e6)} ms`;
+    const s = ns / 1e9;
+    if (s < 60) return `${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
+    return `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
+  }
+  function definedNames(map) {
+    return Object.keys(map ?? {}).filter((n) => !n.startsWith("__ExprExpl_anon__"));
+  }
+  function cellName2(nb, id) {
+    const named = commentName(nb.cell_inputs[id]?.code ?? "");
+    if (named) return cellName(nb.cell_inputs[id].code);
+    const defined = definedNames(nb.cell_dependencies?.[id]?.downstream_cells_map);
+    if (defined.length) return defined.slice(0, 2).join(", ") + (defined.length > 2 ? ", \u2026" : "");
+    return cellName(nb.cell_inputs[id]?.code ?? "");
+  }
+  function statusModel(nb) {
+    const tree = nb.status_tree?.subtasks ?? {};
+    const pkgTask = tree.pkg;
+    const pkgPhase = phaseOf(pkgTask);
+    const runTask = tree.run;
+    const workspace = phaseOf(tree.workspace);
+    const running = nb.process_status === "ready" || nb.process_status === "starting";
+    const steps = [
+      { name: "Start Julia", phase: tree.workspace ? workspace : running ? "done" : "waiting" },
+      { name: "Packages", phase: pkgTask ? pkgPhase : running ? "done" : "waiting" },
+      { name: "Run cells", phase: phaseOf(runTask) }
+    ];
+    const nbpkg = nb.nbpkg ?? {};
+    const installed = nbpkg.installed_versions ?? {};
+    const busy = new Set(nbpkg.busy_packages ?? []);
+    const log = parsePkgLog(nbpkg.terminal_outputs?.nbpkg_sync ?? "");
+    const precompiled = new Set(log.precompiled);
+    const failedSet = new Set(log.failed);
+    const precompiling = phaseOf(pkgTask?.subtasks?.precompile) === "busy";
+    const codes = nb.cell_order.map((id) => nb.cell_inputs[id]?.code ?? "");
+    const direct = importedPackages(codes);
+    for (const name of [...Object.keys(installed), ...busy].sort()) {
+      if (!name.startsWith("__internal") && name !== "nbpkg_sync" && !direct.includes(name)) direct.push(name);
+    }
+    const packages = direct.map((name) => {
+      const version = installed[name];
+      const detail = version === "stdlib" ? "standard library" : version ?? "";
+      let state2;
+      if (pkgPhase === "failed" && (failedSet.has(name) || failedSet.size === 0 && busy.has(name))) state2 = "failed";
+      else if (busy.has(name) && pkgPhase === "busy") state2 = precompiled.has(name) ? "ready" : precompiling ? "precompiling" : "installing";
+      else if (version != null) state2 = "ready";
+      else if (pkgPhase === "done") state2 = Object.keys(installed).length ? "failed" : "ready";
+      else state2 = "waiting";
+      const notFound = state2 === "failed" && version == null && pkgPhase === "done";
+      return { name, state: state2, detail: state2 === "ready" ? detail : notFound ? "not found" : "" };
+    });
+    const deps = log.added.filter((n) => !direct.includes(n));
+    const depsRow = deps.length ? { count: deps.length, precompiled: deps.filter((n) => precompiled.has(n)).length, failed: deps.filter((n) => failedSet.has(n)).length } : null;
+    const cells = nb.cell_order.map((id) => {
+      const r = nb.cell_results[id] ?? {};
+      const state2 = r.running ? "running" : r.queued ? "waiting" : r.errored ? "failed" : r.runtime != null ? "done" : "waiting";
+      const time = (state2 === "done" || state2 === "failed") && r.runtime != null ? prettyTime(r.runtime) : null;
+      return { id, name: cellName2(nb, id), state: state2, time };
+    });
+    const failedPkg = packages.find((p) => p.state === "failed");
+    const failure = failedPkg ? { name: failedPkg.name, cells: cells.filter((c) => c.state === "failed").map((c) => c.name) } : null;
+    if (failedPkg && steps[1].phase === "done") steps[1].phase = "failed";
+    const readyPkgs = packages.filter((p) => p.state === "ready").length;
+    const evaluate = runTask?.subtasks?.evaluate?.subtasks ?? {};
+    const runTotal = Object.keys(evaluate).length;
+    const runDone = Object.values(evaluate).filter((e) => e.finished_at != null).length;
+    let busyText = null;
+    if (steps[0].phase === "busy") busyText = "Starting Julia";
+    else if (pkgPhase === "busy") busyText = packages.length ? `Installing packages \xB7 ${readyPkgs} of ${packages.length}` : "Installing packages";
+    else if (steps[2].phase === "busy") busyText = runTotal ? `Running ${runDone} of ${runTotal}` : "Running";
+    const restart = nbpkg.restart_required_msg ? "required" : nbpkg.restart_recommended_msg ? "recommended" : null;
+    let headline;
+    if (nb.process_status === "waiting_for_permission") headline = "Safe preview \xB7 nothing has run";
+    else if (failure) headline = `Package failed \xB7 ${failure.name}`;
+    else if (busyText?.startsWith("Running")) headline = `Running cells \xB7 ${runDone} of ${runTotal}`;
+    else if (busyText) headline = busyText;
+    else if (restart === "required") headline = "Restart needed";
+    else if (nb.process_status === "no_process" || nb.process_status === "waiting_to_restart") headline = "Julia stopped";
+    else headline = "Ready";
+    return {
+      headline,
+      steps,
+      packages,
+      deps: depsRow,
+      cells,
+      failure,
+      busy: busyText,
+      saveFailed: tree.saving?.success === false,
+      restart
+    };
+  }
+
   // src/state.ts
   var context = { host: "This Mac", agent: "Claude", asking: false, crash: null };
 
@@ -143,10 +281,11 @@
     background: var(--e-popover-bg); box-shadow: 0 12px 32px var(--e-shadow-popover); }
   .endeavor-prompt .head { display: flex; align-items: center; gap: 8px; padding: 0 2px 0 4px; font-size: 12px; line-height: 17px;
     color: var(--e-text-faint); white-space: nowrap; }
-  .endeavor-prompt .what { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; }
+  /* In a narrow bar (Claude's side panel goes down to about 320 px) the key hints give way first, so what was picked still reads. */
+  .endeavor-prompt .what { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; }
   .endeavor-prompt .what svg { flex: none; }
   .endeavor-prompt .what .name { font-family: JuliaMono, ui-monospace, monospace; font-size: 11.5px; color: var(--e-text-secondary); }
-  .endeavor-prompt .keys { flex: none; font-size: 11px; }
+  .endeavor-prompt .keys { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
   .endeavor-prompt .quote { margin: 0 4px; border-left: 2px solid var(--e-control-edge); padding-left: 8px; font-size: 11.5px; line-height: 17px;
     color: var(--e-text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .endeavor-prompt .quote.code { font-family: JuliaMono, ui-monospace, monospace; }
@@ -310,10 +449,12 @@
   #annotate-box { position: absolute; z-index: 9999; pointer-events: none; display: none;
     border: 1.5px dashed var(--e-accent); border-radius: 2px; }
   body.annotating #annotate-box.shown { display: block; }
+  /* One line where it fits; in a narrower pane (Claude's side panel goes down to about 320 px) it wraps, inside the pane. */
   #annotate-hint { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 10000;
-    display: none; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px; border: 1px solid transparent;
-    background: var(--e-hint-bg); color: var(--e-hint-text); font: 12px system-ui; white-space: nowrap; }
-  #annotate-hint .done { color: var(--e-text-primary); cursor: pointer; }
+    display: none; align-items: center; justify-content: center; gap: 6px; padding: 4px 12px; border-radius: 13px; border: 1px solid transparent;
+    box-sizing: border-box; max-width: calc(100% - 16px); width: max-content; text-align: center;
+    background: var(--e-hint-bg); color: var(--e-hint-text); font: 12px system-ui; }
+  #annotate-hint .done { color: var(--e-text-primary); cursor: pointer; white-space: nowrap; }
   #annotate-hint .done:hover { text-decoration: underline; }
   #annotate-bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
     z-index: 10000; display: none; flex-direction: column; gap: 6px; box-sizing: border-box;
@@ -543,7 +684,7 @@
       const line = el?.closest(".cm-line");
       return line && cell.contains(line) ? cmLines(cell).indexOf(line) + 1 : 0;
     };
-    const ours = (target) => bar.contains(target) || hint.contains(target);
+    const ours = (target) => bar.contains(target) || hint.contains(target) || !!target.closest?.("#endeavor-bar");
     const swallow = (e) => {
       const target = e.target;
       if (!active() || ours(target)) return;
@@ -634,6 +775,26 @@ ${text.value}` : sent.comment;
       }
       refresh();
     });
+  }
+
+  // src/narrow.ts
+  var css3 = `
+  /* Long words and links in Markdown wrap at the cell's edge, rather than run past it. */
+  pluto-editor pluto-output :is(p, li, blockquote, h1, h2, h3, h4, h5, h6, dt, dd) { overflow-wrap: break-word; }
+  @media (max-width: 480px) {
+    /* Pluto's are 2.2, 1.8, 1.6, 1.4 and 1.2rem. The pluto-editor in front outweighs Pluto's own rules, whichever loads last. */
+    pluto-editor pluto-output h1 { font-size: 1.6rem; }
+    pluto-editor pluto-output h2 { font-size: 1.4rem; }
+    pluto-editor pluto-output h3 { font-size: 1.25rem; }
+    pluto-editor pluto-output h4 { font-size: 1.15rem; }
+    pluto-editor pluto-output h5 { font-size: 1.05rem; }
+  }
+`;
+  function initNarrow() {
+    const style = document.createElement("style");
+    style.id = "endeavor-narrow";
+    style.textContent = css3;
+    document.head.append(style);
   }
 
   // src/engine.ts
@@ -1008,27 +1169,123 @@ ${pick.text}
     return comment ? `${blocks.join("\n\n")}
 ${comment}` : blocks.join("\n\n");
   }
-  var css3 = `
-  #endeavor-point { position: fixed; right: 16px; bottom: 16px; z-index: 9998; display: flex; align-items: center; gap: 6px;
-    height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--e-popover-edge);
-    background: var(--e-popover-bg); color: var(--e-text-secondary); font: 12px system-ui, -apple-system, "Segoe UI", sans-serif;
-    box-shadow: 0 4px 16px var(--e-shadow-popover); cursor: pointer; }
-  #endeavor-point:hover { color: var(--e-text-primary); background: var(--e-button-hover); }
-  #endeavor-point .key { color: var(--e-text-faint); }
-  body.annotating #endeavor-point { display: none; }
-  /* At the top, under Point's hint, where nothing of Pluto's sits over it. */
-  #endeavor-sent { position: fixed; left: 50%; top: 44px; transform: translateX(-50%); z-index: 10001; display: none;
+  var BAR = 36;
+  var chrome = `
+  :root { --endeavor-bar: ${BAR}px; }
+  body { padding-top: var(--endeavor-bar); box-sizing: border-box; }
+  footer { display: none !important; }
+  pluto-editor > header#pluto-nav { display: none !important; }
+  pluto-editor:is(.process_waiting_for_permission, .process_dead, .nbpkg_restart_required, .nbpkg_restart_recommended, .disconnected) > header#pluto-nav {
+    display: block !important; position: sticky; top: var(--endeavor-bar); z-index: 60; }
+  pluto-editor > header#pluto-nav nav#at_the_top > :not(#process_status) { display: none !important; }
+  pluto-editor > header#pluto-nav nav#at_the_top { justify-content: center; }
+  pluto-editor > main { padding-top: 16px; }
+  /* What Pluto keeps at the top as the page scrolls (its "Save all changes" button) and where a jump
+     to a cell lands go under the toolbar, not behind it. */
+  pluto-editor main > preamble { top: calc(var(--endeavor-bar) + 5px) !important; }
+  html { scroll-padding-top: calc(var(--endeavor-bar) + 8px); }
+  #endeavor-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 9997; box-sizing: border-box; height: var(--endeavor-bar);
+    display: flex; align-items: center; gap: 10px; padding: 0 10px 0 14px;
+    background: var(--e-bg-page); border-bottom: 1px solid var(--e-divider); color: var(--e-text-secondary);
+    font: 12.5px system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #endeavor-bar .file { font-weight: 600; color: var(--e-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  #endeavor-bar .doing { color: var(--e-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+  #endeavor-bar .grow { flex: 1; }
+  #endeavor-bar button { flex: none; display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border: none; border-radius: 6px;
+    background: none; color: var(--e-text-secondary); font: inherit; cursor: pointer; }
+  #endeavor-bar button:hover { color: var(--e-text-primary); background: var(--e-button-hover); }
+  #endeavor-bar button.on { color: var(--e-text-primary); background: var(--e-bg-raised); }
+  #endeavor-bar .key { color: var(--e-text-faint); }
+  /* Live docs: Pluto's own panel, as a sheet down the right side under the toolbar, opened from Docs.
+     Not display: none when shut: Pluto alerts "window too small to show docs" whenever it opens a panel
+     it finds undisplayed, and it hides the panel below 500px wide. Its Status tab isn't offered here. */
+  #helpbox-wrapper { display: block !important; }
+  pluto-helpbox.hidden, pluto-helpbox.helpbox-process { display: none !important; }
+  pluto-helpbox { position: fixed !important; top: var(--endeavor-bar) !important; bottom: 0 !important;
+    right: 0 !important; height: auto !important; width: min(380px, 100vw) !important;
+    border-radius: 0 !important; border-left: 1px solid var(--e-divider); box-shadow: -8px 0 24px var(--e-shadow-popover) !important; }
+  /* Its own tabs and close button: Docs in the toolbar opens and closes it. */
+  pluto-helpbox > header { display: none !important; }
+  /* A narrow panel: the name before the shortcut, and the sheet over the whole width. */
+  @media (max-width: 420px) {
+    #endeavor-bar .key { display: none; }
+    pluto-helpbox { border-left: none; }
+  }
+  /* Pluto's floating safe-preview badge is hidden, as in the app: its band and each cell's
+     "Code not executed in Safe preview" already say it. */
+  .outline-frame-actions-container.safe-preview { display: none !important; }
+`;
+  var css4 = `
+  #annotate-hint { top: calc(var(--endeavor-bar) + 8px) !important; }
+  #endeavor-sent { position: fixed; left: 50%; top: calc(var(--endeavor-bar) + 8px); transform: translateX(-50%); z-index: 10001; display: none;
     max-width: calc(100vw - 32px); box-sizing: border-box; text-align: center;
     padding: 4px 12px; border-radius: 12px; background: var(--e-hint-bg); color: var(--e-hint-text); font: 12px system-ui; }
   #endeavor-sent.shown { display: block; }
-  /* Pluto's own overlays at the bottom, laid out round Point's button: the Live docs and Status tabs just above it,
-     and Settings and FAQ, at the end of the page, above both. Pluto's floating safe-preview badge is hidden, as
-     in the app: wherever it floats, Settings and FAQ pass under it as the page scrolls, and the header's
-     Run notebook code and each cell's "Code not executed in Safe preview" already say it. */
-  pluto-helpbox { bottom: 52px !important; }
-  .outline-frame-actions-container.safe-preview { display: none !important; }
-  pluto-editor footer { padding-bottom: 104px; }
 `;
+  function doing(nb) {
+    if (!nb?.cell_order) return "";
+    const model = statusModel(nb);
+    if (model.busy) return model.busy;
+    if (model.saveFailed) return "Couldn't save";
+    return "";
+  }
+  var fileName = (path) => path ? path.split(/[\\/]/).pop() || "Notebook" : "Notebook";
+  var book = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 3.2c1.8-.6 3.7-.4 5.5.8 1.8-1.2 3.7-1.4 5.5-.8v9.6c-1.8-.6-3.7-.4-5.5.8-1.8-1.2-3.7-1.4-5.5-.8z"/><path d="M8 4v9.6"/></svg>`;
+  function initBar(withPoint, point) {
+    const style = document.createElement("style");
+    style.id = "endeavor-chrome";
+    style.textContent = chrome;
+    document.head.append(style);
+    const bar = document.createElement("div");
+    bar.id = "endeavor-bar";
+    bar.innerHTML = `<span class="file">Notebook</span><span class="doing">Loading\u2026</span><span class="grow"></span><button type="button" class="docs" title="Live docs: what the code under the cursor does">${book}<span>Docs</span></button>` + (withPoint ? `<button type="button" id="endeavor-point" title="Point at a cell, its code or its output, and comment on it for Claude"><span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span></button>` : "");
+    document.body.prepend(bar);
+    const file = bar.querySelector(".file");
+    const words = bar.querySelector(".doing");
+    const docs = bar.querySelector(".docs");
+    const pointButton = bar.querySelector("#endeavor-point");
+    const docsOpen = () => !!document.querySelector("pluto-helpbox.helpbox-docs:not(.hidden)");
+    docs.addEventListener("click", (e) => {
+      if (!e.isTrusted) return;
+      window.dispatchEvent(new CustomEvent("open_bottom_right_panel", { detail: docsOpen() ? null : "docs" }));
+      if (!docsOpen()) setTimeout(() => document.querySelector("#live-docs-search")?.focus(), 50);
+    });
+    pointButton?.addEventListener("click", (e) => e.isTrusted && point(!document.body.classList.contains("annotating")));
+    let last = null;
+    const tick = () => {
+      const nb = window.editor_state?.notebook;
+      if (nb && nb !== last) {
+        last = nb;
+        file.textContent = fileName(nb.path);
+        file.title = file.textContent;
+        words.textContent = doing(nb);
+      }
+      docs.classList.toggle("on", docsOpen());
+      pointButton?.classList.toggle("on", document.body.classList.contains("annotating"));
+    };
+    let soon = 0;
+    new MutationObserver(() => {
+      if (!soon) soon = window.setTimeout(() => (soon = 0, tick()), 250);
+    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+    tick();
+    keepCursorBelowBar();
+  }
+  function keepCursorBelowBar() {
+    let queued = false;
+    document.addEventListener("selectionchange", () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        const selection = window.getSelection();
+        if (!selection?.rangeCount || !selection.isCollapsed || !selection.anchorNode?.parentElement?.closest?.(".cm-content")) return;
+        const range = selection.getRangeAt(0);
+        const rect = range.getClientRects()[0] ?? selection.anchorNode.parentElement.getBoundingClientRect();
+        const bar = document.getElementById("endeavor-bar")?.getBoundingClientRect().bottom ?? 0;
+        if (rect.bottom > 0 && rect.top < bar + 4) window.scrollBy(0, rect.top - bar - 8);
+      });
+    });
+  }
   var started = false;
   function start(notebook, host2) {
     if (started) return;
@@ -1077,22 +1334,20 @@ ${[...earlier, text].join("\n\n")}`).then(
       );
     });
     initTheme();
+    initNarrow();
     closeStrayCompletions();
+    initLinks(host2.openLink);
     followNewCells();
     receive({ type: "theme", name: "view" });
+    initBar(host2.canSend, point);
+    followClaudesPalette();
     if (!host2.canSend) return;
     initAskBox();
     initAnnotate(true);
     const style = document.createElement("style");
-    style.textContent = css3;
+    style.textContent = css4;
     document.head.append(style);
-    const button = document.createElement("button");
-    button.id = "endeavor-point";
-    button.type = "button";
-    button.title = "Point at a cell, its code or its output, and comment on it for Claude";
-    button.innerHTML = `<span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span>`;
-    button.addEventListener("click", (e) => e.isTrusted && point(true));
-    document.body.append(button, sent);
+    document.body.append(sent);
     window.addEventListener(
       "keydown",
       (e) => {
@@ -1103,6 +1358,106 @@ ${[...earlier, text].join("\n\n")}`).then(
       },
       true
     );
+  }
+  function outsideLink(href) {
+    if (!href) return null;
+    return /^(https?:|mailto:)/i.test(href.trim()) ? href.trim() : null;
+  }
+  function initLinks(open) {
+    document.addEventListener("click", (e) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      const link = e.target?.closest?.("a[href]");
+      if (!link) return;
+      const href = (link.getAttribute("href") ?? "").trim();
+      if (/^javascript:/i.test(href)) return;
+      e.preventDefault();
+      if (/^#./.test(href)) {
+        document.getElementById(decodeURIComponent(href.slice(1)))?.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      const url = outsideLink(href);
+      if (url && open && e.isTrusted) open(url).catch(() => {
+      });
+    });
+  }
+  var claudePalette = `
+html.claude-palette {
+  /* Pages, cards, raised controls */
+  --e-bg-page: var(--color-background-primary);
+  --e-bg-sidebar: var(--color-background-secondary);
+  --e-bg-card: var(--color-background-secondary);
+  --e-bg-sunken: var(--color-background-secondary);
+  --e-bg-raised: var(--color-background-tertiary);
+  --e-bg-tag: var(--color-background-tertiary);
+  --e-button-hover: var(--color-background-tertiary);
+  --e-menu-hover: var(--color-background-tertiary);
+  --e-popover-bg: var(--color-background-primary);
+  --e-dialog-bg: var(--color-background-primary);
+  /* Text */
+  --e-text-primary: var(--color-text-primary);
+  --e-text-secondary: var(--color-text-secondary);
+  --e-text-muted: var(--color-text-secondary);
+  --e-text-section: var(--color-text-secondary);
+  --e-text-tag: var(--color-text-secondary);
+  --e-text-faint: var(--color-text-tertiary);
+  --e-text-dim: var(--color-text-tertiary);
+  --e-hint-text: var(--color-text-secondary);
+  /* Edges */
+  --e-border: var(--color-border-tertiary);
+  --e-divider: var(--color-border-tertiary);
+  --e-popover-edge: var(--color-border-secondary);
+  --e-dialog-edge: var(--color-border-secondary);
+  --e-control-edge: var(--color-border-primary);
+  /* Pluto's own colours that the Endeavor look sets */
+  --main-bg-color: var(--color-background-primary);
+  --header-bg-color: var(--color-background-primary);
+  --footer-bg-color: var(--color-background-primary);
+  --pluto-output-bg-color: var(--color-background-primary);
+  --pluto-output-color: var(--color-text-secondary);
+  --pluto-output-h-color: var(--color-text-primary);
+  --rule-color: var(--color-border-tertiary);
+  --code-background: var(--color-background-secondary);
+  --pluto-logs-bg-color: var(--color-background-secondary);
+  --overlay-button-bg: var(--color-background-secondary);
+  --input-context-menu-bg-color: var(--color-background-secondary);
+  --input-context-menu-border-color: var(--color-border-tertiary);
+  --helpbox-bg-color: var(--color-background-secondary);
+  --helpbox-header-bg-color: var(--color-background-tertiary);
+  --helpbox-header-tab-bg-color: var(--color-background-tertiary);
+  --helpbox-header-color: var(--color-text-primary);
+  --helpbox-text-color: var(--color-text-primary);
+  --helpbox-search-bg-color: var(--color-background-primary);
+  --helpbox-search-border-color: var(--color-border-primary);
+  --docs-binding-bg: var(--color-background-tertiary);
+  --export-bg-color: var(--color-background-secondary);
+  --export-color: var(--color-text-primary);
+  --frontmatter-button-bg-color: var(--color-background-tertiary);
+  --frontmatter-input-bg-color: var(--color-background-primary);
+  --frontmatter-input-border-color: var(--color-border-primary);
+  --pluto-runarea-span-color: var(--color-text-tertiary);
+}
+html.claude-palette .pluto-modal { border-color: var(--color-border-secondary); }
+`;
+  var PALETTE_NEEDS = [
+    "--color-background-primary",
+    "--color-background-secondary",
+    "--color-background-tertiary",
+    "--color-text-primary",
+    "--color-text-secondary",
+    "--color-text-tertiary",
+    "--color-border-primary",
+    "--color-border-secondary",
+    "--color-border-tertiary"
+  ];
+  function followClaudesPalette() {
+    const style = document.createElement("style");
+    style.id = "endeavor-claude-palette";
+    style.textContent = claudePalette;
+    document.head.append(style);
+    const root = document.documentElement;
+    const sync = () => root.classList.toggle("claude-palette", PALETTE_NEEDS.every((v) => root.style.getPropertyValue(v).trim() !== ""));
+    new MutationObserver(sync).observe(root, { attributes: true, attributeFilter: ["style"] });
+    sync();
   }
   var STRAY_MS = 5e3;
   function closeStrayCompletions() {

@@ -159,11 +159,13 @@ window.addEventListener("message", async e => {
   if (!m || m.jsonrpc !== "2.0" || m.method === undefined) return;
   if (m.method === "ui/initialize") return send({ id: m.id, result: { protocolVersion: m.params.protocolVersion, hostInfo: { name: "view-check", version: "0" }, hostCapabilities: { serverTools: {}, openLinks: {}, logging: {}, message: { text: {} }, updateModelContext: { text: {} } }, hostContext: context } });
   if (m.method === "ui/notifications/initialized") { window.initialized = true; return; }
+  if (m.method === "ui/notifications/size-changed") { window.sizes = (window.sizes || []).concat([m.params]); return; }
   if (m.method === "tools/call") return send({ id: m.id, result: await window.toolsCall(m.params) });
   if (m.method === "ui/message" && window.refuse) { window.refuse--; return send({ id: m.id, result: { isError: true } }); }
   if (m.method === "ui/message" && window.fail) { window.fail = false; window.failed = (window.failed || 0) + 1; return send({ id: m.id, error: { code: -32001, message: "Request timed out" } }); }
   if (m.method === "ui/message" && window.slow) await new Promise(r => setTimeout(r, window.slow));
   if (m.method === "ui/message") { window.messages.push(m.params); return send({ id: m.id, result: {} }); }
+  if (m.method === "ui/open-link") { (window.links ||= []).push(m.params.url); return send({ id: m.id, result: {} }); }
   if (m.method === "ui/update-model-context") { window.contexts.push(m.params); return send({ id: m.id, result: {} }); }
   if (m.method === "ui/request-display-mode") {
     window.modes.push(m.params.mode);
@@ -217,13 +219,16 @@ window.addEventListener("message", async e => {
   check(true, `${R ? "editing n in the page" : "moving the slider"} ran the dependent cell again in ${LANGUAGE} (${Date.now() - moved} ms)`);
   await page.screenshot({ path: path.join(dir, "view.png") });
 
-  // The Endeavor look, with Pluto's own header (the view has no app header to stand in for it).
+  // The Endeavor look, filling the panel: Pluto's header and footer give way to the view's toolbar,
+  // with the file's name, Docs and Point.
   const look = await frame.evaluate(() => ({
     colours: (document.getElementById("endeavor-theme")?.textContent || "").includes("--main-bg-color"),
     header: getComputedStyle(document.querySelector("header#pluto-nav") || document.body).display !== "none",
-    button: !!document.getElementById("endeavor-point"),
+    footer: getComputedStyle(document.querySelector("pluto-editor footer") || document.body).display !== "none",
+    toolbar: document.querySelector("#endeavor-bar .file")?.textContent,
+    button: !!document.querySelector("#endeavor-bar #endeavor-point"),
   }));
-  check(look.colours && look.header && look.button, `the Endeavor look is on, Pluto's header shows, and so does Point's button (${JSON.stringify(look)})`);
+  check(look.colours && !look.header && !look.footer && look.toolbar === "view-check.jl" && look.button, `the Endeavor look is on, and the toolbar (name, Docs, Point) stands in for Pluto's header and footer (${JSON.stringify(look)})`);
   // Point: the button, a click on the squares cell's output, a comment, ↩.
   await frame.click("#endeavor-point");
   check(await frame.evaluate(() => document.body.classList.contains("annotating")), "the button turns Point on");
@@ -299,10 +304,22 @@ window.addEventListener("message", async e => {
   await page.screenshot({ path: path.join(dir, "point.png") });
   await frame.locator("#annotate-bar textarea").press("Escape");
   check(await frame.evaluate(() => !document.body.classList.contains("annotating")), "Escape leaves Point");
+  // A link in a cell's output opens through Claude (the frame can't open windows). No other link may load a
+  // page in the frame, which would replace the view with a blank one: a jump within the page scrolls.
+  await frame.evaluate(() => document.querySelector("pluto-cell pluto-output").insertAdjacentHTML("beforeend",
+    '<a id="out-link" href="https://example.com/docs">docs</a> <a id="in-link" href="#out-link">here</a> <a id="empty-link" href="#">top</a> <a id="rel-link" href="./other.jl">other</a> <a id="file-link" href="file:///etc/hosts">file</a>'));
+  for (const id of ["out-link", "in-link", "empty-link", "rel-link", "file-link"]) await frame.click("#" + id);
+  await page.waitForFunction(() => (window.links || []).length > 0, null, { timeout: 5000 }).catch(() => {});
+  await new Promise(r => setTimeout(r, 500));
+  const links = await page.evaluate(() => window.links || []);
+  check(links.length === 1 && links[0] === "https://example.com/docs" && await frame.evaluate(() => !!document.querySelector("pluto-editor")), `a link in a cell opens through Claude's ui/open-link, and no other link replaces the view (${JSON.stringify(links)})`);
   await page.evaluate(() => window.closePane());
   await frame.waitForFunction(() => !document.querySelector("#endeavor-card").hidden && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
+  // The size the view reports, which the host gives its frame: the card's, not the panel's it had.
+  await new Promise(r => setTimeout(r, 800));
+  const reported = await page.evaluate(() => (window.sizes || []).at(-1)?.height);
   const small = await frame.evaluate(() => document.documentElement.classList.contains("endeavor-inline") && [...document.body.children].filter(e => e.id !== "endeavor-card").every(e => getComputedStyle(e).display === "none"));
-  check(small, "with the pane closed, the card and its button are back, at card size");
+  check(small && reported < 200, `with the pane closed, the card and its button are back, at card size (reports ${reported} px)`);
   // Back in the pane, Claude closes the notebook: the view says so, instead of Pluto's endless "Reconnecting…".
   await frame.click("#endeavor-open");
   await frame.waitForFunction(() => document.querySelector("#endeavor-card").hidden, null, { timeout: 10000 });
