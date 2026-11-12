@@ -26,6 +26,11 @@ claude plugin marketplace add jowch/EndeavorMCP
 claude plugin install endeavor@endeavor
 ```
 
+Claude Code doesn't update this plugin unless the user turns that on, and
+Endeavor changes often. Suggest that they turn it on, and leave the choice to
+them: in a session, `/plugin`, then Marketplaces, select `endeavor`, and
+"Enable auto-update".
+
 **Codex:**
 
 ```sh
@@ -81,9 +86,12 @@ claude plugin install endeavor@endeavor
 
 Then start Claude Code in your project folder. New notebooks go there.
 
-Claude Code doesn't update a plugin from this marketplace on its own. Turn
-that on in `/plugin`, under Marketplaces, with "Enable auto-update", or update
-by hand:
+**Turn on updates (recommended).** Endeavor changes often, sometimes several
+times a day, and Claude Code doesn't update a plugin from this marketplace
+unless you ask it to. To have it update in the background, open `/plugin` in a
+session, go to Marketplaces, select `endeavor`, and choose "Enable
+auto-update". A new version loads in your next session. If you'd rather choose
+when to update, do it by hand:
 
 ```
 claude plugin marketplace update endeavor
