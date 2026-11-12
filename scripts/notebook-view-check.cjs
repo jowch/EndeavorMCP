@@ -115,7 +115,7 @@ const check = (ok, what) => { console.log((ok ? "ok   " : "FAIL ") + what); if (
   // blob:, and nothing from any host (no connect-src beyond the frame itself).
   const csp = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline'; img-src data: blob:; font-src 'none'; connect-src 'none'; worker-src blob:; media-src data: blob:";
   const html = view.text.replace("<head>", `<head><meta http-equiv="Content-Security-Policy" content="${csp}">`);
-  await page.setContent(`<!DOCTYPE html><body style="margin:0"><iframe id=view sandbox="allow-scripts allow-same-origin" style="width:1000px;height:850px;border:0"></iframe>
+  await page.setContent(`<!DOCTYPE html><body style="margin:0"><textarea id=chat-box></textarea><iframe id=view sandbox="allow-scripts allow-same-origin" style="width:1000px;height:850px;border:0"></iframe>
 <script>
 const frame = document.getElementById("view");
 const context = { displayMode: "inline", availableDisplayModes: ["inline", "fullscreen"], containerDimensions: { width: 1000, maxHeight: 850 }, platform: "desktop" };
@@ -135,6 +135,7 @@ window.addEventListener("message", async e => {
   if (m.method === "tools/call") return send({ id: m.id, result: await window.toolsCall(m.params) });
   if (m.method === "ui/message" && window.refuse) { window.refuse--; return send({ id: m.id, result: { isError: true } }); }
   if (m.method === "ui/message" && window.fail) { window.fail = false; window.failed = (window.failed || 0) + 1; return send({ id: m.id, error: { code: -32001, message: "Request timed out" } }); }
+  if (m.method === "ui/message" && window.slow) await new Promise(r => setTimeout(r, window.slow));
   if (m.method === "ui/message") { window.messages.push(m.params); return send({ id: m.id, result: {} }); }
   if (m.method === "ui/update-model-context") { window.contexts.push(m.params); return send({ id: m.id, result: {} }); }
   if (m.method === "ui/request-display-mode") {
@@ -193,8 +194,20 @@ window.addEventListener("message", async e => {
   const what = await frame.evaluate(() => document.querySelector("#annotate-bar .status")?.textContent);
   check(/squares/.test(what || ""), `a click picks the output (${what})`);
   await frame.locator("#annotate-bar textarea").fill("Why squares?");
+  // The chat takes a moment to answer (Claude's desktop app takes seconds to show the text): the view says it's sending.
+  await page.evaluate(() => { window.slow = 800; });
   await frame.locator("#annotate-bar textarea").press("Enter");
+  const sending = await frame.evaluate(() => document.getElementById("endeavor-sent")?.textContent);
+  check(/^Sending/.test(sending || ""), `while the chat hasn't answered, the view says it's sending (${sending})`);
   await page.waitForFunction(() => window.messages.length === 1, null, { timeout: 5000 }).catch(() => {});
+  await frame.waitForFunction(() => /message box/.test(document.getElementById("endeavor-sent")?.textContent || ""), null, { timeout: 5000 }).catch(() => {});
+  check(await frame.evaluate(() => document.body.classList.contains("annotating")), "once the chat has it, Point stays on while the keyboard is still in the view");
+  // The user goes to Claude's message box to send it: Point ends, as their Escape there can't reach the view.
+  await page.focus("#chat-box");
+  await frame.waitForFunction(() => !document.body.classList.contains("annotating"), null, { timeout: 5000 }).catch(() => {});
+  check(await frame.evaluate(() => !document.body.classList.contains("annotating")), "once the keyboard leaves for Claude's box, Point ends");
+  await page.evaluate(() => { window.slow = 0; });
+  await frame.click("#endeavor-point");
   const message = await page.evaluate(() => window.messages[0]);
   const said = message?.content?.[0]?.text || "";
   check(message?.role === "user" && said.startsWith("\u2193\n\n[Endeavor] The user quoted") && said.includes("A \u2193 just before this note only marks where the quotes start") && /<quote cell="squares" part="output" uri="notebook:\/\/pluto\/[^"]+\/cell\/6e6a1b70-dda7-11f1-a148-b56bbb7771a3">\n[\s\S]+\n<\/quote>\nWhy squares\?$/.test(said), `↩ sends the pick and the comment as the user's message, on a new paragraph: ${JSON.stringify(said.slice(-220))}`);
@@ -224,6 +237,18 @@ window.addEventListener("message", async e => {
   await page.waitForFunction(() => window.messages.length === 3, null, { timeout: 5000 }).catch(() => {});
   const again = await page.evaluate(() => window.messages[2]?.content?.[0]?.text || "");
   check(again.split("<quote cell").length === 2 && again.endsWith("\nKept"), "↩ then sends them, once");
+  // A box (or a figure) goes at once: the view takes no picture, which would hold the message back past
+  // the moment Claude's desktop app takes it.
+  const outBox = await frame.locator("pluto-cell").nth(2).locator("pluto-output").boundingBox();
+  await page.mouse.move(outBox.x + 2, outBox.y + 2);
+  await page.mouse.down();
+  await page.mouse.move(outBox.x + 60, outBox.y + 30, { steps: 5 });
+  await page.mouse.up();
+  const boxAt = Date.now();
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await page.waitForFunction(() => window.messages.length === 4, null, { timeout: 5000 }).catch(() => {});
+  const boxed = await page.evaluate(() => window.messages[3]?.content?.[0]?.text || "");
+  check(/<quote part="box" uri=/.test(boxed) && Date.now() - boxAt < 1500, `a box goes at once, with no picture (${Date.now() - boxAt} ms)`);
   // Nor is one that fails any other way (a timeout), which could still arrive late.
   await page.evaluate(() => { window.fail = true; });
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
@@ -231,7 +256,7 @@ window.addEventListener("message", async e => {
   await frame.locator("#annotate-bar textarea").press("Enter");
   await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Timed out", null, { timeout: 5000 }).catch(() => {});
   await new Promise(r => setTimeout(r, 1000));
-  check((await page.evaluate(() => window.failed === 1 && window.messages.length === 3)), "a timed-out send isn't tried again, and its pick comes back");
+  check((await page.evaluate(() => window.failed === 1 && window.messages.length === 4)), "a timed-out send isn't tried again, and its pick comes back");
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await page.screenshot({ path: path.join(dir, "point.png") });
   await frame.locator("#annotate-bar textarea").press("Escape");
