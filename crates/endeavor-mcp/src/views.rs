@@ -123,7 +123,11 @@ pub fn resources_read(params: &Value) -> Option<Value> {
             // Claude's own field: open in the side panel, not in the conversation. The view also
             // declares that it shows in the panel only (`availableDisplayModes`). Claude's desktop app
             // ignores `prefersBorder` for a local server (2026-11-12) and keeps its bordered frame.
-            "_meta": { "ui": { "prefersBorder": false, "preferredDisplayMode": "fullscreen" } },
+            // PROBE (Mac check, not for main): CDN origins that cell outputs and Pluto's own fonts load
+            // from, to see whether Claude's desktop app honours `csp` for a local server.
+            "_meta": { "ui": { "prefersBorder": false, "preferredDisplayMode": "fullscreen",
+                "csp": { "resourceDomains": ["https://cdn.jsdelivr.net", "https://unpkg.com", "https://esm.sh"],
+                         "connectDomains": ["https://cdn.jsdelivr.net", "https://unpkg.com", "https://esm.sh"] } } },
         }] })
     })
 }
