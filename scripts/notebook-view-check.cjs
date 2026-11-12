@@ -133,9 +133,6 @@ window.addEventListener("message", async e => {
   if (m.method === "ui/initialize") return send({ id: m.id, result: { protocolVersion: m.params.protocolVersion, hostInfo: { name: "view-check", version: "0" }, hostCapabilities: { serverTools: {}, openLinks: {}, logging: {}, message: { text: {} }, updateModelContext: { text: {} } }, hostContext: context } });
   if (m.method === "ui/notifications/initialized") { window.initialized = true; return; }
   if (m.method === "tools/call") return send({ id: m.id, result: await window.toolsCall(m.params) });
-  window.events = window.events || [];
-  if (m.method === "ui/message" && window.refuseText && m.params.content[0].text.includes(window.refuseText.match) && window.refuseText.times > 0) { window.refuseText.times--; window.events.push("refused " + window.refuseText.match); return send({ id: m.id, result: { isError: true } }); }
-  if (m.method === "ui/message") window.events.push("took " + m.params.content[0].text.split(String.fromCharCode(10)).pop());
   if (m.method === "ui/message" && window.refuse) { window.refuse--; return send({ id: m.id, result: { isError: true } }); }
   if (m.method === "ui/message" && window.fail) { window.fail = false; window.failed = (window.failed || 0) + 1; return send({ id: m.id, error: { code: -32001, message: "Request timed out" } }); }
   if (m.method === "ui/message") { window.messages.push(m.params); return send({ id: m.id, result: {} }); }
@@ -200,7 +197,7 @@ window.addEventListener("message", async e => {
   await page.waitForFunction(() => window.messages.length === 1, null, { timeout: 5000 }).catch(() => {});
   const message = await page.evaluate(() => window.messages[0]);
   const said = message?.content?.[0]?.text || "";
-  check(message?.role === "user" && said.startsWith("\n\n[Endeavor] The user quoted") && /<quote cell="squares" part="output" uri="notebook:\/\/pluto\/[^"]+\/cell\/6e6a1b70-dda7-11f1-a148-b56bbb7771a3">\n[\s\S]+\n<\/quote>\nWhy squares\?$/.test(said), `↩ sends the pick and the comment as the user's message, on a new paragraph: ${JSON.stringify(said.slice(-220))}`);
+  check(message?.role === "user" && said.startsWith("\u2014\n\n[Endeavor] The user quoted") && /<quote cell="squares" part="output" uri="notebook:\/\/pluto\/[^"]+\/cell\/6e6a1b70-dda7-11f1-a148-b56bbb7771a3">\n[\s\S]+\n<\/quote>\nWhy squares\?$/.test(said), `↩ sends the pick and the comment as the user's message, on a new paragraph: ${JSON.stringify(said.slice(-220))}`);
   // ⌘↩ (Ctrl+Enter off macOS) keeps the pick in the view; the next ↩ passes both in one message.
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await frame.locator("#annotate-bar textarea").fill("First");
@@ -213,52 +210,28 @@ window.addEventListener("message", async e => {
   await page.waitForFunction(() => window.messages.length === 2, null, { timeout: 5000 }).catch(() => {});
   const second = await page.evaluate(() => window.messages[1]?.content?.[0]?.text || "");
   check(/\nFirst\n\n<quote[\s\S]*\nSecond$/.test(second) && second.split("[Endeavor]").length === 2 && (await page.evaluate(() => window.contexts.length)) === 0, "the next ↩ passes both picks in one message, under one note");
-  // A send the chat refuses once is tried again: one message arrives.
+  // A send the chat refuses (as Claude's desktop app does for a few seconds after typing in its box) isn't
+  // tried again: Point gets the pick and comment back, and the next ↩ sends them once.
   await page.evaluate(() => { window.refuse = 1; });
-  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
-  await frame.locator("#annotate-bar textarea").fill("Refused once");
-  await frame.locator("#annotate-bar textarea").press("Enter");
-  await page.waitForFunction(() => window.messages.length === 3, null, { timeout: 5000 }).catch(() => {});
-  check((await page.evaluate(() => window.messages.length === 3 && window.messages[2].content[0].text.endsWith("\nRefused once"))), "a send the chat refuses once is tried again, and arrives once");
-  // Refused again: Point gets the pick and comment back, and ↩ sends them.
-  await page.evaluate(() => { window.refuse = 2; });
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await frame.locator("#annotate-bar textarea").fill("Kept");
   await frame.locator("#annotate-bar textarea").press("Enter");
   await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Kept", null, { timeout: 5000 }).catch(() => {});
+  await new Promise(r => setTimeout(r, 1000));
   const back = await frame.evaluate(() => ({ comment: document.querySelector("#annotate-bar textarea").value, what: document.querySelector("#annotate-bar .status")?.textContent, said: document.getElementById("endeavor-sent")?.textContent }));
-  check(back.comment === "Kept" && /squares/.test(back.what || "") && /back/.test(back.said || "") && (await page.evaluate(() => window.messages.length)) === 3, `a refused send gives Point its pick and comment back (${JSON.stringify(back)})`);
+  check(back.comment === "Kept" && /squares/.test(back.what || "") && /type in it\. Your pick is back/.test(back.said || "") && (await page.evaluate(() => window.messages.length === 2 && window.refuse === 0)), `a refused send isn't tried again, and Point gets its pick and comment back (${JSON.stringify(back)})`);
   await frame.locator("#annotate-bar textarea").press("Enter");
-  await page.waitForFunction(() => window.messages.length === 4, null, { timeout: 5000 }).catch(() => {});
-  const again = await page.evaluate(() => window.messages[3]?.content?.[0]?.text || "");
-  check(again.split("<quote cell").length === 2 && again.endsWith("\nKept"), `↩ then sends them, once (${JSON.stringify(again.slice(-100))}; ${await page.evaluate(() => window.messages.length)} messages)`);
-  // A send that fails any other way (a timeout) isn't tried again, so it can't arrive twice.
+  await page.waitForFunction(() => window.messages.length === 3, null, { timeout: 5000 }).catch(() => {});
+  const again = await page.evaluate(() => window.messages[2]?.content?.[0]?.text || "");
+  check(again.split("<quote cell").length === 2 && again.endsWith("\nKept"), "↩ then sends them, once");
+  // Nor is one that fails any other way (a timeout), which could still arrive late.
   await page.evaluate(() => { window.fail = true; });
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await frame.locator("#annotate-bar textarea").fill("Timed out");
   await frame.locator("#annotate-bar textarea").press("Enter");
   await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Timed out", null, { timeout: 5000 }).catch(() => {});
   await new Promise(r => setTimeout(r, 1000));
-  check((await page.evaluate(() => window.failed === 1 && window.messages.length === 4)), "a timed-out send isn't tried again, and its pick comes back");
-  // A ↩ while a refused one waits to be tried again: each ↩'s answer finds its own picks, so the second
-  // isn't given back (and sent twice) when the first is refused again.
-  await frame.locator("#annotate-bar textarea").fill("");
-  await frame.locator("#annotate-bar textarea").press("Escape");
-  await frame.click("#endeavor-point");
-  await page.evaluate(() => { window.refuseText = { match: "\nAlpha", times: 2 }; window.events = []; });
-  const sentBefore = await page.evaluate(() => window.messages.length);
-  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
-  await frame.locator("#annotate-bar textarea").fill("Alpha");
-  await frame.locator("#annotate-bar textarea").press("Enter");
-  await frame.locator("pluto-cell").nth(1).locator("pluto-output").click();
-  await frame.locator("#annotate-bar textarea").fill("Bravo");
-  await frame.locator("#annotate-bar textarea").press("Enter");
-  await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Alpha", null, { timeout: 5000 }).catch(() => {});
-  const crossed = await page.evaluate(() => window.events.join(" | "));
-  await frame.locator("#annotate-bar textarea").press("Enter");
-  await page.waitForFunction(n => window.messages.length === n + 2, sentBefore, { timeout: 5000 }).catch(() => {});
-  const ends = await page.evaluate(n => window.messages.slice(n).map(m => m.content[0].text.split("\n").pop()), sentBefore);
-  check(/refused \nAlpha \| took .*Bravo \| refused \nAlpha/.test(crossed) && JSON.stringify(ends) === '["Bravo","Alpha"]', `a ↩ during a refused one's wait: each sent once (${crossed}; ${JSON.stringify(ends)})`);
+  check((await page.evaluate(() => window.failed === 1 && window.messages.length === 3)), "a timed-out send isn't tried again, and its pick comes back");
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await page.screenshot({ path: path.join(dir, "point.png") });
   await frame.locator("#annotate-bar textarea").press("Escape");

@@ -233,20 +233,17 @@ function closeAll() { [...sockets].forEach(s => s.close()); }
 
 // Point's ↩ passes the picks and the comment (and what ⌘↩ added) to the chat as the user's message (Claude's desktop
 // app puts it in its message box for the user to send). A host that takes no messages from views gets
-// the look without Point. Claude's desktop app adds the text at the cursor, straight after anything the
-// user had typed, so it starts on a new paragraph.
-// Claude's desktop app refused (isError) Point's first message after the user had typed in its own
-// box, and inserted nothing; a new message seconds later went through (Desktop recheck, 2026-11-12).
-// So a refusal is tried once more, after a pause that is a guess. Anything else (a timeout, say) isn't:
-// a late first answer would put the message in twice.
-const refused = "Claude's chat didn't take it";
-const message = text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\n\n" + text }] })
-  .then(res => { if (res?.isError) throw new Error(refused); });
+// the look without Point. Claude's desktop app (probed 2026-11-12):
+// - adds the text at the end of its box, straight after anything typed there, and trims the text's
+//   leading whitespace (newlines, no-break and zero-width spaces too), so a visible dash carries the
+//   break onto a new paragraph;
+// - takes a message only right after a press inside the view, and not for about five seconds after
+//   input elsewhere (typing in its box, say). It refuses with an isError answer, and the same press
+//   can't be used again, so a refusal isn't retried: Point gets its picks back and the user presses ↩.
 const pointHost = {
   get canSend() { return !!app.getHostCapabilities()?.message; },
-  send: text => message(text).catch(e => {
-    if (e?.message !== refused) throw e;
-    return new Promise(go => setTimeout(go, 600)).then(() => message(text));
+  send: text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\u2014\n\n" + text }] }).then(res => {
+    if (res?.isError) throw new Error("it isn't ready for a few seconds after you type in it");
   }),
 };
 
