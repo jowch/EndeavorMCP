@@ -180,8 +180,14 @@ window.addEventListener("message", async e => {
 </script></body>`);
   await page.$eval("#view", (f, s) => { f.srcdoc = s; }, html);
   await page.waitForFunction(() => window.initialized, null, { timeout: 15000 });
-  await page.evaluate(result => window.sendToolResult(result), opened.result);
   const frame = page.frames()[1];
+  // A first start that goes on by itself (Ember installing, here): the card says so, not that the call failed.
+  await page.evaluate(() => window.sendToolResult({ content: [{ type: "text", text: JSON.stringify({ error: "r_installing", message: "Installing Ember for R notebooks, which takes a few minutes the first time. Make the same call again right away." }) }], isError: false }));
+  await frame.waitForFunction(() => /Setting up R notebooks/.test(document.querySelector("#endeavor-card .note")?.textContent || ""), null, { timeout: 10000 })
+    .catch(() => {});
+  const installing = await frame.evaluate(() => [document.querySelector("#endeavor-card .note")?.textContent, document.querySelector("#endeavor-open").hidden]);
+  check(/^Setting up R notebooks\. .*Claude calls again, and the notebook opens in a new card\.$/.test(installing[0] || "") && installing[1], `an install in progress says so, with no button: ${JSON.stringify(installing)}`);
+  await page.evaluate(result => window.sendToolResult(result), opened.result);
   await frame.waitForFunction(() => document.querySelector("#endeavor-open") && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
   const asked = await page.evaluate(() => window.modes.slice());
   check(asked[0] === "fullscreen", "the view asks for the panel as it loads");
