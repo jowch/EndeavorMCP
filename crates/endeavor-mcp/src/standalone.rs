@@ -817,6 +817,7 @@ fn relay(options: Options) -> ! {
     let fresh = format!("stdio-{}-{}", std::process::id(), now.as_millis());
     let conversation = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
     let session = session_key(conversation.as_deref(), std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some()).unwrap_or(fresh);
+    precompile_after_update(&options);
     let relay = Arc::new(Relay::new(options, session, Box::new(io::stdout())));
     relay.target_from_project();
     let stdin = io::stdin();
@@ -832,6 +833,121 @@ fn relay(options: Options) -> ! {
     }
     relay.connections.close_all();
     std::process::exit(0)
+}
+
+/// After an install or an update, precompile the runtime and EndeavorRuntimeWarm in the
+/// background, at low priority, before any notebook needs them. The runtime loads
+/// EndeavorRuntimeWarm only when it's already precompiled, and an update leaves it stale: until
+/// the runtime itself got round to it (`warm_up_later`, after 30 s quiet), the first opens ran
+/// without it, about 20 s slower each (measured 2026-11-11). Only where Julia notebooks ran before
+/// (an earlier runtime's precompiled code is in the depot): someone who only opens R notebooks never
+/// needs Julia, and a first install waits for a first Julia notebook as before. It never downloads
+/// Julia, and a failure costs only the speedup: the runtime does its own.
+///
+/// The Julia process is meant to outlive this server: a short session shouldn't throw the work
+/// away. So it, not the server, takes the lock (`.precompiling`, so however many servers start
+/// after an update, one precompiles and the rest exit at once) and writes the marker
+/// (`.precompiled`) when it's done. A runtime folder is one version, so a folder done once for a
+/// depot is never done again, and the marker is checked before looking for Julia, so a start with
+/// nothing to do starts no process. After a failure (`.precompile-failed`) it waits a day.
+fn precompile_after_update(options: &Options) {
+    let (cache, source, depot) = (options.cache.clone(), options.julia.clone(), options.depot.clone());
+    std::thread::spawn(move || {
+        precompile_if_needed(&depot, &|| unpack_runtime(&cache).ok(), &mut |runtime, key| {
+            let Ok((julia, _)) = julia::find(&source, false, &mut |_| {}) else { return };
+            if let Some(mut command) = precompile_command(&julia, runtime, &depot, key) {
+                // Waited for only so it doesn't stay a zombie while this server runs.
+                let _ = command.status();
+            }
+        });
+    });
+}
+
+/// How long a failed background precompile keeps the next ones from trying.
+const PRECOMPILE_RETRY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// `precompile_after_update`'s choice, with the runtime's unpacking and the spawn passed in (for
+/// the tests): `run` gets the runtime folder and the marker's contents, only when Julia notebooks
+/// ran in `depot`, the folder hasn't been done for it, and it hasn't failed in the last day.
+fn precompile_if_needed(depot: &str, runtime: &dyn Fn() -> Option<PathBuf>, run: &mut dyn FnMut(&Path, &str)) {
+    if !julia_ran_here(depot) {
+        return;
+    }
+    let Some(runtime) = runtime() else { return };
+    let key = format!("{depot}\n");
+    if std::fs::read_to_string(runtime.join(".precompiled")).is_ok_and(|said| said == key) {
+        return;
+    }
+    let failed = std::fs::metadata(runtime.join(".precompile-failed")).and_then(|m| m.modified()).ok();
+    if failed.is_some_and(|at| at.elapsed().is_ok_and(|ago| ago < PRECOMPILE_RETRY)) {
+        return;
+    }
+    run(&runtime, &key);
+}
+
+/// Whether an Endeavor runtime has been precompiled in `depot` (JULIA_DEPOT_PATH, whose first
+/// entry is where Julia writes), by any version: a folder only a Julia that ran our runtime makes.
+fn julia_ran_here(depot: &str) -> bool {
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let Some(first) = depot.split(sep).next().filter(|p| !p.is_empty()) else { return false };
+    std::fs::read_dir(Path::new(first).join("compiled"))
+        .map(|versions| versions.flatten().any(|v| v.path().join("EndeavorRuntime").is_dir()))
+        .unwrap_or(false)
+}
+
+/// What the background Julia runs, in the runtime folder (`ENDEAVOR_RUNTIME`). It takes the lock
+/// or exits; leaves a folder whose packages aren't all installed to the runtime's own
+/// `Pkg.instantiate` (two installs into one depot at once aren't safe); precompiles; and writes the
+/// marker (`ENDEAVOR_PRECOMPILED`), or the failure marker.
+const PRECOMPILE_SCRIPT: &str = r#"
+using FileWatching.Pidfile: mkpidlock
+const R = ENV["ENDEAVOR_RUNTIME"]
+lock = try mkpidlock(joinpath(R, ".precompiling"); wait=false, stale_age=60) catch; exit(0) end
+import Pkg
+all(d -> d.source === nothing || isdir(d.source), values(Pkg.dependencies())) || exit(0)
+try
+    Pkg.precompile(["EndeavorRuntime", "EndeavorRuntimeWarm"])
+    write(joinpath(R, ".precompiled"), ENV["ENDEAVOR_PRECOMPILED"])
+    rm(joinpath(R, ".precompile-failed"); force=true)
+catch
+    touch(joinpath(R, ".precompile-failed"))
+    exit(1)
+end
+"#;
+
+/// Julia precompiling the runtime's packages below normal priority: under `nice` where there is
+/// one; on Windows the process lowers its own priority class, which the precompiles it starts inherit.
+/// Its flags must keep the compile cache's key the same as the runtime's (`core::julia_command`):
+/// a flag such as `-O` or `--check-bounds` on one side only would make this work wasted.
+fn precompile_command(julia: &str, runtime: &Path, depot: &str, key: &str) -> Option<std::process::Command> {
+    let lower = if cfg!(windows) {
+        "ccall((:SetPriorityClass, \"kernel32\"), stdcall, Cint, (Ptr{Cvoid}, UInt32), ccall((:GetCurrentProcess, \"kernel32\"), stdcall, Ptr{Cvoid}, ()), 0x00004000)\n"
+    } else {
+        ""
+    };
+    let script = format!("{lower}{PRECOMPILE_SCRIPT}");
+    let nice = (!cfg!(windows)).then(|| ["/usr/bin/nice", "/bin/nice"].into_iter().find(|p| Path::new(p).is_file())).flatten();
+    let mut command = match nice {
+        Some(nice) => {
+            let mut command = std::process::Command::new(nice);
+            command.args(["-n", "10", julia]);
+            command
+        }
+        None => std::process::Command::new(julia),
+    };
+    command
+        .arg("--startup-file=no")
+        .arg(format!("--project={}", runtime.display()))
+        .args(["-e", &script])
+        .env("JULIA_DEPOT_PATH", depot)
+        .env("JULIA_LOAD_PATH", if cfg!(windows) { "@;@stdlib" } else { "@:@stdlib" })
+        .env("ENDEAVOR_RUNTIME", runtime)
+        .env("ENDEAVOR_PRECOMPILED", key)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::client::no_window(&mut command);
+    Some(command)
 }
 
 /// The session key of an agent whose client names its conversation: Claude Code gives

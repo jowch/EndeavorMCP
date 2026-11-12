@@ -372,7 +372,11 @@ Next:
   Windows: setup precompiles `EndeavorRuntime` alone, the runtime precompiles the
   warm package in a low-priority process once nothing has been opening or running
   for 30 s, and the next start loads it. So a first-ever notebook doesn't wait
-  for it, and opens get faster from the next start.
+  for it, and opens get faster from the next start. After an install or update,
+  `endeavor mcp` also starts that low-priority precompile itself, of both
+  packages, once per runtime folder, Julia and depot, but only where Julia
+  notebooks ran before and Julia is already installed. So the first open after
+  an update doesn't run without the warm package: about 24 s instead of 45 s here.
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is
