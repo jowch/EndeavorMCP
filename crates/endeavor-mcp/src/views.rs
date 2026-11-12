@@ -41,7 +41,7 @@ static TOOLS: LazyLock<Value> = LazyLock::new(|| {
     tools
 });
 /// The view's tools: only the view calls them, and the agent doesn't see them.
-pub const NAMES: [&str; 5] = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close"];
+pub const NAMES: [&str; 6] = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close", "notebook_file"];
 
 /// The tools that show the view.
 const SHOWN_BY: [&str; 2] = ["open_notebook", "new_notebook"];
@@ -159,7 +159,13 @@ pub struct Views {
     engines: Mutex<HashMap<String, Backend>>,
     sockets: Mutex<HashMap<u64, Arc<Socket>>>,
     next: AtomicU64,
+    /// The widget files the view read last, with the start of R that served them: one is read in
+    /// parts, and a few outputs ask for the same files in turn.
+    files: Mutex<Vec<(u64, String, Arc<File>)>>,
 }
+
+/// A widget file: its `Content-Type` and its bytes.
+type File = (String, Vec<u8>);
 
 /// A socket the view hasn't asked about for this long is closed: the view went away.
 const IDLE: Duration = Duration::from_secs(60);
@@ -174,6 +180,12 @@ const INBOX_BYTES: usize = 256_000_000;
 const SOCKETS_MAX: usize = 16;
 /// A page part at most.
 const PART_MAX: usize = 2_000_000;
+/// A file part, before base64: a multiple of 3, so the parts' base64 joins up.
+const FILE_PART: usize = 999_999;
+/// A widget file at most (plotly's bundle is about 3.5 MB).
+const FILE_MAX: usize = 64_000_000;
+/// Widget files kept for the view's next parts.
+const FILES_KEPT: usize = 8;
 
 impl Views {
     /// R started: Ember's port and secret.
@@ -258,6 +270,22 @@ impl Views {
                 // `more`: the last message goes on in the next receive.
                 Ok(json!({ "messages": got.messages.iter().map(|m| STANDARD.encode(m)).collect::<Vec<_>>(), "more": got.more, "closed": got.closed }))
             }
+            "notebook_file" => {
+                let notebook = arguments["notebook_id"].as_str().ok_or("notebook_id must be a string")?;
+                let path = arguments["path"].as_str().ok_or("path must be a string")?;
+                let backend = match self.engines.lock().unwrap().get(notebook).copied() {
+                    Some(backend) => backend,
+                    None => open(notebook).ok_or_else(|| format!("not_open: no open notebook has the id {notebook}"))?,
+                };
+                // Only Ember serves a notebook's widget files; Pluto's widgets come with the page.
+                if backend != Backend::Ember {
+                    return Err("not_found: only an R notebook's widgets have files".into());
+                }
+                let file = self.file(path)?;
+                let offset = (arguments["offset"].as_u64().unwrap_or(0) as usize).min(file.1.len());
+                let end = (offset + FILE_PART).min(file.1.len());
+                Ok(json!({ "mime": file.0, "total": file.1.len(), "next": end, "data": STANDARD.encode(&file.1[offset..end]) }))
+            }
             "notebook_socket_close" => {
                 if let Ok(socket) = socket_of() {
                     socket.close();
@@ -267,6 +295,35 @@ impl Views {
             }
             _ => Err(format!("unknown view tool {name}")),
         }
+    }
+
+    /// A widget file of the R that runs now, as Ember serves it: `deps/<name>-<version>/<file>`,
+    /// read from Ember's server on this computer with its secret, the way the notebook's own page
+    /// reads it. Ember serves only the folders of widgets a notebook's outputs use.
+    fn file(&self, path: &str) -> Result<Arc<File>, String> {
+        if !widget_file(path) {
+            return Err(format!("not_found: {path} isn't a widget's file"));
+        }
+        let (port, secret, start) = self.engine(Backend::Ember)?;
+        if let Some((_, _, file)) = self.files.lock().unwrap().iter().find(|(s, p, _)| *s == start && p == path) {
+            return Ok(file.clone());
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (status, mime, body) = crate::http::get_by(port, &format!("/{path}?secret={secret}"), deadline).map_err(|e| format!("not_connected: couldn't reach R's notebook server: {e}"))?;
+        if status != 200 {
+            return Err(format!("not_found: R's notebook server has no {path} (HTTP {status})"));
+        }
+        if body.len() > FILE_MAX {
+            return Err(format!("too_large: {path} is {} MB", body.len() / 1_000_000));
+        }
+        let file = Arc::new((mime.unwrap_or_else(|| "application/octet-stream".into()), body));
+        let mut files = self.files.lock().unwrap();
+        files.retain(|(s, _, _)| *s == start);
+        if files.len() >= FILES_KEPT {
+            files.remove(0);
+        }
+        files.push((start, path.to_owned(), file.clone()));
+        Ok(file)
     }
 
     fn page(&self, backend: Backend, make: impl FnOnce() -> Result<String, String>) -> Result<Arc<String>, String> {
@@ -297,6 +354,16 @@ impl Views {
     fn open_sockets(&self) -> usize {
         self.sockets.lock().unwrap().len()
     }
+}
+
+/// Whether `path` names a widget's file as Ember's outputs do, `deps/<name>-<version>/<file>`, with
+/// nothing that could reach outside that folder or change the request.
+fn widget_file(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("deps/") else { return false };
+    let mut parts = rest.split('/');
+    let folder_and_file = parts.clone().count() >= 2;
+    folder_and_file
+        && parts.all(|part| !part.is_empty() && part != "." && part != ".." && part.chars().all(|c| c.is_ascii_alphanumeric() || "._-+@".contains(c)))
 }
 
 /// The part of `page` from byte `offset`, at most `size` bytes and ending on a character, and where
@@ -938,5 +1005,81 @@ mod tests {
         let part = |offset: u64| views.call("notebook_page", &json!({ "notebook_id": "r", "offset": offset, "size": 10 }), |backend, _| Ok(format!("<html><head>{backend:?}</head><body></body></html>")), |_| unreachable!("a snapshot per part"));
         assert_eq!(part(0).unwrap()["next"], 10);
         assert_eq!(part(10).unwrap()["next"], 20);
+    }
+
+    #[test]
+    fn a_widget_file_is_deps_then_a_folder_then_a_file_and_nothing_else() {
+        for ok in ["deps/plotly-main-2.11.1/plotly-latest.min.js", "deps/htmlwidgets-1.6.4/htmlwidgets.js", "deps/dt-core-1.13/css/jquery.dataTables.min.css"] {
+            assert!(widget_file(ok), "{ok}");
+        }
+        for refused in ["deps/x", "deps/../secret/x.js", "deps/x/../../y", "deps//x.js", "/deps/x/y.js", "deps/x/y.js?secret=1", "deps/x/y z.js", "deps/x/y.js#a", "deps/x/%2e%2e/y", "deps\\x\\y.js", "notebook/x/y.js", "deps/./y.js"] {
+            assert!(!widget_file(refused), "{refused}");
+        }
+    }
+
+    /// A stand-in for Ember's server: `GET /deps/w-1/big.js?secret=s` gives `body`, anything else a
+    /// 404; the count is of the requests it answered.
+    fn deps_server(body: Vec<u8>) -> (u16, Arc<AtomicU64>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = Arc::new(AtomicU64::new(0));
+        let count = served.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap() == 0 || header == "\r\n" {
+                        break;
+                    }
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                if line.starts_with("GET /deps/w-1/big.js?secret=s ") {
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                    stream.write_all(&body).unwrap();
+                } else {
+                    stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                }
+            }
+        });
+        (port, served)
+    }
+
+    #[test]
+    fn an_r_notebooks_widget_file_comes_from_ember_in_parts_read_once() {
+        let body: Vec<u8> = (0..2_500_000u32).map(|i| (i % 251) as u8).collect();
+        let (port, served) = deps_server(body.clone());
+        let views = Views::default();
+        let call = |args: Value, engine: Backend| views.call("notebook_file", &args, |_, _| unreachable!(), |_| Some(engine));
+        let file = |offset: u64| call(json!({ "notebook_id": "r", "path": "deps/w-1/big.js", "offset": offset }), Backend::Ember);
+        assert!(file(0).unwrap_err().starts_with("not_ready: R"));
+        views.set_ember(port, "s".into());
+        let mut data = String::new();
+        let mut offset = 0;
+        loop {
+            let part = file(offset).unwrap();
+            assert_eq!((part["mime"].as_str(), part["total"].as_u64()), (Some("application/javascript"), Some(body.len() as u64)));
+            data += part["data"].as_str().unwrap();
+            offset = part["next"].as_u64().unwrap();
+            if offset == body.len() as u64 {
+                break;
+            }
+        }
+        assert_eq!(STANDARD.decode(&data).unwrap(), body, "the parts' base64 joins up");
+        assert_eq!(served.load(Ordering::SeqCst), 1, "read from Ember once for all its parts");
+        let missing = call(json!({ "notebook_id": "r", "path": "deps/w-1/other.js" }), Backend::Ember).unwrap_err();
+        assert!(missing.starts_with("not_found:"), "{missing}");
+        let outside = call(json!({ "notebook_id": "r", "path": "deps/w-1/../../x" }), Backend::Ember).unwrap_err();
+        assert!(outside.starts_with("not_found:"), "{outside}");
+        assert_eq!(served.load(Ordering::SeqCst), 2, "a path that isn't a widget's file never reaches Ember");
+        let julia = call(json!({ "notebook_id": "jl", "path": "deps/w-1/big.js" }), Backend::Pluto).unwrap_err();
+        assert!(julia.starts_with("not_found:"), "{julia}");
+        // R started again: the file is read again, from the new R.
+        views.set_ember(port, "s".into());
+        file(0).unwrap();
+        assert_eq!(served.load(Ordering::SeqCst), 3);
     }
 }
