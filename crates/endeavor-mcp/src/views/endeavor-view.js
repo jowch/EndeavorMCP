@@ -1157,10 +1157,14 @@ ${comment}` : blocks.join("\n\n");
   pluto-editor > header#pluto-nav nav#at_the_top > :not(#process_status) { display: none !important; }
   pluto-editor > header#pluto-nav nav#at_the_top { justify-content: center; }
   pluto-editor > main { padding-top: 16px; }
+  /* What Pluto keeps at the top as the page scrolls (its "Save all changes" button) and where a jump
+     to a cell lands go under the toolbar, not behind it. */
+  pluto-editor main > preamble { top: calc(var(--endeavor-bar) + 5px) !important; }
+  html { scroll-padding-top: calc(var(--endeavor-bar) + 8px); }
   #endeavor-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 9997; box-sizing: border-box; height: var(--endeavor-bar);
     display: flex; align-items: center; gap: 10px; padding: 0 10px 0 14px;
     background: var(--e-bg-page); border-bottom: 1px solid var(--e-divider); color: var(--e-text-secondary);
-    font: 12.5px var(--font-sans, system-ui), -apple-system, "Segoe UI", sans-serif; }
+    font: 12.5px system-ui, -apple-system, "Segoe UI", sans-serif; }
   #endeavor-bar .file { font-weight: 600; color: var(--e-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   #endeavor-bar .doing { color: var(--e-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
   #endeavor-bar .grow { flex: 1; }
@@ -1211,7 +1215,7 @@ ${comment}` : blocks.join("\n\n");
     document.head.append(style);
     const bar = document.createElement("div");
     bar.id = "endeavor-bar";
-    bar.innerHTML = `<span class="file">Notebook</span><span class="doing"></span><span class="grow"></span><button type="button" class="docs" title="Live docs: what the code under the cursor does">${book}<span>Docs</span></button>` + (withPoint ? `<button type="button" id="endeavor-point" title="Point at a cell, its code or its output, and comment on it for Claude"><span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span></button>` : "");
+    bar.innerHTML = `<span class="file">Notebook</span><span class="doing">Loading\u2026</span><span class="grow"></span><button type="button" class="docs" title="Live docs: what the code under the cursor does">${book}<span>Docs</span></button>` + (withPoint ? `<button type="button" id="endeavor-point" title="Point at a cell, its code or its output, and comment on it for Claude"><span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span></button>` : "");
     document.body.prepend(bar);
     const file = bar.querySelector(".file");
     const words = bar.querySelector(".doing");
@@ -1241,6 +1245,23 @@ ${comment}` : blocks.join("\n\n");
       if (!soon) soon = window.setTimeout(() => (soon = 0, tick()), 250);
     }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
     tick();
+    keepCursorBelowBar();
+  }
+  function keepCursorBelowBar() {
+    let queued = false;
+    document.addEventListener("selectionchange", () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        const selection = window.getSelection();
+        if (!selection?.rangeCount || !selection.isCollapsed || !selection.anchorNode?.parentElement?.closest?.(".cm-content")) return;
+        const range = selection.getRangeAt(0);
+        const rect = range.getClientRects()[0] ?? selection.anchorNode.parentElement.getBoundingClientRect();
+        const bar = document.getElementById("endeavor-bar")?.getBoundingClientRect().bottom ?? 0;
+        if (rect.bottom > 0 && rect.top < bar + 4) window.scrollBy(0, rect.top - bar - 8);
+      });
+    });
   }
   var started = false;
   function start(notebook, host2) {
@@ -1291,7 +1312,7 @@ ${[...earlier, text].join("\n\n")}`).then(
     });
     initTheme();
     closeStrayCompletions();
-    if (host2.openLink) openLinksThrough(host2.openLink);
+    initLinks(host2.openLink);
     followNewCells();
     receive({ type: "theme", name: "view" });
     initBar(host2.canSend, point);
@@ -1317,27 +1338,22 @@ ${[...earlier, text].join("\n\n")}`).then(
     if (!href) return null;
     return /^(https?:|mailto:)/i.test(href.trim()) ? href.trim() : null;
   }
-  function openLinksThrough(open) {
-    document.addEventListener(
-      "click",
-      (e) => {
-        if (!e.isTrusted || e.defaultPrevented || e.button !== 0 || document.body.classList.contains("annotating")) return;
-        const link = e.target?.closest?.("a[href]");
-        const href = link?.getAttribute("href") ?? "";
-        if (/^#./.test(href) && !e.defaultPrevented) {
-          e.preventDefault();
-          document.getElementById(decodeURIComponent(href.slice(1)))?.scrollIntoView({ behavior: "smooth", block: "start" });
-          return;
-        }
-        const url = outsideLink(href);
-        if (!url) return;
-        e.preventDefault();
-        e.stopPropagation();
-        open(url).catch(() => {
-        });
-      },
-      true
-    );
+  function initLinks(open) {
+    document.addEventListener("click", (e) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      const link = e.target?.closest?.("a[href]");
+      if (!link) return;
+      const href = (link.getAttribute("href") ?? "").trim();
+      if (/^javascript:/i.test(href)) return;
+      e.preventDefault();
+      if (/^#./.test(href)) {
+        document.getElementById(decodeURIComponent(href.slice(1)))?.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      const url = outsideLink(href);
+      if (url && open && e.isTrusted) open(url).catch(() => {
+      });
+    });
   }
   var STRAY_MS = 5e3;
   function closeStrayCompletions() {

@@ -265,13 +265,15 @@ window.addEventListener("message", async e => {
   await page.screenshot({ path: path.join(dir, "point.png") });
   await frame.locator("#annotate-bar textarea").press("Escape");
   check(await frame.evaluate(() => !document.body.classList.contains("annotating")), "Escape leaves Point");
-  // A link in a cell's output opens through Claude (the frame can't open windows); a jump within the page doesn't.
-  await frame.evaluate(() => document.querySelector("pluto-cell pluto-output").insertAdjacentHTML("beforeend", '<a id="out-link" href="https://example.com/docs">docs</a> <a id="in-link" href="#out-link">here</a>'));
-  await frame.click("#out-link");
-  await frame.click("#in-link");
+  // A link in a cell's output opens through Claude (the frame can't open windows). No other link may load a
+  // page in the frame, which would replace the view with a blank one: a jump within the page scrolls.
+  await frame.evaluate(() => document.querySelector("pluto-cell pluto-output").insertAdjacentHTML("beforeend",
+    '<a id="out-link" href="https://example.com/docs">docs</a> <a id="in-link" href="#out-link">here</a> <a id="empty-link" href="#">top</a> <a id="rel-link" href="./other.jl">other</a> <a id="file-link" href="file:///etc/hosts">file</a>'));
+  for (const id of ["out-link", "in-link", "empty-link", "rel-link", "file-link"]) await frame.click("#" + id);
   await page.waitForFunction(() => (window.links || []).length > 0, null, { timeout: 5000 }).catch(() => {});
+  await new Promise(r => setTimeout(r, 500));
   const links = await page.evaluate(() => window.links || []);
-  check(links.length === 1 && links[0] === "https://example.com/docs" && await frame.evaluate(() => !!document.querySelector("pluto-editor")), `a link in a cell opens through Claude's ui/open-link, a jump within the page scrolls and keeps the page (${JSON.stringify(links)})`);
+  check(links.length === 1 && links[0] === "https://example.com/docs" && await frame.evaluate(() => !!document.querySelector("pluto-editor")), `a link in a cell opens through Claude's ui/open-link, and no other link replaces the view (${JSON.stringify(links)})`);
   await page.evaluate(() => window.closePane());
   await frame.waitForFunction(() => !document.querySelector("#endeavor-card").hidden && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
   const small = await frame.evaluate(() => document.documentElement.classList.contains("endeavor-inline") && [...document.body.children].filter(e => e.id !== "endeavor-card").every(e => getComputedStyle(e).display === "none"));
