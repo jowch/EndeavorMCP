@@ -812,6 +812,8 @@ struct Relay {
     /// What the log said of the tool calls' `_meta`: its keys, and how many calls had their values
     /// logged (`log_meta`).
     meta_logged: Mutex<(Vec<String>, u32)>,
+    /// The salt of those fingerprints, made per process, so a log doesn't let anyone check a guessed value.
+    meta_salt: std::collections::hash_map::RandomState,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -973,13 +975,11 @@ fn session_key(conversation: Option<&str>, child_of_shell: bool) -> Option<Strin
 /// How many tool calls `Relay::log_meta` logs the `_meta` values of.
 const META_CALLS_LOGGED: u32 = 5;
 
-/// A short fingerprint of `text` for the log: two calls with the same value show the same one, and
-/// the value itself isn't in it.
-fn fingerprint(text: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    format!("{:08x}", hasher.finish() as u32)
+/// A short fingerprint of `text` for the log, salted per process (`salt`): two calls with the same value
+/// show the same one, and the value itself can't be checked against it.
+fn fingerprint(salt: &std::collections::hash_map::RandomState, text: &str) -> String {
+    use std::hash::BuildHasher;
+    format!("{:08x}", salt.hash_one(text) as u32)
 }
 
 impl Relay {
@@ -997,7 +997,7 @@ impl Relay {
         }
         if *calls < META_CALLS_LOGGED {
             *calls += 1;
-            let values: Vec<String> = meta.as_object().into_iter().flatten().filter_map(|(key, value)| Some(format!("{key}={}", fingerprint(value.as_str()?)))).collect();
+            let values: Vec<String> = meta.as_object().into_iter().flatten().filter_map(|(key, value)| Some(format!("{key}={}", fingerprint(&self.meta_salt, value.as_str()?)))).collect();
             if !values.is_empty() {
                 eprintln!("[ Info: Tool call {calls}'s _meta values, as fingerprints: {}", values.join(", "));
             }
@@ -1022,6 +1022,7 @@ impl Relay {
             mcp_session: Mutex::default(),
             views: Default::default(),
             meta_logged: Mutex::default(),
+            meta_salt: Default::default(),
             out: Mutex::new(out),
         }
     }
