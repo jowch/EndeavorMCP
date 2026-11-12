@@ -197,7 +197,7 @@ window.addEventListener("message", async e => {
   await page.waitForFunction(() => window.messages.length === 1, null, { timeout: 5000 }).catch(() => {});
   const message = await page.evaluate(() => window.messages[0]);
   const said = message?.content?.[0]?.text || "";
-  check(message?.role === "user" && said.startsWith("\u2014\n\n[Endeavor] The user quoted") && /<quote cell="squares" part="output" uri="notebook:\/\/pluto\/[^"]+\/cell\/6e6a1b70-dda7-11f1-a148-b56bbb7771a3">\n[\s\S]+\n<\/quote>\nWhy squares\?$/.test(said), `↩ sends the pick and the comment as the user's message, on a new paragraph: ${JSON.stringify(said.slice(-220))}`);
+  check(message?.role === "user" && said.startsWith("\u2193\n\n[Endeavor] The user quoted") && said.includes("A \u2193 just before this note only marks where the quotes start") && /<quote cell="squares" part="output" uri="notebook:\/\/pluto\/[^"]+\/cell\/6e6a1b70-dda7-11f1-a148-b56bbb7771a3">\n[\s\S]+\n<\/quote>\nWhy squares\?$/.test(said), `↩ sends the pick and the comment as the user's message, on a new paragraph: ${JSON.stringify(said.slice(-220))}`);
   // ⌘↩ (Ctrl+Enter off macOS) keeps the pick in the view; the next ↩ passes both in one message.
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await frame.locator("#annotate-bar textarea").fill("First");

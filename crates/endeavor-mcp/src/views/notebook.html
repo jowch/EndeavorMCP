@@ -235,14 +235,13 @@ function closeAll() { [...sockets].forEach(s => s.close()); }
 // app puts it in its message box for the user to send). A host that takes no messages from views gets
 // the look without Point. Claude's desktop app (probed 2026-11-12):
 // - adds the text at the end of its box, straight after anything typed there, and trims the text's
-//   leading whitespace (newlines, no-break and zero-width spaces too), so a visible dash carries the
-//   break onto a new paragraph;
+//   leading whitespace, so the view's text starts with a visible mark (endeavor-view.js);
 // - takes a message only right after a press inside the view, and not for about five seconds after
 //   input elsewhere (typing in its box, say). It refuses with an isError answer, and the same press
 //   can't be used again, so a refusal isn't retried: Point gets its picks back and the user presses ↩.
 const pointHost = {
   get canSend() { return !!app.getHostCapabilities()?.message; },
-  send: text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\u2014\n\n" + text }] }).then(res => {
+  send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(res => {
     if (res?.isError) throw new Error("it isn't ready yet, so try again in a few seconds");
   }),
 };

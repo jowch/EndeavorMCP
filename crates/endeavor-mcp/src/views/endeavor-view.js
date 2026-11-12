@@ -963,6 +963,8 @@ footer form#feedback { display: none !important; }
   // src/view.ts
   var FORMAT = "A quote's uri, notebook://pluto/{notebook_id}/cell/{cell_id}, names its cell (it is not a fetchable URL); `lines` are line numbers in the cell's code, counting from 1. `part` says what was quoted when it isn't code: `output` (text from the cell's output), `figure` (the cell's output, a picture) or `box` (a box the user drew over the notebook; `uri` lists the cells under it). No picture comes with a figure or box here: read current code and outputs with the notebook MCP tools.";
   var QUOTE_NOTE = "[Endeavor] The user quoted parts of the notebook in this message, each as a <quote> followed by their comment on it. " + FORMAT;
+  var LEAD = "\u2193";
+  var LEAD_NOTE = " A \u2193 just before this note only marks where the quotes start; it isn't part of the user's words.";
   var uri = (notebook, cell) => `notebook://pluto/${notebook}/cell/${cell}`;
   function quoteBlock(notebook, pick) {
     if (pick.part === "box") return `<quote part="box" uri="${pick.cells.map((c) => uri(notebook, c)).join(" ")}"/>`;
@@ -1026,7 +1028,9 @@ ${comment}` : blocks.join("\n\n");
         return say(`${added.length} added. ${mac ? "\u21A9" : "Enter"} passes ${added.length === 1 ? "it" : "them"} to the chat with the next pick.`);
       }
       const earlier = added.splice(0);
-      host2.send(`${QUOTE_NOTE}
+      host2.send(`${LEAD}
+
+${QUOTE_NOTE}${LEAD_NOTE}
 
 ${[...earlier, text].join("\n\n")}`).then(
         () => {
