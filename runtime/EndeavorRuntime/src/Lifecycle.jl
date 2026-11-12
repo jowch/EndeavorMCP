@@ -129,6 +129,7 @@ function watch_worker!(session, nb)::Nothing
         delete!(_EXITED, nb.notebook_id)
         true
     end
+    new && _install_stop_hook!(worker)
     # Not the logger of whichever Pluto task saw it first (a package
     # operation's tees into its own log).
     new && @async Base.CoreLogging.with_logger(Base.CoreLogging.global_logger()) do
@@ -138,11 +139,90 @@ function watch_worker!(session, nb)::Nothing
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# Stopping a cell without ending its process
+# ---------------------------------------------------------------------------
+
+# On Julia 1.12, a Ctrl+C sent to a notebook's process lands on Malt's root task, which waits on
+# its socket and ignores it: a cell waiting (`sleep`, a download, a lock) never hears it. Pluto
+# then presses Ctrl+C five times in a row, which ends Julia, so Stop on `sleep(30)` lost every
+# value in the notebook (#139). Julia fixed interrupts on master (JuliaLang/julia#62069).
+#
+# So the notebook's process notes the task each cell runs in, and Stop sends the cell's own task
+# an InterruptException, as Malt does for a worker in the same process. A cell that never yields
+# (a loop in compiled code) can't take it, and gets Pluto's Ctrl+C as before; that one does
+# reach a running task.
+#
+# ponytail: a method on PlutoRunner's `run_inside_trycatch`, the call each cell's code runs in.
+# Only on the Pluto releases below, and only where that method is as expected; anywhere else,
+# Stop is Pluto's own, as before. Remove once the pinned Julia's interrupts reach a waiting task.
+const _STOP_HOOK_PLUTO = (v"1.0.3", v"1.1.0")
+_stop_hook_ok() = pkgversion(Pluto) in _STOP_HOOK_PLUTO
+
+const _STOP_HOOK = quote
+    let f = PlutoRunner.run_inside_trycatch, sig = Tuple{Module,Union{Expr,Function}}
+        methods = Base.methods(f)
+        if !isdefined(Main, :__endeavor_stop) && length(methods) == 1 && only(methods).sig == Tuple{typeof(f),sig.parameters...}
+            Core.eval(Main, quote
+                const __endeavor_cell_task = Ref{Any}(nothing)
+                for T in (Expr, Function)
+                    @eval function PlutoRunner.run_inside_trycatch(m::Module, f::$(Expr(:$, :T)))
+                        Main.__endeavor_cell_task[] = current_task()
+                        try
+                            invoke(PlutoRunner.run_inside_trycatch, $sig, m, f)
+                        finally
+                            Main.__endeavor_cell_task[] = nothing
+                        end
+                    end
+                end
+                # Only the cell Stop meant, and only right away: a late message mustn't stop the next run.
+                function __endeavor_stop(cell_id, deadline)
+                    t = __endeavor_cell_task[]
+                    (time() <= deadline && t isa Task && !istaskdone(t) && PlutoRunner.currently_running_cell_id[] == cell_id) || return false
+                    schedule(t, InterruptException(); error=true)
+                    return true
+                end
+            end)
+        end
+        isdefined(Main, :__endeavor_stop)
+    end
+end
+
+"Note each cell's task in a new process of a notebook, where this Pluto allows it."
+function _install_stop_hook!(worker)::Nothing
+    _stop_hook_ok() || return nothing
+    @async try
+        Pluto.Malt.remote_eval_fetch(worker, _STOP_HOOK) || @warn "Stop: this Pluto's run_inside_trycatch isn't as expected; Stop ends a waiting cell's process, as Pluto's does"
+    catch e
+        Pluto.Malt.isrunning(worker) && @warn "Stop: couldn't prepare the notebook's process" exception=e
+    end
+    return nothing
+end
+
 """
-Interrupt the notebook's run, as Pluto's Stop does. A cell that doesn't stop
-(one long `sleep`) is ended with its process, Pluto pressing Ctrl+C until it
-does; that isn't the process ending by itself (`worker_exited!`), and the next
-run starts a new one. While the notebook's process is still starting, its run
+Stop the running cell in its own task, then, if it hasn't stopped within a few seconds (it never
+yields), as Pluto does. True once the run has stopped.
+"""
+function _stop_run(session, nb, workspace)::Bool
+    cell = findfirst(c -> c.running, nb.cells)
+    if cell !== nothing && workspace.worker isa Pluto.Malt.Worker && _stop_hook_ok()
+        id = nb.cells[cell].cell_id
+        # Not waited for: a cell that never yields holds the process, and this message, until it ends.
+        @async try
+            Pluto.Malt.remote_eval_fetch(workspace.worker, :(isdefined(Main, :__endeavor_stop) && Main.__endeavor_stop($id, $(time() + 2.0))))
+        catch
+        end
+        Pluto.WorkspaceManager.poll(() -> isready(workspace.dowork_token), 3.0, 1/20) && return true
+    end
+    Pluto.WorkspaceManager.interrupt_workspace((session, nb); verbose=false)
+end
+
+"""
+Interrupt the notebook's run, as Pluto's Stop does, for the agent and for the page's Stop
+(`_wrap_page_stop!`). The running cell is stopped in its own task (`_stop_run`). One that
+doesn't stop (a loop in compiled code) gets Pluto's Ctrl+C until it does, which can end its
+process; that isn't the process ending by itself (`worker_exited!`), and the next run starts a
+new one. While the notebook's process is still starting, its run
 hasn't started a cell: it is told to skip them all once the process is up, as
 it skips the cells queued after one Stop interrupts (#179: before, nothing was
 interrupted, and every cell ran).
@@ -162,7 +242,7 @@ function interrupt!(session, nb)
         return Dict{String,Any}("interrupted" => false)
     nb.wants_to_interrupt = true
     lock(() -> _INTERRUPTED[nb.notebook_id] = workspace.worker, _NOTIFY_LOCK)
-    interrupted = Pluto.WorkspaceManager.interrupt_workspace((session, nb); verbose=false)
+    interrupted = _stop_run(session, nb, workspace)
     # Its process lived through it: a later end of it is a crash again.
     Pluto.Malt.isrunning(workspace.worker) &&
         lock(() -> get(_INTERRUPTED, nb.notebook_id, nothing) === workspace.worker && delete!(_INTERRUPTED, nb.notebook_id), _NOTIFY_LOCK)
@@ -207,6 +287,7 @@ function _init_pluto_session!(; pluto_port, launch_browser, require_secret_for_a
     )
     sess = Pluto.ServerSession(; options = opts)
     _wrap_page_restart!()
+    _wrap_page_stop!()
     if notebook !== nothing
         Pluto.SessionActions.open(sess, String(notebook); run_async = true)
     end
