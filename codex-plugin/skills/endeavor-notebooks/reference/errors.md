@@ -30,6 +30,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `run_conflict` | Cells you ran depend on cells changed since this session read them (by the user, by another session, or before this conversation was resumed); nothing ran | Read the cells it names, then run again |
 | `notebook_not_found`, `cell_not_found` | The id is wrong, or the notebook was closed or the cell deleted | `list_notebooks`, or read the notebook again |
 | `file_exists` | `new_notebook` on a path that exists | `open_notebook` it, or pick another name |
+| `folder_not_writable` | `new_notebook` in a folder that is read-only, such as one shared read-only into a virtual machine | Give `path` in a folder the user can write to, one they name or their home folder, and tell them where the notebook is |
 | `file_not_found` | `open_notebook` on a path with no file | Check the path; a relative path starts in the session's folder |
 | `not_a_notebook` | `open_notebook` on a file that isn't a Pluto or Ember notebook, such as a script | Read it as a file |
 | `invalid_path` | `open_notebook` had a null path or one that isn't a string; `new_notebook` had a path that doesn't end in `.jl` or `.R`, or whose folder doesn't exist; or the server was not told the project folder and the path is relative (or `new_notebook` had none) | Fix the path; if the server was not told the project folder, give an absolute path |

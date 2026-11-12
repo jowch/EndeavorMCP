@@ -1420,7 +1420,12 @@ impl Call<'_> {
                 let mut params = match folder {
                     Folder::Unknown => return Err(super::folder_unknown()),
                     // The engine's own naming, like Pluto's "Create a new notebook", in the session's folder.
-                    Folder::In(folder) if std::path::Path::new(folder).is_dir() => json!({ "folder": folder }),
+                    Folder::In(folder) if std::path::Path::new(folder).is_dir() => {
+                        if read_only(folder) {
+                            return Err(not_writable(folder, "this session's folder"));
+                        }
+                        json!({ "folder": folder })
+                    }
                     _ => json!({}),
                 };
                 // In the session's kind, when its client said it.
@@ -1448,6 +1453,9 @@ impl Call<'_> {
                 let dir = super::parent_dir(&path);
                 if !held && !std::path::Path::new(&dir).is_dir() {
                     return Err(argument_error(&format!("invalid_path::Directory does not exist: '{dir}'")));
+                }
+                if !held && read_only(&dir) {
+                    return Err(not_writable(&dir, "the folder"));
                 }
                 json!({ "path": path })
             }
@@ -1935,6 +1943,32 @@ fn r_notebooks(what: &str) -> Result<(), String> {
         return Err(argument_error(&format!("unsupported::{what}. R notebooks don't run on Windows yet; they need macOS or Linux")));
     }
     Ok(())
+}
+
+/// Whether this process can't make a file in the folder `dir`: a read-only disk (a computer's
+/// files shared read-only into a virtual machine, say) or a folder the user can't write to. Only
+/// checked on Unix; elsewhere the engine's own error says it.
+fn read_only(dir: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(dir) = std::ffi::CString::new(std::path::Path::new(dir).as_os_str().as_bytes()) else { return false };
+        // SAFETY: `dir` is a NUL-terminated string that outlives the call.
+        unsafe { libc::access(dir.as_ptr(), libc::W_OK) != 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
+/// The refusal of a new notebook in the read-only folder `dir` (`which`), before the engine
+/// fails to save it: where to make it instead.
+fn not_writable(dir: &str, which: &str) -> String {
+    argument_error(&format!(
+        "folder_not_writable::A new notebook can't be saved in {which}, '{dir}': it is read-only. Make it with a `path` in a folder the user can write to, one they name or their home folder, and tell them where it is."
+    ))
 }
 
 pub fn argument_error(message: &str) -> String {
