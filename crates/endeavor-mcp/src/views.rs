@@ -94,9 +94,9 @@ pub const IN_BROWSER: &str = "in_browser";
 pub fn add_to(tools: &mut Vec<Value>) {
     for tool in tools.iter_mut().filter(|tool| tool["name"].as_str().is_some_and(|name| SHOWN_BY.contains(&name))) {
         tool["_meta"] = json!({ "ui": { "resourceUri": URI }, "ui/resourceUri": URI });
-        // A title for the host's tool row and the view's frame, in place of the tool's name.
+        // Claude's desktop app shows the title in the call's row, after "Widget from <server>" (2026-11-12).
         if tool["title"].is_null() {
-            tool["title"] = json!(if tool["name"] == "new_notebook" { "New notebook" } else { "Notebook" });
+            tool["title"] = json!(if tool["name"] == "new_notebook" { "New notebook" } else { "Open notebook" });
         }
         // A client may say it draws views and still show no card (Claude's desktop app, in its Chat
         // tab, 2026-11-12, #311): the way back to the browser.
@@ -108,21 +108,8 @@ pub fn add_to(tools: &mut Vec<Value>) {
     tools.extend(schemas());
 }
 
-/// Endeavor's icon, for clients that show a server's or a view's icon (MCP `icons`). `views/icon.svg`
-/// is a copy of the app's `assets/icon/icon-small.svg`, the art drawn for 16 and 32 px.
-pub fn icons() -> Value {
-    let svg = STANDARD.encode(include_str!("views/icon.svg"));
-    json!([{ "src": format!("data:image/svg+xml;base64,{svg}"), "mimeType": "image/svg+xml", "sizes": ["any"] }])
-}
-
-/// The view's `_meta.ui`, on its listing and on its contents: hosts differ in where they read it.
-fn resource_meta() -> Value {
-    // `preferredDisplayMode` is Claude's own field: open in the side panel, not in the conversation.
-    json!({ "ui": { "prefersBorder": false, "preferredDisplayMode": "fullscreen" } })
-}
-
 pub fn resources_list() -> Value {
-    json!({ "resources": [{ "uri": URI, "name": "notebook", "title": "Notebook", "description": "The notebook, live, beside the chat.", "mimeType": MIME, "icons": icons(), "_meta": resource_meta() }] })
+    json!({ "resources": [{ "uri": URI, "name": "Notebook", "description": "The notebook, live, beside the chat.", "mimeType": MIME }] })
 }
 
 /// `resources/read`'s result, or None for a resource we don't have.
@@ -132,7 +119,10 @@ pub fn resources_read(params: &Value) -> Option<Value> {
             "uri": URI,
             "mimeType": MIME,
             "text": PAGE.as_str(),
-            "_meta": resource_meta(),
+            // Claude's own field: open in the side panel, not in the conversation. The view also
+            // declares that it shows in the panel only (`availableDisplayModes`). Claude's desktop app
+            // ignores `prefersBorder` for a local server (2026-11-12) and keeps its bordered frame.
+            "_meta": { "ui": { "prefersBorder": false, "preferredDisplayMode": "fullscreen" } },
         }] })
     })
 }
@@ -661,23 +651,12 @@ mod tests {
     }
 
     #[test]
-    fn the_view_and_its_tools_carry_a_title_an_icon_and_no_border() {
+    fn the_tools_that_show_the_view_have_a_title_and_keep_their_own() {
         let mut tools = vec![json!({ "name": "open_notebook" }), json!({ "name": "new_notebook" }), json!({ "name": "open_notebook", "title": "Kept" })];
         add_to(&mut tools);
-        assert_eq!(tools[0]["title"], "Notebook");
+        assert_eq!(tools[0]["title"], "Open notebook");
         assert_eq!(tools[1]["title"], "New notebook");
-        assert_eq!(tools[2]["title"], "Kept", "a tool's own title stays");
-        let listed = &resources_list()["resources"][0];
-        assert_eq!(listed["title"], "Notebook");
-        assert_eq!(listed["icons"], icons());
-        let read = resources_read(&json!({ "uri": URI })).unwrap();
-        for meta in [&listed["_meta"], &read["contents"][0]["_meta"]] {
-            assert_eq!(meta["ui"]["prefersBorder"], false);
-            assert_eq!(meta["ui"]["preferredDisplayMode"], "fullscreen");
-        }
-        let src = icons()[0]["src"].as_str().unwrap().to_string();
-        let svg = STANDARD.decode(src.strip_prefix("data:image/svg+xml;base64,").unwrap()).unwrap();
-        assert_eq!(svg, include_bytes!("views/icon.svg"));
+        assert_eq!(tools[2]["title"], "Kept");
     }
 
     #[test]
