@@ -113,8 +113,9 @@ pub fn resources_list() -> Value {
     json!({ "resources": [{ "uri": URI, "name": "Notebook", "description": "The notebook, live, beside the chat.", "mimeType": MIME }] })
 }
 
-/// The one web host the view lets cell outputs load from (`resources_read`).
-const CDN: &str = "https://cdn.jsdelivr.net";
+/// The web hosts the view lets cell outputs load files from (`resources_read`), and the one they may fetch from.
+const LOADS_FROM: [&str; 2] = ["https://cdn.jsdelivr.net", "https://esm.sh"];
+const FETCHES_FROM: [&str; 1] = ["https://cdn.jsdelivr.net"];
 
 /// `resources/read`'s result, or None for a resource we don't have.
 pub fn resources_read(params: &Value) -> Option<Value> {
@@ -128,12 +129,13 @@ pub fn resources_read(params: &Value) -> Option<Value> {
             // ignores `prefersBorder` for a local server (2026-11-12) and keeps its bordered frame.
             //
             // The frame loads nothing from the web unless its `csp` names the host, and Claude's desktop
-            // app honours it for a local server (checked 2026-11-12). Cell outputs need jsDelivr: Masque's
-            // script and fonts, PlutoUI's widgets, MathJax for math in Pluto, Ember and Latexify, and
-            // Pluto's code fonts. Nothing else is needed: Pluto's page bundles its own imports, and
-            // PlutoPlotly ships plotly.js with the notebook. The README says so (Claude's desktop app).
+            // app honours it for a local server (checked 2026-11-12). jsDelivr serves Pluto's fonts and
+            // MathJax's speech-rule maps, Ember's MathJax, the scripts of some PlutoUI widgets (RangeSlider,
+            // Scrubbable) and the font of Masque's controls. esm.sh serves plotly.js: PlutoPlotly imports it
+            // from there unless a cell runs `enable_plutoplotly_offline()`. Only jsDelivr is fetched from
+            // (MathJax's maps). Other hosts are left out. The README says so (Claude's desktop app).
             "_meta": { "ui": { "prefersBorder": false, "preferredDisplayMode": "fullscreen",
-                "csp": { "resourceDomains": [CDN], "connectDomains": [CDN] } } },
+                "csp": { "resourceDomains": LOADS_FROM, "connectDomains": FETCHES_FROM } } },
         }] })
     })
 }
@@ -721,7 +723,7 @@ mod tests {
         assert!(text.contains("window.EndeavorView = { start }"), "the look and Point are inside");
         assert!(text.contains("availableDisplayModes"));
         let csp = &read["contents"][0]["_meta"]["ui"]["csp"];
-        assert_eq!((&csp["resourceDomains"], &csp["connectDomains"]), (&json!(["https://cdn.jsdelivr.net"]), &json!(["https://cdn.jsdelivr.net"])), "only jsDelivr, as the README says");
+        assert_eq!((&csp["resourceDomains"], &csp["connectDomains"]), (&json!(["https://cdn.jsdelivr.net", "https://esm.sh"]), &json!(["https://cdn.jsdelivr.net"])), "only these, as the README says");
         assert_eq!(read["contents"][0]["mimeType"], MIME);
         assert!(resources_read(&json!({ "uri": "ui://endeavor/other" })).is_none());
     }
