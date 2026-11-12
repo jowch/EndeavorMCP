@@ -387,8 +387,11 @@ notebook of each successful `new_notebook` and `open_notebook` in the user's
 browser with the link that sets the cookie, and adds `opened_in_browser` (false
 where it can't: in a debug build, over ssh, or on Linux without a display). Where
 it can't, a result with a `browser_url` from the runtime on this computer also has
-`browser_note`, the steps for the user: `ssh -L` from their computer and
-`endeavor open` here. It
+`browser_note`, the steps for the user: open the address, `endeavor open` here
+if the page asks to let the browser in, and `ssh -L` from their computer only if
+the address doesn't load. (A virtual machine on the user's computer often shares
+its ports, and `orb run` sets the same ssh variables as a real login, so the note
+doesn't guess.) It
 also takes `token=` out of a `browser_url` from an older runtime. A browser that
 opens a page without the cookie gets a page naming `endeavor open`.
 

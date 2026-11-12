@@ -24,28 +24,20 @@ pub(crate) fn shows(var: impl Fn(&str) -> Option<String>) -> bool {
     can_open(var)
 }
 
-/// Whether this process was started from an ssh login: the user sits at another computer.
-pub(crate) fn over_ssh(var: impl Fn(&str) -> Option<String>) -> bool {
-    ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"].iter().any(|name| var(name).is_some_and(|value| !value.is_empty()))
-}
-
-/// What the agent is told with a `browser_url` that the user's browser can't open yet: this computer
-/// (`host`) shows no browser, so the user is likely at another one, where `localhost:{port}` is not
-/// this runtime until they forward the port. The agent can't forward it from here: the forward starts
-/// on the user's computer. `open` lets their browser in (`endeavor open`), since the link a browser
-/// needs carries the token, which the agent never gets.
-pub(crate) fn note(host: &str, port: u16, open: &str, over_ssh: bool) -> String {
-    let reach = if over_ssh {
-        format!("The user reached {host} over ssh, so their browser reaches `browser_url` only once they forward its port.")
-    } else {
-        format!("If the user works on {host} from another computer, their browser reaches `browser_url` only once they forward its port.")
-    };
+/// What the agent is told with a `browser_url` that no browser was opened for: this computer
+/// (`host`) shows no browser. Whether the user's browser reaches `localhost:{port}` as it is can't be
+/// told from here: a virtual machine on their computer that shares its ports reaches it, and one
+/// entered with `orb run` has the same ssh variables as a real ssh login, which doesn't. So the address
+/// comes first, and the port forward only if it doesn't load. The agent can't forward it: the forward
+/// starts on the user's computer. `open` lets their browser in (`endeavor open`), since the link a
+/// browser needs carries the token, which the agent never gets.
+pub(crate) fn note(host: &str, port: u16, open: &str) -> String {
     format!(
-        "No browser could be opened on {host}, so the notebook did not open for the user. {reach} \
-Give them these steps with the address, and don't say it is open: \
-1. On their own computer, run `ssh -L {port}:localhost:{port} {host}` (with the name they use to ssh to {host}), and keep it open. \
-2. Open `browser_url` in their browser. \
-3. If the page asks to let the browser in, run `{open}` in a terminal on {host}, and open the link it prints. \
+        "No browser could be opened on {host}, so the notebook did not open for the user. \
+Give them `browser_url` to open in their browser, and don't say it is open. \
+If the page asks to let the browser in, they run `{open}` in a terminal on {host} and open the link it prints. \
+Only if the address doesn't load at all, their browser is on another computer: there they run `ssh -L {port}:localhost:{port} {host}` \
+(with the name they use to ssh to {host}), keep it open, and open `browser_url` again. \
 You can't forward the port for them: it starts on their computer."
     )
 }
@@ -154,10 +146,11 @@ mod tests {
     }
 
     #[test]
-    fn the_note_says_how_to_reach_the_page() {
-        let note = note("lab3", 8456, "endeavor open --state-dir /s", true);
-        assert!(note.contains("`ssh -L 8456:localhost:8456 lab3`") && note.contains("`endeavor open --state-dir /s`") && note.contains("over ssh"), "{note}");
-        assert!(over_ssh(vars(&[("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 22")])) && !over_ssh(vars(&[("SSH_TTY", "")])));
+    fn the_note_gives_the_address_first_and_the_forward_only_if_it_fails() {
+        let note = note("lab3", 8456, "endeavor open --state-dir /s");
+        assert!(note.contains("`ssh -L 8456:localhost:8456 lab3`") && note.contains("`endeavor open --state-dir /s`"), "{note}");
+        let (address, forward) = (note.find("Give them `browser_url`").unwrap(), note.find("ssh -L").unwrap());
+        assert!(address < forward && note.contains("Only if the address doesn't load"), "{note}");
     }
 
     #[test]
