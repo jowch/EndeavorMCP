@@ -53,7 +53,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   view's message only right after a press in the view and never sends it, and
   the README tells users to read the box before sending. Point's figures and boxes go without a picture, which
   the app takes natively. Desktop's Chat tab draws no card: its tool list lacks the app-only tools and
-  `open_notebook` still reports `shown_beside_chat` (checked 2026-11-12). Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
+  `open_notebook` still reports `shown_beside_chat` (#311, checked 2026-11-12). Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
   tab (the chat's view reaches another `endeavor mcp` process, which works on
   this computer). A client that draws views but can't move one beside the chat
   gets only the card. Claude ignores the documented automatic side panel for a
