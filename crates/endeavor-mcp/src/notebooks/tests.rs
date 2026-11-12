@@ -889,8 +889,7 @@ fn a_waited_run_cuts_a_dependents_output_text_shorter_than_its_own_cells() {
     s.seconds(1.0);
     s.read("", NB, Y);
     s.edit("", NB, Y, "y = x + 1 # wide table");
-    // The fake engine's output is "ran " and the code.
-    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
     let y = ran["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == Y).unwrap_or_else(|| panic!("{ran}")).clone();
     assert_eq!(y["output_text"], json!("n\t".repeat(300)), "{y}");
     // A dependent that fails keeps its error.
