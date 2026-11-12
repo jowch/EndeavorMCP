@@ -781,7 +781,7 @@ ${text.value}` : sent.comment;
   var css3 = `
   /* Long words and links in Markdown wrap at the cell's edge, rather than run past it. */
   pluto-editor pluto-output :is(p, li, blockquote, h1, h2, h3, h4, h5, h6, dt, dd) { overflow-wrap: break-word; }
-  @media (max-width: 480px) {
+  @media (max-width: 600px) {
     /* Pluto's are 2.2, 1.8, 1.6, 1.4 and 1.2rem. The pluto-editor in front outweighs Pluto's own rules, whichever loads last. */
     pluto-editor pluto-output h1 { font-size: 1.6rem; }
     pluto-editor pluto-output h2 { font-size: 1.4rem; }
@@ -794,6 +794,61 @@ ${text.value}` : sent.comment;
     const style = document.createElement("style");
     style.id = "endeavor-narrow";
     style.textContent = css3;
+    document.head.append(style);
+  }
+
+  // src/space.ts
+  var EMBER = "pluto-editor:has(> #ember-run-status)";
+  var PLUTO = "pluto-editor:not(:has(> #ember-run-status))";
+  var css4 = `
+  /* Left of a cell: Pluto's eye (16 px icon), or Ember's eye and run button (46 px, Ember's own
+     measure). Right: 10 px, for an overlay scrollbar's thumb. */
+  pluto-editor { --e-left: 26px; --e-right: 10px; }
+  ${EMBER} { --e-left: 46px; }
+  /* Ember keeps 52 px at the top for its own header, which the view hides. */
+  pluto-editor { padding-top: 0 !important; }
+  /* Under the toolbar, only the room the first cell's add-cell button needs (the cell's own margin). */
+  pluto-editor > main { padding-top: 4px !important; }
+  /* Under the last cell: enough to bring it up off the bottom edge and clear Point's bar, not Pluto's
+     16rem, which in a 721 px panel was a third of it empty. */
+  pluto-editor:not(.disable_ui) > main { padding-bottom: 96px !important; }
+  /* The page is the panel's height under the toolbar, so a short notebook doesn't scroll by the toolbar's height. */
+  body > div:has(> pluto-editor) { min-height: calc(100vh - var(--endeavor-bar)) !important; }
+  /* 760 px is where the panel ends and full screen begins, here and for Docs and Status (view.ts):
+     below it they open as a drawer along the bottom, from it as a sheet down the right. */
+  @media (max-width: 759px) {
+    /* The panel: cells from the eye to the scrollbar, whatever the width. */
+    pluto-editor main { margin-left: 0 !important; margin-right: 0 !important; width: 100% !important; max-width: none !important;
+      box-sizing: border-box; padding-left: var(--e-left) !important; padding-right: var(--e-right) !important; }
+  }
+  @media (min-width: 760px) {
+    /* Full screen: a wider column, centred, for long code lines and wide tables. Prose keeps a
+       readable measure (the cap holds a Markdown cell's own images and tables to it too). Not beside
+       PlutoUI's table of contents, which floats at the right. */
+    ${PLUTO}:not(:has(.plutoui-toc.aside)) main, ${EMBER} main { max-width: 1031px !important; margin-left: auto !important; margin-right: auto !important; }
+    pluto-output .markdown { max-width: 720px; }
+    /* With Docs or Status open as a sheet down the right (view.ts), the column moves out from under it,
+       to the left edge. The selector must outweigh the column rule above (1,2,2: its :has(.plutoui-toc.aside)
+       counts two classes); this one is (1,2,4). */
+    body:has(pluto-helpbox:not(.hidden)) :is(${PLUTO}, ${EMBER}):not(.disable_ui) main { margin-left: 0 !important; margin-right: 392px !important;
+      padding-left: var(--e-left) !important; max-width: min(1031px, calc(100% - 392px)) !important; }
+  }
+  /* A Markdown cell's first heading starts at the top of its output, not a line below it. */
+  pluto-editor pluto-output .markdown > :first-child { margin-top: 0 !important; }
+  /* The eye sits right against the cell, without Pluto's 10 px of padding to its left. */
+  ${PLUTO} pluto-shoulder > button { padding-left: 4px !important; }
+  /* Inside a cell, the line numbers (dots until hovered) take two digits' room, not 31 px (Pluto) or 34 px (Ember). */
+  ${PLUTO} pluto-input .cm-editor .cm-gutter { min-width: 0 !important; }
+  ${PLUTO} pluto-input .cm-editor .cm-lineNumbers .cm-gutterElement { min-width: 16px; padding: 0 2px 0 3px !important; }
+  ${PLUTO} pluto-input .cm-editor .cm-line { padding-left: 4px !important; }
+  ${EMBER} pluto-input .cm-editor :is(.cm-gutters, .cm-gutter.cm-lineNumbers) { min-width: 24px !important; }
+  ${EMBER} pluto-input .cm-editor .cm-lineNumbers .cm-gutterElement { padding: 0 6px 0 4px !important; }
+  ${EMBER} pluto-input .cm-editor .cm-content { padding: 7px 8px 7px 6px !important; }
+`;
+  function initSpace() {
+    const style = document.createElement("style");
+    style.id = "endeavor-space";
+    style.textContent = css4;
     document.head.append(style);
   }
 
@@ -1169,7 +1224,8 @@ ${pick.text}
     return comment ? `${blocks.join("\n\n")}
 ${comment}` : blocks.join("\n\n");
   }
-  var BAR = 36;
+  var DRAWER = 40;
+  var BAR = 32;
   var chrome = `
   :root { --endeavor-bar: ${BAR}px; }
   body { padding-top: var(--endeavor-bar); box-sizing: border-box; }
@@ -1179,7 +1235,6 @@ ${comment}` : blocks.join("\n\n");
     display: block !important; position: sticky; top: var(--endeavor-bar); z-index: 60; }
   pluto-editor > header#pluto-nav nav#at_the_top > :not(#process_status) { display: none !important; }
   pluto-editor > header#pluto-nav nav#at_the_top { justify-content: center; }
-  pluto-editor > main { padding-top: 16px; }
   /* What Pluto keeps at the top as the page scrolls (its "Save all changes" button) and where a jump
      to a cell lands go under the toolbar, not behind it. */
   pluto-editor main > preamble { top: calc(var(--endeavor-bar) + 5px) !important; }
@@ -1196,26 +1251,39 @@ ${comment}` : blocks.join("\n\n");
   #endeavor-bar button:hover { color: var(--e-text-primary); background: var(--e-button-hover); }
   #endeavor-bar button.on { color: var(--e-text-primary); background: var(--e-bg-raised); }
   #endeavor-bar .key { color: var(--e-text-faint); }
-  /* Live docs: Pluto's own panel, as a sheet down the right side under the toolbar, opened from Docs.
-     Not display: none when shut: Pluto alerts "window too small to show docs" whenever it opens a panel
-     it finds undisplayed, and it hides the panel below 500px wide. Its Status tab isn't offered here. */
+  /* Live docs and Status: Pluto's own panel, opened from Docs or Status, as a sheet down the right side under the toolbar,
+     or in a panel too narrow to keep the code beside it, a drawer along the bottom (#211), with room
+     under the last cell to scroll it above the drawer. Not display: none when shut: Pluto alerts
+     "window too small to show docs" whenever it opens a panel it finds undisplayed, and it hides the
+     panel below 500px wide. Ember's (R) panel is its own wrapper
+     round the help, with a scrim below 640 px: the wrapper takes the sheet's place, and no scrim
+     covers the code. */
   #helpbox-wrapper { display: block !important; }
-  pluto-helpbox.hidden, pluto-helpbox.helpbox-process { display: none !important; }
-  pluto-helpbox { position: fixed !important; top: var(--endeavor-bar) !important; bottom: 0 !important;
-    right: 0 !important; height: auto !important; width: min(380px, 100vw) !important;
-    border-radius: 0 !important; border-left: 1px solid var(--e-divider); box-shadow: -8px 0 24px var(--e-shadow-popover) !important; }
-  /* Its own tabs and close button: Docs in the toolbar opens and closes it. */
+  pluto-helpbox.hidden { display: none !important; }
+  ${PLUTO} pluto-helpbox, ${EMBER} #helpbox-wrapper.open { position: fixed !important; top: var(--endeavor-bar) !important; bottom: 0 !important;
+    left: auto !important; right: 0 !important; height: auto !important; width: min(380px, 100vw) !important;
+    border-radius: 0 !important; border: none !important; border-left: 1px solid var(--e-divider) !important;
+    box-shadow: -8px 0 24px var(--e-shadow-popover) !important; }
+  ${EMBER} pluto-helpbox { position: static !important; width: auto !important; height: 100% !important; border: none !important; box-shadow: none !important; }
+  ${EMBER} .ember-scrim { display: none !important; }
+  /* Its own tabs and close button: Docs and Status in the toolbar open and close it. */
   pluto-helpbox > header { display: none !important; }
-  /* A narrow panel: the name before the shortcut, and the sheet over the whole width. */
+  @media (max-width: 759px) {
+    ${PLUTO} pluto-helpbox, ${EMBER} #helpbox-wrapper.open { top: auto !important; left: 0 !important; width: auto !important; height: ${DRAWER}vh !important;
+      border-left: none !important; border-top: 1px solid var(--e-divider) !important; box-shadow: 0 -8px 24px var(--e-shadow-popover) !important; }
+    /* Ember's sheet slides in from the right below 1240 px; as a drawer it comes up from the bottom. */
+    ${EMBER} #helpbox-wrapper.open { animation-name: ember-slide-up !important; }
+    body:has(pluto-helpbox:not(.hidden)) pluto-editor:not(.disable_ui) > main { padding-bottom: calc(${DRAWER}vh + 24px) !important; }
+  }
+  /* A narrow panel: the file's name before the shortcut and the panel buttons' words (their icons stay). */
   @media (max-width: 420px) {
-    #endeavor-bar .key { display: none; }
-    pluto-helpbox { border-left: none; }
+    #endeavor-bar .key, #endeavor-bar .panel .word { display: none; }
   }
   /* Pluto's floating safe-preview badge is hidden, as in the app: its band and each cell's
      "Code not executed in Safe preview" already say it. */
   .outline-frame-actions-container.safe-preview { display: none !important; }
 `;
-  var css4 = `
+  var css5 = `
   #annotate-hint { top: calc(var(--endeavor-bar) + 8px) !important; }
   #endeavor-sent { position: fixed; left: 50%; top: calc(var(--endeavor-bar) + 8px); transform: translateX(-50%); z-index: 10001; display: none;
     max-width: calc(100vw - 32px); box-sizing: border-box; text-align: center;
@@ -1231,6 +1299,11 @@ ${comment}` : blocks.join("\n\n");
   }
   var fileName = (path) => path ? path.split(/[\\/]/).pop() || "Notebook" : "Notebook";
   var book = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 3.2c1.8-.6 3.7-.4 5.5.8 1.8-1.2 3.7-1.4 5.5-.8v9.6c-1.8-.6-3.7-.4-5.5.8-1.8-1.2-3.7-1.4-5.5-.8z"/><path d="M8 4v9.6"/></svg>`;
+  var pulse = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8.5h3l1.8-4.5 3.4 8 1.8-3.5h3"/></svg>`;
+  var PANELS = [
+    ["docs", "Docs", book, "Live docs: what the code under the cursor does"],
+    ["process", "Status", pulse, "Status: what the notebook is doing, its packages and how long each step took"]
+  ];
   function initBar(withPoint, point) {
     const style = document.createElement("style");
     style.id = "endeavor-chrome";
@@ -1238,18 +1311,20 @@ ${comment}` : blocks.join("\n\n");
     document.head.append(style);
     const bar = document.createElement("div");
     bar.id = "endeavor-bar";
-    bar.innerHTML = `<span class="file">Notebook</span><span class="doing">Loading\u2026</span><span class="grow"></span><button type="button" class="docs" title="Live docs: what the code under the cursor does">${book}<span>Docs</span></button>` + (withPoint ? `<button type="button" id="endeavor-point" title="Point at a cell, its code or its output, and comment on it for Claude"><span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span></button>` : "");
+    bar.innerHTML = `<span class="file">Notebook</span><span class="doing">Loading\u2026</span><span class="grow"></span>` + PANELS.map(([tab, word, icon, title]) => `<button type="button" class="panel ${tab}" title="${title}" aria-label="${word}">${icon}<span class="word">${word}</span></button>`).join("") + (withPoint ? `<button type="button" id="endeavor-point" title="Point at a cell, its code or its output, and comment on it for Claude"><span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span></button>` : "");
     document.body.prepend(bar);
     const file = bar.querySelector(".file");
     const words = bar.querySelector(".doing");
-    const docs = bar.querySelector(".docs");
     const pointButton = bar.querySelector("#endeavor-point");
-    const docsOpen = () => !!document.querySelector("pluto-helpbox.helpbox-docs:not(.hidden)");
-    docs.addEventListener("click", (e) => {
-      if (!e.isTrusted) return;
-      window.dispatchEvent(new CustomEvent("open_bottom_right_panel", { detail: docsOpen() ? null : "docs" }));
-      if (!docsOpen()) setTimeout(() => document.querySelector("#live-docs-search")?.focus(), 50);
-    });
+    const panelOpen = (tab) => !!document.querySelector(`pluto-helpbox.helpbox-${tab}:not(.hidden)`);
+    const panels = PANELS.map(([tab]) => [tab, bar.querySelector(`.panel.${tab}`)]);
+    for (const [tab, button] of panels)
+      button.addEventListener("click", (e) => {
+        if (!e.isTrusted) return;
+        const open = panelOpen(tab);
+        window.dispatchEvent(new CustomEvent("open_bottom_right_panel", { detail: open ? null : tab }));
+        if (!open && tab === "docs") setTimeout(() => document.querySelector("#live-docs-search")?.focus(), 50);
+      });
     pointButton?.addEventListener("click", (e) => e.isTrusted && point(!document.body.classList.contains("annotating")));
     let last = null;
     const tick = () => {
@@ -1260,7 +1335,7 @@ ${comment}` : blocks.join("\n\n");
         file.title = file.textContent;
         words.textContent = doing(nb);
       }
-      docs.classList.toggle("on", docsOpen());
+      for (const [tab, button] of panels) button.classList.toggle("on", panelOpen(tab));
       pointButton?.classList.toggle("on", document.body.classList.contains("annotating"));
     };
     let soon = 0;
@@ -1336,6 +1411,7 @@ ${[...earlier, text].join("\n\n")}`).then(
     });
     initTheme();
     initNarrow();
+    initSpace();
     closeStrayCompletions();
     initLinks(host2.openLink);
     followNewCells();
@@ -1346,7 +1422,7 @@ ${[...earlier, text].join("\n\n")}`).then(
     initAskBox();
     initAnnotate(true);
     const style = document.createElement("style");
-    style.textContent = css4;
+    style.textContent = css5;
     document.head.append(style);
     document.body.append(sent);
     window.addEventListener(
