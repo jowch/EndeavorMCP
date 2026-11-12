@@ -219,7 +219,7 @@ window.addEventListener("message", async e => {
   await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Kept", null, { timeout: 5000 }).catch(() => {});
   await new Promise(r => setTimeout(r, 1000));
   const back = await frame.evaluate(() => ({ comment: document.querySelector("#annotate-bar textarea").value, what: document.querySelector("#annotate-bar .status")?.textContent, said: document.getElementById("endeavor-sent")?.textContent }));
-  check(back.comment === "Kept" && /squares/.test(back.what || "") && /type in it\. Your pick is back/.test(back.said || "") && (await page.evaluate(() => window.messages.length === 2 && window.refuse === 0)), `a refused send isn't tried again, and Point gets its pick and comment back (${JSON.stringify(back)})`);
+  check(back.comment === "Kept" && /squares/.test(back.what || "") && /try again in a few seconds\. Your pick is back/.test(back.said || "") && (await page.evaluate(() => window.messages.length === 2 && window.refuse === 0)), `a refused send isn't tried again, and Point gets its pick and comment back (${JSON.stringify(back)})`);
   await frame.locator("#annotate-bar textarea").press("Enter");
   await page.waitForFunction(() => window.messages.length === 3, null, { timeout: 5000 }).catch(() => {});
   const again = await page.evaluate(() => window.messages[2]?.content?.[0]?.text || "");

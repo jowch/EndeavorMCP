@@ -243,7 +243,7 @@ function closeAll() { [...sockets].forEach(s => s.close()); }
 const pointHost = {
   get canSend() { return !!app.getHostCapabilities()?.message; },
   send: text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\u2014\n\n" + text }] }).then(res => {
-    if (res?.isError) throw new Error("it isn't ready for a few seconds after you type in it");
+    if (res?.isError) throw new Error("it isn't ready yet, so try again in a few seconds");
   }),
 };
 
