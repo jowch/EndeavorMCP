@@ -51,7 +51,12 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   takes no messages from views gets the look without Point. A notebook's output
   scripts run in the view and can post to the chat too (#304); Desktop takes a
   view's message only right after a press in the view and never sends it, and
-  the README tells users to read the box before sending. Point's figures and boxes go without a picture, which
+  the README tells users to read the box before sending. The view fills Claude's
+  panel: Pluto's header, footer and floating tabs give way to one slim toolbar
+  (the file's name, what Pluto is doing, Docs and Point), and Pluto's header
+  shows only as its band when the notebook needs the user (Safe preview,
+  Restart). The "Open notebook" card uses Claude's style variables, on a
+  transparent background. Point's figures and boxes go without a picture, which
   the app takes natively. Desktop's Chat tab draws no card (its tool list lacks the app-only tools,
   checked 2026-11-12), and the server can't tell it from the Code tab: so the
   agent says the notebook should show beside the chat, and if the user doesn't

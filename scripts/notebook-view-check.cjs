@@ -179,13 +179,16 @@ window.addEventListener("message", async e => {
   check(true, `moving the slider ran the dependent cell again in Julia (${Date.now() - moved} ms)`);
   await page.screenshot({ path: path.join(dir, "view.png") });
 
-  // The Endeavor look, with Pluto's own header (the view has no app header to stand in for it).
+  // The Endeavor look, filling the panel: Pluto's header and footer give way to the view's toolbar,
+  // with the file's name, Docs and Point.
   const look = await frame.evaluate(() => ({
     colours: (document.getElementById("endeavor-theme")?.textContent || "").includes("--main-bg-color"),
     header: getComputedStyle(document.querySelector("header#pluto-nav") || document.body).display !== "none",
-    button: !!document.getElementById("endeavor-point"),
+    footer: getComputedStyle(document.querySelector("pluto-editor footer") || document.body).display !== "none",
+    toolbar: document.querySelector("#endeavor-bar .file")?.textContent,
+    button: !!document.querySelector("#endeavor-bar #endeavor-point"),
   }));
-  check(look.colours && look.header && look.button, `the Endeavor look is on, Pluto's header shows, and so does Point's button (${JSON.stringify(look)})`);
+  check(look.colours && !look.header && !look.footer && look.toolbar === "view-check.jl" && look.button, `the Endeavor look is on, and the toolbar (name, Docs, Point) stands in for Pluto's header and footer (${JSON.stringify(look)})`);
   // Point: the button, a click on the squares cell's output, a comment, ↩.
   await frame.click("#endeavor-point");
   check(await frame.evaluate(() => document.body.classList.contains("annotating")), "the button turns Point on");
