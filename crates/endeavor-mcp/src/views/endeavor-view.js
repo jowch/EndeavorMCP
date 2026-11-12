@@ -1138,15 +1138,15 @@ footer form#feedback { display: none !important; }
   }
 
   // src/view.ts
-  var FORMAT = "A quote's uri, notebook://pluto/{notebook_id}/cell/{cell_id}, names its cell (it is not a fetchable URL); `lines` are line numbers in the cell's code, counting from 1. `part` says what was quoted when it isn't code: `output` (text from the cell's output), `figure` (the cell's output, a picture) or `box` (a box the user drew over the notebook; `uri` lists the cells under it). No picture comes with a figure or box here: read current code and outputs with the notebook MCP tools.";
-  var QUOTE_NOTE = "[Endeavor] The user quoted parts of the notebook in this message, each as a <quote> followed by their comment on it. " + FORMAT;
+  var format = (engine) => "A quote's uri, notebook://" + engine + "/{notebook_id}/cell/{cell_id}, names its cell (it is not a fetchable URL); `lines` are line numbers in the cell's code, counting from 1. `part` says what was quoted when it isn't code: `output` (text from the cell's output), `figure` (the cell's output, a picture) or `box` (a box the user drew over the notebook; `uri` lists the cells under it). No picture comes with a figure or box here: read current code and outputs with the notebook MCP tools.";
+  var quoteNote = (engine = "pluto") => "[Endeavor] The user quoted parts of the notebook in this message, each as a <quote> followed by their comment on it. " + format(engine);
   var LEAD = "\u2193";
   var LEAD_NOTE = " A \u2193 just before this note only marks where the quotes start; it isn't part of the user's words.";
-  var uri = (notebook, cell) => `notebook://pluto/${notebook}/cell/${cell}`;
-  function quoteBlock(notebook, pick) {
-    if (pick.part === "box") return `<quote part="box" uri="${pick.cells.map((c) => uri(notebook, c)).join(" ")}"/>`;
+  var uri = (notebook, cell, engine) => `notebook://${engine}/${notebook}/cell/${cell}`;
+  function quoteBlock(notebook, pick, engine = "pluto") {
+    if (pick.part === "box") return `<quote part="box" uri="${pick.cells.map((c) => uri(notebook, c, engine)).join(" ")}"/>`;
     const at = `cell="${cellName(pick.code).replace(/"/g, "'")}"`;
-    const where = uri(notebook, pick.cell);
+    const where = uri(notebook, pick.cell, engine);
     switch (pick.part) {
       case "cell":
         return `<quote ${at} uri="${where}">
@@ -1164,8 +1164,8 @@ ${pick.text}
         return `<quote ${at} part="figure" uri="${where}"/>`;
     }
   }
-  function quoteText(notebook, picks, comment) {
-    const blocks = picks.map((p) => quoteBlock(notebook, p));
+  function quoteText(notebook, picks, comment, engine = "pluto") {
+    const blocks = picks.map((p) => quoteBlock(notebook, p, engine));
     return comment ? `${blocks.join("\n\n")}
 ${comment}` : blocks.join("\n\n");
   }
@@ -1290,6 +1290,7 @@ ${comment}` : blocks.join("\n\n");
   function start(notebook, host2) {
     if (started) return;
     started = true;
+    const engine = host2.engine === "ember" ? "ember" : "pluto";
     const added = [];
     const receive = (msg) => window.__endeavor?.receive(msg);
     const sent = document.createElement("div");
@@ -1304,7 +1305,7 @@ ${comment}` : blocks.join("\n\n");
     const point = (on2) => receive({ type: "annotate", on: on2 });
     setHost((msg) => {
       if (msg.type !== "quote" || !msg.picks.length) return;
-      const text = quoteText(notebook, msg.picks, msg.comment);
+      const text = quoteText(notebook, msg.picks, msg.comment, engine);
       if (msg.add) {
         added.push(text);
         return say(`${added.length} added. ${mac ? "\u21A9" : "Enter"} passes ${added.length === 1 ? "it" : "them"} to the chat with the next pick.`);
@@ -1313,7 +1314,7 @@ ${comment}` : blocks.join("\n\n");
       say("Sending to Claude's chat\u2026", 0);
       host2.send(`${LEAD}
 
-${QUOTE_NOTE}${LEAD_NOTE}
+${quoteNote(engine)}${LEAD_NOTE}
 
 ${[...earlier, text].join("\n\n")}`).then(
         () => {
