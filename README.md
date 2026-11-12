@@ -220,6 +220,21 @@ and the page says how to get in. The agent can:
 Each agent session works in one notebook. If you edit a cell while the agent
 works, it reads your change before it overwrites it.
 
+### In Claude's desktop app
+
+In the Code tab of Claude's desktop app, the notebook opens beside the chat
+instead of in your browser. **Point** (⌘⇧E, or Ctrl+Shift+E) lets you click a
+cell, its code or its output, add a comment, and press ↩ to put it in the
+chat's message box, ready to send. The text starts with ↓ on its own line.
+If the app isn't ready for it, which happens for a few seconds after you type
+in the message box, your pick comes back and ↩ tries again.
+
+A notebook's outputs can carry their own scripts, and in this view a script
+can put text in your message box too, after any click in the notebook. The
+app never sends it for you, so read what's in the box before you send it.
+Open notebooks from other people in safe preview and look at them before you
+run them, as you would in Pluto.
+
 ## What keeps running
 
 The notebook runtime keeps running after the agent session ends. A later
