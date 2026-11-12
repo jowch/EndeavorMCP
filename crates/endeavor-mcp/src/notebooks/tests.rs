@@ -2261,6 +2261,20 @@ fn opening_and_making_notebooks() {
     assert_eq!(s.call("", "new_notebook", json!({ "path": path })), Err(format!("ArgumentError: file_exists::'{path}' already exists; use open_notebook to load it")));
     assert_eq!(s.refused("", "new_notebook", json!({ "path": format!("{dir}{SEP}x.txt") })), "invalid_path");
     assert_eq!(s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}missing{SEP}y.jl") })), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}{SEP}missing'")));
+    // A read-only folder is refused before the engine fails to save there, with where to go instead.
+    // (Root writes anywhere, so there the folder isn't read-only to it and nothing is checked.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = format!("{dir}{SEP}locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(format!("{locked}{SEP}probe"), "").is_err() {
+            let refused = s.call("", "new_notebook", json!({ "path": format!("{locked}{SEP}z.jl") })).unwrap_err();
+            assert!(refused.starts_with(&format!("ArgumentError: folder_not_writable::A new notebook can't be saved in the folder, '{locked}': it is read-only.")) && refused.contains("`path`"), "{refused}");
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     // A session's folder takes its unnamed notebooks, and relative paths.
     let named = s.notebooks.tool("s", "new_notebook", &json!({ "path": "named.jl" }), &Folder::In(dir.clone()), Instant::now()).map(tool_json).unwrap();
     assert_eq!(named["path"], format!("{dir}{SEP}named.jl"));
