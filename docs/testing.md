@@ -196,7 +196,8 @@ policy lets it reach nothing but its own tools, as in Claude. Playing the
 host's side of the MCP Apps protocol, it checks that the view stays a card
 inline, opens the live notebook once moved to the panel, that moving the
 slider runs the dependent cell again in Julia, and that the Endeavor look is
-on and a pick with Point reaches the chat as the user's message (↩, with what ⌘↩ added). It needs Playwright with
+on and a pick with Point reaches the chat as the user's message (↩, with what ⌘↩ added). Last, it
+closes the notebook with `close_notebook` and checks that the view says the notebook was closed. It needs Playwright with
 Chromium (preinstalled in a cloud session) and Julia:
 
 ```sh

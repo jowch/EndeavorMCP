@@ -191,9 +191,10 @@ class RelaySocket {
   async _start() {
     if (!active) await new Promise(go => waiters.push(go));
     if (this.readyState !== 0) return;
+    if (failed) return this._closed();
     try {
       this.id = (await call("notebook_socket_open", { notebook_id: notebook.id })).socket;
-    } catch (e) { return this._closed(); }
+    } catch (e) { if (/^not_open\b/.test(e.message)) shut(); return this._closed(); }
     if (this.readyState !== 0) { call("notebook_socket_close", { socket: this.id }).catch(() => {}); return; }
     this.readyState = 1;
     this._fire("open", {});
@@ -244,6 +245,16 @@ class RelaySocket {
   removeEventListener(type, f) { this._listeners[type] = (this._listeners[type] || []).filter(g => g !== f); }
 }
 function closeAll() { [...sockets].forEach(s => s.close()); }
+// The notebook was closed (Claude's close_notebook, say) while its page was shown: Pluto would
+// say "Reconnecting…" for ever, and drop what the user types. Cover it with a plain message instead.
+function shut() {
+  if (failed) return;
+  failed = "This notebook was closed. Ask Claude to open it again.";
+  retry = false;
+  card.hidden = false;
+  card.className = "cover";
+  update();
+}
 
 // Point's ↩ passes the picks and the comment (and what ⌘↩ added) to the chat as the user's message (Claude's desktop
 // app puts it in its message box for the user to send). A host that takes no messages from views gets

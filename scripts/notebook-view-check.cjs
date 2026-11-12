@@ -282,7 +282,16 @@ window.addEventListener("message", async e => {
   const reported = await page.evaluate(() => (window.sizes || []).at(-1)?.height);
   const small = await frame.evaluate(() => document.documentElement.classList.contains("endeavor-inline") && [...document.body.children].filter(e => e.id !== "endeavor-card").every(e => getComputedStyle(e).display === "none"));
   check(small && reported < 200, `with the pane closed, the card and its button are back, at card size (reports ${reported} px)`);
-  console.log("screenshots " + path.join(dir, "view.png") + " " + path.join(dir, "point.png"));
+  // Back in the pane, Claude closes the notebook: the view says so, instead of Pluto's endless "Reconnecting…".
+  await frame.click("#endeavor-open");
+  await frame.waitForFunction(() => document.querySelector("#endeavor-card").hidden, null, { timeout: 10000 });
+  const closed = (await rpc("tools/call", { name: "close_notebook", arguments: { notebook_id: fields.notebook_id } })).result;
+  check(!closed.isError, "close_notebook closed it");
+  await frame.waitForFunction(() => /was closed/.test(document.querySelector("#endeavor-card.cover:not([hidden]) .note")?.textContent || ""), null, { timeout: 30000 }).catch(() => {});
+  const shut = await frame.evaluate(() => ({ note: document.querySelector("#endeavor-card .note").textContent, cover: document.querySelector("#endeavor-card").className, button: !document.querySelector("#endeavor-open").hidden }));
+  check(shut.cover === "cover" && /was closed/.test(shut.note) && !shut.button, `once it's closed, the view says so (${JSON.stringify(shut)})`);
+  await page.screenshot({ path: path.join(dir, "closed.png") });
+  console.log("screenshots " + ["view.png", "point.png", "closed.png"].map(f => path.join(dir, f)).join(" "));
   console.log("view calls " + JSON.stringify(calls));
   const at = name => firsts[name] ? `${firsts[name][0] - clicked} ms (took ${firsts[name][1]} ms)` : "never";
   console.log(`after the click: first page part at ${at("notebook_page")}, socket opened at ${at("notebook_socket_open")}, cells drawn at ${cellsAt} ms`);

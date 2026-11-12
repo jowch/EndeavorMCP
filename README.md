@@ -215,6 +215,7 @@ and the page says how to get in. The agent can:
   preview: nothing runs until you click **Run notebook code** or ask the agent
   to run it.
 - Add, edit, delete, move and fold cells, then run them.
+- Close a notebook when you ask: its process ends, and the file keeps its code.
 - Read cell outputs, including tables, and look at plots.
 
 Each agent session works in one notebook. If you edit a cell while the agent

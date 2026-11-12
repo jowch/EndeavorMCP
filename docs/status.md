@@ -64,7 +64,10 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   see it, opens it again with `in_browser`, which opens a browser tab (#311).
   Desktop also serves all its conversations on one connection, so its session
   may work on several notebooks, and one conversation can change a notebook
-  another opened once it opens it (`X-Endeavor-Notebooks`, docs/endeavor-mcp.md). Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
+  another opened once it opens it (`X-Endeavor-Notebooks`, docs/endeavor-mcp.md).
+  `close_notebook` ends a session's own notebook's process when the user asks,
+  as the app's Stop notebook does, so a sitting no longer needs `endeavor stop`
+  (interface 37). Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
   tab (the chat's view reaches another `endeavor mcp` process, which works on
   this computer). A client that draws views but can't move one beside the chat
   gets only the card. Claude ignores the documented automatic side panel for a

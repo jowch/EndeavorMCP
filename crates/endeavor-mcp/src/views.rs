@@ -94,6 +94,10 @@ pub const IN_BROWSER: &str = "in_browser";
 pub fn add_to(tools: &mut Vec<Value>) {
     for tool in tools.iter_mut().filter(|tool| tool["name"].as_str().is_some_and(|name| SHOWN_BY.contains(&name))) {
         tool["_meta"] = json!({ "ui": { "resourceUri": URI }, "ui/resourceUri": URI });
+        // Claude's desktop app shows the title in the call's row, after "Widget from <server>" (2026-11-12).
+        if tool["title"].is_null() {
+            tool["title"] = json!(if tool["name"] == "new_notebook" { "New notebook" } else { "Open notebook" });
+        }
         // A client may say it draws views and still show no card (Claude's desktop app, in its Chat
         // tab, 2026-11-12, #311): the way back to the browser.
         tool["inputSchema"]["properties"][IN_BROWSER] = json!({
@@ -116,7 +120,8 @@ pub fn resources_read(params: &Value) -> Option<Value> {
             "mimeType": MIME,
             "text": PAGE.as_str(),
             // Claude's own field: open in the side panel, not in the conversation. The view also
-            // declares that it shows in the panel only (`availableDisplayModes`).
+            // declares that it shows in the panel only (`availableDisplayModes`). Claude's desktop app
+            // ignores `prefersBorder` for a local server (2026-11-12) and keeps its bordered frame.
             "_meta": { "ui": { "prefersBorder": false, "preferredDisplayMode": "fullscreen" } },
         }] })
     })
@@ -643,6 +648,15 @@ mod tests {
         let names: Vec<&str> = tools[2..].iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(names, NAMES);
         assert!(tools[2..].iter().all(|t| t["_meta"]["ui"]["visibility"] == json!(["app"])));
+    }
+
+    #[test]
+    fn the_tools_that_show_the_view_have_a_title_and_keep_their_own() {
+        let mut tools = vec![json!({ "name": "open_notebook" }), json!({ "name": "new_notebook" }), json!({ "name": "open_notebook", "title": "Kept" })];
+        add_to(&mut tools);
+        assert_eq!(tools[0]["title"], "Open notebook");
+        assert_eq!(tools[1]["title"], "New notebook");
+        assert_eq!(tools[2]["title"], "Kept");
     }
 
     #[test]
