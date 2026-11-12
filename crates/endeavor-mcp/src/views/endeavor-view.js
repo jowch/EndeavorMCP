@@ -375,7 +375,7 @@
     return !!a.el && a.el === b.el;
   }
   var state = null;
-  function initAnnotate() {
+  function initAnnotate(answered = false) {
     const picks = [];
     let hover = null;
     const active = () => document.body.classList.contains("annotating");
@@ -497,10 +497,12 @@
       send({ type: "mode", on: enable });
       requestAnimationFrame(() => setTimeout(() => document.body.classList.toggle("annotate-numbers", active())));
     }
+    const underWay = [];
     async function sendComment(add) {
       if (!picks.length) return;
       const sending = picks.splice(0, picks.length);
       const comment = text.value.trim();
+      if (!add && answered) underWay.push({ picks: sending, comment });
       text.value = "";
       text.dispatchEvent(new Event("input"));
       refresh();
@@ -601,6 +603,17 @@
     );
     hint.querySelector(".done").onclick = () => set(false);
     on("annotate", (msg) => set(msg.on));
+    on("quote_sent", (msg) => {
+      const sent = underWay.shift();
+      if (msg.ok || !sent || !active()) return;
+      picks.unshift(...sent.picks.filter((p) => !picks.some((q) => samePick(p, q))));
+      if (sent.comment) {
+        text.value = text.value.trim() ? `${sent.comment}
+${text.value}` : sent.comment;
+        text.dispatchEvent(new Event("input"));
+      }
+      refresh();
+    });
   }
 
   // src/engine.ts
@@ -1000,7 +1013,6 @@ ${comment}` : blocks.join("\n\n");
       clearTimeout(hide);
       hide = window.setTimeout(() => sent.classList.remove("shown"), 4e3);
     };
-    const kept = (why) => say(`${why} Your ${added.length === 1 ? "pick is" : "picks are"} kept: ${mac ? "\u21A9" : "Enter"} with your next pick passes ${added.length === 1 ? "it" : "them"} to the chat.`);
     setHost((msg) => {
       if (msg.type === "shoot") return setTimeout(() => toPage?.({ type: "shot", id: msg.id }));
       if (msg.type !== "quote" || !msg.picks.length) return;
@@ -1013,10 +1025,14 @@ ${comment}` : blocks.join("\n\n");
       host2.send(`${QUOTE_NOTE}
 
 ${[...earlier, text].join("\n\n")}`).then(
-        () => say("Passed to the chat"),
+        () => {
+          toPage?.({ type: "quote_sent", ok: true });
+          say("Passed to the chat");
+        },
         (e) => {
-          added.unshift(...earlier, text);
-          kept(`Couldn't reach Claude's chat${e instanceof Error && e.message ? `: ${e.message}` : ""}.`);
+          added.unshift(...earlier);
+          toPage?.({ type: "quote_sent", ok: false });
+          say(`Couldn't reach Claude's chat${e instanceof Error && e.message ? `: ${e.message}` : ""}. Your ${msg.picks.length === 1 ? "pick is" : "picks are"} back: ${mac ? "\u21A9" : "Enter"} sends again.`);
         }
       );
     });
@@ -1026,7 +1042,7 @@ ${[...earlier, text].join("\n\n")}`).then(
     receive({ type: "theme", name: "view" });
     if (!host2.canSend) return;
     initAskBox();
-    initAnnotate();
+    initAnnotate(true);
     const style = document.createElement("style");
     style.textContent = css3;
     document.head.append(style);

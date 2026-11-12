@@ -235,13 +235,19 @@ function closeAll() { [...sockets].forEach(s => s.close()); }
 // app puts it in its message box for the user to send). A host that takes no messages from views gets
 // the look without Point. Claude's desktop app adds the text at the cursor, straight after anything the
 // user had typed, so it starts on a new paragraph.
-const asked = async res => { if (res?.isError) throw new Error("Claude's chat didn't take it"); };
-const message = text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\n\n" + text }] }).then(asked);
-// Claude's desktop app refused the first message after the user had typed in its own box, and took
-// the same message a moment later (2026-11-12): one refusal is tried again before Point says so.
+// Claude's desktop app refused (isError) Point's first message after the user had typed in its own
+// box, and inserted nothing; a new message seconds later went through (Desktop recheck, 2026-11-12).
+// So a refusal is tried once more, after a pause that is a guess. Anything else (a timeout, say) isn't:
+// a late first answer would put the message in twice.
+const refused = "Claude's chat didn't take it";
+const message = text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\n\n" + text }] })
+  .then(res => { if (res?.isError) throw new Error(refused); });
 const pointHost = {
   get canSend() { return !!app.getHostCapabilities()?.message; },
-  send: text => message(text).catch(() => new Promise(go => setTimeout(go, 600)).then(() => message(text))),
+  send: text => message(text).catch(e => {
+    if (e?.message !== refused) throw e;
+    return new Promise(go => setTimeout(go, 600)).then(() => message(text));
+  }),
 };
 
 async function load() {
