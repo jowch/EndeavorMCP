@@ -278,6 +278,11 @@
     document.body.classList.remove(SHOOTING);
     return id;
   }
+  function pickSource(pick) {
+    if (pick.part === "box") return `Box \xB7 ${pick.cells.length} cell${pick.cells.length === 1 ? "" : "s"}`;
+    const part = pick.part === "lines" ? pick.lines[0] === pick.lines[1] ? `line ${pick.lines[0]}` : `lines ${pick.lines[0]}\u2013${pick.lines[1]}` : pick.part;
+    return `${cellName(pick.code)} \xB7 ${part}`;
+  }
   function sendQuote(picks, comment, add, ref) {
     const notebook = new URLSearchParams(location.search).get("id");
     send({ type: "quote", notebook, picks, comment, add, ...ref === void 0 ? {} : { ref } });
@@ -375,6 +380,17 @@
     return !!a.el && a.el === b.el;
   }
   var state = null;
+  function pointState() {
+    const picks = state?.picks ?? [];
+    const cells = picks.flatMap((p) => p.pick.part === "box" ? p.pick.cells : [p.pick.cell]);
+    return {
+      picked: [...new Set(cells)],
+      picks: picks.map((p) => pickSource(p.pick)),
+      box: picks.some((p) => p.box),
+      status: state?.status() ?? "",
+      comment: state?.comment() ?? ""
+    };
+  }
   function initAnnotate(answered = false) {
     const picks = [];
     let hover = null;
@@ -1003,24 +1019,30 @@ ${comment}` : blocks.join("\n\n");
   #endeavor-sent { position: fixed; right: 16px; bottom: 16px; z-index: 10001; display: none;
     padding: 4px 12px; border-radius: 999px; background: var(--e-hint-bg); color: var(--e-hint-text); font: 12px system-ui; }
   #endeavor-sent.shown { display: block; }
+  /* Pluto's own overlays at the bottom, laid out round Point's button: the Live docs and Status tabs just above it,
+     the safe-preview badge at the bottom left, and Settings and FAQ, at the end of the page, above all three. */
+  pluto-helpbox { bottom: 52px !important; }
+  .outline-frame-actions-container.safe-preview { left: 16px; bottom: 12px; }
+  pluto-editor footer { padding-bottom: 104px; }
 `;
   var started = false;
   function start(notebook, host2) {
     if (started) return;
     started = true;
     const added = [];
-    let toPage = null;
+    const receive = (msg) => window.__endeavor?.receive(msg);
     const sent = document.createElement("div");
     sent.id = "endeavor-sent";
     let hide = 0;
-    const say = (text) => {
+    const say = (text, ms = 4e3) => {
       sent.textContent = text;
       sent.classList.add("shown");
       clearTimeout(hide);
-      hide = window.setTimeout(() => sent.classList.remove("shown"), 4e3);
+      if (ms) hide = window.setTimeout(() => sent.classList.remove("shown"), ms);
     };
+    const point = (on2) => receive({ type: "annotate", on: on2 });
     setHost((msg) => {
-      if (msg.type === "shoot") return setTimeout(() => toPage?.({ type: "shot", id: msg.id }));
+      if (msg.type === "shoot") return setTimeout(() => receive({ type: "shot", id: msg.id }));
       if (msg.type !== "quote" || !msg.picks.length) return;
       const text = quoteText(notebook, msg.picks, msg.comment);
       if (msg.add) {
@@ -1028,25 +1050,28 @@ ${comment}` : blocks.join("\n\n");
         return say(`${added.length} added. ${mac ? "\u21A9" : "Enter"} passes ${added.length === 1 ? "it" : "them"} to the chat with the next pick.`);
       }
       const earlier = added.splice(0);
+      say("Sending to Claude's chat\u2026", 0);
       host2.send(`${LEAD}
 
 ${QUOTE_NOTE}${LEAD_NOTE}
 
 ${[...earlier, text].join("\n\n")}`).then(
         () => {
-          if (msg.ref !== void 0) toPage?.({ type: "quote_sent", ref: msg.ref, ok: true });
-          say("Passed to the chat");
+          if (msg.ref !== void 0) receive({ type: "quote_sent", ref: msg.ref, ok: true });
+          say("On its way to Claude's message box. Send it from there.", 8e3);
+          const now = pointState();
+          if (!now.picks.length && !now.comment.trim()) point(false);
         },
         (e) => {
           added.unshift(...earlier);
-          if (msg.ref !== void 0) toPage?.({ type: "quote_sent", ref: msg.ref, ok: false });
+          if (msg.ref !== void 0) receive({ type: "quote_sent", ref: msg.ref, ok: false });
           say(`Couldn't reach Claude's chat${e instanceof Error && e.message ? `: ${e.message}` : ""}. Your ${msg.picks.length === 1 ? "pick is" : "picks are"} back: ${mac ? "\u21A9" : "Enter"} sends again.`);
         }
       );
     });
     initTheme();
-    const receive = (msg) => window.__endeavor?.receive(msg);
-    toPage = receive;
+    closeStrayCompletions();
+    followNewCells();
     receive({ type: "theme", name: "view" });
     if (!host2.canSend) return;
     initAskBox();
@@ -1059,7 +1084,6 @@ ${[...earlier, text].join("\n\n")}`).then(
     button.type = "button";
     button.title = "Point at a cell, its code or its output, and comment on it for Claude";
     button.innerHTML = `<span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span>`;
-    const point = (on2) => receive({ type: "annotate", on: on2 });
     button.addEventListener("click", (e) => e.isTrusted && point(true));
     document.body.append(button, sent);
     window.addEventListener(
@@ -1072,6 +1096,62 @@ ${[...earlier, text].join("\n\n")}`).then(
       },
       true
     );
+  }
+  var STRAY_MS = 5e3;
+  function closeStrayCompletions() {
+    let lastInput = 0;
+    let timer = 0;
+    for (const type of ["keydown", "pointerdown"]) window.addEventListener(type, (e) => e.isTrusted && (lastInput = Date.now()), true);
+    const list = () => document.querySelector(".cm-tooltip-autocomplete");
+    const close = () => {
+      const open = list();
+      if (!open || document.body.classList.contains("annotating")) return;
+      open.closest(".cm-editor")?.querySelector(".cm-content")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true, cancelable: true }));
+    };
+    const check = (openedAt) => {
+      timer = 0;
+      if (!list()) return;
+      const idle = Date.now() - Math.max(openedAt, lastInput);
+      if (!document.hasFocus() || idle >= STRAY_MS) close();
+      if (list()) timer = window.setTimeout(() => check(openedAt), Math.max(STRAY_MS - idle, 500));
+    };
+    new MutationObserver(() => {
+      if (!timer && list()) check(Date.now());
+    }).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("blur", close);
+  }
+  var IDLE_MS = 2e3;
+  function followNewCells() {
+    let lastInput = 0;
+    for (const type of ["keydown", "pointerdown", "wheel", "touchmove"]) window.addEventListener(type, (e) => e.isTrusted && (lastInput = Date.now()), { capture: true, passive: true });
+    const known = /* @__PURE__ */ new Set();
+    let settled = false;
+    let settle = 0;
+    const cells = () => [...document.querySelectorAll("pluto-cell")];
+    const show = (cell) => {
+      const r = cell.getBoundingClientRect();
+      if (r.top >= 0 && r.bottom <= window.innerHeight) return;
+      cell.scrollIntoView({ block: r.height > window.innerHeight ? "start" : "center", behavior: "smooth" });
+    };
+    new MutationObserver(() => {
+      const added = cells().filter((c) => c.id && !known.has(c.id));
+      if (!added.length) return;
+      added.forEach((c) => known.add(c.id));
+      if (!settled) {
+        clearTimeout(settle);
+        settle = window.setTimeout(() => settled = true, 1500);
+        return;
+      }
+      if (added.length > 3 || Date.now() - lastInput < IDLE_MS) return;
+      const cell = added[added.length - 1];
+      const since = Date.now();
+      show(cell);
+      const grow = new ResizeObserver(() => {
+        if (lastInput > since || Date.now() - since > 15e3 || !cell.isConnected) return grow.disconnect();
+        show(cell);
+      });
+      grow.observe(cell);
+    }).observe(document.body, { childList: true, subtree: true });
   }
   window.EndeavorView = { start };
 })();
