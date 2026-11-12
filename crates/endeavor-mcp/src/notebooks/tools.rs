@@ -777,7 +777,9 @@ impl Call<'_> {
         let snapshots = self.nbs.snapshots()?;
         let bound = self.nbs.bound(self.owner);
         let paths: Vec<String> = snapshots.iter().map(|nb| canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone())).collect();
-        let own = |at: usize| bound.as_ref().is_some_and(|bound| paths[at] == *bound);
+        // Worked out before the state is locked below: `works_on` locks it too.
+        let owned: Vec<bool> = paths.iter().map(|path| bound.as_ref().is_some_and(|bound| path == bound) || self.nbs.works_on(self.owner, path)).collect();
+        let own = |at: usize| owned[at];
         if let Some(bound) = bound.as_ref().filter(|bound| !paths.contains(bound)) {
             self.nbs.unbind(self.owner, bound);
         }

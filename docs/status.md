@@ -55,7 +55,10 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   the app takes natively. Desktop's Chat tab draws no card (its tool list lacks the app-only tools,
   checked 2026-11-12), and the server can't tell it from the Code tab: so the
   agent says the notebook should show beside the chat, and if the user doesn't
-  see it, opens it again with `in_browser`, which opens a browser tab (#311). Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
+  see it, opens it again with `in_browser`, which opens a browser tab (#311).
+  Desktop also serves all its conversations on one connection, so its session
+  may work on several notebooks, and one conversation can change a notebook
+  another opened (`X-Endeavor-Notebooks`, docs/endeavor-mcp.md). Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
   tab (the chat's view reaches another `endeavor mcp` process, which works on
   this computer). A client that draws views but can't move one beside the chat
   gets only the card. Claude ignores the documented automatic side panel for a

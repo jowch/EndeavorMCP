@@ -809,6 +809,9 @@ struct Relay {
     /// The client draws MCP App views (it said so in `initialize`): notebooks show in the notebook
     /// view beside the chat, not in a browser tab (`views`).
     views: std::sync::atomic::AtomicBool,
+    /// The `_meta` keys of a `tools/call` were logged: once, to learn whether a client that serves several
+    /// conversations on one connection names the conversation in each call.
+    meta_logged: std::sync::atomic::AtomicBool,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -985,6 +988,7 @@ impl Relay {
             protocol: Mutex::default(),
             mcp_session: Mutex::default(),
             views: Default::default(),
+            meta_logged: Default::default(),
             out: Mutex::new(out),
         }
     }
@@ -1094,6 +1098,10 @@ impl Relay {
             return;
         }
         let tool = (message["method"] == "tools/call").then(|| crate::mcp::current_name(message["params"]["name"].as_str().unwrap_or_default()).to_owned());
+        if tool.is_some() && !self.meta_logged.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let keys: Vec<&str> = message["params"]["_meta"].as_object().map(|meta| meta.keys().map(String::as_str).collect()).unwrap_or_default();
+            eprintln!("[ Info: Tool calls carry _meta keys: {}", if keys.is_empty() { "(none)".to_owned() } else { keys.join(", ") });
+        }
         // `in_browser` is the front's, for a client that draws views (`views::add_to`); the runtime
         // doesn't know it.
         let mut message = message;
@@ -1247,6 +1255,11 @@ impl Relay {
         }
         if self.options.skills_plugin {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
+        }
+        // A client that draws views (Claude's desktop app) serves all its conversations on this one
+        // connection, so its session may work on several notebooks (`Notebooks::refusal`).
+        if self.views.load(std::sync::atomic::Ordering::SeqCst) {
+            head.push_str("X-Endeavor-Notebooks: several\r\n");
         }
         if let Some(version) = &*self.protocol.lock().unwrap() {
             head.push_str(&format!("MCP-Protocol-Version: {version}\r\n"));

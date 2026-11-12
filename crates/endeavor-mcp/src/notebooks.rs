@@ -238,6 +238,9 @@ struct State {
     /// The app binds a session started from an existing notebook; otherwise
     /// the first notebook the session opens or creates binds it.
     bindings: HashMap<String, String>,
+    /// The sessions that may work on several notebooks (`allow_several`), and the notebooks each
+    /// opened or created after the one it is bound to: canonical paths.
+    several: HashMap<String, HashSet<String>>,
     /// When each agent session last made a tool call, for `recent_sessions` and
     /// to forget sessions that went quiet. Made when a session is bound or
     /// makes a call; dropped with its binding, or `SESSION_KEPT` after its
@@ -274,10 +277,12 @@ impl State {
     /// Drop the records of sessions that haven't called in a week, and their bindings.
     fn forget_old(&mut self, now: f64) {
         let bindings = &mut self.bindings;
+        let several = &mut self.several;
         self.seen.retain(|session, seen| {
             let kept = now - seen.last_call.unwrap_or(f64::MIN).max(seen.since) < SESSION_KEPT;
             if !kept {
                 bindings.remove(session);
+                several.remove(session);
             }
             kept
         });
@@ -625,7 +630,7 @@ impl Notebooks {
             starting: Mutex::default(),
             notices: Mutex::default(),
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new(), calls: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), several: HashMap::new(), seen: HashMap::new(), calls: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),
@@ -1161,7 +1166,10 @@ impl Notebooks {
             let path = canonical_path(path).unwrap_or_else(|_| path.to_owned());
             let now = self.now();
             let mut state = self.state.lock().unwrap();
-            state.bindings.entry(owner.to_owned()).or_insert(path);
+            let bound = state.bindings.entry(owner.to_owned()).or_insert_with(|| path.clone()).clone();
+            if bound != path && let Some(also) = state.several.get_mut(owner) {
+                also.insert(path);
+            }
             state.record_bound(owner, now);
         }
     }
@@ -1172,6 +1180,25 @@ impl Notebooks {
         if state.bindings.get(owner).is_some_and(|bound| bound == path) {
             state.bindings.remove(owner);
         }
+        if let Some(also) = state.several.get_mut(owner) {
+            also.remove(path);
+        }
+    }
+
+    /// Session `owner` may work on several notebooks: its client serves several conversations on one
+    /// connection, so this server can't tell them apart (Claude's desktop app). Each notebook it opens
+    /// or creates is one it works on; it still can't change one it didn't open.
+    pub fn allow_several(&self, owner: &str) {
+        if !owner.is_empty() {
+            self.state.lock().unwrap().several.entry(owner.to_owned()).or_default();
+        }
+    }
+
+    /// Whether session `owner` works on the notebook at canonical `path`: its bound one, or for a
+    /// session that may work on several, one it opened since.
+    fn works_on(&self, owner: &str, path: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state.bindings.get(owner).is_some_and(|bound| bound == path) || state.several.get(owner).is_some_and(|also| also.contains(path))
     }
 
     /// Why a session may not make this call: it works on another notebook.
@@ -1202,6 +1229,9 @@ impl Notebooks {
                     Ok(_) => {}
                 }
             }
+            if self.state.lock().unwrap().several.contains_key(owner) {
+                return None;
+            }
             return match requested {
                 Some(requested) => refuse(&format!("{} {requested}", if tool == "open_notebook" { "open" } else { "create" })),
                 None => refuse("create another notebook"),
@@ -1214,7 +1244,7 @@ impl Notebooks {
         let known = self.state.lock().unwrap().notebooks.get(&id).map(|nb| nb.path.clone()).filter(|p| !p.is_empty());
         let path = known.or_else(|| self.snapshot(&id).ok().map(|nb| nb.path))?;
         match canonical_path(&path) {
-            Ok(canonical) if canonical == bound => None,
+            Ok(canonical) if canonical == bound || self.works_on(owner, &canonical) => None,
             Err(error) => Some(error),
             Ok(_) => refuse(&format!("change or run {path}")),
         }
@@ -1555,6 +1585,10 @@ impl Notebooks {
             let mut state = self.state.lock().unwrap();
             for bound in state.bindings.values_mut().filter(|bound| **bound == old) {
                 *bound = new.clone();
+            }
+            for also in state.several.values_mut().filter(|also| also.contains(&old)) {
+                also.remove(&old);
+                also.insert(new.clone());
             }
             for (key, entry) in state.idle_stopped.iter_mut().filter(|(key, _)| *key == old) {
                 *key = new.clone();

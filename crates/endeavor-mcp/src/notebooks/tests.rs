@@ -2435,6 +2435,37 @@ fn one_notebook_per_session() {
 }
 
 #[test]
+fn a_session_that_may_work_on_several_notebooks() {
+    // Claude's desktop app serves all its conversations on one connection: each notebook that session
+    // opens or creates is one it works on, and it still can't change one it didn't open.
+    let s = setup();
+    let paths = temp_notebooks("several", 4);
+    let refused = |result: Result<Value, String>| result.err().and_then(|e| e.split_once("::").map(|(kind, _)| kind.to_owned()));
+    let one = Some("ArgumentError: one_notebook".to_owned());
+    s.notebooks.allow_several("d");
+    let first = s.call("d", "open_notebook", json!({ "path": &paths[0] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    let second = s.call("d", "open_notebook", json!({ "path": &paths[1] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    std::fs::remove_file(&paths[2]).unwrap();
+    let third = s.call("d", "new_notebook", json!({ "path": &paths[2] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    assert_eq!(s.notebooks.bound("d").as_ref(), Some(&paths[0]), "the first one stays its notebook");
+    for id in [&first, &second, &third] {
+        assert_eq!(refused(s.call("d", "run_all_cells", json!({ "notebook_id": id }))), None);
+    }
+    // One the app opened isn't the session's.
+    let apps = s.call("", "open_notebook", json!({ "path": &paths[3] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    s.notebooks.publish();
+    assert_eq!(refused(s.call("d", "run_all_cells", json!({ "notebook_id": apps }))), one);
+    assert_eq!(refused(s.call("d", "read_notebook_code", json!({ "notebook_id": apps }))), None);
+    let listed = s.call("d", "list_notebooks", json!({})).unwrap();
+    let mine: Vec<&str> = listed.as_array().unwrap().iter().filter(|nb| nb["this_session"] == true).filter_map(|nb| nb["path"].as_str()).collect();
+    assert_eq!(mine.len(), 3, "{listed}");
+    assert!(!mine.contains(&paths[3].as_str()));
+    // Any other session keeps one notebook.
+    s.call("e", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    assert_eq!(refused(s.call("e", "open_notebook", json!({ "path": &paths[1] }))), one);
+}
+
+#[test]
 fn opening_an_open_notebook_joins_it_and_changes_nothing() {
     let s = setup();
     let paths = temp_notebooks("join", 2);
