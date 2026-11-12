@@ -1576,22 +1576,26 @@ impl Call<'_> {
         Ok(result)
     }
 
+    /// Close the notebook, as the app's "Stop notebook" does: its process ends, for every session and
+    /// the user's browser too. Pluto saved the file with every change, so nothing is lost but the values.
+    fn close_notebook(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        let stopped = self.nbs.stop_notebook(&nb.path)?;
+        let path = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
+        self.nbs.unbind(self.owner, &path);
+        // Not stopped: it was no longer open (its engine ended meanwhile).
+        if stopped["stopped"] != true {
+            return Err(argument_error(&format!("notebook_not_found::{} is no longer open.", nb.path)));
+        }
+        Ok(json!({ "notebook_id": nb.id, "path": nb.path, "closed": true }))
+    }
+
     /// The page's Restart, for the agent (#202): a new process for the notebook, with every value
     /// gone. Pluto's then runs every cell, and that run is the session's, as `allow_execution`'s
     /// is: a read or a waited submit waits for it. Since it runs every cell, a cell that was running
     /// runs again, so the result names those (`running_again`): a restart meant to end a stuck cell
     /// doesn't, unless the cell was edited first. Ember's leaves every cell not run. The engines
     /// refuse it in safe preview.
-    /// Close the notebook, as the app's "Stop notebook" does: its process ends, for every session and
-    /// the user's browser too. Pluto saved the file with every change, so nothing is lost but the values.
-    fn close_notebook(&self) -> Result<Value, String> {
-        let nb = self.notebook()?;
-        self.nbs.stop_notebook(&nb.path)?;
-        let path = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
-        self.nbs.unbind(self.owner, &path);
-        Ok(json!({ "notebook_id": nb.id, "path": nb.path, "closed": true }))
-    }
-
     fn restart_notebook(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         let running: Vec<String> = nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running)).cloned().collect();
