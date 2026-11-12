@@ -24,17 +24,22 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   Slurm (`tests/machines.rs`), and over real ssh and Julia in `e2e_machines`.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
-- The notebook view (`views.rs`, interface 36): a client that draws MCP App
+- The notebook view (`views.rs`, interface 36; R notebooks interface 38): a client that draws MCP App
   views (Claude Desktop and claude.ai say so in `initialize`) gets
   `open_notebook` and `new_notebook` with a `ui://endeavor/notebook` view, and
-  no browser tab. The view is Pluto's own live editor, shown only beside the
+  no browser tab. The view is the notebook's own live editor (Pluto's, or Ember's
+  for an R notebook), shown only beside the
   chat (the Code tab's panel, after one click on its card) or full screen
-  (Claude's chat, without a click). It reaches Pluto through tools only it
-  calls: `notebook_page` reads Pluto's page, made by Julia
-  (`endeavor/page_bundle`), and `notebook_socket_*` relay Pluto's WebSocket,
-  which the core holds on loopback. Checked with
-  `scripts/notebook-view-check.cjs` ([testing.md](testing.md)) and a step of
-  `e2e_julia`. A socket no view asks about for 60 s, or with 256 MB unread,
+  (Claude's chat, without a click). It reaches its engine through tools only it
+  calls: `notebook_page` reads the notebook's page, made by Julia
+  (`endeavor/page_bundle`) or for an R notebook by R's adapter
+  (`page_bundle`, Ember's `view_page()`, made again each time R starts), and
+  `notebook_socket_*` relay the engine's WebSocket, which the core holds on
+  loopback. Checked with `scripts/notebook-view-check.cjs` (`--r` for R;
+  [testing.md](testing.md)) and a step of `e2e_julia` and of `e2e_r`. An
+  Ember from before `view_page()` gets a card that says it updates when R
+  next starts. R notebooks' widget files (htmlwidgets: plotly, leaflet, DT)
+  don't load in the view yet: base R plots and tables do. A socket no view asks about for 60 s, or with 256 MB unread,
   closes itself; a message over 1 MB comes in parts. A card that Claude draws
   again for an old call waits for a click. It has the Endeavor look and Point
   (`views/endeavor-view.js`, a copy of the app's `frontend/dist/view.js`,
@@ -67,7 +72,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   another opened once it opens it (`X-Endeavor-Notebooks`, docs/endeavor-mcp.md).
   `close_notebook` ends a session's own notebook's process when the user asks,
   as the app's Stop notebook does, so a sitting no longer needs `endeavor stop`
-  (interface 37). Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
+  (interface 37). Not yet: R widgets (above), and a notebook on a machine, which still opens in a browser
   tab (the chat's view reaches another `endeavor mcp` process, which works on
   this computer). A client that draws views but can't move one beside the chat
   gets only the card. Claude ignores the documented automatic side panel for a

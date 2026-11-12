@@ -16,7 +16,7 @@
 # The methods and their replies are Adapter.jl's (`adapter_call`): status,
 # open, new, and for a notebook_id snapshot, graph, shutdown, apply, run,
 # interrupt, answer, restart, allow_execution, move, render_text, render_png
-# and validate. Errors read as Julia shows them, which the core parses:
+# and validate. One is R's own: page_bundle, the notebook view's page. Errors read as Julia shows them, which the core parses:
 # `ArgumentError: kind::message`, or `KeyError: key "kind::message" not found`
 # for a notebook or cell that isn't there; any other R error is
 # `r_error::message`.
@@ -1142,8 +1142,20 @@ status <- function() {
        seq = A$seq)
 }
 
+# Ember's live editor as one page with its code inside, for the notebook view in Claude's desktop app,
+# which can load nothing from Ember's server (views.rs). The view sets `window.endeavor_notebook_id`
+# before the page's scripts run, and relays its WebSocket to Ember itself. An Ember from before
+# view_page() can't make one: it updates when R next starts (install.R).
+page_bundle <- function() {
+  view_page <- get0("view_page", envir = asNamespace("ember"), mode = "function")
+  if (is.null(view_page)) argument_error("update_ember", "This Ember can't make the notebook view's page; it updates when R next starts")
+  list(html = view_page("window.endeavor_notebook_id"), ember_version = as.character(utils::packageVersion("ember")))
+}
+
 adapter_call <- function(method, params) {
   if (method == "status") return(status())
+  # The same page serves every notebook: the notebook id only routes the call to R.
+  if (method == "page_bundle") return(page_bundle())
   if (method == "open") return(open_path(params$path, isTRUE(params$run)))
   if (method == "new") return(new_at(params$path, params$folder))
   if (method == "snapshot" && is.null(params$notebook_id)) {

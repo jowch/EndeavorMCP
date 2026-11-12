@@ -101,6 +101,9 @@ openButton.addEventListener("click", () => {
   update();
 });
 
+// The notebook's language, from its file name: R notebooks run in Ember, the rest in Julia's Pluto.
+const language = () => /\.r$/i.test(notebook?.name || "") ? "R" : "Julia";
+
 // A load's error as the user reads it. The view's tools write theirs for Claude, after a code
 // ("not_ready: Julia isn't running"); the host's own (a timeout, say) come as they are. `retry`:
 // whether trying again can help, from the view, without Claude.
@@ -113,7 +116,9 @@ function readable(e) {
   if (code === "not_ready" && /didn't answer/.test(text)) return slow;
   switch (code) {
     case "not_open": return { text: "This notebook isn't open any more. " + again, retry: false };
-    case "not_ready": return { text: "Julia isn't running right now. " + again, retry: false };
+    case "not_ready": return { text: `${language()} isn't running right now. ` + again, retry: false };
+    // An Ember from before the view: R gets the newest when it starts again.
+    case "update_ember": return { text: "This R notebook needs a newer Ember to show here. Ember updates the next time R starts.", retry: false };
     case "not_connected": return { text: "Couldn't connect to the notebook. Try again, or ask Claude to open it again.", retry: true };
     // Sockets left by views that went away: freed after a minute idle.
     case "too_many": return { text: "Too many notebook views are open. Wait a minute, then try again.", retry: true };
@@ -174,6 +179,13 @@ function update() {
 // the view's tools. It waits while the view is inline, so an inline view runs no notebook.
 const b64 = u8 => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
 const unb64 = t => Uint8Array.from(atob(t), c => c.charCodeAt(0));
+const joined = parts => {
+  if (parts.length === 1) return parts[0];
+  const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) { all.set(p, at); at += p.length; }
+  return all;
+};
 const call = async (name, args) => {
   const res = await app.callServerTool({ name, arguments: args });
   if (res.isError) throw new Error((res.content || []).map(c => c.text).join(" "));
@@ -211,7 +223,8 @@ class RelaySocket {
       messages.forEach((m, i) => {
         parts.push(unb64(m));
         if (got.more && i === messages.length - 1) return;
-        const data = new Blob(parts);
+        // Pluto reads a Blob; Ember asks for ArrayBuffers (`binaryType`), as a real socket would give.
+        const data = this.binaryType === "arraybuffer" ? joined(parts).buffer : new Blob(parts);
         parts = [];
         if (this.readyState === 1) this._fire("message", { data });
       });
@@ -276,19 +289,21 @@ const pointHost = {
 
 async function load() {
   // The page in parts: a large `ui://` resource doesn't show, and the view can fetch nothing.
+  // Each notebook's engine has its own page: Pluto's for Julia, Ember's for R.
   // An old card's notebook may be closed by now: say so, rather than draw a page that can't connect.
   const probe = await call("notebook_socket_open", { notebook_id: notebook.id });
   call("notebook_socket_close", { socket: probe.socket }).catch(() => {});
   let text = "", offset = 0, total = 1, size = 1000000;
   while (offset < total) {
-    const part = await call("notebook_page", { offset, size });
+    const part = await call("notebook_page", { notebook_id: notebook.id, offset, size });
     total = part.total; text += part.text; offset = part.next;
   }
   const page = JSON.parse(text);
   drawn = true;
   window.WebSocket = RelaySocket;
   window.endeavor_notebook_id = notebook.id;
-  // Pluto makes its socket's address from this; the stand-in doesn't use it.
+  // Pluto and Ember make their socket's address from this (the view's own is about:srcdoc); the
+  // stand-in doesn't use it.
   window.pluto_pluto_server_url = "https://pluto.invalid/";
   document.head.insertAdjacentHTML("beforeend", page.head);
   document.body.insertAdjacentHTML("beforeend", page.body);

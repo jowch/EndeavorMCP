@@ -2,10 +2,11 @@
   {
     "name": "notebook_page",
     "title": "Notebook page",
-    "description": "Used by the notebook view to read Pluto's page in parts.",
+    "description": "Used by the notebook view to read its notebook's page in parts: Pluto's, or Ember's for an R notebook.",
     "inputSchema": {
       "type": "object",
       "properties": {
+        "notebook_id": { "type": "string", "description": "The open notebook the page is for. Without it, Pluto's." },
         "offset": { "type": "number", "description": "Where the part starts: 0, then the `next` of the part before." },
         "size": { "type": "number", "description": "At most this many bytes." }
       },
