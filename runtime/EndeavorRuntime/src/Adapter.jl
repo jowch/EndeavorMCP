@@ -461,6 +461,23 @@ function _wrap_page_restart!()
     return nothing
 end
 
+# Pluto's own Stop, from the notebook's page, goes to its `interrupt_all` handler and not through
+# `interrupt!`, so it ended a waiting cell's process, and that read as a crash (#139). It is
+# `interrupt!` now, which does what that handler does, but stops the cell in its own task first.
+# Only on the Pluto releases `_stop_hook_ok` knows. Once per Julia.
+const _PLUTO_STOP = Ref{Any}(nothing)
+function _wrap_page_stop!()
+    (_PLUTO_STOP[] === nothing && _stop_hook_ok()) || return nothing
+    original = _PLUTO_STOP[] = Pluto.responses[:interrupt_all]
+    Pluto.responses[:interrupt_all] = function (request; kwargs...)
+        nb = request.notebook
+        nb === nothing && return original(request; kwargs...)
+        interrupt!(request.session, nb)
+        return nothing
+    end
+    return nothing
+end
+
 # Move the notebook's file to `path` (checked by the core), as Pluto's own file box does.
 function move!(session, nb, path::AbstractString)
     Pluto.SessionActions.move(session, nb, path)

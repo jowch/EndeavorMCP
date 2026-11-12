@@ -454,6 +454,14 @@ Next:
   SIGTERM, as did everything they started, and the curl, wget or juliaup the core starts to
   download Julia, Endeavor's own R or a helper (#181), which before went on after
   a Ctrl-C had stopped the core.
+- Stop on a Julia cell that waits (`sleep`, a download, a lock) stops the cell and keeps the
+  notebook's process and its values (#139). On Julia 1.12 a Ctrl+C sent to the process
+  never reaches a waiting cell, so Pluto pressed it until Julia ended, which lost every value
+  and read as a crash. The runtime now notes each cell's task in the notebook's process and
+  stops that task, for the agent's `interrupt_notebook` and for the page's Stop button alike;
+  only a cell that never yields still gets Pluto's Ctrl+C. It is a hook into PlutoRunner
+  (`_STOP_HOOK` in `Lifecycle.jl`), only on the Pluto releases it was checked on: on any
+  other, Stop is Pluto's own, as before.
   In Julia, an interrupt while the notebook's process is still starting stops its
   run before any cell, and the answer lists them all as `dropped` at once (#179).
   Before, it reported them dropped, or none when the start took longer than its
