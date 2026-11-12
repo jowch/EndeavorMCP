@@ -79,10 +79,10 @@ pub fn is_tool(name: &str) -> bool {
 
 /// Tools that change the notebook or run code, here or on the server. `interrupt_notebook` only
 /// stops a run, so no mode asks first, but plan mode refuses it and it stays in the session's notebook.
-pub const WRITE_TOOLS: [&str; 18] = [
+pub const WRITE_TOOLS: [&str; 19] = [
     "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
     "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell", "interrupt_notebook",
-    "answer_prompt", "restart_notebook",
+    "answer_prompt", "restart_notebook", "close_notebook",
     "apply_package_update", "approve_install", "set_input",
 ];
 
@@ -94,6 +94,8 @@ pub fn runs_code(tool: &str, arguments: &Value) -> bool {
         "execute_cell" | "submit_changes" | "run_all_cells" | "allow_execution" | "delete_cell" => true,
         // A restart clears every value, and a Julia notebook's runs every cell.
         "restart_notebook" => true,
+        // Closing ends the notebook's process, and every value with it.
+        "close_notebook" => true,
         // Moving the package date installs packages, and can restart R.
         "apply_package_update" => true,
         // A new input value reruns the cells that read it.
@@ -1325,7 +1327,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (37, "4a66322947a66451"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (38, "e6f15328e3fa48b7"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1372,7 +1374,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (37, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (38, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]
