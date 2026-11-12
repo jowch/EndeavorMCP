@@ -705,6 +705,28 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
 }
 
 #[test]
+fn a_notebook_that_closes_while_the_events_are_put_together_is_left_out() {
+    let s = setup();
+    let (a, b) = (id(1), id(2));
+    s.engine.open(&a, "/n/a.jl", &[(X, "x = 1")]);
+    s.engine.open(&b, "/n/b.jl", &[(X, "x = 1")]);
+    // An idle stop closes `a` after the snapshots are read, before its graph is.
+    let (read_tx, read) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    *s.engine.hold_snapshot.lock().unwrap() = Some((read_tx, release_rx));
+    let subscribing = std::thread::spawn({
+        let notebooks = s.notebooks.clone();
+        move || notebooks.subscribe().map(|(first, _)| first)
+    });
+    read.recv().unwrap();
+    s.engine.notebooks.lock().unwrap().retain(|nb| nb.id != a);
+    release.send(()).unwrap();
+    let first: Value = serde_json::from_str(&subscribing.join().unwrap().expect("the events start")).unwrap();
+    let listed: Vec<&Value> = first["notebooks"].as_array().unwrap().iter().map(|nb| &nb["notebook_id"]).collect();
+    assert_eq!(listed, [&json!(b)], "{first}");
+}
+
+#[test]
 fn a_read_of_the_notebook_from_before_an_agent_edit_doesnt_make_it_the_users() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 6"), (Y, "y = x * 7")]);

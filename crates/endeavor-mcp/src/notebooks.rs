@@ -968,8 +968,20 @@ impl Notebooks {
         // The snapshots are taken before the state is locked, so a notebook made meanwhile is missing from them,
         // though a tool may already have recorded reads of it (new_notebook does). Its state stays.
         let since = self.state.lock().unwrap().seq;
-        let snapshots = self.snapshots()?;
-        let graphs = snapshots.iter().map(|nb| Ok((nb.id.clone(), self.graph(&nb.id, GraphQuery::default())?))).collect::<Result<HashMap<_, _>, String>>()?;
+        let mut snapshots = self.snapshots()?;
+        // A notebook closed after the snapshots (an idle stop, a shutdown) has no graph: it's left out, as if
+        // the snapshots came after it closed. Before, the whole event failed and `/events` answered 502.
+        let mut graphs = HashMap::new();
+        for nb in &snapshots {
+            match self.graph(&nb.id, GraphQuery::default()) {
+                Ok(graph) => {
+                    graphs.insert(nb.id.clone(), graph);
+                }
+                Err(e) if e.contains("notebook_not_found::") => {}
+                Err(e) => return Err(e),
+            }
+        }
+        snapshots.retain(|nb| graphs.contains_key(&nb.id));
         let mut state = self.state.lock().unwrap();
         state.notebooks.retain(|id, notebook| snapshots.iter().any(|nb| nb.id == *id) || notebook.touched_after(since));
         let mut list = Vec::new();
