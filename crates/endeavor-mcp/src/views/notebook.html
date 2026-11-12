@@ -1,16 +1,27 @@
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Notebook</title>
 <style>
-#endeavor-card { font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; align-items: center; gap: 12px; padding: 12px 14px; box-sizing: border-box; }
-#endeavor-card.cover { position: fixed; inset: 0; z-index: 2147483647; background: Canvas; color: CanvasText; justify-content: center; flex-direction: column; }
-#endeavor-card .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#endeavor-card .note { opacity: 0.7; }
-#endeavor-card button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
+/* The card in Claude's own tokens (hostContext.styles.variables, set on :root below), with system
+   colours where Claude sends none, on a transparent background so it sits in the chat as Claude's cards do. */
+html, body { background: transparent; margin: 0; }
+#endeavor-card { font: var(--font-text-sm-size, 13px)/var(--font-text-sm-line-height, 1.4) var(--font-sans, system-ui), -apple-system, "Segoe UI", sans-serif;
+  color: var(--color-text-primary, CanvasText); display: flex; align-items: center; gap: 12px; padding: 12px 14px; box-sizing: border-box;
+  border: 1px solid var(--color-border-tertiary, color-mix(in srgb, CanvasText 15%, transparent)); border-radius: var(--border-radius-lg, 10px); }
+#endeavor-card.cover { position: fixed; inset: 0; z-index: 2147483647; border: none; border-radius: 0; background: var(--color-background-primary, Canvas);
+  justify-content: center; flex-direction: column; }
+#endeavor-card .name { font-weight: var(--font-weight-semibold, 600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#endeavor-card .note { color: var(--color-text-secondary, color-mix(in srgb, CanvasText 70%, transparent)); }
+#endeavor-card button { font: inherit; padding: 6px 12px; border-radius: var(--border-radius-md, 6px); border: 1px solid var(--color-border-primary, color-mix(in srgb, CanvasText 30%, transparent));
+  background: var(--color-background-primary, transparent); color: var(--color-text-primary, inherit); cursor: pointer; white-space: nowrap; }
+#endeavor-card button:hover { background: var(--color-background-secondary, color-mix(in srgb, CanvasText 6%, transparent)); }
 #endeavor-card[hidden], #endeavor-card button[hidden] { display: none; }
 /* Inline after the notebook was shown: only the card, at card size; the notebook stays as it was. */
 html.endeavor-inline body > :not(#endeavor-card) { display: none !important; }
+/* And the page's own sizing gives way, so the view reports the card's height, not the panel's it had: Pluto's
+   body is at least the frame's height and has its own background, and the toolbar's room is at the top. */
+html.endeavor-inline, html.endeavor-inline body { min-height: 0 !important; height: auto !important; padding-top: 0 !important; background: transparent !important; }
 #endeavor-card .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-#endeavor-card.cover .text { flex: 0; align-items: center; }
+#endeavor-card.cover .text { flex: 0; align-items: center; text-align: center; }
 </style>
 </head><body>
 <div id="endeavor-card"><div class="text"><span class="name">Notebook</span><span class="note">Opening…</span></div><button id="endeavor-open" hidden>Open the notebook</button></div>
@@ -31,7 +42,7 @@ html.endeavor-inline body > :not(#endeavor-card) { display: none !important; }
 // Code tab needs one). A card drawn again later, for an old call, waits for the click. The view can reach
 // nothing on this computer, so Pluto's page and its WebSocket come through tools only the view
 // calls: `notebook_page` and `notebook_socket_*` (Endeavor's `views.rs`).
-const { App } = window.McpAppLib;
+const { App, applyHostStyleVariables } = window.McpAppLib;
 const card = document.getElementById("endeavor-card");
 const nameEl = card.querySelector(".name");
 const noteEl = card.querySelector(".note");
@@ -128,6 +139,9 @@ function update() {
     return;
   }
   if (notebook) nameEl.textContent = notebook.name;
+  // Claude's colours, fonts and radii for the card, when it sends them.
+  const vars = context().styles?.variables;
+  if (vars) try { applyHostStyleVariables(vars); } catch (e) {}
   // Room for what the host draws over the view (Claude's reply box in its chat), when it says.
   document.body.style.paddingBottom = (context().safeAreaInsets?.bottom || 0) + "px";
   const show = inPanel();
@@ -244,7 +258,7 @@ function shut() {
 
 // Point's ↩ passes the picks and the comment (and what ⌘↩ added) to the chat as the user's message (Claude's desktop
 // app puts it in its message box for the user to send). A host that takes no messages from views gets
-// the look without Point. Claude's desktop app (probed 2026-11-12):
+// the look without Point. Links open through the host's ui/open-link. Claude's desktop app (probed 2026-11-12):
 // - adds the text at the end of its box, straight after anything typed there, and trims the text's
 //   leading whitespace, so the view's text starts with a visible mark (endeavor-view.js);
 // - takes a message only right after a press inside the view, and not for about five seconds after
@@ -255,6 +269,9 @@ const pointHost = {
   send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(res => {
     if (res?.isError) throw new Error("it isn't ready yet, so try again in a few seconds");
   }),
+  // Links in cells open in the user's browser through Claude, which asks first: the view's frame
+  // can't open windows itself. Only when the host offers it.
+  get openLink() { return app.getHostCapabilities()?.openLinks ? url => app.openLink({ url }).then(() => {}) : undefined; },
 };
 
 async function load() {
