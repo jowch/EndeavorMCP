@@ -2646,6 +2646,19 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     assert!(!out.status.success() && !stdout.contains(TOKEN) && !stderr.contains(TOKEN) && stderr.contains("in your own terminal"), "{stdout} {stderr}");
     front.finish();
 
+    // A client that draws views gets the notebook beside the chat, and no tab; one that draws no
+    // card after all (Claude's desktop app, Chat tab, #311) asks for the browser with `in_browser`.
+    std::fs::remove_file(&opened).unwrap();
+    let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", opened.to_str().unwrap())]);
+    front.request("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": { "extensions": { "io.modelcontextprotocol/ui": { "mimeTypes": ["text/html;profile=mcp-app"] } } }, "clientInfo": { "name": "Viewer", "version": "0" } }));
+    let shown = front.ok("open_notebook", json!({ "path": path }));
+    assert_eq!((shown["shown_beside_chat"].clone(), shown["opened_in_browser"].clone()), (json!(true), json!(false)), "{shown}");
+    assert!(!opened.exists(), "no tab opens beside the view");
+    let tab = front.ok("open_notebook", json!({ "path": path, "in_browser": true }));
+    assert_eq!((tab.get("shown_beside_chat"), tab["opened_in_browser"].clone()), (None, json!(true)), "{tab}");
+    assert_eq!(std::fs::read_to_string(&opened).unwrap().lines().count(), 1, "in_browser opens the tab");
+    front.finish();
+
     // Where no browser can be opened, the agent is told so, and gives the link with the steps that
     // reach it: over ssh, the user's browser is on another computer, which needs the port forwarded.
     let mut front = start_front(&place, &[("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")]);
