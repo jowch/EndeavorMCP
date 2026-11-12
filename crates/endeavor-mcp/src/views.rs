@@ -108,7 +108,8 @@ pub fn add_to(tools: &mut Vec<Value>) {
     tools.extend(schemas());
 }
 
-/// Endeavor's icon, for clients that show a server's or a view's icon (MCP `icons`).
+/// Endeavor's icon, for clients that show a server's or a view's icon (MCP `icons`). `views/icon.svg`
+/// is a copy of the app's `assets/icon/icon-small.svg`, the art drawn for 16 and 32 px.
 pub fn icons() -> Value {
     let svg = STANDARD.encode(include_str!("views/icon.svg"));
     json!([{ "src": format!("data:image/svg+xml;base64,{svg}"), "mimeType": "image/svg+xml", "sizes": ["any"] }])
@@ -657,6 +658,26 @@ mod tests {
         let names: Vec<&str> = tools[2..].iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(names, NAMES);
         assert!(tools[2..].iter().all(|t| t["_meta"]["ui"]["visibility"] == json!(["app"])));
+    }
+
+    #[test]
+    fn the_view_and_its_tools_carry_a_title_an_icon_and_no_border() {
+        let mut tools = vec![json!({ "name": "open_notebook" }), json!({ "name": "new_notebook" }), json!({ "name": "open_notebook", "title": "Kept" })];
+        add_to(&mut tools);
+        assert_eq!(tools[0]["title"], "Notebook");
+        assert_eq!(tools[1]["title"], "New notebook");
+        assert_eq!(tools[2]["title"], "Kept", "a tool's own title stays");
+        let listed = &resources_list()["resources"][0];
+        assert_eq!(listed["title"], "Notebook");
+        assert_eq!(listed["icons"], icons());
+        let read = resources_read(&json!({ "uri": URI })).unwrap();
+        for meta in [&listed["_meta"], &read["contents"][0]["_meta"]] {
+            assert_eq!(meta["ui"]["prefersBorder"], false);
+            assert_eq!(meta["ui"]["preferredDisplayMode"], "fullscreen");
+        }
+        let src = icons()[0]["src"].as_str().unwrap().to_string();
+        let svg = STANDARD.decode(src.strip_prefix("data:image/svg+xml;base64,").unwrap()).unwrap();
+        assert_eq!(svg, include_bytes!("views/icon.svg"));
     }
 
     #[test]
