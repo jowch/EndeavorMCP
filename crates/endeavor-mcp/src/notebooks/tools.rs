@@ -632,14 +632,16 @@ impl Call<'_> {
             .filter_map(|id| Some((id, nb.cells.get(id)?)))
             .filter(|(_, cell)| !cell.output.is_empty() && !cell.running && !cell.queued)
             .map(|(id, cell)| {
-                let mut entry = json!({ "cell_id": id, "output_summary": cell.output });
-                if let Some(error) = &cell.error {
-                    entry["error"] = error.clone();
-                }
                 // The output of a cell that only ran along is the agent's to read if it wants it: a run of
                 // a cell many others read sent back each one's table, most of a long session's run
                 // replies. An error isn't cut.
                 let max = if along.contains(id) && cell.error.is_none() { DEPENDENT_TEXT_MAX } else { RECEIPT_TEXT_MAX };
+                // A long text output too: a `Text` of 200,000 lines came back whole, 1.5 MB.
+                let summary = if cell.errored { cell.output.clone() } else { cut_middle(&cell.output, max, max / 4, "read_cell shows more.") };
+                let mut entry = json!({ "cell_id": id, "output_summary": summary });
+                if let Some(error) = &cell.error {
+                    entry["error"] = error.clone();
+                }
                 if let Some(text) = self.output_text(&nb, id)? {
                     entry["output_text"] = json!(cut(&text, max));
                 }
@@ -739,7 +741,7 @@ impl Call<'_> {
         let cell = &nb.cells[id];
         let stale = cell.stale || self.pending_run(nb).iter().any(|p| p == id);
         let mut out = json!({
-            "cell_id": id, "code": cell.code, "output": cut_middle(&cell.output, OUTPUT_MAX, OUTPUT_END), "errored": cell.errored,
+            "cell_id": id, "code": cell.code, "output": cut_middle(&cell.output, OUTPUT_MAX, OUTPUT_END, OUTPUT_REST), "errored": cell.errored,
             "running": cell.running, "queued": cell.queued, "code_folded": cell.folded, "stale": stale,
         });
         if let Some(error) = &cell.error {
@@ -2098,14 +2100,18 @@ pub(super) fn cut(text: &str, max: usize) -> String {
 
 /// `text` cut to about `max` bytes at character boundaries, keeping its start and its last
 /// `end` bytes, saying how much was left out.
-pub(super) fn cut_middle(text: &str, max: usize, end: usize) -> String {
+/// `rest` says where the rest is.
+pub(super) fn cut_middle(text: &str, max: usize, end: usize, rest: &str) -> String {
     if text.len() <= max {
         return text.to_owned();
     }
     let head = (0..=max - end).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
     let tail = (text.len() - end..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len());
-    format!("{}\n… ({} bytes of this output left out here, of {})\n{}", &text[..head], tail - head, text.len(), &text[tail..])
+    format!("{}\n… ({} of this output's {} bytes are left out here. {rest})\n{}", &text[..head], tail - head, text.len(), &text[tail..])
 }
+
+/// Where the rest of an output `read_cell` cut is: nowhere a tool reaches.
+const OUTPUT_REST: &str = "No tool shows them: to see a part, run a cell that picks it out, such as its first or last lines.";
 
 /// How `view_cell_output` says an output has no PNG form, and how the runtime says it couldn't ask
 /// the worker for one (`_cell_png` in `Output.jl`): the failures a picture of the notebook can stand in for.

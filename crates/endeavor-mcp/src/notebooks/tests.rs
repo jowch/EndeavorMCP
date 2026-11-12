@@ -889,7 +889,8 @@ fn a_waited_run_cuts_a_dependents_output_text_shorter_than_its_own_cells() {
     s.seconds(1.0);
     s.read("", NB, Y);
     s.edit("", NB, Y, "y = x + 1 # wide table");
-    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
+    // The fake engine's output is "ran " and the code.
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
     let y = ran["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == Y).unwrap_or_else(|| panic!("{ran}")).clone();
     assert_eq!(y["output_text"], json!("n\t".repeat(300)), "{y}");
     // A dependent that fails keeps its error.
@@ -2144,7 +2145,8 @@ fn read_cell_adds_the_text_form_of_rich_outputs() {
 #[test]
 fn read_cell_cuts_a_huge_text_output_to_its_start_and_end() {
     let s = setup();
-    s.engine.open(NB, "/n/a.jl", &[(X, "Text(join(string.(1:200_000), '\\n'))")]);
+    let long = "1".repeat(20_000);
+    s.engine.open(NB, "/n/a.jl", &[(X, "Text(join(string.(1:200_000), '\\n'))"), (Y, &long)]);
     // 1.3 MB, as the desktop check's `Text` output: with a 3-byte character where the cuts fall.
     let big = format!("{}€{}€{}", "a".repeat(11_999), "b".repeat(1_300_000), "c".repeat(3_998));
     s.engine.with(NB, |nb| nb.cells[0].output = big.clone());
@@ -2152,7 +2154,11 @@ fn read_cell_cuts_a_huge_text_output_to_its_start_and_end() {
     let output = read["output"].as_str().unwrap();
     assert!(output.len() < 16_200, "{}", output.len());
     assert!(output.starts_with(&"a".repeat(11_999)) && output.ends_with(&format!("\n{}", "c".repeat(3_998))), "{output:.40}");
-    assert!(output.contains(&format!("\n… ({} bytes of this output left out here, of {})\n", big.len() - 11_999 - 3_998, big.len())), "{}", &output[11_990..12_100]);
+    assert!(output.contains(&format!("\n… ({} of this output's {} bytes are left out here. No tool shows them: to see a part, run a cell that picks it out, such as its first or last lines.)\n", big.len() - 11_999 - 3_998, big.len())), "{}", &output[11_990..12_200]);
+    // The fake engine's output is "ran " and the code.
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
+    let summary = ran["outputs"]["changed"][0]["output_summary"].as_str().unwrap_or_else(|| panic!("{ran:.300}"));
+    assert!(summary.len() < 2_200 && summary.contains("bytes are left out here. read_cell shows more.)"), "a run's reply cuts it shorter: {summary}");
     s.engine.with(NB, |nb| nb.cells[0].output = "1".repeat(16_000));
     assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap()["output"], json!("1".repeat(16_000)), "16,000 bytes is whole");
 }

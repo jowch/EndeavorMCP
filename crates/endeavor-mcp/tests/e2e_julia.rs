@@ -333,6 +333,27 @@ fn the_runtime_end_to_end() {
         }
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": logs }));
         assert_eq!((&read["output"], &read["notes"]), (&json!("7"), &json!(["logged_warning::3 rows dropped (n = 3)", "logged_info::loaded", "printed::fitting\n100%"])), "{read}");
+        // A huge text output, as the desktop check's (1.3 MB): cut in the run's reply and in read_cell.
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "Text(join(string.(1:200_000), '\\n'))", "after_cell_id": logs }));
+        let big = added["cell_id"].as_str().unwrap().to_owned();
+        let ran = rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": big, "wait_for_completion": true }));
+        let summary = ran["outputs"]["changed"][0]["output_summary"].as_str().unwrap_or_else(|| panic!("{ran:.500}"));
+        assert!(summary.len() < 2_200 && summary.starts_with("1\n2\n") && summary.ends_with("199999\n200000") && summary.contains("read_cell shows more."), "a run's reply: {summary}");
+        let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": big }));
+        let output = read["output"].as_str().unwrap();
+        assert!(output.len() < 16_200 && output.ends_with("199999\n200000") && output.contains("bytes are left out here. No tool shows them"), "read_cell: {:.300}", output);
+        // Markdown math, read as stripped HTML while another cell runs: its numeric entities decoded, once, so
+        // the source's literal `&amp;#123;` reads as written.
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "md\"Euler: $e^{i\\pi} + 1 = 0$, and &amp;#123;\"", "after_cell_id": big }));
+        let math = added["cell_id"].as_str().unwrap().to_owned();
+        rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": math, "wait_for_completion": true }));
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "sleep(4)", "after_cell_id": math }));
+        let slow = added["cell_id"].as_str().unwrap().to_owned();
+        rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": slow, "wait_for_completion": false }));
+        let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": math }));
+        let text = read["output_text"].as_str().unwrap_or_else(|| panic!("{read}"));
+        assert!(text.contains("e^{i\\pi} + 1 = 0") && text.contains(", and &amp;#123;") && !text.contains("&#43;"), "Markdown's text: {text}");
+        rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
         (notebook, path, cell)
     });
 
