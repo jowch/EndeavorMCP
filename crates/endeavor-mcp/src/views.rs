@@ -161,8 +161,11 @@ pub struct Views {
     next: AtomicU64,
     /// The widget files the view read last, with the start of R that served them: one is read in
     /// parts, and a few outputs ask for the same files in turn.
-    files: Mutex<Vec<(u64, String, Arc<(String, Vec<u8>)>)>>,
+    files: Mutex<Vec<(u64, String, Arc<File>)>>,
 }
+
+/// A widget file: its `Content-Type` and its bytes.
+type File = (String, Vec<u8>);
 
 /// A socket the view hasn't asked about for this long is closed: the view went away.
 const IDLE: Duration = Duration::from_secs(60);
@@ -297,7 +300,7 @@ impl Views {
     /// A widget file of the R that runs now, as Ember serves it: `deps/<name>-<version>/<file>`,
     /// read from Ember's server on this computer with its secret, the way the notebook's own page
     /// reads it. Ember serves only the folders of widgets a notebook's outputs use.
-    fn file(&self, path: &str) -> Result<Arc<(String, Vec<u8>)>, String> {
+    fn file(&self, path: &str) -> Result<Arc<File>, String> {
         if !widget_file(path) {
             return Err(format!("not_found: {path} isn't a widget's file"));
         }
