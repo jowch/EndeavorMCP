@@ -66,6 +66,13 @@ const app = new App({ name: "Endeavor notebook", version: "1" }, { availableDisp
 app.ontoolresult = result => {
   // The tool's own text is written for Claude (it may say to call again): the card doesn't show it.
   const unopened = "This call didn't open the notebook. Claude's reply says why.";
+  // A start that goes on by itself: Claude makes the same call again and gets a new card.
+  const waiting = {
+    r_installing: "Setting up R notebooks. This can take a few minutes the first time. Claude calls again, and the notebook opens in a new card.",
+    julia_starting: "Julia is starting. The first start on a computer can take 10 minutes or more. Claude calls again, and the notebook opens in a new card.",
+    notebook_opening: "The notebook is still opening. Claude calls again, and the notebook opens in a new card.",
+  };
+  failed = null; elsewhere = false;
   if (result.isError) {
     failed = unopened;
   } else {
@@ -78,8 +85,8 @@ app.ontoolresult = result => {
     } else if (fields.notebook_id) {
       elsewhere = true;
     } else {
-      // A result with no notebook: Julia still starting, or no such file, say.
-      failed = unopened;
+      // A result with no notebook: Julia still starting, Ember installing, or no such file, say.
+      failed = waiting[fields.error] || unopened;
     }
   }
   update();
@@ -279,6 +286,8 @@ function shut() {
 //   input elsewhere (typing in its box, say). It refuses with an isError answer, and the same press
 //   can't be used again, so a refusal isn't retried: Point gets its picks back and the user presses ↩.
 const pointHost = {
+  // Names the notebook's engine in a quote's uri, as the app does: notebook://ember/… for R.
+  get engine() { return language() === "R" ? "ember" : "pluto"; },
   get canSend() { return !!app.getHostCapabilities()?.message; },
   send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(res => {
     if (res?.isError) throw new Error("it isn't ready yet, so try again in a few seconds");
