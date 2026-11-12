@@ -237,8 +237,9 @@ comes back, and you press ↩ again.
 A notebook's outputs can carry their own scripts, and in this view a script
 can put text in your message box too, after any click or key press in the
 notebook. The app never sends it for you, so read the end of the box before
-you send. Notebooks open in safe preview, where no code runs and no output
-scripts run either. Look at a notebook from someone else before you press **Run notebook code**, or let the agent run it.
+you send. A notebook you open starts in safe preview, where no code runs and
+no output scripts run either. Look at a notebook from someone else before you
+press **Run notebook code** or let the agent run it.
 
 ## What keeps running
 
