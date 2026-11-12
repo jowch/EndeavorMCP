@@ -85,12 +85,12 @@ pub fn schemas() -> Vec<Value> {
     TOOLS.as_array().cloned().unwrap_or_default()
 }
 
-/// `tools/list` for a client that draws views: the tools that open a notebook show it, and the
-/// view's own tools are listed for the view.
 /// `new_notebook`'s and `open_notebook`'s argument, for a client that draws views, to open the
 /// notebook in the browser after all.
 pub const IN_BROWSER: &str = "in_browser";
 
+/// `tools/list` for a client that draws views: the tools that open a notebook show it, and the
+/// view's own tools are listed for the view.
 pub fn add_to(tools: &mut Vec<Value>) {
     for tool in tools.iter_mut().filter(|tool| tool["name"].as_str().is_some_and(|name| SHOWN_BY.contains(&name))) {
         tool["_meta"] = json!({ "ui": { "resourceUri": URI }, "ui/resourceUri": URI });

@@ -1100,7 +1100,7 @@ impl Relay {
         let mut in_browser = false;
         let stripped;
         let line = match message["params"]["arguments"].as_object_mut() {
-            Some(arguments) if views && matches!(tool.as_deref(), Some("new_notebook" | "open_notebook")) && arguments.contains_key(crate::views::IN_BROWSER) => {
+            Some(arguments) if views && matches!(tool.as_deref(), Some("new_notebook" | "open_notebook")) && arguments.get(crate::views::IN_BROWSER).is_some_and(Value::is_boolean) => {
                 in_browser = arguments.remove(crate::views::IN_BROWSER) == Some(Value::Bool(true));
                 stripped = to_json(&message);
                 stripped.as_str()
