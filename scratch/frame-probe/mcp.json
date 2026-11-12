@@ -1,0 +1,6 @@
+{
+  "mcpServers": {
+    "frame-probe-stdio": { "command": "python3", "args": ["../../scratch/frame-probe/probe_server.py", "stdio"] },
+    "frame-probe-http": { "type": "http", "url": "http://127.0.0.1:8765/mcp" }
+  }
+}
