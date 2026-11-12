@@ -1094,6 +1094,19 @@ impl Relay {
             return;
         }
         let tool = (message["method"] == "tools/call").then(|| crate::mcp::current_name(message["params"]["name"].as_str().unwrap_or_default()).to_owned());
+        // `in_browser` is the front's, for a client that draws views (`views::add_to`); the runtime
+        // doesn't know it.
+        let mut message = message;
+        let mut in_browser = false;
+        let stripped;
+        let line = match message["params"]["arguments"].as_object_mut() {
+            Some(arguments) if views && matches!(tool.as_deref(), Some("new_notebook" | "open_notebook")) && arguments.contains_key(crate::views::IN_BROWSER) => {
+                in_browser = arguments.remove(crate::views::IN_BROWSER) == Some(Value::Bool(true));
+                stripped = to_json(&message);
+                stripped.as_str()
+            }
+            _ => line,
+        };
         if tool.is_some() {
             self.learn_workspace(&message);
         }
@@ -1160,7 +1173,7 @@ impl Relay {
                 Ok(route) => route,
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
-            let sink = |reply: String| self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, reply)));
+            let sink = |reply: String| self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, in_browser, reply)));
             match self.post(&route, line, &sink) {
                 Ok(()) => return,
                 Err(Sent::NotConnected(e)) if attempt == 0 => {
@@ -1176,7 +1189,7 @@ impl Relay {
     /// `open_notebook` made or opened opened in the user's browser, with the link that lets the
     /// browser in. Each such call opens it, so that asking the agent to open it again works, except
     /// within `REOPEN_AFTER` of opening the same one. `opened_in_browser` says whether it is open.
-    fn in_browser(&self, message: &Value, tool: Option<&str>, route: &Route, reply: String) -> String {
+    fn in_browser(&self, message: &Value, tool: Option<&str>, route: &Route, asked: bool, reply: String) -> String {
         // The view's replies, a receive up to a few MB: nothing here is for them.
         if tool.is_some_and(crate::views::is_view_tool) {
             return reply;
@@ -1191,7 +1204,7 @@ impl Relay {
         // no tab opens. A notebook on a machine opens in a tab as before: the view's calls may reach
         // another front, which works on this computer. `shown_at` lets a view the client draws again
         // later (the conversation reopened) tell that it's an old one.
-        let in_view = route.host.is_none() && self.views.load(std::sync::atomic::Ordering::SeqCst) && matches!(tool, Some("new_notebook" | "open_notebook"));
+        let in_view = route.host.is_none() && self.views.load(std::sync::atomic::Ordering::SeqCst) && matches!(tool, Some("new_notebook" | "open_notebook")) && !asked;
         if in_view {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
             fields.insert("opened_in_browser".into(), false.into());
