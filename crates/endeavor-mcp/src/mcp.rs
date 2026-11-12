@@ -1023,9 +1023,6 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
             });
             if caller.views {
                 result["capabilities"]["resources"] = json!({});
-                // MCP's display name. Claude's desktop app shows the config name instead (2026-11-12),
-                // but the field is standard and costs nothing.
-                result["serverInfo"]["title"] = json!("Endeavor");
             }
             if let Some(instructions) = guide::instructions(standalone, caller.has_skills, caller.front, caller.views) {
                 result["instructions"] = instructions.into();
