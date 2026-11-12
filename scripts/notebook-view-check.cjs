@@ -115,7 +115,7 @@ const check = (ok, what) => { console.log((ok ? "ok   " : "FAIL ") + what); if (
   // blob:, and nothing from any host (no connect-src beyond the frame itself).
   const csp = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline'; img-src data: blob:; font-src 'none'; connect-src 'none'; worker-src blob:; media-src data: blob:";
   const html = view.text.replace("<head>", `<head><meta http-equiv="Content-Security-Policy" content="${csp}">`);
-  await page.setContent(`<!DOCTYPE html><body style="margin:0"><iframe id=view sandbox="allow-scripts allow-same-origin" style="width:1000px;height:850px;border:0"></iframe>
+  await page.setContent(`<!DOCTYPE html><body style="margin:0"><textarea id=chat-box></textarea><iframe id=view sandbox="allow-scripts allow-same-origin" style="width:1000px;height:850px;border:0"></iframe>
 <script>
 const frame = document.getElementById("view");
 const context = { displayMode: "inline", availableDisplayModes: ["inline", "fullscreen"], containerDimensions: { width: 1000, maxHeight: 850 }, platform: "desktop" };
@@ -200,9 +200,12 @@ window.addEventListener("message", async e => {
   const sending = await frame.evaluate(() => document.getElementById("endeavor-sent")?.textContent);
   check(/^Sending/.test(sending || ""), `while the chat hasn't answered, the view says it's sending (${sending})`);
   await page.waitForFunction(() => window.messages.length === 1, null, { timeout: 5000 }).catch(() => {});
+  await frame.waitForFunction(() => /message box/.test(document.getElementById("endeavor-sent")?.textContent || ""), null, { timeout: 5000 }).catch(() => {});
+  check(await frame.evaluate(() => document.body.classList.contains("annotating")), "once the chat has it, Point stays on while the keyboard is still in the view");
+  // The user goes to Claude's message box to send it: Point ends, as their Escape there can't reach the view.
+  await page.focus("#chat-box");
   await frame.waitForFunction(() => !document.body.classList.contains("annotating"), null, { timeout: 5000 }).catch(() => {});
-  const passed = await frame.evaluate(() => [document.body.classList.contains("annotating"), document.getElementById("endeavor-sent")?.textContent]);
-  check(!passed[0] && /message box/.test(passed[1] || ""), `once the chat has it, Point ends (the user sends it from Claude's box): ${JSON.stringify(passed)}`);
+  check(await frame.evaluate(() => !document.body.classList.contains("annotating")), "once the keyboard leaves for Claude's box, Point ends");
   await page.evaluate(() => { window.slow = 0; });
   await frame.click("#endeavor-point");
   const message = await page.evaluate(() => window.messages[0]);
@@ -220,8 +223,6 @@ window.addEventListener("message", async e => {
   await page.waitForFunction(() => window.messages.length === 2, null, { timeout: 5000 }).catch(() => {});
   const second = await page.evaluate(() => window.messages[1]?.content?.[0]?.text || "");
   check(/\nFirst\n\n<quote[\s\S]*\nSecond$/.test(second) && second.split("[Endeavor]").length === 2 && (await page.evaluate(() => window.contexts.length)) === 0, "the next ↩ passes both picks in one message, under one note");
-  await frame.waitForFunction(() => !document.body.classList.contains("annotating"), null, { timeout: 5000 }).catch(() => {});
-  await frame.click("#endeavor-point");
   // A send the chat refuses (as Claude's desktop app does for a few seconds after typing in its box) isn't
   // tried again: Point gets the pick and comment back, and the next ↩ sends them once.
   await page.evaluate(() => { window.refuse = 1; });
@@ -236,8 +237,6 @@ window.addEventListener("message", async e => {
   await page.waitForFunction(() => window.messages.length === 3, null, { timeout: 5000 }).catch(() => {});
   const again = await page.evaluate(() => window.messages[2]?.content?.[0]?.text || "");
   check(again.split("<quote cell").length === 2 && again.endsWith("\nKept"), "↩ then sends them, once");
-  await frame.waitForFunction(() => !document.body.classList.contains("annotating"), null, { timeout: 5000 }).catch(() => {});
-  await frame.click("#endeavor-point");
   // Nor is one that fails any other way (a timeout), which could still arrive late.
   await page.evaluate(() => { window.fail = true; });
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();

@@ -1059,8 +1059,12 @@ ${[...earlier, text].join("\n\n")}`).then(
         () => {
           if (msg.ref !== void 0) receive({ type: "quote_sent", ref: msg.ref, ok: true });
           say("On its way to Claude's message box. Send it from there.", 8e3);
-          const now = pointState();
-          if (!now.picks.length && !now.comment.trim()) point(false);
+          const end = () => {
+            const now = pointState();
+            if (!now.picks.length && !now.comment.trim()) point(false);
+          };
+          if (!document.hasFocus()) end();
+          else window.addEventListener("blur", end, { once: true });
         },
         (e) => {
           added.unshift(...earlier);
@@ -1101,7 +1105,7 @@ ${[...earlier, text].join("\n\n")}`).then(
   function closeStrayCompletions() {
     let lastInput = 0;
     let timer = 0;
-    for (const type of ["keydown", "pointerdown"]) window.addEventListener(type, (e) => e.isTrusted && (lastInput = Date.now()), true);
+    for (const type of ["keydown", "pointerdown", "pointermove", "wheel"]) window.addEventListener(type, (e) => e.isTrusted && (lastInput = Date.now()), { capture: true, passive: true });
     const list = () => document.querySelector(".cm-tooltip-autocomplete");
     const close = () => {
       const open = list();
@@ -1121,9 +1125,20 @@ ${[...earlier, text].join("\n\n")}`).then(
     window.addEventListener("blur", close);
   }
   var IDLE_MS = 2e3;
+  var OWN_SCROLL_MS = 1e3;
   function followNewCells() {
     let lastInput = 0;
-    for (const type of ["keydown", "pointerdown", "wheel", "touchmove"]) window.addEventListener(type, (e) => e.isTrusted && (lastInput = Date.now()), { capture: true, passive: true });
+    for (const type of ["keydown", "pointerdown"]) window.addEventListener(type, (e) => e.isTrusted && (lastInput = Date.now()), true);
+    let following = true;
+    let ownScroll = 0;
+    window.addEventListener(
+      "scroll",
+      () => {
+        if (Date.now() - ownScroll < OWN_SCROLL_MS) return;
+        following = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
+      },
+      { passive: true }
+    );
     const known = /* @__PURE__ */ new Set();
     let settled = false;
     let settle = 0;
@@ -1131,6 +1146,7 @@ ${[...earlier, text].join("\n\n")}`).then(
     const show = (cell) => {
       const r = cell.getBoundingClientRect();
       if (r.top >= 0 && r.bottom <= window.innerHeight) return;
+      ownScroll = Date.now();
       cell.scrollIntoView({ block: r.height > window.innerHeight ? "start" : "center", behavior: "smooth" });
     };
     new MutationObserver(() => {
@@ -1142,12 +1158,12 @@ ${[...earlier, text].join("\n\n")}`).then(
         settle = window.setTimeout(() => settled = true, 1500);
         return;
       }
-      if (added.length > 3 || Date.now() - lastInput < IDLE_MS) return;
+      if (added.length > 3 || !following || Date.now() - lastInput < IDLE_MS) return;
       const cell = added[added.length - 1];
       const since = Date.now();
       show(cell);
       const grow = new ResizeObserver(() => {
-        if (lastInput > since || Date.now() - since > 15e3 || !cell.isConnected) return grow.disconnect();
+        if (!following || lastInput > since || Date.now() - since > 15e3 || !cell.isConnected) return grow.disconnect();
         show(cell);
       });
       grow.observe(cell);
