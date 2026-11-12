@@ -223,12 +223,13 @@ window.addEventListener("message", async e => {
   // with the file's name, Docs and Point.
   const look = await frame.evaluate(() => ({
     colours: (document.getElementById("endeavor-theme")?.textContent || "").includes("--main-bg-color"),
-    header: getComputedStyle(document.querySelector("header#pluto-nav") || document.body).display !== "none",
-    footer: getComputedStyle(document.querySelector("pluto-editor footer") || document.body).display !== "none",
+    // Ember's page has no footer: one that isn't there is hidden too.
+    header: [document.querySelector("header#pluto-nav")].some(e => e && getComputedStyle(e).display !== "none"),
+    footer: [document.querySelector("pluto-editor footer")].some(e => e && getComputedStyle(e).display !== "none"),
     toolbar: document.querySelector("#endeavor-bar .file")?.textContent,
     button: !!document.querySelector("#endeavor-bar #endeavor-point"),
   }));
-  check(look.colours && !look.header && !look.footer && look.toolbar === "view-check.jl" && look.button, `the Endeavor look is on, and the toolbar (name, Docs, Point) stands in for Pluto's header and footer (${JSON.stringify(look)})`);
+  check(look.colours && !look.header && !look.footer && look.toolbar === path.basename(notebookPath) && look.button, `the Endeavor look is on, and the toolbar (name, Docs, Point) stands in for Pluto's header and footer (${JSON.stringify(look)})`);
   // Point: the button, a click on the squares cell's output, a comment, ↩.
   await frame.click("#endeavor-point");
   check(await frame.evaluate(() => document.body.classList.contains("annotating")), "the button turns Point on");
