@@ -237,6 +237,18 @@ window.addEventListener("message", async e => {
   await page.waitForFunction(() => window.messages.length === 3, null, { timeout: 5000 }).catch(() => {});
   const again = await page.evaluate(() => window.messages[2]?.content?.[0]?.text || "");
   check(again.split("<quote cell").length === 2 && again.endsWith("\nKept"), "↩ then sends them, once");
+  // A box (or a figure) goes at once: the view takes no picture, which would hold the message back past
+  // the moment Claude's desktop app takes it.
+  const outBox = await frame.locator("pluto-cell").nth(2).locator("pluto-output").boundingBox();
+  await page.mouse.move(outBox.x + 2, outBox.y + 2);
+  await page.mouse.down();
+  await page.mouse.move(outBox.x + 60, outBox.y + 30, { steps: 5 });
+  await page.mouse.up();
+  const boxAt = Date.now();
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await page.waitForFunction(() => window.messages.length === 4, null, { timeout: 5000 }).catch(() => {});
+  const boxed = await page.evaluate(() => window.messages[3]?.content?.[0]?.text || "");
+  check(/<quote part="box" uri=/.test(boxed) && Date.now() - boxAt < 1500, `a box goes at once, with no picture (${Date.now() - boxAt} ms)`);
   // Nor is one that fails any other way (a timeout), which could still arrive late.
   await page.evaluate(() => { window.fail = true; });
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
@@ -244,7 +256,7 @@ window.addEventListener("message", async e => {
   await frame.locator("#annotate-bar textarea").press("Enter");
   await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Timed out", null, { timeout: 5000 }).catch(() => {});
   await new Promise(r => setTimeout(r, 1000));
-  check((await page.evaluate(() => window.failed === 1 && window.messages.length === 3)), "a timed-out send isn't tried again, and its pick comes back");
+  check((await page.evaluate(() => window.failed === 1 && window.messages.length === 4)), "a timed-out send isn't tried again, and its pick comes back");
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await page.screenshot({ path: path.join(dir, "point.png") });
   await frame.locator("#annotate-bar textarea").press("Escape");
