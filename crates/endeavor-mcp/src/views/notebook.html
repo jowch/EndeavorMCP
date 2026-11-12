@@ -41,7 +41,7 @@ html.endeavor-inline, html.endeavor-inline body { min-height: 0 !important; heig
 // It asks to move when a notebook has just opened (Claude's chat lets it then) and on a click (the
 // Code tab needs one). A card drawn again later, for an old call, waits for the click. The view can reach
 // nothing on this computer, so Pluto's page and its WebSocket come through tools only the view
-// calls: `notebook_page` and `notebook_socket_*` (Endeavor's `views.rs`).
+// calls: `notebook_page`, `notebook_socket_*` and `notebook_file` (Endeavor's `views.rs`).
 const { App, applyHostStyleVariables } = window.McpAppLib;
 const card = document.getElementById("endeavor-card");
 const nameEl = card.querySelector(".name");
@@ -314,6 +314,19 @@ async function load() {
   // Pluto and Ember make their socket's address from this (the view's own is about:srcdoc); the
   // stand-in doesn't use it.
   window.pluto_pluto_server_url = "https://pluto.invalid/";
+  // An R notebook's widgets (plotly, say) load their files from Ember's server, which the view
+  // can't reach: Ember asks here instead (window.ember_dep_file), and the core reads the file.
+  const id = notebook.id;
+  window.ember_dep_file = async path => {
+    let data = "", mime = "", offset = 0, total = 1;
+    while (offset < total) {
+      const part = await call("notebook_file", { notebook_id: id, path, offset });
+      mime = part.mime; total = part.total; data += part.data;
+      if (part.next <= offset) break;
+      offset = part.next;
+    }
+    return { mime, data };
+  };
   document.head.insertAdjacentHTML("beforeend", page.head);
   document.body.insertAdjacentHTML("beforeend", page.body);
   // After Pluto's stylesheets, so the look's rules win; before any of the page's scripts, so
