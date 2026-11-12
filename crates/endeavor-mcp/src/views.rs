@@ -86,11 +86,21 @@ pub fn schemas() -> Vec<Value> {
     TOOLS.as_array().cloned().unwrap_or_default()
 }
 
+/// `new_notebook`'s and `open_notebook`'s argument, for a client that draws views, to open the
+/// notebook in the browser after all.
+pub const IN_BROWSER: &str = "in_browser";
+
 /// `tools/list` for a client that draws views: the tools that open a notebook show it, and the
 /// view's own tools are listed for the view.
 pub fn add_to(tools: &mut Vec<Value>) {
     for tool in tools.iter_mut().filter(|tool| tool["name"].as_str().is_some_and(|name| SHOWN_BY.contains(&name))) {
         tool["_meta"] = json!({ "ui": { "resourceUri": URI }, "ui/resourceUri": URI });
+        // A client may say it draws views and still show no card (Claude's desktop app, in its Chat
+        // tab, 2026-11-12, #311): the way back to the browser.
+        tool["inputSchema"]["properties"][IN_BROWSER] = json!({
+            "type": "boolean",
+            "description": "Open the notebook in the user's browser instead of beside the chat. Set it when the user says they don't see the notebook or its card. Default: false.",
+        });
     }
     tools.extend(schemas());
 }
@@ -672,6 +682,8 @@ mod tests {
         add_to(&mut tools);
         assert_eq!(tools[0]["_meta"]["ui"]["resourceUri"], URI);
         assert!(tools[1].get("_meta").is_none());
+        assert_eq!(tools[0]["inputSchema"]["properties"][IN_BROWSER]["type"], "boolean", "the way to the browser when no card shows");
+        assert!(tools[1].get("inputSchema").is_none());
         let names: Vec<&str> = tools[2..].iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(names, NAMES);
         assert!(tools[2..].iter().all(|t| t["_meta"]["ui"]["visibility"] == json!(["app"])));

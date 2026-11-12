@@ -56,7 +56,7 @@ const APP: &str = "These tools edit and run a live notebook, in Julia (Pluto) or
 pub const STANDALONE: &str = "These tools edit and run live notebooks, in Julia (Pluto) or R (Ember), without the Endeavor app: \
 the user watches them in a web browser, on the notebook's own page, and there is no notebook pane next to this chat. \
 When the user asks to open, show or look at a `.jl` or `.R` file, try `open_notebook` before reading the file, so they can watch it; if it fails with `not_a_notebook`, read the file. \
-`new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. When it has `browser_note`, the address won't open for the user as it is: give them the note's steps with it. \
+`new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. When it has `browser_note`, no browser opened for the user: give them the address and follow the note. \
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts.";
 
@@ -88,7 +88,9 @@ pub fn instructions(standalone: bool, has_skills: bool, machines: bool, views: b
 
 /// Said to a client that draws the notebook view (`views`), after `STANDALONE`.
 const VIEWS: &str = "In this client, `new_notebook` and `open_notebook` show the notebook in the chat instead of a browser tab (`shown_beside_chat`): \
-say that it opens beside the chat or full screen, by itself or with one click on its card, and don't give the address.";
+say that it should open beside the chat or full screen, by itself or with one click on its card, and don't give the address. \
+Some parts of this client show no card: if the user says they don't see the notebook, call `open_notebook` again with `in_browser` true, \
+which opens it in their browser.";
 
 /// `tools/list`'s entry for the guide.
 pub fn schema() -> Value {

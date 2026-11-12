@@ -2646,14 +2646,33 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     assert!(!out.status.success() && !stdout.contains(TOKEN) && !stderr.contains(TOKEN) && stderr.contains("in your own terminal"), "{stdout} {stderr}");
     front.finish();
 
-    // Where no browser can be opened, the agent is told so, and gives the link with the steps that
-    // reach it: over ssh, the user's browser is on another computer, which needs the port forwarded.
+    // A client that draws views gets the notebook beside the chat, and no tab; one that draws no
+    // card after all (Claude's desktop app, Chat tab, #311) asks for the browser with `in_browser`.
+    std::fs::remove_file(&opened).unwrap();
+    let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", opened.to_str().unwrap())]);
+    front.request("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": { "extensions": { "io.modelcontextprotocol/ui": { "mimeTypes": ["text/html;profile=mcp-app"] } } }, "clientInfo": { "name": "Viewer", "version": "0" } }));
+    let shown = front.ok("open_notebook", json!({ "path": path }));
+    assert_eq!((shown["shown_beside_chat"].clone(), shown["opened_in_browser"].clone()), (json!(true), json!(false)), "{shown}");
+    assert!(!opened.exists(), "no tab opens beside the view");
+    let tab = front.ok("open_notebook", json!({ "path": path, "in_browser": true }));
+    assert_eq!((tab.get("shown_beside_chat"), tab["opened_in_browser"].clone()), (None, json!(true)), "{tab}");
+    assert_eq!(std::fs::read_to_string(&opened).unwrap().lines().count(), 1, "in_browser opens the tab");
+    // Its connection serves every conversation (Claude's desktop app), so a second notebook isn't refused.
+    let other = place.project.join("other.jl").display().to_string();
+    std::fs::write(&other, "### A Pluto.jl notebook ###").unwrap();
+    place.local_bridge.set_notebooks(vec![notebook_json(NOTEBOOK, &path), notebook_json("aaaaaaaa-0000-0000-0000-000000000002", &other)]);
+    let second = front.ok("open_notebook", json!({ "path": other }));
+    assert_eq!(second["path"].as_str(), Some(other.as_str()), "{second}");
+    front.finish();
+
+    // Where no browser can be opened, the agent is told so, and gives the link, with the port forward
+    // for when it doesn't load: over ssh, the user's browser is on another computer.
     let mut front = start_front(&place, &[("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")]);
     front.initialize();
     let shut = front.ok("open_notebook", json!({ "path": path }));
     assert_eq!((shut["browser_url"].as_str(), shut["opened_in_browser"].clone()), (Some(page.as_str()), json!(false)), "{shut}");
     let note = shut["browser_note"].as_str().unwrap_or_default();
-    assert!(note.contains(&format!("`ssh -L {port}:localhost:{port} ")) && note.contains("over ssh") && note.contains(" open --state-dir "), "{shut}");
+    assert!(note.contains(&format!("`ssh -L {port}:localhost:{port} ")) && note.contains("Only if the address doesn't load") && note.contains(" open --state-dir "), "{shut}");
     let status = front.ok("session_status", json!({}));
     assert!(status["browser_note"].as_str().is_some_and(|n| n.contains("ssh -L")), "asked for the link again, the agent gets the steps again: {status}");
     assert!(!shut.to_string().contains(TOKEN) && !shut.to_string().contains(&pages), "{shut}");

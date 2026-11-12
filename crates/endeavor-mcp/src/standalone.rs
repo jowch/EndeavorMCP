@@ -809,6 +809,11 @@ struct Relay {
     /// The client draws MCP App views (it said so in `initialize`): notebooks show in the notebook
     /// view beside the chat, not in a browser tab (`views`).
     views: std::sync::atomic::AtomicBool,
+    /// What the log said of the tool calls' `_meta`: its keys, and how many calls had their values
+    /// logged (`log_meta`).
+    meta_logged: Mutex<(Vec<String>, u32)>,
+    /// The salt of those fingerprints, made per process, so a log doesn't let anyone check a guessed value.
+    meta_salt: std::collections::hash_map::RandomState,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -967,7 +972,38 @@ fn session_key(conversation: Option<&str>, child_of_shell: bool) -> Option<Strin
     ok.then(|| format!("claude-{id}"))
 }
 
+/// How many tool calls `Relay::log_meta` logs the `_meta` values of.
+const META_CALLS_LOGGED: u32 = 5;
+
+/// A short fingerprint of `text` for the log, salted per process (`salt`): two calls with the same value
+/// show the same one, and the value itself can't be checked against it.
+fn fingerprint(salt: &std::collections::hash_map::RandomState, text: &str) -> String {
+    use std::hash::BuildHasher;
+    format!("{:08x}", salt.hash_one(text) as u32)
+}
+
 impl Relay {
+    /// Log what a tool call's `_meta` holds, to learn whether a client that serves several conversations
+    /// on one connection names the conversation in each call: its keys whenever they change, and for the
+    /// first `META_CALLS_LOGGED` calls a fingerprint of each string value, never the value. A value that
+    /// differs between two conversations and stays the same within one names the conversation.
+    fn log_meta(&self, meta: &Value) {
+        let keys: Vec<String> = meta.as_object().map(|meta| meta.keys().cloned().collect()).unwrap_or_default();
+        let mut logged = self.meta_logged.lock().unwrap();
+        let (seen, calls) = &mut *logged;
+        if *seen != keys || *calls == 0 {
+            eprintln!("[ Info: Tool calls carry _meta keys: {}", if keys.is_empty() { "(none)".to_owned() } else { keys.join(", ") });
+            *seen = keys;
+        }
+        if *calls < META_CALLS_LOGGED {
+            *calls += 1;
+            let values: Vec<String> = meta.as_object().into_iter().flatten().filter_map(|(key, value)| Some(format!("{key}={}", fingerprint(&self.meta_salt, value.as_str()?)))).collect();
+            if !values.is_empty() {
+                eprintln!("[ Info: Tool call {calls}'s _meta values, as fingerprints: {}", values.join(", "));
+            }
+        }
+    }
+
     fn new(options: Options, session: String, out: Box<dyn Write + Send>) -> Relay {
         Relay {
             target: Mutex::new(Target::local(options.folder.as_deref())),
@@ -985,6 +1021,8 @@ impl Relay {
             protocol: Mutex::default(),
             mcp_session: Mutex::default(),
             views: Default::default(),
+            meta_logged: Mutex::default(),
+            meta_salt: Default::default(),
             out: Mutex::new(out),
         }
     }
@@ -1095,6 +1133,22 @@ impl Relay {
         }
         let tool = (message["method"] == "tools/call").then(|| crate::mcp::current_name(message["params"]["name"].as_str().unwrap_or_default()).to_owned());
         if tool.is_some() {
+            self.log_meta(&message["params"]["_meta"]);
+        }
+        // `in_browser` is the front's, for a client that draws views (`views::add_to`); the runtime
+        // doesn't know it.
+        let mut message = message;
+        let mut in_browser = false;
+        let stripped;
+        let line = match message["params"]["arguments"].as_object_mut() {
+            Some(arguments) if views && matches!(tool.as_deref(), Some("new_notebook" | "open_notebook")) && arguments.get(crate::views::IN_BROWSER).is_some_and(Value::is_boolean) => {
+                in_browser = arguments.remove(crate::views::IN_BROWSER) == Some(Value::Bool(true));
+                stripped = to_json(&message);
+                stripped.as_str()
+            }
+            _ => line,
+        };
+        if tool.is_some() {
             self.learn_workspace(&message);
         }
         if let Some(tool) = tool.as_deref().filter(|tool| crate::mcp::MACHINE_NAMES.contains(tool)) {
@@ -1160,7 +1214,7 @@ impl Relay {
                 Ok(route) => route,
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
-            let sink = |reply: String| self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, reply)));
+            let sink = |reply: String| self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, in_browser, reply)));
             match self.post(&route, line, &sink) {
                 Ok(()) => return,
                 Err(Sent::NotConnected(e)) if attempt == 0 => {
@@ -1176,7 +1230,7 @@ impl Relay {
     /// `open_notebook` made or opened opened in the user's browser, with the link that lets the
     /// browser in. Each such call opens it, so that asking the agent to open it again works, except
     /// within `REOPEN_AFTER` of opening the same one. `opened_in_browser` says whether it is open.
-    fn in_browser(&self, message: &Value, tool: Option<&str>, route: &Route, reply: String) -> String {
+    fn in_browser(&self, message: &Value, tool: Option<&str>, route: &Route, asked: bool, reply: String) -> String {
         // The view's replies, a receive up to a few MB: nothing here is for them.
         if tool.is_some_and(crate::views::is_view_tool) {
             return reply;
@@ -1191,7 +1245,7 @@ impl Relay {
         // no tab opens. A notebook on a machine opens in a tab as before: the view's calls may reach
         // another front, which works on this computer. `shown_at` lets a view the client draws again
         // later (the conversation reopened) tell that it's an old one.
-        let in_view = route.host.is_none() && self.views.load(std::sync::atomic::Ordering::SeqCst) && matches!(tool, Some("new_notebook" | "open_notebook"));
+        let in_view = route.host.is_none() && self.views.load(std::sync::atomic::Ordering::SeqCst) && matches!(tool, Some("new_notebook" | "open_notebook")) && !asked;
         if in_view {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
             fields.insert("opened_in_browser".into(), false.into());
@@ -1206,12 +1260,13 @@ impl Relay {
             }
             fields.insert("opened_in_browser".into(), opened.into());
         }
-        // A runtime on this computer, which shows the user no browser: the address alone won't open
-        // for them. (On a machine the connection's port is on the user's computer already.)
+        // A runtime on this computer, which shows the user no browser: nothing opened for them, and the
+        // address may or may not reach their browser. (On a machine the connection's port is on the
+        // user's computer already.)
         let var = |name: &str| std::env::var(name).ok();
         if route.host.is_none() && !in_view && !browser::shows(var) {
             let open = crate::core::open_command(&self.options.state_dir);
-            fields.insert("browser_note".into(), browser::note(&crate::hostname(), route.port, &open, browser::over_ssh(var)).into());
+            fields.insert("browser_note".into(), browser::note(&crate::hostname(), route.port, &open).into());
         }
         fields.insert("browser_url".into(), url.into());
         parsed["result"]["content"][0]["text"] = to_json(&Value::Object(fields)).into();
@@ -1234,6 +1289,11 @@ impl Relay {
         }
         if self.options.skills_plugin {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
+        }
+        // A client that draws views (Claude's desktop app) serves all its conversations on this one
+        // connection, so its session may work on several notebooks (`Notebooks::refusal`).
+        if self.views.load(std::sync::atomic::Ordering::SeqCst) {
+            head.push_str("X-Endeavor-Notebooks: several\r\n");
         }
         if let Some(version) = &*self.protocol.lock().unwrap() {
             head.push_str(&format!("MCP-Protocol-Version: {version}\r\n"));

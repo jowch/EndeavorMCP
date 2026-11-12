@@ -218,14 +218,18 @@ and the page says how to get in. The agent can:
 - Read cell outputs, including tables, and look at plots.
 
 Each agent session works in one notebook. If you edit a cell while the agent
-works, it reads your change before it overwrites it.
+works, it reads your change before it overwrites it. An app that shows the
+notebook beside the chat, such as Claude's desktop app, is the exception: the
+server can't tell its chats apart, so every chat there can work on any notebook
+a chat in it opened.
 
 ### In Claude's desktop app
 
 In the Code tab of Claude's desktop app, a Julia notebook on this computer
 opens beside the chat: click the notebook's card to show it. R notebooks and
-notebooks on a machine still open in your browser, and the Chat tab doesn't
-show the notebook yet.
+notebooks on a machine still open in your browser. The Chat tab doesn't show
+the notebook yet: tell Claude you don't see it, and it opens the notebook in
+your browser.
 
 **Point** (⌘⇧E, or Ctrl+Shift+E) lets you click a cell, its code or its
 output, add a comment, and press ↩ to put it in the chat's message box, ready

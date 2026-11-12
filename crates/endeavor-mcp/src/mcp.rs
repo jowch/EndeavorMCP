@@ -241,6 +241,9 @@ pub struct Caller {
     pub no_folder: bool,
     /// The client draws MCP App views (`views`): the front lists the notebook view and its tools.
     pub views: bool,
+    /// The session may work on several notebooks (`X-Endeavor-Notebooks: several`): its front's client
+    /// serves several conversations on one connection, as Claude's desktop app does.
+    pub several: bool,
 }
 
 /// A name that goes in a header or a message: printable characters only,
@@ -258,7 +261,8 @@ impl Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
         let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
         let browser_port = request.header("X-Endeavor-Browser-Port").and_then(|port| port.trim().parse().ok()).filter(|&port| port != 0);
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false }
+        let several = header("X-Endeavor-Notebooks") == "several";
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several }
     }
 }
 
@@ -532,6 +536,9 @@ impl Bridge {
             }
         }
         self.notebooks.note_call(&caller.owner);
+        if caller.several {
+            self.notebooks.allow_several(&caller.owner);
+        }
         if !caller.owner.is_empty() && acts(name, &arguments) {
             if self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
                 self.notebooks.publish();

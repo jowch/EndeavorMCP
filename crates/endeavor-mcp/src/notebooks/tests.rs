@@ -2261,6 +2261,20 @@ fn opening_and_making_notebooks() {
     assert_eq!(s.call("", "new_notebook", json!({ "path": path })), Err(format!("ArgumentError: file_exists::'{path}' already exists; use open_notebook to load it")));
     assert_eq!(s.refused("", "new_notebook", json!({ "path": format!("{dir}{SEP}x.txt") })), "invalid_path");
     assert_eq!(s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}missing{SEP}y.jl") })), Err(format!("ArgumentError: invalid_path::Directory does not exist: '{dir}{SEP}missing'")));
+    // A read-only folder is refused before the engine fails to save there, with where to go instead.
+    // (Root writes anywhere, so there the folder isn't read-only to it and nothing is checked.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = format!("{dir}{SEP}locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(format!("{locked}{SEP}probe"), "").is_err() {
+            let refused = s.call("", "new_notebook", json!({ "path": format!("{locked}{SEP}z.jl") })).unwrap_err();
+            assert!(refused.starts_with(&format!("ArgumentError: folder_not_writable::A new notebook can't be saved in the folder, '{locked}': it is read-only.")) && refused.contains("`path`"), "{refused}");
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     // A session's folder takes its unnamed notebooks, and relative paths.
     let named = s.notebooks.tool("s", "new_notebook", &json!({ "path": "named.jl" }), &Folder::In(dir.clone()), Instant::now()).map(tool_json).unwrap();
     assert_eq!(named["path"], format!("{dir}{SEP}named.jl"));
@@ -2432,6 +2446,51 @@ fn one_notebook_per_session() {
     assert_eq!(s.notebooks.bound("c").as_ref(), Some(&paths[2]));
     assert_eq!(refused(s.call("c", "new_notebook", json!({ "path": &paths[3] }))), one);
     assert_eq!(refused(s.call("c", "open_notebook", json!({ "path": first_nb }))), one);
+}
+
+#[test]
+fn a_session_that_may_work_on_several_notebooks() {
+    // Claude's desktop app serves all its conversations on one connection: each notebook that session
+    // opens or creates is one it works on, and it still can't change one it didn't open.
+    let s = setup();
+    let paths = temp_notebooks("several", 4);
+    let refusal = |result: Result<Value, String>| result.err().filter(|e| e.starts_with("ArgumentError: one_notebook::"));
+    s.notebooks.allow_several("d");
+    let first = s.call("d", "open_notebook", json!({ "path": &paths[0] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    let second = s.call("d", "open_notebook", json!({ "path": &paths[1] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    std::fs::remove_file(&paths[2]).unwrap();
+    let third = s.call("d", "new_notebook", json!({ "path": &paths[2] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    for id in [&first, &second, &third] {
+        assert_eq!(refusal(s.call("d", "run_all_cells", json!({ "notebook_id": id }))), None);
+    }
+    // One the app opened isn't the session's until it opens it.
+    let apps = s.call("", "open_notebook", json!({ "path": &paths[3] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    s.notebooks.publish();
+    assert_eq!(
+        refusal(s.call("d", "run_all_cells", json!({ "notebook_id": apps }))),
+        Some(format!(
+            "ArgumentError: one_notebook::{} wasn't opened or created here, so you can't change or run it. \
+             If the user wants you to work on it, open it with `open_notebook` and its path first.",
+            paths[3]
+        ))
+    );
+    assert_eq!(refusal(s.call("d", "read_notebook_code", json!({ "notebook_id": apps }))), None);
+    // It can't say which notebook is the conversation's, so none is `this_session`.
+    let listed = s.call("d", "list_notebooks", json!({})).unwrap();
+    assert!(listed.as_array().unwrap().iter().all(|nb| nb["this_session"] == false), "{listed}");
+
+    // Its first notebook closing changes nothing: the app's is still refused, its others still run.
+    s.notebooks.stop_notebook(&paths[0]).unwrap();
+    s.call("d", "list_notebooks", json!({})).unwrap();
+    assert!(refusal(s.call("d", "run_all_cells", json!({ "notebook_id": apps }))).is_some());
+    assert_eq!(refusal(s.call("d", "run_all_cells", json!({ "notebook_id": second }))), None);
+    // Opening the app's notebook makes it one the session works on.
+    assert_eq!(s.call("d", "open_notebook", json!({ "path": &paths[3] })).unwrap()["already_open"], true);
+    assert_eq!(refusal(s.call("d", "run_all_cells", json!({ "notebook_id": apps }))), None);
+
+    // Any other session keeps one notebook.
+    s.call("e", "open_notebook", json!({ "path": &paths[1] })).unwrap();
+    assert!(refusal(s.call("e", "open_notebook", json!({ "path": &paths[2] }))).is_some());
 }
 
 #[test]
