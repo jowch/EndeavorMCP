@@ -222,18 +222,23 @@ works, it reads your change before it overwrites it.
 
 ### In Claude's desktop app
 
-In the Code tab of Claude's desktop app, the notebook opens beside the chat
-instead of in your browser. **Point** (⌘⇧E, or Ctrl+Shift+E) lets you click a
-cell, its code or its output, add a comment, and press ↩ to put it in the
-chat's message box, ready to send. The text starts with ↓ on its own line.
-If the app isn't ready for it, which happens for a few seconds after you type
-in the message box, your pick comes back and ↩ tries again.
+In the Code tab of Claude's desktop app, a Julia notebook on this computer
+opens beside the chat: click the notebook's card to show it. R notebooks and
+notebooks on a machine still open in your browser, and the Chat tab doesn't
+show the notebook yet.
+
+**Point** (⌘⇧E, or Ctrl+Shift+E) lets you click a cell, its code or its
+output, add a comment, and press ↩ to put it in the chat's message box, ready
+to send. The text goes at the end of the box, after anything you typed, and
+starts with ↓. The app turns it away for a few seconds after you type or click
+elsewhere on the page, or if the same press was already used. Then your pick
+comes back, and you press ↩ again.
 
 A notebook's outputs can carry their own scripts, and in this view a script
-can put text in your message box too, after any click in the notebook. The
-app never sends it for you, so read what's in the box before you send it.
-Open notebooks from other people in safe preview and look at them before you
-run them, as you would in Pluto.
+can put text in your message box too, after any click or key press in the
+notebook. The app never sends it for you, so read the end of the box before
+you send. Notebooks open in safe preview, where no code runs and no output
+scripts run either. Look at a notebook from someone else before you press **Run notebook code**, or let the agent run it.
 
 ## What keeps running
 
