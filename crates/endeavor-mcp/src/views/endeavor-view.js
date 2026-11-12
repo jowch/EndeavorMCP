@@ -1000,15 +1000,7 @@ ${comment}` : blocks.join("\n\n");
       clearTimeout(hide);
       hide = window.setTimeout(() => sent.classList.remove("shown"), 4e3);
     };
-    const giveBack = (comment, why) => {
-      const box = document.querySelector("#annotate-bar textarea");
-      if (box && !box.value.trim() && comment) {
-        box.value = comment;
-        box.dispatchEvent(new Event("input"));
-      }
-      say(comment ? `${why} Your comment is back in the box.` : why);
-    };
-    const failed = (comment) => (e) => giveBack(comment, `Couldn't reach Claude's chat${e instanceof Error && e.message ? `: ${e.message}` : ""}.`);
+    const kept = (why) => say(`${why} Your ${added.length === 1 ? "pick is" : "picks are"} kept: ${mac ? "\u21A9" : "Enter"} with your next pick passes ${added.length === 1 ? "it" : "them"} to the chat.`);
     setHost((msg) => {
       if (msg.type === "shoot") return setTimeout(() => toPage?.({ type: "shot", id: msg.id }));
       if (msg.type !== "quote" || !msg.picks.length) return;
@@ -1023,8 +1015,8 @@ ${comment}` : blocks.join("\n\n");
 ${[...earlier, text].join("\n\n")}`).then(
         () => say("Passed to the chat"),
         (e) => {
-          added.unshift(...earlier);
-          failed(msg.comment)(e);
+          added.unshift(...earlier, text);
+          kept(`Couldn't reach Claude's chat${e instanceof Error && e.message ? `: ${e.message}` : ""}.`);
         }
       );
     });

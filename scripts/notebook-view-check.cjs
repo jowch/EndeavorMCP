@@ -133,7 +133,7 @@ window.addEventListener("message", async e => {
   if (m.method === "ui/initialize") return send({ id: m.id, result: { protocolVersion: m.params.protocolVersion, hostInfo: { name: "view-check", version: "0" }, hostCapabilities: { serverTools: {}, openLinks: {}, logging: {}, message: { text: {} }, updateModelContext: { text: {} } }, hostContext: context } });
   if (m.method === "ui/notifications/initialized") { window.initialized = true; return; }
   if (m.method === "tools/call") return send({ id: m.id, result: await window.toolsCall(m.params) });
-  if (m.method === "ui/message" && window.refuse) { window.refuse = false; return send({ id: m.id, error: { code: -32000, message: "refused" } }); }
+  if (m.method === "ui/message" && window.refuse) { window.refuse--; return send({ id: m.id, error: { code: -32000, message: "refused" } }); }
   if (m.method === "ui/message") { window.messages.push(m.params); return send({ id: m.id, result: {} }); }
   if (m.method === "ui/update-model-context") { window.contexts.push(m.params); return send({ id: m.id, result: {} }); }
   if (m.method === "ui/request-display-mode") {
@@ -209,13 +209,27 @@ window.addEventListener("message", async e => {
   await page.waitForFunction(() => window.messages.length === 2, null, { timeout: 5000 }).catch(() => {});
   const second = await page.evaluate(() => window.messages[1]?.content?.[0]?.text || "");
   check(/\nFirst\n\n<quote[\s\S]*\nSecond$/.test(second) && second.split("[Endeavor]").length === 2 && (await page.evaluate(() => window.contexts.length)) === 0, "the next ↩ passes both picks in one message, under one note");
-  // A send the chat refuses gives the comment back.
-  await page.evaluate(() => { window.refuse = true; });
+  // A send the chat refuses once is tried again: one message arrives.
+  await page.evaluate(() => { window.refuse = 1; });
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
-  await frame.locator("#annotate-bar textarea").fill("Try again");
+  await frame.locator("#annotate-bar textarea").fill("Refused once");
   await frame.locator("#annotate-bar textarea").press("Enter");
-  await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Try again", null, { timeout: 5000 }).catch(() => {});
-  check(await frame.evaluate(() => document.querySelector("#annotate-bar textarea").value === "Try again"), "a refused send puts the comment back in the box");
+  await page.waitForFunction(() => window.messages.length === 3, null, { timeout: 5000 }).catch(() => {});
+  check((await page.evaluate(() => window.messages.length === 3 && window.messages[2].content[0].text.endsWith("\nRefused once"))), "a send the chat refuses once is tried again, and arrives once");
+  // Refused again: the pick and comment stay in the view, and the next ↩ passes them with its own.
+  await page.evaluate(() => { window.refuse = 2; });
+  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
+  await frame.locator("#annotate-bar textarea").fill("Kept");
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await frame.waitForFunction(() => /kept/.test(document.getElementById("endeavor-sent")?.textContent || ""), null, { timeout: 5000 }).catch(() => {});
+  const keptSaid = await frame.evaluate(() => document.getElementById("endeavor-sent")?.textContent || "");
+  check(/pick is kept/.test(keptSaid) && (await page.evaluate(() => window.messages.length)) === 3, `a refused send keeps the pick in the view (${keptSaid})`);
+  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
+  await frame.locator("#annotate-bar textarea").fill("After");
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await page.waitForFunction(() => window.messages.length === 4, null, { timeout: 5000 }).catch(() => {});
+  const after = await page.evaluate(() => window.messages[3]?.content?.[0]?.text || "");
+  check(/\nKept\n\n<quote[\s\S]*\nAfter$/.test(after), "the next ↩ passes the kept pick with the new one");
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await page.screenshot({ path: path.join(dir, "point.png") });
   await frame.locator("#annotate-bar textarea").press("Escape");

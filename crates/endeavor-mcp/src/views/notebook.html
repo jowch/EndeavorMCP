@@ -236,9 +236,12 @@ function closeAll() { [...sockets].forEach(s => s.close()); }
 // the look without Point. Claude's desktop app adds the text at the cursor, straight after anything the
 // user had typed, so it starts on a new paragraph.
 const asked = async res => { if (res?.isError) throw new Error("Claude's chat didn't take it"); };
+const message = text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\n\n" + text }] }).then(asked);
+// Claude's desktop app refused the first message after the user had typed in its own box, and took
+// the same message a moment later (2026-11-12): one refusal is tried again before Point says so.
 const pointHost = {
   get canSend() { return !!app.getHostCapabilities()?.message; },
-  send: text => app.sendMessage({ role: "user", content: [{ type: "text", text: "\n\n" + text }] }).then(asked),
+  send: text => message(text).catch(() => new Promise(go => setTimeout(go, 600)).then(() => message(text))),
 };
 
 async function load() {
