@@ -106,6 +106,7 @@ impl Notebooks {
             "interrupt_notebook" => t.interrupt_notebook(),
             "answer_prompt" => t.answer_prompt(),
             "restart_notebook" => t.restart_notebook(),
+            "close_notebook" => t.close_notebook(),
             "preview_package_update" => t.preview_package_update(),
             "approve_install" => t.approve_install(),
             "apply_package_update" => t.apply_package_update(),
@@ -1581,6 +1582,20 @@ impl Call<'_> {
             result["message"] = json!("A cell didn't stop, so the notebook's process was ended. Its values are gone: the next run starts a new process.");
         }
         Ok(result)
+    }
+
+    /// Close the notebook, as the app's "Stop notebook" does: its process ends, for every session and
+    /// the user's browser too. Pluto saved the file with every change, so nothing is lost but the values.
+    fn close_notebook(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        let stopped = self.nbs.stop_notebook(&nb.path)?;
+        let path = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
+        self.nbs.unbind(self.owner, &path);
+        // Not stopped: it was no longer open (its engine ended meanwhile).
+        if stopped["stopped"] != true {
+            return Err(argument_error(&format!("notebook_not_found::{} is no longer open.", nb.path)));
+        }
+        Ok(json!({ "notebook_id": nb.id, "path": nb.path, "closed": true }))
     }
 
     /// The page's Restart, for the agent (#202): a new process for the notebook, with every value

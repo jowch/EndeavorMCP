@@ -371,7 +371,8 @@ notebook another of them opened, once it opens it. The front logs the tool
 calls' `_meta` keys whenever they change, and for the first few calls a
 fingerprint of each string value (never the value), to learn whether Desktop
 names the conversation in each call; if it does, the session should be keyed
-on that instead.
+on that instead. Checked 2026-11-12: Desktop (Code tab) sends no `_meta` at
+all, so there is nothing to key on yet.
 
 Each session also leaves a record: when it last made a tool call (a held
 `/endeavor/events` stream doesn't count). A session has a record from when it
