@@ -247,6 +247,13 @@ starts with ↓. The app turns it away for a few seconds after you type or click
 elsewhere on the page, or if the same press was already used. Then your pick
 comes back, and you press ↩ again.
 
+The view can load files from one web host, **cdn.jsdelivr.net**, and no
+other. Notebook outputs need it: Masque's plots and their fonts, PlutoUI's
+widgets, the math in Markdown cells, and the notebook's code font all come
+from there. Pluto's own page and PlutoPlotly's plots need no web host. An
+output that loads a script from anywhere else (unpkg.com or esm.sh, say)
+doesn't draw in this view; open the notebook in your browser instead.
+
 A notebook's outputs can carry their own scripts, and in this view a script
 can put text in your message box too, after any click or key press in the
 notebook. The app never sends it for you, so read the end of the box before
