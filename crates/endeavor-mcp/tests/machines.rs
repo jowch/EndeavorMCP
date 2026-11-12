@@ -2657,6 +2657,12 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     let tab = front.ok("open_notebook", json!({ "path": path, "in_browser": true }));
     assert_eq!((tab.get("shown_beside_chat"), tab["opened_in_browser"].clone()), (None, json!(true)), "{tab}");
     assert_eq!(std::fs::read_to_string(&opened).unwrap().lines().count(), 1, "in_browser opens the tab");
+    // Its connection serves every conversation (Claude's desktop app), so a second notebook isn't refused.
+    let other = place.project.join("other.jl").display().to_string();
+    std::fs::write(&other, "### A Pluto.jl notebook ###").unwrap();
+    place.local_bridge.set_notebooks(vec![notebook_json(NOTEBOOK, &path), notebook_json("aaaaaaaa-0000-0000-0000-000000000002", &other)]);
+    let second = front.ok("open_notebook", json!({ "path": other }));
+    assert_eq!(second["path"].as_str(), Some(other.as_str()), "{second}");
     front.finish();
 
     // Where no browser can be opened, the agent is told so, and gives the link with the steps that

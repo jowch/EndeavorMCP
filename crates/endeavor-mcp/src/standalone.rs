@@ -809,6 +809,11 @@ struct Relay {
     /// The client draws MCP App views (it said so in `initialize`): notebooks show in the notebook
     /// view beside the chat, not in a browser tab (`views`).
     views: std::sync::atomic::AtomicBool,
+    /// What the log said of the tool calls' `_meta`: its keys, and how many calls had their values
+    /// logged (`log_meta`).
+    meta_logged: Mutex<(Vec<String>, u32)>,
+    /// The salt of those fingerprints, made per process, so a log doesn't let anyone check a guessed value.
+    meta_salt: std::collections::hash_map::RandomState,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -967,7 +972,38 @@ fn session_key(conversation: Option<&str>, child_of_shell: bool) -> Option<Strin
     ok.then(|| format!("claude-{id}"))
 }
 
+/// How many tool calls `Relay::log_meta` logs the `_meta` values of.
+const META_CALLS_LOGGED: u32 = 5;
+
+/// A short fingerprint of `text` for the log, salted per process (`salt`): two calls with the same value
+/// show the same one, and the value itself can't be checked against it.
+fn fingerprint(salt: &std::collections::hash_map::RandomState, text: &str) -> String {
+    use std::hash::BuildHasher;
+    format!("{:08x}", salt.hash_one(text) as u32)
+}
+
 impl Relay {
+    /// Log what a tool call's `_meta` holds, to learn whether a client that serves several conversations
+    /// on one connection names the conversation in each call: its keys whenever they change, and for the
+    /// first `META_CALLS_LOGGED` calls a fingerprint of each string value, never the value. A value that
+    /// differs between two conversations and stays the same within one names the conversation.
+    fn log_meta(&self, meta: &Value) {
+        let keys: Vec<String> = meta.as_object().map(|meta| meta.keys().cloned().collect()).unwrap_or_default();
+        let mut logged = self.meta_logged.lock().unwrap();
+        let (seen, calls) = &mut *logged;
+        if *seen != keys || *calls == 0 {
+            eprintln!("[ Info: Tool calls carry _meta keys: {}", if keys.is_empty() { "(none)".to_owned() } else { keys.join(", ") });
+            *seen = keys;
+        }
+        if *calls < META_CALLS_LOGGED {
+            *calls += 1;
+            let values: Vec<String> = meta.as_object().into_iter().flatten().filter_map(|(key, value)| Some(format!("{key}={}", fingerprint(&self.meta_salt, value.as_str()?)))).collect();
+            if !values.is_empty() {
+                eprintln!("[ Info: Tool call {calls}'s _meta values, as fingerprints: {}", values.join(", "));
+            }
+        }
+    }
+
     fn new(options: Options, session: String, out: Box<dyn Write + Send>) -> Relay {
         Relay {
             target: Mutex::new(Target::local(options.folder.as_deref())),
@@ -985,6 +1021,8 @@ impl Relay {
             protocol: Mutex::default(),
             mcp_session: Mutex::default(),
             views: Default::default(),
+            meta_logged: Mutex::default(),
+            meta_salt: Default::default(),
             out: Mutex::new(out),
         }
     }
@@ -1094,6 +1132,9 @@ impl Relay {
             return;
         }
         let tool = (message["method"] == "tools/call").then(|| crate::mcp::current_name(message["params"]["name"].as_str().unwrap_or_default()).to_owned());
+        if tool.is_some() {
+            self.log_meta(&message["params"]["_meta"]);
+        }
         // `in_browser` is the front's, for a client that draws views (`views::add_to`); the runtime
         // doesn't know it.
         let mut message = message;
@@ -1247,6 +1288,11 @@ impl Relay {
         }
         if self.options.skills_plugin {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
+        }
+        // A client that draws views (Claude's desktop app) serves all its conversations on this one
+        // connection, so its session may work on several notebooks (`Notebooks::refusal`).
+        if self.views.load(std::sync::atomic::Ordering::SeqCst) {
+            head.push_str("X-Endeavor-Notebooks: several\r\n");
         }
         if let Some(version) = &*self.protocol.lock().unwrap() {
             head.push_str(&format!("MCP-Protocol-Version: {version}\r\n"));
