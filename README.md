@@ -218,9 +218,10 @@ and the page says how to get in. The agent can:
 - Read cell outputs, including tables, and look at plots.
 
 Each agent session works in one notebook. If you edit a cell while the agent
-works, it reads your change before it overwrites it. Claude's desktop app is
-the exception: there, every chat can work on any notebook a chat opened, since
-the server can't tell its chats apart.
+works, it reads your change before it overwrites it. An app that shows the
+notebook beside the chat, such as Claude's desktop app, is the exception: the
+server can't tell its chats apart, so every chat there can work on any notebook
+a chat in it opened.
 
 ### In Claude's desktop app
 

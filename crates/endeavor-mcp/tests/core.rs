@@ -446,11 +446,12 @@ fn an_agent_without_the_session_header_is_told_apart_by_its_mcp_session_id() {
     assert_eq!(marked(&two), vec![(a.clone(), false), (b.clone(), true)]);
 
     // A front whose client serves several conversations on one connection (Claude's desktop app)
-    // says so, and its session works on each notebook it opens.
+    // says so, and its session works on each notebook it opens. It can't say which is the
+    // conversation's, so none is `this_session`.
     let desktop = [("X-Endeavor-Session", "desktop"), ("X-Endeavor-Notebooks", "several")];
     assert_eq!(call(&desktop, "open_notebook", serde_json::json!({ "path": a }))["path"], serde_json::json!(a));
     assert_eq!(call(&desktop, "open_notebook", serde_json::json!({ "path": b }))["path"], serde_json::json!(b), "a second notebook isn't refused");
-    assert_eq!(marked(&desktop), vec![(a.clone(), true), (b.clone(), true)]);
+    assert_eq!(marked(&desktop), vec![(a.clone(), false), (b.clone(), false)]);
 }
 
 #[test]

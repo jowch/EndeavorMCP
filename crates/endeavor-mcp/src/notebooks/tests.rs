@@ -2440,29 +2440,43 @@ fn a_session_that_may_work_on_several_notebooks() {
     // opens or creates is one it works on, and it still can't change one it didn't open.
     let s = setup();
     let paths = temp_notebooks("several", 4);
-    let refused = |result: Result<Value, String>| result.err().and_then(|e| e.split_once("::").map(|(kind, _)| kind.to_owned()));
-    let one = Some("ArgumentError: one_notebook".to_owned());
+    let refusal = |result: Result<Value, String>| result.err().filter(|e| e.starts_with("ArgumentError: one_notebook::"));
     s.notebooks.allow_several("d");
     let first = s.call("d", "open_notebook", json!({ "path": &paths[0] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
     let second = s.call("d", "open_notebook", json!({ "path": &paths[1] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
     std::fs::remove_file(&paths[2]).unwrap();
     let third = s.call("d", "new_notebook", json!({ "path": &paths[2] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
-    assert_eq!(s.notebooks.bound("d").as_ref(), Some(&paths[0]), "the first one stays its notebook");
     for id in [&first, &second, &third] {
-        assert_eq!(refused(s.call("d", "run_all_cells", json!({ "notebook_id": id }))), None);
+        assert_eq!(refusal(s.call("d", "run_all_cells", json!({ "notebook_id": id }))), None);
     }
-    // One the app opened isn't the session's.
+    // One the app opened isn't the session's until it opens it.
     let apps = s.call("", "open_notebook", json!({ "path": &paths[3] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
     s.notebooks.publish();
-    assert_eq!(refused(s.call("d", "run_all_cells", json!({ "notebook_id": apps }))), one);
-    assert_eq!(refused(s.call("d", "read_notebook_code", json!({ "notebook_id": apps }))), None);
+    assert_eq!(
+        refusal(s.call("d", "run_all_cells", json!({ "notebook_id": apps }))),
+        Some(format!(
+            "ArgumentError: one_notebook::{} wasn't opened or created here, so you can't change or run it. \
+             If the user wants you to work on it, open it with `open_notebook` and its path first.",
+            paths[3]
+        ))
+    );
+    assert_eq!(refusal(s.call("d", "read_notebook_code", json!({ "notebook_id": apps }))), None);
+    // It can't say which notebook is the conversation's, so none is `this_session`.
     let listed = s.call("d", "list_notebooks", json!({})).unwrap();
-    let mine: Vec<&str> = listed.as_array().unwrap().iter().filter(|nb| nb["this_session"] == true).filter_map(|nb| nb["path"].as_str()).collect();
-    assert_eq!(mine.len(), 3, "{listed}");
-    assert!(!mine.contains(&paths[3].as_str()));
+    assert!(listed.as_array().unwrap().iter().all(|nb| nb["this_session"] == false), "{listed}");
+
+    // Its first notebook closing changes nothing: the app's is still refused, its others still run.
+    s.notebooks.stop_notebook(&paths[0]).unwrap();
+    s.call("d", "list_notebooks", json!({})).unwrap();
+    assert!(refusal(s.call("d", "run_all_cells", json!({ "notebook_id": apps }))).is_some());
+    assert_eq!(refusal(s.call("d", "run_all_cells", json!({ "notebook_id": second }))), None);
+    // Opening the app's notebook makes it one the session works on.
+    assert_eq!(s.call("d", "open_notebook", json!({ "path": &paths[3] })).unwrap()["already_open"], true);
+    assert_eq!(refusal(s.call("d", "run_all_cells", json!({ "notebook_id": apps }))), None);
+
     // Any other session keeps one notebook.
-    s.call("e", "open_notebook", json!({ "path": &paths[0] })).unwrap();
-    assert_eq!(refused(s.call("e", "open_notebook", json!({ "path": &paths[1] }))), one);
+    s.call("e", "open_notebook", json!({ "path": &paths[1] })).unwrap();
+    assert!(refusal(s.call("e", "open_notebook", json!({ "path": &paths[2] }))).is_some());
 }
 
 #[test]

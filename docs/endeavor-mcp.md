@@ -360,11 +360,18 @@ many sessions, and the server can't tell them apart (checked 2026-11-12: a
 new conversation was refused for the notebook an earlier one had opened,
 until Desktop restarted). The front sends `X-Endeavor-Notebooks: several` for
 a client that draws views, and the core then lets that session work on every
-notebook it opens or creates, and still refuses changes to one it didn't open
-(`Notebooks::allow_several`). The cost: any of Desktop's conversations can
-change a notebook another of them opened. The front logs the `_meta` keys of
-the first tool call, to learn whether Desktop names the conversation in each
-call; if it does, the session should be keyed on that instead.
+notebook it opens or creates, by the notebook's id, so one that closes and is
+opened again elsewhere isn't among them. It still refuses changes to a notebook
+it didn't open, even after its first notebook closed, and says to open it
+first (`Notebooks::allow_several`). `list_notebooks` marks no notebook
+`this_session` for that session, since it can't say which is the
+conversation's: a new conversation makes or opens its own, and one that opened
+a notebook keeps its id. The cost: any of Desktop's conversations can change a
+notebook another of them opened, once it opens it. The front logs the tool
+calls' `_meta` keys whenever they change, and for the first few calls a
+fingerprint of each string value (never the value), to learn whether Desktop
+names the conversation in each call; if it does, the session should be keyed
+on that instead.
 
 Each session also leaves a record: when it last made a tool call (a held
 `/endeavor/events` stream doesn't count). A session has a record from when it
