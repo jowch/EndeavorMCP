@@ -1075,7 +1075,11 @@ impl Relay {
         };
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
         if message["method"] == "initialize" {
-            self.views.store(crate::views::client_draws_views(&message), std::sync::atomic::Ordering::SeqCst);
+            let draws = crate::views::client_draws_views(&message);
+            self.views.store(draws, std::sync::atomic::Ordering::SeqCst);
+            // Which client this is and whether it says it draws views: a host's log shows only method names.
+            let client = &message["params"]["clientInfo"];
+            eprintln!("[ Info: Client {} {}: draws views: {}", client["name"].as_str().unwrap_or("?"), client["version"].as_str().unwrap_or("?"), if draws { "yes" } else { "no" });
         }
         let views = self.views.load(std::sync::atomic::Ordering::SeqCst);
         if let Some(reply) = crate::mcp::answer_locally(&message, self.options.skills_plugin, self.options.folder.is_none(), views) {
