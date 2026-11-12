@@ -132,6 +132,7 @@ window.addEventListener("message", async e => {
   if (!m || m.jsonrpc !== "2.0" || m.method === undefined) return;
   if (m.method === "ui/initialize") return send({ id: m.id, result: { protocolVersion: m.params.protocolVersion, hostInfo: { name: "view-check", version: "0" }, hostCapabilities: { serverTools: {}, openLinks: {}, logging: {}, message: { text: {} }, updateModelContext: { text: {} } }, hostContext: context } });
   if (m.method === "ui/notifications/initialized") { window.initialized = true; return; }
+  if (m.method === "ui/notifications/size-changed") { window.sizes = (window.sizes || []).concat([m.params]); return; }
   if (m.method === "tools/call") return send({ id: m.id, result: await window.toolsCall(m.params) });
   if (m.method === "ui/message" && window.refuse) { window.refuse--; return send({ id: m.id, result: { isError: true } }); }
   if (m.method === "ui/message" && window.fail) { window.fail = false; window.failed = (window.failed || 0) + 1; return send({ id: m.id, error: { code: -32001, message: "Request timed out" } }); }
@@ -276,8 +277,11 @@ window.addEventListener("message", async e => {
   check(links.length === 1 && links[0] === "https://example.com/docs" && await frame.evaluate(() => !!document.querySelector("pluto-editor")), `a link in a cell opens through Claude's ui/open-link, and no other link replaces the view (${JSON.stringify(links)})`);
   await page.evaluate(() => window.closePane());
   await frame.waitForFunction(() => !document.querySelector("#endeavor-card").hidden && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
+  // The size the view reports, which the host gives its frame: the card's, not the panel's it had.
+  await new Promise(r => setTimeout(r, 800));
+  const reported = await page.evaluate(() => (window.sizes || []).at(-1)?.height);
   const small = await frame.evaluate(() => document.documentElement.classList.contains("endeavor-inline") && [...document.body.children].filter(e => e.id !== "endeavor-card").every(e => getComputedStyle(e).display === "none"));
-  check(small, "with the pane closed, the card and its button are back, at card size");
+  check(small && reported < 200, `with the pane closed, the card and its button are back, at card size (reports ${reported} px)`);
   console.log("screenshots " + path.join(dir, "view.png") + " " + path.join(dir, "point.png"));
   console.log("view calls " + JSON.stringify(calls));
   const at = name => firsts[name] ? `${firsts[name][0] - clicked} ms (took ${firsts[name][1]} ms)` : "never";
