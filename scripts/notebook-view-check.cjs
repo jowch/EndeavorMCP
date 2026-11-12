@@ -186,7 +186,7 @@ window.addEventListener("message", async e => {
   await frame.waitForFunction(() => /Setting up R notebooks/.test(document.querySelector("#endeavor-card .note")?.textContent || ""), null, { timeout: 10000 })
     .catch(() => {});
   const installing = await frame.evaluate(() => [document.querySelector("#endeavor-card .note")?.textContent, document.querySelector("#endeavor-open").hidden]);
-  check(/^Setting up R notebooks\. .*Claude opens the notebook when it's ready\.$/.test(installing[0] || "") && installing[1], `an install in progress says so, with no button: ${JSON.stringify(installing)}`);
+  check(/^Setting up R notebooks\. .*Claude calls again, and the notebook opens in a new card\.$/.test(installing[0] || "") && installing[1], `an install in progress says so, with no button: ${JSON.stringify(installing)}`);
   await page.evaluate(result => window.sendToolResult(result), opened.result);
   await frame.waitForFunction(() => document.querySelector("#endeavor-open") && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
   const asked = await page.evaluate(() => window.modes.slice());
