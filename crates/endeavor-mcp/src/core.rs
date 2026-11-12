@@ -51,7 +51,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// missing, doesn't count (`network`); nor do descriptions and changes inside the core. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 36;
+pub const INTERFACE: u32 = 37;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -1184,6 +1184,7 @@ impl RStarter {
         };
         let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("r_failed::R's state has no {key}: {state}"));
         let (bridge, ember) = (port("bridge_port")?, port("ember_port")?);
+        served.bridge.views.set_ember(ember, secret.clone());
         *served.ember.lock().unwrap() = Some(Page { port: ember, secret });
         let (children, pid) = (self.child.clone(), child.id());
         if let Some(mut old) = self.child.lock().unwrap().replace(child) {

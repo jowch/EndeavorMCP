@@ -493,11 +493,14 @@ impl Bridge {
         if let Err(result) = check_arguments(name, &arguments, false) {
             return result;
         }
-        let page = || {
-            let port = *self.julia.port.get().ok_or("not_ready: Julia isn't running")?;
-            crate::views::page_from_julia(port, &self.julia.token)
+        let page = |backend, notebook: Option<&str>| match (backend, notebook) {
+            (wire::backend::Backend::Ember, Some(id)) => self.notebooks.ember_page(id),
+            _ => {
+                let port = *self.julia.port.get().ok_or("not_ready: Julia isn't running")?;
+                crate::views::page_from_julia(port, &self.julia.token)
+            }
         };
-        match self.views.call(name, &arguments, page, |id| self.notebooks.open_in_pluto(id)) {
+        match self.views.call(name, &arguments, page, |id| self.notebooks.open_in(id)) {
             Ok(result) => json!({ "content": [{ "type": "text", "text": "ok" }], "structuredContent": result, "isError": false }),
             Err(error) => json!({ "content": [{ "type": "text", "text": error }], "isError": true }),
         }
@@ -1315,7 +1318,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (36, "6737cd7cff508ee1"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (37, "4a66322947a66451"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1362,7 +1365,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (36, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (37, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

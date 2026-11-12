@@ -204,6 +204,17 @@ cargo build -p endeavor-mcp
 JULIA_DEPOT=~/.cache/endeavor/depot: node scripts/notebook-view-check.cjs
 ```
 
+With `--r` it does the same with an R notebook in Ember, and edits a cell in
+the page where the Julia notebook moves its slider. It needs `Rscript`; the
+first run installs Ember. Ember's page comes from its `view_page()`, so a
+debug build can be pointed at a local build of an Ember branch with
+`ENDEAVOR_TEST_EMBER_REPOSITORY=file:///path/to/repo` (a repository with
+`src/contrib/PACKAGES` and its `SHA256` field, as `e2e_r`'s stand-ins make).
+
+```sh
+node scripts/notebook-view-check.cjs --r
+```
+
 It takes about a minute, and prints the times from the click to the page,
 the socket and the cells, and where its screenshots are. Claude itself is the
 last check: add `endeavor mcp` to `claude_desktop_config.json`, ask for a

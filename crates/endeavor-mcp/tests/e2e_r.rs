@@ -25,6 +25,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use serde_json::{Value, json};
 
 fn fresh(path: PathBuf) -> PathBuf {
@@ -178,6 +179,27 @@ fn tomorrow() -> String {
     format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
 }
 
+/// A MessagePack map of string fields and an empty `body`: Pluto's message shape, which Ember's is.
+fn msgpack(fields: &[(&str, &str)]) -> Vec<u8> {
+    let mut out = vec![0x80 | (fields.len() as u8 + 1)];
+    let string = |out: &mut Vec<u8>, s: &str| {
+        assert!(s.len() < 256);
+        if s.len() < 32 { out.push(0xa0 | s.len() as u8) } else { out.extend([0xd9, s.len() as u8]) }
+        out.extend(s.as_bytes());
+    };
+    for (key, value) in fields {
+        string(&mut out, key);
+        string(&mut out, value);
+    }
+    string(&mut out, "body");
+    out.push(0x80);
+    out
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
     let started = Instant::now();
     eprintln!("── {name}");
@@ -321,6 +343,52 @@ fn an_r_notebook_through_the_runtime() {
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
         assert_eq!(read["errored"], false, "{read}");
         assert!(read["output"].as_str().unwrap().contains("42"), "{read}");
+    });
+
+    step("the notebook view gets Ember's page, and its socket reaches Ember", || {
+        let mut view = |name: &str, arguments: Value| {
+            let reply = agent.mcp("tools/call", json!({ "name": name, "arguments": arguments }));
+            assert_eq!(reply["result"]["isError"], false, "{name}: {reply}");
+            reply["result"]["structuredContent"].clone()
+        };
+        // R's adapter answers `page_bundle` with Ember's `view_page()`; the core splits it as it does
+        // Pluto's, and refuses a page that loads scripts from outside.
+        let (mut text, mut offset) = (String::new(), 0);
+        loop {
+            let part = view("notebook_page", json!({ "notebook_id": notebook, "offset": offset, "size": 1_000_000 }));
+            text.push_str(part["text"].as_str().unwrap());
+            offset = part["next"].as_u64().unwrap();
+            if offset >= part["total"].as_u64().unwrap() {
+                break;
+            }
+        }
+        let page: Value = serde_json::from_str(&text).unwrap();
+        let scripts = page["scripts"].as_array().unwrap();
+        assert!(scripts.len() > 1 && scripts.iter().all(|s| s["attrs"]["src"].is_null()), "every script inline: {} scripts", scripts.len());
+        assert!(scripts.iter().any(|s| s["text"] == "window.pluto_notebook_id = window.endeavor_notebook_id;"), "the notebook id comes from the view");
+        assert!(scripts.iter().any(|s| s["attrs"]["id"] == "ember-modules"), "Ember's frontend is inside the page");
+
+        let socket = view("notebook_socket_open", json!({ "notebook_id": notebook }))["socket"].clone();
+        let send = |view: &mut dyn FnMut(&str, Value) -> Value, kind: &str| {
+            let message = msgpack(&[("type", kind), ("client_id", "e2e"), ("request_id", kind), ("notebook_id", &notebook)]);
+            view("notebook_socket_send", json!({ "socket": socket, "data": base64::engine::general_purpose::STANDARD.encode(message) }));
+        };
+        send(&mut view, "connect");
+        send(&mut view, "reset_shared_state");
+        let mut got = Vec::new();
+        let began = Instant::now();
+        while !(contains(&got, b"\xafnotebook_exists\xc3") && contains(&got, b"x <- 41")) && began.elapsed() < Duration::from_secs(60) {
+            let reply = view("notebook_socket_recv", json!({ "socket": socket, "wait_ms": 1500 }));
+            assert_ne!(reply["closed"], true, "Ember closed the socket");
+            for m in reply["messages"].as_array().unwrap() {
+                got.extend(base64::engine::general_purpose::STANDARD.decode(m.as_str().unwrap()).unwrap());
+            }
+        }
+        assert!(contains(&got, b"\xafnotebook_exists\xc3"), "Ember knows the notebook");
+        assert!(contains(&got, b"x <- 41"), "the notebook's cells came back");
+        view("notebook_socket_close", json!({ "socket": socket }));
+        let refused = agent.mcp("tools/call", json!({ "name": "notebook_page", "arguments": { "notebook_id": "00000000-0000-0000-0000-00000000dead", "offset": 0, "size": 10 } }));
+        assert_eq!(refused["result"]["isError"], true, "a notebook that isn't open: {refused}");
     });
 
     step("an ancestor run alone leaves its dependent's result stale", || {

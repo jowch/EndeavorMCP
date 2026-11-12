@@ -4,12 +4,14 @@
 // a sandboxed frame under a strict content security policy (nothing reachable but our own tools,
 // as in Claude), and plays the host's side of the MCP Apps protocol. Then it moves a slider and
 // checks that the dependent cell ran again in Julia, and points at an output with Point and checks
-// what reaches the chat.
+// what reaches the chat. With --r it does the same with an R notebook in Ember, and edits a cell in
+// the page where the Julia notebook moves its slider.
 //
-//   node scripts/notebook-view-check.cjs [path/to/endeavor]
+//   node scripts/notebook-view-check.cjs [path/to/endeavor] [--r]
 //   (JULIA_DEPOT=... sets the runtime's depot, as `--depot` does)
 //
-// Needs Playwright with Chromium and a Julia for the runtime (the first run installs Pluto).
+// Needs Playwright with Chromium, and a Julia for the runtime (the first run installs Pluto), or
+// with --r an Rscript (the first run installs Ember).
 // Writes its notebook, state and a screenshot to a temporary folder, and prints what it saw.
 const { chromium } = require("playwright");
 const { spawn } = require("child_process");
@@ -17,10 +19,35 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const binary = path.resolve(process.argv[2] || path.join(__dirname, "..", "target", "debug", "endeavor"));
+const args = process.argv.slice(2);
+const R = args.includes("--r");
+const binary = path.resolve(args.find(a => a !== "--r") || path.join(__dirname, "..", "target", "debug", "endeavor"));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "endeavor-view-"));
-const notebookPath = path.join(dir, "view-check.jl");
-fs.writeFileSync(notebookPath, `### A Pluto.jl notebook ###
+const notebookPath = path.join(dir, R ? "view-check.R" : "view-check.jl");
+// The same three cells in each language: a title, `n`, and `squares`, which reads `n`.
+const SQUARES = "6e6a1b70-dda7-11f1-a148-b56bbb7771a3";
+const LANGUAGE = R ? "R" : "Julia";
+fs.writeFileSync(notebookPath, R ? `### An Ember notebook ###
+# /// environment
+# snapshot = "2026-11-01"
+# ///
+
+# %% id=6e6a1b70-dda7-11f1-a148-b56bbb7771a1
+"View check"
+
+# %% id=6e6a1b70-dda7-11f1-a148-b56bbb7771a2
+n <- 5
+
+# %% id=${SQUARES}
+squares <- (1:n)^2
+squares
+
+# /// cell order
+# 6e6a1b70-dda7-11f1-a148-b56bbb7771a1
+# 6e6a1b70-dda7-11f1-a148-b56bbb7771a2
+# ${SQUARES}
+# ///
+` : `### A Pluto.jl notebook ###
 # v0.20.0
 
 using Markdown
@@ -84,11 +111,11 @@ const check = (ok, what) => { console.log((ok ? "ok   " : "FAIL ") + what); if (
 
   const began = Date.now();
   let opened;
-  for (let attempt = 0; attempt < 30; attempt++) {
+  for (let attempt = 0; attempt < (R ? 240 : 30); attempt++) {
     opened = await rpc("tools/call", { name: "open_notebook", arguments: { path: notebookPath, run_notebook: true } });
     const text = opened.result?.content?.[0]?.text || "";
-    if (!/notebook_opening|julia_starting|starting/.test(text)) break;
-    await new Promise(r => setTimeout(r, 2000));
+    if (!/notebook_opening|julia_starting|starting|r_installing/.test(text)) break;
+    await new Promise(r => setTimeout(r, R ? 5000 : 2000));
   }
   console.log("open_notebook said: " + JSON.stringify(opened.result).slice(0, 600));
   const fields = JSON.parse(opened.result.content[0].text);
@@ -167,15 +194,26 @@ window.addEventListener("message", async e => {
   await frame.click("#endeavor-open");
   await frame.waitForFunction(() => document.querySelectorAll("pluto-cell").length === 3, null, { timeout: 60000 });
   const cellsAt = Date.now() - clicked;
-  // Once the page is connected, Pluto sets the slider's value in Julia and the cell runs again.
-  await frame.waitForFunction(() => document.querySelectorAll("pluto-cell").length === 3 && /squares[\s\S]*25/.test([...document.querySelectorAll("pluto-output")].map(o => o.innerText).join(" ")), null, { timeout: 60000 });
+  // Once the page is connected, Pluto sets the slider's value in Julia and the cell runs again. Ember
+  // shows the result as R prints it.
+  const showsSquares = R ? /1\s+4\s+9\s+16\s+25/ : /squares[\s\S]*25/;
+  await frame.waitForFunction(re => document.querySelectorAll("pluto-cell").length === 3 && new RegExp(re).test([...document.querySelectorAll("pluto-output")].map(o => o.innerText).join(" ")), showsSquares.source, { timeout: 60000 });
   const shown = Date.now() - clicked;
   const before = await frame.evaluate(() => [...document.querySelectorAll("pluto-output")].map(o => o.innerText.replace(/\s+/g, " ").trim()));
-  check(before.some(t => /squares.*25/.test(t)), `the live notebook shows in the panel (${shown} ms after the click): ${JSON.stringify(before[2])}`);
+  check(before.some(t => showsSquares.test(t)), `the live notebook shows in the panel (${shown} ms after the click): ${JSON.stringify(before[2])}`);
   const moved = Date.now();
-  await frame.evaluate(() => { const r = document.querySelector("input[type=range]"); r.value = 12; r.dispatchEvent(new Event("input", { bubbles: true })); });
+  if (R) {
+    // An edit in the page, run with Shift+Enter: it goes to Ember through the relay, and `squares` runs again.
+    const editor = frame.locator("pluto-cell").nth(1).locator(".cm-content");
+    await editor.click();
+    await page.keyboard.press("Control+A");
+    await page.keyboard.type("n <- 12");
+    await page.keyboard.press("Shift+Enter");
+  } else {
+    await frame.evaluate(() => { const r = document.querySelector("input[type=range]"); r.value = 12; r.dispatchEvent(new Event("input", { bubbles: true })); });
+  }
   await frame.waitForFunction(() => /144/.test([...document.querySelectorAll("pluto-output")].map(o => o.innerText).join(" ")), null, { timeout: 20000 });
-  check(true, `moving the slider ran the dependent cell again in Julia (${Date.now() - moved} ms)`);
+  check(true, `${R ? "editing n in the page" : "moving the slider"} ran the dependent cell again in ${LANGUAGE} (${Date.now() - moved} ms)`);
   await page.screenshot({ path: path.join(dir, "view.png") });
 
   // The Endeavor look, with Pluto's own header (the view has no app header to stand in for it).
@@ -197,7 +235,7 @@ window.addEventListener("message", async e => {
   await page.waitForFunction(() => window.messages.length === 1, null, { timeout: 5000 }).catch(() => {});
   const message = await page.evaluate(() => window.messages[0]);
   const said = message?.content?.[0]?.text || "";
-  check(message?.role === "user" && said.startsWith("\u2193\n\n[Endeavor] The user quoted") && said.includes("A \u2193 just before this note only marks where the quotes start") && /<quote cell="squares" part="output" uri="notebook:\/\/pluto\/[^"]+\/cell\/6e6a1b70-dda7-11f1-a148-b56bbb7771a3">\n[\s\S]+\n<\/quote>\nWhy squares\?$/.test(said), `↩ sends the pick and the comment as the user's message, on a new paragraph: ${JSON.stringify(said.slice(-220))}`);
+  check(message?.role === "user" && said.startsWith("\u2193\n\n[Endeavor] The user quoted") && said.includes("A \u2193 just before this note only marks where the quotes start") && new RegExp(`<quote cell="squares[^"]*" part="output" uri="notebook://pluto/[^"]+/cell/${SQUARES}">\\n[\\s\\S]+\\n</quote>\\nWhy squares\\?$`).test(said), `↩ sends the pick and the comment as the user's message, on a new paragraph: ${JSON.stringify(said.slice(-220))}`);
   // ⌘↩ (Ctrl+Enter off macOS) keeps the pick in the view; the next ↩ passes both in one message.
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await frame.locator("#annotate-bar textarea").fill("First");

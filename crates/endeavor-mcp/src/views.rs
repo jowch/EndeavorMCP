@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
+use wire::backend::Backend;
 
 /// The extension a client names in `initialize` when it draws MCP App views.
 pub const EXTENSION: &str = "io.modelcontextprotocol/ui";
@@ -112,7 +113,8 @@ pub fn resources_read(params: &Value) -> Option<Value> {
     })
 }
 
-/// Pluto's page for the notebook view, from Julia (`endeavor/page_bundle`).
+/// Pluto's page for the notebook view, from Julia (`endeavor/page_bundle`). Ember's comes from R's
+/// adapter (`page_bundle`, Ember's `view_page()`), through the core's engines.
 pub fn page_from_julia(port: u16, token: &str) -> Result<String, String> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/page_bundle" }).to_string();
     let bearer = format!("Bearer {token}");
@@ -125,12 +127,17 @@ pub fn page_from_julia(port: u16, token: &str) -> Result<String, String> {
     }
 }
 
-/// What the core keeps for the views: Pluto's page, made once, and the open sockets.
+/// What the core keeps for the views: each engine's page, made once, and the open sockets.
 #[derive(Default)]
 pub struct Views {
     /// Pluto's private port and secret, once Julia is up.
     pub pluto: OnceLock<(u16, String)>,
-    page: Mutex<Option<Arc<String>>>,
+    /// Ember's port and secret, from the R that runs now: each start of R has its own, and may have a
+    /// newer Ember.
+    ember: Mutex<Option<(u16, String)>>,
+    /// Each engine's page, with the port of the engine that made it: a page from an R that has
+    /// ended is made again, since R may have updated Ember when it started again.
+    pages: Mutex<Vec<(Backend, u16, Arc<String>)>>,
     sockets: Mutex<HashMap<u64, Arc<Socket>>>,
     next: AtomicU64,
 }
@@ -150,9 +157,23 @@ const SOCKETS_MAX: usize = 16;
 const PART_MAX: usize = 2_000_000;
 
 impl Views {
-    /// One of the view's tool calls. `page` makes Pluto's page (`endeavor/page_bundle`), and `open`
-    /// says whether a notebook id is one Pluto has open.
-    pub fn call(&self, name: &str, arguments: &Value, page: impl FnOnce() -> Result<String, String>, open: impl FnOnce(&str) -> bool) -> Result<Value, String> {
+    /// R started: Ember's port and secret.
+    pub fn set_ember(&self, port: u16, secret: String) {
+        *self.ember.lock().unwrap() = Some((port, secret));
+    }
+
+    /// Where an engine's page and WebSocket are, or why not.
+    fn engine(&self, backend: Backend) -> Result<(u16, String), String> {
+        match backend {
+            Backend::Pluto => self.pluto.get().cloned().ok_or_else(|| "not_ready: Julia isn't running".to_owned()),
+            Backend::Ember => self.ember.lock().unwrap().clone().ok_or_else(|| "not_ready: R isn't running".to_owned()),
+        }
+    }
+
+    /// One of the view's tool calls. `page` makes an engine's page for a notebook open in it (Pluto's
+    /// from Julia, Ember's from R's adapter), and `open` says which engine has a notebook id open, if
+    /// any. A `notebook_page` without a notebook is Pluto's.
+    pub fn call(&self, name: &str, arguments: &Value, page: impl FnOnce(Backend, Option<&str>) -> Result<String, String>, open: impl FnOnce(&str) -> Option<Backend>) -> Result<Value, String> {
         self.close_idle();
         let socket_of = || -> Result<Arc<Socket>, String> {
             let id = arguments["socket"].as_u64().ok_or("socket must be a number")?;
@@ -160,7 +181,12 @@ impl Views {
         };
         match name {
             "notebook_page" => {
-                let page = self.page(page)?;
+                let notebook = arguments["notebook_id"].as_str();
+                let backend = match notebook {
+                    Some(id) => open(id).ok_or_else(|| format!("not_open: no open notebook has the id {id}"))?,
+                    None => Backend::Pluto,
+                };
+                let page = self.page(backend, || page(backend, notebook))?;
                 let offset = arguments["offset"].as_u64().unwrap_or(0) as usize;
                 let size = (arguments["size"].as_u64().unwrap_or(1_000_000) as usize).clamp(1, PART_MAX);
                 let (text, next) = part(&page, offset, size);
@@ -168,14 +194,13 @@ impl Views {
             }
             "notebook_socket_open" => {
                 let notebook = arguments["notebook_id"].as_str().ok_or("notebook_id must be a string")?;
-                if !open(notebook) {
-                    return Err(format!("not_open: no open notebook has the id {notebook}"));
-                }
-                let (port, secret) = self.pluto.get().cloned().ok_or("not_ready: Julia isn't running")?;
+                let backend = open(notebook).ok_or_else(|| format!("not_open: no open notebook has the id {notebook}"))?;
+                let (port, secret) = self.engine(backend)?;
+                let engine = crate::notebooks::engines::language(backend);
                 if self.sockets.lock().unwrap().len() >= SOCKETS_MAX {
                     return Err("too_many: too many notebook views are open".into());
                 }
-                let socket = Socket::connect(port, &format!("/?secret={secret}"), IDLE, INBOX_BYTES).map_err(|e| format!("not_connected: couldn't reach Pluto: {e}"))?;
+                let socket = Socket::connect(port, &format!("/?secret={secret}"), IDLE, INBOX_BYTES).map_err(|e| format!("not_connected: couldn't reach {engine}'s notebook server: {e}"))?;
                 // Counted again with the insert, under one lock: calls at the same moment stay under the cap.
                 let mut sockets = self.sockets.lock().unwrap();
                 if sockets.len() >= SOCKETS_MAX {
@@ -212,13 +237,15 @@ impl Views {
         }
     }
 
-    fn page(&self, make: impl FnOnce() -> Result<String, String>) -> Result<Arc<String>, String> {
-        let mut page = self.page.lock().unwrap();
-        if let Some(page) = page.as_ref() {
+    fn page(&self, backend: Backend, make: impl FnOnce() -> Result<String, String>) -> Result<Arc<String>, String> {
+        let (port, _) = self.engine(backend)?;
+        let mut pages = self.pages.lock().unwrap();
+        if let Some((_, _, page)) = pages.iter().find(|(b, made_by, _)| *b == backend && *made_by == port) {
             return Ok(page.clone());
         }
         let made = Arc::new(split_page(&make()?)?);
-        *page = Some(made.clone());
+        pages.retain(|(b, _, _)| *b != backend);
+        pages.push((backend, port, made.clone()));
         Ok(made)
     }
 
@@ -734,26 +761,26 @@ mod tests {
     fn a_socket_relays_messages_both_ways_and_reports_its_close() {
         let views = Views::default();
         let _ = views.pluto.set((echo_server(2), "s".into()));
-        let open = |id: &str| id == "nb";
-        let refused = views.call("notebook_socket_open", &json!({ "notebook_id": "other" }), || unreachable!(), open);
+        let open = |id: &str| (id == "nb").then_some(Backend::Pluto);
+        let refused = views.call("notebook_socket_open", &json!({ "notebook_id": "other" }), |_, _| unreachable!(), open);
         assert!(refused.unwrap_err().starts_with("not_open"));
-        let socket = views.call("notebook_socket_open", &json!({ "notebook_id": "nb" }), || unreachable!(), open).unwrap()["socket"].clone();
+        let socket = views.call("notebook_socket_open", &json!({ "notebook_id": "nb" }), |_, _| unreachable!(), open).unwrap()["socket"].clone();
         let long = "x".repeat(300);
         for data in ["hello", long.as_str()] {
-            views.call("notebook_socket_send", &json!({ "socket": socket, "data": STANDARD.encode(data) }), || unreachable!(), open).unwrap();
+            views.call("notebook_socket_send", &json!({ "socket": socket, "data": STANDARD.encode(data) }), |_, _| unreachable!(), open).unwrap();
         }
         let mut got = Vec::new();
         let mut closed = false;
         let began = Instant::now();
         while !closed && began.elapsed() < Duration::from_secs(5) {
-            let reply = views.call("notebook_socket_recv", &json!({ "socket": socket, "wait_ms": 500 }), || unreachable!(), open).unwrap();
+            let reply = views.call("notebook_socket_recv", &json!({ "socket": socket, "wait_ms": 500 }), |_, _| unreachable!(), open).unwrap();
             got.extend(reply["messages"].as_array().unwrap().iter().map(|m| String::from_utf8(STANDARD.decode(m.as_str().unwrap()).unwrap()).unwrap()));
             closed = reply["closed"] == true;
         }
         assert_eq!(got, ["hello", long.as_str()]);
         assert!(closed, "Pluto's close reaches the view");
         assert_eq!(views.open_sockets(), 0, "a closed socket is dropped");
-        let gone = views.call("notebook_socket_send", &json!({ "socket": socket, "data": "" }), || unreachable!(), open);
+        let gone = views.call("notebook_socket_send", &json!({ "socket": socket, "data": "" }), |_, _| unreachable!(), open);
         assert!(gone.unwrap_err().starts_with("closed"));
     }
 
@@ -805,28 +832,64 @@ mod tests {
     fn a_receive_waits_no_longer_than_asked() {
         let views = Views::default();
         let _ = views.pluto.set((echo_server(1), "s".into()));
-        let socket = views.call("notebook_socket_open", &json!({ "notebook_id": "nb" }), || unreachable!(), |_| true).unwrap()["socket"].clone();
+        let socket = views.call("notebook_socket_open", &json!({ "notebook_id": "nb" }), |_, _| unreachable!(), |_| Some(Backend::Pluto)).unwrap()["socket"].clone();
         let began = Instant::now();
-        let reply = views.call("notebook_socket_recv", &json!({ "socket": socket, "wait_ms": 200 }), || unreachable!(), |_| true).unwrap();
+        let reply = views.call("notebook_socket_recv", &json!({ "socket": socket, "wait_ms": 200 }), |_, _| unreachable!(), |_| Some(Backend::Pluto)).unwrap();
         assert_eq!(reply["messages"], json!([]));
         assert!(began.elapsed() < Duration::from_millis(1000));
         let began = Instant::now();
-        views.call("notebook_socket_recv", &json!({ "socket": socket, "wait_ms": 60000 }), || unreachable!(), |_| true).unwrap();
+        views.call("notebook_socket_recv", &json!({ "socket": socket, "wait_ms": 60000 }), |_, _| unreachable!(), |_| Some(Backend::Pluto)).unwrap();
         assert!(began.elapsed() < WAIT_MAX + Duration::from_millis(500), "capped");
-        views.call("notebook_socket_close", &json!({ "socket": socket }), || unreachable!(), |_| true).unwrap();
+        views.call("notebook_socket_close", &json!({ "socket": socket }), |_, _| unreachable!(), |_| Some(Backend::Pluto)).unwrap();
         assert_eq!(views.open_sockets(), 0);
     }
 
     #[test]
     fn the_page_is_made_once_and_read_in_parts() {
         let views = Views::default();
+        let _ = views.pluto.set((1, "s".into()));
         let html = "<html><head><title>P</title></head><body>b</body></html>";
-        let first = views.call("notebook_page", &json!({ "offset": 0, "size": 10 }), || Ok(html.to_owned()), |_| true).unwrap();
+        let first = views.call("notebook_page", &json!({ "offset": 0, "size": 10 }), |_, _| Ok(html.to_owned()), |_| Some(Backend::Pluto)).unwrap();
         assert_eq!(first["next"], 10);
-        let rest = views.call("notebook_page", &json!({ "offset": 10, "size": 1000 }), || Err("made again".into()), |_| true).unwrap();
+        let rest = views.call("notebook_page", &json!({ "offset": 10, "size": 1000 }), |_, _| Err("made again".into()), |_| Some(Backend::Pluto)).unwrap();
         let joined = format!("{}{}", first["text"].as_str().unwrap(), rest["text"].as_str().unwrap());
         assert_eq!(rest["next"], first["total"]);
         let split: Value = serde_json::from_str(&joined).unwrap();
         assert_eq!(split["head"], "<title>P</title>");
+    }
+
+    #[test]
+    fn an_r_notebooks_page_is_embers_and_made_again_when_r_starts_again() {
+        let views = Views::default();
+        let _ = views.pluto.set((1, "s".into()));
+        let open = |id: &str| match id {
+            "jl" => Some(Backend::Pluto),
+            "r" => Some(Backend::Ember),
+            _ => None,
+        };
+        let page = |backend: Backend, id: Option<&str>| Ok(format!("<html><head><title>{backend:?} {}</title></head><body></body></html>", id.unwrap_or("-")));
+        let title = |reply: Value| serde_json::from_str::<Value>(reply["text"].as_str().unwrap()).unwrap()["head"].as_str().unwrap().to_owned();
+        let read = |id: &str| views.call("notebook_page", &json!({ "notebook_id": id, "offset": 0, "size": 100000 }), page, open);
+        assert!(read("r").unwrap_err().starts_with("not_ready: R"), "no R yet");
+        views.set_ember(2, "e".into());
+        assert_eq!(title(read("r").unwrap()), "<title>Ember r</title>");
+        assert_eq!(title(read("jl").unwrap()), "<title>Pluto jl</title>");
+        assert!(read("gone").unwrap_err().starts_with("not_open"));
+        // Made once per R: the same R's page is kept, a new R's is made again.
+        let again = |id: Option<&str>| views.call("notebook_page", &json!({ "notebook_id": "r", "offset": 0, "size": 100000 }), move |_, _| id.map(|id| format!("<html><head>{id}</head><body></body></html>")).ok_or("made again".to_owned()), open);
+        assert_eq!(title(again(None).unwrap()), "<title>Ember r</title>");
+        views.set_ember(3, "e".into());
+        assert_eq!(title(again(Some("new")).unwrap()), "new");
+    }
+
+    #[test]
+    fn an_r_notebooks_socket_goes_to_ember() {
+        let views = Views::default();
+        let open = |_: &str| Some(Backend::Ember);
+        let refused = views.call("notebook_socket_open", &json!({ "notebook_id": "r" }), |_, _| unreachable!(), open);
+        assert!(refused.unwrap_err().starts_with("not_ready: R"));
+        views.set_ember(echo_server(1), "s".into());
+        let socket = views.call("notebook_socket_open", &json!({ "notebook_id": "r" }), |_, _| unreachable!(), open).unwrap()["socket"].clone();
+        views.call("notebook_socket_close", &json!({ "socket": socket }), |_, _| unreachable!(), open).unwrap();
     }
 }

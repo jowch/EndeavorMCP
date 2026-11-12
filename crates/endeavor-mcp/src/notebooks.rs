@@ -841,8 +841,18 @@ impl Notebooks {
     }
 
     /// Whether Pluto has notebook `id` open: the notebook view connects only to one it has.
-    pub fn open_in_pluto(&self, id: &str) -> bool {
-        self.snapshots().is_ok_and(|open| open.iter().any(|nb| nb.id == id && engines::of_path(&nb.path) == wire::backend::Backend::Pluto))
+    pub fn open_in(&self, id: &str) -> Option<wire::backend::Backend> {
+        self.snapshots().ok()?.iter().find(|nb| nb.id == id).map(|nb| engines::of_path(&nb.path))
+    }
+
+    /// Ember's page for the notebook view, from R's adapter (`page_bundle`), for notebook `id`,
+    /// which is open in R.
+    pub fn ember_page(&self, id: &str) -> Result<String, String> {
+        let reply = self.call("page_bundle", json!({ "notebook_id": id })).map_err(|e| match e.trim_start_matches("ArgumentError: ").split_once("::") {
+            Some(("update_ember", said)) => format!("update_ember: {said}"),
+            _ => format!("R couldn't make Ember's page: {e}"),
+        })?;
+        reply["html"].as_str().map(str::to_owned).ok_or_else(|| "R couldn't make Ember's page: no page".to_owned())
     }
 
     /// One call to the engine's adapter: its result, or the error it raised.

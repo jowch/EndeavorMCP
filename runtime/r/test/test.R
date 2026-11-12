@@ -321,6 +321,15 @@ check("validate: a syntax error", length(v$errors) == 1 && identical(v$errors[[1
 check("validate: fine code", length(result("validate", list(notebook_id = nid, cell_id = ids[3], code = "x + 1"))$errors) == 0)
 check("validate: an unknown cell", startsWith(call("validate", list(notebook_id = nid, cell_id = "x", code = "1"))$error, "KeyError: key \"cell_not_found::"))
 check("unknown method", startsWith(call("frobnicate", list(notebook_id = nid))$error, "ArgumentError: unknown_method::"))
+# The notebook view's page: Ember's view_page(), or, from an Ember before it, a plain "update" error.
+page <- call("page_bundle", list(notebook_id = nid))
+if (is.null(get0("view_page", envir = asNamespace("ember"), mode = "function"))) {
+  check("page_bundle from an old Ember: update_ember", startsWith(page$error, "ArgumentError: update_ember::"))
+} else {
+  check("page_bundle: Ember's live page, with the notebook id from the view",
+        grepl("window.pluto_notebook_id = window.endeavor_notebook_id;", page$result$html, fixed = TRUE) &&
+        grepl('id="ember-modules"', page$result$html, fixed = TRUE) && nzchar(page$result$ember_version))
+}
 warned <- result("apply", list(notebook_id = nid, ops = list(list(op = "insert", index = 6, code = "warning(\"careful\")\n7", folded = FALSE))))
 r <- result("run", list(notebook_id = nid, cells = warned$inserted, wait = TRUE, timeout = 60))
 wc <- cell_of(result("snapshot", list(notebook_id = nid)), warned$inserted[[1]])
