@@ -94,6 +94,10 @@ pub const IN_BROWSER: &str = "in_browser";
 pub fn add_to(tools: &mut Vec<Value>) {
     for tool in tools.iter_mut().filter(|tool| tool["name"].as_str().is_some_and(|name| SHOWN_BY.contains(&name))) {
         tool["_meta"] = json!({ "ui": { "resourceUri": URI }, "ui/resourceUri": URI });
+        // A title for the host's tool row and the view's frame, in place of the tool's name.
+        if tool["title"].is_null() {
+            tool["title"] = json!(if tool["name"] == "new_notebook" { "New notebook" } else { "Notebook" });
+        }
         // A client may say it draws views and still show no card (Claude's desktop app, in its Chat
         // tab, 2026-11-12, #311): the way back to the browser.
         tool["inputSchema"]["properties"][IN_BROWSER] = json!({
@@ -104,8 +108,20 @@ pub fn add_to(tools: &mut Vec<Value>) {
     tools.extend(schemas());
 }
 
+/// Endeavor's icon, for clients that show a server's or a view's icon (MCP `icons`).
+pub fn icons() -> Value {
+    let svg = STANDARD.encode(include_str!("views/icon.svg"));
+    json!([{ "src": format!("data:image/svg+xml;base64,{svg}"), "mimeType": "image/svg+xml", "sizes": ["any"] }])
+}
+
+/// The view's `_meta.ui`, on its listing and on its contents: hosts differ in where they read it.
+fn resource_meta() -> Value {
+    // `preferredDisplayMode` is Claude's own field: open in the side panel, not in the conversation.
+    json!({ "ui": { "prefersBorder": false, "preferredDisplayMode": "fullscreen" } })
+}
+
 pub fn resources_list() -> Value {
-    json!({ "resources": [{ "uri": URI, "name": "Notebook", "description": "The notebook, live, beside the chat.", "mimeType": MIME }] })
+    json!({ "resources": [{ "uri": URI, "name": "notebook", "title": "Notebook", "description": "The notebook, live, beside the chat.", "mimeType": MIME, "icons": icons(), "_meta": resource_meta() }] })
 }
 
 /// `resources/read`'s result, or None for a resource we don't have.
@@ -115,9 +131,7 @@ pub fn resources_read(params: &Value) -> Option<Value> {
             "uri": URI,
             "mimeType": MIME,
             "text": PAGE.as_str(),
-            // Claude's own field: open in the side panel, not in the conversation. The view also
-            // declares that it shows in the panel only (`availableDisplayModes`).
-            "_meta": { "ui": { "prefersBorder": false, "preferredDisplayMode": "fullscreen" } },
+            "_meta": resource_meta(),
         }] })
     })
 }
