@@ -285,6 +285,8 @@ function shut() {
 //   input elsewhere (typing in its box, say). It refuses with an isError answer, and the same press
 //   can't be used again, so a refusal isn't retried: Point gets its picks back and the user presses ↩.
 const pointHost = {
+  // Names the notebook's engine in a quote's uri, as the app does: notebook://ember/… for R.
+  get engine() { return language() === "R" ? "ember" : "pluto"; },
   get canSend() { return !!app.getHostCapabilities()?.message; },
   send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(res => {
     if (res?.isError) throw new Error("it isn't ready yet, so try again in a few seconds");
