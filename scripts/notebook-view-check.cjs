@@ -137,6 +137,7 @@ window.addEventListener("message", async e => {
   if (m.method === "ui/message" && window.fail) { window.fail = false; window.failed = (window.failed || 0) + 1; return send({ id: m.id, error: { code: -32001, message: "Request timed out" } }); }
   if (m.method === "ui/message" && window.slow) await new Promise(r => setTimeout(r, window.slow));
   if (m.method === "ui/message") { window.messages.push(m.params); return send({ id: m.id, result: {} }); }
+  if (m.method === "ui/open-link") { (window.links ||= []).push(m.params.url); return send({ id: m.id, result: {} }); }
   if (m.method === "ui/update-model-context") { window.contexts.push(m.params); return send({ id: m.id, result: {} }); }
   if (m.method === "ui/request-display-mode") {
     window.modes.push(m.params.mode);
@@ -264,6 +265,13 @@ window.addEventListener("message", async e => {
   await page.screenshot({ path: path.join(dir, "point.png") });
   await frame.locator("#annotate-bar textarea").press("Escape");
   check(await frame.evaluate(() => !document.body.classList.contains("annotating")), "Escape leaves Point");
+  // A link in a cell's output opens through Claude (the frame can't open windows); a jump within the page doesn't.
+  await frame.evaluate(() => document.querySelector("pluto-cell pluto-output").insertAdjacentHTML("beforeend", '<a id="out-link" href="https://example.com/docs">docs</a> <a id="in-link" href="#out-link">here</a>'));
+  await frame.click("#out-link");
+  await frame.click("#in-link");
+  await page.waitForFunction(() => (window.links || []).length > 0, null, { timeout: 5000 }).catch(() => {});
+  const links = await page.evaluate(() => window.links || []);
+  check(links.length === 1 && links[0] === "https://example.com/docs" && await frame.evaluate(() => !!document.querySelector("pluto-editor")), `a link in a cell opens through Claude's ui/open-link, a jump within the page scrolls and keeps the page (${JSON.stringify(links)})`);
   await page.evaluate(() => window.closePane());
   await frame.waitForFunction(() => !document.querySelector("#endeavor-card").hidden && !document.querySelector("#endeavor-open").hidden, null, { timeout: 10000 });
   const small = await frame.evaluate(() => document.documentElement.classList.contains("endeavor-inline") && [...document.body.children].filter(e => e.id !== "endeavor-card").every(e => getComputedStyle(e).display === "none"));

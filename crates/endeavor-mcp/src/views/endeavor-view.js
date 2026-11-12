@@ -1291,6 +1291,7 @@ ${[...earlier, text].join("\n\n")}`).then(
     });
     initTheme();
     closeStrayCompletions();
+    if (host2.openLink) openLinksThrough(host2.openLink);
     followNewCells();
     receive({ type: "theme", name: "view" });
     initBar(host2.canSend, point);
@@ -1308,6 +1309,32 @@ ${[...earlier, text].join("\n\n")}`).then(
         e.preventDefault();
         e.stopPropagation();
         point(!document.body.classList.contains("annotating"));
+      },
+      true
+    );
+  }
+  function outsideLink(href) {
+    if (!href) return null;
+    return /^(https?:|mailto:)/i.test(href.trim()) ? href.trim() : null;
+  }
+  function openLinksThrough(open) {
+    document.addEventListener(
+      "click",
+      (e) => {
+        if (!e.isTrusted || e.defaultPrevented || e.button !== 0 || document.body.classList.contains("annotating")) return;
+        const link = e.target?.closest?.("a[href]");
+        const href = link?.getAttribute("href") ?? "";
+        if (/^#./.test(href) && !e.defaultPrevented) {
+          e.preventDefault();
+          document.getElementById(decodeURIComponent(href.slice(1)))?.scrollIntoView({ behavior: "smooth", block: "start" });
+          return;
+        }
+        const url = outsideLink(href);
+        if (!url) return;
+        e.preventDefault();
+        e.stopPropagation();
+        open(url).catch(() => {
+        });
       },
       true
     );

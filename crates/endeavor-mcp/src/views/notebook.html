@@ -244,7 +244,7 @@ function closeAll() { [...sockets].forEach(s => s.close()); }
 
 // Point's ↩ passes the picks and the comment (and what ⌘↩ added) to the chat as the user's message (Claude's desktop
 // app puts it in its message box for the user to send). A host that takes no messages from views gets
-// the look without Point. Claude's desktop app (probed 2026-11-12):
+// the look without Point. Links open through the host's ui/open-link. Claude's desktop app (probed 2026-11-12):
 // - adds the text at the end of its box, straight after anything typed there, and trims the text's
 //   leading whitespace, so the view's text starts with a visible mark (endeavor-view.js);
 // - takes a message only right after a press inside the view, and not for about five seconds after
@@ -255,6 +255,9 @@ const pointHost = {
   send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(res => {
     if (res?.isError) throw new Error("it isn't ready yet, so try again in a few seconds");
   }),
+  // Links in cells open in the user's browser through Claude, which asks first: the view's frame
+  // can't open windows itself. Only when the host offers it.
+  get openLink() { return app.getHostCapabilities()?.openLinks ? url => app.openLink({ url }).then(() => {}) : undefined; },
 };
 
 async function load() {
