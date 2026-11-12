@@ -132,12 +132,16 @@ pub fn page_from_julia(port: u16, token: &str) -> Result<String, String> {
 pub struct Views {
     /// Pluto's private port and secret, once Julia is up.
     pub pluto: OnceLock<(u16, String)>,
-    /// Ember's port and secret, from the R that runs now: each start of R has its own, and may have a
-    /// newer Ember.
-    ember: Mutex<Option<(u16, String)>>,
-    /// Each engine's page, with the port of the engine that made it: a page from an R that has
-    /// ended is made again, since R may have updated Ember when it started again.
-    pages: Mutex<Vec<(Backend, u16, Arc<String>)>>,
+    /// Ember's port and secret, from the R that runs now, and which start of R that is (from 1): each
+    /// start may have a newer Ember, and may well reuse the port (Ember tries 4321 first).
+    ember: Mutex<Option<(u16, String, u64)>>,
+    /// Each engine's page, with the start of the engine that made it (0 for Julia, which starts once):
+    /// a page from an R that has ended is made again.
+    pages: Mutex<Vec<(Backend, u64, Arc<String>)>>,
+    /// The engine of each notebook a view's socket opened for, as `open` said then: the view opens
+    /// one before it reads its page, so the page's parts need no `open` (a snapshot of every
+    /// notebook) each.
+    engines: Mutex<HashMap<String, Backend>>,
     sockets: Mutex<HashMap<u64, Arc<Socket>>>,
     next: AtomicU64,
 }
@@ -159,13 +163,15 @@ const PART_MAX: usize = 2_000_000;
 impl Views {
     /// R started: Ember's port and secret.
     pub fn set_ember(&self, port: u16, secret: String) {
-        *self.ember.lock().unwrap() = Some((port, secret));
+        let mut ember = self.ember.lock().unwrap();
+        let start = ember.as_ref().map_or(0, |(_, _, start)| *start) + 1;
+        *ember = Some((port, secret, start));
     }
 
-    /// Where an engine's page and WebSocket are, or why not.
-    fn engine(&self, backend: Backend) -> Result<(u16, String), String> {
+    /// Where an engine's page and WebSocket are, and which start of it this is, or why not.
+    fn engine(&self, backend: Backend) -> Result<(u16, String, u64), String> {
         match backend {
-            Backend::Pluto => self.pluto.get().cloned().ok_or_else(|| "not_ready: Julia isn't running".to_owned()),
+            Backend::Pluto => self.pluto.get().map(|(port, secret)| (*port, secret.clone(), 0)).ok_or_else(|| "not_ready: Julia isn't running".to_owned()),
             Backend::Ember => self.ember.lock().unwrap().clone().ok_or_else(|| "not_ready: R isn't running".to_owned()),
         }
     }
@@ -183,7 +189,10 @@ impl Views {
             "notebook_page" => {
                 let notebook = arguments["notebook_id"].as_str();
                 let backend = match notebook {
-                    Some(id) => open(id).ok_or_else(|| format!("not_open: no open notebook has the id {id}"))?,
+                    Some(id) => match self.engines.lock().unwrap().get(id).copied() {
+                        Some(backend) => backend,
+                        None => open(id).ok_or_else(|| format!("not_open: no open notebook has the id {id}"))?,
+                    },
                     None => Backend::Pluto,
                 };
                 let page = self.page(backend, || page(backend, notebook))?;
@@ -195,7 +204,15 @@ impl Views {
             "notebook_socket_open" => {
                 let notebook = arguments["notebook_id"].as_str().ok_or("notebook_id must be a string")?;
                 let backend = open(notebook).ok_or_else(|| format!("not_open: no open notebook has the id {notebook}"))?;
-                let (port, secret) = self.engine(backend)?;
+                {
+                    // A notebook's engine stays its engine while it's open; ids are few.
+                    let mut engines = self.engines.lock().unwrap();
+                    if engines.len() >= 1024 {
+                        engines.clear();
+                    }
+                    engines.insert(notebook.to_owned(), backend);
+                }
+                let (port, secret, _) = self.engine(backend)?;
                 let engine = crate::notebooks::engines::language(backend);
                 if self.sockets.lock().unwrap().len() >= SOCKETS_MAX {
                     return Err("too_many: too many notebook views are open".into());
@@ -238,14 +255,14 @@ impl Views {
     }
 
     fn page(&self, backend: Backend, make: impl FnOnce() -> Result<String, String>) -> Result<Arc<String>, String> {
-        let (port, _) = self.engine(backend)?;
+        let (_, _, start) = self.engine(backend)?;
         let mut pages = self.pages.lock().unwrap();
-        if let Some((_, _, page)) = pages.iter().find(|(b, made_by, _)| *b == backend && *made_by == port) {
+        if let Some((_, _, page)) = pages.iter().find(|(b, made_by, _)| *b == backend && *made_by == start) {
             return Ok(page.clone());
         }
         let made = Arc::new(split_page(&make()?)?);
         pages.retain(|(b, _, _)| *b != backend);
-        pages.push((backend, port, made.clone()));
+        pages.push((backend, start, made.clone()));
         Ok(made)
     }
 
@@ -878,8 +895,8 @@ mod tests {
         // Made once per R: the same R's page is kept, a new R's is made again.
         let again = |id: Option<&str>| views.call("notebook_page", &json!({ "notebook_id": "r", "offset": 0, "size": 100000 }), move |_, _| id.map(|id| format!("<html><head>{id}</head><body></body></html>")).ok_or("made again".to_owned()), open);
         assert_eq!(title(again(None).unwrap()), "<title>Ember r</title>");
-        views.set_ember(3, "e".into());
-        assert_eq!(title(again(Some("new")).unwrap()), "new");
+        views.set_ember(2, "e".into());
+        assert_eq!(title(again(Some("new")).unwrap()), "new", "an R started again on the same port and secret");
     }
 
     #[test]
@@ -891,5 +908,9 @@ mod tests {
         views.set_ember(echo_server(1), "s".into());
         let socket = views.call("notebook_socket_open", &json!({ "notebook_id": "r" }), |_, _| unreachable!(), open).unwrap()["socket"].clone();
         views.call("notebook_socket_close", &json!({ "socket": socket }), |_, _| unreachable!(), open).unwrap();
+        // The view's probe told the views the notebook's engine: its page's parts don't ask again.
+        let part = |offset: u64| views.call("notebook_page", &json!({ "notebook_id": "r", "offset": offset, "size": 10 }), |backend, _| Ok(format!("<html><head>{backend:?}</head><body></body></html>")), |_| unreachable!("a snapshot per part"));
+        assert_eq!(part(0).unwrap()["next"], 10);
+        assert_eq!(part(10).unwrap()["next"], 20);
     }
 }
