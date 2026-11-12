@@ -876,7 +876,7 @@ fn the_runtime_end_to_end() {
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": stuck }));
     });
 
-    step("Stop stops a waiting cell, a looping one and one in compiled code, and the notebook keeps its values (#139)", || {
+    step("Stop stops a waiting cell, a looping one, one that never yields and one in compiled code, and the notebook keeps its values (#139)", || {
         let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
         let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
         rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
@@ -888,6 +888,7 @@ fn the_runtime_end_to_end() {
         for code in [
             "(sleep(60); 1)",
             "let n = 0; for i in 1:10^12; n += i; i % 10^6 == 0 && yield(); end; n end",
+            "let s = 0.0; for i in 1:10^12; s += sin(i); end; s end",
             "ccall(:sleep, Cuint, (Cuint,), 8)",
         ] {
             let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": code, "after_cell_id": after }));

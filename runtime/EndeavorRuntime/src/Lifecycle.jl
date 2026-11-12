@@ -208,11 +208,15 @@ function _stop_run(session, nb, workspace)::Bool
     if cell !== nothing && workspace.worker isa Pluto.Malt.Worker && _stop_hook_ok()
         id = nb.cells[cell].cell_id
         # Not waited for: a cell that never yields holds the process, and this message, until it ends.
+        # A reply of false (no hook in the process, or the cell not noted yet) falls back at once.
+        reply = Ref{Any}(nothing)
         @async try
-            Pluto.Malt.remote_eval_fetch(workspace.worker, :(isdefined(Main, :__endeavor_stop) && Main.__endeavor_stop($id, $(time() + 2.0))))
+            reply[] = Pluto.Malt.remote_eval_fetch(workspace.worker, :(isdefined(Main, :__endeavor_stop) && Main.__endeavor_stop($id, $(time() + 2.0))))
         catch
+            reply[] = false
         end
-        Pluto.WorkspaceManager.poll(() -> isready(workspace.dowork_token), 3.0, 1/20) && return true
+        Pluto.WorkspaceManager.poll(() -> isready(workspace.dowork_token) || reply[] === false, 3.0, 1/20)
+        isready(workspace.dowork_token) && return true
     end
     Pluto.WorkspaceManager.interrupt_workspace((session, nb); verbose=false)
 end
