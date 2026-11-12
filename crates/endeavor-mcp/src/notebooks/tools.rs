@@ -106,6 +106,7 @@ impl Notebooks {
             "interrupt_notebook" => t.interrupt_notebook(),
             "answer_prompt" => t.answer_prompt(),
             "restart_notebook" => t.restart_notebook(),
+            "close_notebook" => t.close_notebook(),
             "preview_package_update" => t.preview_package_update(),
             "approve_install" => t.approve_install(),
             "apply_package_update" => t.apply_package_update(),
@@ -1581,6 +1582,16 @@ impl Call<'_> {
     /// runs again, so the result names those (`running_again`): a restart meant to end a stuck cell
     /// doesn't, unless the cell was edited first. Ember's leaves every cell not run. The engines
     /// refuse it in safe preview.
+    /// Close the notebook, as the app's "Stop notebook" does: its process ends, for every session and
+    /// the user's browser too. Pluto saved the file with every change, so nothing is lost but the values.
+    fn close_notebook(&self) -> Result<Value, String> {
+        let nb = self.notebook()?;
+        self.nbs.stop_notebook(&nb.path)?;
+        let path = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
+        self.nbs.unbind(self.owner, &path);
+        Ok(json!({ "notebook_id": nb.id, "path": nb.path, "closed": true }))
+    }
+
     fn restart_notebook(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         let running: Vec<String> = nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running)).cloned().collect();

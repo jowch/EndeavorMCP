@@ -2480,6 +2480,24 @@ fn a_session_that_may_work_on_several_notebooks() {
 }
 
 #[test]
+fn close_notebook_ends_its_own_notebook_and_no_other() {
+    let s = setup();
+    let paths = temp_notebooks("close", 2);
+    let mine = s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    let theirs = s.call("b", "open_notebook", json!({ "path": &paths[1] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    s.notebooks.publish();
+    // Another session's notebook is refused, as every change to it is.
+    assert!(s.call("a", "close_notebook", json!({ "notebook_id": theirs })).unwrap_err().starts_with("ArgumentError: one_notebook::"));
+    let closed = s.call("a", "close_notebook", json!({ "notebook_id": mine })).unwrap();
+    assert_eq!(closed, json!({ "notebook_id": mine, "path": paths[0], "closed": true }));
+    let open: Vec<String> = s.notebooks.snapshots().unwrap().into_iter().map(|nb| nb.path).collect();
+    assert_eq!(open, [paths[1].clone()]);
+    // The session has no notebook now, so it may open another.
+    assert_eq!(s.notebooks.bound("a"), None);
+    assert!(s.call("a", "open_notebook", json!({ "path": &paths[0] })).is_ok());
+}
+
+#[test]
 fn opening_an_open_notebook_joins_it_and_changes_nothing() {
     let s = setup();
     let paths = temp_notebooks("join", 2);
