@@ -1260,12 +1260,13 @@ impl Relay {
             }
             fields.insert("opened_in_browser".into(), opened.into());
         }
-        // A runtime on this computer, which shows the user no browser: the address alone won't open
-        // for them. (On a machine the connection's port is on the user's computer already.)
+        // A runtime on this computer, which shows the user no browser: nothing opened for them, and the
+        // address may or may not reach their browser. (On a machine the connection's port is on the
+        // user's computer already.)
         let var = |name: &str| std::env::var(name).ok();
         if route.host.is_none() && !in_view && !browser::shows(var) {
             let open = crate::core::open_command(&self.options.state_dir);
-            fields.insert("browser_note".into(), browser::note(&crate::hostname(), route.port, &open, browser::over_ssh(var)).into());
+            fields.insert("browser_note".into(), browser::note(&crate::hostname(), route.port, &open).into());
         }
         fields.insert("browser_url".into(), url.into());
         parsed["result"]["content"][0]["text"] = to_json(&Value::Object(fields)).into();
