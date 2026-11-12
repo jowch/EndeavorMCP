@@ -1023,6 +1023,9 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
             });
             if caller.views {
                 result["capabilities"]["resources"] = json!({});
+                // What a host that draws views may show as the view's source.
+                result["serverInfo"]["title"] = json!("Endeavor");
+                result["serverInfo"]["icons"] = crate::views::icons();
             }
             if let Some(instructions) = guide::instructions(standalone, caller.has_skills, caller.front, caller.views) {
                 result["instructions"] = instructions.into();
