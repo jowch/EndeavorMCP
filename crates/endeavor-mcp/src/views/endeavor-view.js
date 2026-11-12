@@ -278,9 +278,9 @@
     document.body.classList.remove(SHOOTING);
     return id;
   }
-  function sendQuote(picks, comment, add) {
+  function sendQuote(picks, comment, add, ref) {
     const notebook = new URLSearchParams(location.search).get("id");
-    send({ type: "quote", notebook, picks, comment, add });
+    send({ type: "quote", notebook, picks, comment, add, ...ref === void 0 ? {} : { ref } });
   }
 
   // src/annotate.ts
@@ -497,12 +497,14 @@
       send({ type: "mode", on: enable });
       requestAnimationFrame(() => setTimeout(() => document.body.classList.toggle("annotate-numbers", active())));
     }
-    const underWay = [];
+    const underWay = /* @__PURE__ */ new Map();
+    let nextRef = 1;
     async function sendComment(add) {
       if (!picks.length) return;
       const sending = picks.splice(0, picks.length);
       const comment = text.value.trim();
-      if (!add && answered) underWay.push({ picks: sending, comment });
+      const ref = !add && answered ? nextRef++ : void 0;
+      if (ref !== void 0) underWay.set(ref, { picks: sending, comment });
       text.value = "";
       text.dispatchEvent(new Event("input"));
       refresh();
@@ -513,7 +515,7 @@
           out.push(b ? { ...p.pick, shot: await shoot(b) } : p.pick);
         } else out.push(p.pick);
       }
-      sendQuote(out, comment, add);
+      sendQuote(out, comment, add, ref);
     }
     let drag = null;
     let justDragged = false;
@@ -604,8 +606,10 @@
     hint.querySelector(".done").onclick = () => set(false);
     on("annotate", (msg) => set(msg.on));
     on("quote_sent", (msg) => {
-      const sent = underWay.shift();
-      if (msg.ok || !sent || !active()) return;
+      const sent = underWay.get(msg.ref);
+      underWay.delete(msg.ref);
+      if (msg.ok || !sent) return;
+      set(true);
       picks.unshift(...sent.picks.filter((p) => !picks.some((q) => samePick(p, q))));
       if (sent.comment) {
         text.value = text.value.trim() ? `${sent.comment}
@@ -1026,12 +1030,12 @@ ${comment}` : blocks.join("\n\n");
 
 ${[...earlier, text].join("\n\n")}`).then(
         () => {
-          toPage?.({ type: "quote_sent", ok: true });
+          if (msg.ref !== void 0) toPage?.({ type: "quote_sent", ref: msg.ref, ok: true });
           say("Passed to the chat");
         },
         (e) => {
           added.unshift(...earlier);
-          toPage?.({ type: "quote_sent", ok: false });
+          if (msg.ref !== void 0) toPage?.({ type: "quote_sent", ref: msg.ref, ok: false });
           say(`Couldn't reach Claude's chat${e instanceof Error && e.message ? `: ${e.message}` : ""}. Your ${msg.picks.length === 1 ? "pick is" : "picks are"} back: ${mac ? "\u21A9" : "Enter"} sends again.`);
         }
       );

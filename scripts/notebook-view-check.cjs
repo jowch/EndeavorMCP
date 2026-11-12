@@ -133,6 +133,9 @@ window.addEventListener("message", async e => {
   if (m.method === "ui/initialize") return send({ id: m.id, result: { protocolVersion: m.params.protocolVersion, hostInfo: { name: "view-check", version: "0" }, hostCapabilities: { serverTools: {}, openLinks: {}, logging: {}, message: { text: {} }, updateModelContext: { text: {} } }, hostContext: context } });
   if (m.method === "ui/notifications/initialized") { window.initialized = true; return; }
   if (m.method === "tools/call") return send({ id: m.id, result: await window.toolsCall(m.params) });
+  window.events = window.events || [];
+  if (m.method === "ui/message" && window.refuseText && m.params.content[0].text.includes(window.refuseText.match) && window.refuseText.times > 0) { window.refuseText.times--; window.events.push("refused " + window.refuseText.match); return send({ id: m.id, result: { isError: true } }); }
+  if (m.method === "ui/message") window.events.push("took " + m.params.content[0].text.split(String.fromCharCode(10)).pop());
   if (m.method === "ui/message" && window.refuse) { window.refuse--; return send({ id: m.id, result: { isError: true } }); }
   if (m.method === "ui/message" && window.fail) { window.fail = false; window.failed = (window.failed || 0) + 1; return send({ id: m.id, error: { code: -32001, message: "Request timed out" } }); }
   if (m.method === "ui/message") { window.messages.push(m.params); return send({ id: m.id, result: {} }); }
@@ -237,6 +240,25 @@ window.addEventListener("message", async e => {
   await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Timed out", null, { timeout: 5000 }).catch(() => {});
   await new Promise(r => setTimeout(r, 1000));
   check((await page.evaluate(() => window.failed === 1 && window.messages.length === 4)), "a timed-out send isn't tried again, and its pick comes back");
+  // A ↩ while a refused one waits to be tried again: each ↩'s answer finds its own picks, so the second
+  // isn't given back (and sent twice) when the first is refused again.
+  await frame.locator("#annotate-bar textarea").fill("");
+  await frame.locator("#annotate-bar textarea").press("Escape");
+  await frame.click("#endeavor-point");
+  await page.evaluate(() => { window.refuseText = { match: "\nAlpha", times: 2 }; window.events = []; });
+  const sentBefore = await page.evaluate(() => window.messages.length);
+  await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
+  await frame.locator("#annotate-bar textarea").fill("Alpha");
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await frame.locator("pluto-cell").nth(1).locator("pluto-output").click();
+  await frame.locator("#annotate-bar textarea").fill("Bravo");
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Alpha", null, { timeout: 5000 }).catch(() => {});
+  const crossed = await page.evaluate(() => window.events.join(" | "));
+  await frame.locator("#annotate-bar textarea").press("Enter");
+  await page.waitForFunction(n => window.messages.length === n + 2, sentBefore, { timeout: 5000 }).catch(() => {});
+  const ends = await page.evaluate(n => window.messages.slice(n).map(m => m.content[0].text.split("\n").pop()), sentBefore);
+  check(/refused \nAlpha \| took .*Bravo \| refused \nAlpha/.test(crossed) && JSON.stringify(ends) === '["Bravo","Alpha"]', `a ↩ during a refused one's wait: each sent once (${crossed}; ${JSON.stringify(ends)})`);
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await page.screenshot({ path: path.join(dir, "point.png") });
   await frame.locator("#annotate-bar textarea").press("Escape");
