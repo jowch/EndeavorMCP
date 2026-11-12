@@ -477,6 +477,7 @@
   var DRAG = 4;
   var FIGURE = "img, svg, canvas, video";
   var PARAGRAPH = "p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, table";
+  var TREE = "pluto-tree, table.pluto-table";
   function targetAt(el) {
     const cell = el?.closest("pluto-cell");
     if (!el || !cell) return null;
@@ -487,9 +488,19 @@
     let figure = el.closest(FIGURE);
     while (figure?.parentElement?.closest(FIGURE) && output.contains(figure.parentElement.closest(FIGURE))) figure = figure.parentElement.closest(FIGURE);
     if (figure && output.contains(figure)) return { part: "figure", cell, el: figure };
+    let tree = el.closest(TREE);
+    while (tree?.parentElement?.closest(TREE) && output.contains(tree.parentElement.closest(TREE))) tree = tree.parentElement.closest(TREE);
+    if (tree && output.contains(tree)) return { part: "output", cell, el: tree };
     const paragraph = el.closest(PARAGRAPH);
     if (paragraph && output.contains(paragraph)) return { part: "output", cell, el: paragraph };
     return { part: output.querySelector(FIGURE) ? "figure" : "output", cell, el: output };
+  }
+  function widgetValues(el) {
+    return [...el.querySelectorAll("input, select, textarea")].filter((i) => !(i instanceof HTMLInputElement) || !["hidden", "password", "file", "button", "submit", "reset", "image"].includes(i.type)).map((i) => {
+      const kind = i instanceof HTMLInputElement ? i.type : i.tagName.toLowerCase();
+      const value = i instanceof HTMLInputElement && (i.type === "checkbox" || i.type === "radio") ? String(i.checked) : i.value;
+      return `${kind}: ${value}`;
+    }).join("\n");
   }
   var pageBox = (r) => ({
     left: r.left + window.scrollX,
@@ -628,7 +639,7 @@
           return { pick: { part: "lines", cell: cell.id, code, lines: [1, lines], text: code }, el };
         }
         case "output":
-          return { pick: { part: "output", cell: cell.id, code, text: (el.innerText ?? el.textContent ?? "").trim() }, el };
+          return { pick: { part: "output", cell: cell.id, code, text: (el.innerText ?? el.textContent ?? "").trim() || widgetValues(el) }, el };
         case "figure":
           return { pick: { part: "figure", cell: cell.id, code }, el };
       }

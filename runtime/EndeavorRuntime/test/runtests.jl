@@ -72,6 +72,11 @@ end
         @test startswith(out, "[text/html output,")
     end
 
+    @testset "_html_text: numeric entities, as Pluto's Markdown writes math" begin
+        html = "<p>\$e^&#123;i\\pi&#125; &#43; 1 &#61; 0\$ &#x2014; &amp;#123; &lt;b&gt; &#0; &#99999999;</p>"
+        @test EndeavorRuntime._html_text(html) == "\$e^{i\\pi} + 1 = 0\$ — &#123; <b> &#0; &#99999999;"
+    end
+
     # ---------------------------------------------------------------------------
     # MCP protocol round-trip tests (no network, no Pluto web server)
     # ---------------------------------------------------------------------------
