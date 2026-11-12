@@ -2,12 +2,13 @@
 <html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Notebook</title>
 <style>
 /* The card in Claude's own tokens (hostContext.styles.variables, set on :root below), with system
-   colours where Claude sends none, on a transparent background so it sits in the chat as Claude's cards do. */
+   colours where Claude sends none, on a transparent background so it sits in the chat as Claude's cards do.
+   No border or margin of its own: Claude's desktop app draws every view in its own bordered box, and a
+   second box inset in it read as a card inside a card (Mac check, 2026-11-12). */
 html, body { background: transparent; margin: 0; }
 #endeavor-card { font: var(--font-text-sm-size, 13px)/var(--font-text-sm-line-height, 1.4) var(--font-sans, system-ui), -apple-system, "Segoe UI", sans-serif;
-  color: var(--color-text-primary, CanvasText); display: flex; align-items: center; gap: 12px; padding: 12px 14px; box-sizing: border-box;
-  border: 1px solid var(--color-border-tertiary, color-mix(in srgb, CanvasText 15%, transparent)); border-radius: var(--border-radius-lg, 10px); }
-#endeavor-card.cover { position: fixed; inset: 0; z-index: 2147483647; border: none; border-radius: 0; background: var(--color-background-primary, Canvas);
+  color: var(--color-text-primary, CanvasText); display: flex; align-items: center; gap: 12px; padding: 12px 14px; box-sizing: border-box; }
+#endeavor-card.cover { position: fixed; inset: 0; z-index: 2147483647; background: var(--color-background-primary, Canvas);
   justify-content: center; flex-direction: column; }
 #endeavor-card .name { font-weight: var(--font-weight-semibold, 600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #endeavor-card .note { color: var(--color-text-secondary, color-mix(in srgb, CanvasText 70%, transparent)); }
@@ -285,6 +286,8 @@ function shut() {
 //   input elsewhere (typing in its box, say). It refuses with an isError answer, and the same press
 //   can't be used again, so a refusal isn't retried: Point gets its picks back and the user presses ↩.
 const pointHost = {
+  // Names the notebook's engine in a quote's uri, as the app does: notebook://ember/… for R.
+  get engine() { return language() === "R" ? "ember" : "pluto"; },
   get canSend() { return !!app.getHostCapabilities()?.message; },
   send: text => app.sendMessage({ role: "user", content: [{ type: "text", text }] }).then(res => {
     if (res?.isError) throw new Error("it isn't ready yet, so try again in a few seconds");
