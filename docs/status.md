@@ -43,9 +43,17 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   that ⌘↩ added (kept in the view until then). Claude's
   desktop app puts it in its message box for the user to send (checked
   2026-11-11); its Code tab gave a view's context to Claude on no turn, so the
-  view doesn't use context. A refused send puts the comment back; a host that
-  takes no messages from views gets the look without Point. Point's figures and boxes go without a picture, which
-  the app takes natively. Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
+  view doesn't use context. Desktop adds the message at the end of its box and
+  trims its leading whitespace, so it starts with ↓ (explained in its note);
+  it refuses one for about 5 s after other input on the page, or when the same
+  press was already used, and then Point gets its picks and comment back for
+  the user to press ↩ again (checked 2026-11-12). A host that
+  takes no messages from views gets the look without Point. A notebook's output
+  scripts run in the view and can post to the chat too (#304); Desktop takes a
+  view's message only right after a press in the view and never sends it, and
+  the README tells users to read the box before sending. Point's figures and boxes go without a picture, which
+  the app takes natively. Desktop's Chat tab draws no card: its tool list lacks the app-only tools and
+  `open_notebook` still reports `shown_beside_chat` (#311, checked 2026-11-12). Not yet: R notebooks, and a notebook on a machine, which still opens in a browser
   tab (the chat's view reaches another `endeavor mcp` process, which works on
   this computer). A client that draws views but can't move one beside the chat
   gets only the card. Claude ignores the documented automatic side panel for a
