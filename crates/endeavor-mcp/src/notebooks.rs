@@ -238,6 +238,9 @@ struct State {
     /// The app binds a session started from an existing notebook; otherwise
     /// the first notebook the session opens or creates binds it.
     bindings: HashMap<String, String>,
+    /// The sessions that may work on several notebooks (`allow_several`), and the notebooks each
+    /// opened or created: their ids, so that one closed and opened again elsewhere isn't one of them.
+    several: HashMap<String, HashSet<String>>,
     /// When each agent session last made a tool call, for `recent_sessions` and
     /// to forget sessions that went quiet. Made when a session is bound or
     /// makes a call; dropped with its binding, or `SESSION_KEPT` after its
@@ -274,10 +277,12 @@ impl State {
     /// Drop the records of sessions that haven't called in a week, and their bindings.
     fn forget_old(&mut self, now: f64) {
         let bindings = &mut self.bindings;
+        let several = &mut self.several;
         self.seen.retain(|session, seen| {
             let kept = now - seen.last_call.unwrap_or(f64::MIN).max(seen.since) < SESSION_KEPT;
             if !kept {
                 bindings.remove(session);
+                several.remove(session);
             }
             kept
         });
@@ -625,7 +630,7 @@ impl Notebooks {
             starting: Mutex::default(),
             notices: Mutex::default(),
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), seen: HashMap::new(), calls: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), several: HashMap::new(), seen: HashMap::new(), calls: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),
@@ -1155,13 +1160,16 @@ impl Notebooks {
         self.state.lock().unwrap().bindings.get(owner).cloned()
     }
 
-    /// After a successful open or new: bind the session if it isn't bound yet.
-    fn opened_by(&self, owner: &str, path: &str) {
+    /// After a successful open or new of notebook `id`: bind the session if it isn't bound yet.
+    fn opened_by(&self, owner: &str, path: &str, id: &str) {
         if !owner.is_empty() {
             let path = canonical_path(path).unwrap_or_else(|_| path.to_owned());
             let now = self.now();
             let mut state = self.state.lock().unwrap();
             state.bindings.entry(owner.to_owned()).or_insert(path);
+            if let Some(opened) = state.several.get_mut(owner) {
+                opened.insert(id.to_owned());
+            }
             state.record_bound(owner, now);
         }
     }
@@ -1174,11 +1182,52 @@ impl Notebooks {
         }
     }
 
+    /// Session `owner` may work on several notebooks: its client serves several conversations on one
+    /// connection, so this server can't tell them apart (Claude's desktop app). Each notebook it opens
+    /// or creates is one it works on, whether or not its first one is still open; it still can't change
+    /// one it didn't open, and `list_notebooks` marks none `this_session`, since it can't say which is
+    /// the conversation's.
+    pub fn allow_several(&self, owner: &str) {
+        if !owner.is_empty() {
+            self.state.lock().unwrap().several.entry(owner.to_owned()).or_default();
+        }
+    }
+
+    /// Whether session `owner` may work on several notebooks (`allow_several`).
+    fn several(&self, owner: &str) -> bool {
+        self.state.lock().unwrap().several.contains_key(owner)
+    }
+
+    /// Why a session that may work on several notebooks may not make this call: it changes or runs a
+    /// notebook the session didn't open or create.
+    fn several_refusal(&self, owner: &str, tool: &str, arguments: &Value, folder: &Folder) -> Option<String> {
+        if tool == "open_notebook" || tool == "new_notebook" {
+            let requested = arguments.get("path").and_then(Value::as_str)?;
+            return requested_path(requested, folder).and_then(|path| canonical_path(&path)).err();
+        }
+        if !WRITE_TOOLS.contains(&tool) || tool == "run_shell" {
+            return None;
+        }
+        let id = parse_uuid(&julia_string(arguments.get("notebook_id").unwrap_or(&Value::String(String::new()))))?;
+        if self.state.lock().unwrap().several.get(owner).is_some_and(|opened| opened.contains(&id)) {
+            return None;
+        }
+        let known = self.state.lock().unwrap().notebooks.get(&id).map(|nb| nb.path.clone()).filter(|p| !p.is_empty());
+        let path = known.or_else(|| self.snapshot(&id).ok().map(|nb| nb.path))?;
+        Some(format!(
+            "ArgumentError: one_notebook::{path} wasn't opened or created here, so you can't change or run it. \
+             If the user wants you to work on it, open it with `open_notebook` and its path first."
+        ))
+    }
+
     /// Why a session may not make this call: it works on another notebook.
     /// Other notebooks stay readable. A notebook that is no longer open is not one it works on.
     pub fn refusal(&self, owner: &str, tool: &str, arguments: &Value, folder: &Folder) -> Option<String> {
         if owner.is_empty() {
             return None;
+        }
+        if self.several(owner) {
+            return self.several_refusal(owner, tool, arguments, folder);
         }
         let bound = self.bound(owner)?;
         let refuse = |what: &str| {
