@@ -788,8 +788,204 @@ ${text.value}` : sent.comment;
     });
   }
 
-  // src/narrow.ts
+  // src/find.ts
+  var ROOT = "pluto-notebook";
+  var BLOCK = ".cm-line, p, li, td, th, h1, h2, h3, h4, h5, h6, pre, div, pluto-output, pluto-cell";
+  function findMatches(root, query) {
+    const needle = query.toLowerCase();
+    if (!needle) return [];
+    const doc = root.ownerDocument;
+    const shown = /* @__PURE__ */ new Map();
+    const isShown = (el) => {
+      let yes = shown.get(el);
+      if (yes === void 0) shown.set(el, yes = el.checkVisibility?.() ?? true);
+      return yes;
+    };
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+      acceptNode: (node) => {
+        if (node.nodeType === 1) return node.tagName === "BR" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+        const parent = node.parentElement;
+        if (!parent || !node.nodeValue) return NodeFilter.FILTER_REJECT;
+        if (parent.closest("script, style, template, [hidden], [aria-hidden='true']") || !isShown(parent)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    const pieces = [];
+    let text = "";
+    let block = null;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.nodeType === 1) {
+        text += "\n";
+        block = null;
+        continue;
+      }
+      const here = node.parentElement.closest(BLOCK);
+      if (here !== block) {
+        text += "\n";
+        block = here;
+      }
+      pieces.push({ node, at: text.length });
+      text += node.nodeValue;
+    }
+    const haystack = text.toLowerCase();
+    const point = (offset, end) => {
+      let lo = 0;
+      let hi = pieces.length - 1;
+      while (lo < hi) {
+        const mid = lo + hi + 1 >> 1;
+        if (end ? pieces[mid].at < offset : pieces[mid].at <= offset) lo = mid;
+        else hi = mid - 1;
+      }
+      return [pieces[lo].node, offset - pieces[lo].at];
+    };
+    const found = [];
+    for (let i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + needle.length)) {
+      const range = doc.createRange();
+      range.setStart(...point(i, false));
+      range.setEnd(...point(i + needle.length, true));
+      found.push(range);
+    }
+    return found;
+  }
+  var glass = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>`;
+  var findButton = () => `<button type="button" id="endeavor-find-button" title="Find in the notebook (${mac ? "\u2318F" : "Ctrl+F"})" aria-label="Find">${glass}<span class="word">Find</span></button>`;
   var css3 = `
+  #endeavor-find { position: fixed; top: calc(var(--endeavor-bar) + 6px); right: 10px; z-index: 9998; display: none; align-items: center; gap: 4px;
+    padding: 4px 4px 4px 8px; border-radius: 8px; border: 1px solid var(--e-divider); background: var(--e-bg-page);
+    box-shadow: 0 4px 16px var(--e-shadow-popover); color: var(--e-text-secondary); font: 12.5px system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #endeavor-find.open { display: flex; }
+  #endeavor-find input { width: min(220px, 50vw); border: none; outline: none; background: none; color: var(--e-text-primary); font: inherit; }
+  #endeavor-find .count { min-width: 44px; text-align: right; color: var(--e-text-muted); white-space: nowrap; }
+  #endeavor-find button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px;
+    background: none; color: var(--e-text-secondary); font: inherit; cursor: pointer; }
+  #endeavor-find button:hover { color: var(--e-text-primary); background: var(--e-button-hover); }
+  ::highlight(endeavor-find) { background-color: rgba(255, 196, 0, 0.35); }
+  ::highlight(endeavor-find-current) { background-color: rgba(255, 150, 0, 0.75); color: black; }
+`;
+  var highlights = () => globalThis.CSS?.highlights;
+  var Highlight = () => globalThis.Highlight;
+  function initFind(button) {
+    const style = document.createElement("style");
+    style.id = "endeavor-find-style";
+    style.textContent = css3;
+    document.head.append(style);
+    const box = document.createElement("div");
+    box.id = "endeavor-find";
+    box.setAttribute("role", "search");
+    box.innerHTML = `<input type="text" placeholder="Find in the notebook" aria-label="Find in the notebook" spellcheck="false"><span class="count" aria-live="polite"></span><button type="button" class="previous" title="Previous (\u21E7\u21A9)" aria-label="Previous match">\u2191</button><button type="button" class="next" title="Next (\u21A9)" aria-label="Next match">\u2193</button><button type="button" class="close" title="Close (Esc)" aria-label="Close">\u2715</button>`;
+    document.body.append(box);
+    const input = box.querySelector("input");
+    const count = box.querySelector(".count");
+    let matches = [];
+    let current = -1;
+    const paint = () => {
+      const h = highlights();
+      const H = Highlight();
+      if (!h || !H) return;
+      h.set("endeavor-find", new H(...matches));
+      if (current >= 0 && matches[current]) h.set("endeavor-find-current", new H(matches[current]));
+      else h.delete("endeavor-find-current");
+    };
+    const show = () => {
+      const range = matches[current];
+      count.textContent = !input.value ? "" : matches.length ? `${current + 1} of ${matches.length}` : "No matches";
+      paint();
+      if (!range) return;
+      for (let el = range.startContainer.parentElement; el && el !== document.body; el = el.parentElement) {
+        const style2 = getComputedStyle(el);
+        const r = range.getBoundingClientRect();
+        const area = el.getBoundingClientRect();
+        if (/auto|scroll/.test(style2.overflowY) && el.scrollHeight > el.clientHeight && (r.top < area.top || r.bottom > area.bottom))
+          el.scrollTop += r.top - area.top - el.clientHeight / 2;
+        if (/auto|scroll/.test(style2.overflowX) && el.scrollWidth > el.clientWidth && (r.left < area.left || r.right > area.right))
+          el.scrollLeft += r.left - area.left - el.clientWidth / 2;
+      }
+      const rect = range.getBoundingClientRect();
+      const top = (document.getElementById("endeavor-bar")?.getBoundingClientRect().bottom ?? 0) + box.offsetHeight + 16;
+      if (rect.top < top || rect.bottom > window.innerHeight - 16) window.scrollBy(0, rect.top - (top + window.innerHeight) / 2);
+    };
+    const search = (keep) => {
+      const root = document.querySelector(ROOT);
+      const before = matches[current];
+      matches = root ? findMatches(root, input.value) : [];
+      current = matches.length ? 0 : -1;
+      if (keep && before) {
+        const same = matches.findIndex((m) => m.compareBoundaryPoints(Range.START_TO_START, before) >= 0);
+        if (same >= 0) current = same;
+      }
+      show();
+    };
+    const step = (by) => {
+      if (!matches.length) return;
+      current = (current + by + matches.length) % matches.length;
+      show();
+    };
+    const isOpen = () => box.classList.contains("open");
+    const open = () => {
+      box.classList.add("open");
+      button.classList.add("on");
+      input.focus();
+      input.select();
+      if (input.value) search(true);
+    };
+    const close = () => {
+      box.classList.remove("open");
+      button.classList.remove("on");
+      matches = [];
+      current = -1;
+      highlights()?.delete("endeavor-find");
+      highlights()?.delete("endeavor-find-current");
+    };
+    let typing = 0;
+    input.addEventListener("input", () => {
+      clearTimeout(typing);
+      typing = window.setTimeout(() => (typing = 0, search(false)), 80);
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (typing) {
+          clearTimeout(typing);
+          typing = 0;
+          search(false);
+        } else step(e.shiftKey ? -1 : 1);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+      e.stopPropagation();
+    });
+    box.querySelector(".previous").addEventListener("click", () => step(-1));
+    box.querySelector(".next").addEventListener("click", () => step(1));
+    box.querySelector(".close").addEventListener("click", close);
+    button.addEventListener("click", (e) => e.isTrusted && (isOpen() ? close() : open()));
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        if (!e.isTrusted || !modHeld(e) || e.altKey || mac && e.ctrlKey) return;
+        const key = e.key.toLowerCase();
+        if (key === "f" && !e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          open();
+        } else if (key === "g" && isOpen()) {
+          e.preventDefault();
+          e.stopPropagation();
+          step(e.shiftKey ? -1 : 1);
+        }
+      },
+      true
+    );
+    let soon = 0;
+    new MutationObserver((records) => {
+      if (!isOpen() || !input.value || records.every((r) => box.contains(r.target))) return;
+      if (!soon) soon = window.setTimeout(() => (soon = 0, search(true)), 300);
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+    return { open };
+  }
+
+  // src/narrow.ts
+  var css4 = `
   /* Long words and links in Markdown wrap at the cell's edge, rather than run past it. */
   pluto-editor pluto-output :is(p, li, blockquote, h1, h2, h3, h4, h5, h6, dt, dd) { overflow-wrap: break-word; }
   @media (max-width: 600px) {
@@ -804,14 +1000,14 @@ ${text.value}` : sent.comment;
   function initNarrow() {
     const style = document.createElement("style");
     style.id = "endeavor-narrow";
-    style.textContent = css3;
+    style.textContent = css4;
     document.head.append(style);
   }
 
   // src/space.ts
   var EMBER = "pluto-editor:has(> #ember-run-status)";
   var PLUTO = "pluto-editor:not(:has(> #ember-run-status))";
-  var css4 = `
+  var css5 = `
   /* Left of a cell: Pluto's eye (16 px icon), or Ember's eye and run button (46 px, Ember's own
      measure). Right: 10 px, for an overlay scrollbar's thumb. */
   pluto-editor { --e-left: 26px; --e-right: 10px; }
@@ -859,7 +1055,7 @@ ${text.value}` : sent.comment;
   function initSpace() {
     const style = document.createElement("style");
     style.id = "endeavor-space";
-    style.textContent = css4;
+    style.textContent = css5;
     document.head.append(style);
   }
 
@@ -1305,13 +1501,13 @@ ${comment}` : blocks.join("\n\n");
   }
   /* A narrow panel: the file's name before the shortcut and the panel buttons' words (their icons stay). */
   @media (max-width: 420px) {
-    #endeavor-bar .key, #endeavor-bar .panel .word { display: none; }
+    #endeavor-bar .key, #endeavor-bar .panel .word, #endeavor-find-button .word { display: none; }
   }
   /* Pluto's floating safe-preview badge is hidden, as in the app: its band and each cell's
      "Code not executed in Safe preview" already say it. */
   .outline-frame-actions-container.safe-preview { display: none !important; }
 `;
-  var css5 = `
+  var css6 = `
   #annotate-hint { top: calc(var(--endeavor-bar) + 8px) !important; }
   #endeavor-sent { position: fixed; left: 50%; top: calc(var(--endeavor-bar) + 8px); transform: translateX(-50%); z-index: 10001; display: none;
     max-width: calc(100vw - 32px); box-sizing: border-box; text-align: center;
@@ -1339,7 +1535,7 @@ ${comment}` : blocks.join("\n\n");
     document.head.append(style);
     const bar = document.createElement("div");
     bar.id = "endeavor-bar";
-    bar.innerHTML = `<span class="file">Notebook</span><span class="doing">Loading\u2026</span><span class="grow"></span>` + PANELS.map(([tab, word, icon, title]) => `<button type="button" class="panel ${tab}" title="${title}" aria-label="${word}">${icon}<span class="word">${word}</span></button>`).join("") + (withPoint ? `<button type="button" id="endeavor-point" title="Point at a cell, its code or its output, and comment on it for Claude"><span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span></button>` : "");
+    bar.innerHTML = `<span class="file">Notebook</span><span class="doing">Loading\u2026</span><span class="grow"></span>` + findButton() + PANELS.map(([tab, word, icon, title]) => `<button type="button" class="panel ${tab}" title="${title}" aria-label="${word}">${icon}<span class="word">${word}</span></button>`).join("") + (withPoint ? `<button type="button" id="endeavor-point" title="Point at a cell, its code or its output, and comment on it for Claude"><span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span></button>` : "");
     document.body.prepend(bar);
     const file = bar.querySelector(".file");
     const words = bar.querySelector(".doing");
@@ -1354,6 +1550,7 @@ ${comment}` : blocks.join("\n\n");
         if (!open && tab === "docs") setTimeout(() => document.querySelector("#live-docs-search")?.focus(), 50);
       });
     pointButton?.addEventListener("click", (e) => e.isTrusted && point(!document.body.classList.contains("annotating")));
+    initFind(bar.querySelector("#endeavor-find-button"));
     let last = null;
     const tick = () => {
       const nb = window.editor_state?.notebook;
@@ -1450,7 +1647,7 @@ ${[...earlier, text].join("\n\n")}`).then(
     initAskBox();
     initAnnotate(true);
     const style = document.createElement("style");
-    style.textContent = css5;
+    style.textContent = css6;
     document.head.append(style);
     document.body.append(sent);
     window.addEventListener(
