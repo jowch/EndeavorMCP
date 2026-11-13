@@ -247,6 +247,15 @@ starts with ↓. The app turns it away for a few seconds after you type or click
 elsewhere on the page, or if the same press was already used. Then your pick
 comes back, and you press ↩ again.
 
+The view can load files from two web hosts, and no others:
+
+- **cdn.jsdelivr.net**: Pluto's fonts, and the scripts of some outputs, such
+  as PlutoUI's RangeSlider and Scrubbable, and the font of Masque's controls.
+- **esm.sh**: plotly.js, which PlutoPlotly loads from there.
+
+An output that loads from anywhere else doesn't draw in this view. Open the
+notebook in your browser instead.
+
 A notebook's outputs can carry their own scripts, and in this view a script
 can put text in your message box too, after any click or key press in the
 notebook. The app never sends it for you, so read the end of the box before
