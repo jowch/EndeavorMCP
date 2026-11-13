@@ -1169,28 +1169,32 @@ nav#at_the_top > pluto-filepicker, nav#at_the_top > div.desktop_picker_group, #e
   var both = `
 footer form#feedback { display: none !important; }
 `;
-  var juliaMono = [
-    { file: "Regular", weight: 400, style: "normal" },
-    { file: "Bold", weight: 700, style: "normal" },
-    { file: "RegularItalic", weight: 400, style: "italic" }
-  ].map(
-    ({ file, weight, style }) => `
+  var JULIA_MONO_WEB = "https://cdn.jsdelivr.net/gh/cormullion/juliamono@v0.63.2/webfonts";
+  function juliaMonoFaces(from) {
+    return [
+      { file: "Regular", weight: 400, style: "normal" },
+      { file: "Bold", weight: 700, style: "normal" },
+      { file: "RegularItalic", weight: 400, style: "italic" }
+    ].map(({ file, weight, style }) => {
+      const src = from === "app" ? `url("endeavor://localhost/fonts/JuliaMono-${file}.ttf") format("truetype")` : `url("${JULIA_MONO_WEB}/JuliaMono-${file}.woff2") format("woff2")`;
+      return `
 @font-face {
   font-family: JuliaMono;
-  src: url("endeavor://localhost/fonts/JuliaMono-${file}.ttf") format("truetype");
+  src: ${src};
   font-display: swap;
   font-weight: ${weight};
   font-style: ${style};
-}`
-  ).join("");
-  function initTheme() {
+}`;
+    }).join("");
+  }
+  function initTheme(fontsFrom = "app") {
     const tokenSheet = document.createElement("style");
     tokenSheet.id = "endeavor-tokens";
     tokenSheet.textContent = tokens;
     document.head.append(tokenSheet);
     const fonts = document.createElement("style");
     fonts.id = "endeavor-fonts";
-    fonts.textContent = juliaMono;
+    fonts.textContent = juliaMonoFaces(fontsFrom);
     document.head.append(fonts);
     const style = document.createElement("style");
     style.id = "endeavor-theme";
@@ -1433,7 +1437,7 @@ ${[...earlier, text].join("\n\n")}`).then(
         }
       );
     });
-    initTheme();
+    initTheme("web");
     initNarrow();
     initSpace();
     closeStrayCompletions();

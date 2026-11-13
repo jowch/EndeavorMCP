@@ -253,8 +253,9 @@ The view can load files from two web hosts, and no others:
   as PlutoUI's RangeSlider and Scrubbable, and the font of Masque's controls.
 - **esm.sh**: plotly.js, which PlutoPlotly loads from there.
 
-An output that loads from anywhere else doesn't draw in this view. Open the
-notebook in your browser instead.
+An output that loads from anywhere else doesn't draw in this view. Plotly's
+map plots are one: they fetch their maps from cdn.plot.ly. Open the notebook
+in your browser instead.
 
 A notebook's outputs can carry their own scripts, and in this view a script
 can put text in your message box too, after any click or key press in the
