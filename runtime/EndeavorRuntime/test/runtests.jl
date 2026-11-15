@@ -771,4 +771,51 @@ end
         end
     end
 
+    @testset "Stop: the page's and the agent's stop a waiting cell in its own task, and its process lives on (#139)" begin
+        EndeavorRuntime.stop_pluto_stack!()
+        pluto_port = 1850 + rand(0:99)
+        mcp_port = 3050 + rand(0:99)
+        EndeavorRuntime.configure_standalone!(; pluto_port, mcp_port)
+        X, Y = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+        try
+            EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
+            adapter(method, params) = JSON.parse(String(HTTP.post("http://127.0.0.1:$mcp_port/adapter", [],
+                JSON.json(Dict("method" => method, "params" => params)); readtimeout=120).body))
+            result(method, params) = (reply = adapter(method, params); haskey(reply, "error") ? error(reply["error"]) : reply["result"])
+            @test EndeavorRuntime._stop_hook_ok()   # the pinned Pluto; on another, Stop is Pluto's own
+            nid = result("open", Dict("path" => fresh_fixture(), "run" => true))["notebook_id"]
+            session = EndeavorRuntime.standalone_session()
+            nb = session.notebooks[UUID(nid)]
+            @test timedwait(() -> !any(c -> c.running || c.queued, nb.cells), 120) == :ok
+            worker = Pluto.WorkspaceManager.get_workspace((session, nb)).worker
+            @test timedwait(() -> Pluto.Malt.remote_eval_fetch(worker, :(isdefined(Main, :__endeavor_stop))), 30) == :ok
+            stop_page() = Pluto.responses[:interrupt_all](Pluto.ClientRequest(session=session, notebook=nb))
+            stop_agent() = result("interrupt", Dict("notebook_id" => nid))
+            for (code, stop) in (("y = (sleep(600); x)", stop_page), ("y = (sleep(600); x)", stop_agent),
+                                 ("y = let n = 0; for i in 1:10^12; n += i; i % 10^6 == 0 && yield(); end; n end", stop_page))
+                result("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => code)]))
+                result("run", Dict("notebook_id" => nid, "cells" => [Y], "wait" => false, "timeout" => 60))
+                @test timedwait(() -> nb.cells_dict[UUID(Y)].running, 60) == :ok
+                sleep(1)
+                took = @elapsed stop()
+                @test took < 4
+                @test timedwait(() -> !nb.cells_dict[UUID(Y)].running, 10) == :ok
+                @test nb.cells_dict[UUID(Y)].errored && occursin("InterruptException", string(nb.cells_dict[UUID(Y)].output.body))
+                @test Pluto.Malt.isrunning(worker) && nb.process_status == Pluto.ProcessStatus.ready
+                @test result("snapshot", Dict("notebook_id" => nid))["exited"] === nothing
+            end
+            # A late stop doesn't reach the next run: only the cell it meant, and only right away.
+            result("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => "y = (sleep(3); x * 7)")]))
+            result("run", Dict("notebook_id" => nid, "cells" => [Y], "wait" => false, "timeout" => 60))
+            @test timedwait(() -> nb.cells_dict[UUID(Y)].running, 60) == :ok
+            @test Pluto.Malt.remote_eval_fetch(worker, :(Main.__endeavor_stop(Base.UUID($X), time() + 2))) == false
+            @test Pluto.Malt.remote_eval_fetch(worker, :(Main.__endeavor_stop(Base.UUID($Y), time() - 1))) == false
+            @test timedwait(() -> !nb.cells_dict[UUID(Y)].running, 30) == :ok
+            @test string(nb.cells_dict[UUID(Y)].output.body) == "42"
+            result("shutdown", Dict("notebook_id" => nid))
+        finally
+            EndeavorRuntime.stop_pluto_stack!()
+        end
+    end
+
 end
