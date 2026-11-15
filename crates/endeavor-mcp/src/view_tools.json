@@ -58,5 +58,19 @@
       "properties": { "socket": { "type": "number" } },
       "required": ["socket"]
     }
+  },
+  {
+    "name": "notebook_file",
+    "title": "Notebook widget file",
+    "description": "Used by the notebook view to read a file an R notebook's widget needs, in parts.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "notebook_id": { "type": "string", "description": "The open R notebook the widget is in." },
+        "path": { "type": "string", "description": "The file, as the widget names it: deps/<name>-<version>/<file>." },
+        "offset": { "type": "number", "description": "Where the part starts: 0, then the `next` of the part before." }
+      },
+      "required": ["notebook_id", "path"]
+    }
   }
 ]

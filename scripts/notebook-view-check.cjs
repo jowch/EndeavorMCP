@@ -20,13 +20,16 @@ const os = require("os");
 const path = require("path");
 
 const args = process.argv.slice(2);
-const R = args.includes("--r");
-const binary = path.resolve(args.find(a => a !== "--r") || path.join(__dirname, "..", "target", "debug", "endeavor"));
+// --widget: an R notebook with a plotly cell too, whose files come through notebook_file.
+const WIDGET = args.includes("--widget");
+const R = args.includes("--r") || WIDGET;
+const binary = path.resolve(args.find(a => !a.startsWith("--")) || path.join(__dirname, "..", "target", "debug", "endeavor"));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "endeavor-view-"));
 const notebookPath = path.join(dir, R ? "view-check.R" : "view-check.jl");
 // The same three cells in each language: a title, `n`, and `squares`, which reads `n`.
 const SQUARES = "6e6a1b70-dda7-11f1-a148-b56bbb7771a3";
 const LANGUAGE = R ? "R" : "Julia";
+const CELLS = WIDGET ? 4 : 3;
 fs.writeFileSync(notebookPath, R ? `### An Ember notebook ###
 # /// environment
 # snapshot = "2026-11-01"
@@ -41,11 +44,14 @@ n <- 5
 # %% id=${SQUARES}
 squares <- (1:n)^2
 squares
-
+${WIDGET ? `
+# %% id=6e6a1b70-dda7-11f1-a148-b56bbb7771a4
+plotly::plot_ly(x = seq_along(squares), y = squares, type = "scatter", mode = "markers")
+` : ""}
 # /// cell order
 # 6e6a1b70-dda7-11f1-a148-b56bbb7771a1
 # 6e6a1b70-dda7-11f1-a148-b56bbb7771a2
-# ${SQUARES}
+# ${SQUARES}${WIDGET ? "\n# 6e6a1b70-dda7-11f1-a148-b56bbb7771a4" : ""}
 # ///
 ` : `### A Pluto.jl notebook ###
 # v0.20.0
@@ -105,7 +111,8 @@ const check = (ok, what) => { console.log((ok ? "ok   " : "FAIL ") + what); if (
   const tools = (await rpc("tools/list", {})).result.tools;
   const open = tools.find(t => t.name === "open_notebook");
   check(open?._meta?.ui?.resourceUri === "ui://endeavor/notebook", "open_notebook shows the notebook view");
-  check(tools.filter(t => ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close"].includes(t.name)).length === 5 && tools.filter(t => ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close"].includes(t.name)).every(t => t._meta?.ui?.visibility?.[0] === "app"), "the view's tools are for the view only");
+  const VIEW_TOOLS = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close", "notebook_file"];
+  check(tools.filter(t => VIEW_TOOLS.includes(t.name)).length === 6 && tools.filter(t => VIEW_TOOLS.includes(t.name)).every(t => t._meta?.ui?.visibility?.[0] === "app"), "the view's tools are for the view only");
   const view = (await rpc("resources/read", { uri: "ui://endeavor/notebook" })).result.contents[0];
   check(view.mimeType === "text/html;profile=mcp-app" && view.text.length > 100000, `the view is served (${view.text.length} bytes)`);
 
@@ -201,15 +208,21 @@ window.addEventListener("message", async e => {
   check(card[0] === "Couldn't connect to the notebook. Try again, or ask Claude to open it again." && card[1] === "Try again", `a failed load says so in plain words, with a way to try again: ${JSON.stringify(card)}`);
   const clicked = Date.now();
   await frame.click("#endeavor-open");
-  await frame.waitForFunction(() => document.querySelectorAll("pluto-cell").length === 3, null, { timeout: 60000 });
+  await frame.waitForFunction(cells => document.querySelectorAll("pluto-cell").length === cells, CELLS, { timeout: 60000 });
   const cellsAt = Date.now() - clicked;
   // Once the page is connected, Pluto sets the slider's value in Julia and the cell runs again. Ember
   // shows the result as R prints it.
   const showsSquares = R ? /1\s+4\s+9\s+16\s+25/ : /squares[\s\S]*25/;
-  await frame.waitForFunction(re => document.querySelectorAll("pluto-cell").length === 3 && new RegExp(re).test([...document.querySelectorAll("pluto-output")].map(o => o.innerText).join(" ")), showsSquares.source, { timeout: 60000 });
+  await frame.waitForFunction(([re, cells]) => document.querySelectorAll("pluto-cell").length === cells && new RegExp(re).test([...document.querySelectorAll("pluto-output")].map(o => o.innerText).join(" ")), [showsSquares.source, CELLS], { timeout: 60000 });
   const shown = Date.now() - clicked;
   const before = await frame.evaluate(() => [...document.querySelectorAll("pluto-output")].map(o => o.innerText.replace(/\s+/g, " ").trim()));
   check(before.some(t => showsSquares.test(t)), `the live notebook shows in the panel (${shown} ms after the click): ${JSON.stringify(before[2])}`);
+  if (WIDGET) {
+    // plotly's files come through notebook_file (Ember's window.ember_dep_file), and the plot draws.
+    const drawn = await frame.waitForFunction(() => !!document.querySelector(".plotly .main-svg .scatterlayer .point"), null, { timeout: 180000 }).then(() => true, () => false);
+    const out = await frame.evaluate(() => (document.querySelectorAll("pluto-cell")[3]?.querySelector("pluto-output")?.innerHTML || "").slice(0, 400));
+    check(drawn && calls.notebook_file > 0, `the plotly widget draws, its files read through notebook_file (${calls.notebook_file || 0} calls, ${Date.now() - clicked} ms after the click)${drawn ? "" : ": " + JSON.stringify(out)}`);
+  }
   const moved = Date.now();
   if (R) {
     // An edit in the page, run with Shift+Enter: it goes to Ember through the relay, and `squares` runs again.
@@ -223,6 +236,12 @@ window.addEventListener("message", async e => {
   }
   await frame.waitForFunction(() => /144/.test([...document.querySelectorAll("pluto-output")].map(o => o.innerText).join(" ")), null, { timeout: 20000 });
   check(true, `${R ? "editing n in the page" : "moving the slider"} ran the dependent cell again in ${LANGUAGE} (${Date.now() - moved} ms)`);
+  if (WIDGET) {
+    // The plot runs again too, and draws its 12 points with the files it already has.
+    const before = calls.notebook_file;
+    const redrawn = await frame.waitForFunction(() => document.querySelectorAll(".plotly .scatterlayer .point").length === 12, null, { timeout: 30000 }).then(() => true, () => false);
+    check(redrawn && calls.notebook_file === before, `the plot draws again after the edit, reading no file again (${Date.now() - moved} ms)`);
+  }
   await page.screenshot({ path: path.join(dir, "view.png") });
 
   // The Endeavor look, filling the panel: Pluto's header and footer give way to the view's toolbar,

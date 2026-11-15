@@ -372,6 +372,25 @@ fn exchange(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadli
     Ok((response.status(), Some(body)))
 }
 
+/// A GET of `path` on this computer's `port`: the status, the `Content-Type`, and the body, all
+/// done by `deadline`.
+pub fn get_by(port: u16, path: &str, deadline: Instant) -> io::Result<(u16, Option<String>, Vec<u8>)> {
+    let connect = deadline.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_secs(5));
+    let upstream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), connect)?;
+    let _ = upstream.set_nodelay(true);
+    let mut out = &upstream;
+    out.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").as_bytes())?;
+    let mut reader = BufReader::new(Timed { socket: &upstream, deadline: Some(deadline) });
+    let response = loop {
+        let response = Head::read(&mut reader)?.ok_or(io::ErrorKind::UnexpectedEof)?;
+        if !(100..200).contains(&response.status()) {
+            break response;
+        }
+    };
+    let body = read_body(&mut reader, response.response_body("GET")?)?;
+    Ok((response.status(), response.header("content-type").map(str::to_owned), body))
+}
+
 /// Relay a response body from `upstream` to `client` as it arrives, like
 /// `copy_body`, but give up as soon as the client hangs up: a stream of events
 /// may write nothing for a long time, and the upstream end should close with it.
