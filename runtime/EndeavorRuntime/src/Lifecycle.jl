@@ -97,6 +97,7 @@ function _handle_pluto_event(event)::Nothing
         nb = event.notebook
         if sess === nothing || !haskey(sess.notebooks, nb.notebook_id)
             forget_topology!(nb.notebook_id)
+            forget_controls!(nb.notebook_id)
             lock(() -> (delete!(_WATCHED, nb.notebook_id); delete!(_EXITED, nb.notebook_id); delete!(_INTERRUPTED, nb.notebook_id)), _NOTIFY_LOCK)
             _notify_notebook!("notebook_shut_down", nb)
         else

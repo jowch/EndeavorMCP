@@ -56,6 +56,15 @@ impl Session {
         }
     }
 
+    /// A notebook view tool's reply (`notebook_socket_*`), which comes as structured content.
+    pub fn view(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
+        let msg = self.request("tools/call", json!({ "name": name, "arguments": arguments }))?;
+        if msg["result"]["isError"] == true {
+            return Err(format!("{name}: {}", msg["result"]["content"][0]["text"].as_str().unwrap_or_default()));
+        }
+        Ok(msg["result"]["structuredContent"].clone())
+    }
+
     /// A tool's reply text, parsed as JSON. A runtime that is still starting is asked again.
     pub fn tool(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
         let began = Instant::now();
@@ -69,7 +78,8 @@ impl Session {
                 std::thread::sleep(Duration::from_secs(5));
                 continue;
             }
-            let starting = matches!(code.as_str(), "julia_starting" | "notebook_opening") || (code.is_empty() && text.to_lowercase().contains("starting"));
+            // The loose match is only for a reply that isn't JSON: a notebook's own text may say "starting".
+            let starting = matches!(code.as_str(), "julia_starting" | "notebook_opening") || (serde_json::from_str::<Value>(&text).is_err() && text.to_lowercase().contains("starting"));
             if starting && began.elapsed() < Duration::from_secs(600) {
                 continue;
             }

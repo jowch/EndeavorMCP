@@ -166,7 +166,9 @@ function _parse_validation_errors(nb::Pluto.Notebook, cell::Pluto.Cell, code::St
     return errors
 end
 
-function _snapshot_cell(cell)
+# `inputs` are the cell's controls as `read_cell` lists them, and `moved` the notes on a cell
+# whose result used a control moved away from its default (Controls.jl).
+function _snapshot_cell(cell; inputs = nothing, moved = String[])
     d = Dict{String,Any}(
         "cell_id"  => string(cell.cell_id),
         "code"     => cell.code,
@@ -182,8 +184,9 @@ function _snapshot_cell(cell)
         "hidden"   => _is_manifest_cell(cell.cell_id) || _is_fake_bind_shim(cell) || Pluto.must_be_commented_in_file(cell),
         "markdown" => _is_markdown_cell(cell),
         # A running cell's logs are its current run's so far, not its last run's.
-        "notes"    => cell.running ? String[] : _cell_notes(cell),
+        "notes"    => cell.running ? String[] : vcat(_cell_notes(cell), moved),
     )
+    inputs === nothing || (d["inputs"] = [c["line"] for c in inputs])
     err = _cell_output_error(cell)
     err !== nothing && (d["error"] = err)
     return d
@@ -236,7 +239,9 @@ function _package_step(nb)
     )
 end
 
-function snapshot(nb)
+function snapshot(nb; controls = Dict{String,Any}())
+    moved = moved_input_notes(nb, controls)
+    cell(id) = _snapshot_cell(nb.cells_dict[id]; inputs = get(controls, string(id), nothing), moved = get(moved, string(id), String[]))
     Dict{String,Any}(
         "notebook_id"       => string(nb.notebook_id),
         "path"              => nb.path,
@@ -246,7 +251,7 @@ function snapshot(nb)
         "safe_preview"      => nb.process_status === Pluto.ProcessStatus.waiting_for_permission,
         "exited"            => exited_cells(nb),
         "packages"          => package_step(nb),
-        "cells"          => [_snapshot_cell(nb.cells_dict[id]) for id in nb.cell_order],
+        "cells"          => [cell(id) for id in nb.cell_order],
     )
 end
 
@@ -529,10 +534,10 @@ function adapter_call(session, method::AbstractString, params)
     id = get(params, "notebook_id", nothing)
     if method == "snapshot" && id === nothing
         seq = _seq()
-        return Dict{String,Any}("notebooks" => [snapshot(nb) for nb in values(session.notebooks)], "seq" => seq)
+        return Dict{String,Any}("notebooks" => [snapshot(nb; controls = controls(session, nb)) for nb in values(session.notebooks)], "seq" => seq)
     end
     nb = _get_notebook(session, string(id))
-    method == "snapshot" && return (seq = _seq(); merge!(snapshot(nb), Dict{String,Any}("seq" => seq)))
+    method == "snapshot" && return (seq = _seq(); merge!(snapshot(nb; controls = controls(session, nb)), Dict{String,Any}("seq" => seq)))
     method == "graph" && return graph(nb; fresh=get(params, "fresh", false), refresh=get(params, "refresh", false),
                                       edges=get(params, "edges", false), packages=get(params, "packages", false))
     method == "shutdown" && return shutdown_notebook!(session, nb)

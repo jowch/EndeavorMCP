@@ -175,6 +175,98 @@ end
         @test EndeavorRuntime.render_png(session, nb, cells[3])["png"] === nothing
     end
 
+    @testset "controls: how read_cell words a widget, from its hooks" begin
+        # Stand-ins for AbstractPlutoDingetjes' answers, matched by name as the runtime matches them.
+        struct NotGiven end
+        struct InfinitePossibilities end
+        struct Slide; values::AbstractRange; end
+        struct Pick; options::Vector{Pair}; end
+        struct Box end
+        Base.show(io::IO, ::MIME"text/plain", ::Box) = print(io, "A box over the plot")
+        index = (el, i) -> el isa Slide ? el.values[i] : el isa Pick ? el.options[i].first : i
+        line(el, value, default, possible) = EndeavorRuntime.__endeavor_control(:x, el, value, _ -> default, possible, index)
+
+        slide = Slide(0.01:0.01:1.0)
+        @test line(slide, Some(0.5), 0.5, 1:100)["line"] == "x: Slide 0.01 to 1.0, step 0.01, value 0.5"
+        moved = line(slide, Some(0.3), 0.5, 1:100)
+        @test moved["line"] == "x: Slide 0.01 to 1.0, step 0.01, value 0.3 (default 0.5)"
+        @test (moved["moved"], moved["value"], moved["default"]) == (true, "0.3", "0.5")
+        # Choices show their label when it differs, as the agent would otherwise guess the label.
+        pick = Pick(["a" => "Apple", "b" => "b"])
+        @test line(pick, Some("b"), "b", 1:2)["line"] == "x: Pick of Apple = \"a\", \"b\", value \"b\""
+        many = Pick(["v$i" => "v$i" for i in 1:40])
+        @test line(many, Some("v1"), "v1", 1:40)["line"] == "x: Pick 40 choices, from \"v1\" to \"v40\", value \"v1\""
+        @test line(:w, Some(true), true, [false, true])["line"] == "x: Symbol, value true"
+        @test line(:w, Some("hi"), "hi", InfinitePossibilities())["line"] == "x: Symbol, any text, value \"hi\""
+        @test line(:w, Some(2), 2, :NotGiven)["line"] == "x: Symbol, value 2"
+        @test line(:w, Some(2), 2, NotGiven())["line"] == "x: Symbol, value 2"
+        # A widget with its own text form (Masque's) says what it is in its own words.
+        @test line(Box(), Some(1), 1, NotGiven())["line"] == "x: Box, value 1. A box over the plot"
+        # No default (a home-made `html"<input>"`): never moved. Not yet defined: not set.
+        @test !line(:w, Some(3), missing, NotGiven())["moved"]
+        @test line(:w, nothing, 1, NotGiven())["line"] == "x: Symbol, value not set"
+        # Long values are cut.
+        long = repeat("a", 200)
+        @test endswith(line(:w, Some(long), long, InfinitePossibilities())["line"], "…")
+    end
+
+    @testset "controls: read_cell lists a cell's controls, and the cells that used a moved one say so" begin
+        knob = """
+        begin
+            struct Knob; start::Int; end
+            Base.get(k::Knob) = k.start
+            Base.show(io::IO, ::MIME"text/html", ::Knob) = print(io, "<input type=range>")
+        end
+        """
+        session, nb, cells = make_session_with_notebook(knob, "@bind w Knob(4)", "y = w * 2", "z = y + 1", "other = 1")
+        Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
+        snap() = Dict(c["cell_id"] => c for c in EndeavorRuntime.adapter_call(session, "snapshot", Dict("notebook_id" => string(nb.notebook_id)))["cells"])
+        id(i) = string(cells[i].cell_id)
+        moved_notes(s, i) = filter(n -> startswith(n, "uses_moved_input::"), s[id(i)]["notes"])
+
+        s = snap()
+        @test s[id(2)]["inputs"] == ["w: Knob, value 4"]
+        @test !haskey(s[id(3)], "inputs") && !haskey(s[id(5)], "inputs")
+        @test all(i -> isempty(moved_notes(s, i)), 1:5)
+
+        # The user moves it on the page: the cells that read it, and theirs, say which value they used.
+        nb.bonds[:w] = Pluto.BondValue(9)
+        Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
+        s = snap()
+        @test s[id(2)]["inputs"] == ["w: Knob, value 9 (default 4)"]
+        note = "uses_moved_input::This result used w = 9, set on the page. The file's default is 4, so a rerun of the file gives other results."
+        @test moved_notes(s, 3) == [note] && moved_notes(s, 4) == [note]
+        @test isempty(moved_notes(s, 2)) && isempty(moved_notes(s, 5))
+
+        # The control's own cell running again puts it back to its default, and the notes go.
+        Pluto.update_save_run!(session, nb, cells[2:2]; run_async=false, save=true)
+        s = snap()
+        @test s[id(2)]["inputs"] == ["w: Knob, value 4"]
+        @test isempty(moved_notes(s, 3))
+
+        # A process that doesn't answer (busy in a task that never yields, no cell running) holds
+        # up only the snapshot that asked it, and that one for at most the wait.
+        spin = Pluto.Cell(; code="spin = @async (sleep(1); while true end)")
+        push!(nb.cells, spin)
+        nb.cells_dict[spin.cell_id] = spin
+        nb.cell_order = [nb.cell_order; spin.cell_id]
+        Pluto.update_save_run!(session, nb, [spin]; run_async=false, save=true)
+        sleep(2)
+        nb.bonds[:w] = Pluto.BondValue(5)
+        first_wait = @elapsed EndeavorRuntime.controls(session, nb)
+        later = [@elapsed(EndeavorRuntime.controls(session, nb)) for _ in 1:3]
+        @test first_wait < EndeavorRuntime._CONTROLS_WAIT + 1
+        @test all(<(0.5), later)
+
+        # A notebook with no control asks its process nothing.
+        session2, nb2, _ = make_session_with_notebook("a = 1")
+        Pluto.update_save_run!(session2, nb2, nb2.cells; run_async=false, save=true)
+        @test EndeavorRuntime.controls(session2, nb2) == Dict()
+        @test !haskey(EndeavorRuntime._CONTROLS, nb2.notebook_id)
+        Pluto.SessionActions.shutdown(session, nb; async=false, verbose=false)
+        Pluto.SessionActions.shutdown(session2, nb2; async=false, verbose=false)
+    end
+
     @testset "render_png without a worker" begin
         session, nb, cells = make_session_with_notebook("plot", "fig")   # never run: no workspace
         png = UInt8[0x89, 0x50, 0x4e, 0x47]
