@@ -13,6 +13,9 @@ using Plots
 # ╔═╡ 9e5b4c73-4f60-4182-bdce-3f4a5b6c7d05
 using CSV
 
+# ╔═╡ 9e5b4c73-4f60-4182-bdce-3f4a5b6c7d06
+using PlutoUI
+
 # ╔═╡ 9e5b4c73-4f60-4182-bdce-3f4a5b6c7d03
 DataFrame(t = 0:2, N = [1.0, 0.5, 0.25])
 
@@ -23,5 +26,6 @@ plot(sin, 0, 2π)
 # ╠═9e5b4c73-4f60-4182-bdce-3f4a5b6c7d01
 # ╠═9e5b4c73-4f60-4182-bdce-3f4a5b6c7d02
 # ╠═9e5b4c73-4f60-4182-bdce-3f4a5b6c7d05
+# ╠═9e5b4c73-4f60-4182-bdce-3f4a5b6c7d06
 # ╠═9e5b4c73-4f60-4182-bdce-3f4a5b6c7d03
 # ╠═9e5b4c73-4f60-4182-bdce-3f4a5b6c7d04

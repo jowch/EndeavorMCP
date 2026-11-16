@@ -84,6 +84,9 @@ Each task is a folder in `smoke/tasks/`:
   is the same in every run. The `injected` check fails if it never came.
   That session runs without the agent's `CLAUDE_CODE_SESSION_ID`, which
   would make it the agent's own session rather than another one.
+  A step `{ "page": { "bond": "cutoff", "value": 7 } }` is the user moving
+  a Pluto widget on the page instead, sent over the notebook view's socket as
+  Pluto's page sends it. The value is the page's own: a Slider's index, from 1.
 
 For each task, the runner makes a fresh folder with its own runtime state and
 a copy of `project/`. It starts `claude -p` there, with this checkout's
@@ -105,7 +108,7 @@ depot, so a notebook whose packages weren't saved in its file can still pass.
 
 Before the first task, the runner warms the shared depot: it opens
 `smoke/warm/warm.jl`, which loads the packages the tasks' notebooks reach for
-(CSV, DataFrames, Plots), so no task passes or fails on whether an earlier one
+(CSV, DataFrames, Plots, PlutoUI), so no task passes or fails on whether an earlier one
 installed them. On a new machine this takes several minutes. N9 is the one
 task with an empty depot of its own, for a first install. When an R task is
 to run and R is there, it also opens `smoke/warm/warm.R`, so Ember's first
@@ -241,6 +244,7 @@ something subtle, make it soft.
 | `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: the agent waits through it and reports the table (#58) |
 | `N10-big-notebook` | change one value in an open notebook of 42 cells and report a count | what a larger notebook costs: reads, and each change's reply |
 | `N11-logged-warning` | change a cutoff in an open notebook whose parsing cell logs a `@warn` that 2 of 8 CSV rows were left out, and report the mean; the count is only in the warning | that what a cell logs reaches the agent, and it passes a warning on (#257) |
+| `N12-moved-widget` | report a mean from an open notebook whose cutoff slider the user moved on the page from its default just before the agent looks | that the agent hears a result used a moved widget (`uses_moved_input`), and says which value it used and what the file's default is |
 | `L1-long-analysis` (long) | a 96-well growth plate, from loading the data to a written summary, in twelve messages with plots; the plate has a failed well, a contaminated one, a saturated reading and gaps | what a real-sized session costs: requests, context at the end, and which replies fill it. About 100 requests and 18 minutes with Claude Code's default model, so it runs only with `--long` |
 | `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
 | `R2-first-package` | a dplyr table and its mean in a new R notebook | R's first package install: the agent waits through it and doesn't run the cells again; when the install outlasts a waited run, the tools say R is getting dplyr ready (#78) |

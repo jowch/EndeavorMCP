@@ -658,7 +658,10 @@ impl Call<'_> {
         // Haiku 4.5 read a logged warning in `warnings` and reported the result as clean (N11).
         // The first one is quoted in the message: the agent passes on what it reads there.
         let logged: Vec<&str> = warnings.iter().filter(|w| w.starts_with("logged_warning::") || w.starts_with("logged_error::")).map(String::as_str).collect();
-        let logged_message = logged_message(&logged);
+        // A result made at a control the user moved on the page isn't what a rerun of the file
+        // gives: said in the message too, for the same reason.
+        let moved: Vec<&str> = warnings.iter().filter(|w| w.starts_with("uses_moved_input::")).map(String::as_str).collect();
+        let logged_message = logged_message(&logged).or_else(|| moved_message(&moved));
         let pending = self.pending_run(&nb);
         // The notebook's order isn't in it: two lists of every cell's id grow
         // with the notebook and come back on every change, and an agent that
@@ -894,8 +897,11 @@ impl Call<'_> {
             )));
         } else if let Some(cell_now) = nb.cells.get(&cell).filter(|c| !c.running && !c.queued) {
             // The same message as a run's, for a read of a cell that logged a warning or an error.
-            let logged: Vec<String> = cell_now.notes.iter().filter(|n| n.starts_with("logged_warning::") || n.starts_with("logged_error::")).map(|n| n.replacen("::", &format!("::Cell {cell}: "), 1)).collect();
-            if let Some(message) = logged_message(&logged.iter().map(String::as_str).collect::<Vec<_>>()) {
+            let with_cell = |kinds: &[&str]| -> Vec<String> { cell_now.notes.iter().filter(|n| kinds.iter().any(|k| n.starts_with(k))).map(|n| n.replacen("::", &format!("::Cell {cell}: "), 1)).collect() };
+            let logged = with_cell(&["logged_warning::", "logged_error::"]);
+            let moved = with_cell(&["uses_moved_input::"]);
+            let message = logged_message(&logged.iter().map(String::as_str).collect::<Vec<_>>()).or_else(|| moved_message(&moved.iter().map(String::as_str).collect::<Vec<_>>()));
+            if let Some(message) = message {
                 out.insert("message".into(), json!(message));
             }
         }
@@ -2202,6 +2208,15 @@ fn run_notes(cells: &[(&String, &Cell)], along: &[String]) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+/// A run's or a read's `message` when a result used a control the user moved on the page
+/// (`uses_moved_input`): the agent reports the result at that value, and should say so.
+fn moved_message(moved: &[&str]) -> Option<String> {
+    let first = moved.first()?;
+    let (_, rest) = first.split_once("::")?;
+    let more = if moved.len() > 1 { format!(" There are {} more like it.", moved.len() - 1) } else { String::new() };
+    Some(format!("{rest} When you report the result, say which value it used. To keep that value, change the control's default in its cell.{more}"))
 }
 
 /// A run's `message` when a cell it ran logged a warning or an error: the first, quoted, and that

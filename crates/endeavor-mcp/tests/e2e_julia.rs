@@ -333,8 +333,18 @@ fn the_runtime_end_to_end() {
         }
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": logs }));
         assert_eq!((&read["output"], &read["notes"]), (&json!("7"), &json!(["logged_warning::3 rows dropped (n = 3)", "logged_info::loaded", "printed::fitting\n100%"])), "{read}");
+        // A widget's cell lists it under `inputs`, read from the notebook's process (a widget
+        // that gives its default through `Base.get`, so the test needs no package).
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "begin\n    struct Dial; start::Int; end\n    Base.get(d::Dial) = d.start\n    Base.show(io::IO, ::MIME\"text/html\", ::Dial) = print(io, \"<input type=range>\")\nend", "after_cell_id": logs }));
+        let dial_type = added["cell_id"].as_str().unwrap().to_owned();
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "@bind dial Dial(4)", "after_cell_id": dial_type }));
+        let dial = added["cell_id"].as_str().unwrap().to_owned();
+        rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": dial, "wait_for_completion": true }));
+        let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": dial }));
+        assert_eq!(read["inputs"], json!(["dial: Dial, value 4"]), "{read}");
+        assert_eq!(rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": logs })).get("inputs"), None, "a cell with no widget has no `inputs`");
         // A huge text output, as the desktop check's (1.3 MB): cut in the run's reply and in read_cell.
-        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "Text(join(string.(1:200_000), '\\n'))", "after_cell_id": logs }));
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "Text(join(string.(1:200_000), '\\n'))", "after_cell_id": dial }));
         let big = added["cell_id"].as_str().unwrap().to_owned();
         let ran = rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": big, "wait_for_completion": true }));
         let summary = ran["outputs"]["changed"][0]["output_summary"].as_str().unwrap_or_else(|| panic!("{ran:.500}"));

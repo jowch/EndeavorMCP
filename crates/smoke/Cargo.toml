@@ -11,3 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = "1"
+# The page's socket messages, which the notebook view tools take as base64 (inject.rs).
+base64 = "0.22"

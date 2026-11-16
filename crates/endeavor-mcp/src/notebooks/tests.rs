@@ -1045,6 +1045,31 @@ fn what_a_julia_cell_printed_and_logged_reaches_the_agent() {
 }
 
 #[test]
+fn a_julia_cells_controls_and_a_result_from_a_moved_one_reach_the_agent() {
+    // A widget's value isn't saved: a result read after the user moved it isn't what a rerun of
+    // the file gives. The runtime lists the widget under `inputs`, and notes the cells that used
+    // the moved value; the agent hears it in the message too.
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "@bind w Slider(1:10, default=4)"), (Y, "y = w * 2")]);
+    let note = "uses_moved_input::This result used w = 9, set on the page. The file's default is 4, so a rerun of the file gives other results.";
+    s.engine.with(NB, |nb| {
+        nb.cells[0].inputs = vec!["w: Slider 1 to 10, step 1, value 9 (default 4)".into()];
+        nb.cells[1].notes = vec![note.into()];
+    });
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!(read["inputs"], json!(["w: Slider 1 to 10, step 1, value 9 (default 4)"]), "{read}");
+    assert_eq!(read.get("message"), None, "{read}");
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    assert_eq!((read.get("inputs"), &read["notes"]), (None, &json!([note])), "{read}");
+    let message = read["message"].as_str().unwrap();
+    assert!(message.starts_with(&format!("Cell {Y}: This result used w = 9")) && message.contains("say which value it used"), "{read}");
+
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
+    assert!(ran["warnings"].as_array().unwrap().contains(&json!(format!("uses_moved_input::Cell {Y}: This result used w = 9, set on the page. The file's default is 4, so a rerun of the file gives other results."))), "{ran}");
+    assert!(ran["message"].as_str().unwrap().contains("say which value it used"), "{ran}");
+}
+
+#[test]
 fn a_runs_notes_are_folded_and_capped() {
     // A run of every cell would send back what each one printed, and a @warn in a function many
     // cells call comes back once per cell: the same note is one line, warnings come first, and the

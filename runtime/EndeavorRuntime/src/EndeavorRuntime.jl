@@ -8,6 +8,7 @@ using HTTP
 using Pluto
 
 include("Output.jl")
+include("Controls.jl")
 include("Adapter.jl")
 include("Lifecycle.jl")
 include("Server.jl")
