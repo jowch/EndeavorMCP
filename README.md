@@ -302,11 +302,13 @@ Every message makes the agent read the whole conversation again, with the
 notebook code and results it has read so far. So each message in a long
 session costs more than the one before. Two habits keep usage down:
 
-- Start a new session for a new question (`/clear` in Claude Code). The
-  notebook keeps running, and the new session joins it as it is.
-- For questions about a notebook, try a smaller model first, such as Sonnet
-  (`/model sonnet` in Claude Code). Opus costs about twice as much for the
-  same conversation.
+- Start a new session when you move on to something new, or once the
+  conversation is long (`/clear` in Claude Code, `/new` in Codex). The
+  notebook keeps running, and the new session joins it as it is. A new
+  session reads the notebook again, so starting over after every question
+  saves little.
+- Try Sonnet for questions about a notebook (`/model sonnet` in Claude Code).
+  Opus uses up a plan faster.
 
 ## Limits to know before you start
 
