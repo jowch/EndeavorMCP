@@ -296,6 +296,18 @@ the machine's home folder.
   runtime is on a compute node, and there is no supported way to open it
   between sessions.
 
+## What uses up your plan
+
+Every message makes the agent read the whole conversation again, with the
+notebook code and results it has read so far. So each message in a long
+session costs more than the one before. Two habits keep usage down:
+
+- Start a new session for a new question (`/clear` in Claude Code). The
+  notebook keeps running, and the new session joins it as it is.
+- For questions about a notebook, try a smaller model first, such as Sonnet
+  (`/model sonnet` in Claude Code). Opus costs about twice as much for the
+  same conversation.
+
 ## Limits to know before you start
 
 - The Endeavor desktop app and the plugin cannot work on the same notebook

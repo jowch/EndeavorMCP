@@ -1,0 +1,9 @@
+{
+  "about": "Questions only, on a 40-cell analysis that is already open and run: eleven messages asking what the notebook does and what its results mean, with no request to change it. Measures what a chat-only session costs on a large notebook: input tokens, context at the end, and how much of it is the notebook's code read up front. The baseline (2026-11-04, one run each) was about 1M input tokens and 60k context at the end, with Sonnet 5.5 and Opus 5.5 alike. Tags: already_open, size, long.",
+  "checks": [
+    { "check": "notebooks", "count": 1 },
+    { "check": "no_errored_cells" },
+    { "check": "not_called", "tool": "submit_changes", "soft": true },
+    { "check": "final_message_contains_any", "texts": ["growth", "Growth"], "soft": true }
+  ]
+}
