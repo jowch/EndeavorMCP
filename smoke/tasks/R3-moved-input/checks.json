@@ -1,13 +1,14 @@
 {
-  "about": "N12 in R: an open R notebook with an emberui slider for the cutoff. Before the agent looks, the user moves the slider from its default, 2.5, to 4.0, so the results the agent reads (4.57 t/ha from 3 plots) aren't what a rerun of the file gives (3.87 from 6). Ember shows the default only on the input's own cell (no note on the readers yet), so this checks that the agent says which cutoff the answer used and that the file's default is 2.5. Tags: already_open, widgets, r.",
+  "about": "N12 in R: an open R notebook with an emberui slider for the cutoff. Before the agent looks, the user moves the slider from its default, 2.5, to 4.0, so the results the agent reads (4.57 t/ha from 3 plots) aren't what a rerun of the file gives (3.87 from 6). Ember shows the default only on the input's own cell (no note on the readers yet), so this checks that the agent reads the input's cell, and says which cutoff the answer used and that the file's default is 2.5. Tags: already_open, widgets, r.",
   "checks": [
     { "check": "injected" },
     { "check": "notebooks", "count": 1 },
     { "check": "no_errored_cells" },
     { "check": "output_contains", "texts": ["4.57 t/ha, from 3 plots"] },
     { "check": "called", "tool": "set_input", "min": 0, "max": 0 },
-    { "check": "reply_contains", "texts": ["(default 2.5)"], "soft": true },
+    { "check": "reply_contains", "texts": ["(default 2.5)"] },
     { "check": "final_message_contains_any", "texts": ["4.57", "4.6 t"] },
+    { "check": "final_message_contains_any", "texts": ["4.0", "cutoff of 4", "cutoff is 4", "cutoff 4", "to 4", "at 4 t"] },
     { "check": "final_message_contains_any", "texts": ["2.5"] }
   ]
 }
