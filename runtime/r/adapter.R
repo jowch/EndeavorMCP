@@ -350,11 +350,7 @@ snapshot_cell <- function(v) {
 # shows it: "n: slider 10 to 500, step 10, value 250 (default 100)". An
 # input that isn't bound says why, as the page's greyed widget does.
 input_line <- function(i) {
-  # A number as JSON writes it (5, not 5L), anything else as R prints it.
-  shown <- function(x) {
-    if (is.numeric(x) && length(x) == 1 && is.null(names(x))) format(x, digits = 15)
-    else paste(deparse(x, width.cutoff = 500L), collapse = "")
-  }
+  shown <- input_value
   spec <- i$spec %||% list()
   type <- spec$type %||% "input"
   range <- function(min, max) {
@@ -494,7 +490,51 @@ snapshot <- function(rec) {
     packages = package_step(rec, snap, state),
     lazy = identical(state$file$header$on_cell_change, "lazy"),
     package_date = state$file$header$snapshot,
-    cells = unname(lapply(snap$cells, snapshot_cell)))
+    cells = moved_input_notes(rec, unname(lapply(snap$cells, snapshot_cell)), snap$cells))
+}
+
+# A note on each cell whose result used an input the user moved off its default
+# (on the page or with set_input): a rerun of the file uses the default, so the
+# agent shouldn't report the result as the notebook's. The input's own cell has
+# the default in its `inputs` line instead. A reader that shows `stale` didn't
+# run with the value yet, so it gets none. Nothing when every input is at its
+# default, the usual case, and then the graph isn't built.
+moved_input_notes <- function(rec, cells, views) {
+  moved <- list()
+  for (v in views) for (i in v$inputs %||% list()) {
+    if (isTRUE(i$bound) && !is.null(i$name) && !identical(i$value, i$default))
+      moved[[length(moved) + 1]] <- list(cell = v$id, input = i)
+  }
+  if (length(moved) == 0) return(cells)
+  g <- tryCatch(dependency_graph(rec$nb), error = function(e) NULL)
+  if (is.null(g)) return(cells)
+  ids <- vapply(cells, function(d) d$cell_id, character(1))
+  for (m in moved) {
+    i <- m$input
+    e <- g$edges
+    seen <- unique(e$from[e$to == m$cell & e$name == i$name])
+    todo <- seen
+    while (length(todo) > 0) {
+      nxt <- setdiff(unlist(g$downstream[todo]), c(seen, m$cell))
+      seen <- c(seen, nxt)
+      todo <- nxt
+    }
+    note <- sprintf("uses_moved_input::This result used %s = %s, set on the page. The file's default is %s, so a rerun of the file gives other results.",
+                    i$name, input_value(i$value), input_value(i$default))
+    for (id in seen) {
+      k <- match(id, ids)
+      if (is.na(k) || isTRUE(cells[[k]]$stale) || isTRUE(cells[[k]]$running) || cells[[k]]$not_run) next
+      cells[[k]]$notes <- I(c(cells[[k]]$notes, note))
+    }
+  }
+  cells
+}
+
+# A value as input_line shows it: a number as JSON writes it (5, not 5L),
+# anything else as R prints it.
+input_value <- function(x) {
+  if (is.numeric(x) && length(x) == 1 && is.null(names(x))) format(x, digits = 15)
+  else paste(deparse(x, width.cutoff = 500L), collapse = "")
 }
 
 # ---- Graph -------------------------------------------------------------------
