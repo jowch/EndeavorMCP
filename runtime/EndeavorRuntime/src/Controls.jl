@@ -147,7 +147,7 @@ end
 Core.eval(@__MODULE__, _CONTROLS_CODE)
 
 # What the runtime last learned about each notebook's controls: `key` says what it was learned
-# for (the notebook's process, its control cells' last runs, the page's values), `info` is what
+# for (the notebook's process, its cells' last runs, the page's values), `info` is what
 # `__endeavor_controls` answered, and `task` a query still on its way.
 mutable struct _Controls
     key::Any
@@ -219,7 +219,10 @@ function _controls(session, nb)
     catch
         UInt(0)
     end
-    key = (objectid(workspace), [(c.cell_id, c.output.last_run_timestamp) for c in with], bonds)
+    # Every cell's last run, not only the widgets' cells': a value the page sends is in
+    # `nb.bonds` before the run that sets it in the notebook's module starts, so a query in that
+    # moment reads the old value. The readers' runs then change the key, and the next call asks again.
+    key = (objectid(workspace), [(c.cell_id, c.output.last_run_timestamp) for c in cells], bonds)
     busy = any(c -> c.running || c.queued, cells)
     # Only the call that starts a query waits for it. A query that outlasts the wait is left to
     # finish, and every call until then answers with what was known before, at once.

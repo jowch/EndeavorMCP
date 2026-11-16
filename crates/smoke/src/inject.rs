@@ -85,7 +85,7 @@ impl Injection {
 fn move_on_page(session: &mut crate::mcp::Session, id: &str, page: &Value) -> Result<(), String> {
     use base64::Engine;
     let bond = page["bond"].as_str().ok_or("page: bond must be a string")?;
-    let socket = session.tool("notebook_socket_open", json!({ "notebook_id": id }))?["socket"].clone();
+    let socket = session.view("notebook_socket_open", json!({ "notebook_id": id }))?["socket"].clone();
     let message = |kind: &str, body: Value| json!({ "type": kind, "client_id": "smoke", "request_id": kind, "notebook_id": id, "body": body });
     let messages = [
         message("connect", json!({})),
@@ -94,12 +94,12 @@ fn move_on_page(session: &mut crate::mcp::Session, id: &str, page: &Value) -> Re
     ];
     for m in messages {
         let data = base64::engine::general_purpose::STANDARD.encode(msgpack(&m));
-        session.tool("notebook_socket_send", json!({ "socket": socket, "data": data }))?;
-        session.tool("notebook_socket_recv", json!({ "socket": socket, "wait_ms": 1000 }))?;
+        session.view("notebook_socket_send", json!({ "socket": socket, "data": data }))?;
+        session.view("notebook_socket_recv", json!({ "socket": socket, "wait_ms": 1000 }))?;
     }
     // Pluto runs the readers once it has the value; give it a moment to start them.
     std::thread::sleep(Duration::from_secs(1));
-    let _ = session.tool("notebook_socket_close", json!({ "socket": socket }));
+    let _ = session.view("notebook_socket_close", json!({ "socket": socket }));
     Ok(())
 }
 
