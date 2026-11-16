@@ -436,5 +436,9 @@ such as the reference `app.md`: skip those parts. \
 This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
 that the user reaches over ssh. `list_machines` only reads and is fine any time; call the other three only when the user asks.\n\n\
 Before your first notebook tool call in a session, load the `endeavor-notebooks` skill, read the engine reference it names (`pluto.md` for Julia, `ember.md` for R) before you write a cell, and follow them: \
-the read-edit-run loop, the rules for what one cell may hold and for names defined in two cells, and looking at a plot with `view_cell_output` before you say it is right."
+the read-edit-run loop, the rules for what one cell may hold and for names defined in two cells, and looking at a plot with `view_cell_output` before you say it is right. \
+To see what a notebook holds or answer a question about it, don't read its file: the file has the code but no results, \
+and all of it stays in the conversation, which every later message reads again. \
+Join the notebook instead (`list_notebooks`, or `open_notebook` with its path), call `read_notebook_code` with `outline` true for one line a cell, \
+and `read_cell` only the cells the question needs."
 }
