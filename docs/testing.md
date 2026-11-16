@@ -214,7 +214,11 @@ debug build can be pointed at a local build of an Ember branch with
 
 ```sh
 node scripts/notebook-view-check.cjs --r
+node scripts/notebook-view-check.cjs --widget   # --r with a plotly cell: its files come through notebook_file
 ```
+
+`--widget` needs an Ember with `window.ember_dep_file` (Ember #629) and
+installs plotly into the notebook's library the first time.
 
 It takes about a minute, and prints the times from the click to the page,
 the socket and the cells, and where its screenshots are. Claude itself is the

@@ -26,6 +26,11 @@ claude plugin marketplace add jowch/EndeavorMCP
 claude plugin install endeavor@endeavor
 ```
 
+Claude Code doesn't update this plugin unless the user turns that on, and
+Endeavor changes often. Suggest that they turn it on, and leave the choice to
+them: in a session, `/plugin`, then Marketplaces, select `endeavor`, and
+"Enable auto-update".
+
 **Codex:**
 
 ```sh
@@ -81,9 +86,12 @@ claude plugin install endeavor@endeavor
 
 Then start Claude Code in your project folder. New notebooks go there.
 
-Claude Code doesn't update a plugin from this marketplace on its own. Turn
-that on in `/plugin`, under Marketplaces, with "Enable auto-update", or update
-by hand:
+**Turn on updates (recommended).** Endeavor changes often, sometimes several
+times a day, and Claude Code doesn't update a plugin from this marketplace
+unless you ask it to. To have it update in the background, open `/plugin` in a
+session, go to Marketplaces, select `endeavor`, and choose "Enable
+auto-update". A new version loads in your next session. If you'd rather choose
+when to update, do it by hand:
 
 ```
 claude plugin marketplace update endeavor
@@ -238,6 +246,20 @@ to send. The text goes at the end of the box, after anything you typed, and
 starts with ↓. The app turns it away for a few seconds after you type or click
 elsewhere on the page, or if the same press was already used. Then your pick
 comes back, and you press ↩ again.
+
+**Find** (the magnifier, or ⌘F / Ctrl+F with the cursor in the notebook)
+searches the cells' code and outputs. ↩ and ⇧↩ step through the matches, and
+Esc closes it. A folded cell's code isn't searched.
+
+The view can load files from two web hosts, and no others:
+
+- **cdn.jsdelivr.net**: Pluto's fonts, and the scripts of some outputs, such
+  as PlutoUI's RangeSlider and Scrubbable, and the font of Masque's controls.
+- **esm.sh**: plotly.js, which PlutoPlotly loads from there.
+
+An output that loads from anywhere else doesn't draw in this view. Plotly's
+map plots are one: they fetch their maps from cdn.plot.ly. Open the notebook
+in your browser instead.
 
 A notebook's outputs can carry their own scripts, and in this view a script
 can put text in your message box too, after any click or key press in the

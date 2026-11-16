@@ -213,6 +213,13 @@ end
 
 const _HTML_ENTITIES = ["&nbsp;" => " ", "&lt;" => "<", "&gt;" => ">", "&quot;" => "\"", "&#39;" => "'", "&amp;" => "&"]
 
+"The character a numeric entity (`&#123;`, `&#x7b;`) names; the entity as it is if it names none."
+function _numeric_entity(entity::AbstractString)
+    hex = entity[3] in ('x', 'X')
+    code = tryparse(UInt32, entity[(hex ? 4 : 3):end-1]; base = hex ? 16 : 10)
+    code === nothing || code == 0 || !isvalid(Char, code) ? String(entity) : string(Char(code))
+end
+
 const _SCRIPT_END = Dict("script" => r"</script\s*>"i, "style" => r"</style\s*>"i)
 
 "An HTML string without its `<script>` and `<style>` elements; an unclosed one runs to the end."
@@ -237,7 +244,9 @@ function _html_text(html::AbstractString)
     # `[^<>]`, so a stray `<` costs a scan to the next tag, not to the end. The cost: a tag
     # whose attribute value holds a `<` (`title="a<b"`) leaves its start in the text. Rare.
     s = replace(s, r"<[^<>]*>" => "")
-    s = replace(s, _HTML_ENTITIES...)
+    # One pass, so `&amp;#123;` stays `&#123;`. Pluto's Markdown writes `{`, `+` and `=` in
+    # math as `&#123;`, `&#43;` and `&#61;`.
+    s = replace(s, _HTML_ENTITIES..., r"&#[0-9]{1,7};|&#[xX][0-9a-fA-F]{1,6};" => _numeric_entity)
     s = join((rstrip(line, (' ', '\t')) for line in split(s, '\n')), '\n')
     s = replace(s, r"\n{3,}" => "\n\n")
     return strip(s)

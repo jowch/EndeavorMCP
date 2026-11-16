@@ -333,6 +333,27 @@ fn the_runtime_end_to_end() {
         }
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": logs }));
         assert_eq!((&read["output"], &read["notes"]), (&json!("7"), &json!(["logged_warning::3 rows dropped (n = 3)", "logged_info::loaded", "printed::fitting\n100%"])), "{read}");
+        // A huge text output, as the desktop check's (1.3 MB): cut in the run's reply and in read_cell.
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "Text(join(string.(1:200_000), '\\n'))", "after_cell_id": logs }));
+        let big = added["cell_id"].as_str().unwrap().to_owned();
+        let ran = rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": big, "wait_for_completion": true }));
+        let summary = ran["outputs"]["changed"][0]["output_summary"].as_str().unwrap_or_else(|| panic!("{ran:.500}"));
+        assert!(summary.len() < 2_200 && summary.starts_with("1\n2\n") && summary.ends_with("199999\n200000") && summary.contains("read_cell shows more."), "a run's reply: {summary}");
+        let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": big }));
+        let output = read["output"].as_str().unwrap();
+        assert!(output.len() < 16_200 && output.ends_with("199999\n200000") && output.contains("bytes are left out here. No tool shows them"), "read_cell: {:.300}", output);
+        // Markdown math, read as stripped HTML while another cell runs: its numeric entities decoded, once, so
+        // the source's literal `&amp;#123;` reads as written.
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "md\"Euler: $e^{i\\pi} + 1 = 0$, and &amp;#123;\"", "after_cell_id": big }));
+        let math = added["cell_id"].as_str().unwrap().to_owned();
+        rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": math, "wait_for_completion": true }));
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "sleep(4)", "after_cell_id": math }));
+        let slow = added["cell_id"].as_str().unwrap().to_owned();
+        rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": slow, "wait_for_completion": false }));
+        let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": math }));
+        let text = read["output_text"].as_str().unwrap_or_else(|| panic!("{read}"));
+        assert!(text.contains("e^{i\\pi} + 1 = 0") && text.contains(", and &amp;#123;") && !text.contains("&#43;"), "Markdown's text: {text}");
+        rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
         (notebook, path, cell)
     });
 
@@ -723,18 +744,17 @@ fn the_runtime_end_to_end() {
             (added["cell_id"].clone(), last, started.elapsed())
         };
 
-        // One long `sleep` doesn't stop for Ctrl+C: Pluto ends the notebook's process, as its own
-        // Stop does. That isn't a crash: the notebook waits for a restart, without `exited`.
+        // One long `sleep`, which Ctrl+C doesn't reach on Julia 1.12, is stopped in its own task: the
+        // notebook's process lives on (#139; before, Pluto ended it, as its own Stop did).
         let (slow, last, took) = stop_during(&mut rt, "slow = (sleep(600); 1)");
-        assert!(took < Duration::from_secs(30), "the call ended {:.1} s after it began", took.as_secs_f64());
+        assert!(took < Duration::from_secs(10), "the call ended {:.1} s after it began", took.as_secs_f64());
         let listed = rt.notebooks(SERVER).into_iter().find(|nb| nb["notebook_id"] == previewed.as_str()).unwrap();
-        assert_eq!((&listed["exited"], &listed["execution_allowed"]), (&Value::Null, &json!(false)), "{listed}");
+        assert_eq!((&listed["exited"], &listed["execution_allowed"]), (&Value::Null, &json!(true)), "{listed}");
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
-        rt.call("endeavor/restart_notebook", json!({ "notebook_id": previewed })).unwrap();
         let ran = rt.ok(SERVER, "execute_cell", json!({ "notebook_id": previewed, "cell_id": last, "wait_for_completion": true }));
         assert_eq!(ran["execution"]["status"], "completed", "{ran}");
 
-        // A cell that stops for Ctrl+C ends interrupted, and its process lives on. The next step
+        // A cell sleeping in a loop ends interrupted the same way, and its process lives on. The next step
         // ends that process, which is reported as a crash again.
         let (slow, _, took) = stop_during(&mut rt, "slow = (for _ in 1:600; sleep(1); end; 1)");
         assert!(took < Duration::from_secs(20), "the call ended {:.1} s after it began", took.as_secs_f64());
@@ -854,6 +874,44 @@ fn the_runtime_end_to_end() {
         let read = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": stuck }));
         assert!(read["running"] == false && read["errored"] == false && read["output"].as_str().is_some_and(|o| o.contains('2')), "the edited cell ran and finished: {read}");
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": stuck }));
+    });
+
+    step("Stop stops a waiting cell, a looping one, one that never yields and one in compiled code, and the notebook keeps its values (#139)", || {
+        let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
+        let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
+        rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
+        let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": "kept = getpid()", "after_cell_id": last }));
+        let kept = added["cell_id"].clone();
+        rt.ok(SERVER, "execute_cell", json!({ "notebook_id": previewed, "cell_id": kept, "wait_for_completion": true }));
+        let value = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": kept }))["output"].clone();
+        let mut after = kept.clone();
+        for code in [
+            "(sleep(60); 1)",
+            "let n = 0; for i in 1:10^12; n += i; i % 10^6 == 0 && yield(); end; n end",
+            "let s = 0.0; for i in 1:10^12; s += sin(i); end; s end",
+            "ccall(:sleep, Cuint, (Cuint,), 8)",
+        ] {
+            let added = rt.ok(SERVER, "add_cell", json!({ "notebook_id": previewed, "code": code, "after_cell_id": after }));
+            let cell = added["cell_id"].clone();
+            rt.ok(SERVER, "execute_cell", json!({ "notebook_id": previewed, "cell_id": cell, "wait_for_completion": false }));
+            let started = Instant::now();
+            while !rt.notebooks(SERVER).into_iter().any(|nb| nb["running"].as_array().is_some_and(|r| r.contains(&cell))) {
+                assert!(started.elapsed() < Duration::from_secs(60), "{code} didn't start");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            let asked = Instant::now();
+            let stopped = rt.ok(SERVER, "interrupt_notebook", json!({ "notebook_id": previewed }));
+            eprintln!("Stop on {code}: {:.1} s, {stopped}", asked.elapsed().as_secs_f64());
+            assert!(stopped["stopped"].as_array().unwrap().contains(&cell) && stopped["process_status"] == "ready", "{code}: {stopped}");
+            let read = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": cell }));
+            assert!(read["errored"] == true && read["output"].as_str().unwrap().contains("InterruptException"), "{code}: {read}");
+            let ran = rt.ok(SERVER, "execute_cell", json!({ "notebook_id": previewed, "cell_id": kept, "wait_for_completion": true }));
+            assert_eq!(ran["outputs"]["changed"][0]["output_summary"], value, "{code}: the same process lived through the Stop");
+            rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": cell }));
+            after = kept.clone();
+        }
+        rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": kept }));
     });
 
     step("a notebook's own Julia ending by itself ends the run waiting for it", || {

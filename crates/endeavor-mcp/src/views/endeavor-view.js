@@ -477,6 +477,7 @@
   var DRAG = 4;
   var FIGURE = "img, svg, canvas, video";
   var PARAGRAPH = "p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, table";
+  var TREE = "pluto-tree, table.pluto-table";
   function targetAt(el) {
     const cell = el?.closest("pluto-cell");
     if (!el || !cell) return null;
@@ -487,9 +488,19 @@
     let figure = el.closest(FIGURE);
     while (figure?.parentElement?.closest(FIGURE) && output.contains(figure.parentElement.closest(FIGURE))) figure = figure.parentElement.closest(FIGURE);
     if (figure && output.contains(figure)) return { part: "figure", cell, el: figure };
+    let tree = el.closest(TREE);
+    while (tree?.parentElement?.closest(TREE) && output.contains(tree.parentElement.closest(TREE))) tree = tree.parentElement.closest(TREE);
+    if (tree && output.contains(tree)) return { part: "output", cell, el: tree };
     const paragraph = el.closest(PARAGRAPH);
     if (paragraph && output.contains(paragraph)) return { part: "output", cell, el: paragraph };
     return { part: output.querySelector(FIGURE) ? "figure" : "output", cell, el: output };
+  }
+  function widgetValues(el) {
+    return [...el.querySelectorAll("input, select, textarea")].filter((i) => !(i instanceof HTMLInputElement) || !["hidden", "password", "file", "button", "submit", "reset", "image"].includes(i.type)).map((i) => {
+      const kind = i instanceof HTMLInputElement ? i.type : i.tagName.toLowerCase();
+      const value = i instanceof HTMLInputElement && (i.type === "checkbox" || i.type === "radio") ? String(i.checked) : i.value;
+      return `${kind}: ${value}`;
+    }).join("\n");
   }
   var pageBox = (r) => ({
     left: r.left + window.scrollX,
@@ -628,7 +639,7 @@
           return { pick: { part: "lines", cell: cell.id, code, lines: [1, lines], text: code }, el };
         }
         case "output":
-          return { pick: { part: "output", cell: cell.id, code, text: (el.innerText ?? el.textContent ?? "").trim() }, el };
+          return { pick: { part: "output", cell: cell.id, code, text: (el.innerText ?? el.textContent ?? "").trim() || widgetValues(el) }, el };
         case "figure":
           return { pick: { part: "figure", cell: cell.id, code }, el };
       }
@@ -777,11 +788,207 @@ ${text.value}` : sent.comment;
     });
   }
 
-  // src/narrow.ts
+  // src/find.ts
+  var ROOT = "pluto-notebook";
+  var BLOCK = ".cm-line, p, li, td, th, h1, h2, h3, h4, h5, h6, pre, div, pluto-output, pluto-cell";
+  function findMatches(root, query) {
+    const needle = query.toLowerCase();
+    if (!needle) return [];
+    const doc = root.ownerDocument;
+    const shown = /* @__PURE__ */ new Map();
+    const isShown = (el) => {
+      let yes = shown.get(el);
+      if (yes === void 0) shown.set(el, yes = el.checkVisibility?.() ?? true);
+      return yes;
+    };
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+      acceptNode: (node) => {
+        if (node.nodeType === 1) return node.tagName === "BR" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+        const parent = node.parentElement;
+        if (!parent || !node.nodeValue) return NodeFilter.FILTER_REJECT;
+        if (parent.closest("script, style, template, [hidden], [aria-hidden='true']") || !isShown(parent)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    const pieces = [];
+    let text = "";
+    let block = null;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.nodeType === 1) {
+        text += "\n";
+        block = null;
+        continue;
+      }
+      const here = node.parentElement.closest(BLOCK);
+      if (here !== block) {
+        text += "\n";
+        block = here;
+      }
+      pieces.push({ node, at: text.length });
+      text += node.nodeValue;
+    }
+    const haystack = text.toLowerCase();
+    const point = (offset, end) => {
+      let lo = 0;
+      let hi = pieces.length - 1;
+      while (lo < hi) {
+        const mid = lo + hi + 1 >> 1;
+        if (end ? pieces[mid].at < offset : pieces[mid].at <= offset) lo = mid;
+        else hi = mid - 1;
+      }
+      return [pieces[lo].node, offset - pieces[lo].at];
+    };
+    const found = [];
+    for (let i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + needle.length)) {
+      const range = doc.createRange();
+      range.setStart(...point(i, false));
+      range.setEnd(...point(i + needle.length, true));
+      found.push(range);
+    }
+    return found;
+  }
+  var glass = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>`;
+  var findButton = () => `<button type="button" id="endeavor-find-button" title="Find in the notebook (${mac ? "\u2318F" : "Ctrl+F"})" aria-label="Find">${glass}<span class="word">Find</span></button>`;
   var css3 = `
+  #endeavor-find { position: fixed; top: calc(var(--endeavor-bar) + 6px); right: 10px; z-index: 9998; display: none; align-items: center; gap: 4px;
+    padding: 4px 4px 4px 8px; border-radius: 8px; border: 1px solid var(--e-divider); background: var(--e-bg-page);
+    box-shadow: 0 4px 16px var(--e-shadow-popover); color: var(--e-text-secondary); font: 12.5px system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #endeavor-find.open { display: flex; }
+  #endeavor-find input { width: min(220px, 50vw); border: none; outline: none; background: none; color: var(--e-text-primary); font: inherit; }
+  #endeavor-find .count { min-width: 44px; text-align: right; color: var(--e-text-muted); white-space: nowrap; }
+  #endeavor-find button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px;
+    background: none; color: var(--e-text-secondary); font: inherit; cursor: pointer; }
+  #endeavor-find button:hover { color: var(--e-text-primary); background: var(--e-button-hover); }
+  ::highlight(endeavor-find) { background-color: rgba(255, 196, 0, 0.35); }
+  ::highlight(endeavor-find-current) { background-color: rgba(255, 150, 0, 0.75); color: black; }
+`;
+  var highlights = () => globalThis.CSS?.highlights;
+  var Highlight = () => globalThis.Highlight;
+  function initFind(button) {
+    const style = document.createElement("style");
+    style.id = "endeavor-find-style";
+    style.textContent = css3;
+    document.head.append(style);
+    const box = document.createElement("div");
+    box.id = "endeavor-find";
+    box.setAttribute("role", "search");
+    box.innerHTML = `<input type="text" placeholder="Find in the notebook" aria-label="Find in the notebook" spellcheck="false"><span class="count" aria-live="polite"></span><button type="button" class="previous" title="Previous (\u21E7\u21A9)" aria-label="Previous match">\u2191</button><button type="button" class="next" title="Next (\u21A9)" aria-label="Next match">\u2193</button><button type="button" class="close" title="Close (Esc)" aria-label="Close">\u2715</button>`;
+    document.body.append(box);
+    const input = box.querySelector("input");
+    const count = box.querySelector(".count");
+    let matches = [];
+    let current = -1;
+    const paint = () => {
+      const h = highlights();
+      const H = Highlight();
+      if (!h || !H) return;
+      h.set("endeavor-find", new H(...matches));
+      if (current >= 0 && matches[current]) h.set("endeavor-find-current", new H(matches[current]));
+      else h.delete("endeavor-find-current");
+    };
+    const show = () => {
+      const range = matches[current];
+      count.textContent = !input.value ? "" : matches.length ? `${current + 1} of ${matches.length}` : "No matches";
+      paint();
+      if (!range) return;
+      for (let el = range.startContainer.parentElement; el && el !== document.body; el = el.parentElement) {
+        const style2 = getComputedStyle(el);
+        const r = range.getBoundingClientRect();
+        const area = el.getBoundingClientRect();
+        if (/auto|scroll/.test(style2.overflowY) && el.scrollHeight > el.clientHeight && (r.top < area.top || r.bottom > area.bottom))
+          el.scrollTop += r.top - area.top - el.clientHeight / 2;
+        if (/auto|scroll/.test(style2.overflowX) && el.scrollWidth > el.clientWidth && (r.left < area.left || r.right > area.right))
+          el.scrollLeft += r.left - area.left - el.clientWidth / 2;
+      }
+      const rect = range.getBoundingClientRect();
+      const top = (document.getElementById("endeavor-bar")?.getBoundingClientRect().bottom ?? 0) + box.offsetHeight + 16;
+      if (rect.top < top || rect.bottom > window.innerHeight - 16) window.scrollBy(0, rect.top - (top + window.innerHeight) / 2);
+    };
+    const search = (keep) => {
+      const root = document.querySelector(ROOT);
+      const before = matches[current];
+      matches = root ? findMatches(root, input.value) : [];
+      current = matches.length ? 0 : -1;
+      if (keep && before) {
+        const same = matches.findIndex((m) => m.compareBoundaryPoints(Range.START_TO_START, before) >= 0);
+        if (same >= 0) current = same;
+      }
+      show();
+    };
+    const step = (by) => {
+      if (!matches.length) return;
+      current = (current + by + matches.length) % matches.length;
+      show();
+    };
+    const isOpen = () => box.classList.contains("open");
+    const open = () => {
+      box.classList.add("open");
+      button.classList.add("on");
+      input.focus();
+      input.select();
+      if (input.value) search(true);
+    };
+    const close = () => {
+      box.classList.remove("open");
+      button.classList.remove("on");
+      matches = [];
+      current = -1;
+      highlights()?.delete("endeavor-find");
+      highlights()?.delete("endeavor-find-current");
+    };
+    let typing = 0;
+    input.addEventListener("input", () => {
+      clearTimeout(typing);
+      typing = window.setTimeout(() => (typing = 0, search(false)), 80);
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (typing) {
+          clearTimeout(typing);
+          typing = 0;
+          search(false);
+        } else step(e.shiftKey ? -1 : 1);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+      e.stopPropagation();
+    });
+    box.querySelector(".previous").addEventListener("click", () => step(-1));
+    box.querySelector(".next").addEventListener("click", () => step(1));
+    box.querySelector(".close").addEventListener("click", close);
+    button.addEventListener("click", (e) => e.isTrusted && (isOpen() ? close() : open()));
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        if (!e.isTrusted || !modHeld(e) || e.altKey || mac && e.ctrlKey) return;
+        const key = e.key.toLowerCase();
+        if (key === "f" && !e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          open();
+        } else if (key === "g" && isOpen()) {
+          e.preventDefault();
+          e.stopPropagation();
+          step(e.shiftKey ? -1 : 1);
+        }
+      },
+      true
+    );
+    let soon = 0;
+    new MutationObserver((records) => {
+      if (!isOpen() || !input.value || records.every((r) => box.contains(r.target))) return;
+      if (!soon) soon = window.setTimeout(() => (soon = 0, search(true)), 300);
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+    return { open };
+  }
+
+  // src/narrow.ts
+  var css4 = `
   /* Long words and links in Markdown wrap at the cell's edge, rather than run past it. */
   pluto-editor pluto-output :is(p, li, blockquote, h1, h2, h3, h4, h5, h6, dt, dd) { overflow-wrap: break-word; }
-  @media (max-width: 480px) {
+  @media (max-width: 600px) {
     /* Pluto's are 2.2, 1.8, 1.6, 1.4 and 1.2rem. The pluto-editor in front outweighs Pluto's own rules, whichever loads last. */
     pluto-editor pluto-output h1 { font-size: 1.6rem; }
     pluto-editor pluto-output h2 { font-size: 1.4rem; }
@@ -793,7 +1000,62 @@ ${text.value}` : sent.comment;
   function initNarrow() {
     const style = document.createElement("style");
     style.id = "endeavor-narrow";
-    style.textContent = css3;
+    style.textContent = css4;
+    document.head.append(style);
+  }
+
+  // src/space.ts
+  var EMBER = "pluto-editor:has(> #ember-run-status)";
+  var PLUTO = "pluto-editor:not(:has(> #ember-run-status))";
+  var css5 = `
+  /* Left of a cell: Pluto's eye (16 px icon), or Ember's eye and run button (46 px, Ember's own
+     measure). Right: 10 px, for an overlay scrollbar's thumb. */
+  pluto-editor { --e-left: 26px; --e-right: 10px; }
+  ${EMBER} { --e-left: 46px; }
+  /* Ember keeps 52 px at the top for its own header, which the view hides. */
+  pluto-editor { padding-top: 0 !important; }
+  /* Under the toolbar, only the room the first cell's add-cell button needs (the cell's own margin). */
+  pluto-editor > main { padding-top: 4px !important; }
+  /* Under the last cell: enough to bring it up off the bottom edge and clear Point's bar, not Pluto's
+     16rem, which in a 721 px panel was a third of it empty. */
+  pluto-editor:not(.disable_ui) > main { padding-bottom: 96px !important; }
+  /* The page is the panel's height under the toolbar, so a short notebook doesn't scroll by the toolbar's height. */
+  body > div:has(> pluto-editor) { min-height: calc(100vh - var(--endeavor-bar)) !important; }
+  /* 760 px is where the panel ends and full screen begins, here and for Docs and Status (view.ts):
+     below it they open as a drawer along the bottom, from it as a sheet down the right. */
+  @media (max-width: 759px) {
+    /* The panel: cells from the eye to the scrollbar, whatever the width. */
+    pluto-editor main { margin-left: 0 !important; margin-right: 0 !important; width: 100% !important; max-width: none !important;
+      box-sizing: border-box; padding-left: var(--e-left) !important; padding-right: var(--e-right) !important; }
+  }
+  @media (min-width: 760px) {
+    /* Full screen: a wider column, centred, for long code lines and wide tables. Prose keeps a
+       readable measure (the cap holds a Markdown cell's own images and tables to it too). Not beside
+       PlutoUI's table of contents, which floats at the right. */
+    ${PLUTO}:not(:has(.plutoui-toc.aside)) main, ${EMBER} main { max-width: 1031px !important; margin-left: auto !important; margin-right: auto !important; }
+    pluto-output .markdown { max-width: 720px; }
+    /* With Docs or Status open as a sheet down the right (view.ts), the column moves out from under it,
+       to the left edge. The selector must outweigh the column rule above (1,2,2: its :has(.plutoui-toc.aside)
+       counts two classes); this one is (1,2,4). */
+    body:has(pluto-helpbox:not(.hidden)) :is(${PLUTO}, ${EMBER}):not(.disable_ui) main { margin-left: 0 !important; margin-right: 392px !important;
+      padding-left: var(--e-left) !important; max-width: min(1031px, calc(100% - 392px)) !important; }
+  }
+  /* A Markdown cell's first heading starts at the top of its output, not a line below it. */
+  pluto-editor pluto-output .markdown > :first-child { margin-top: 0 !important; }
+  /* The eye sits right against the cell, without Pluto's 10 px of padding to its left. */
+  ${PLUTO} pluto-shoulder > button { padding-left: 4px !important; }
+  /* Inside a cell, the line numbers (dots until hovered) take two digits' room, not 31 px (Pluto) or 34 px (Ember). */
+  ${PLUTO} pluto-input .cm-editor .cm-gutter { min-width: 0 !important; }
+  ${PLUTO} pluto-input .cm-editor .cm-lineNumbers .cm-gutterElement { min-width: 16px; padding: 0 2px 0 3px !important; }
+  ${PLUTO} pluto-input .cm-editor .cm-line { padding-left: 4px !important; }
+  ${EMBER} pluto-input .cm-editor :is(.cm-gutters, .cm-gutter.cm-lineNumbers) { min-width: 24px !important; }
+  ${EMBER} pluto-input .cm-editor .cm-lineNumbers .cm-gutterElement { padding: 0 6px 0 4px !important; }
+  ${EMBER} pluto-input .cm-editor .cm-content { padding: 7px 8px 7px 6px !important; }
+`;
+  function initSpace() {
+    const style = document.createElement("style");
+    style.id = "endeavor-space";
+    style.textContent = css5;
     document.head.append(style);
   }
 
@@ -1103,28 +1365,32 @@ nav#at_the_top > pluto-filepicker, nav#at_the_top > div.desktop_picker_group, #e
   var both = `
 footer form#feedback { display: none !important; }
 `;
-  var juliaMono = [
-    { file: "Regular", weight: 400, style: "normal" },
-    { file: "Bold", weight: 700, style: "normal" },
-    { file: "RegularItalic", weight: 400, style: "italic" }
-  ].map(
-    ({ file, weight, style }) => `
+  var JULIA_MONO_WEB = "https://cdn.jsdelivr.net/gh/cormullion/juliamono@v0.63.2/webfonts";
+  function juliaMonoFaces(from) {
+    return [
+      { file: "Regular", weight: 400, style: "normal" },
+      { file: "Bold", weight: 700, style: "normal" },
+      { file: "RegularItalic", weight: 400, style: "italic" }
+    ].map(({ file, weight, style }) => {
+      const src = from === "app" ? `url("endeavor://localhost/fonts/JuliaMono-${file}.ttf") format("truetype")` : `url("${JULIA_MONO_WEB}/JuliaMono-${file}.woff2") format("woff2")`;
+      return `
 @font-face {
   font-family: JuliaMono;
-  src: url("endeavor://localhost/fonts/JuliaMono-${file}.ttf") format("truetype");
+  src: ${src};
   font-display: swap;
   font-weight: ${weight};
   font-style: ${style};
-}`
-  ).join("");
-  function initTheme() {
+}`;
+    }).join("");
+  }
+  function initTheme(fontsFrom = "app") {
     const tokenSheet = document.createElement("style");
     tokenSheet.id = "endeavor-tokens";
     tokenSheet.textContent = tokens;
     document.head.append(tokenSheet);
     const fonts = document.createElement("style");
     fonts.id = "endeavor-fonts";
-    fonts.textContent = juliaMono;
+    fonts.textContent = juliaMonoFaces(fontsFrom);
     document.head.append(fonts);
     const style = document.createElement("style");
     style.id = "endeavor-theme";
@@ -1138,15 +1404,28 @@ footer form#feedback { display: none !important; }
   }
 
   // src/view.ts
-  var FORMAT = "A quote's uri, notebook://pluto/{notebook_id}/cell/{cell_id}, names its cell (it is not a fetchable URL); `lines` are line numbers in the cell's code, counting from 1. `part` says what was quoted when it isn't code: `output` (text from the cell's output), `figure` (the cell's output, a picture) or `box` (a box the user drew over the notebook; `uri` lists the cells under it). No picture comes with a figure or box here: read current code and outputs with the notebook MCP tools.";
-  var QUOTE_NOTE = "[Endeavor] The user quoted parts of the notebook in this message, each as a <quote> followed by their comment on it. " + FORMAT;
+  var format = (engine) => "A quote's uri, notebook://" + engine + "/{notebook_id}/cell/{cell_id}, names its cell (it is not a fetchable URL); `lines` are line numbers in the cell's code, counting from 1. `part` says what was quoted when it isn't code: `output` (text from the cell's output), `figure` (the cell's output, a picture) or `box` (a box the user drew over the notebook; `uri` lists the cells under it). No picture comes with a figure or box here: read current code and outputs with the notebook MCP tools.";
+  var quoteNote = (engine = "pluto") => "[Endeavor] The user quoted parts of the notebook in this message, each as a <quote> followed by their comment on it. " + format(engine);
   var LEAD = "\u2193";
   var LEAD_NOTE = " A \u2193 just before this note only marks where the quotes start; it isn't part of the user's words.";
-  var uri = (notebook, cell) => `notebook://pluto/${notebook}/cell/${cell}`;
-  function quoteBlock(notebook, pick) {
-    if (pick.part === "box") return `<quote part="box" uri="${pick.cells.map((c) => uri(notebook, c)).join(" ")}"/>`;
+  var uri = (notebook, cell, engine) => `notebook://${engine}/${notebook}/cell/${cell}`;
+  var OUTPUT_MAX = 4e3;
+  var OUTPUT_END = 500;
+  function outputText(text) {
+    if (text.length <= OUTPUT_MAX) return text;
+    const low = (i) => (text.charCodeAt(i) & 64512) === 56320;
+    let end = OUTPUT_MAX - OUTPUT_END;
+    if (low(end)) end--;
+    let start2 = text.length - OUTPUT_END;
+    if (low(start2)) start2++;
+    return `${text.slice(0, end)}
+[${(start2 - end).toLocaleString("en-US")} characters of this output left out here.]
+${text.slice(start2)}`;
+  }
+  function quoteBlock(notebook, pick, engine = "pluto") {
+    if (pick.part === "box") return `<quote part="box" uri="${pick.cells.map((c) => uri(notebook, c, engine)).join(" ")}"/>`;
     const at = `cell="${cellName(pick.code).replace(/"/g, "'")}"`;
-    const where = uri(notebook, pick.cell);
+    const where = uri(notebook, pick.cell, engine);
     switch (pick.part) {
       case "cell":
         return `<quote ${at} uri="${where}">
@@ -1158,18 +1437,19 @@ ${pick.text}
 </quote>`;
       case "output":
         return `<quote ${at} part="output" uri="${where}">
-${pick.text}
+${outputText(pick.text)}
 </quote>`;
       case "figure":
         return `<quote ${at} part="figure" uri="${where}"/>`;
     }
   }
-  function quoteText(notebook, picks, comment) {
-    const blocks = picks.map((p) => quoteBlock(notebook, p));
+  function quoteText(notebook, picks, comment, engine = "pluto") {
+    const blocks = picks.map((p) => quoteBlock(notebook, p, engine));
     return comment ? `${blocks.join("\n\n")}
 ${comment}` : blocks.join("\n\n");
   }
-  var BAR = 36;
+  var DRAWER = 40;
+  var BAR = 32;
   var chrome = `
   :root { --endeavor-bar: ${BAR}px; }
   body { padding-top: var(--endeavor-bar); box-sizing: border-box; }
@@ -1179,7 +1459,6 @@ ${comment}` : blocks.join("\n\n");
     display: block !important; position: sticky; top: var(--endeavor-bar); z-index: 60; }
   pluto-editor > header#pluto-nav nav#at_the_top > :not(#process_status) { display: none !important; }
   pluto-editor > header#pluto-nav nav#at_the_top { justify-content: center; }
-  pluto-editor > main { padding-top: 16px; }
   /* What Pluto keeps at the top as the page scrolls (its "Save all changes" button) and where a jump
      to a cell lands go under the toolbar, not behind it. */
   pluto-editor main > preamble { top: calc(var(--endeavor-bar) + 5px) !important; }
@@ -1196,26 +1475,39 @@ ${comment}` : blocks.join("\n\n");
   #endeavor-bar button:hover { color: var(--e-text-primary); background: var(--e-button-hover); }
   #endeavor-bar button.on { color: var(--e-text-primary); background: var(--e-bg-raised); }
   #endeavor-bar .key { color: var(--e-text-faint); }
-  /* Live docs: Pluto's own panel, as a sheet down the right side under the toolbar, opened from Docs.
-     Not display: none when shut: Pluto alerts "window too small to show docs" whenever it opens a panel
-     it finds undisplayed, and it hides the panel below 500px wide. Its Status tab isn't offered here. */
+  /* Live docs and Status: Pluto's own panel, opened from Docs or Status, as a sheet down the right side under the toolbar,
+     or in a panel too narrow to keep the code beside it, a drawer along the bottom (#211), with room
+     under the last cell to scroll it above the drawer. Not display: none when shut: Pluto alerts
+     "window too small to show docs" whenever it opens a panel it finds undisplayed, and it hides the
+     panel below 500px wide. Ember's (R) panel is its own wrapper
+     round the help, with a scrim below 640 px: the wrapper takes the sheet's place, and no scrim
+     covers the code. */
   #helpbox-wrapper { display: block !important; }
-  pluto-helpbox.hidden, pluto-helpbox.helpbox-process { display: none !important; }
-  pluto-helpbox { position: fixed !important; top: var(--endeavor-bar) !important; bottom: 0 !important;
-    right: 0 !important; height: auto !important; width: min(380px, 100vw) !important;
-    border-radius: 0 !important; border-left: 1px solid var(--e-divider); box-shadow: -8px 0 24px var(--e-shadow-popover) !important; }
-  /* Its own tabs and close button: Docs in the toolbar opens and closes it. */
+  pluto-helpbox.hidden { display: none !important; }
+  ${PLUTO} pluto-helpbox, ${EMBER} #helpbox-wrapper.open { position: fixed !important; top: var(--endeavor-bar) !important; bottom: 0 !important;
+    left: auto !important; right: 0 !important; height: auto !important; width: min(380px, 100vw) !important;
+    border-radius: 0 !important; border: none !important; border-left: 1px solid var(--e-divider) !important;
+    box-shadow: -8px 0 24px var(--e-shadow-popover) !important; }
+  ${EMBER} pluto-helpbox { position: static !important; width: auto !important; height: 100% !important; border: none !important; box-shadow: none !important; }
+  ${EMBER} .ember-scrim { display: none !important; }
+  /* Its own tabs and close button: Docs and Status in the toolbar open and close it. */
   pluto-helpbox > header { display: none !important; }
-  /* A narrow panel: the name before the shortcut, and the sheet over the whole width. */
+  @media (max-width: 759px) {
+    ${PLUTO} pluto-helpbox, ${EMBER} #helpbox-wrapper.open { top: auto !important; left: 0 !important; width: auto !important; height: ${DRAWER}vh !important;
+      border-left: none !important; border-top: 1px solid var(--e-divider) !important; box-shadow: 0 -8px 24px var(--e-shadow-popover) !important; }
+    /* Ember's sheet slides in from the right below 1240 px; as a drawer it comes up from the bottom. */
+    ${EMBER} #helpbox-wrapper.open { animation-name: ember-slide-up !important; }
+    body:has(pluto-helpbox:not(.hidden)) pluto-editor:not(.disable_ui) > main { padding-bottom: calc(${DRAWER}vh + 24px) !important; }
+  }
+  /* A narrow panel: the file's name before the shortcut and the panel buttons' words (their icons stay). */
   @media (max-width: 420px) {
-    #endeavor-bar .key { display: none; }
-    pluto-helpbox { border-left: none; }
+    #endeavor-bar .key, #endeavor-bar .panel .word, #endeavor-find-button .word { display: none; }
   }
   /* Pluto's floating safe-preview badge is hidden, as in the app: its band and each cell's
      "Code not executed in Safe preview" already say it. */
   .outline-frame-actions-container.safe-preview { display: none !important; }
 `;
-  var css4 = `
+  var css6 = `
   #annotate-hint { top: calc(var(--endeavor-bar) + 8px) !important; }
   #endeavor-sent { position: fixed; left: 50%; top: calc(var(--endeavor-bar) + 8px); transform: translateX(-50%); z-index: 10001; display: none;
     max-width: calc(100vw - 32px); box-sizing: border-box; text-align: center;
@@ -1231,6 +1523,11 @@ ${comment}` : blocks.join("\n\n");
   }
   var fileName = (path) => path ? path.split(/[\\/]/).pop() || "Notebook" : "Notebook";
   var book = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 3.2c1.8-.6 3.7-.4 5.5.8 1.8-1.2 3.7-1.4 5.5-.8v9.6c-1.8-.6-3.7-.4-5.5.8-1.8-1.2-3.7-1.4-5.5-.8z"/><path d="M8 4v9.6"/></svg>`;
+  var pulse = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8.5h3l1.8-4.5 3.4 8 1.8-3.5h3"/></svg>`;
+  var PANELS = [
+    ["docs", "Docs", book, "Live docs: what the code under the cursor does"],
+    ["process", "Status", pulse, "Status: what the notebook is doing, its packages and how long each step took"]
+  ];
   function initBar(withPoint, point) {
     const style = document.createElement("style");
     style.id = "endeavor-chrome";
@@ -1238,19 +1535,22 @@ ${comment}` : blocks.join("\n\n");
     document.head.append(style);
     const bar = document.createElement("div");
     bar.id = "endeavor-bar";
-    bar.innerHTML = `<span class="file">Notebook</span><span class="doing">Loading\u2026</span><span class="grow"></span><button type="button" class="docs" title="Live docs: what the code under the cursor does">${book}<span>Docs</span></button>` + (withPoint ? `<button type="button" id="endeavor-point" title="Point at a cell, its code or its output, and comment on it for Claude"><span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span></button>` : "");
+    bar.innerHTML = `<span class="file">Notebook</span><span class="doing">Loading\u2026</span><span class="grow"></span>` + findButton() + PANELS.map(([tab, word, icon, title]) => `<button type="button" class="panel ${tab}" title="${title}" aria-label="${word}">${icon}<span class="word">${word}</span></button>`).join("") + (withPoint ? `<button type="button" id="endeavor-point" title="Point at a cell, its code or its output, and comment on it for Claude"><span>Point</span><span class="key">${mac ? "\u2318\u21E7E" : "Ctrl+Shift+E"}</span></button>` : "");
     document.body.prepend(bar);
     const file = bar.querySelector(".file");
     const words = bar.querySelector(".doing");
-    const docs = bar.querySelector(".docs");
     const pointButton = bar.querySelector("#endeavor-point");
-    const docsOpen = () => !!document.querySelector("pluto-helpbox.helpbox-docs:not(.hidden)");
-    docs.addEventListener("click", (e) => {
-      if (!e.isTrusted) return;
-      window.dispatchEvent(new CustomEvent("open_bottom_right_panel", { detail: docsOpen() ? null : "docs" }));
-      if (!docsOpen()) setTimeout(() => document.querySelector("#live-docs-search")?.focus(), 50);
-    });
+    const panelOpen = (tab) => !!document.querySelector(`pluto-helpbox.helpbox-${tab}:not(.hidden)`);
+    const panels = PANELS.map(([tab]) => [tab, bar.querySelector(`.panel.${tab}`)]);
+    for (const [tab, button] of panels)
+      button.addEventListener("click", (e) => {
+        if (!e.isTrusted) return;
+        const open = panelOpen(tab);
+        window.dispatchEvent(new CustomEvent("open_bottom_right_panel", { detail: open ? null : tab }));
+        if (!open && tab === "docs") setTimeout(() => document.querySelector("#live-docs-search")?.focus(), 50);
+      });
     pointButton?.addEventListener("click", (e) => e.isTrusted && point(!document.body.classList.contains("annotating")));
+    initFind(bar.querySelector("#endeavor-find-button"));
     let last = null;
     const tick = () => {
       const nb = window.editor_state?.notebook;
@@ -1260,7 +1560,7 @@ ${comment}` : blocks.join("\n\n");
         file.title = file.textContent;
         words.textContent = doing(nb);
       }
-      docs.classList.toggle("on", docsOpen());
+      for (const [tab, button] of panels) button.classList.toggle("on", panelOpen(tab));
       pointButton?.classList.toggle("on", document.body.classList.contains("annotating"));
     };
     let soon = 0;
@@ -1290,6 +1590,7 @@ ${comment}` : blocks.join("\n\n");
   function start(notebook, host2) {
     if (started) return;
     started = true;
+    const engine = host2.engine === "ember" ? "ember" : "pluto";
     const added = [];
     const receive = (msg) => window.__endeavor?.receive(msg);
     const sent = document.createElement("div");
@@ -1304,7 +1605,7 @@ ${comment}` : blocks.join("\n\n");
     const point = (on2) => receive({ type: "annotate", on: on2 });
     setHost((msg) => {
       if (msg.type !== "quote" || !msg.picks.length) return;
-      const text = quoteText(notebook, msg.picks, msg.comment);
+      const text = quoteText(notebook, msg.picks, msg.comment, engine);
       if (msg.add) {
         added.push(text);
         return say(`${added.length} added. ${mac ? "\u21A9" : "Enter"} passes ${added.length === 1 ? "it" : "them"} to the chat with the next pick.`);
@@ -1313,7 +1614,7 @@ ${comment}` : blocks.join("\n\n");
       say("Sending to Claude's chat\u2026", 0);
       host2.send(`${LEAD}
 
-${QUOTE_NOTE}${LEAD_NOTE}
+${quoteNote(engine)}${LEAD_NOTE}
 
 ${[...earlier, text].join("\n\n")}`).then(
         () => {
@@ -1333,8 +1634,9 @@ ${[...earlier, text].join("\n\n")}`).then(
         }
       );
     });
-    initTheme();
+    initTheme("web");
     initNarrow();
+    initSpace();
     closeStrayCompletions();
     initLinks(host2.openLink);
     followNewCells();
@@ -1345,7 +1647,7 @@ ${[...earlier, text].join("\n\n")}`).then(
     initAskBox();
     initAnnotate(true);
     const style = document.createElement("style");
-    style.textContent = css4;
+    style.textContent = css6;
     document.head.append(style);
     document.body.append(sent);
     window.addEventListener(

@@ -705,6 +705,28 @@ fn events_say_who_changed_each_cell_and_what_the_agent_replaced() {
 }
 
 #[test]
+fn a_notebook_that_closes_while_the_events_are_put_together_is_left_out() {
+    let s = setup();
+    let (a, b) = (id(1), id(2));
+    s.engine.open(&a, "/n/a.jl", &[(X, "x = 1")]);
+    s.engine.open(&b, "/n/b.jl", &[(X, "x = 1")]);
+    // An idle stop closes `a` after the snapshots are read, before its graph is.
+    let (read_tx, read) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    *s.engine.hold_snapshot.lock().unwrap() = Some((read_tx, release_rx));
+    let subscribing = std::thread::spawn({
+        let notebooks = s.notebooks.clone();
+        move || notebooks.subscribe().map(|(first, _)| first)
+    });
+    read.recv().unwrap();
+    s.engine.notebooks.lock().unwrap().retain(|nb| nb.id != a);
+    release.send(()).unwrap();
+    let first: Value = serde_json::from_str(&subscribing.join().unwrap().expect("the events start")).unwrap();
+    let listed: Vec<&Value> = first["notebooks"].as_array().unwrap().iter().map(|nb| &nb["notebook_id"]).collect();
+    assert_eq!(listed, [&json!(b)], "{first}");
+}
+
+#[test]
 fn a_read_of_the_notebook_from_before_an_agent_edit_doesnt_make_it_the_users() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 6"), (Y, "y = x * 7")]);
@@ -2139,6 +2161,27 @@ fn read_cell_adds_the_text_form_of_rich_outputs() {
     assert_eq!(read(Y).get("output_text"), None);
     s.engine.with(NB, |nb| nb.cells[0].errored = true);
     assert_eq!(read(X).get("output_text"), None);
+}
+
+#[test]
+fn read_cell_cuts_a_huge_text_output_to_its_start_and_end() {
+    let s = setup();
+    let long = "1".repeat(20_000);
+    s.engine.open(NB, "/n/a.jl", &[(X, "Text(join(string.(1:200_000), '\\n'))"), (Y, &long)]);
+    // 1.3 MB, as the desktop check's `Text` output: with a 3-byte character where the cuts fall.
+    let big = format!("{}€{}€{}", "a".repeat(11_999), "b".repeat(1_300_000), "c".repeat(3_998));
+    s.engine.with(NB, |nb| nb.cells[0].output = big.clone());
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let output = read["output"].as_str().unwrap();
+    assert!(output.len() < 16_200, "{}", output.len());
+    assert!(output.starts_with(&"a".repeat(11_999)) && output.ends_with(&format!("\n{}", "c".repeat(3_998))), "{output:.40}");
+    assert!(output.contains(&format!("\n… ({} of this output's {} bytes are left out here. No tool shows them: to see a part, run a cell that picks it out, such as its first or last lines.)\n", big.len() - 11_999 - 3_998, big.len())), "{}", &output[11_990..12_200]);
+    // The fake engine's output is "ran " and the code.
+    let ran = s.call("", "execute_cell", json!({ "notebook_id": NB, "cell_id": Y, "wait_for_completion": true })).unwrap();
+    let summary = ran["outputs"]["changed"][0]["output_summary"].as_str().unwrap_or_else(|| panic!("{ran:.300}"));
+    assert!(summary.len() < 2_200 && summary.contains("bytes are left out here. read_cell shows more.)"), "a run's reply cuts it shorter: {summary}");
+    s.engine.with(NB, |nb| nb.cells[0].output = "1".repeat(16_000));
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap()["output"], json!("1".repeat(16_000)), "16,000 bytes is whole");
 }
 
 #[test]
