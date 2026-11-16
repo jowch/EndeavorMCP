@@ -1317,6 +1317,8 @@ impl Call<'_> {
             }
             if cell.errored {
                 line.push_str(" | errored");
+            } else if cell.off {
+                line.push_str(" | off");
             } else if cell.running || cell.queued {
                 line.push_str(if cell.running { " | running" } else { " | queued" });
             } else if !cell.output.is_empty() {
@@ -1324,6 +1326,8 @@ impl Call<'_> {
             }
             if cell.stale || pending.contains(id) {
                 line.push_str(" | stale");
+            } else if cell.not_run && !cell.off {
+                line.push_str(" | not run");
             }
             lines.push(line);
         }
@@ -2152,8 +2156,6 @@ fn string_index_error(text: &str, index: usize) -> String {
     }
 }
 
-/// The length of what a base64 text decodes to.
-/// `text` cut to at most `max` bytes at a character boundary, saying so.
 /// How long an outline's first line and output may be, and how many names it lists, in bytes and names.
 const OUTLINE_LINE_MAX: usize = 80;
 const OUTLINE_OUTPUT_MAX: usize = 60;
@@ -2190,6 +2192,8 @@ fn first_prose_line(code: &str, ember: bool) -> String {
         .to_owned()
 }
 
+/// The length of what a base64 text decodes to.
+/// `text` cut to at most `max` bytes at a character boundary, saying so.
 pub(super) fn cut(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();

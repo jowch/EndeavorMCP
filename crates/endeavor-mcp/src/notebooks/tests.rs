@@ -1357,6 +1357,26 @@ fn an_outline_shows_each_cell_on_one_line_and_reads_none() {
     assert_eq!(s.call("", "read_notebook_code", json!({ "notebook_id": NB, "outline": "yes" })), Err("ArgumentError: invalid_argument::outline must be a boolean".into()));
 }
 
+/// An Ember notebook's outline takes its text cells' prose from their `#'` lines, and marks cells
+/// that haven't run and cells Ember won't run.
+#[test]
+fn an_ember_notebooks_outline_shows_its_prose_and_cells_not_run_or_off() {
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    const Z: &str = "33333333-3333-3333-3333-333333333333";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "#' # Title\n#' Some prose."), (Y, "b <- 2"), (Z, "plot(b)")]);
+    ember.with(R, |nb| {
+        nb.cells[1].not_run = true;
+        nb.cells[2].off = true;
+        nb.cells[2].not_run = true;
+    });
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    let outline = s.call("", "read_notebook_code", json!({ "notebook_id": R, "outline": true })).unwrap();
+    assert_eq!(outline["outline"], format!("{X} | md: # Title\n{Y} | b <- 2 | not run\n{Z} | plot(b) | off"));
+}
+
 /// An Ember notebook reads with its own file's markers, and its text cells, `#'` lines already,
 /// with no `# md:`.
 #[test]
