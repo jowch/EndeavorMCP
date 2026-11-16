@@ -519,8 +519,8 @@ moved_input_notes <- function(rec, cells, views) {
       seen <- c(seen, nxt)
       todo <- nxt
     }
-    note <- sprintf("uses_moved_input::This result used %s = %s, set on the page. The file's default is %s, so a rerun of the file gives other results.",
-                    i$name, input_value(i$value), input_value(i$default))
+    note <- sprintf("uses_moved_input::This result used %s = %s, set on the page or with set_input. The file's default is %s, so a rerun of the file gives other results.",
+                    i$name, note_value(i$value), note_value(i$default))
     for (id in seen) {
       k <- match(id, ids)
       if (is.na(k) || isTRUE(cells[[k]]$stale) || isTRUE(cells[[k]]$running) || cells[[k]]$not_run) next
@@ -528,6 +528,12 @@ moved_input_notes <- function(rec, cells, views) {
     }
   }
   cells
+}
+
+# A value in the note: an input_list() part as list(n = 3), not list(n = 3L).
+note_value <- function(x) {
+  if (is.list(x)) paste(deparse(x, width.cutoff = 500L, control = c("keepNA", "niceNames")), collapse = "")
+  else input_value(x)
 }
 
 # A value as input_line shows it: a number as JSON writes it (5, not 5L),
