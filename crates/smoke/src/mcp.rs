@@ -78,7 +78,8 @@ impl Session {
                 std::thread::sleep(Duration::from_secs(5));
                 continue;
             }
-            let starting = matches!(code.as_str(), "julia_starting" | "notebook_opening") || (code.is_empty() && text.to_lowercase().contains("starting"));
+            // The loose match is only for a reply that isn't JSON: a notebook's own text may say "starting".
+            let starting = matches!(code.as_str(), "julia_starting" | "notebook_opening") || (serde_json::from_str::<Value>(&text).is_err() && text.to_lowercase().contains("starting"));
             if starting && began.elapsed() < Duration::from_secs(600) {
                 continue;
             }
