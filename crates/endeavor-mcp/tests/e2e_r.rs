@@ -868,6 +868,13 @@ fn an_r_notebook_through_the_runtime() {
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "I" }));
         assert_eq!(read["inputs"], json!([format!("n: slider 1 to 10, value 7 (default 5){UNMOVABLE}"), "m: select of A = 1, B = 2, value 2 (default 1)"]), "{read}");
         assert_eq!(read["output"], output, "the input's own cell didn't rerun: {read}");
+        // The readers say their result used a moved value; the input's own cell has its default instead.
+        assert!(read.get("notes").is_none_or(|n| n == &json!([])), "{read}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "N" }));
+        assert_eq!(read["notes"], json!(["uses_moved_input::This result used n = 7, set on the page or with set_input. The file's default is 5, so a rerun of the file gives other results."]), "{read}");
+        assert!(read["message"].as_str().unwrap().contains("say which value it used"), "{read}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "M" }));
+        assert_eq!(read["notes"], json!(["uses_moved_input::This result used m = 2, set on the page or with set_input. The file's default is 1, so a rerun of the file gives other results."]), "{read}");
 
         let (refused, said) = agent.call("set_input", json!({ "notebook_id": id, "name": "n", "value": 70 }));
         assert!(refused && said["error"] == "invalid_value" && said["message"].as_str().unwrap().contains("from 1 to 10"), "{said}");

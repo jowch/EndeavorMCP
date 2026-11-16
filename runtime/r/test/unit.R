@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "download_step", "structure_error", "EXTRA_FIX", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "input_line", "json_value", "json_choice")
+wanted <- c("%||%", "package_step", "download_step", "structure_error", "EXTRA_FIX", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "input_line", "input_value", "moved_input_notes", "note_value", "json_value", "json_choice")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -217,6 +217,27 @@ check("a JSON array for a single dropdown is one choice that is a vector",
       identical(A$json_value(list(type = "select", choices = list(a = c(2, 3), b = "x"), multiple = FALSE), list(2L, 3L)), c(2, 3)))
 check("a number for a slider is left as it is",
       identical(A$json_value(slider, 7L), 7L))
+
+# ---- moved_input_notes ----
+# C holds the input n; A reads n, B reads A, D reads C's other name k, S is stale.
+graph_of <- list(
+  edges = data.frame(from = c("A", "B", "D", "S"), to = c("C", "A", "C", "C"), name = c("n", "a", "k", "n")),
+  downstream = list(C = c("A", "D", "S"), A = "B", B = character(), D = character(), S = character()))
+A$dependency_graph <- function(nb) { A$graph_calls <- A$graph_calls + 1L; graph_of }
+A$graph_calls <- 0L
+out <- function(id, stale = FALSE) list(cell_id = id, notes = I(character()), stale = stale, running = FALSE, not_run = FALSE)
+cells <- list(out("C"), out("A"), out("B"), out("D"), out("S", stale = TRUE))
+views <- function(value) list(list(id = "C", inputs = list(input(slider, value = value))), list(id = "A"), list(id = "B"), list(id = "D"), list(id = "S"))
+same <- A$moved_input_notes(list(nb = NULL), cells, views(100))
+check("every input at its default: no notes, and no graph built",
+      identical(same, cells) && A$graph_calls == 0L)
+moved <- A$moved_input_notes(list(nb = NULL), cells, views(250))
+note <- "uses_moved_input::This result used n = 250, set on the page or with set_input. The file's default is 100, so a rerun of the file gives other results."
+notes <- lapply(moved, function(d) as.character(d$notes))
+check("a moved input notes its readers and theirs, not its own cell, another name's reader or a stale one",
+      identical(notes, list(character(), note, note, character(), character())))
+check("an input_list() part reads as R code without the L",
+      identical(A$note_value(list(n = 3L, method = "a")), 'list(n = 3, method = "a")'))
 
 cat(sprintf("\n%d passed, %d failed\n", passed, failed))
 if (failed > 0) quit(status = 1)
