@@ -167,6 +167,17 @@ _has_control(cell) = occursin("@bind", cell.code)
 
 forget_controls!(notebook_id::UUID) = lock(() -> delete!(_CONTROLS, notebook_id), _CONTROLS_LOCK)
 
+# A finished query's answer becomes what is known. A failed one keeps the last answer, and counts as
+# asked for its key, so it isn't asked again until something changes.
+function _adopt!(entry::_Controls)
+    task = entry.task
+    (task === nothing || !istaskdone(task)) && return nothing
+    istaskfailed(task) || (entry.info = fetch(task))
+    entry.key = entry.task_key
+    entry.task = nothing
+    return nothing
+end
+
 function _controls_query(workspace, ids)
     code = _CONTROLS_CODE
     module_name = workspace.module_name
@@ -210,31 +221,19 @@ function _controls(session, nb)
     end
     key = (objectid(workspace), [(c.cell_id, c.output.last_run_timestamp) for c in with], bonds)
     busy = any(c -> c.running || c.queued, cells)
+    # Only the call that starts a query waits for it. A query that outlasts the wait is left to
+    # finish, and every call until then answers with what was known before, at once.
     task = lock(_CONTROLS_LOCK) do
         entry = get!(() -> _Controls(nothing, Dict{String,Any}(), nothing, nothing), _CONTROLS, nb.notebook_id)
-        if entry.task !== nothing && istaskdone(entry.task)
-            if !istaskfailed(entry.task)
-                entry.info = fetch(entry.task)
-                entry.key = entry.task_key
-            end
-            entry.task = nothing
-        end
-        (entry.key == key || busy) && return nothing
-        if entry.task === nothing
-            ids = [c.cell_id for c in with]
-            entry.task = @async _controls_query(workspace, ids)
-            entry.task_key = key
-        end
-        entry.task_key == key ? entry.task : nothing
+        _adopt!(entry)
+        (entry.key == key || busy || entry.task !== nothing) && return nothing
+        ids = [c.cell_id for c in with]
+        entry.task = @async _controls_query(workspace, ids)
+        entry.task_key = key
+        entry.task
     end
     if task !== nothing && timedwait(() -> istaskdone(task), _CONTROLS_WAIT; pollint = 0.02) === :ok
-        lock(_CONTROLS_LOCK) do
-            entry = _CONTROLS[nb.notebook_id]
-            if entry.task === task
-                istaskfailed(task) || (entry.info = fetch(task); entry.key = entry.task_key)
-                entry.task = nothing
-            end
-        end
+        lock(() -> _adopt!(_CONTROLS[nb.notebook_id]), _CONTROLS_LOCK)
     end
     return lock(() -> haskey(_CONTROLS, nb.notebook_id) ? _CONTROLS[nb.notebook_id].info : Dict{String,Any}(), _CONTROLS_LOCK)
 end

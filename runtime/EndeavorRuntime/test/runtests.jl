@@ -244,6 +244,20 @@ end
         @test s[id(2)]["inputs"] == ["w: Knob, value 4"]
         @test isempty(moved_notes(s, 3))
 
+        # A process that doesn't answer (busy in a task that never yields, no cell running) holds
+        # up only the snapshot that asked it, and that one for at most the wait.
+        spin = Pluto.Cell(; code="spin = @async (sleep(1); while true end)")
+        push!(nb.cells, spin)
+        nb.cells_dict[spin.cell_id] = spin
+        nb.cell_order = [nb.cell_order; spin.cell_id]
+        Pluto.update_save_run!(session, nb, [spin]; run_async=false, save=true)
+        sleep(2)
+        nb.bonds[:w] = Pluto.BondValue(5)
+        first_wait = @elapsed EndeavorRuntime.controls(session, nb)
+        later = [@elapsed(EndeavorRuntime.controls(session, nb)) for _ in 1:3]
+        @test first_wait < EndeavorRuntime._CONTROLS_WAIT + 1
+        @test all(<(0.5), later)
+
         # A notebook with no control asks its process nothing.
         session2, nb2, _ = make_session_with_notebook("a = 1")
         Pluto.update_save_run!(session2, nb2, nb2.cells; run_async=false, save=true)
