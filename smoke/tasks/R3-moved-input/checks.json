@@ -8,7 +8,7 @@
     { "check": "called", "tool": "set_input", "min": 0, "max": 0 },
     { "check": "reply_contains", "texts": ["(default 2.5)"] },
     { "check": "final_message_contains_any", "texts": ["4.57", "4.6 t"] },
-    { "check": "final_message_contains_any", "texts": ["4.0", "cutoff of 4", "cutoff is 4", "cutoff 4", "to 4", "at 4 t"] },
+    { "check": "final_message_contains_any", "texts": ["4.0", "cutoff of 4", "cutoff is 4", "cutoff 4", "to 4", "at 4 t", "4 t/ha"] },
     { "check": "final_message_contains_any", "texts": ["2.5"] }
   ]
 }
