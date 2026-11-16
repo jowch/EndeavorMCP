@@ -292,7 +292,7 @@
     "name": "fold_cell"
   },
   {
-    "description": "Read the whole notebook as one string, each cell under a marker line with its id: `# ╔═╡ <id>` in a Pluto notebook, `# %% id=<id>` in an Ember one, as in the notebook's file. Counts as a read of every cell it returns. Markdown (prose) cells are left out unless `include_markdown` is true, so `cell_ids` can have fewer ids than the notebook has cells (`get_cell_order` lists all of them); when any are left out, `markdown_cells_left_out` says how many. The engine's own package cells are always left out.",
+    "description": "To see what a notebook holds, or to find the cells a question is about, start with `outline=true`: one line a cell, with its id, its first line, the names it defines, and its output or whether it errored, at a small part of the size of the code. Then read_cell the cells you need. Without `outline`, read the whole notebook as one string, each cell under a marker line with its id: `# ╔═╡ <id>` in a Pluto notebook, `# %% id=<id>` in an Ember one, as in the notebook's file. Counts as a read of every cell it returns. Markdown (prose) cells are left out unless `include_markdown` is true, so `cell_ids` can have fewer ids than the notebook has cells (`get_cell_order` lists all of them); when any are left out, `markdown_cells_left_out` says how many. The engine's own package cells are always left out.",
     "inputSchema": {
       "properties": {
         "include_markdown": {
@@ -303,12 +303,16 @@
           "type": "string"
         },
         "order": {
-          "description": "`execution` (the default): the order the cells run in. `visual`: their order on the page.",
+          "description": "`execution` (the default): the order the cells run in. `visual`: their order on the page, the default with `outline`.",
           "enum": [
             "execution",
             "visual"
           ],
           "type": "string"
+        },
+        "outline": {
+          "description": "One line a cell instead of the code. It shows prose cells too, and reads no cell: an edit still needs read_cell first. Default: false.",
+          "type": "boolean"
         }
       },
       "required": [

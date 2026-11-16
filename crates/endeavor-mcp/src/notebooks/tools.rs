@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use super::{Cell, Change, Folder, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, cell_id_in, uuid_value};
+use super::{Cell, Change, Folder, Graph, GraphQuery, Notebooks, Snapshot, Started, absolute_path, canonical_path, cell_id_in, uuid_value};
 use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
 use wire::backend::Backend;
@@ -1216,17 +1216,28 @@ impl Call<'_> {
 
     fn read_notebook_code(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
-        let order = self.args.get("order").cloned().unwrap_or(json!("execution"));
+        let outline = bool_arg(self.args, "outline", false)?;
+        // An outline is for a first look, as the reader sees the notebook: page order unless asked.
+        let order = self.args.get("order").cloned().unwrap_or(json!(if outline { "visual" } else { "execution" }));
         let markdown = self.args.get("include_markdown").cloned().unwrap_or(json!(false));
         if !order.is_string() {
             return Err(format!("TypeError: in keyword argument order, expected AbstractString, got a value of type {}", julia_type(&order)));
         }
         let Value::Bool(markdown) = markdown else { return Err(non_boolean(&markdown)) };
-        let cells: Vec<String> = match order.as_str() {
-            Some("visual") => nb.order.clone(),
-            Some("execution") => self.nbs.graph(&nb.id, GraphQuery::default())?.order,
+        let execution = match order.as_str() {
+            Some("visual") => false,
+            Some("execution") => true,
             _ => return Err(argument_error(&format!("invalid_order::order must be 'execution' or 'visual', got '{}'", julia_string(&order)))),
         };
+        // An outline names what each cell defines, so it needs the graph in either order.
+        let graph = if execution || outline { Some(self.nbs.graph(&nb.id, GraphQuery::default())?) } else { None };
+        let cells: Vec<String> = match &graph {
+            Some(graph) if execution => graph.order.clone(),
+            _ => nb.order.clone(),
+        };
+        if let (true, Some(graph)) = (outline, &graph) {
+            return Ok(self.outline(&nb, &cells, graph, &order));
+        }
         // An Ember file's text cells are already `#'` comments, so they need no `# md:`.
         let ember = self.nbs.backend_of(&nb.id) == Backend::Ember;
         let marker = if ember { EMBER_CELL_MARKER } else { CELL_MARKER };
@@ -1270,6 +1281,59 @@ impl Call<'_> {
             result["markdown_cells_left_out"] = left_out.into();
         }
         Ok(result)
+    }
+
+    /// `read_notebook_code` with `outline`: one line a cell, so an agent finds the cells a
+    /// question needs without reading all the code. The whole code of a 40-cell analysis was
+    /// 17.6k tokens, a third of a questions-only session's input; its outline is a fraction of
+    /// that, with what the code alone lacks: each cell's output and whether it errored. It reads
+    /// no cell, so an edit still needs a read of its cell.
+    fn outline(&self, nb: &Snapshot, cells: &[String], graph: &Graph, order: &Value) -> Value {
+        let ember = self.nbs.backend_of(&nb.id) == Backend::Ember;
+        let pending = self.pending_run(nb);
+        let mut lines = Vec::new();
+        for id in cells {
+            let Some(cell) = nb.cells.get(id) else { continue };
+            if cell.hidden {
+                continue;
+            }
+            let mut line = format!("{id} | ");
+            if cell.markdown {
+                line.push_str("md: ");
+                line.push_str(&outline_text(&first_prose_line(&cell.code, ember), OUTLINE_LINE_MAX));
+                lines.push(line);
+                continue;
+            }
+            line.push_str(&outline_text(&first_code_line(&cell.code), OUTLINE_LINE_MAX));
+            if let Some(node) = graph.node(id) {
+                let mut defs: Vec<&str> = node.definitions.iter().chain(&node.functions).map(String::as_str).collect();
+                defs.sort_unstable();
+                defs.dedup();
+                if !defs.is_empty() {
+                    let shown = defs.len().min(OUTLINE_NAMES_MAX);
+                    let more = if defs.len() > shown { format!(" +{}", defs.len() - shown) } else { String::new() };
+                    line.push_str(&format!(" | defines {}{more}", defs[..shown].join(", ")));
+                }
+            }
+            if cell.errored {
+                line.push_str(" | errored");
+            } else if cell.running || cell.queued {
+                line.push_str(if cell.running { " | running" } else { " | queued" });
+            } else if !cell.output.is_empty() {
+                line.push_str(&format!(" | -> {}", outline_text(&cell.output, OUTLINE_OUTPUT_MAX)));
+            }
+            if cell.stale || pending.contains(id) {
+                line.push_str(" | stale");
+            }
+            lines.push(line);
+        }
+        json!({
+            "notebook_id": nb.id,
+            "path": nb.path,
+            "order": order,
+            "outline": lines.join("\n"),
+            "message": "One line a cell: its id, its first line, the names it defines, and its output or state. This read no cell: read_cell the ones you need, which an edit needs too.",
+        })
     }
 
     fn get_cell_order(&self) -> Result<Value, String> {
@@ -2090,6 +2154,42 @@ fn string_index_error(text: &str, index: usize) -> String {
 
 /// The length of what a base64 text decodes to.
 /// `text` cut to at most `max` bytes at a character boundary, saying so.
+/// How long an outline's first line and output may be, and how many names it lists, in bytes and names.
+const OUTLINE_LINE_MAX: usize = 80;
+const OUTLINE_OUTPUT_MAX: usize = 60;
+const OUTLINE_NAMES_MAX: usize = 4;
+
+/// Text on one line, cut at `max` bytes with an ellipsis.
+fn outline_text(text: &str, max: usize) -> String {
+    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.len() <= max {
+        return one;
+    }
+    let end = (0..=max).rev().find(|&i| one.is_char_boundary(i)).unwrap_or(0);
+    format!("{}…", &one[..end])
+}
+
+/// A code cell's first telling line: its first comment or code line, skipping a bare `begin` or `let`.
+fn first_code_line(code: &str) -> String {
+    let mut lines = code.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or("");
+    if matches!(first, "begin" | "let") {
+        return lines.next().map_or_else(|| first.to_owned(), |next| format!("{first} {next}"));
+    }
+    if first.is_empty() { "(empty)".to_owned() } else { first.to_owned() }
+}
+
+/// A prose cell's first line of text, without Pluto's `md"""` or Ember's `#'`.
+fn first_prose_line(code: &str, ember: bool) -> String {
+    let body = if ember { code.to_owned() } else { code.trim().trim_start_matches("md").trim_start_matches('"').to_owned() };
+    body.lines()
+        .map(|l| if ember { l.trim().trim_start_matches("#'").trim() } else { l.trim() })
+        .find(|l| !l.is_empty() && !l.starts_with("\"\"\""))
+        .unwrap_or("")
+        .trim_end_matches('"')
+        .to_owned()
+}
+
 pub(super) fn cut(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();

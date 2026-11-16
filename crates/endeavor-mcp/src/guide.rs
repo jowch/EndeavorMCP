@@ -36,6 +36,15 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
 pub const LOAD_SKILL: &str = "Before your first notebook tool call in a session, load the `endeavor-notebooks` skill, read the engine reference it names (`pluto.md` for Julia, `ember.md` for R) before you write a cell, and follow them: \
 the read-edit-run loop, the rules for what one cell may hold and for names defined in two cells, and looking at a plot with `view_cell_output` before you say it is right.";
 
+/// How to look at a notebook without reading all its code, told to every agent. Both Claude
+/// models read the whole `.jl` with their own file tool before loading the skill, on the first
+/// question about a notebook: a third of a questions-only session's input (Q1, 2026-11-04). So
+/// it is here, in what an agent has before its first call, as well as in the skill.
+pub const READ_FIRST: &str = "To see what a notebook holds or answer a question about it, don't read its file: the file has the code but no results, \
+and all of it stays in the conversation, which every later message reads again. \
+Join the notebook instead (`list_notebooks`, or `open_notebook` with its path), call `read_notebook_code` with `outline` true for one line a cell, \
+and `read_cell` only the cells the question needs.";
+
 /// Where the guide keeps what only the app needs, for an agent in the app without the skills.
 const APP_GUIDE: &str = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
 
@@ -79,10 +88,10 @@ pub fn instructions(standalone: bool, has_skills: bool, machines: bool, views: b
     };
     let machines_text = if views { format!(" {VIEWS}{machines_text}") } else { machines_text };
     match (standalone, has_skills) {
-        (false, true) => Some(format!("{LOAD_SKILL} {APP_REPLIES}")),
-        (false, false) => Some(format!("{APP} {READ_GUIDE} {APP_REPLIES} {APP_GUIDE}")),
-        (true, true) => Some(format!("{STANDALONE}{machines_text}\n\n{LOAD_SKILL}")),
-        (true, false) => Some(format!("{STANDALONE}{machines_text}\n\n{READ_GUIDE}")),
+        (false, true) => Some(format!("{LOAD_SKILL} {READ_FIRST} {APP_REPLIES}")),
+        (false, false) => Some(format!("{APP} {READ_GUIDE} {READ_FIRST} {APP_REPLIES} {APP_GUIDE}")),
+        (true, true) => Some(format!("{STANDALONE}{machines_text}\n\n{LOAD_SKILL} {READ_FIRST}")),
+        (true, false) => Some(format!("{STANDALONE}{machines_text}\n\n{READ_GUIDE} {READ_FIRST}")),
     }
 }
 

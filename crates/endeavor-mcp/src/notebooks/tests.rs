@@ -1326,6 +1326,37 @@ fn adding_moving_folding_and_deleting_cells() {
     assert_eq!(s.refused("", "delete_cell", json!({ "notebook_id": NB, "cell_id": b })), "cell_not_found");
 }
 
+/// An outline is one line a cell in page order, prose cells too: its first line, what it defines,
+/// and its output or error. It reads no cell, so an edit still needs a read.
+#[test]
+fn an_outline_shows_each_cell_on_one_line_and_reads_none() {
+    const Z: &str = "33333333-3333-3333-3333-333333333333";
+    const P: &str = "44444444-4444-4444-4444-444444444444";
+    const Q: &str = "55555555-5555-5555-5555-555555555555";
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(Y, "md\"\"\"\n# Growth curves\nSome prose.\n\"\"\""), (X, "x = 1"), (Z, "# Rates by strain\ny = x + 1"), (P, "PLUTO = 1"), (Q, "begin\n    plot(x)\nend")]);
+    s.engine.with(NB, |nb| {
+        nb.cells[3].hidden = true;
+        nb.cells[1].output = "1".into();
+        nb.cells[2].errored = true;
+        nb.cells[2].output = "boom".into();
+    });
+    let outline = s.call("", "read_notebook_code", json!({ "notebook_id": NB, "outline": true })).unwrap();
+    assert_eq!(outline["order"], "visual");
+    assert_eq!(outline["outline"], format!("{Y} | md: # Growth curves\n{X} | x = 1 | defines x | -> 1\n{Z} | # Rates by strain | defines y | errored\n{Q} | begin plot(x)"));
+    assert!(outline.get("code").is_none());
+    assert_eq!(
+        s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 2" })),
+        Err(format!("ArgumentError: read_required::Call read_cell or read_notebook_code before editing cell {X}"))
+    );
+    let long = "a".repeat(200);
+    s.engine.with(NB, |nb| nb.cells[1].output = long.clone());
+    let outline = s.call("", "read_notebook_code", json!({ "notebook_id": NB, "outline": true, "order": "execution" })).unwrap();
+    assert_eq!(outline["order"], "execution");
+    assert!(outline["outline"].as_str().unwrap().contains(&format!("-> {}…", "a".repeat(60))));
+    assert_eq!(s.call("", "read_notebook_code", json!({ "notebook_id": NB, "outline": "yes" })), Err("ArgumentError: invalid_argument::outline must be a boolean".into()));
+}
+
 /// An Ember notebook reads with its own file's markers, and its text cells, `#'` lines already,
 /// with no `# md:`.
 #[test]

@@ -1327,7 +1327,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (39, "41002f1d5cab4d9c"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (40, "cf2b3b87266b7b6a"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1374,7 +1374,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (39, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (40, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]
@@ -1421,6 +1421,10 @@ mod tests {
             "These tools edit and run a live notebook, in Julia (Pluto) or R (Ember), that the user sees in Endeavor, next to this chat. \
 Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
 how to find this session's notebook, the read-edit-run loop, and the rules for a cell. \
+To see what a notebook holds or answer a question about it, don't read its file: the file has the code but no results, \
+and all of it stays in the conversation, which every later message reads again. \
+Join the notebook instead (`list_notebooks`, or `open_notebook` with its path), call `read_notebook_code` with `outline` true for one line a cell, \
+and `read_cell` only the cells the question needs. \
 In your replies, link each cell you talk about the first time it comes up, as `[a few words](notebook://pluto/{notebook_id}/cell/{cell_id})` \
 (`notebook://ember/...` in R), with the cell's real id: the user clicks it to scroll the notebook to that cell. \
 Start a code cell that defines no name, such as a plot or a check, with a `# ` comment of at most 28 characters, in words with no code, saying what it does; the app names the cell by it. The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`."

@@ -7,14 +7,14 @@ description: >-
   deleting, folding or running cells; reading results and checking plots;
   widgets and data analysis in a Julia (Pluto) or R (Ember) notebook; working in a notebook
   another agent has open; or a notebook tool refusing a call. For a `.jl` or
-  `.R` file the user asks to open, show or look at, try `open_notebook` before
-  reading the file. Read it before the first
+  `.R` file the user asks to open, show, look at or asks about, try
+  `open_notebook` and its outline before reading the file. Read it before the first
   notebook tool call of a session. Not for Jupyter `.ipynb` files.
 ---
 
 # Working in a live notebook
 
-These tools act on a notebook that is running in Endeavor's runtime. The user watches the same notebook and can edit it while you work. It is not a file to patch: the runtime owns the notebook's file and rewrites it, so create notebooks with `new_notebook` and change them only through the tools. You can read any notebook's file to reuse its code.
+These tools act on a notebook that is running in Endeavor's runtime. The user watches the same notebook and can edit it while you work. It is not a file to patch: the runtime owns the notebook's file and rewrites it, so create notebooks with `new_notebook` and change them only through the tools. You can read another notebook's file to reuse its code; for this session's notebook, use the tools.
 
 The notebook is reactive. Running a cell also runs every cell that depends on it, and cells run in dependency order, not page order. `read_notebook_code` shows the order they run in.
 
@@ -32,6 +32,10 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
 - No notebook yet and the user wants notebook work: call `new_notebook` with a short descriptive file name, ending in `.jl` for Julia or `.R` for R. Make an R notebook when the user asks for R or their project is in R; otherwise Julia. R notebooks don't run on Windows yet: there, tell the user and offer Julia. Don't ask the user to make one. Its empty first cell is in `cell_ids` and counts as read, so edit that cell first.
 - The user names an existing notebook: `open_notebook`. If it is unclear which file they mean, ask; don't search for one to open. If the notebook is already open, the session joins it as it is and nothing runs (`already_open`). That is also how a second agent shares your notebook: give it the path.
 - After that, any call that opens, creates, changes or runs another notebook fails with `one_notebook`. A new step of the analysis is a new section in this notebook. If the user wants to work in another notebook, they start a new session.
+
+## Questions about a notebook
+
+When the user asks what a notebook does or what its results mean, start from `read_notebook_code` with `outline=true`: one line a cell, with what it defines and its output or error. Then `read_cell` the cells the question is about, and `view_cell_output` a plot before you describe it. Don't read all the code, or the notebook's file, to answer one question: it stays in the conversation, and every later message reads it again. Read all of it (`read_notebook_code` without `outline`) only when the task needs all of it, such as reviewing the whole analysis.
 
 ## Read, stage, run, check
 
