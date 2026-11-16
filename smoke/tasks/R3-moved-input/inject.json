@@ -1,0 +1,7 @@
+{
+  "about": "Before the agent's first look, the user moves the cutoff slider from its default 2.5 to 4.0, through set_input as the page does.",
+  "when": "before",
+  "tools": ["list_notebooks", "open_notebook", "read_notebook_code", "read_cell", "get_cell_order", "get_execution_order"],
+  "notebook": "cutoff.R",
+  "steps": [{ "tool": "set_input", "args": { "name": "cutoff", "value": 4.0, "wait_for_completion": true } }]
+}
