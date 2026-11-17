@@ -191,6 +191,9 @@ function _cell_png(session, nb, cell)
     # long run delays this call until it yields.
     png = Pluto.WorkspaceManager.Malt.remote_eval_fetch(workspace.worker, quote
         let value = get(PlutoRunner.cell_results, $cell_id, nothing)
+            # `@bind x widget` makes the cell's value Pluto's `Bond`, which shows only as
+            # HTML; the widget inside it may have a picture of its own.
+            value isa PlutoRunner.Bond && (value = value.element)
             value !== nothing && showable(MIME"image/png"(), value) ?
                 repr(MIME"image/png"(), value) : nothing
         end
@@ -274,6 +277,7 @@ function _cell_text(session, nb, cell)
         # (`HTML(...)`, most widgets) prints as a struct dump; its stripped HTML reads better.
         text = Pluto.WorkspaceManager.Malt.remote_eval_fetch(workspace.worker, quote
             let value = get(PlutoRunner.cell_results, $cell_id, nothing)
+                value isa PlutoRunner.Bond && (value = value.element)   # as in `_cell_png`
                 generic = $html && which(show, Tuple{IO, MIME"text/plain", typeof(value)}).module === Base.Multimedia
                 value === nothing || generic ? nothing : sprint(show, MIME"text/plain"(), value;
                     context = (:limit => true, :displaysize => (60, 160)))
