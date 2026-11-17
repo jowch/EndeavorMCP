@@ -308,6 +308,28 @@ end
         @test EndeavorRuntime.render_png(session, nb, cells[2]) == Dict("png" => nothing, "mime" => "text/html")
     end
 
+    @testset "render_png and render_text read the widget inside an @bind" begin
+        widget = """
+        begin
+            struct Pictured end
+            Base.show(io::IO, ::MIME"text/html", ::Pictured) = print(io, "<input type=range>")
+            Base.show(io::IO, ::MIME"image/png", ::Pictured) = write(io, UInt8[0x89, 0x50, 0x4e, 0x47])
+            Base.show(io::IO, ::MIME"text/plain", ::Pictured) = print(io, "Pictured widget, value 3")
+            struct HtmlOnly end
+            Base.show(io::IO, ::MIME"text/html", ::HtmlOnly) = print(io, "<b>plain</b>")
+        end
+        """
+        session, nb, cells = make_session_with_notebook(widget, "@bind x Pictured()", "@bind y HtmlOnly()")
+        Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
+        @test cells[2].output.mime == MIME("text/html")
+        rendered = EndeavorRuntime.render_png(session, nb, cells[2])
+        @test (base64decode(rendered["png"]), rendered["mime"]) == (UInt8[0x89, 0x50, 0x4e, 0x47], "text/html")
+        @test EndeavorRuntime.render_text(session, nb, cells[2])["text"] == "Pictured widget, value 3"
+        # A widget with no picture or text form of its own reads as before.
+        @test EndeavorRuntime.render_png(session, nb, cells[3])["png"] === nothing
+        @test EndeavorRuntime.render_text(session, nb, cells[3])["text"] == "plain"
+    end
+
     @testset "render_text shows rich outputs as text" begin
         session, nb, cells = make_session_with_notebook(
             "Dict(\"mean\" => 2.5)",
