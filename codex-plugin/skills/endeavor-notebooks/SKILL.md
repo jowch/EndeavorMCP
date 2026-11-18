@@ -7,7 +7,8 @@ description: >-
   deleting, folding or running cells; reading results and checking plots;
   widgets and data analysis in a Julia (Pluto), R (Ember) or Python (marimo) notebook; working in a notebook
   another agent has open; or a notebook tool refusing a call. For a `.jl`, `.R`
-  or marimo `.py` file the user asks to open, show or look at, try `open_notebook` before
+  or `.py` file the user asks to open, show or look at (a `.py` file may be a marimo
+  notebook), try `open_notebook` before
   reading the file. Read it before the first
   notebook tool call of a session. Not for Jupyter `.ipynb` files.
 ---
