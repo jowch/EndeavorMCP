@@ -74,6 +74,11 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   Desktop also serves all its conversations on one connection, so its session
   may work on several notebooks, and one conversation can change a notebook
   another opened once it opens it (`X-Endeavor-Notebooks`, docs/endeavor-mcp.md).
+  Whether a session is the app's or the plugin's is the session's own, not the
+  runtime's: the front sends `X-Endeavor-Client: plugin` and the app's agents
+  `app`, so on one runtime that both use, each gets its own guide, browser
+  links, host tools and offer of Endeavor's own R. A caller that sends neither
+  is taken as the runtime's starter was (#110).
   `close_notebook` ends a session's own notebook's process when the user asks,
   as the app's Stop notebook does, so a sitting no longer needs `endeavor stop`
   (interface 37). Not yet: a notebook on a machine, which still opens in a browser
