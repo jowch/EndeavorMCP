@@ -731,6 +731,31 @@ fn the_runtime_end_to_end() {
         rt.call("endeavor/stop_notebook", json!({ "path": crashing })).unwrap();
     });
 
+    step("a read right after an agent's open with its run waits for that run (#331)", || {
+        let ids = ["33100001-bbeb-11f1-8e5f-a5a8320edb60", "33100002-bbeb-11f1-8e5f-a5a8320edb60"];
+        let codes = ["s = (sleep(2); 1)", "t = (sleep(2); s + 1)"];
+        let mut text = String::from("### A Pluto.jl notebook ###\n# v1.0.3\n\nusing Markdown\nusing InteractiveUtils\n\n");
+        for (id, code) in ids.iter().zip(codes) {
+            text.push_str(&format!("# ╔═╡ {id}\n{code}\n\n"));
+        }
+        text.push_str("# ╔═╡ Cell order:\n");
+        for id in ids {
+            text.push_str(&format!("# ╠═{id}\n"));
+        }
+        let opening = mac.join("opening.jl");
+        std::fs::write(&opening, text).unwrap();
+        let opening = opening.to_str().unwrap().to_owned();
+        rt.call("endeavor/set_notebook", json!({ "owner": "3", "notebook": opening })).unwrap();
+        let opened = rt.ok(THIRD, "open_notebook", json!({ "path": opening, "run_notebook": true }));
+        let id = opened["notebook_id"].as_str().unwrap().to_owned();
+        // At once, while the notebook's Julia starts: the read waits for the open's run, and the
+        // cell has its value.
+        let began = Instant::now();
+        let read = rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": ids[1] }));
+        assert_eq!((&read["output"], &read["running"], &read["queued"]), (&json!("2"), &json!(false), &json!(false)), "after {:.1} s: {read}", began.elapsed().as_secs_f64());
+        rt.call("endeavor/stop_notebook", json!({ "path": opening })).unwrap();
+    });
+
     step("the agent's Stop interrupts the cell its call is running", || {
         // Add a cell with `code` after the last one, run it waiting, and cancel the call 3 s in,
         // as the agent's client does when the user presses Stop: the cell, and how long the call took.

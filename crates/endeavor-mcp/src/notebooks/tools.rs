@@ -1393,7 +1393,19 @@ impl Call<'_> {
         if !warnings.is_empty() {
             result["warnings"] = json!(warnings);
         }
-        self.nbs.opened_by(self.owner, opened["path"].as_str().unwrap_or_default(), opened["notebook_id"].as_str().unwrap_or_default());
+        let id = opened["notebook_id"].as_str().unwrap_or_default();
+        self.nbs.opened_by(self.owner, opened["path"].as_str().unwrap_or_default(), id);
+        // The open's run of the whole notebook is the session's, as allow_execution's is (#170): a
+        // read or a waited submit waits for it (#331). Pluto marks every cell queued as it opens
+        // and names no run, so the run goes on while one of its cells hasn't finished.
+        // The notebook is open either way: a snapshot that fails only leaves the run unwaited.
+        if run && !self.owner.is_empty()
+            && let Ok(nb) = self.nbs.snapshot(id)
+        {
+            self.nbs.with_state(&nb.id, |state| {
+                state.started.push(Started { owner: self.owner.to_owned(), run: None, cells: nb.order.iter().cloned().collect(), follows: HashMap::new() });
+            });
+        }
         Ok(result)
     }
 
