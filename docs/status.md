@@ -78,7 +78,9 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   runtime's: the front sends `X-Endeavor-Client: plugin` and the app's agents
   `app`, so on one runtime that both use, each gets its own guide, browser
   links, host tools and offer of Endeavor's own R. A caller that sends neither
-  is taken as the runtime's starter was (#110).
+  is taken as the runtime's starter was (#110). Until the plugins' pinned build
+  has this, a runtime the plugin started ignores the app's header and still
+  answers the app's agents as the plugin's.
   `close_notebook` ends a session's own notebook's process when the user asks,
   as the app's Stop notebook does, so a sitting no longer needs `endeavor stop`
   (interface 37). Not yet: a notebook on a machine, which still opens in a browser

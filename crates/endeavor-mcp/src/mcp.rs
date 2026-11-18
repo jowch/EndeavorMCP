@@ -314,7 +314,8 @@ impl Bridge {
         }
     }
 
-    /// A session's working folder: the one it was given, else the standalone runtime's.
+    /// A session's working folder: the one it was given, else the standalone runtime's. The app's
+    /// sessions always give theirs, so the standalone folder is only ever the plugin's sessions' fallback.
     fn folder(&self, owner: &str) -> Folder {
         match self.folders.lock().unwrap().get(owner) {
             Some(Some(dir)) => Folder::In(dir.clone()),
