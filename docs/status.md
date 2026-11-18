@@ -495,4 +495,10 @@ Next:
   move of the unpacked files, which juliaup doesn't retry). `tests/own_julia.rs`
   covers these with real downloads (ignored by default); run on Linux only so
   far.
+- A Julia that juliaup removes while the runtime runs on it (`juliaup update`
+  removes the version it updates past) leaves the runtime unable to start a
+  notebook's process, which is that same Julia started again. Restart, open,
+  new and Run notebook then refuse with `julia_removed`, before they stop
+  anything, and Pluto's page Restart does nothing; restarting Julia fixes it
+  (#346).
 - marimo after Ember.
