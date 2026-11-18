@@ -1371,6 +1371,7 @@ nav#at_the_top > pluto-filepicker, nav#at_the_top > div.desktop_picker_group, #e
   var both = `
 footer form#feedback { display: none !important; }
 `;
+  var APP_FONTS = /Win/.test(navigator.platform) ? "http://endeavor.localhost/fonts" : "endeavor://localhost/fonts";
   var JULIA_MONO_WEB = "https://cdn.jsdelivr.net/gh/cormullion/juliamono@v0.63.2/webfonts";
   function juliaMonoFaces(from) {
     return [
@@ -1378,7 +1379,7 @@ footer form#feedback { display: none !important; }
       { file: "Bold", weight: 700, style: "normal" },
       { file: "RegularItalic", weight: 400, style: "italic" }
     ].map(({ file, weight, style }) => {
-      const src = from === "app" ? `url("endeavor://localhost/fonts/JuliaMono-${file}.ttf") format("truetype")` : `url("${JULIA_MONO_WEB}/JuliaMono-${file}.woff2") format("woff2")`;
+      const src = from === "app" ? `url("${APP_FONTS}/JuliaMono-${file}.ttf") format("truetype")` : `url("${JULIA_MONO_WEB}/JuliaMono-${file}.woff2") format("woff2")`;
       return `
 @font-face {
   font-family: JuliaMono;
