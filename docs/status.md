@@ -282,6 +282,28 @@ Known gaps:
 
 Next:
 
+- Python notebooks run in marimo (app #1), in the library and the plugin only so
+  far: the app and the notebook view beside the chat don't show them yet. `wire`
+  knows their files (`Backend::Marimo`: a `.py` with `import marimo` and
+  `app = marimo.App(`). The core starts Python notebooks' adapter
+  (`runtime/marimo/adapter.py`) through uv the first time one is opened or made,
+  drives it with R's protocol (`notebooks/r.rs`), serves marimo's page at
+  `/marimo/` (not its terminal or file listings), and stops it on exit. marimo
+  runs every notebook in its own uv environment from the notebook's header; a new
+  notebook's header pins marimo and an `exclude-newer` package date, and a
+  package a run imports is installed and written there at its exact version.
+  The notebooks are always lazy. marimo allows one editing page per notebook, so
+  the adapter watches as a read-only viewer and the user's page takes the notebook
+  over as its editor; a second page is read-only until its Take over. The page
+  and its WebSocket open only for a notebook that is open and allowed to run,
+  since opening one builds its environment; the proxy decodes a path before it
+  matches the refusals, as marimo's server does. A new notebook's header also
+  holds Python to the minor version it was made with (interface 42). The app's
+  runtime and a server's refuse Python notebooks for now. Not on Windows. Known
+  gaps: an opened notebook can't be changed in safe preview (#351), no tool moves
+  the package date (#352), ids shift after a reload (#353), `set_input` and
+  `view_cell_output` of HTML aren't there, and uv isn't installed for the user
+  (#354).
 - Ember (R notebooks) is in development in its own repository. It joins as
   another adapter behind the core, with its own path prefix on the one port
   ([runtime-core.md](runtime-core.md), [one-port.md](one-port.md)). So far

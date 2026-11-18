@@ -96,7 +96,7 @@ packages and notebook code all print to, so a stdio protocol would need a
 pipe of its own, and every adapter already serves HTTP (the engine's UI). The core opens the
 stream once the engine answers and reopens it if it drops, rereading every
 notebook when it does. An engine other than Pluto's that stops answering
-(R's) is dropped, and the next R notebook opened starts it again. Its
+(R's or Python's) is dropped, and the next R notebook opened starts it again. Its
 notebooks are kept as closed, with why it ended, until R reports one open
 again (an open's reply, or a snapshot that lists it) or the app's
 `stop_notebook` dismisses it: how

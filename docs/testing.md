@@ -256,6 +256,24 @@ shows up there.
 cargo test -p endeavor-mcp --test e2e_r -- --ignored --nocapture
 ```
 
+## Python notebooks against real marimo
+
+`crates/endeavor-mcp/tests/e2e_marimo.rs` runs `endeavor serve` with no Julia and real marimo.
+An agent opens a marimo notebook, which starts Python notebooks' adapter
+(`runtime/marimo/adapter.py`) through uv; it checks safe preview, edits and runs cells in
+order, reads an error, makes a new notebook (its header pins marimo and a package date), and
+reaches marimo's page at `/marimo/` (but not its terminal or file listings). A stand-in for
+marimo's page then takes the notebook as its editor and must see the agent's next edit: marimo
+doesn't send an edit back to the connection it came from, so an edit sent in the page's name
+never reached the page, whose autosave then put the old code back. Stopping the runtime stops
+marimo. It needs `uv` (on the PATH or in `~/.local/bin`) and PyPI, and prints `SKIPPED` and
+passes without uv. The first run downloads marimo into uv's cache. The `E2E` workflow runs it
+in a job of its own.
+
+```sh
+cargo test -p endeavor-mcp --test e2e_marimo -- --ignored --nocapture
+```
+
 ## The client library over real ssh
 
 `crates/endeavor-mcp/tests/e2e_client.rs` runs `endeavor_mcp::client` the way

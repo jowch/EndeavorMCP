@@ -258,6 +258,7 @@ impl Engines {
 pub fn of_path(path: &str) -> Backend {
     match Path::new(path).extension().and_then(|e| e.to_str()) {
         Some("R" | "r") => Backend::Ember,
+        Some("py") => Backend::Marimo,
         _ => Backend::Pluto,
     }
 }
@@ -289,6 +290,7 @@ pub fn language(backend: Backend) -> &'static str {
     match backend {
         Backend::Pluto => "Julia",
         Backend::Ember => "R",
+        Backend::Marimo => "Python",
     }
 }
 

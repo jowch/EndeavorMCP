@@ -212,6 +212,7 @@ impl Views {
         match backend {
             Backend::Pluto => self.pluto.get().map(|(port, secret)| (*port, secret.clone(), 0)).ok_or_else(|| "not_ready: Julia isn't running".to_owned()),
             Backend::Ember => self.ember.lock().unwrap().clone().ok_or_else(|| "not_ready: R isn't running".to_owned()),
+            Backend::Marimo => Err("not_ready: Python notebooks have no page in this view".to_owned()),
         }
     }
 

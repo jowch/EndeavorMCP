@@ -9,10 +9,11 @@ use serde_json::{Value, json};
 pub const TOOL: &str = "notebook_guide";
 
 /// Each skill file by its path under `plugin/skills`.
-const FILES: [(&str, &str); 7] = [
+const FILES: [(&str, &str); 8] = [
     (NOTEBOOKS, include_str!("../../../plugin/skills/endeavor-notebooks/SKILL.md")),
     (PLUTO, include_str!("../../../plugin/skills/endeavor-notebooks/reference/pluto.md")),
     ("endeavor-notebooks/reference/ember.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/ember.md")),
+    ("endeavor-notebooks/reference/marimo.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/marimo.md")),
     ("endeavor-notebooks/reference/app.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/app.md")),
     ("endeavor-notebooks/reference/errors.md", include_str!("../../../plugin/skills/endeavor-notebooks/reference/errors.md")),
     ("endeavor-machines/SKILL.md", include_str!("../../../plugin/skills/endeavor-machines/SKILL.md")),
@@ -33,7 +34,7 @@ how to find this session's notebook, the read-edit-run loop, and the rules for a
 /// description alone isn't enough: Haiku 4.5 starts on the tools without it,
 /// and then splits a cell's code wrongly and skips looking at plots (#242).
 /// With the skill but not the reference it still defines a name in two cells.
-pub const LOAD_SKILL: &str = "Before your first notebook tool call in a session, load the `endeavor-notebooks` skill, read the engine reference it names (`pluto.md` for Julia, `ember.md` for R) before you write a cell, and follow them: \
+pub const LOAD_SKILL: &str = "Before your first notebook tool call in a session, load the `endeavor-notebooks` skill, read the engine reference it names (`pluto.md` for Julia, `ember.md` for R, `marimo.md` for Python) before you write a cell, and follow them: \
 the read-edit-run loop, the rules for what one cell may hold and for names defined in two cells, and looking at a plot with `view_cell_output` before you say it is right.";
 
 /// Where the guide keeps what only the app needs, for an agent in the app without the skills.
@@ -53,9 +54,9 @@ const APP: &str = "These tools edit and run a live notebook, in Julia (Pluto) or
 /// What a runtime without the app (`endeavor serve` or `mcp`) tells every
 /// agent: the skill keeps what holds only in the app apart, and this says
 /// which side the agent is on.
-pub const STANDALONE: &str = "These tools edit and run live notebooks, in Julia (Pluto) or R (Ember), without the Endeavor app: \
+pub const STANDALONE: &str = "These tools edit and run live notebooks, in Julia (Pluto), R (Ember) or Python (marimo), without the Endeavor app: \
 the user watches them in a web browser, on the notebook's own page, and there is no notebook pane next to this chat. \
-When the user asks to open, show or look at a `.jl` or `.R` file, try `open_notebook` before reading the file, so they can watch it; if it fails with `not_a_notebook`, read the file. \
+When the user asks to open, show or look at a `.jl`, `.R` or `.py` file, call `open_notebook` on it before reading it, so they can watch it, even when you can't tell it is a notebook: a `.py` file may be a marimo notebook, and a plain script fails at once with `not_a_notebook`; then read the file. \
 `new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. When it has `browser_note`, no browser opened for the user: give them the address and follow the note. \
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts.";
@@ -130,7 +131,7 @@ fn whole() -> String {
     };
     format!(
         "This guide is the notebook skill followed by the reference for Julia notebooks (`endeavor-notebooks/reference/pluto.md`), so where the skill says to read that reference, it is below: don't ask for it again. \
-         For an R notebook, read the topic `endeavor-notebooks/reference/ember.md` before its first cell. \
+         For an R notebook, read the topic `endeavor-notebooks/reference/ember.md` before its first cell, and for a Python one `endeavor-notebooks/reference/marimo.md`. \
          Other links to .md paths in this guide are further topics: call `notebook_guide` with `topic` set to the path when the guide says to read one.\n\n\
          {}\n---\n\n\
          {}\n---\n\n\
@@ -213,7 +214,7 @@ mod tests {
         let guide = read(&json!({})).unwrap();
         assert!(guide.contains("\n# Working in a live notebook\n"), "{guide}");
         assert!(!guide.contains("\nname: endeavor-"), "front matter left in");
-        for topic in ["pluto", "ember", "app", "errors"] {
+        for topic in ["pluto", "ember", "marimo", "app", "errors"] {
             assert!(guide.contains(&format!("[reference/{topic}.md](endeavor-notebooks/reference/{topic}.md)")), "{topic}");
         }
         assert!(guide.contains("\n# Pluto notebooks (Julia)\n"), "the guide holds the cell rules");

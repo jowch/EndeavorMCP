@@ -1300,6 +1300,13 @@ impl Notebooks {
         self.state.lock().unwrap().idle_limit_hours
     }
 
+    /// Whether the notebook at `path` is open and allowed to run: what lets a browser open marimo's page
+    /// for it, which builds its environment.
+    pub fn open_and_allowed(&self, path: &str) -> bool {
+        let Ok(target) = canonical_path(path) else { return false };
+        self.snapshots().is_ok_and(|snapshots| snapshots.iter().any(|nb| nb.execution_allowed && !nb.safe_preview && canonical_path(&nb.path).is_ok_and(|p| p == target)))
+    }
+
     /// How many notebooks the engine has open, if it answers.
     pub fn open_count(&self) -> Option<usize> {
         self.snapshots().ok().map(|snapshots| snapshots.len())
@@ -1517,7 +1524,7 @@ impl Notebooks {
         // Ember keeps code as it stores it (`normalise_code`), and compares `expected` that way too.
         let backend = self.backend_of(&nb.id);
         let stored = |code: &str| match backend {
-            Backend::Pluto => code.to_owned(),
+            Backend::Pluto | Backend::Marimo => code.to_owned(),
             Backend::Ember => {
                 let code = code.replace("\r\n", "\n");
                 let mut lines: Vec<&str> = code.split('\n').collect();
@@ -1607,6 +1614,7 @@ impl Notebooks {
         let (fits, extension) = match self.backend_of(&nb.id) {
             Backend::Pluto => (target.ends_with(".jl"), ".jl"),
             Backend::Ember => (engines::of_path(&target) == Backend::Ember, ".R"),
+            Backend::Marimo => (target.ends_with(".py"), ".py"),
         };
         if !fits {
             return Err(format!("ArgumentError: invalid_path::Notebook path must end in {extension}: '{target}'"));

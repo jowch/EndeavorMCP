@@ -292,7 +292,7 @@
     "name": "fold_cell"
   },
   {
-    "description": "Read the whole notebook as one string, each cell under a marker line with its id: `# ╔═╡ <id>` in a Pluto notebook, `# %% id=<id>` in an Ember one, as in the notebook's file. Counts as a read of every cell it returns. Markdown (prose) cells are left out unless `include_markdown` is true, so `cell_ids` can have fewer ids than the notebook has cells (`get_cell_order` lists all of them); when any are left out, `markdown_cells_left_out` says how many. The engine's own package cells are always left out.",
+    "description": "Read the whole notebook as one string, each cell under a marker line with its id: `# ╔═╡ <id>` in a Pluto or marimo notebook, `# %% id=<id>` in an Ember one, as in the notebook's file. Counts as a read of every cell it returns. Markdown (prose) cells are left out unless `include_markdown` is true, so `cell_ids` can have fewer ids than the notebook has cells (`get_cell_order` lists all of them); when any are left out, `markdown_cells_left_out` says how many. The engine's own package cells are always left out.",
     "inputSchema": {
       "properties": {
         "include_markdown": {
@@ -498,7 +498,7 @@
     "name": "session_status"
   },
   {
-    "description": "Open an existing notebook file the user named, and make it this session's notebook. When the user asks to open, show or look at a `.jl` or `.R` file, try it before reading the file; it fails with `not_a_notebook` if the file isn't one. It opens in safe preview: no code runs until the user allows it. If the file is already open, the session joins that notebook as it is (`already_open`) and nothing runs. Fails with `one_notebook` if the session already works in another notebook that is open.",
+    "description": "Open an existing notebook file the user named, and make it this session's notebook. When the user asks to open, show or look at a `.jl`, `.R` or `.py` file, call it before reading the file, even when you can't tell it is a notebook (a `.py` file may be a marimo notebook); it fails at once with `not_a_notebook` if the file isn't one. It opens in safe preview: no code runs until the user allows it. If the file is already open, the session joins that notebook as it is (`already_open`) and nothing runs. Fails with `one_notebook` if the session already works in another notebook that is open.",
     "inputSchema": {
       "properties": {
         "path": {
@@ -522,7 +522,7 @@
     "inputSchema": {
       "properties": {
         "path": {
-          "description": "Where to create it, ending in `.jl` for a Julia notebook or `.R` for an R notebook (not on Windows); a relative path is inside the session's folder. The file must not exist yet and its folder must. Default: a notebook with a generated name in the session's folder, in R if the session was started for R notebooks and in Julia otherwise.",
+          "description": "Where to create it, ending in `.jl` for a Julia notebook, `.R` for an R notebook or `.py` for a Python (marimo) notebook (R and Python not on Windows); a relative path is inside the session's folder. The file must not exist yet and its folder must. Default: a notebook with a generated name in the session's folder, in R if the session was started for R notebooks and in Julia otherwise.",
           "type": "string"
         }
       },
