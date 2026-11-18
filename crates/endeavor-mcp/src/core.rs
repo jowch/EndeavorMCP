@@ -2221,13 +2221,21 @@ fn marimo_target(target: &str, allowed: impl Fn(&str) -> bool) -> MarimoTarget {
         return MarimoTarget::Refused;
     }
     // A notebook's page and its WebSocket name its file; marimo makes the notebook's session (and its
-    // environment) when the WebSocket connects.
-    let file = query.split('&').find_map(|pair| pair.strip_prefix("file=")).map(|file| percent_decoded(file, true));
-    match file {
-        Some(Some(file)) if allowed(&file) => MarimoTarget::Forward,
-        Some(_) => MarimoTarget::NotAllowed,
-        None if ["/ws", "/ws_sync", "/sse"].iter().any(|socket| rest == *socket || rest.starts_with(&format!("{socket}/"))) => MarimoTarget::NotAllowed,
-        None => MarimoTarget::Forward,
+    // environment) when the WebSocket connects. marimo decodes the keys too and takes the last
+    // `file`, so every pair is decoded here, and only one `file` may be given.
+    let mut files = Vec::new();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match (percent_decoded(key, true), percent_decoded(value, true)) {
+            (Some(key), Some(value)) => if key == "file" { files.push(value) },
+            _ => return MarimoTarget::NotAllowed,
+        }
+    }
+    match files.as_slice() {
+        [file] if allowed(file) => MarimoTarget::Forward,
+        [_, ..] => MarimoTarget::NotAllowed,
+        [] if ["/ws", "/ws_sync", "/sse"].iter().any(|socket| rest == *socket || rest.starts_with(&format!("{socket}/"))) => MarimoTarget::NotAllowed,
+        [] => MarimoTarget::Forward,
     }
 }
 
@@ -2577,6 +2585,13 @@ mod tests {
         assert_eq!(target("/marimo/sse?session_id=s"), MarimoTarget::NotAllowed);
         assert_eq!(target("/marimo/ws_sync?session_id=s"), MarimoTarget::NotAllowed);
         assert_eq!(target("/marimo/?file=%zz"), MarimoTarget::NotAllowed);
+        // marimo decodes the keys and takes the last `file`: a second one, however it's spelled, isn't let through.
+        for page in ["/marimo/", "/marimo/ws"] {
+            for query in ["file=/w/a%20b.py&file=/w/other.py", "file=/w/a%20b.py&%66ile=/w/other.py", "file=/w/a%20b.py&%66%69%6c%65=/w/other.py", "file=/w/a%20b.py&fil%zz=x", "%66ile=/w/other.py"] {
+                assert_eq!(target(&format!("{page}?{query}&session_id=s")), MarimoTarget::NotAllowed, "{page}?{query}");
+            }
+            assert_eq!(target(&format!("{page}?%66ile=/w/a%20b.py&session_id=s")), MarimoTarget::Forward, "{page}");
+        }
     }
 
     #[test]

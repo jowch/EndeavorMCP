@@ -31,6 +31,7 @@ Every call into marimo's internals is in this file; marimo is pinned
 import asyncio
 import ast
 import json
+import html as html_module
 import os
 import re
 import secrets
@@ -539,6 +540,30 @@ def html_text(html):
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def table_text(html):
+    """A table (a DataFrame's output) as text: its first page of rows, as marimo's page shows them, and how many rows it has in all."""
+    def attr(name):
+        found = re.search(name + r"='([^']*)'", html)
+        return html_module.unescape(found.group(1)) if found else None
+    try:
+        rows = json.loads(attr("data-data") or "null")
+        rows = json.loads(rows) if isinstance(rows, str) and rows[:1] in ("[", "{") else rows
+        total = json.loads(attr("data-total-rows") or "null")
+    except ValueError:
+        return None
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        shape = f", {total} rows" if isinstance(total, int) else ""
+        return f"[a table{shape}; its rows aren't in the output: read them with code, as `df.head(20)` or `print(df)`]"
+    columns = list(dict.fromkeys(k for r in rows for k in r if k != "_marimo_row_id"))
+    text = lambda v: "" if v is None else str(v)
+    grid = [columns] + [[text(r.get(c)) for c in columns] for r in rows]
+    widths = [max(len(line[i]) for line in grid) for i in range(len(columns))]
+    lines = ["  ".join(cell.rjust(w) for cell, w in zip(line, widths)) for line in grid]
+    if isinstance(total, int) and total > len(rows):
+        lines.append(f"[the first {len(rows)} of {total} rows]")
+    return "\n".join(lines)
+
+
 def output_text(out, console):
     parts = [x.get("data", "") for x in console if x.get("channel") in ("stdout", "stderr") and isinstance(x.get("data"), str)]
     bundle = bundle_of(out)
@@ -553,7 +578,10 @@ def output_text(out, console):
         parts.append(html_text(str(bundle["text/markdown"])))
     elif "text/html" in bundle and bundle["text/html"]:
         html = str(bundle["text/html"])
-        if "<marimo-ui-element" in html:
+        table = table_text(html) if "<marimo-table" in html else None
+        if table:
+            parts.append(table)
+        elif "<marimo-ui-element" in html:
             parts.append("[a marimo UI element: " + (re.search(r"<marimo-([a-z-]+)", html.split("<marimo-ui-element", 1)[1]) or ["", "widget"])[1] + "]")
         else:
             parts.append(html_text(html))

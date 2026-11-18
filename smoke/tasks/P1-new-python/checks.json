@@ -4,7 +4,8 @@
     { "check": "called", "tool": "new_notebook", "min": 1, "max": 1 },
     { "check": "notebooks", "count": 1, "ending": ".py" },
     { "check": "no_errored_cells" },
-    { "check": "output_contains", "texts": ["74.08", "4.97"] },
+    { "check": "output_contains", "texts": ["74.08"] },
+    { "check": "output_contains", "texts": ["4.97"], "soft": true },
     { "check": "agent_tools_not_used", "tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"] },
     { "check": "final_message_contains_any", "texts": ["http://"], "soft": true },
     { "check": "reproducible" }

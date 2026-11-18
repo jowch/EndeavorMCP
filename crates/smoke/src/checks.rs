@@ -231,9 +231,11 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                     differ.push(format!("{} wasn't opened again", nb.path));
                     continue;
                 };
-                for cell in nb.cells.iter().filter(|c| !c.busy && !is_picture(&c.output)) {
+                for (at, cell) in nb.cells.iter().enumerate().filter(|(_, c)| !c.busy && !is_picture(&c.output)) {
                     compared += 1;
-                    match again.cell(&cell.id) {
+                    // A marimo notebook's cell ids aren't in its file, so a reload gives new
+                    // ones (#353): there, the same code in the same place is the same cell.
+                    match again.cell(&cell.id).or_else(|| again.cells.get(at).filter(|a| a.code == cell.code)) {
                         None => differ.push(format!("{}: gone", first_line(&cell.code))),
                         Some(a) if a.errored != cell.errored => differ.push(format!("{}: errored {} then {}", first_line(&cell.code), cell.errored, a.errored)),
                         Some(a) if a.output.trim_end() != cell.output.trim_end() => {
@@ -462,6 +464,13 @@ mod tests {
         assert!(!changed.passed && changed.detail.contains("b = 1"), "{}", changed.detail);
         assert!(!judge(Ok(vec![notebook(&[("a", "1", false)])])).passed, "a cell missing from the rerun fails");
         assert!(!judge(Err("Julia didn't start".into())).passed);
+        let renamed = |ids: [&str; 4], codes: [&str; 4]| {
+            let mut nb = notebook(&[(ids[0], "1", false), (ids[1], "2", false), (ids[2], "3", false), (ids[3], "", false)]);
+            nb.cells.iter_mut().zip(codes).for_each(|(c, code)| c.code = code.into());
+            nb
+        };
+        assert!(judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1", "c = 1", "d = 1"])])).passed, "a reload that gives new ids matches by place and code");
+        assert!(!judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "c = 1", "b = 1", "d = 1"])])).passed, "but not a cell that moved");
         let busy = [notebook(&[("c", "", true)])];
         let ev = Evidence { calls: &[], notebooks: &busy, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("c", "3", false)])])), turns: &[], server_files: &[] };
         assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "nothing compared fails");
