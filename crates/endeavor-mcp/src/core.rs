@@ -51,7 +51,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// missing, doesn't count (`network`); nor do descriptions and changes inside the core. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 40;
+pub const INTERFACE: u32 = 42;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -1414,6 +1414,10 @@ impl MarimoStarter {
         if cfg!(windows) {
             return Err("unsupported::Python notebooks don't work on Windows yet".into());
         }
+        // ponytail: the app has no pane for marimo's page yet, and a server's runtime has no uv set up (#354).
+        if served.bridge.standalone.is_none() {
+            return Err("unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet in the Endeavor app or on a server".into());
+        }
         let uv = find_uv().ok_or_else(|| "python_not_found::Python notebooks need uv, which isn't installed. Install it (https://docs.astral.sh/uv/getting-started/installation/), then try again.".to_owned())?;
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("python_failed::{e}"))?;
@@ -1925,7 +1929,8 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
             }
             (Route::Marimo, _) => {
                 let marimo = served.marimo.lock().unwrap().clone();
-                match (marimo_target(request.path()), marimo) {
+                let target = marimo_target(request.target(), |file| served.bridge.notebooks.open_and_allowed(file));
+                match (target, marimo) {
                     (MarimoTarget::Moved(location), _) => {
                         http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
                         let close = if request.keeps_alive() { "" } else { "Connection: close\r\n" };
@@ -1935,6 +1940,11 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
                     (MarimoTarget::Refused, _) => {
                         http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
                         http::respond(&mut client, "404 Not Found", None, b"", request.keeps_alive())?;
+                        request.keeps_alive()
+                    }
+                    (MarimoTarget::NotAllowed, _) => {
+                        http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
+                        http::respond(&mut client, "403 Forbidden", Some("text/html; charset=utf-8"), MARIMO_NOT_ALLOWED_PAGE.as_bytes(), request.keeps_alive())?;
                         request.keeps_alive()
                     }
                     (MarimoTarget::Forward, None) => return refuse(&mut client, "503 Service Unavailable", "Python notebooks aren't running"),
@@ -2186,21 +2196,74 @@ enum MarimoTarget {
     /// For bare `/marimo`, where to send the browser instead.
     Moved(String),
     /// marimo's terminal, and its file and home listings: the user's computer beyond the notebook, which
-    /// the page doesn't need for one notebook.
+    /// the page doesn't need for one notebook. Also a path that could decode to one of them.
     Refused,
+    /// A page or WebSocket for a file that isn't an open notebook allowed to run: marimo would build its
+    /// environment, installing what its header names, which runs code (safe preview).
+    NotAllowed,
 }
 
-fn marimo_target(path: &str) -> MarimoTarget {
-    let rest = path.strip_prefix("/marimo").unwrap_or(path);
+/// Where a request for `target` under `/marimo` goes. `allowed` says whether a file is an open notebook
+/// allowed to run. marimo's server decodes the path before it routes it, so the path is decoded here
+/// before it's matched, and one that decodes to something odd is refused.
+fn marimo_target(target: &str, allowed: impl Fn(&str) -> bool) -> MarimoTarget {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let Some(path) = percent_decoded(path, false) else { return MarimoTarget::Refused };
+    let rest = path.strip_prefix("/marimo").unwrap_or(&path);
     if rest.is_empty() {
-        return MarimoTarget::Moved("/marimo/".into());
+        return MarimoTarget::Moved(if query.is_empty() { "/marimo/".into() } else { format!("/marimo/?{query}") });
     }
-    const REFUSED: [&str; 3] = ["/terminal", "/api/files/", "/api/home/"];
-    if REFUSED.iter().any(|refused| rest == refused.trim_end_matches('/') || rest.starts_with(refused) || rest.starts_with(&format!("{}/", refused.trim_end_matches('/')))) {
+    if rest.contains(['%', '\\']) || rest.contains("//") || rest.split('/').any(|segment| segment == ".." || segment == ".") {
         return MarimoTarget::Refused;
     }
-    MarimoTarget::Forward
+    const REFUSED: [&str; 3] = ["/terminal", "/api/files", "/api/home"];
+    if REFUSED.iter().any(|refused| rest == *refused || rest.starts_with(&format!("{refused}/"))) {
+        return MarimoTarget::Refused;
+    }
+    // A notebook's page and its WebSocket name its file; marimo makes the notebook's session (and its
+    // environment) when the WebSocket connects.
+    let file = query.split('&').find_map(|pair| pair.strip_prefix("file=")).map(|file| percent_decoded(file, true));
+    match file {
+        Some(Some(file)) if allowed(&file) => MarimoTarget::Forward,
+        Some(_) => MarimoTarget::NotAllowed,
+        None if ["/ws", "/ws_sync", "/sse"].iter().any(|socket| rest == *socket || rest.starts_with(&format!("{socket}/"))) => MarimoTarget::NotAllowed,
+        None => MarimoTarget::Forward,
+    }
 }
+
+/// `text` with its `%XX` escapes decoded (and `+` as a space, in a query): None when an escape is
+/// broken or the result isn't UTF-8.
+fn percent_decoded(text: &str, query: bool) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = |b: Option<&u8>| b.and_then(|b| (*b as char).to_digit(16));
+                out.push((hex(bytes.get(i + 1))? * 16 + hex(bytes.get(i + 2))?) as u8);
+                i += 3;
+            }
+            b'+' if query => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// What a browser sees for a Python notebook it may not open yet.
+const MARIMO_NOT_ALLOWED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Endeavor</title>
+<body style=\"font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; line-height: 1.5\">
+<h1>This notebook isn't allowed to run yet</h1>
+<p>Opening a Python notebook here installs the packages it names, which runs code. It opens once it is allowed to run: ask your agent to run it, or to open it again once you've allowed it.</p>
+</body>
+";
 
 /// `target` with Ember's `secret` as its only `secret` query parameter.
 fn with_secret(target: &str, secret: &str) -> String {
@@ -2489,18 +2552,31 @@ mod tests {
 
     #[test]
     fn marimos_page_is_under_its_prefix_without_its_terminal_or_file_listings() {
+        let open = |file: &str| file == "/w/a b.py";
+        let target = |t: &str| marimo_target(t, open);
         assert_eq!(Route::of("/marimo"), Route::Marimo);
         assert_eq!(Route::of("/marimo/ws"), Route::Marimo);
         assert_eq!(Route::of("/marimoz"), Route::Pluto);
-        assert_eq!(marimo_target("/marimo"), MarimoTarget::Moved("/marimo/".into()));
-        assert_eq!(marimo_target("/marimo/"), MarimoTarget::Forward);
-        assert_eq!(marimo_target("/marimo/api/document/transaction"), MarimoTarget::Forward);
-        for refused in ["/marimo/terminal", "/marimo/terminal/ws", "/marimo/api/files/list_files", "/marimo/api/home/workspace_files", "/marimo/api/home"] {
-            assert_eq!(marimo_target(refused), MarimoTarget::Refused, "{refused}");
+        assert_eq!(target("/marimo"), MarimoTarget::Moved("/marimo/".into()));
+        assert_eq!(target("/marimo?file=x"), MarimoTarget::Moved("/marimo/?file=x".into()));
+        assert_eq!(target("/marimo/assets/index.js"), MarimoTarget::Forward);
+        assert_eq!(target("/marimo/api/document/transaction"), MarimoTarget::Forward);
+        for refused in ["/marimo/terminal", "/marimo/terminal/ws", "/marimo/api/files/list_files", "/marimo/api/home/workspace_files", "/marimo/api/home", "/marimo/api/files"] {
+            assert_eq!(target(refused), MarimoTarget::Refused, "{refused}");
         }
-        assert_eq!(with_secret("/edit?id=1", "s"), "/edit?id=1&secret=s");
-        assert_eq!(with_secret("/", "s"), "/?secret=s");
-        assert_eq!(with_secret("/edit?secret=theirs&id=1", "s"), "/edit?id=1&secret=s", "a secret the browser sends is replaced");
+        // marimo's server decodes the path before routing it.
+        for refused in ["/marimo/%74erminal/ws", "/marimo/api/%66iles/list_files", "/marimo/api%2Ffiles/list_files", "/marimo/api/%2566iles/x", "/marimo//api/files/x", "/marimo/x/../api/files/x", "/marimo/api/home%", "/marimo/%ff"] {
+            assert_eq!(target(refused), MarimoTarget::Refused, "{refused}");
+        }
+        // The page and WebSocket of an open notebook that may run, and nothing else: opening one builds its environment.
+        assert_eq!(target("/marimo/?file=/w/a%20b.py"), MarimoTarget::Forward);
+        assert_eq!(target("/marimo/ws?session_id=s&file=/w/a+b.py"), MarimoTarget::Forward);
+        assert_eq!(target("/marimo/?file=/w/other.py"), MarimoTarget::NotAllowed);
+        assert_eq!(target("/marimo/ws?file=/etc/x.py&session_id=s"), MarimoTarget::NotAllowed);
+        assert_eq!(target("/marimo/ws?session_id=s"), MarimoTarget::NotAllowed);
+        assert_eq!(target("/marimo/sse?session_id=s"), MarimoTarget::NotAllowed);
+        assert_eq!(target("/marimo/ws_sync?session_id=s"), MarimoTarget::NotAllowed);
+        assert_eq!(target("/marimo/?file=%zz"), MarimoTarget::NotAllowed);
     }
 
     #[test]

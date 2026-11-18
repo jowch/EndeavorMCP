@@ -23,8 +23,6 @@ const EMBER_HEADER: &str = "### An Ember notebook ###";
 impl Backend {
     /// The kinds the app offers and lists.
     pub const ALL: [Backend; 2] = [Backend::Pluto, Backend::Ember];
-    /// Every kind the runtime runs.
-    pub const EVERY: [Backend; 3] = [Backend::Pluto, Backend::Ember, Backend::Marimo];
 
     /// Its name in `notebook://<name>/…` cell URIs.
     pub fn name(self) -> &'static str {
@@ -35,7 +33,8 @@ impl Backend {
         }
     }
 
-    /// The first line of its notebook files.
+    /// The first line of its notebook files. Never compare text with Marimo's, which is empty, so
+    /// any text starts with it: `is_marimo` tells a marimo file.
     fn header(self) -> &'static str {
         match self {
             Backend::Pluto => PLUTO_HEADER,
@@ -70,9 +69,15 @@ impl Backend {
         (read && first == header.as_bytes()).then_some(backend)
     }
 
-    /// The page for notebook `id`, from the runtime's root URL (`http://host:port/?token=…`).
+    /// The page for notebook `id`, from the runtime's root URL (`http://host:port/?token=…`). marimo
+    /// names its pages by the notebook's file, not its id (`/marimo/?file=<path>`), so Marimo's is only
+    /// marimo's root, and `notebook_id` finds no id in it.
     pub fn notebook_url(self, root: &str, id: &str) -> String {
-        root.replacen("/?", &format!("{}/edit?id={id}&", self.prefix()), 1)
+        match self {
+            // ponytail: the app has no pane for Python notebooks yet; slice 2 gives it the path.
+            Backend::Marimo => root.replacen("/?", &format!("{}/?", self.prefix()), 1),
+            _ => root.replacen("/?", &format!("{}/edit?id={id}&", self.prefix()), 1),
+        }
     }
 
     /// The notebook id in a notebook page's URL, not yet validated.
@@ -80,7 +85,7 @@ impl Backend {
         let (address, query) = url.split_once('?')?;
         // The path after `scheme://host:port`, or the whole thing when the URL has no host.
         let path = address.split_once("://").map_or(address, |(_, rest)| rest.find('/').map_or("", |slash| &rest[slash..]));
-        if path != format!("{}/edit", self.prefix()) {
+        if self == Backend::Marimo || path != format!("{}/edit", self.prefix()) {
             return None;
         }
         query.split('&').find_map(|kv| kv.strip_prefix("id="))
@@ -152,10 +157,11 @@ mod tests {
 
     #[test]
     fn marimo_pages_are_under_their_own_prefix() {
+        // marimo names its pages by file, so there is no page by id.
         let url = Backend::Marimo.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc");
-        assert_eq!(url, "http://127.0.0.1:1234/marimo/edit?id=abc&token=t0k3n");
-        assert_eq!(Backend::Marimo.notebook_id(&url), Some("abc"));
-        assert_eq!(Backend::Ember.notebook_id(&url), None);
+        assert_eq!(url, "http://127.0.0.1:1234/marimo/?token=t0k3n");
+        assert_eq!(Backend::Marimo.notebook_id(&url), None);
+        assert_eq!(Backend::Marimo.notebook_id("http://127.0.0.1:1234/marimo/edit?id=abc"), None);
     }
 
     #[test]

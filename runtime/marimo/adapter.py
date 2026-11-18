@@ -81,9 +81,11 @@ manager = "uv"
 # sandbox's packages. marimo is pinned to the server's version (else marimo adds `marimo>=<newest>`, and
 # the kernel can come up newer than the server), and `exclude-newer` holds every package, dependencies
 # included, to what was published by the time the notebook was made, as an R notebook's package date
-# does. Packages the notebook imports are added with their exact versions (`Notebook.install`).
+# does. Python is held to the minor version it was made with, since packages from that date may have no
+# wheels for a later one. Packages the notebook imports are added with their exact versions
+# (`Notebook.install`).
 NEW_HEADER = """# /// script
-# requires-python = ">=3.10"
+# requires-python = "=={python}.*"
 # dependencies = [
 #     "marimo=={version}",
 # ]
@@ -434,9 +436,17 @@ class Notebook:
         if not modules:
             return False
         self.missing |= set(modules)
-        code = CODE_MODE + "from marimo._runtime.packages.module_name_to_pypi_name import module_name_to_pypi_name\n" \
-            "names = module_name_to_pypi_name()\nasync with ctx:\n" + \
-            "".join(f"    ctx.packages.add(names.get({m!r}, {m!r}))\n" for m in sorted(modules))
+        # marimo 0.25.1 adds a sandboxed notebook's package with `uv add --script`, which keeps to the
+        # header's date (e2e_marimo checks it). Its other way in, `uv pip install`, reads no header and
+        # would take today's version, which a header dated before it can't build again; the date is set
+        # for that one too.
+        date = package_date(self.path)
+        code = CODE_MODE + "import os\nfrom marimo._runtime.packages.module_name_to_pypi_name import module_name_to_pypi_name\n" \
+            "names = module_name_to_pypi_name()\n" + \
+            (f"os.environ['UV_EXCLUDE_NEWER'] = {date!r}\n" if date else "") + \
+            "try:\n    async with ctx:\n" + \
+            "".join(f"        ctx.packages.add(names.get({m!r}, {m!r}))\n" for m in sorted(modules)) + \
+            "finally:\n    os.environ.pop('UV_EXCLUDE_NEWER', None)\n"
         rerun = sorted({c for cs in modules.values() for c in cs}, key=self.order.index)
         for c in rerun:
             self.cells[c]["status"], self.cells[c]["queued_by_us"] = "queued", True
@@ -551,6 +561,17 @@ def output_text(out, console):
         parts.append(f"[{', '.join(sorted(bundle))} output]")
     parts = [p.rstrip("\n") for p in parts if p]
     return cap("\n".join(parts))
+
+
+def package_date(path):
+    """The `exclude-newer` date in a notebook's PEP 723 header, or None."""
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return None
+    block = re.search(r"^# /// script\s*$(.*?)^# ///\s*$", text, re.M | re.S)
+    found = block and re.search(r'^#\s*exclude-newer\s*=\s*"([^"]+)"', block.group(1), re.M)
+    return found.group(1) if found else None
 
 
 def json_text(data):
@@ -735,7 +756,7 @@ class Adapter:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # The first write of a file no engine has yet: marimo's own empty notebook.
         date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        Path(path).write_text(NEW_HEADER.format(version=marimo.__version__, date=date) + NEW_NOTEBOOK)
+        Path(path).write_text(NEW_HEADER.format(python=f"{sys.version_info[0]}.{sys.version_info[1]}", version=marimo.__version__, date=date) + NEW_NOTEBOOK)
         r = await self.open(path, True)
         nb = self.notebooks[r["notebook_id"]]
         r["cells"] = [{"cell_id": c, "code": nb.cells[c]["code"]} for c in nb.order]

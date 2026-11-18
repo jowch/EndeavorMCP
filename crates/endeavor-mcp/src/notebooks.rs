@@ -1300,6 +1300,13 @@ impl Notebooks {
         self.state.lock().unwrap().idle_limit_hours
     }
 
+    /// Whether the notebook at `path` is open and allowed to run: what lets a browser open marimo's page
+    /// for it, which builds its environment.
+    pub fn open_and_allowed(&self, path: &str) -> bool {
+        let Ok(target) = canonical_path(path) else { return false };
+        self.snapshots().is_ok_and(|snapshots| snapshots.iter().any(|nb| nb.execution_allowed && !nb.safe_preview && canonical_path(&nb.path).is_ok_and(|p| p == target)))
+    }
+
     /// How many notebooks the engine has open, if it answers.
     pub fn open_count(&self) -> Option<usize> {
         self.snapshots().ok().map(|snapshots| snapshots.len())
