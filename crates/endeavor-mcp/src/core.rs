@@ -211,7 +211,7 @@ pub fn main(argv: &[String]) -> ! {
     Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
     let not_let_in = not_let_in(&open_command(&args.state_dir));
     let allow_r_install = Arc::new(std::sync::atomic::AtomicBool::new(args.install_r));
-    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new() });
+    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new(), marimo: Default::default() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
     let r = RStarter::new(&args, &engine_token, allow_r_install);
@@ -219,9 +219,14 @@ pub fn main(argv: &[String]) -> ! {
     let r = RStarter { mask: Some(inherited_mask), ..r };
     let r = Arc::new(r);
     let _ = served.r.set(r.clone());
-    let starting = (r.clone(), served.clone());
+    let marimo = MarimoStarter::new(&args, &engine_token);
+    #[cfg(unix)]
+    let marimo = MarimoStarter { mask: Some(inherited_mask), ..marimo };
+    let marimo = Arc::new(marimo);
+    let starting = (r.clone(), served.clone(), marimo.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, came, wait| match backend {
         Backend::Ember => starting.0.start_noting(&starting.1, came + wait.min(ember_wait())),
+        Backend::Marimo => starting.2.start(&starting.1),
         Backend::Pluto => starting.1.julia.wait(&starting.1, wait.saturating_sub(came.elapsed()).min(julia_wait())).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait. Set before
@@ -266,6 +271,7 @@ pub fn main(argv: &[String]) -> ! {
     }
     let _ = std::fs::remove_file(args.state_dir.join(JULIA_STATE));
     r.stop();
+    marimo.stop();
     remove_state(&args.state_dir, std::process::id() as i32, None);
     match stop {
         Stop::Julia(status) => exit_like(status),
@@ -1373,6 +1379,133 @@ const INSTALL_FAILED: &str = "r_failed::Couldn't install Ember for R notebooks; 
 /// Why R notebooks have no Ember, when there's no compiler to build it.
 const NO_COMPILER: &str = "r_failed::Couldn't install Ember for R notebooks: it has to be built on this computer, and there is no compiler here to build it. The runtime's log has the details.";
 
+/// Starts Python notebooks' adapter (`runtime/marimo/adapter.py`, which runs marimo) the first time a
+/// Python notebook is opened or made, and stops it when the core ends. uv runs it, with the packages
+/// in `requirements.txt`; each notebook then gets its own uv environment from its header.
+struct MarimoStarter {
+    adapter: PathBuf,
+    requirements: PathBuf,
+    state: PathBuf,
+    /// The engines' key, which the adapter's bridge takes: not the MCP bearer token.
+    token: String,
+    #[cfg(unix)]
+    mask: Option<libc::sigset_t>,
+    spawn: Spawner,
+    child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+}
+
+impl MarimoStarter {
+    fn new(args: &Args, token: &str) -> MarimoStarter {
+        let folder = args.runtime.join("marimo");
+        MarimoStarter {
+            adapter: folder.join("adapter.py"),
+            requirements: folder.join("requirements.txt"),
+            state: args.state_dir.join(MARIMO_STATE),
+            token: token.to_owned(),
+            #[cfg(unix)]
+            mask: None,
+            spawn: Spawner::new(),
+            child: Arc::default(),
+        }
+    }
+
+    /// Start the adapter and wait until marimo answers: what answers for Python, and marimo's page on `/marimo/`.
+    fn start(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+        if cfg!(windows) {
+            return Err("unsupported::Python notebooks don't work on Windows yet".into());
+        }
+        let uv = find_uv().ok_or_else(|| "python_not_found::Python notebooks need uv, which isn't installed. Install it (https://docs.astral.sh/uv/getting-started/installation/), then try again.".to_owned())?;
+        let _ = std::fs::remove_file(&self.state);
+        let secret = ember_secret().map_err(|e| format!("python_failed::{e}"))?;
+        let mut command = Command::new(&uv);
+        command.args(["run", "--quiet", "--no-project", "--with-requirements"]).arg(&self.requirements).arg("python").arg(&self.adapter);
+        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_MARIMO_TOKEN", &secret).env("ENDEAVOR_MARIMO_STATE", &self.state).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        if let Some(mask) = self.mask {
+            // SAFETY: only async-signal-safe calls between fork and exec.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                    Ok(())
+                });
+            }
+        }
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            command.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        let mut child = self.spawn.spawn(command).map_err(|e| format!("python_not_found::Couldn't start uv ({}): {e}", uv.display()))?;
+        let last_words = child.stderr.take().map(pass_on_stderr);
+        // ponytail: the first start downloads marimo and maybe Python, which the call waits for
+        // whole; no "installing" answer to come back to, as R has.
+        let deadline = std::time::Instant::now() + MARIMO_START;
+        let state = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
+                return Err(format!("python_failed::Python notebooks' engine stopped while starting: {}", why_r_ended(Some(status), &said)));
+            }
+            if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
+                break state;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("python_failed::Python notebooks' engine didn't start within {} seconds", MARIMO_START.as_secs()));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("python_failed::marimo's state has no {key}: {state}"));
+        let (bridge, page) = (port("bridge_port")?, port("marimo_port")?);
+        *served.marimo.lock().unwrap() = Some(Page { port: page, secret });
+        let (children, pid) = (self.child.clone(), child.id());
+        if let Some(mut old) = self.child.lock().unwrap().replace(child) {
+            let _ = old.kill();
+            let _ = old.wait();
+        }
+        let why_ended = move || {
+            let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
+            let status = children.lock().unwrap().as_mut().filter(|child| child.id() == pid).and_then(|child| child.try_wait().ok().flatten());
+            Some(why_r_ended(status, &said))
+        };
+        Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
+    }
+
+    fn stop(&self) {
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            // SIGTERM first: the adapter stops marimo, which stops each notebook's kernel.
+            #[cfg(unix)]
+            {
+                // SAFETY: a plain kill(2) of our own child.
+                unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+                let by = std::time::Instant::now() + Duration::from_secs(3);
+                while std::time::Instant::now() < by && matches!(child.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::fs::remove_file(&self.state);
+    }
+}
+
+/// How long the first Python notebook waits for marimo: uv may download Python and marimo first.
+const MARIMO_START: Duration = Duration::from_secs(300);
+
+const MARIMO_STATE: &str = "marimo.json";
+
+/// uv: on PATH, where its installer puts it, or Homebrew's.
+fn find_uv() -> Option<PathBuf> {
+    let home = crate::paths::Env::here().home;
+    let path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
+    let more = [home.join(".local/bin"), home.join(".cargo/bin"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")];
+    path.into_iter().chain(more).map(|dir| dir.join("uv")).find(|uv| uv.is_file())
+}
+
 /// How the error that R stopped while its adapter started begins.
 const STOPPED_STARTING: &str = "r_failed::R stopped while starting";
 
@@ -1417,7 +1550,7 @@ fn set_pluto_folder(julia_port: u16, token: &str, folder: &str) {
 /// (`unknown`) a folder that has Julia (Pluto) notebooks starts it, and one with only R notebooks, or
 /// none, never does. It never downloads Julia (`JuliaStarter::begin`).
 fn warm_for(served: &Arc<Served>, folder: &str, kind: &str) {
-    if !served.julia.when_needed || !served.julia.idle() || kind == "r" {
+    if !served.julia.when_needed || !served.julia.idle() || kind == "r" || kind == "python" {
         return;
     }
     let (served, folder, said) = (served.clone(), folder.to_owned(), kind == "julia");
@@ -1560,6 +1693,8 @@ struct Served {
     stops: std::sync::mpsc::Sender<Stop>,
     /// Ember's, while it runs, for `/ember/`.
     ember: std::sync::Mutex<Option<Page>>,
+    /// marimo's, while it runs, for `/marimo/`.
+    marimo: std::sync::Mutex<Option<Page>>,
     /// Whether Endeavor's own R may be installed (`RStarter::allow_own`).
     allow_r_install: Arc<std::sync::atomic::AtomicBool>,
     /// R notebooks' starter, for `endeavor/r_status`: set once, as the core starts.
@@ -1665,6 +1800,8 @@ enum Route {
     NotFound,
     /// `/ember` and below: Ember's page, its files and its WebSocket.
     Ember,
+    /// `/marimo` and below: marimo's page, its API and its WebSocket.
+    Marimo,
     /// Everything else: Pluto's page, its files and its WebSocket.
     Pluto,
 }
@@ -1672,7 +1809,7 @@ enum Route {
 impl Route {
     /// An engine's page, which a browser reaches with the cookie.
     fn is_page(self) -> bool {
-        matches!(self, Route::Pluto | Route::Ember)
+        matches!(self, Route::Pluto | Route::Ember | Route::Marimo)
     }
 
     fn of(path: &str) -> Route {
@@ -1683,6 +1820,8 @@ impl Route {
             _ if path.starts_with("/endeavor/") => Route::NotFound,
             "/ember" => Route::Ember,
             _ if path.starts_with("/ember/") => Route::Ember,
+            "/marimo" => Route::Marimo,
+            _ if path.starts_with("/marimo/") => Route::Marimo,
             _ => Route::Pluto,
         }
     }
@@ -1780,6 +1919,32 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
                         request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Cookie"));
                         forward(request, None, &mut reader, ember.port, "R", &|response| {
                             response.headers.retain(|(name, value)| !(name.eq_ignore_ascii_case("Set-Cookie") && value.trim_start().starts_with("ember_secret")));
+                        })?
+                    }
+                }
+            }
+            (Route::Marimo, _) => {
+                let marimo = served.marimo.lock().unwrap().clone();
+                match (marimo_target(request.path()), marimo) {
+                    (MarimoTarget::Moved(location), _) => {
+                        http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
+                        let close = if request.keeps_alive() { "" } else { "Connection: close\r\n" };
+                        write!(client, "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\n{close}\r\n")?;
+                        request.keeps_alive()
+                    }
+                    (MarimoTarget::Refused, _) => {
+                        http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
+                        http::respond(&mut client, "404 Not Found", None, b"", request.keeps_alive())?;
+                        request.keeps_alive()
+                    }
+                    (MarimoTarget::Forward, None) => return refuse(&mut client, "503 Service Unavailable", "Python notebooks aren't running"),
+                    (MarimoTarget::Forward, Some(marimo)) => {
+                        // marimo serves under `/marimo` itself (`--base-url`), so the target stays; it takes its
+                        // token as a bearer, the browser's cookie and authorization go no further.
+                        request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Cookie"));
+                        request.headers.push(("Authorization".into(), format!("Bearer {}", marimo.secret)));
+                        forward(request, None, &mut reader, marimo.port, "Python", &|response| {
+                            response.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Set-Cookie"));
                         })?
                     }
                 }
@@ -2012,6 +2177,29 @@ fn ember_target(target: &str) -> Result<String, String> {
         return Err(format!("/ember/{rest}"));
     }
     Ok(rest.to_owned())
+}
+
+/// What a request under `/marimo` gets.
+#[derive(Debug, PartialEq)]
+enum MarimoTarget {
+    Forward,
+    /// For bare `/marimo`, where to send the browser instead.
+    Moved(String),
+    /// marimo's terminal, and its file and home listings: the user's computer beyond the notebook, which
+    /// the page doesn't need for one notebook.
+    Refused,
+}
+
+fn marimo_target(path: &str) -> MarimoTarget {
+    let rest = path.strip_prefix("/marimo").unwrap_or(path);
+    if rest.is_empty() {
+        return MarimoTarget::Moved("/marimo/".into());
+    }
+    const REFUSED: [&str; 3] = ["/terminal", "/api/files/", "/api/home/"];
+    if REFUSED.iter().any(|refused| rest == refused.trim_end_matches('/') || rest.starts_with(refused) || rest.starts_with(&format!("{}/", refused.trim_end_matches('/')))) {
+        return MarimoTarget::Refused;
+    }
+    MarimoTarget::Forward
 }
 
 /// `target` with Ember's `secret` as its only `secret` query parameter.
@@ -2297,6 +2485,19 @@ mod tests {
         assert_eq!(ember_target("/ember/"), Ok("/".into()));
         assert_eq!(ember_target("/ember"), Err("/ember/".into()));
         assert_eq!(ember_target("/ember?x=1"), Err("/ember/?x=1".into()));
+    }
+
+    #[test]
+    fn marimos_page_is_under_its_prefix_without_its_terminal_or_file_listings() {
+        assert_eq!(Route::of("/marimo"), Route::Marimo);
+        assert_eq!(Route::of("/marimo/ws"), Route::Marimo);
+        assert_eq!(Route::of("/marimoz"), Route::Pluto);
+        assert_eq!(marimo_target("/marimo"), MarimoTarget::Moved("/marimo/".into()));
+        assert_eq!(marimo_target("/marimo/"), MarimoTarget::Forward);
+        assert_eq!(marimo_target("/marimo/api/document/transaction"), MarimoTarget::Forward);
+        for refused in ["/marimo/terminal", "/marimo/terminal/ws", "/marimo/api/files/list_files", "/marimo/api/home/workspace_files", "/marimo/api/home"] {
+            assert_eq!(marimo_target(refused), MarimoTarget::Refused, "{refused}");
+        }
         assert_eq!(with_secret("/edit?id=1", "s"), "/edit?id=1&secret=s");
         assert_eq!(with_secret("/", "s"), "/?secret=s");
         assert_eq!(with_secret("/edit?secret=theirs&id=1", "s"), "/edit?id=1&secret=s", "a secret the browser sends is replaced");
@@ -2322,7 +2523,7 @@ mod tests {
         let (stops, _) = std::sync::mpsc::channel();
         let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
         let julia = JuliaStarter::new(&parse_args(&argv).unwrap(), TOKEN, "process", stops.clone());
-        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default(), r: OnceLock::new() })
+        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default(), r: OnceLock::new(), marimo: Default::default() })
     }
 
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.

@@ -1517,7 +1517,7 @@ impl Notebooks {
         // Ember keeps code as it stores it (`normalise_code`), and compares `expected` that way too.
         let backend = self.backend_of(&nb.id);
         let stored = |code: &str| match backend {
-            Backend::Pluto => code.to_owned(),
+            Backend::Pluto | Backend::Marimo => code.to_owned(),
             Backend::Ember => {
                 let code = code.replace("\r\n", "\n");
                 let mut lines: Vec<&str> = code.split('\n').collect();
@@ -1607,6 +1607,7 @@ impl Notebooks {
         let (fits, extension) = match self.backend_of(&nb.id) {
             Backend::Pluto => (target.ends_with(".jl"), ".jl"),
             Backend::Ember => (engines::of_path(&target) == Backend::Ember, ".R"),
+            Backend::Marimo => (target.ends_with(".py"), ".py"),
         };
         if !fits {
             return Err(format!("ArgumentError: invalid_path::Notebook path must end in {extension}: '{target}'"));

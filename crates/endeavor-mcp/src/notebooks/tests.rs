@@ -2306,7 +2306,7 @@ fn opening_and_making_notebooks() {
     for (name, text) in [("fit.jl", "using Statistics\nmean([1, 2])\n"), ("fit.R", "x <- mean(c(1, 2))\n"), ("empty.jl", ""), ("notes.txt", "### A Pluto.jl notebook ###\n")] {
         let script = format!("{dir}{SEP}{name}");
         std::fs::write(&script, text).unwrap();
-        assert_eq!(s.call("", "open_notebook", json!({ "path": script })), Err(format!("ArgumentError: not_a_notebook::'{script}' isn't a notebook: it doesn't start with a Pluto or Ember notebook's first line")));
+        assert_eq!(s.call("", "open_notebook", json!({ "path": script })), Err(format!("ArgumentError: not_a_notebook::'{script}' isn't a notebook: it doesn't start with a Pluto or Ember notebook's first line, and it isn't a marimo app")));
     }
     assert_eq!(opens(), before, "the runtime wasn't asked to open them");
     assert_eq!(s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}none.jl") })), Err(format!("ArgumentError: file_not_found::No file at '{dir}{SEP}none.jl'")));
@@ -3260,7 +3260,7 @@ fn new_notebook_takes_an_r_path_only_where_r_notebooks_open() {
         assert!(other.contains("invalid_path::Notebook path must end in .jl: "), "R isn't offered where R notebooks can't open: {other}");
     } else {
         assert_eq!(made, Err("unsupported::R notebooks aren't running in this runtime".into()), "it goes to the R engine, which this test's runtime hasn't");
-        assert!(other.contains("invalid_path::Notebook path must end in .jl (Julia) or .R (R): "), "{other}");
+        assert!(other.contains("invalid_path::Notebook path must end in .jl (Julia), .R (R) or .py (Python, marimo): "), "{other}");
     }
 }
 

@@ -1360,8 +1360,9 @@ impl Call<'_> {
         }
         // A plain script isn't opened: Pluto would leave a backup copy of it next to it before refusing it.
         match wire::backend::Backend::of_file(std::path::Path::new(path)) {
-            None => return Err(argument_error(&format!("not_a_notebook::'{path}' isn't a notebook: it doesn't start with a Pluto or Ember notebook's first line"))),
+            None => return Err(argument_error(&format!("not_a_notebook::'{path}' isn't a notebook: it doesn't start with a Pluto or Ember notebook's first line, and it isn't a marimo app"))),
             Some(wire::backend::Backend::Ember) => r_notebooks(&format!("'{path}' is an Ember notebook (R)"))?,
+            Some(wire::backend::Backend::Marimo) => python_notebooks(&format!("'{path}' is a marimo notebook (Python)"))?,
             Some(wire::backend::Backend::Pluto) => {}
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
@@ -1443,9 +1444,16 @@ impl Call<'_> {
                     _ => json!({}),
                 };
                 // In the session's kind, when its client said it.
-                if let Some(kind @ wire::backend::Backend::Ember) = self.nbs.kind(self.owner) {
-                    r_notebooks("This session's notebooks are R notebooks")?;
-                    params["engine"] = json!(kind);
+                match self.nbs.kind(self.owner) {
+                    Some(kind @ wire::backend::Backend::Ember) => {
+                        r_notebooks("This session's notebooks are R notebooks")?;
+                        params["engine"] = json!(kind);
+                    }
+                    Some(kind @ wire::backend::Backend::Marimo) => {
+                        python_notebooks("This session's notebooks are Python notebooks")?;
+                        params["engine"] = json!(kind);
+                    }
+                    _ => {}
                 }
                 params
             }
@@ -1453,8 +1461,9 @@ impl Call<'_> {
                 let path = absolute_path(&super::requested_path(requested, folder)?)?;
                 match super::engines::of_path(&path) {
                     wire::backend::Backend::Ember => r_notebooks(&format!("'{path}' would be an R notebook"))?,
+                    wire::backend::Backend::Marimo => python_notebooks(&format!("'{path}' would be a Python notebook"))?,
                     _ if !path.ends_with(".jl") => {
-                        let ends = if cfg!(windows) { ".jl" } else { ".jl (Julia) or .R (R)" };
+                        let ends = if cfg!(windows) { ".jl" } else { ".jl (Julia), .R (R) or .py (Python, marimo)" };
                         return Err(argument_error(&format!("invalid_path::Notebook path must end in {ends}: '{path}'")));
                     }
                     _ => {}
@@ -1645,6 +1654,7 @@ impl Call<'_> {
                 }
             }
             Backend::Ember => "R started fresh. Every cell is `not_run` and holds no value until it runs: `run_all_cells` runs the notebook from the top.".to_owned(),
+            Backend::Marimo => "Python started fresh. Every cell is `not_run` and holds no value until it runs: `run_all_cells` runs the notebook from the top.".to_owned(),
         });
         Ok(result)
     }
@@ -1969,6 +1979,14 @@ pub(super) fn already_open(error: &str) -> bool {
 fn r_notebooks(what: &str) -> Result<(), String> {
     if cfg!(windows) {
         return Err(argument_error(&format!("unsupported::{what}. R notebooks don't run on Windows yet; they need macOS or Linux")));
+    }
+    Ok(())
+}
+
+/// Whether Python notebooks can open here: not on Windows yet, where marimo's adapter hasn't been tried.
+fn python_notebooks(what: &str) -> Result<(), String> {
+    if cfg!(windows) {
+        return Err(argument_error(&format!("unsupported::{what}. Python notebooks don't run on Windows yet; they need macOS or Linux")));
     }
     Ok(())
 }

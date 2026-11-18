@@ -176,6 +176,11 @@ pub(crate) fn browser_link(port: u16, target: &str) -> String {
     format!("http://localhost:{port}{target}")
 }
 
+/// `value` for a URL's query: percent-encoded, but for what's plain in a path.
+pub(crate) fn query_value(value: &str) -> String {
+    value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
 /// `url` with the runtime's `token`, which lets a browser in: its first visit gets the cookie. Only
 /// for the user's own browser and terminal, never for a tool result.
 pub(crate) fn entry_link(url: &str, token: &str) -> String {
@@ -388,6 +393,7 @@ impl Bridge {
                         let kind = match said {
                             "julia" => Some(wire::backend::Backend::Pluto),
                             "r" => Some(wire::backend::Backend::Ember),
+                            "python" => Some(wire::backend::Backend::Marimo),
                             _ => None,
                         };
                         self.notebooks.set_kind(&owner, kind);
@@ -404,7 +410,11 @@ impl Bridge {
                     folders.insert(owner, Some(folder.clone()));
                     drop(folders);
                     if let Some(told) = self.on_folder.get() {
-                        told(&folder, kind.map_or("unknown", |kind| if kind == wire::backend::Backend::Ember { "r" } else { "julia" }));
+                        told(&folder, kind.map_or("unknown", |kind| match kind {
+                            wire::backend::Backend::Ember => "r",
+                            wire::backend::Backend::Marimo => "python",
+                            wire::backend::Backend::Pluto => "julia",
+                        }));
                     }
                 }
             }
@@ -501,6 +511,9 @@ impl Bridge {
         }
         let page = |backend, notebook: Option<&str>| match (backend, notebook) {
             (wire::backend::Backend::Ember, Some(id)) => self.notebooks.ember_page(id),
+            // ponytail: Python notebooks have no page for the notebook view yet (marimo's editor is
+            // 21 MB of lazily loaded modules); the user opens the browser link instead.
+            (wire::backend::Backend::Marimo, Some(_)) => Err("not_supported: Python notebooks can't show in this view yet; open the notebook's browser link instead".to_owned()),
             _ => {
                 let port = *self.julia.port.get().ok_or("not_ready: Julia isn't running")?;
                 crate::views::page_from_julia(port, &self.julia.token)
@@ -629,6 +642,11 @@ impl Bridge {
                 Some(id) => match self.notebooks.backend_of(id) {
                     wire::backend::Backend::Pluto => format!("/edit?id={id}"),
                     wire::backend::Backend::Ember => format!("/ember/edit?id={id}"),
+                    // marimo's page names its notebook by path.
+                    wire::backend::Backend::Marimo => match fields.get("path").and_then(Value::as_str) {
+                        Some(path) => format!("/marimo/?file={}", query_value(path)),
+                        None => return,
+                    },
                 },
                 None => return,
             },
@@ -1079,7 +1097,7 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
 
 /// The `path` descriptions of the tools that take one, in a front without a project folder: the usual
 /// ones say relative paths go in the session's folder, and that a name is generated there.
-const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl` for a Julia notebook or `.R` for an R notebook (not on Windows). The file must not exist yet and its folder must. \
+const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl` for a Julia notebook, `.R` for an R notebook or `.py` for a Python (marimo) notebook (R and Python not on Windows). The file must not exist yet and its folder must. \
 Required on this computer: this server was not told the project folder, so it can't choose one unless the client names it with the call, as Codex does. \
 A relative path starts in that folder, and without it is refused. \
 On a server after `use_machine`, a relative path starts in the session's folder there.";

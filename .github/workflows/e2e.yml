@@ -1,5 +1,5 @@
-# The tests against real Julia (e2e_julia, e2e_serve) and real Julia and R
-# (e2e_r), which ci.yml skips because they are ignored by default. They take a
+# The tests against real Julia (e2e_julia, e2e_serve), real Julia and R
+# (e2e_r) and real marimo (e2e_marimo), which ci.yml skips because they are ignored by default. They take a
 # few minutes once the packages are cached and much longer the first time, so
 # they run in their own workflow: CI's checks don't wait for them. Linux only
 # for now. They run on a
@@ -168,3 +168,27 @@ jobs:
             target/tmp/e2e-r/depot
             ~/.cache/endeavor/r
           key: e2e-r-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml', 'runtime/r/install.R') }}-${{ github.run_id }}
+
+  marimo:
+    name: e2e marimo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install
+      # Python notebooks need only uv: it fetches Python, marimo (runtime/marimo/requirements.txt)
+      # and each notebook's packages.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.32'
+      - name: Build
+        run: cargo build --locked -p endeavor-mcp --tests
+      - name: Test
+        run: |
+          set -o pipefail
+          cargo test --locked -p endeavor-mcp --test e2e_marimo -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/e2e_marimo.log"
+          if grep -q 'SKIPPED:' "$RUNNER_TEMP/e2e_marimo.log"; then
+            echo "::error::e2e_marimo was skipped"
+            exit 1
+          fi
