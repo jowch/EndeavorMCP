@@ -769,15 +769,36 @@ const KEPT_PREVIOUS: i32 = 3;
 /// `endeavor mcp` the agent installs it with `use_machine` once the user agrees; the app's agents
 /// have no `use_machine`, so there the user installs it from the notebook pane or Settings.
 fn own_r_offer(item: &wire::Item, in_app: bool) -> String {
-    if in_app {
-        format!(
-            "r_not_found::No R was found on this computer. Endeavor can install its own R if the user agrees: {item}. Tell the user to click Install R in the notebook pane, or Install in the app's Settings under Notebooks, then R. Once it's installed, open the notebook again."
-        )
-    } else {
-        format!(
-            "r_not_found::No R was found here, and Endeavor may install its own R only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then open the notebook again."
-        )
+    own_r_offer_text(&item.to_string(), in_app)
+}
+
+/// The two offers, each as the words before the item and after it: the app's, then the plugin's.
+const OWN_R_OFFERS: [(&str, &str); 2] = [
+    (
+        "r_not_found::No R was found on this computer. Endeavor can install its own R if the user agrees: ",
+        ". Tell the user to click Install R in the notebook pane, or Install in the app's Settings under Notebooks, then R. Once it's installed, open the notebook again.",
+    ),
+    (
+        "r_not_found::No R was found here, and Endeavor may install its own R only if the user agrees: ",
+        ". Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then open the notebook again.",
+    ),
+];
+
+fn own_r_offer_text(item: &str, in_app: bool) -> String {
+    let (before, after) = OWN_R_OFFERS[usize::from(!in_app)];
+    format!("{before}{item}{after}")
+}
+
+/// `error` as the app's caller (`app`) or the plugin's should hear it: R starts once for every
+/// caller of a runtime the app and the plugin share, and its offer of Endeavor's own R is worded for
+/// whoever started the runtime. Anything else is left as it is.
+pub(crate) fn own_r_offer_for(error: &str, app: bool) -> std::borrow::Cow<'_, str> {
+    for (before, after) in OWN_R_OFFERS {
+        if let Some(item) = error.strip_prefix(before).and_then(|rest| rest.strip_suffix(after)) {
+            return own_r_offer_text(item, app).into();
+        }
     }
+    error.into()
 }
 
 /// Why R wasn't found, and what the user can do about it: Endeavor installs its own R only on a Mac.
@@ -1069,7 +1090,8 @@ impl RStarter {
             ember: &ember,
             ember_installed: EmberBuilds::read(&folder).installed(&folder),
             launching: self.launching.load(std::sync::atomic::Ordering::SeqCst),
-            failed: failed.as_deref(),
+            // Only the app asks, so the offer of Endeavor's own R is the app's.
+            failed: failed.as_deref().map(|why| own_r_offer_for(why, true)).as_deref(),
         })
     }
 
@@ -2409,6 +2431,17 @@ mod tests {
         assert!(standalone.starts_with("r_not_found::") && standalone.contains("`use_machine`") && standalone.contains("R 4.6.1 (about 165 MB"), "{standalone}");
         let app = own_r_offer(&item, true);
         assert!(app.starts_with("r_not_found::") && app.contains("Install R in the notebook pane") && app.contains("Settings under Notebooks, then R") && !app.contains("use_machine"), "{app}");
+    }
+
+    #[test]
+    fn the_own_r_offer_is_worded_for_the_caller_not_the_runtime() {
+        let item = wire::Item { kind: wire::KIND_RUNTIME.into(), name: "R 4.6.1".into(), size_mb: Some(165), place: Some("/x/R-4.6.1".into()) };
+        for started_by_app in [true, false] {
+            let kept = own_r_offer(&item, started_by_app);
+            assert_eq!(own_r_offer_for(&kept, true), own_r_offer(&item, true));
+            assert_eq!(own_r_offer_for(&kept, false), own_r_offer(&item, false));
+        }
+        assert_eq!(own_r_offer_for("r_not_found::Couldn't find R", false), "r_not_found::Couldn't find R");
     }
 
     #[test]

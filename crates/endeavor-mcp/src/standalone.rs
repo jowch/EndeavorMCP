@@ -1280,7 +1280,8 @@ impl Relay {
         let socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)).map_err(Sent::NotConnected)?;
         let _ = socket.set_nodelay(true);
         let mut head = format!(
-            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nX-Endeavor-Session: {}\r\nContent-Length: {}\r\n",
+            // `X-Endeavor-Client`: the plugin's answers, on a runtime the app started too (`mcp::Caller::app`).
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nX-Endeavor-Session: {}\r\nX-Endeavor-Client: plugin\r\nContent-Length: {}\r\n",
             self.session,
             body.len()
         );

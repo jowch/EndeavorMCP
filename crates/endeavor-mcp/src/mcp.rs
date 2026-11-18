@@ -251,6 +251,11 @@ pub struct Caller {
     /// The session may work on several notebooks (`X-Endeavor-Notebooks: several`): its front's client
     /// serves several conversations on one connection, as Claude's desktop app does.
     pub several: bool,
+    /// The caller is the app or one of its agents, which the app shows the notebooks to; otherwise it is
+    /// the plugin's (`endeavor mcp`, `serve`), whose user watches them in a browser. `X-Endeavor-Client`
+    /// says which (`app` or `plugin`); a caller that doesn't say is taken as the runtime's starter was, so
+    /// the app and the plugin can share one runtime and each still gets its own answers (#110).
+    pub app: bool,
 }
 
 /// A name that goes in a header or a message: printable characters only,
@@ -264,12 +269,18 @@ pub(crate) fn clean_label(text: &str) -> Option<String> {
 const LABEL_MAX: usize = 80;
 
 impl Caller {
-    fn of(request: &Head) -> Caller {
+    /// The caller of `request`, on a runtime the app started (`app_runtime`) or the plugin did.
+    fn of(request: &Head, app_runtime: bool) -> Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
         let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
         let browser_port = request.header("X-Endeavor-Browser-Port").and_then(|port| port.trim().parse().ok()).filter(|&port| port != 0);
         let several = header("X-Endeavor-Notebooks") == "several";
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several }
+        let app = match header("X-Endeavor-Client").as_str() {
+            "app" => true,
+            "plugin" => false,
+            _ => app_runtime,
+        };
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several, app }
     }
 }
 
@@ -308,7 +319,8 @@ impl Bridge {
         }
     }
 
-    /// A session's working folder: the one it was given, else the standalone runtime's.
+    /// A session's working folder: the one it was given, else the standalone runtime's. The app's
+    /// sessions always give theirs, so the standalone folder is only ever the plugin's sessions' fallback.
     fn folder(&self, owner: &str) -> Folder {
         match self.folders.lock().unwrap().get(owner) {
             Some(Some(dir)) => Folder::In(dir.clone()),
@@ -451,7 +463,7 @@ impl Bridge {
                 return Some(answer(self.notebooks.new_for(&owner, &folder)));
             }
             method if JULIA_CALLS.contains(&method) => return None,
-            _ => return Some(self.dispatch(&message, &Caller::default(), &|| false).unwrap_or_else(|| "{}".into())),
+            _ => return Some(self.dispatch(&message, &Caller { app: true, ..Caller::default() }, &|| false).unwrap_or_else(|| "{}".into())),
         }
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
@@ -459,8 +471,10 @@ impl Bridge {
 
     /// Serve `POST /mcp`. Whether the connection can carry another request.
     pub fn mcp(&self, request: &Head, reader: &mut BufReader<wire::Shared>, client: &mut wire::Shared) -> io::Result<bool> {
-        let mut caller = Caller::of(request);
+        let mut caller = Caller::of(request, self.standalone.is_none());
+        // `serve --host-tools` gives them to the plugin's sessions, not to the app's.
         if caller.host.is_empty()
+            && !caller.app
             && let Some(host) = self.standalone.as_ref().and_then(|s| s.host.clone())
         {
             caller.host = host;
@@ -486,7 +500,7 @@ impl Bridge {
                 std::thread::spawn(move || notebooks.stop_for(&owner, &notebook, runs_code));
             }
         }
-        answer(message, caller, self.standalone.is_some(), |params| {
+        answer(message, caller, |params| {
             // The notebook view's calls: not the session's activity, and nothing the app is told of.
             if let Some(name) = params["name"].as_str().filter(|name| crate::views::is_view_tool(name)) {
                 return self.view_call(name, params);
@@ -625,17 +639,17 @@ impl Bridge {
                 text(&result)
             }
             Ok(Reply::Image { meta, png_base64 }) => image_result(&meta, png_base64),
-            Err(error) => tool_error(&error, help),
+            Err(error) => tool_error(&crate::core::own_r_offer_for(&error, caller.app), help),
         }
     }
 
     /// Without the app, the user watches notebooks in a browser: the results
     /// that name a notebook, or the session, carry the link to it. A caller
     /// that says which port its browser uses (`X-Endeavor-Browser-Port`) gets it on any
-    /// runtime; otherwise only a standalone runtime adds one, with its own port. The link has no
+    /// runtime; otherwise only a standalone runtime adds one, with its own port, and not for the app's callers. The link has no
     /// token: the `mcp` front opens the notebook in the user's browser with it, and `serve` prints it.
     fn add_browser_url(&self, tool: &str, caller: &Caller, result: &mut Value) {
-        let Some(port) = caller.browser_port.or_else(|| self.standalone.as_ref().map(|s| s.port)) else { return };
+        let Some(port) = caller.browser_port.or_else(|| self.standalone.as_ref().filter(|_| !caller.app).map(|s| s.port)) else { return };
         let Value::Object(fields) = result else { return };
         let target = match tool {
             "new_notebook" | "open_notebook" => match fields.get("notebook_id").and_then(Value::as_str) {
@@ -1029,7 +1043,7 @@ impl Held {
 
 /// The reply to one JSON-RPC message, if it gets one; `call` gives a
 /// `tools/call`'s result.
-fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(&Value) -> Value) -> Option<String> {
+fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) -> Option<String> {
     // Notifications get no reply.
     let id = message.get("id").filter(|id| !id.is_null())?;
     let ok = |result: Value| Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result })));
@@ -1047,7 +1061,7 @@ fn answer(message: &Value, caller: &Caller, standalone: bool, call: impl FnOnce(
             if caller.views {
                 result["capabilities"]["resources"] = json!({});
             }
-            if let Some(instructions) = guide::instructions(standalone, caller.has_skills, caller.front, caller.views) {
+            if let Some(instructions) = guide::instructions(!caller.app, caller.has_skills, caller.front, caller.views) {
                 result["instructions"] = instructions.into();
             }
             ok(result)
@@ -1107,9 +1121,9 @@ On a server after `use_machine`, a relative path starts in the session's folder 
 
 /// The reply to a JSON-RPC message while the app can't reach the runtime:
 /// what the core would say, except that a tool call fails with `why`, plain
-/// text Claude reads before trying again.
+/// text Claude reads before trying again. The listener that says this is the app's.
 pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> Option<String> {
-    answer(message, &Caller::of(request), false, |_| json!({ "content": [{ "type": "text", "text": why }], "isError": true }))
+    answer(message, &Caller::of(request, true), |_| json!({ "content": [{ "type": "text", "text": why }], "isError": true }))
 }
 
 /// The reply to a message a standalone runtime's stdio relay answers itself
@@ -1118,7 +1132,7 @@ pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> 
 pub(crate) fn answer_locally(message: &Value, has_skills: bool, no_folder: bool, views: bool) -> Option<String> {
     let local = matches!(message["method"].as_str(), Some("initialize" | "ping" | "tools/list" | "resources/list" | "resources/read"));
     let caller = Caller { has_skills, front: true, no_folder, views, ..Caller::default() };
-    local.then(|| answer(message, &caller, true, |_| unreachable!("tools/call isn't answered locally"))).flatten()
+    local.then(|| answer(message, &caller, |_| unreachable!("tools/call isn't answered locally"))).flatten()
 }
 
 /// Kinds that mean the agent called a notebook tool the wrong way (a bad
@@ -1402,10 +1416,28 @@ mod tests {
     }
 
     #[test]
+    fn the_app_or_the_plugin_is_the_callers_not_the_runtimes() {
+        let head = |client: &str| crate::http::Head::read(&mut format!("POST /mcp HTTP/1.1\r\nX-Endeavor-Session: s\r\n{client}\r\n").as_bytes()).unwrap().unwrap();
+        for app_runtime in [true, false] {
+            assert!(Caller::of(&head("X-Endeavor-Client: app\r\n"), app_runtime).app);
+            assert!(!Caller::of(&head("X-Endeavor-Client: plugin\r\n"), app_runtime).app);
+            assert_eq!(Caller::of(&head(""), app_runtime).app, app_runtime, "a caller that doesn't say is the starter's");
+        }
+        let instructions = |app: bool| {
+            let caller = Caller { app, ..Caller::default() };
+            let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }), &caller, |_| json!(null)).unwrap();
+            serde_json::from_str::<Value>(&reply).unwrap()["result"]["instructions"].clone()
+        };
+        assert_eq!(instructions(true), json!(guide::instructions(false, false, false, false)));
+        assert_eq!(instructions(false), json!(guide::instructions(true, false, false, false)));
+        assert_ne!(instructions(true), instructions(false));
+    }
+
+    #[test]
     fn a_front_without_a_folder_lists_the_same_tools_with_two_path_descriptions_replaced() {
         let list = |no_folder: bool| {
             let caller = Caller { has_skills: true, front: true, no_folder, ..Caller::default() };
-            let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }), &caller, true, |_| json!(null)).unwrap();
+            let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }), &caller, |_| json!(null)).unwrap();
             serde_json::from_str::<Value>(&reply).unwrap()["result"]["tools"].clone()
         };
         let (with, without) = (list(false), list(true));
@@ -1429,8 +1461,8 @@ mod tests {
     #[test]
     fn an_agent_without_the_plugin_is_told_to_read_the_guide() {
         let ask = |method: &str, has_skills: bool| {
-            let caller = Caller { has_skills, ..Caller::default() };
-            let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} }), &caller, false, |_| json!(null)).unwrap();
+            let caller = Caller { has_skills, app: true, ..Caller::default() };
+            let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} }), &caller, |_| json!(null)).unwrap();
             serde_json::from_str::<Value>(&reply).unwrap()["result"].clone()
         };
         let names = |result: Value| result["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
