@@ -1874,6 +1874,7 @@ fn open_notebooks_run_of_the_notebook_is_the_sessions_run() {
     let path = temp_notebooks("open-run", 1).remove(0);
     *s.engine.opens_with.lock().unwrap() = vec![(X.into(), "x = 1".into()), (Y.into(), "y = x + linger()".into())];
     let id = s.call("7", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    assert_eq!(s.notebooks.session_runs("7"), vec![id.clone()], "the session's Stop reaches the open's run");
     // The run is under way: X finished, Y still running.
     s.engine.with(&id, |nb| {
         nb.cells[0].queued = false;
