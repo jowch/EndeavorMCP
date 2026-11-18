@@ -250,7 +250,7 @@ fn a_python_notebook_through_the_runtime() {
         assert_eq!(order.len(), 2, "{order:?}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0] }));
         assert_eq!(read["code"], "x = 20", "{read}");
-        // ponytail: marimo has no session in safe preview, so nothing can save an edit (#TBD).
+        // ponytail: marimo has no session in safe preview, so nothing can save an edit (#351).
         let (failed, refused) = agent.call("edit_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "code": "x = 41" }));
         assert!(failed || refused.get("error").is_some(), "{refused}");
         agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
