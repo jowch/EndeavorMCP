@@ -56,7 +56,7 @@ const APP: &str = "These tools edit and run a live notebook, in Julia (Pluto) or
 /// which side the agent is on.
 pub const STANDALONE: &str = "These tools edit and run live notebooks, in Julia (Pluto), R (Ember) or Python (marimo), without the Endeavor app: \
 the user watches them in a web browser, on the notebook's own page, and there is no notebook pane next to this chat. \
-When the user asks to open, show or look at a `.jl`, `.R` or `.py` file (a `.py` file may be a marimo notebook), try `open_notebook` before reading the file, so they can watch it; if it fails with `not_a_notebook`, read the file. \
+When the user asks to open, show or look at a `.jl`, `.R` or `.py` file, call `open_notebook` on it before reading it, so they can watch it, even when you can't tell it is a notebook: a `.py` file may be a marimo notebook, and a plain script fails at once with `not_a_notebook`; then read the file. \
 `new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. When it has `browser_note`, no browser opened for the user: give them the address and follow the note. \
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts.";
