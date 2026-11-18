@@ -333,7 +333,7 @@ Next:
   such cells (#232). A waited `submit_changes` with
   nothing staged reports the cells that ran while it waited, and `errored` if one failed (#171; interface 14).
   `allow_execution`'s run of the notebook is the agent's run too, so a read or a waited submit
-  right after it waits for it, in both engines (#170; interface 15). A read whose
+  right after it waits for it, in both engines (#170; interface 15). So is the run an agent's `open_notebook` starts with `run_notebook`, in both engines, and the session's Stop interrupts it (#331, interface 41). A read whose
   wait runs out with the cell still running or queued says so in a `message`, with
   how long it waited (#203): agents that saw only `running` reported that it
   hadn't waited. When R ends, its
@@ -502,4 +502,10 @@ Next:
   move of the unpacked files, which juliaup doesn't retry). `tests/own_julia.rs`
   covers these with real downloads (ignored by default); run on Linux only so
   far.
+- A Julia that juliaup removes while the runtime runs on it (`juliaup update`
+  removes the version it updates past) leaves the runtime unable to start a
+  notebook's process, which is that same Julia started again. Restart, open,
+  new and Run notebook then refuse with `julia_removed`, before they stop
+  anything, and Pluto's page Restart does nothing; restarting Julia fixes it
+  (#346).
 - marimo after Ember.
