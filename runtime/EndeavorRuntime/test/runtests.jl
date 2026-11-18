@@ -771,6 +771,29 @@ end
             @test result("allow_execution", Dict("notebook_id" => previewed, "run" => false, "timeout" => 60)) ==
                   Dict("already_allowed" => true, "ran" => false, "process_status" => "ready")
 
+            # Julia's own folder gone, as juliaup leaves the version it updated past: what would start a
+            # process says why and what to do, before anything stops. The running process lives on.
+            session = EndeavorRuntime.standalone_session()
+            worker = Pluto.WorkspaceManager.get_workspace((session, nb)).worker
+            removed(reply) = haskey(reply, "error") && startswith(reply["error"], "ArgumentError: julia_removed::Julia $VERSION, which this Endeavor runs on, was removed")
+            gone_dir = mktempdir()
+            EndeavorRuntime._JULIA_EXE[] = joinpath(gone_dir, "bin", "julia")
+            try
+                @test removed(adapter("restart", Dict("notebook_id" => nid, "timeout" => 60)))
+                @test nb.process_status == Pluto.ProcessStatus.ready && Pluto.Malt.isrunning(worker)
+                @test result("run", Dict("notebook_id" => nid, "cells" => [Y], "wait" => true, "timeout" => 60))["completed"] == [Y]
+                @test removed(adapter("open", Dict("path" => fresh_fixture(), "run" => true)))
+                gated = result("open", Dict("path" => fresh_fixture(), "run" => false))["notebook_id"]
+                @test removed(adapter("allow_execution", Dict("notebook_id" => gated, "run" => true, "timeout" => 60)))
+                @test session.notebooks[UUID(gated)].process_status == Pluto.ProcessStatus.waiting_for_permission
+                unmade = joinpath(gone_dir, "unmade.jl")
+                @test removed(adapter("new", Dict("path" => unmade))) && !isfile(unmade)
+                @test occursin(gone_dir, adapter("restart", Dict("notebook_id" => nid, "timeout" => 60))["error"])
+                result("shutdown", Dict("notebook_id" => gated))
+            finally
+                EndeavorRuntime._JULIA_EXE[] = ""
+            end
+
             # New notebooks: at a path, or named by Pluto in a folder.
             dir = realpath(mktempdir())
             made = result("new", Dict("path" => joinpath(dir, "made.jl")))

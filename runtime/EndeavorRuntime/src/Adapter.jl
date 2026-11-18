@@ -388,6 +388,23 @@ function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
     return result
 end
 
+# A notebook's process is this Julia started again (Malt runs `Base.julia_cmd()`, from `Sys.BINDIR`).
+# juliaup removes a version it updates past even while that version runs, and then no notebook can
+# start a process until Julia restarts: Malt's spawn fails with ENOENT. What would start one asks
+# first, so it says why and what to do, and nothing that runs now is stopped for a start that can't
+# happen. The path is a Ref so the tests can point it somewhere empty.
+const _JULIA_EXE = Ref{String}("")
+_julia_exe() = isempty(_JULIA_EXE[]) ? joinpath(Sys.BINDIR, Base.julia_exename()) : _JULIA_EXE[]
+
+function _require_julia()
+    isfile(_julia_exe()) && return nothing
+    throw(ArgumentError(
+        "julia_removed::Julia $VERSION, which this Endeavor runs on, was removed from $(dirname(dirname(_julia_exe()))) " *
+        "(juliaup removes a version when it updates past it), so no notebook can start. " *
+        "Restart Julia to use the Julia installed now; notebooks running now keep running until then",
+    ))
+end
+
 # Pluto's "Run notebook code" for a notebook in safe preview: restart its
 # process, then run every cell (`run`) or leave it to start on the next run.
 function allow_execution!(session, nb, run::Bool, timeout::Real)
@@ -399,6 +416,7 @@ function allow_execution!(session, nb, run::Bool, timeout::Real)
     haskey(nb.metadata, "risky_file_source") && throw(ArgumentError(
         "risky_source::Cannot allow execution for risky remote sources via MCP; ask the user to run it from the notebook itself",
     ))
+    _require_julia()
     nb.process_status = Pluto.ProcessStatus.waiting_to_restart
     session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(nb)
     _notify_browser(session, nb)
@@ -424,6 +442,7 @@ function restart!(session, nb, timeout::Real)
     ps === Pluto.ProcessStatus.waiting_for_permission &&
         throw(ArgumentError("execution_blocked::The notebook is in safe preview; Run notebook starts it"))
     ps === Pluto.ProcessStatus.waiting_to_restart && return Dict{String,Any}("restarted" => false)
+    _require_julia()
     nb.process_status = Pluto.ProcessStatus.waiting_to_restart
     session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(nb)
     _notify_browser(session, nb)
@@ -490,6 +509,7 @@ function move!(session, nb, path::AbstractString)
 end
 
 function open_notebook(session, path::AbstractString, run::Bool)
+    run && _require_julia()
     nb = try
         Pluto.SessionActions.open(session, path; run_async = true, execution_allowed = run)
     catch e
@@ -504,6 +524,7 @@ end
 # Pluto's own folder. Pluto writes the file (never a hand-written header), then
 # it opens and runs like any other; its cells come back so the caller can edit them.
 function new_notebook(session, path, folder)
+    _require_julia()  # before its file is made
     nb = if path !== nothing
         Pluto.emptynotebook(path)
     elseif folder !== nothing
