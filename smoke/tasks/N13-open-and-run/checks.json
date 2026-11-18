@@ -1,0 +1,13 @@
+{
+  "about": "A notebook from disk opened with its run, whose cells take 20 s: a read right after the open waits for that run (#331), so the agent reports the value without polling or running the cells again. Tags: open_notebook run_notebook, read_cell wait, running twice.",
+  "checks": [
+    { "check": "called", "tool": "open_notebook", "args": { "run_notebook": true } },
+    { "check": "no_rerun_of_running_cells" },
+    { "check": "no_errored_cells" },
+    { "check": "final_message_contains_any", "texts": ["25.1157"] },
+    { "check": "reply_contains", "texts": ["25.1157"] },
+    { "check": "called", "tool": "read_cell", "max": 2, "soft": true },
+    { "check": "not_called", "tool": "execute_cell", "soft": true },
+    { "check": "not_called", "tool": "run_all_cells", "soft": true }
+  ]
+}

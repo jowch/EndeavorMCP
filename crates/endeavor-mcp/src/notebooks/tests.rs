@@ -107,6 +107,8 @@ struct Engine {
     /// runtime answers nothing else while it starts the notebook.
     hold_open: Mutex<Option<Receiver<()>>>,
     starting: Mutex<()>,
+    /// The cells the next `open` reads from the file; with `run`, all queued, as Pluto marks them.
+    opens_with: Mutex<Vec<(String, String)>>,
 }
 
 impl Engine {
@@ -208,7 +210,12 @@ impl Engine {
                 let mut made = self.made.lock().unwrap();
                 *made += 1;
                 let id = format!("cccccccc-0000-0000-0000-{:012}", *made);
-                let cells = if method == "new" { vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")] } else { Vec::new() };
+                let cells = if method == "new" {
+                    vec![FakeCell::new(&format!("dddddddd-0000-0000-0000-{:012}", *made), "")]
+                } else {
+                    let read = std::mem::take(&mut *self.opens_with.lock().unwrap());
+                    read.iter().map(|(id, code)| FakeCell { queued: params["run"] == true, ..FakeCell::new(id, code) }).collect()
+                };
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
                 // A file named for it is in Ember's lazy mode.
                 let lazy = method == "open" && path.contains("lazy");
@@ -1859,6 +1866,56 @@ fn allow_executions_run_of_the_notebook_is_the_sessions_run() {
     let receipt = super::tools::tool_json(s.notebooks.tool("7", "submit_changes", &json!({ "notebook_id": NB, "wait_for_completion": true }), &Folder::Process, began).unwrap());
     assert_eq!(receipt["execution"]["status"], "completed", "{receipt}");
     assert!(began.elapsed() < Duration::from_secs(1), "nothing to wait for");
+}
+
+#[test]
+fn open_notebooks_run_of_the_notebook_is_the_sessions_run() {
+    let s = setup();
+    let path = temp_notebooks("open-run", 1).remove(0);
+    *s.engine.opens_with.lock().unwrap() = vec![(X.into(), "x = 1".into()), (Y.into(), "y = x + linger()".into())];
+    let id = s.call("7", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    // The run is under way: X finished, Y still running.
+    s.engine.with(&id, |nb| {
+        nb.cells[0].queued = false;
+        nb.cells[1].queued = false;
+        nb.cells[1].running = true;
+    });
+    let late = || Instant::now().checked_sub(Duration::from_secs(43)).expect("a clock that has run that long");
+    let tool = |owner: &str, name: &str, args: Value, began: Instant| super::tools::tool_json(s.notebooks.tool(owner, name, &args, &Folder::Process, began).unwrap());
+    // A read of a cell it is running waits for it, as for a run the session started itself (#331).
+    let began = late();
+    let read = tool("7", "read_cell", json!({ "notebook_id": id, "cell_id": Y }), began);
+    assert_eq!(read["running"], true, "{read}");
+    assert!(read["message"].as_str().is_some_and(|m| m.contains("the cell is still running")), "the read says its wait ran out: {read}");
+    assert!(began.elapsed() >= Duration::from_secs(44), "the read waited for the run");
+    // So does a waited submit with nothing staged.
+    let began = late();
+    let receipt = tool("7", "submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }), began);
+    assert_eq!((&receipt["execution"]["status"], &receipt["execution"]["still_running"]), (&json!("running"), &json!([Y])), "{receipt}");
+    assert!(began.elapsed() >= Duration::from_secs(44), "the submit waited for the run");
+    // Not another session's.
+    let began = Instant::now();
+    assert_eq!(tool("8", "read_cell", json!({ "notebook_id": id, "cell_id": Y }), began)["running"], true);
+    assert!(began.elapsed() < Duration::from_secs(1), "another session's read isn't held up");
+    // Once its cells have finished there is nothing to wait for.
+    s.engine.with(&id, |nb| nb.cells[1].running = false);
+    let began = Instant::now();
+    let receipt = tool("7", "submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }), began);
+    assert_eq!(receipt["execution"]["status"], "completed", "{receipt}");
+    assert!(began.elapsed() < Duration::from_secs(1), "nothing to wait for");
+}
+
+#[test]
+fn an_open_without_its_run_starts_no_run_of_the_sessions() {
+    let s = setup();
+    let path = temp_notebooks("open-preview", 1).remove(0);
+    *s.engine.opens_with.lock().unwrap() = vec![(X.into(), "x = 1".into())];
+    let id = s.call("7", "open_notebook", json!({ "path": path })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new(), "safe preview runs nothing");
+    s.engine.with(&id, |nb| nb.cells[0].running = true);
+    let began = Instant::now();
+    super::tools::tool_json(s.notebooks.tool("7", "read_cell", &json!({ "notebook_id": id, "cell_id": X }), &Folder::Process, began).unwrap());
+    assert!(began.elapsed() < Duration::from_secs(1), "a run the session didn't start isn't waited for");
 }
 
 #[test]
