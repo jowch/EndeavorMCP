@@ -401,7 +401,8 @@ function _require_julia()
     throw(ArgumentError(
         "julia_removed::Julia $VERSION, which this Endeavor runs on, was removed from $(dirname(dirname(_julia_exe()))) " *
         "(juliaup removes a version when it updates past it), so no notebook can start. " *
-        "Restart Julia to use the Julia installed now; notebooks running now keep running until then",
+        "Restart Julia to use the Julia installed now. Notebooks running now keep running until then, " *
+        "though loading a package they haven't loaded yet may fail",
     ))
 end
 
@@ -476,6 +477,12 @@ function _wrap_page_restart!()
     original = _PLUTO_RESTART[] = Pluto.responses[:restart_process]
     Pluto.responses[:restart_process] = function (request; kwargs...)
         nb = request.notebook
+        # A restart that can't start a process would stop the one running: the page's Restart
+        # does nothing then, as the adapter's `restart` refuses with `julia_removed`.
+        if nb !== nothing && !isfile(_julia_exe())
+            @warn "Restart: Julia $VERSION was removed from $(dirname(dirname(_julia_exe()))), so the notebook can't restart until Julia restarts; it keeps the process it has"
+            return nothing
+        end
         if nb !== nothing && nb.process_status !== Pluto.ProcessStatus.waiting_to_restart
             _forget_failed_start!(nb)
             nb.wants_to_interrupt = false
@@ -508,8 +515,16 @@ function move!(session, nb, path::AbstractString)
     return Dict{String,Any}("path" => nb.path)
 end
 
+# Whether `path` is a notebook open in `session`, as Pluto's open tells.
+function _open_already(session, path::AbstractString)
+    tamed = Pluto.tamepath(path)
+    isfile(tamed) || return false
+    return any(nb -> isfile(nb.path) && realpath(nb.path) == realpath(tamed), values(session.notebooks))
+end
+
 function open_notebook(session, path::AbstractString, run::Bool)
-    run && _require_julia()
+    # One already open says so (below), as it would with its Julia there.
+    run && !_open_already(session, path) && _require_julia()
     nb = try
         Pluto.SessionActions.open(session, path; run_async = true, execution_allowed = run)
     catch e
