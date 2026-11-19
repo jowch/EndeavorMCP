@@ -13,6 +13,7 @@ pub(crate) mod engines;
 
 mod r;
 mod tools;
+pub(crate) use tools::ASK_STEP;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};

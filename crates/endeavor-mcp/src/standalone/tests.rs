@@ -337,12 +337,24 @@ impl Out {
     fn lines(&self) -> Vec<String> {
         String::from_utf8(self.0.lock().unwrap().clone()).unwrap().lines().map(str::to_owned).collect()
     }
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
 }
 
 /// A stand-in for the runtime's `/mcp`: answers `tools/call` `session_status` as JSON,
 /// `list_notebooks` as an event stream (a progress notification, then the reply), and
 /// a notification with `202`. What each request's head and body were.
-fn fake_core() -> (u16, Arc<Mutex<Vec<(Head, String)>>>) {
+fn fake_core() -> FakeCore {
+    fake_core_listing("ran")
+}
+
+/// The stand-in's port, and what it was sent.
+type FakeCore = (u16, Arc<Mutex<Vec<(Head, String)>>>);
+
+/// `fake_core`, with `list_notebooks`' text `listed`.
+fn fake_core_listing(listed: &str) -> FakeCore {
+    let listed = listed.to_owned();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -363,7 +375,7 @@ fn fake_core() -> (u16, Arc<Mutex<Vec<(Head, String)>>>) {
                     http::write_chunk(&mut client, b": waiting\n\n").unwrap();
                     let progress = r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1,"progressToken":"p"}}"#;
                     http::write_chunk(&mut client, format!("event: message\ndata: {progress}\n\n").as_bytes()).unwrap();
-                    let reply = json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": "ran" }] } });
+                    let reply = json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": listed }] } });
                     http::write_chunk(&mut client, format!("event: message\ndata: {reply}\n\n").as_bytes()).unwrap();
                     http::write_chunk(&mut client, b"").unwrap();
                 }
@@ -640,4 +652,93 @@ fn the_background_precompile_runs_once_per_runtime_folder_and_only_where_julia_r
     std::fs::write(runtime.join(".precompile-failed"), "").unwrap();
     try_it();
     assert_eq!(runs.borrow().len(), 2, "a failure in the last day isn't retried");
+}
+
+#[test]
+fn approve_install_asks_the_user_first_where_the_client_can() {
+    // Haiku 4.5 approved large R downloads before the user said yes (#285): a client that can show a
+    // form gets Endeavor's own question first, and a no never reaches the runtime.
+    let nb = "1b2c3d4e-0000-4000-8000-000000000001";
+    let listed = json!([{ "notebook_id": nb, "execution_allowed": true, "packages": { "step": "asking", "download": { "bytes": 11385380, "packages": [{ "package": "ALL", "version": "1.44.0", "bytes": 11385380 }] } } }]);
+    let (port, seen) = fake_core_listing(&listed.to_string());
+    let (relay, out) = ready_relay(port, &seen, true);
+    relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"claude-code"}}}"#);
+    // The tool says Endeavor asks, so the agent doesn't ask in the chat too.
+    relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+    let tools: Value = serde_json::from_str(out.lines().last().unwrap()).unwrap();
+    let approve = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "approve_install").unwrap().clone();
+    assert!(approve["description"].as_str().unwrap().contains("don't ask in the chat first"), "{approve}");
+    out.clear();
+    let call = |id: u64, notebook: &str| json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "approve_install", "arguments": { "notebook_id": notebook } } }).to_string();
+    let question = || loop {
+        if let Some(line) = out.lines().into_iter().find(|l| l.contains("elicitation/create")) {
+            break serde_json::from_str::<Value>(&line).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let approvals = || seen.lock().unwrap().iter().filter(|(_, body)| body.contains("approve_install")).count();
+    let ask = |id: u64, answer: &'static str| {
+        let calling = { let relay = relay.clone(); let line = call(id, nb); std::thread::spawn(move || relay.handle(&line)) };
+        let question = question();
+        assert_eq!(question["params"]["message"], "R needs to download ALL 1.44.0 (11 MB) before this notebook's cells can run. Download it now?");
+        out.clear();
+        relay.handle(&json!({ "jsonrpc": "2.0", "id": question["id"], "result": { "action": answer } }).to_string());
+        calling.join().unwrap();
+        let reply: Value = out.lines().iter().map(|l| serde_json::from_str::<Value>(l).unwrap()).find(|r| r["id"] == id).expect("the call's reply");
+        out.clear();
+        reply
+    };
+    let declined = ask(5, "decline");
+    assert_eq!(declined["result"]["isError"], true, "{declined}");
+    assert!(declined["result"]["content"][0]["text"].as_str().unwrap().contains("said no"), "{declined}");
+    assert_eq!(approvals(), 0, "a no doesn't reach the runtime");
+    // A yes passes the call on, as it came; the answer itself goes nowhere.
+    ask(6, "accept");
+    assert_eq!(approvals(), 1);
+    assert!(!seen.lock().unwrap().iter().any(|(_, b)| b.contains("\"action\"")));
+
+    // A call the client cancels while the dialog is up downloads nothing, even on a later yes, and gets no reply.
+    let calling = { let relay = relay.clone(); let line = call(7, nb); std::thread::spawn(move || relay.handle(&line)) };
+    let asked = question();
+    relay.handle(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#);
+    calling.join().unwrap();
+    relay.handle(&json!({ "jsonrpc": "2.0", "id": asked["id"], "result": { "action": "accept" } }).to_string());
+    let lines: Vec<Value> = out.lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(lines.iter().all(|l| l["id"] != 7), "{lines:?}");
+    assert!(lines.iter().any(|l| l["method"] == "notifications/cancelled" && l["params"]["requestId"] == asked["id"]), "the dialog is withdrawn: {lines:?}");
+    assert_eq!(approvals(), 1);
+    assert!(!seen.lock().unwrap().iter().any(|(_, b)| b.contains("notifications/cancelled")), "the runtime never saw that call");
+    out.clear();
+
+    // A notebook with no download waiting gets no question: the runtime answers the call itself.
+    relay.handle(&call(8, "1b2c3d4e-0000-4000-8000-000000000002"));
+    assert!(!out.lines().iter().any(|l| l.contains("elicitation/create")), "{:?}", out.lines());
+    assert_eq!(approvals(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn approve_install_asks_when_the_runtime_cant_be_looked_at() {
+    // A runtime the front can't reach now may be by the call itself, which reconnects: the front can't
+    // tell that nothing waits, so it asks, without the sizes.
+    let (port, seen) = fake_core();
+    let (relay, out) = ready_relay(port, &seen, true);
+    relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"claude-code"}}}"#);
+    out.clear();
+    // The runtime was replaced by one whose port answers nothing.
+    let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::os::unix::process::parent_id(), "started": null, "token": "other", "port": gone });
+    std::fs::write(relay.options.state_dir.join("runtime.json"), record.to_string()).unwrap();
+    let calling = { let relay = relay.clone(); std::thread::spawn(move || relay.handle(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"approve_install","arguments":{"notebook_id":"1b2c3d4e-0000-4000-8000-000000000001"}}}"#)) };
+    let question = loop {
+        if let Some(line) = out.lines().into_iter().find(|l| l.contains("elicitation/create")) {
+            break serde_json::from_str::<Value>(&line).unwrap();
+        }
+        assert!(!calling.is_finished(), "not asked: {:?}", out.lines());
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(question["params"]["message"].as_str().unwrap().contains("some large Bioconductor data packages"), "{question}");
+    relay.handle(&json!({ "jsonrpc": "2.0", "id": question["id"], "result": { "action": "decline" } }).to_string());
+    calling.join().unwrap();
+    assert!(!seen.lock().unwrap().iter().any(|(_, body)| body.contains("approve_install")));
 }

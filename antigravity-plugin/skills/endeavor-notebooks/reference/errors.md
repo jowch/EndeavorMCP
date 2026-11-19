@@ -13,6 +13,8 @@ These come back the same way, but nothing failed and the call is not marked an e
 | `no_preview` | `apply_package_update` without a ready `preview_package_update` for that date, or the notebook's packages changed since | Preview that date again, tell the user what changes, then apply |
 | `not_updatable` | `preview_package_update` with a `package` that isn't in the notebook's packages, or doesn't come from CRAN | Only a CRAN package in the notebook has release dates to move to. Tell the user; a package from elsewhere changes with its install call |
 | `nothing_to_approve` | `approve_install` when no install is waiting for an OK, or in safe preview, before the notebook may run | Nothing to approve: `list_notebooks` shows what the notebook's packages are doing |
+| `download_declined` | `approve_install`: Endeavor asked the user in its own dialog whether to download, and they said no. Nothing downloads | Tell the user the cells stay queued; call `approve_install` again only if they ask for the download |
+| `download_not_answered` | `approve_install`: the user closed Endeavor's dialog, didn't answer it within 30 minutes, or it couldn't be shown. Nothing downloads | Ask the user in the chat; if they want it, call `approve_install` again, which asks them once more |
 | `not_r_notebook` | A package-date tool or `approve_install` on a Julia notebook | Julia notebooks keep their package versions in their Pkg environment |
 | `notebook_opening` | `open_notebook`, `new_notebook` or `allow_execution` took longer than one call waits: often the first notebook in a new Julia process, or a notebook leaving safe preview whose packages need installing. It goes on | Make the same call again, with the same arguments, to get its result |
 

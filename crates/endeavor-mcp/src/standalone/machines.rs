@@ -271,6 +271,11 @@ pub(super) struct NotReady {
 }
 
 impl NotReady {
+    /// Nothing runs on the target: no runtime was there to start (`idle`), or `stop_machine` ended it.
+    pub(super) fn nothing_runs(&self) -> bool {
+        self.idle || self.stopped
+    }
+
     fn plain(message: impl Into<String>) -> NotReady {
         NotReady { name: String::new(), message: message.into(), reached: None, idle: false, stopped: false }
     }
