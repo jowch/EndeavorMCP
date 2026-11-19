@@ -29,10 +29,10 @@ const CANCELLED: &str = "cancelled";
 const ASK_IN_CHAT: &str = "It doesn't ask the user: calling it is the user's yes. Ask them first, end your reply, and call it only once they have said yes in a later message; never on your own.";
 
 /// The same where the front asks the user itself: asking in the chat too would have them say yes twice.
-const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that names what downloads and its size, and nothing downloads unless they say yes there. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or close the dialog, the call fails with `download_declined` or `download_not_answered`.";
+const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size, and nothing downloads unless they say yes there or with the button on the notebook's page. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or close the dialog, the call fails with `download_declined` or `download_not_answered`.";
 
 /// The runtime's asking step (`notebooks::ASK_STEP`) where the front asks the user itself.
-const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
+const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first. The notebook's page also has a button for it.";
 
 #[derive(Default)]
 pub(super) struct Consent {
@@ -149,22 +149,26 @@ impl Consent {
     /// the download `waiting`.
     pub(super) fn ask(&self, call: &Value, waiting: Waiting, write: &dyn Fn(&str)) -> Asked {
         let call_id = to_json(&call["id"]);
-        let cancelled = self.calls.lock().unwrap().remove(&call_id).flatten().is_some();
-        if cancelled {
+        // Under the calls' lock from the check to the question's entry, so that a cancel either marks
+        // the call or finds its question.
+        let mut calls = self.calls.lock().unwrap();
+        if calls.get(&call_id).is_some_and(|question| question.as_deref() == Some(CANCELLED)) {
+            calls.remove(&call_id);
             return Asked::Dropped;
         }
-        if !self.can_ask() {
-            return Asked::Unasked;
-        }
         let what = match &waiting {
-            Waiting::Nothing => return Asked::Unasked,
-            Waiting::Asking(download) => what(download),
-            Waiting::Unknown => "some large Bioconductor data packages".to_owned(),
+            _ if !self.can_ask() => None,
+            Waiting::Nothing => None,
+            Waiting::Asking(download) => Some(what(download)),
+            Waiting::Unknown => Some("some large Bioconductor data packages".to_owned()),
+        };
+        let Some(what) = what else {
+            // The call goes on to the runtime, and so does a cancel of it.
+            calls.remove(&call_id);
+            return Asked::Unasked;
         };
         let id = format!("{ID_PREFIX}{}", self.next.fetch_add(1, Ordering::SeqCst) + 1);
         let (answered, answer) = mpsc::channel();
-        // Under the calls' lock, so that a cancel either marks the call or finds its question.
-        let mut calls = self.calls.lock().unwrap();
         self.waiting.lock().unwrap().insert(id.clone(), answered);
         calls.insert(call_id.clone(), Some(id.clone()));
         drop(calls);
@@ -187,11 +191,11 @@ impl Consent {
                 withdraw();
                 return Asked::Dropped;
             }
-            ("decline", _) => "download_declined::The user was asked in Endeavor's own dialog and said no, so nothing downloads and the cells that need it stay queued. Tell the user; call approve_install again only if they ask for the download.".to_owned(),
-            ("cancel", _) => "download_not_answered::The user closed Endeavor's dialog without answering, so nothing downloads and the cells that need it stay queued. Ask the user in the chat; if they want it, call approve_install again, and it asks them once more.".to_owned(),
+            ("decline", _) => "download_declined::The user said no in Endeavor's download dialog, which the app they talk to you in showed, so nothing downloads and the cells that need it stay queued. Tell the user; call approve_install again only if they ask for the download.".to_owned(),
+            ("cancel", _) => "download_not_answered::The user closed Endeavor's download dialog without answering. That dialog was in the app they talk to you in, and it is gone now. Nothing downloads and the cells that need it stay queued. Ask the user in the chat whether to download it; if they say yes, call approve_install again, and the same dialog asks them once more. The notebook's page also has its own button that approves it.".to_owned(),
             (_, None) => {
                 withdraw();
-                "download_not_answered::Endeavor asked the user in a dialog and got no answer, so nothing downloads. Ask the user in the chat; if they want it, call approve_install again, and it asks them once more.".to_owned()
+                "download_not_answered::Endeavor asked the user in a dialog in the app they talk to you in and got no answer, so nothing downloads. Ask the user in the chat; if they want it, call approve_install again, and it asks them once more.".to_owned()
             }
             (_, Some(answer)) => format!(
                 "download_not_answered::Endeavor couldn't ask the user ({}), so nothing downloads. Ask the user in the chat; if they want it, call approve_install again.",
@@ -299,7 +303,7 @@ mod tests {
         assert_eq!(sent[0]["method"], "elicitation/create");
         assert_eq!(sent[0]["params"]["message"], "R needs to download ALL 1.44.0 (11 MB) before this notebook's cells can run. Download it now?");
         // A no, a closed dialog or an error downloads nothing, and the agent hears which.
-        for (answer, kind) in [(Some(json!({ "action": "decline" })), "said no"), (Some(json!({ "action": "cancel" })), "without answering"), (None, "Method not found")] {
+        for (answer, kind) in [(Some(json!({ "action": "decline" })), "said no"), (Some(json!({ "action": "cancel" })), "without answering. That dialog was in the app they talk to you in, and it is gone now"), (None, "Method not found")] {
             let (result, _) = asked(consent.clone(), all(), answer);
             let Asked::No(result) = result else { panic!("{kind}: not refused") };
             assert_eq!(result["isError"], true, "{result}");
@@ -376,11 +380,14 @@ mod tests {
     #[test]
     fn where_it_asks_the_asking_message_says_so() {
         let reply = |text: &str| to_json(&json!({ "jsonrpc": "2.0", "id": 4, "result": { "content": [{ "type": "text", "text": to_json(&json!({ "message": text })) }] } }));
-        let asking = format!("R has to download ALL. {} The page's own button does the same.", crate::notebooks::ASK_STEP);
+        let asking = format!("R has to download ALL. {} Don't call read_cell to wait.", crate::notebooks::ASK_STEP);
         let consent = Consent::default();
         assert_eq!(consent.reply_said(reply(&asking)), reply(&asking));
         consent.learn_client(&initialize(json!({ "form": {} })));
-        assert_eq!(consent.reply_said(reply(&asking)), reply(&format!("R has to download ALL. {ASK_STEP_IN_DIALOG} The page's own button does the same.")));
+        let said = consent.reply_said(reply(&asking));
+        assert_eq!(said, reply(&format!("R has to download ALL. {ASK_STEP_IN_DIALOG} Don't call read_cell to wait.")));
+        // It says where the dialog is, and the page's button is still there.
+        assert!(said.contains("The notebook's page also has a button for it.") && !said.contains("The page's own button does the same."), "{said}");
     }
 
     #[test]
