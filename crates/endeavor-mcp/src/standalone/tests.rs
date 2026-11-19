@@ -491,7 +491,7 @@ fn a_call_with_the_wrong_arguments_is_answered_by_the_front_and_not_passed_on() 
     let said: Vec<Value> = out.lines().iter().map(|l| serde_json::from_str::<Value>(l).unwrap()).map(|r| serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap()).collect();
     assert_eq!(said.len(), 3, "a notification gets no answer: {said:?}");
     assert_eq!(said.iter().map(|s| s["error"].as_str().unwrap()).collect::<Vec<_>>(), ["invalid_argument", "invalid_argument", "unknown_tool"]);
-    assert!(said[0]["message"].as_str().unwrap().starts_with("`name` is not an argument of `new_notebook`. Its arguments: `path`."), "{said:?}");
+    assert!(said[0]["message"].as_str().unwrap().starts_with("`name` is not an argument of `new_notebook`. Its arguments: `path`, `user_words`."), "{said:?}");
     call(4, "list_notebooks", r#"{"placeholder":""}"#);
     assert_eq!(seen.lock().unwrap().len(), 1, "a tool with no arguments ignores them and the call goes on");
 }

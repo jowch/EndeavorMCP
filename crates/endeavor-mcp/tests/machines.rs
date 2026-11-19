@@ -1422,7 +1422,7 @@ fn only_a_call_of_a_known_tool_starts_the_local_runtime() {
     let guide = front.request("tools/call", json!({ "name": "notebook_guide", "arguments": {} }));
     assert_eq!(guide["result"]["isError"], false, "{guide}");
     let (failed, said) = front.call("new_notebook", json!({ "name": "remote.jl" }));
-    assert!(failed && said["error"] == "invalid_argument" && said["message"].as_str().unwrap().starts_with("`name` is not an argument of `new_notebook`. Its arguments: `path`."), "{said}");
+    assert!(failed && said["error"] == "invalid_argument" && said["message"].as_str().unwrap().starts_with("`name` is not an argument of `new_notebook`. Its arguments: `path`, `user_words`."), "{said}");
     let (failed, said) = front.call("edit_cell", json!({ "notebook_id": NOTEBOOK, "cell_id": "c" }));
     assert!(failed && said["error"] == "invalid_argument" && said["message"].as_str().unwrap().starts_with("`edit_cell` needs `code`."), "{said}");
     let (failed, said) = front.call("use_machine", json!({}));

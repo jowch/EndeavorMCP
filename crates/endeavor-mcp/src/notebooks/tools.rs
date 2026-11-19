@@ -1525,6 +1525,19 @@ impl Call<'_> {
                 if !held && !std::path::Path::new(&dir).is_dir() {
                     return Err(argument_error(&format!("invalid_path::Directory does not exist: '{dir}'")));
                 }
+                // New notebooks are Julia unless the user asks for R or Python or the project is in it. Told so
+                // in the tool text alone, Haiku 4.5 still made a Python notebook for a plain plot most times
+                // (#361), so a notebook in another language needs the user's ask or the project's files.
+                let backend = super::engines::of_path(&path);
+                if !held && matches!(backend, wire::backend::Backend::Ember | wire::backend::Backend::Marimo) && !asked_in(backend, self.args.get("user_words").and_then(Value::as_str).unwrap_or("")) && self.nbs.kind(self.owner) != Some(backend) {
+                    let session = match folder { Folder::In(f) => Some(f.as_str()), _ => None };
+                    if !project_in(backend, [Some(dir.as_str()), session].into_iter().flatten()) {
+                        let language = if backend == wire::backend::Backend::Ember { "R" } else { "Python" };
+                        return Err(argument_error(&format!(
+                            "not_asked::New notebooks are in Julia unless the user asks for {language} or their project is in {language}, and this project has no {language} files. Make a `.jl` notebook instead. If the user did ask for {language}, call new_notebook again with `user_words`: their words that ask for it, quoted exactly."
+                        )));
+                    }
+                }
                 if !held && read_only(&dir) {
                     return Err(not_writable(&dir, "the folder"));
                 }
@@ -2022,6 +2035,48 @@ fn julia_iterate(value: &Value) -> Result<Vec<Value>, String> {
 /// its error's kind, as for every adapter error (`ArgumentError: kind::message`).
 pub(super) fn already_open(error: &str) -> bool {
     error.strip_prefix("ArgumentError: ").is_some_and(|rest| rest.starts_with("notebook_already_open::"))
+}
+
+/// Whether `words`, the user's as the agent quotes them, name `backend`'s language.
+fn asked_in(backend: wire::backend::Backend, words: &str) -> bool {
+    let lower = words.to_ascii_lowercase();
+    match backend {
+        wire::backend::Backend::Ember => words.split(|c: char| !c.is_ascii_alphanumeric() && c != '.').any(|w| w == "R" || w == "r" || w.ends_with(".R")) || lower.contains("tidyverse") || lower.contains("ggplot"),
+        _ => lower.contains("python") || lower.contains("marimo") || lower.contains(".py"),
+    }
+}
+
+/// Whether the project is in `backend`'s language: a file of it in one of `dirs`, or in a folder
+/// one level below. Looks at a few thousand entries at most, and not in hidden folders.
+fn project_in<'a>(backend: wire::backend::Backend, dirs: impl Iterator<Item = &'a str>) -> bool {
+    let ours = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        match backend {
+            wire::backend::Backend::Ember => matches!(ext, "r" | "rmd" | "rproj") || matches!(lower.as_str(), "description" | "renv.lock"),
+            _ => matches!(ext, "py" | "ipynb") || matches!(lower.as_str(), "pyproject.toml" | "requirements.txt" | "setup.py" | "pipfile" | "uv.lock" | "environment.yml"),
+        }
+    };
+    let mut seen = 0;
+    let mut todo: Vec<(std::path::PathBuf, u8)> = dirs.map(|d| (std::path::PathBuf::from(d), 0)).collect();
+    while let Some((dir, depth)) = todo.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            seen += 1;
+            if seen > 4000 {
+                return false;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            if is_dir {
+                if depth == 0 && !name.starts_with('.') && name != "__marimo__" {
+                    todo.push((entry.path(), 1));
+                }
+            } else if ours(&name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Whether R notebooks can open here: not on Windows, where Ember doesn't run yet.

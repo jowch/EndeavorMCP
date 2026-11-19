@@ -301,7 +301,7 @@ fn a_python_notebook_through_the_runtime() {
         // A session works on one notebook: another agent makes it.
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
         agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
-        let made = agent.ok("new_notebook", json!({ "path": "fresh.py" }));
+        let made = agent.ok("new_notebook", json!({ "path": "fresh.py", "user_words": "in Python" }));
         assert_eq!(made["execution_allowed"], true, "{made}");
         let text = std::fs::read_to_string(folder.join("fresh.py")).unwrap();
         assert!(text.contains("\"marimo==0.25.1\"") && text.contains("exclude-newer = \""), "{text}");

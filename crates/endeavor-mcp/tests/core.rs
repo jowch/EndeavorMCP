@@ -519,7 +519,7 @@ fn a_call_with_arguments_the_tool_does_not_take_is_refused_and_is_not_the_sessio
     let guide = "\nSee `notebook_guide` with `topic` set to `endeavor-notebooks/reference/errors.md` for what this error means and what to do.";
     assert_eq!(
         send(1, "new_notebook", serde_json::json!({ "name": "remote.jl" })),
-        tool_error(1, "invalid_argument", &format!("`name` is not an argument of `new_notebook`. Its arguments: `path`.{guide}"))
+        tool_error(1, "invalid_argument", &format!("`name` is not an argument of `new_notebook`. Its arguments: `path`, `user_words`.{guide}"))
     );
     assert!(!send(2, "list_notebooks", serde_json::json!({ "input": "" })).contains("invalid_argument"), "a tool with no arguments ignores what it is given");
     assert!(send(10, "add_cell", serde_json::json!({ "notebook_id": "n1" })).contains("invalid_notebook_id"), "add_cell without code passes the check");

@@ -3340,7 +3340,7 @@ fn an_r_install_waiting_for_an_ok_says_to_ask_the_user_and_nothing_waits_for_it(
 fn new_notebook_takes_an_r_path_only_where_r_notebooks_open() {
     let s = setup();
     let dir = std::env::temp_dir().to_string_lossy().trim_end_matches(SEP).to_owned();
-    let made = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}endeavor-new-r-test.R") }));
+    let made = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}endeavor-new-r-test.R"), "user_words": "make it in R" }));
     let other = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}notes.txt") })).unwrap_err();
     if cfg!(windows) {
         let refused = made.unwrap_err();
@@ -3350,6 +3350,41 @@ fn new_notebook_takes_an_r_path_only_where_r_notebooks_open() {
         assert_eq!(made, Err("unsupported::R notebooks aren't running in this runtime".into()), "it goes to the R engine, which this test's runtime hasn't");
         assert!(other.contains("invalid_path::Notebook path must end in .jl (Julia), .R (R) or .py (Python, marimo): "), "{other}");
     }
+}
+
+#[test]
+fn a_new_r_or_python_notebook_needs_the_users_ask_or_the_projects_files() {
+    if cfg!(windows) {
+        return;
+    }
+    // Told only in the tool text, Haiku 4.5 made a Python notebook for a plain plot most times (#361).
+    let s = setup();
+    let dir = std::env::temp_dir().join(format!("endeavor-not-asked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    for (name, language) in [("plot.py", "Python"), ("plot.R", "R")] {
+        let refused = s.call("", "new_notebook", json!({ "path": path(name) })).unwrap_err();
+        assert!(refused.contains("not_asked::") && refused.contains(&format!("unless the user asks for {language}")) && refused.contains("`user_words`"), "{refused}");
+        // Words that don't name the language don't do (Haiku quoted "Plot sin(x)").
+        let unnamed = s.call("", "new_notebook", json!({ "path": path(name), "user_words": "Plot sin(x) from 0 to 2π" })).unwrap_err();
+        assert!(unnamed.contains("not_asked::"), "{unnamed}");
+        // Asked for, it goes on to the engine, which this test's runtime hasn't.
+        let words = if language == "R" { "do it in R please" } else { "a Python notebook" };
+        let asked = s.call("", "new_notebook", json!({ "path": path(name), "user_words": words })).unwrap_err();
+        assert!(asked.contains("aren't running in this runtime"), "{asked}");
+    }
+    // A project with a file in the language, even one folder down, needs no ask; one in a hidden folder doesn't count.
+    std::fs::create_dir_all(dir.join(".venv")).unwrap();
+    std::fs::write(dir.join(".venv/site.py"), "").unwrap();
+    assert!(s.call("", "new_notebook", json!({ "path": path("plot.py") })).unwrap_err().contains("not_asked::"));
+    std::fs::write(dir.join("data/clean.py"), "").unwrap();
+    assert!(s.call("", "new_notebook", json!({ "path": path("plot.py") })).unwrap_err().contains("aren't running in this runtime"));
+    std::fs::write(dir.join("DESCRIPTION"), "").unwrap();
+    assert!(s.call("", "new_notebook", json!({ "path": path("plot.R") })).unwrap_err().contains("aren't running in this runtime"));
+    // Julia needs nothing.
+    s.call("", "new_notebook", json!({ "path": path("plot.jl") })).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

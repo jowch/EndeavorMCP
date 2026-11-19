@@ -524,6 +524,10 @@
         "path": {
           "description": "Where to create it, ending in `.jl` for a Julia notebook, `.R` for an R notebook or `.py` for a Python (marimo) notebook (R and Python not on Windows); a relative path is inside the session's folder. The file must not exist yet and its folder must. Default: a notebook with a generated name in the session's folder, in R if the session was started for R notebooks and in Julia otherwise.",
           "type": "string"
+        },
+        "user_words": {
+          "description": "For an R or Python notebook: the user's words that ask for that language, quoted exactly. Without them, an R or Python notebook is refused with `not_asked` unless the project has files in that language.",
+          "type": "string"
         }
       },
       "required": [],

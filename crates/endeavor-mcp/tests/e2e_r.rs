@@ -560,7 +560,7 @@ fn an_r_notebook_through_the_runtime() {
         // A session works on one notebook, so another session makes this one.
         let mut agent = Agent::new(port, &token);
         agent.initialize();
-        let made = agent.ok("new_notebook", json!({ "path": "fresh.R" }));
+        let made = agent.ok("new_notebook", json!({ "path": "fresh.R", "user_words": "an R notebook" }));
         assert!(folder.join("fresh.R").exists() && made["created"] == true && made.get("warnings").is_none(), "{made}");
         assert!(wire::backend::Backend::of_file(&folder.join("fresh.R")) == Some(wire::backend::Backend::Ember), "an Ember file");
         let (id, cell) = (made["notebook_id"].as_str().unwrap(), made["cell_ids"][0].as_str().unwrap());
@@ -573,7 +573,7 @@ fn an_r_notebook_through_the_runtime() {
     step("a text cell reads as its prose with its inline values, and a notebook with no packages previews as such (#270, #269)", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();
-        let made = agent.ok("new_notebook", json!({ "path": "prose.R" }));
+        let made = agent.ok("new_notebook", json!({ "path": "prose.R", "user_words": "an R notebook" }));
         let (id, cell) = (made["notebook_id"].as_str().unwrap().to_owned(), made["cell_ids"][0].clone());
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "x <- 21" }));
         let text = agent.ok("add_cell", json!({ "notebook_id": id, "code": "#' ## Result\n#'\n#' Twice is `r x * 2`, not `r x`.", "after_cell_id": cell }))["cell_id"].clone();
@@ -597,7 +597,7 @@ fn an_r_notebook_through_the_runtime() {
     step("a run goes on through the dependents Ember queues: a read or a waited submit waits for them (#151) and says if one failed (#171)", || {
         let mut agent = Agent::new(port, &token);
         agent.initialize();
-        let made = agent.ok("new_notebook", json!({ "path": "chain.R" }));
+        let made = agent.ok("new_notebook", json!({ "path": "chain.R", "user_words": "an R notebook" }));
         let (id, up) = (made["notebook_id"].as_str().unwrap().to_owned(), made["cell_ids"][0].clone());
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
         let down = agent.ok("add_cell", json!({ "notebook_id": id, "code": "{ Sys.sleep(3); if (a > 3) stop(\"boom\"); a + 1 }", "after_cell_id": up }))["cell_id"].clone();

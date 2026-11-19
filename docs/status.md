@@ -307,7 +307,11 @@ Next:
   and its WebSocket open only for a notebook that is open and allowed to run,
   since opening one builds its environment; the proxy decodes a path before it
   matches the refusals, as marimo's server does. A new notebook's header also
-  holds Python to the minor version it was made with (interface 42). The app's
+  holds Python to the minor version it was made with (interface 42). An agent's
+  `new_notebook` for an R or Python notebook is refused with `not_asked` unless it
+  quotes the user's words naming that language (`user_words`) or the project has
+  files in it, since the tool text alone didn't keep Haiku 4.5 from Python for a
+  plain plot (#361, interface 43). The app's
   runtime and a server's refuse Python notebooks for now. Not on Windows. Known
   gaps: an opened notebook can't be changed in safe preview (#351), no tool moves
   the package date (#352), ids shift after a reload (#353), `set_input` and
