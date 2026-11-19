@@ -1471,7 +1471,7 @@ fn run_shell_runs_in_the_login_shell_and_keeps_to_its_limits() {
     assert_eq!(ran, serde_json::json!({ "exit_code": 3, "stdout": format!("out\n{}\n", folder.display()), "stderr": "err\n", "timed_out": false, "cwd": folder }));
     assert_eq!(server.run(serde_json::json!({ "command": "pwd" }))["stdout"], format!("{}\n", home.display()), "home by default");
     let env = server.run(serde_json::json!({ "command": "echo \"$JULIA_DEPOT_PATH|$ENDEAVOR_TOKEN|$ENDEAVOR_LAUNCHER$ENDEAVOR_BUILD\"" }));
-    assert_eq!(env["stdout"], "/opt/depot:||\n", "Julia's environment, without the runtime's secrets");
+    assert_eq!(env["stdout"], format!("/opt/depot:{}:||\n", home.join(".julia").display()), "Julia's environment, with the user's depot behind ours (#367), without the runtime's secrets");
 
     // A session's own folder is where it runs by default.
     let set = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_session_folder","params":{{"owner":"8","folder":"{}"}}}}"#, folder.display());

@@ -357,7 +357,7 @@ fn julia_command(julia: &str, runtime: &Path, depot: &str, token: &str, launcher
         .arg(format!("--project={runtime}"))
         .arg(format!("{runtime}/boot.jl"))
         .args(ports.map(|p| p.to_string()))
-        .env("JULIA_DEPOT_PATH", depot)
+        .env("JULIA_DEPOT_PATH", crate::paths::with_user_depot(depot))
         // Not argv, which `ps` shows to every user.
         .env("ENDEAVOR_TOKEN", token)
         .env("ENDEAVOR_STATE", julia_state)

@@ -64,7 +64,7 @@ of theirs (`module load julia`), then `julia` on the login shell's PATH
 no Julia found, it says how to install one (juliaup).
 
 - **Packages.** The runtime already uses its own package store first, with the
-  user's `~/.julia` behind it read-only (`src/runtime.rs`), so registries and
+  user's `~/.julia` behind it (`paths::with_user_depot`, #367), so registries and
   packages the user has are reused and nothing is written into `~/.julia`.
   Keep that: it stops our pins clashing with the user's environments.
 - **First run** still installs and precompiles the pinned Pluto the adapter

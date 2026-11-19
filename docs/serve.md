@@ -197,8 +197,10 @@ status` shows what is running and where.
 | `--state-dir DIR` | Where the runtime keeps `runtime.json`, its token and `runtime.log` | `~/.local/state/endeavor/serve/<host name>` |
 
 The default depot is the one the app uses on servers, so packages installed
-for one are there for the other. The trailing `:` puts your own `~/.julia`
-behind it, read-only.
+for one are there for the other. A trailing `:` puts your own depot behind
+it (the first entry of your `JULIA_DEPOT_PATH`, else `~/.julia`), so your
+registries and packages are found. Packages Endeavor installs go into the
+first entry, not into yours.
 
 Use `--host-tools` when your agent runs on another computer, such as your
 laptop, and its own file and shell tools can't see this machine. Without

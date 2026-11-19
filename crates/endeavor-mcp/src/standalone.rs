@@ -954,7 +954,7 @@ fn precompile_command(julia: &str, runtime: &Path, depot: &str, key: &str) -> Op
         .arg("--startup-file=no")
         .arg(format!("--project={}", runtime.display()))
         .args(["-e", &script])
-        .env("JULIA_DEPOT_PATH", depot)
+        .env("JULIA_DEPOT_PATH", crate::paths::with_user_depot(depot))
         .env("JULIA_LOAD_PATH", if cfg!(windows) { "@;@stdlib" } else { "@:@stdlib" })
         .env("ENDEAVOR_RUNTIME", runtime)
         .env("ENDEAVOR_PRECOMPILED", key)
