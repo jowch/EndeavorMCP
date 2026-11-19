@@ -307,14 +307,10 @@ fn a_python_notebook_through_the_runtime() {
         // marimo installs with `uv pip install`, which reads no header; the date has to reach it. boto3 has a
         // release most days, so the newest is never the one of a date weeks back.
         const DATE: &str = "2026-10-05T00:00:00Z";
-        std::fs::write(folder.join("endeavor-e2e-dated.py"), GROWTH.replace("#     \"marimo==0.25.1\",\n# ]\n", &format!("#     \"marimo==0.25.1\",\n# ]\n#\n# [tool.uv]\n# exclude-newer = \"{DATE}\"\n"))).unwrap();
-        // uv keeps a script's environment by its path, so one from an earlier run would have boto3 already.
-        let cache = String::from_utf8(Command::new("uv").args(["cache", "dir"]).output().unwrap().stdout).unwrap();
-        for old in std::fs::read_dir(Path::new(cache.trim()).join("environments-v2")).into_iter().flatten().flatten() {
-            if old.file_name().to_string_lossy().starts_with("endeavor-e2e-dated-") {
-                let _ = std::fs::remove_dir_all(old.path());
-            }
-        }
+        // uv keeps a script's environment by its path, so a notebook of an earlier run's name would have
+        // boto3 already, and nothing would install: each run's notebook has a name of its own.
+        let name = format!("endeavor-e2e-dated-{}.py", std::process::id());
+        std::fs::write(folder.join(&name), GROWTH.replace("#     \"marimo==0.25.1\",\n# ]\n", &format!("#     \"marimo==0.25.1\",\n# ]\n#\n# [tool.uv]\n# exclude-newer = \"{DATE}\"\n"))).unwrap();
         let expected = Command::new("uv").args(["pip", "compile", "--quiet", "--no-header", "--no-annotate", "--exclude-newer", DATE, "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().and_then(|mut uv| {
             uv.stdin.take().unwrap().write_all(b"boto3\n")?;
             uv.wait_with_output()
@@ -322,21 +318,29 @@ fn a_python_notebook_through_the_runtime() {
         let expected = String::from_utf8(expected.unwrap().stdout).unwrap().lines().find(|l| l.starts_with("boto3==")).unwrap().to_owned();
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
         agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
-        let opened = agent.ok("open_notebook", json!({ "path": "endeavor-e2e-dated.py" }));
+        let opened = agent.ok("open_notebook", json!({ "path": name }));
         let id = opened["notebook_id"].clone();
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
         let cell = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"][1].as_str().unwrap().to_owned();
         agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
-        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import boto3\nboto3.__version__" }));
-        agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": true }));
-        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+        // Run as an agent usually does, without waiting, then read: the read waits through the install and
+        // the rerun, and never shows the ModuleNotFoundError the first run hit (smoke N7 with Haiku, 11-19).
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import boto3\nboto3.__version__", "run_after": true }));
+        let mut read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+        for _ in 0..20 {
+            assert!(read["errored"] == false, "a cell waiting for its package doesn't show the import error: {read}");
+            if read["queued"] != true && read["running"] != true {
+                break;
+            }
+            read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+        }
         let version = expected.trim_start_matches("boto3==");
         assert!(read["output"].as_str().unwrap_or_default().contains(version), "boto3 {version}, as of {DATE}: {read}");
-        let header = std::fs::read_to_string(folder.join("endeavor-e2e-dated.py")).unwrap();
+        let header = std::fs::read_to_string(folder.join(&name)).unwrap();
         assert!(header.contains(&format!("\"{expected}\"")), "the header names {expected}: {header}");
         // The header builds again: a version newer than its date wouldn't resolve.
         agent.ok("close_notebook", json!({ "notebook_id": id }));
-        let opened = agent.ok("open_notebook", json!({ "path": "endeavor-e2e-dated.py" }));
+        let opened = agent.ok("open_notebook", json!({ "path": name }));
         let id = opened["notebook_id"].clone();
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
         agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": true }));

@@ -259,6 +259,9 @@ class Notebook:
         self.order = []
         self.cells = {}
         self.missing = set()
+        # An agent's run's cells (`watch_run`), and the install under way for some of them: a cell that
+        # failed to import a package we'll install reads as queued until it runs again.
+        self.watched, self.installing = set(), None
         self.ws = None
         # The watch's own consumer id, which edits are sent as (`go_live`).
         self.watcher = None
@@ -404,6 +407,7 @@ class Notebook:
                 c["console"] = []
                 c["ran_code"] = c["code"]
                 c["stale"] = False
+                c["awaiting_install"] = False
             elif status == "idle" and c["status"] == "running":
                 c["last_run"] = d.get("timestamp") or time.time()
                 c["runtime"] = max(0.0, c["last_run"] - c["started"])
@@ -414,6 +418,9 @@ class Notebook:
         if d.get("output") is not None:
             c["output"] = d["output"]
             c["errored"] = d["output"].get("channel") == "marimo-error"
+            # Marked here, as marimo reports the error, so no read sees it between the run and the install.
+            if c["errored"] and d["cell_id"] in self.watched and self.missing_modules([d["cell_id"]]):
+                c["awaiting_install"] = True
         console = d.get("console")
         if console:
             c["console"] += console if isinstance(console, list) else [console]
@@ -450,15 +457,18 @@ class Notebook:
             "finally:\n    os.environ.pop('UV_EXCLUDE_NEWER', None)\n"
         rerun = sorted({c for cs in modules.values() for c in cs}, key=self.order.index)
         for c in rerun:
-            self.cells[c]["status"], self.cells[c]["queued_by_us"] = "queued", True
+            self.cells[c]["status"], self.cells[c]["queued_by_us"], self.cells[c]["awaiting_install"] = "queued", True, True
+        self.installing = {"packages": sorted(modules), "started": time.time()}
         try:
             ok, out = await self.m.execute(await self.session_id(), code, timeout=1800)
         except Exception as e:  # noqa: BLE001
             ok, out = False, str(e)
+        finally:
+            self.installing = None
         if not ok:
             print(f"endeavor marimo: couldn't install {sorted(modules)}: {out[-500:]}", file=sys.stderr)
             for c in rerun:
-                self.cells[c]["status"] = "idle"
+                self.cells[c]["status"], self.cells[c]["awaiting_install"] = "idle", False
             return False
         return rerun
 
@@ -477,8 +487,14 @@ class Notebook:
 
     def cell_state(self, cid):
         c = self.cells[cid]
-        return {"cell_id": cid, "code": c["code"], "running": c["status"] == "running",
-                "queued": c["status"] == "queued", "errored": c["errored"]}
+        waiting = self.waits_for_install(cid)
+        return {"cell_id": cid, "code": c["code"], "running": c["status"] == "running" and not waiting,
+                "queued": c["status"] == "queued" or waiting, "errored": c["errored"] and not waiting}
+
+    def waits_for_install(self, cid):
+        """The cell failed to import a package that is being, or is about to be, installed for it."""
+        c = self.cells[cid]
+        return bool(c.get("awaiting_install")) and c["status"] != "running"
 
     def process_status(self):
         if not self.allowed:
@@ -489,15 +505,18 @@ class Notebook:
         c = self.cells[cid]
         out = c["output"] or {}
         never = c["ran_code"] is None and c["last_run"] == 0.0
+        waiting = self.waits_for_install(cid)
         d = {"cell_id": cid, "code": c["code"], "folded": c["hide_code"],
-             "running": c["status"] == "running", "queued": c["status"] == "queued",
-             "errored": c["errored"], "last_run": c["last_run"], "runtime": c["runtime"] * 1e9,
+             "running": c["status"] == "running" and not waiting, "queued": c["status"] == "queued" or waiting,
+             "errored": c["errored"] and not waiting, "last_run": c["last_run"], "runtime": c["runtime"] * 1e9,
              "output": "", "hidden": False, "markdown": is_markdown(c["code"]),
              # marimo's lazy mode marks a cell whose inputs changed; a cell edited since its run is
              # stale for the tools too.
              "stale": bool(c["stale"]) or (c["ran_code"] is not None and c["ran_code"] != c["code"]),
              "not_run": never and not c["errored"], "off": False, "notes": [], "inputs": []}
-        if c["errored"]:
+        if waiting:
+            pass
+        elif c["errored"]:
             d["error"] = error_of(out, c["console"])
             d["output"] = d["error"]["msg"]
         else:
@@ -509,7 +528,16 @@ class Notebook:
         return {"notebook_id": self.id, "path": self.path, "cell_order": list(self.order),
                 "process_status": self.process_status(), "execution_allowed": self.allowed,
                 "safe_preview": not self.allowed, "lazy": True,
+                "packages": self.install_state(),
                 "cells": [self.snapshot_cell(cid) for cid in self.order]}
+
+    def install_state(self):
+        """The package install under way, as the tools show a Julia or R one, or None."""
+        if not self.installing and not any(self.waits_for_install(c) for c in self.order):
+            return None
+        started = (self.installing or {}).get("started", time.time())
+        return {"step": "installing", "packages": (self.installing or {}).get("packages", []),
+                "seconds": int(time.time() - started), "last_line": None}
 
     def check_cell(self, cid):
         if cid not in self.cells:
@@ -880,6 +908,7 @@ class Adapter:
         self.runs += 1
         run = f"py-run-{self.runs}"
         if watch:
+            nb.watched |= set(cells)
             self.done[run] = asyncio.Event()
             asyncio.create_task(self.watch_run(nb, cells, run))
         return run
@@ -902,6 +931,18 @@ class Adapter:
         return [c for c in cells if c in nb.cells and nb.cells[c]["status"] in ("queued", "running")]
 
     async def watch_run(self, nb, cells, run):
+        nb.watched |= set(cells)
+        try:
+            await self.watch_cells(nb, cells)
+        finally:
+            nb.watched -= set(cells)
+            for c in cells:
+                if c in nb.cells:
+                    nb.cells[c]["awaiting_install"] = False
+        self.done.pop(run, asyncio.Event()).set()
+        self.notify("run_finished", notebook_id=nb.id, run=run, cells=[c for c in cells if c in nb.cells])
+
+    async def watch_cells(self, nb, cells):
         while True:
             while self.unfinished(nb, cells) and nb.id in self.notebooks:
                 await asyncio.sleep(0.2)
@@ -910,8 +951,6 @@ class Adapter:
                 break
             await self.start_run(nb, rerun, watch=False)
             await asyncio.sleep(0.3)
-        self.done.pop(run, asyncio.Event()).set()
-        self.notify("run_finished", notebook_id=nb.id, run=run, cells=[c for c in cells if c in nb.cells])
 
     async def run(self, nb, cells, wait, timeout):
         cells = [nb.check_cell(c) for c in cells]

@@ -1111,7 +1111,7 @@ fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) 
 
 /// The `path` descriptions of the tools that take one, in a front without a project folder: the usual
 /// ones say relative paths go in the session's folder, and that a name is generated there.
-const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl` for a Julia notebook, `.R` for an R notebook or `.py` for a Python (marimo) notebook (R and Python not on Windows). The file must not exist yet and its folder must. \
+const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl` for a Julia notebook, `.R` for an R notebook or `.py` for a Python (marimo) notebook (R and Python not on Windows). Make a Julia notebook unless the user asks for R or Python or their project is in R or Python. The file must not exist yet and its folder must. \
 Required on this computer: this server was not told the project folder, so it can't choose one unless the client names it with the call, as Codex does. \
 A relative path starts in that folder, and without it is refused. \
 On a server after `use_machine`, a relative path starts in the session's folder there.";
