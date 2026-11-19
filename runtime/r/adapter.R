@@ -28,8 +28,28 @@
 # is not used. Everything shares Ember's one R thread, so notifications stay
 # small: `cell_state` names only the cells whose code changed.
 
-# The user's ~/.Rprofile ran before this (notebooks run here, with their settings). If it
-# set .libPaths(), put the libraries R_LIBS names, where Ember is, back in front.
+# Notebooks run in this R, with the user's settings. The core has R read an
+# empty profile and names the user's in ENDEAVOR_R_PROFILE (empty for
+# ~/.Rprofile; unset for Endeavor's own R, which reads none): run it here, as R
+# would have, into the global environment, so an error in it is logged and R
+# carries on instead of stopping before the notebook opens.
+run_user_profile <- function(profile = Sys.getenv("ENDEAVOR_R_PROFILE", unset = NA), envir = globalenv()) {
+  if (is.na(profile)) return(invisible(FALSE))
+  if (!nzchar(profile)) profile <- file.path(path.expand("~"), ".Rprofile")
+  if (!file.exists(profile)) return(invisible(FALSE))
+  tryCatch({
+    sys.source(profile, envir = envir)
+    if (exists(".First", envir = envir, inherits = FALSE)) get(".First", envir = envir)()
+    invisible(TRUE)
+  }, error = function(e) {
+    message("Endeavor: your R profile (", profile, ") stopped with an error, and R carries on without the rest of it: ", conditionMessage(e))
+    invisible(FALSE)
+  })
+}
+run_user_profile()
+
+# If the profile set .libPaths(), put the libraries R_LIBS names, where Ember
+# is, back in front.
 local({
   ours <- strsplit(Sys.getenv("R_LIBS"), .Platform$path.sep, fixed = TRUE)[[1]]
   ours <- ours[nzchar(ours) & dir.exists(ours)]

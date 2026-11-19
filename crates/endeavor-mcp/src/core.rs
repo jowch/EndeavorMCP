@@ -942,15 +942,20 @@ impl EmberBuilds {
 }
 
 /// R reads ~/.Renviron and ~/.Rprofile only when there is no `.Renviron` or `.Rprofile` in the
-/// folder it starts in. Name the home ones, unless the user named others, so a project's (renv's,
-/// say) isn't read instead. A file that isn't there is read as empty.
-fn user_r_settings(command: &mut Command, home: Option<&Path>) {
-    let Some(home) = home.filter(|h| !h.as_os_str().is_empty()) else { return };
-    for (name, file) in [("R_ENVIRON_USER", ".Renviron"), ("R_PROFILE_USER", ".Rprofile")] {
-        if std::env::var_os(name).is_none_or(|v| v.is_empty()) {
-            command.env(name, home.join(file));
-        }
+/// folder it starts in. Name the home .Renviron, unless the user named another, so a project's (renv's,
+/// say) isn't read instead. A file that isn't there is read as empty. On Windows R looks in R_USER
+/// (Documents), not the home folder, so it keeps its own rules there.
+///
+/// The profile is different: an error in it stops Rscript before the adapter runs, and the notebook
+/// would say only that R stopped. So R reads `empty` (an empty file) as the profile, and the adapter
+/// runs the user's (ENDEAVOR_R_PROFILE, or ~/.Rprofile when that's empty) itself, where an error in it
+/// is logged and R carries on.
+fn user_r_settings(command: &mut Command, home: Option<&Path>, empty: &Path) {
+    let named = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
+    if let Some(home) = home.filter(|h| !h.as_os_str().is_empty() && !cfg!(windows)) && named("R_ENVIRON_USER").is_none() {
+        command.env("R_ENVIRON_USER", home.join(".Renviron"));
     }
+    command.env("ENDEAVOR_R_PROFILE", named("R_PROFILE_USER").unwrap_or_default()).env("R_PROFILE_USER", empty);
 }
 
 /// What R last wrote to stderr, which goes on to the runtime's log as it comes.
@@ -1195,9 +1200,13 @@ impl RStarter {
         // Endeavor's own R keeps its own settings (`r::Source::command`).
         let mut command = self.r.command(&[Path::new("--no-save"), Path::new("--no-restore"), &self.adapter]);
         if self.r.own().is_none() {
-            user_r_settings(&mut command, std::env::home_dir().as_deref());
+            let empty = self.state.with_file_name("empty.Rprofile");
+            std::fs::write(&empty, "").map_err(|e| format!("r_failed::Couldn't write {}: {e}", empty.display()))?;
+            user_r_settings(&mut command, std::env::home_dir().as_deref(), &empty);
         }
-        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null()).stderr(Stdio::piped());
+        // What R prints (a profile's messages, a notebook's print() outside a cell) goes to the log,
+        // never to our stdout, which is the MCP channel for `endeavor mcp`.
+        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null()).stdout(Stdio::from(io::stderr())).stderr(Stdio::piped());
         self.with_mask(&mut command);
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
@@ -2385,18 +2394,25 @@ mod tests {
 
     #[test]
     fn r_reads_the_users_home_settings_not_a_projects() {
+        let empty = std::path::Path::new("/state/empty.Rprofile");
         let mut command = std::process::Command::new("Rscript");
-        user_r_settings(&mut command, Some(std::path::Path::new("/home/ada")));
+        user_r_settings(&mut command, Some(std::path::Path::new("/home/ada")), empty);
         let env: std::collections::HashMap<_, _> = command.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
-        if std::env::var_os("R_ENVIRON_USER").is_none() {
+        if std::env::var_os("R_ENVIRON_USER").is_none() && !cfg!(windows) {
             assert_eq!(env["R_ENVIRON_USER"].as_deref(), Some(std::path::Path::new("/home/ada").join(".Renviron").to_string_lossy().as_ref()));
         }
+        if cfg!(windows) {
+            assert!(!env.contains_key("R_ENVIRON_USER"), "Windows: R's own rules for .Renviron");
+        }
+        // R reads an empty profile; the adapter runs the user's, where an error in it doesn't stop R.
+        assert_eq!(env["R_PROFILE_USER"].as_deref(), Some(empty.to_string_lossy().as_ref()));
         if std::env::var_os("R_PROFILE_USER").is_none() {
-            assert_eq!(env["R_PROFILE_USER"].as_deref(), Some(std::path::Path::new("/home/ada").join(".Rprofile").to_string_lossy().as_ref()));
+            assert_eq!(env["ENDEAVOR_R_PROFILE"].as_deref(), Some(""));
         }
         let mut none = std::process::Command::new("Rscript");
-        user_r_settings(&mut none, None);
-        assert_eq!(none.get_envs().count(), 0, "no home: R's own rules");
+        user_r_settings(&mut none, None, empty);
+        let names: Vec<_> = none.get_envs().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+        assert_eq!(names.len(), 2, "no home: no R_ENVIRON_USER, {names:?}");
     }
 
     #[test]
