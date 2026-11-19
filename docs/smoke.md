@@ -213,8 +213,8 @@ makes it reported only: a failed soft check doesn't fail the task.
 | `no_errored_cells` | no cell of an open notebook has an error |
 | `output_contains` `texts` | some cell's output contains every one of `texts` |
 | `execution_allowed` `value` | every open notebook's `execution_allowed` is `value` |
-| `final_message_contains_any` `texts` | the agent's answer to the last message (all its text, as the user sees it) contains one of `texts`, ignoring case |
-| `final_message_lacks` `texts` | that answer contains none of `texts`, ignoring case |
+| `final_message_contains_any` `texts` | the agent's last message contains one of `texts`, ignoring case |
+| `final_message_lacks` `texts` | the agent's last message contains none of `texts`, ignoring case |
 | `server_file` `suffix` | a file ending in `suffix` is in the server's notebook folder at the end |
 | `no_rerun_of_running_cells` `require_still_running` (false) | no call ran a cell that was still running, as far as the log shows: a run that returned before its cells finished, a `still_running` list, or `read_cell` and `list_notebooks` saying so; with `require_still_running`, a waited run also stopped waiting |
 | `reply_contains` `texts` | some tool reply in the log contains every one of `texts`, so a number the agent reports came from the notebook |

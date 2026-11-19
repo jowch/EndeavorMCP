@@ -493,9 +493,6 @@ fn notebooks_json(notebooks: &[crate::mcp::Notebook]) -> Value {
 
 #[derive(Default)]
 struct AgentRun {
-    /// What the agent wrote in its answer to the user's last message: every text part of it, not
-    /// only the last one. The user reads all of it; Haiku 4.5 said the notebook hadn't run in a
-    /// line before its last read and not in its summary (N3), which the user saw.
     final_message: String,
     /// The model the session started with, and every model that answered (a subagent can use another).
     model: Option<String>,
@@ -615,7 +612,6 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
     let mut run = AgentRun { problem, ..AgentRun::default() };
     let text = std::fs::read_to_string(work.join("transcript.jsonl")).unwrap_or_default();
     let mut last_message: Option<String> = None;
-    let mut said: Vec<String> = Vec::new();
     for event in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         match event["type"].as_str() {
             Some("system") if event["subtype"] == "compact_boundary" => run.compactions += 1,
@@ -640,22 +636,13 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
                     run.tokens.context = read;
                     run.tokens.input += read;
                 }
-                for part in event["message"]["content"].as_array().into_iter().flatten() {
-                    match part["type"].as_str() {
-                        Some("tool_use") => run.tools.push(part["name"].as_str().unwrap_or_default().to_owned()),
-                        Some("text") => said.extend(part["text"].as_str().map(str::to_owned)),
-                        _ => {}
-                    }
+                for part in event["message"]["content"].as_array().into_iter().flatten().filter(|p| p["type"] == "tool_use") {
+                    run.tools.push(part["name"].as_str().unwrap_or_default().to_owned());
                 }
             }
             // One per user message: its turns count alone, its cost is the session's so far.
             Some("result") => {
-                // A subagent's text isn't in the session's events, so the result's own text is kept if it is missing.
-                let last = event["result"].as_str().unwrap_or_default().to_owned();
-                if !last.is_empty() && !said.contains(&last) {
-                    said.push(last);
-                }
-                run.final_message = std::mem::take(&mut said).join("\n\n");
+                run.final_message = event["result"].as_str().unwrap_or_default().to_owned();
                 run.turns = Some(run.turns.unwrap_or(0) + event["num_turns"].as_u64().unwrap_or(0));
                 run.cost_usd = event["total_cost_usd"].as_f64();
                 // A message's own usage counts its output only up to its first part, so the output is the

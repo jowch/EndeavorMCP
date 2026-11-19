@@ -886,7 +886,7 @@ impl Call<'_> {
         if let Some(fix) = nb.cells.get(&cell).and_then(|c| self.defined_elsewhere(&nb, &cell, c)) {
             out.insert("defined_elsewhere".into(), json!(fix));
         }
-        let asks =nb.prompted().filter(|asks| **asks == cell || nb.cells.get(&cell).is_some_and(|c| c.running || c.queued)).cloned();
+        let asks = nb.prompted().filter(|asks| **asks == cell || nb.cells.get(&cell).is_some_and(|c| c.running || c.queued)).cloned();
         if let Some(asks) = asks {
             // The cell asking, or one queued behind it.
             if asks != cell {
@@ -1341,7 +1341,11 @@ impl Call<'_> {
     /// For a Pluto cell that fails with "Multiple definitions for x", which other cells define x
     /// and what to do, beside its error. Haiku 4.5 put a second `using StatsPlots` in a later cell
     /// and left both erroring (#242); the error alone doesn't say where the other one is.
+    /// Ember's error has the same words, but its advice doesn't fit R, so Pluto's only.
     fn defined_elsewhere(&self, nb: &Snapshot, id: &str, cell: &Cell) -> Option<String> {
+        if self.nbs.backend_of(&nb.id) != Backend::Pluto {
+            return None;
+        }
         let msg = cell.error.as_ref()?["msg"].as_str()?;
         let names = msg.strip_prefix("Multiple definitions for ")?.split(['.', '\n']).next()?;
         let names: Vec<&str> = names.split(", ").flat_map(|n| n.split(" and ")).map(str::trim).filter(|n| !n.is_empty()).collect();
@@ -1354,7 +1358,7 @@ impl Call<'_> {
             })
             .collect();
         (!each.is_empty()).then(|| format!(
-            "{}. A name can be defined in only one cell, so both cells fail. Keep one definition and remove the other; for a package, keep its `using` or `import` in one cell only.",
+            "{}. A name can be defined in only one cell, so each cell that defines it fails. Keep one definition and remove the other; for a package, keep its `using` or `import` in one cell only.",
             each.join("; ")
         ))
     }

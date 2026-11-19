@@ -1066,6 +1066,14 @@ fn a_name_defined_in_two_cells_says_where_the_other_is() {
     // Another error says nothing of the kind.
     s.engine.with(NB, |nb| nb.cells.iter_mut().for_each(|c| (c.errored, c.output) = (c.id == Z, if c.id == Z { "UndefVarError: `q` not defined".into() } else { String::new() })));
     assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Z })).unwrap().get("defined_elsewhere"), None);
+    // Nor does Ember's error in the same words: its advice about `using` is Julia's.
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/b.R", &[(X, "x = 1"), (Y, "x = 2")]);
+    ember.with(R, |nb| nb.cells.iter_mut().for_each(|c| (c.errored, c.output) = (true, error.into())));
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": R, "cell_id": Y })).unwrap().get("defined_elsewhere"), None);
 }
 
 #[test]
