@@ -6,6 +6,7 @@ using JSON
 using UUIDs
 using HTTP
 using Pluto
+import Pkg
 
 include("Output.jl")
 include("Controls.jl")
