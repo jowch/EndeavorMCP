@@ -675,7 +675,7 @@
     "name": "apply_package_update"
   },
   {
-    "description": "R notebooks only. Say yes to a large download: an install whose Bioconductor annotation and experiment-data packages add up to more than 500 MB (Ember's default limit) stops before downloading anything, and its cells wait, queued, with `packages.step` `asking` and `packages.download` listing the packages and their sizes. Calling it stands for the user's yes. Ask them first, end your reply, and call it only once they have said yes in a later message; never on your own. Where the client can show a dialog, Endeavor also asks the user there before anything downloads; if they say no or close it, the call fails with `download_declined` or `download_not_answered`. Refused with `nothing_to_approve` when no install is waiting for an OK, or the notebook isn't allowed to run yet. The library then installs and the queued cells run.",
+    "description": "R notebooks only. Say yes to a large download: an install whose Bioconductor annotation and experiment-data packages add up to more than 500 MB (Ember's default limit) stops before downloading anything, and its cells wait, queued, with `packages.step` `asking` and `packages.download` listing the packages and their sizes. It doesn't ask the user: calling it is the user's yes. Ask them first, end your reply, and call it only once they have said yes in a later message; never on your own. Refused with `nothing_to_approve` when no install is waiting for an OK, or the notebook isn't allowed to run yet. The library then installs and the queued cells run.",
     "inputSchema": {
       "properties": {
         "notebook_id": {

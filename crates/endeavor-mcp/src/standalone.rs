@@ -1126,6 +1126,10 @@ impl Relay {
         if self.consent.take_answer(&message) {
             return;
         }
+        // A cancel of a call that waits for the user's answer, which the runtime hasn't seen.
+        if self.consent.take_cancel(&message) {
+            return;
+        }
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
         if message["method"] == "initialize" {
             self.consent.learn_client(&message);
@@ -1141,6 +1145,7 @@ impl Relay {
                 let negotiated: Value = serde_json::from_str(&reply).unwrap_or_default();
                 *self.protocol.lock().unwrap() = negotiated["result"]["protocolVersion"].as_str().map(str::to_owned);
             }
+            let reply = if message["method"] == "tools/list" { self.consent.tools_listed(reply) } else { reply };
             return self.write(&reply);
         }
         // The runtime has nothing to do with it.
@@ -1219,15 +1224,18 @@ impl Relay {
                 self.write(&self.decorate(&message, tool.as_deref(), tool_failure(id, &message, &why)));
             }
         };
-        // These two use a runtime that is running, and start none.
         // Nothing downloads unless the user says yes to it themselves, where the client can ask them.
-        if tool.as_deref() == Some("approve_install") && id.is_some() {
-            if let consent::Asked::No(result) = self.consent.ask(&message, &|line| self.write(line)) {
-                return self.answer_call(&message, tool.as_deref(), result);
+        // Only a download that waits for an OK is asked about, with what the runtime says it is.
+        if tool.as_deref() == Some("approve_install") && id.is_some() && self.consent.can_ask() {
+            let waiting = self.waiting_download(message["params"]["arguments"]["notebook_id"].as_str().unwrap_or_default(), deadline);
+            match self.consent.ask(&message, waiting, &|line| self.write(line)) {
+                consent::Asked::No(result) => return self.answer_call(&message, tool.as_deref(), result),
+                consent::Asked::Dropped => return,
+                consent::Asked::Yes => deadline = machines::Deadline::after(start_wait()),
+                consent::Asked::Unasked => {}
             }
-            // The user's time to answer isn't the runtime's to start in.
-            deadline = machines::Deadline::after(start_wait());
         }
+        // These two use a runtime that is running, and start none.
         let need = match tool.as_deref() {
             Some("session_status") => Need::Peek,
             Some("list_notebooks") => Need::Look,
@@ -1239,7 +1247,6 @@ impl Relay {
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
             let sink = |reply: String| {
-                self.consent.learn_reply(&message, &reply);
                 self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, in_browser, reply)))
             };
             match self.post(&route, line, &sink) {
@@ -1250,6 +1257,24 @@ impl Relay {
                 Err(Sent::NotConnected(e) | Sent::Failed(e)) => return failed(format!("Endeavor's runtime didn't answer: {e}")),
             }
         }
+    }
+
+    /// What `notebook`'s install waits for, from the runtime's own `list_notebooks`. With no runtime
+    /// running, nothing can wait.
+    fn waiting_download(&self, notebook: &str, deadline: machines::Deadline) -> consent::Waiting {
+        let Ok(route) = self.route(Need::Look, deadline) else { return consent::Waiting::Nothing };
+        let id = "endeavor-look";
+        let look = to_json(&json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
+        let listed = Mutex::new(None);
+        let sink = |reply: String| {
+            if serde_json::from_str::<Value>(&reply).is_ok_and(|reply| reply["id"] == id) {
+                *listed.lock().unwrap() = Some(reply);
+            }
+        };
+        if self.post(&route, &look, &sink).is_err() {
+            return consent::Waiting::Unknown;
+        }
+        listed.into_inner().unwrap().map_or(consent::Waiting::Unknown, |listed| consent::waiting_in(&listed, notebook))
     }
 
     /// A runtime's reply to the agent's call, with no token in its `browser_url` (a runtime from
