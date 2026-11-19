@@ -207,6 +207,8 @@ fn a_python_notebook_through_the_runtime() {
         .args(["--julia", julia.to_str().unwrap(), "--depot", &format!("{}:", work.join("depot").display())])
         .env("XDG_CACHE_HOME", work.join("cache"))
         .env("XDG_STATE_HOME", work.join("state-home"))
+        // The install step reads while a package installs, which a warm uv cache would otherwise finish first.
+        .env("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS", "3")
         .env("XDG_CONFIG_HOME", work.join("config"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -308,8 +310,14 @@ fn a_python_notebook_through_the_runtime() {
         // release most days, so the newest is never the one of a date weeks back.
         const DATE: &str = "2026-10-05T00:00:00Z";
         // uv keeps a script's environment by its path, so a notebook of an earlier run's name would have
-        // boto3 already, and nothing would install: each run's notebook has a name of its own.
+        // boto3 already, and nothing would install: each run's notebook has a name of its own, and the
+        // environments of earlier runs' go (marimo's uv uses the runtime's cache, under XDG_CACHE_HOME).
         let name = format!("endeavor-e2e-dated-{}.py", std::process::id());
+        for old in std::fs::read_dir(work.join("cache/uv/environments-v2")).into_iter().flatten().flatten() {
+            if old.file_name().to_string_lossy().starts_with("endeavor-e2e-dated-") {
+                let _ = std::fs::remove_dir_all(old.path());
+            }
+        }
         std::fs::write(folder.join(&name), GROWTH.replace("#     \"marimo==0.25.1\",\n# ]\n", &format!("#     \"marimo==0.25.1\",\n# ]\n#\n# [tool.uv]\n# exclude-newer = \"{DATE}\"\n"))).unwrap();
         let expected = Command::new("uv").args(["pip", "compile", "--quiet", "--no-header", "--no-annotate", "--exclude-newer", DATE, "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().and_then(|mut uv| {
             uv.stdin.take().unwrap().write_all(b"boto3\n")?;
@@ -326,6 +334,17 @@ fn a_python_notebook_through_the_runtime() {
         // Run as an agent usually does, without waiting, then read: the read waits through the install and
         // the rerun, and never shows the ModuleNotFoundError the first run hit (smoke N7 with Haiku, 11-19).
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import boto3\nboto3.__version__", "run_after": true }));
+        // The install is under way (slowed by ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS) and says what it installs.
+        let began = Instant::now();
+        let installing = loop {
+            let listed = agent.ok("list_notebooks", json!({}));
+            let nb = listed.as_array().unwrap().iter().find(|n| n["notebook_id"] == id).unwrap().clone();
+            if nb["packages"].is_object() || began.elapsed() > Duration::from_secs(20) {
+                break nb;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(installing["packages"]["packages"].as_array().is_some_and(|p| p.iter().any(|p| p == "boto3")), "the install says it installs boto3: {installing}");
         let mut read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
         for _ in 0..20 {
             assert!(read["errored"] == false, "a cell waiting for its package doesn't show the import error: {read}");

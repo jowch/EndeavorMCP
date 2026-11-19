@@ -284,7 +284,8 @@ fn has_args(call: &Call, want: &Value) -> bool {
 
 /// An output that is a picture, which a second run needn't draw byte for byte the same.
 fn is_picture(output: &str) -> bool {
-    output.contains("data:image") || output.contains("<img") || output.contains("<svg") || output.len() > 20_000
+    // A marimo (or any) picture read_cell names rather than shows: "[image/png output, 109198 bytes; ...]".
+    output.contains("data:image") || output.contains("<img") || output.contains("<svg") || output.len() > 20_000 || output.contains("[image/")
 }
 
 /// Whether the runtime turned the call away because Julia, the runtime or the notebook's open was still
@@ -460,6 +461,9 @@ mod tests {
             run(&json!({ "check": "reproducible" }), &ev)
         };
         assert!(judge(Ok(vec![notebook(&[("a", "1", false), ("b", "2\n", false), ("c", "3", false), ("d", "<img src=\"data:image/png;base64,BBB\">", false)])])).passed);
+        let named = [notebook(&[("a", "[image/png output, 109198 bytes; call view_cell_output to see it]", false)])];
+        let ev = Evidence { calls: &[], notebooks: &named, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("a", "[image/png output, 254282 bytes; call view_cell_output to see it]", false)])])), turns: &[], server_files: &[] };
+        assert!(!run(&json!({ "check": "reproducible" }), &ev).passed && run(&json!({ "check": "reproducible" }), &ev).detail.contains("no cell"), "a picture named by its size isn't compared");
         let changed = judge(Ok(vec![notebook(&[("a", "1", false), ("b", "5", false), ("c", "3", false), ("d", "", false)])]));
         assert!(!changed.passed && changed.detail.contains("b = 1"), "{}", changed.detail);
         assert!(!judge(Ok(vec![notebook(&[("a", "1", false)])])).passed, "a cell missing from the rerun fails");

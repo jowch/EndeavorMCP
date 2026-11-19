@@ -429,8 +429,9 @@ fn serve_and_mcp_without_the_app() {
 fn said_standalone() -> &'static str {
     "These tools edit and run live notebooks, in Julia (Pluto), R (Ember) or Python (marimo), without the Endeavor app: \
 the user watches them in a web browser, on the notebook's own page, and there is no notebook pane next to this chat. \
+A new notebook is in Julia unless the user asks for R or Python or their project is in R or Python. \
 When the user asks to open, show or look at a `.jl`, `.R` or `.py` file, call `open_notebook` on it before reading it, so they can watch it, even when you can't tell it is a notebook: a `.py` file may be a marimo notebook, and a plain script fails at once with `not_a_notebook`; then read the file. \
-A new notebook is in Julia unless the user asks for R or Python or their project is in R or Python. `new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. When it has `browser_note`, no browser opened for the user: give them the address and follow the note. \
+`new_notebook` and `open_notebook` return `browser_url`: give it to the user. When the result has `opened_in_browser` true, the notebook should already be open in their browser; say so, and give the address in case it isn't. When it has `browser_note`, no browser opened for the user: give them the address and follow the note. \
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts. \
 This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
