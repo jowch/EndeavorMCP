@@ -67,6 +67,16 @@ pub enum Source {
 }
 
 impl Source {
+    /// The VALUE of `--julia VALUE` that means this, or None for a shell line (`--julia-shell`).
+    pub fn value(&self) -> Option<String> {
+        match self {
+            Source::Path(path) => Some(path.clone()),
+            Source::Auto => Some("auto".into()),
+            Source::Own => Some("own".into()),
+            Source::Shell(_) => None,
+        }
+    }
+
     /// What `--julia VALUE` means: `auto`, `own`, or a path (a julia called `own` is `./own`).
     pub fn from_value(value: String) -> Source {
         match value.as_str() {
@@ -148,10 +158,77 @@ fn found(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> R
 
 /// The user's own Julia, which `--julia auto` runs before Endeavor's: the login shell's `julia` (on
 /// Windows the PATH's), with its version, or why it can't be used (too old, doesn't run), in which
-/// case `auto` runs Endeavor's. None when there is none. For the app's Settings, which say which runs.
+/// case `auto` runs Endeavor's. None when there is none.
 pub fn users_julia() -> Option<Result<(String, String), String>> {
     let path = path_julia()?;
     Some(checked_version(&path, &format!("Found {path}, but it doesn't run.")).map(|version| (real_julia(path), version)))
+}
+
+/// Which Julia the app's Settings ask for on this computer. The library decides what that runs
+/// (`choose`), so the app and a server pick Julia the same way.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Preference {
+    /// The user's own Julia when they have one new enough, else Endeavor's (`--julia auto`).
+    #[default]
+    Auto,
+    /// Endeavor's own Julia, the pinned version, even when the user has one (`--julia own`).
+    Endeavors,
+    /// This julia, while it runs and is new enough; else as `Auto`.
+    Path(PathBuf),
+}
+
+/// What a julia the user chose turned out to be.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Chosen {
+    /// It runs and is new enough; its version, e.g. "1.12.6".
+    Usable(String),
+    /// Nothing is at the path any more.
+    Gone,
+    /// Something is there, but it didn't answer as Julia does.
+    NotJulia,
+    /// Julia, but older than Endeavor needs; its version.
+    TooOld(String),
+}
+
+/// Run the chosen file once to read its version (blocking; Julia answers in well under a second).
+pub fn check_chosen(path: &Path) -> Chosen {
+    if !path.is_file() {
+        return Chosen::Gone;
+    }
+    let mut command = Command::new(path);
+    crate::client::no_window(&mut command);
+    match command.arg("--version").stdin(Stdio::null()).output() {
+        Ok(out) if out.status.success() => chosen_from_version(&String::from_utf8_lossy(&out.stdout)),
+        _ => Chosen::NotJulia,
+    }
+}
+
+/// `julia --version`'s answer, as a check of the chosen file.
+fn chosen_from_version(text: &str) -> Chosen {
+    let Some(version) = text.trim().strip_prefix("julia version ") else { return Chosen::NotJulia };
+    match parse_version(version) {
+        Some(v) if v < MIN_JULIA => Chosen::TooOld(version.to_owned()),
+        Some(_) => Chosen::Usable(version.to_owned()),
+        None => Chosen::NotJulia,
+    }
+}
+
+/// The oldest Julia Endeavor runs, for saying so ("1.12").
+pub fn min_version() -> String {
+    format!("{}.{}", MIN_JULIA.0, MIN_JULIA.1)
+}
+
+/// The `--julia` a preference gives the runtime: a chosen julia that can't be used counts as
+/// `Auto`. `chosen` is `check_chosen`'s answer for a `Path`, when it has been asked.
+pub fn choose(preference: &Preference, chosen: Option<&Chosen>) -> Source {
+    match preference {
+        Preference::Auto => Source::Auto,
+        Preference::Endeavors => Source::Own,
+        Preference::Path(path) => match chosen.cloned().unwrap_or_else(|| check_chosen(path)) {
+            Chosen::Usable(_) => Source::Path(path.display().to_string()),
+            _ => Source::Auto,
+        },
+    }
 }
 
 fn expand_home(path: &str) -> String {
@@ -377,7 +454,7 @@ fn added_mark() -> Option<PathBuf> {
 }
 
 /// The official tarball for this machine: its URL, SHA-256 and size.
-fn tarball() -> Result<(&'static str, &'static str, u64), String> {
+pub fn tarball() -> Result<(&'static str, &'static str, u64), String> {
     let (os, arch) = (uname("-s"), uname("-m").replace("arm64", "aarch64"));
     let &(_, _, url, sha256, size) = TARBALLS
         .iter()
@@ -504,6 +581,31 @@ fn sha256_of(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chosen_julia_is_checked_by_its_version() {
+        assert_eq!(chosen_from_version("julia version 1.12.6\n"), Chosen::Usable("1.12.6".into()));
+        assert_eq!(chosen_from_version("julia version 1.13.4\n"), Chosen::Usable("1.13.4".into()));
+        assert_eq!(chosen_from_version("julia version 1.11.9\n"), Chosen::TooOld("1.11.9".into()), "#370");
+        assert_eq!(chosen_from_version("Python 3.12.1\n"), Chosen::NotJulia);
+        assert_eq!(chosen_from_version(""), Chosen::NotJulia);
+        assert_eq!(min_version(), "1.12");
+    }
+
+    #[test]
+    fn a_preference_chooses_the_runtimes_julia() {
+        assert_eq!(choose(&Preference::Auto, None), Source::Auto, "yours, else Endeavor's");
+        assert_eq!(choose(&Preference::Endeavors, None), Source::Own);
+        let path = Preference::Path("/opt/julia/bin/julia".into());
+        assert_eq!(choose(&path, Some(&Chosen::Usable("1.13.4".into()))), Source::Path("/opt/julia/bin/julia".into()));
+        for broken in [Chosen::Gone, Chosen::NotJulia, Chosen::TooOld("1.11.9".into())] {
+            assert_eq!(choose(&path, Some(&broken)), Source::Auto, "{broken:?} runs another");
+        }
+        assert_eq!(choose(&Preference::Path("/no/such/julia".into()), None), Source::Auto, "checked when not asked yet");
+        assert_eq!(Source::Auto.value().as_deref(), Some("auto"));
+        assert_eq!(Source::Own.value().as_deref(), Some("own"));
+        assert_eq!(Source::Shell("module load julia".into()).value(), None);
+    }
 
     #[test]
     fn versions_and_home_paths() {
