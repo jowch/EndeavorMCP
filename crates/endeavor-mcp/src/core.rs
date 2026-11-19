@@ -983,8 +983,9 @@ fn pass_on_stderr(stderr: std::process::ChildStderr) -> Arc<LastWords> {
     words
 }
 
-/// Why R ended, for the agent and the user: how its process ended (nothing while it runs) and its last error.
-fn why_r_ended(status: Option<std::process::ExitStatus>, said: &[String]) -> String {
+/// Why R (or Python's adapter: `who`) ended, for the agent and the user: how its process ended
+/// (nothing while it runs) and its last error.
+fn why_stopped(who: &str, status: Option<std::process::ExitStatus>, said: &[String]) -> String {
     const LONGEST: usize = 300;
     let how = status.map_or_else(|| "it stopped answering".to_owned(), |status| status.to_string());
     // R's error and the "Execution halted" after it.
@@ -996,7 +997,7 @@ fn why_r_ended(status: Option<std::process::ExitStatus>, said: &[String]) -> Str
     if last.chars().count() > LONGEST {
         last = format!("…{}", last.chars().rev().take(LONGEST).collect::<Vec<_>>().into_iter().rev().collect::<String>());
     }
-    format!("{how}; R's last output: {last}")
+    format!("{how}; {who}'s last output: {last}")
 }
 
 /// Starts R's adapter (`runtime/r/adapter.R`), with Ember in it, the first time an R notebook is
@@ -1234,7 +1235,7 @@ impl RStarter {
                 drop(children);
                 std::thread::sleep(Duration::from_millis(20));
             };
-            Some(why_r_ended(status, &said))
+            Some(why_stopped("R", status, &said))
         };
         Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
     }
@@ -1477,7 +1478,7 @@ impl MarimoStarter {
         let state = loop {
             if let Ok(Some(status)) = child.try_wait() {
                 let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
-                return Err(format!("python_failed::Python notebooks' engine stopped while starting: {}", why_r_ended(Some(status), &said)));
+                return Err(format!("python_failed::Python notebooks' engine stopped while starting: {}", why_stopped("Python", Some(status), &said)));
             }
             if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
                 break state;
@@ -1500,7 +1501,7 @@ impl MarimoStarter {
         let why_ended = move || {
             let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
             let status = children.lock().unwrap().as_mut().filter(|child| child.id() == pid).and_then(|child| child.try_wait().ok().flatten());
-            Some(why_r_ended(status, &said))
+            Some(why_stopped("Python", status, &said))
         };
         Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
     }
@@ -2405,11 +2406,11 @@ mod tests {
     fn why_r_ended_says_how_its_process_ended_and_its_last_output() {
         use std::os::unix::process::ExitStatusExt;
         let said = |lines: &[&str]| lines.iter().map(|line| line.to_string()).collect::<Vec<_>>();
-        assert_eq!(why_r_ended(None, &[]), "it stopped answering");
-        assert_eq!(why_r_ended(Some(ExitStatus::from_raw(9)), &[]), "signal: 9 (SIGKILL)");
+        assert_eq!(why_stopped("R", None, &[]), "it stopped answering");
+        assert_eq!(why_stopped("R", Some(ExitStatus::from_raw(9)), &[]), "signal: 9 (SIGKILL)");
         let error = said(&["Listening on 127.0.0.1", "Error in loadNamespace(x) : there is no package called 'ember'", "Calls: loadNamespace -> withRestarts", "Execution halted"]);
-        assert_eq!(why_r_ended(Some(ExitStatus::from_raw(1 << 8)), &error), "exit status: 1; R's last output: Error in loadNamespace(x) : there is no package called 'ember' Calls: loadNamespace -> withRestarts Execution halted");
-        let long = why_r_ended(None, &said(&[&"x".repeat(1000)]));
+        assert_eq!(why_stopped("R", Some(ExitStatus::from_raw(1 << 8)), &error), "exit status: 1; R's last output: Error in loadNamespace(x) : there is no package called 'ember' Calls: loadNamespace -> withRestarts Execution halted");
+        let long = why_stopped("R", None, &said(&[&"x".repeat(1000)]));
         assert!(long.ends_with(&format!("…{}", "x".repeat(300))), "the end is kept: {long}");
     }
 
@@ -2426,7 +2427,8 @@ mod tests {
         let said = words.after_end(Duration::from_secs(10));
         assert_eq!(said.len(), 20, "the last 20 lines: {said:?}");
         assert_eq!(said[said.len() - 2..], ["\u{FFFD} not utf-8", "Error: boom"], "blank lines are left out, and bytes that aren't UTF-8 don't stop it");
-        assert_eq!(why_r_ended(Some(status), &said), "exit status: 3; R's last output: line 29 \u{FFFD} not utf-8 Error: boom");
+        assert_eq!(why_stopped("R", Some(status), &said), "exit status: 3; R's last output: line 29 \u{FFFD} not utf-8 Error: boom");
+        assert!(why_stopped("Python", Some(status), &said).contains("; Python's last output: "), "Python's adapter is named as itself (#363)");
     }
 
     #[test]

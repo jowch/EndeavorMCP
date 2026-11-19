@@ -207,6 +207,38 @@ fn the_runtime_unpacks_once_per_version() {
     std::fs::remove_dir_all(&cache).unwrap();
 }
 
+#[test]
+fn threads_unpacking_at_once_each_get_the_whole_folder() {
+    // A server unpacks for its runtime while its precompile thread unpacks too (#363): with one
+    // staging folder per process, one thread cleared it while the other moved it into place.
+    let files: Vec<(String, Vec<u8>)> = (0..400).map(|i| (format!("runtime/f{i}.txt"), vec![b'x'; 4096])).collect();
+    let files: &'static [(&'static str, &'static [u8])] = Box::leak(files.iter().map(|(p, c)| (&*Box::leak(p.clone().into_boxed_str()), &*Box::leak(c.clone().into_boxed_slice()))).collect::<Vec<_>>().into_boxed_slice());
+    for round in 0..10 {
+        let cache = scratch(&format!("unpack-race-{round}"));
+        let threads: Vec<_> = (0..4).map(|_| {
+            let cache = cache.clone();
+            std::thread::spawn(move || unpack(&cache, "0.1.0-race", files))
+        }).collect();
+        for t in threads {
+            let dir = t.join().unwrap().unwrap_or_else(|e| panic!("round {round}: {e}"));
+            let missing: Vec<_> = files.iter().filter(|(p, _)| !dir.join(p).is_file()).map(|(p, _)| *p).collect();
+            assert!(missing.is_empty(), "round {round}: {} of {} files missing, such as {}", missing.len(), files.len(), missing[0]);
+        }
+        assert_eq!(names(&cache), ["0.1.0-race"], "no staging folder is left");
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+}
+
+#[test]
+fn an_unpack_that_fails_leaves_no_staging_folder() {
+    let cache = scratch("unpack-fails");
+    // The second file needs a folder where the first is a file, so the unpack fails part way.
+    let files: &[(&str, &[u8])] = &[("runtime/a", b"a"), ("runtime/a/b", b"b")];
+    assert!(unpack(&cache, "0.1.0-fail", files).is_err());
+    assert!(names(&cache).is_empty(), "{:?}", names(&cache));
+    std::fs::remove_dir_all(&cache).unwrap();
+}
+
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     names.sort();

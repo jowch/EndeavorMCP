@@ -248,12 +248,19 @@ pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<Pa
         return Ok(dir);
     }
     let failed = |e: io::Error| format!("Couldn't unpack Endeavor's runtime into {}: {e}", cache.display());
-    let part = cache.join(format!("{version}.part.{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&part);
-    for (path, contents) in files.iter().chain([&(IN_USE, &b""[..])]) {
+    // One staging folder per call, not per process: a server's precompile thread unpacks while the
+    // server does, and with a shared one, one call cleared it as the other moved it into place (#363).
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let part = cache.join(format!("{version}.part.{}.{}", std::process::id(), CALLS.fetch_add(1, Ordering::Relaxed)));
+    let written = files.iter().chain([&(IN_USE, &b""[..])]).try_for_each(|(path, contents)| {
         let file = part.join(path);
-        std::fs::create_dir_all(file.parent().unwrap()).map_err(failed)?;
-        std::fs::write(&file, contents).map_err(failed)?;
+        std::fs::create_dir_all(file.parent().unwrap())?;
+        std::fs::write(&file, contents)
+    });
+    if let Err(e) = written {
+        // A full disk shouldn't also keep each try's partial copy.
+        let _ = std::fs::remove_dir_all(&part);
+        return Err(failed(e));
     }
     match std::fs::rename(&part, &dir) {
         Ok(()) => {
