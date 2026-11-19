@@ -1,7 +1,7 @@
 # The Ember adapter: the R side of the engine interface (docs/runtime-core.md),
 # as Adapter.jl is Pluto's. The core starts it as
 #
-#   Rscript --vanilla runtime/r/adapter.R
+#   Rscript --no-save --no-restore runtime/r/adapter.R
 #
 # with ENDEAVOR_TOKEN (the bearer token every request must carry),
 # ENDEAVOR_R_STATE (where to write {pid, bridge_port, ember_port,
@@ -27,6 +27,14 @@
 # reply, `snapshot`'s and `status`'s carry it. Ember's own per-notebook `seq`
 # is not used. Everything shares Ember's one R thread, so notifications stay
 # small: `cell_state` names only the cells whose code changed.
+
+# The user's ~/.Rprofile ran before this (notebooks run here, with their settings). If it
+# set .libPaths(), put the libraries R_LIBS names, where Ember is, back in front.
+local({
+  ours <- strsplit(Sys.getenv("R_LIBS"), .Platform$path.sep, fixed = TRUE)[[1]]
+  ours <- ours[nzchar(ours) & dir.exists(ours)]
+  .libPaths(c(ours, .libPaths()))
+})
 
 suppressPackageStartupMessages({
   library(ember)

@@ -941,6 +941,18 @@ impl EmberBuilds {
     }
 }
 
+/// R reads ~/.Renviron and ~/.Rprofile only when there is no `.Renviron` or `.Rprofile` in the
+/// folder it starts in. Name the home ones, unless the user named others, so a project's (renv's,
+/// say) isn't read instead. A file that isn't there is read as empty.
+fn user_r_settings(command: &mut Command, home: Option<&Path>) {
+    let Some(home) = home.filter(|h| !h.as_os_str().is_empty()) else { return };
+    for (name, file) in [("R_ENVIRON_USER", ".Renviron"), ("R_PROFILE_USER", ".Rprofile")] {
+        if std::env::var_os(name).is_none_or(|v| v.is_empty()) {
+            command.env(name, home.join(file));
+        }
+    }
+}
+
 /// What R last wrote to stderr, which goes on to the runtime's log as it comes.
 #[derive(Default)]
 struct LastWords {
@@ -1177,7 +1189,14 @@ impl RStarter {
     fn launch_adapter(&self, served: &Served, library: &str) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("r_failed::{e}"))?;
-        let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
+        // Not `--vanilla`: notebooks run in this R, so they get the user's ~/.Renviron and ~/.Rprofile
+        // (a library in R_LIBS_USER, a repos option, GITHUB_PAT), and the site's. Their home ones, not a
+        // project's in the folder R starts in, which could be renv's and take Ember's libraries away.
+        // Endeavor's own R keeps its own settings (`r::Source::command`).
+        let mut command = self.r.command(&[Path::new("--no-save"), Path::new("--no-restore"), &self.adapter]);
+        if self.r.own().is_none() {
+            user_r_settings(&mut command, std::env::home_dir().as_deref());
+        }
         command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null()).stderr(Stdio::piped());
         self.with_mask(&mut command);
         // SAFETY: only async-signal-safe calls between fork and exec.
@@ -2363,6 +2382,22 @@ fn refuse(client: &mut impl Write, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r_reads_the_users_home_settings_not_a_projects() {
+        let mut command = std::process::Command::new("Rscript");
+        user_r_settings(&mut command, Some(std::path::Path::new("/home/ada")));
+        let env: std::collections::HashMap<_, _> = command.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+        if std::env::var_os("R_ENVIRON_USER").is_none() {
+            assert_eq!(env["R_ENVIRON_USER"].as_deref(), Some(std::path::Path::new("/home/ada").join(".Renviron").to_string_lossy().as_ref()));
+        }
+        if std::env::var_os("R_PROFILE_USER").is_none() {
+            assert_eq!(env["R_PROFILE_USER"].as_deref(), Some(std::path::Path::new("/home/ada").join(".Rprofile").to_string_lossy().as_ref()));
+        }
+        let mut none = std::process::Command::new("Rscript");
+        user_r_settings(&mut none, None);
+        assert_eq!(none.get_envs().count(), 0, "no home: R's own rules");
+    }
 
     #[test]
     fn a_call_made_while_an_install_runs_waits_for_it() {
