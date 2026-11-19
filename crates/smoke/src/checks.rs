@@ -214,7 +214,8 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
         // reactivity already drops what a deleted cell defined; what this
         // catches is what lives outside the notebook's memory: a file a cell
         // wrote that a deleted cell made, and the code and order as saved.
-        // Cells still running when the agent ended, and pictures, aren't compared.
+        // Cells still running when the agent ended aren't compared. A picture's bytes aren't
+        // either: it counts as the same if it's still a picture and didn't error.
         "reproducible" => {
             let rerun = match ev.rerun {
                 None => return Err("the notebooks weren't run again".into()),
@@ -231,13 +232,14 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                     differ.push(format!("{} wasn't opened again", nb.path));
                     continue;
                 };
-                for (at, cell) in nb.cells.iter().enumerate().filter(|(_, c)| !c.busy && !is_picture(&c.output)) {
+                for (at, cell) in nb.cells.iter().enumerate().filter(|(_, c)| !c.busy) {
                     compared += 1;
                     // A marimo notebook's cell ids aren't in its file, so a reload gives new
                     // ones (#353): there, the same code in the same place is the same cell.
                     match again.cell(&cell.id).or_else(|| again.cells.get(at).filter(|a| a.code == cell.code)) {
                         None => differ.push(format!("{}: gone", first_line(&cell.code))),
                         Some(a) if a.errored != cell.errored => differ.push(format!("{}: errored {} then {}", first_line(&cell.code), cell.errored, a.errored)),
+                        Some(a) if is_picture(&cell.output) && is_picture(&a.output) => {}
                         Some(a) if a.output.trim_end() != cell.output.trim_end() => {
                             differ.push(format!("{}: {:?} then {:?}", first_line(&cell.code), clip(&cell.output, 120), clip(&a.output, 120)))
                         }
@@ -248,7 +250,7 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             if !differ.is_empty() {
                 Err(differ.join("; "))
             } else if compared == 0 {
-                // Every cell was a picture or still running: the check would pass on nothing.
+                // Every cell was still running: the check would pass on nothing.
                 Err("no cell to compare".into())
             } else {
                 Ok(format!("{compared} cells the same"))
@@ -284,7 +286,8 @@ fn has_args(call: &Call, want: &Value) -> bool {
 
 /// An output that is a picture, which a second run needn't draw byte for byte the same.
 fn is_picture(output: &str) -> bool {
-    output.contains("data:image") || output.contains("<img") || output.contains("<svg") || output.len() > 20_000
+    // A marimo (or any) picture read_cell names rather than shows: "[image/png output, 109198 bytes; ...]".
+    output.contains("data:image") || output.contains("<img") || output.contains("<svg") || output.len() > 20_000 || output.contains("[image/")
 }
 
 /// Whether the runtime turned the call away because Julia, the runtime or the notebook's open was still
@@ -460,12 +463,17 @@ mod tests {
             run(&json!({ "check": "reproducible" }), &ev)
         };
         assert!(judge(Ok(vec![notebook(&[("a", "1", false), ("b", "2\n", false), ("c", "3", false), ("d", "<img src=\"data:image/png;base64,BBB\">", false)])])).passed);
+        let named = [notebook(&[("a", "[image/png output, 109198 bytes; call view_cell_output to see it]", false)])];
+        let ev = Evidence { calls: &[], notebooks: &named, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("a", "[image/png output, 254282 bytes; call view_cell_output to see it]", false)])])), turns: &[], server_files: &[] };
+        assert!(run(&json!({ "check": "reproducible" }), &ev).passed, "a picture named by its size counts as the same picture, whatever its size");
+        let ev = Evidence { calls: &[], notebooks: &named, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("a", "NameError: np", false)])])), turns: &[], server_files: &[] };
+        assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "but not a picture that became text");
         let changed = judge(Ok(vec![notebook(&[("a", "1", false), ("b", "5", false), ("c", "3", false), ("d", "", false)])]));
         assert!(!changed.passed && changed.detail.contains("b = 1"), "{}", changed.detail);
         assert!(!judge(Ok(vec![notebook(&[("a", "1", false)])])).passed, "a cell missing from the rerun fails");
         assert!(!judge(Err("Julia didn't start".into())).passed);
         let renamed = |ids: [&str; 4], codes: [&str; 4]| {
-            let mut nb = notebook(&[(ids[0], "1", false), (ids[1], "2", false), (ids[2], "3", false), (ids[3], "", false)]);
+            let mut nb = notebook(&[(ids[0], "1", false), (ids[1], "2", false), (ids[2], "3", false), (ids[3], "<img src=\"data:image/png;base64,CCC\">", false)]);
             nb.cells.iter_mut().zip(codes).for_each(|(c, code)| c.code = code.into());
             nb
         };

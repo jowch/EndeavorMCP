@@ -299,7 +299,9 @@ Next:
   runs every notebook in its own uv environment from the notebook's header; a new
   notebook's header pins marimo and an `exclude-newer` package date, and a
   package a run imports is installed and written there at its exact version.
-  The notebooks are always lazy. marimo allows one editing page per notebook, so
+  marimo runs them lazily, so opening one runs nothing and a run from marimo's
+  page marks the cells below stale; an agent's run takes them too, as in Pluto.
+  marimo allows one editing page per notebook, so
   the adapter watches as a read-only viewer and the user's page takes the notebook
   over as its editor; a second page is read-only until its Take over. The page
   and its WebSocket open only for a notebook that is open and allowed to run,

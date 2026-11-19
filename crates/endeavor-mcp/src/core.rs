@@ -1446,6 +1446,11 @@ impl MarimoStarter {
         let mut command = Command::new(&uv);
         command.args(["run", "--quiet", "--no-project", "--with-requirements"]).arg(&self.requirements).arg("python").arg(&self.adapter);
         command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_MARIMO_TOKEN", &secret).env("ENDEAVOR_MARIMO_STATE", &self.state).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+        // ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS slows the adapter's package installs (e2e_marimo reads
+        // during one); only a debug build passes it on.
+        if !cfg!(debug_assertions) {
+            command.env_remove("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS");
+        }
         #[cfg(unix)]
         if let Some(mask) = self.mask {
             // SAFETY: only async-signal-safe calls between fork and exec.
