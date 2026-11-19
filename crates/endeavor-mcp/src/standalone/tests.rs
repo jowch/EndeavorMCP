@@ -229,6 +229,16 @@ fn threads_unpacking_at_once_each_get_the_whole_folder() {
     }
 }
 
+#[test]
+fn an_unpack_that_fails_leaves_no_staging_folder() {
+    let cache = scratch("unpack-fails");
+    // The second file needs a folder where the first is a file, so the unpack fails part way.
+    let files: &[(&str, &[u8])] = &[("runtime/a", b"a"), ("runtime/a/b", b"b")];
+    assert!(unpack(&cache, "0.1.0-fail", files).is_err());
+    assert!(names(&cache).is_empty(), "{:?}", names(&cache));
+    std::fs::remove_dir_all(&cache).unwrap();
+}
+
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     names.sort();
