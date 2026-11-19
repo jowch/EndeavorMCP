@@ -371,7 +371,8 @@ Next:
   `--julia-when-needed` runs them with no Julia (#81, #87). R is what
   `--r` or
   `--r-shell` (serve, mcp, `connect`, a machine's `r` in machines.json) names,
-  else Endeavor's own R once it's installed, else the login shell's `Rscript`.
+  else the login shell's `Rscript`, else Endeavor's own R if it's installed
+  (looked for once, when the runtime starts).
   On the user's own Mac (a core started with `--own-r`: `serve`, `mcp`, and
   the app's local runtime; never a server) with no R, the open answers
   `r_not_found` offering Endeavor's own R 4.6.1 (`r::install_own`, #85). A Mac
@@ -511,13 +512,21 @@ Next:
   choice lives here, not in the app. The user's depot goes behind ours
   (`paths::with_user_depot`): a trailing `:` alone gave Julia only its bundled
   depots, so a LocalRegistry and the user's packages were never found. R
-  notebooks read the user's `~/.Renviron` and `~/.Rprofile` (no more
-  `--vanilla`), and the user's R runs ahead of Endeavor's own R. Julia 1.11
-  is refused (the runtime's manifest doesn't instantiate on it). E2E runs the
-  Julia tests daily on the newest release and pre-release. Not done: a
-  registry in the user's depot is updated only by their own Julia (Pkg
-  updates the first depot's), so a version registered from another computer
-  shows up after their next `]up` or `Pkg.Registry.update()`.
+  Pkg updates only the first depot's registries, so the runtime updates the
+  ones in the user's depot itself (at most hourly) before Pluto opens a
+  notebook (`Adapter.update_user_registries`). R notebooks read the user's
+  `~/.Renviron` and `~/.Rprofile` (no more `--vanilla`; on Windows R's own
+  rules for `.Renviron`). The adapter runs the profile itself
+  (`run_user_profile`), so an error in it is logged instead of stopping R, and
+  R's stdout goes to the log, never to the MCP channel. The user's R runs ahead
+  of Endeavor's own R. juliaup's launcher gives way to the Julia it would start
+  (its `Sys.BINDIR`) on every platform, not only Windows. Julia 1.11 is refused
+  (the runtime's manifest doesn't instantiate on it). E2E runs the Julia tests
+  daily on the newest release and pre-release.
+  `endeavor/julia_status` says which Julia a start found (`julia`: `path`,
+  `version`, `endeavors`) and `endeavor/r_status` which R runs (`r`:
+  `rscript`, `endeavors`), so the app shows the runtime's choice instead of
+  making it again.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds
