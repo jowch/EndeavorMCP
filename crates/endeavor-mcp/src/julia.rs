@@ -146,6 +146,14 @@ fn found(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> R
     }
 }
 
+/// The user's own Julia, which `--julia auto` runs before Endeavor's: the login shell's `julia` (on
+/// Windows the PATH's), with its version, or why it can't be used (too old, doesn't run), in which
+/// case `auto` runs Endeavor's. None when there is none. For the app's Settings, which say which runs.
+pub fn users_julia() -> Option<Result<(String, String), String>> {
+    let path = path_julia()?;
+    Some(checked_version(&path, &format!("Found {path}, but it doesn't run.")).map(|version| (real_julia(path), version)))
+}
+
 fn expand_home(path: &str) -> String {
     match (path.strip_prefix("~/"), std::env::home_dir()) {
         (Some(rest), Some(home)) => format!("{}/{rest}", home.display()),
