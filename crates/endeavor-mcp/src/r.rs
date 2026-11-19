@@ -53,11 +53,24 @@ impl Source {
     pub fn describe(&self) -> String {
         match self {
             Source::Path(path) => path.clone(),
-            Source::Auto => match own_rscript() {
+            Source::Auto => match own_in_use() {
                 Some(_) => format!("Endeavor's own R {OWN_VERSION} in {}", own_dir(&crate::paths::Env::here()).display()),
                 None => "Rscript on the login shell's PATH".into(),
             },
             Source::Shell(line) => format!("Rscript after `{line}` in a login shell"),
+        }
+    }
+
+    /// The Rscript this runs, as a path where it's known (the chosen one, Endeavor's own, the one the
+    /// login shell found), else as `describe` says it: for the app to show (`endeavor/r_status`).
+    pub fn rscript(&self) -> String {
+        match self {
+            Source::Path(path) => path.clone(),
+            Source::Auto => match own_in_use() {
+                Some(own) => own.display().to_string(),
+                None => users_rscript().unwrap_or_else(|| self.describe()),
+            },
+            Source::Shell(_) => self.describe(),
         }
     }
 
@@ -99,7 +112,7 @@ impl Source {
             }
             // Its packages go in its own library, never in the user's R library, and the user's R
             // settings (~/.Renviron, ~/.Rprofile, R_LIBS) don't point it at another R's.
-            Source::Auto if let Some(rscript) = own_rscript() => {
+            Source::Auto if let Some(rscript) = own_in_use() => {
                 let own = own_dir(&crate::paths::Env::here());
                 let mut command = Command::new(&rscript);
                 command.args(args).env("R_LIBS_USER", own.join(USER_LIBRARY)).env("R_ENVIRON_USER", own.join("user-Renviron")).env("R_PROFILE_USER", own.join("user-Rprofile")).env_remove("R_LIBS");
@@ -122,7 +135,7 @@ impl Source {
 
     /// The folder of Endeavor's own R, when this is `--r auto` and it's installed: the R that runs.
     pub fn own(&self) -> Option<PathBuf> {
-        (matches!(self, Source::Auto) && own_rscript().is_some()).then(|| own_dir(&crate::paths::Env::here()))
+        (matches!(self, Source::Auto) && own_in_use().is_some()).then(|| own_dir(&crate::paths::Env::here()))
     }
 
     /// Endeavor's own R, which may be installed here, when this is `--r auto`, it isn't installed yet,
@@ -208,6 +221,27 @@ pub fn own_installed() -> Option<OwnR> {
 /// where it isn't offered: anywhere but a Mac it has an installer for.
 pub fn own_offered() -> Option<wire::Item> {
     own_item_for(macos_version(), &crate::julia::uname("-m"), &crate::paths::Env::here())
+}
+
+/// Endeavor's own R when `--r auto` runs it: installed here, and the login shell finds no Rscript
+/// of the user's. Someone who installs R after Endeavor's gets theirs (from the runtime's next
+/// start: it's looked for once).
+fn own_in_use() -> Option<PathBuf> {
+    static USERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let own = own_rscript()?;
+    (!*USERS.get_or_init(|| users_rscript().is_some_and(|theirs| Path::new(&theirs) != own))).then_some(own)
+}
+
+/// The login shell's Rscript, on Unix (on Windows `auto` is the PATH's, and there is no own R).
+fn users_rscript() -> Option<String> {
+    if cfg!(windows) {
+        return None;
+    }
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
+    let shell = if is_csh(&shell) { "/bin/sh".to_owned() } else { shell };
+    let output = Command::new(&shell).args(["-lc", "command -v Rscript"]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    output.status.success().then(|| stdout.lines().rev().map(str::trim).find(|l| l.starts_with('/')).map(str::to_owned)).flatten()
 }
 
 /// Endeavor's own Rscript, if it's installed.

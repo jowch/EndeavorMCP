@@ -357,7 +357,7 @@ fn julia_command(julia: &str, runtime: &Path, depot: &str, token: &str, launcher
         .arg(format!("--project={runtime}"))
         .arg(format!("{runtime}/boot.jl"))
         .args(ports.map(|p| p.to_string()))
-        .env("JULIA_DEPOT_PATH", depot)
+        .env("JULIA_DEPOT_PATH", crate::paths::with_user_depot(depot))
         // Not argv, which `ps` shows to every user.
         .env("ENDEAVOR_TOKEN", token)
         .env("ENDEAVOR_STATE", julia_state)
@@ -423,6 +423,8 @@ struct JuliaNow {
     said: bool,
     /// How Julia ended, if the one started last did.
     exited: Option<ExitStatus>,
+    /// The Julia the last start found: its path, version, and whether it's Endeavor's own.
+    started: Option<(String, String, bool)>,
 }
 
 /// Finds and starts Julia (`julia boot.jl`, with Pluto) when it's first needed, once at a time.
@@ -469,7 +471,7 @@ impl JuliaStarter {
             #[cfg(unix)]
             mask: None,
             spawn: Spawner::new(),
-            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), began: std::time::Instant::now(), said: false, exited: None }),
+            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), began: std::time::Instant::now(), said: false, exited: None, started: None }),
             changed: std::sync::Condvar::new(),
             pid: 0.into(),
             stopping: false.into(),
@@ -584,10 +586,12 @@ impl JuliaStarter {
     /// Where Julia is, for the app (`endeavor/julia_status`), without starting it: `not_started`,
     /// `starting` with the step in words and how many seconds since the last sign of progress, `ready`,
     /// or `failed` with the error's code and why. Reading a failure here doesn't count as saying it: the
-    /// agent's next call that needs Julia still hears why. The app's Retry is `start_now`.
+    /// agent's next call that needs Julia still hears why. The app's Retry is `start_now`. Once a
+    /// start has found Julia, `julia` says which (`path`, `version`, `endeavors`): the app shows it
+    /// rather than working out for itself which Julia `--julia` picks.
     fn status(&self) -> Value {
         let now = self.now.lock().unwrap();
-        match &now.phase {
+        let mut status = match &now.phase {
             Phase::Idle => json!({ "state": "not_started" }),
             Phase::Starting(step) => json!({ "state": "starting", "step": step, "quiet_seconds": now.moved.elapsed().as_secs() }),
             Phase::Ready => json!({ "state": "ready" }),
@@ -595,7 +599,11 @@ impl JuliaStarter {
                 let (code, message) = why.split_once("::").unwrap_or(("julia_failed", why.as_str()));
                 json!({ "state": "failed", "code": code, "message": message })
             }
+        };
+        if let (Some((path, version, endeavors)), false) = (&now.started, matches!(now.phase, Phase::Idle)) {
+            status["julia"] = json!({ "path": path, "version": version, "endeavors": endeavors });
         }
+        status
     }
 
     /// Start Julia now, for the app (`endeavor/start_julia`): its Retry after a failure, which then counts
@@ -613,11 +621,12 @@ impl JuliaStarter {
     /// Find Julia, start it, and wait until its bridge answers; then have Pluto suggest the notebooks' folder.
     fn start(&self, served: &Arc<Served>, warm: bool) -> Result<JuliaReady, String> {
         let install = !warm && self.install.load(std::sync::atomic::Ordering::SeqCst);
-        let found = crate::julia::find(&self.source, install, &mut |line| {
+        self.now.lock().unwrap().started = None;
+        let found = crate::julia::find_whose(&self.source, install, &mut |line| {
             eprintln!("{line}");
             self.step(line);
         });
-        let (julia, version) = found.map_err(|failure| match failure {
+        let (julia, version, endeavors) = found.map_err(|failure| match failure {
             crate::julia::Failure::Missing(item) => format!(
                 "julia_not_found::Julia wasn't found here, and Endeavor may download its own copy only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` again with `install: true`."
             ),
@@ -626,6 +635,7 @@ impl JuliaStarter {
         if self.when_needed {
             eprintln!("[ Info: Starting Julia {version} ({julia})");
         }
+        self.now.lock().unwrap().started = Some((julia.clone(), version.clone(), endeavors));
         self.step(format!("Julia {version} is starting and loading Pluto"));
         let _ = std::fs::remove_file(&self.state);
         let mut command = julia_command(&julia, &self.runtime, &self.depot, &self.token, &self.launcher, &self.state)?;
@@ -941,6 +951,23 @@ impl EmberBuilds {
     }
 }
 
+/// R reads ~/.Renviron and ~/.Rprofile only when there is no `.Renviron` or `.Rprofile` in the
+/// folder it starts in. Name the home .Renviron, unless the user named another, so a project's (renv's,
+/// say) isn't read instead. A file that isn't there is read as empty. On Windows R looks in R_USER
+/// (Documents), not the home folder, so it keeps its own rules there.
+///
+/// The profile is different: an error in it stops Rscript before the adapter runs, and the notebook
+/// would say only that R stopped. So R reads `empty` (an empty file) as the profile, and the adapter
+/// runs the user's (ENDEAVOR_R_PROFILE, or ~/.Rprofile when that's empty) itself, where an error in it
+/// is logged and R carries on.
+fn user_r_settings(command: &mut Command, home: Option<&Path>, empty: &Path) {
+    let named = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
+    if let Some(home) = home.filter(|h| !h.as_os_str().is_empty() && !cfg!(windows)) && named("R_ENVIRON_USER").is_none() {
+        command.env("R_ENVIRON_USER", home.join(".Renviron"));
+    }
+    command.env("ENDEAVOR_R_PROFILE", named("R_PROFILE_USER").unwrap_or_default()).env("R_PROFILE_USER", empty);
+}
+
 /// What R last wrote to stderr, which goes on to the runtime's log as it comes.
 #[derive(Default)]
 struct LastWords {
@@ -1078,9 +1105,18 @@ impl RStarter {
     }
 
     /// Where R notebooks' setup is, for the app (`endeavor/r_status`), without starting anything (see
-    /// `r_status`). Whoever waits for it, the agent included.
+    /// `r_status`). Whoever waits for it, the agent included. While R runs, `r` says which R it is
+    /// (`rscript`, and `endeavors` for Endeavor's own), so the app shows it instead of working it out.
     fn status(&self) -> Value {
         let running = self.child.lock().unwrap().as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+        let mut status = self.status_of(running);
+        if running {
+            status["r"] = json!({ "rscript": self.r.rscript(), "endeavors": self.r.own().is_some() });
+        }
+        status
+    }
+
+    fn status_of(&self, running: bool) -> Value {
         let folder = self.ember_folder();
         let own = self.own_install.lock().unwrap();
         let ember = self.install.lock().unwrap();
@@ -1177,8 +1213,19 @@ impl RStarter {
     fn launch_adapter(&self, served: &Served, library: &str) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("r_failed::{e}"))?;
-        let mut command = self.r.command(&[Path::new("--vanilla"), &self.adapter]);
-        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null()).stderr(Stdio::piped());
+        // Not `--vanilla`: notebooks run in this R, so they get the user's ~/.Renviron and ~/.Rprofile
+        // (a library in R_LIBS_USER, a repos option, GITHUB_PAT), and the site's. Their home ones, not a
+        // project's in the folder R starts in, which could be renv's and take Ember's libraries away.
+        // Endeavor's own R keeps its own settings (`r::Source::command`).
+        let mut command = self.r.command(&[Path::new("--no-save"), Path::new("--no-restore"), &self.adapter]);
+        if self.r.own().is_none() {
+            let empty = self.state.with_file_name("empty.Rprofile");
+            std::fs::write(&empty, "").map_err(|e| format!("r_failed::Couldn't write {}: {e}", empty.display()))?;
+            user_r_settings(&mut command, std::env::home_dir().as_deref(), &empty);
+        }
+        // What R prints (a profile's messages, a notebook's print() outside a cell) goes to the log,
+        // never to our stdout, which is the MCP channel for `endeavor mcp`.
+        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null()).stdout(Stdio::from(io::stderr())).stderr(Stdio::piped());
         self.with_mask(&mut command);
         // SAFETY: only async-signal-safe calls between fork and exec.
         #[cfg(target_os = "linux")]
@@ -2363,6 +2410,29 @@ fn refuse(client: &mut impl Write, status: &str, why: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r_reads_the_users_home_settings_not_a_projects() {
+        let empty = std::path::Path::new("/state/empty.Rprofile");
+        let mut command = std::process::Command::new("Rscript");
+        user_r_settings(&mut command, Some(std::path::Path::new("/home/ada")), empty);
+        let env: std::collections::HashMap<_, _> = command.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+        if std::env::var_os("R_ENVIRON_USER").is_none() && !cfg!(windows) {
+            assert_eq!(env["R_ENVIRON_USER"].as_deref(), Some(std::path::Path::new("/home/ada").join(".Renviron").to_string_lossy().as_ref()));
+        }
+        if cfg!(windows) {
+            assert!(!env.contains_key("R_ENVIRON_USER"), "Windows: R's own rules for .Renviron");
+        }
+        // R reads an empty profile; the adapter runs the user's, where an error in it doesn't stop R.
+        assert_eq!(env["R_PROFILE_USER"].as_deref(), Some(empty.to_string_lossy().as_ref()));
+        if std::env::var_os("R_PROFILE_USER").is_none() {
+            assert_eq!(env["ENDEAVOR_R_PROFILE"].as_deref(), Some(""));
+        }
+        let mut none = std::process::Command::new("Rscript");
+        user_r_settings(&mut none, None, empty);
+        let names: Vec<_> = none.get_envs().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+        assert_eq!(names.len(), 2, "no home: no R_ENVIRON_USER, {names:?}");
+    }
 
     #[test]
     fn a_call_made_while_an_install_runs_waits_for_it() {

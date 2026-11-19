@@ -863,14 +863,16 @@ fn relay(options: Options) -> ! {
 /// away. So it, not the server, takes the lock (`.precompiling`, so however many servers start
 /// after an update, one precompiles and the rest exit at once) and writes the marker
 /// (`.precompiled`) when it's done. A runtime folder is one version, so a folder done once for a
-/// depot is never done again, and the marker is checked before looking for Julia, so a start with
-/// nothing to do starts no process. After a failure (`.precompile-failed`) it waits a day.
+/// depot and a Julia version is never done again. Compiled code is per Julia version, so the user's
+/// Julia moving on (`juliaup update`) does it again; finding which Julia that is costs one
+/// `julia --version`, and only where Julia notebooks ran. After a failure (`.precompile-failed`) it
+/// waits a day.
 fn precompile_after_update(options: &Options) {
     let (cache, source, depot) = (options.cache.clone(), options.julia.clone(), options.depot.clone());
     std::thread::spawn(move || {
-        precompile_if_needed(&depot, &|| unpack_runtime(&cache).ok(), &mut |runtime, key| {
-            let Ok((julia, _)) = julia::find(&source, false, &mut |_| {}) else { return };
-            if let Some(mut command) = precompile_command(&julia, runtime, &depot, key) {
+        let find = || julia::find(&source, false, &mut |_| {}).ok();
+        precompile_if_needed(&depot, &|| unpack_runtime(&cache).ok(), &find, &mut |runtime, key, julia| {
+            if let Some(mut command) = precompile_command(julia, runtime, &depot, key) {
                 // Waited for only so it doesn't stay a zombie while this server runs.
                 let _ = command.status();
             }
@@ -881,15 +883,17 @@ fn precompile_after_update(options: &Options) {
 /// How long a failed background precompile keeps the next ones from trying.
 const PRECOMPILE_RETRY: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// `precompile_after_update`'s choice, with the runtime's unpacking and the spawn passed in (for
-/// the tests): `run` gets the runtime folder and the marker's contents, only when Julia notebooks
-/// ran in `depot`, the folder hasn't been done for it, and it hasn't failed in the last day.
-fn precompile_if_needed(depot: &str, runtime: &dyn Fn() -> Option<PathBuf>, run: &mut dyn FnMut(&Path, &str)) {
+/// `precompile_after_update`'s choice, with the runtime's unpacking, finding Julia (its path and
+/// version) and the spawn passed in (for the tests): `run` gets the runtime folder, the marker's
+/// contents and the julia, only when Julia notebooks ran in `depot`, the folder hasn't been done for
+/// it with this Julia version, and it hasn't failed in the last day.
+fn precompile_if_needed(depot: &str, runtime: &dyn Fn() -> Option<PathBuf>, julia: &dyn Fn() -> Option<(String, String)>, run: &mut dyn FnMut(&Path, &str, &str)) {
     if !julia_ran_here(depot) {
         return;
     }
     let Some(runtime) = runtime() else { return };
-    let key = format!("{depot}\n");
+    let Some((julia, version)) = julia() else { return };
+    let key = format!("{depot}\n{version}\n");
     if std::fs::read_to_string(runtime.join(".precompiled")).is_ok_and(|said| said == key) {
         return;
     }
@@ -897,7 +901,7 @@ fn precompile_if_needed(depot: &str, runtime: &dyn Fn() -> Option<PathBuf>, run:
     if failed.is_some_and(|at| at.elapsed().is_ok_and(|ago| ago < PRECOMPILE_RETRY)) {
         return;
     }
-    run(&runtime, &key);
+    run(&runtime, &key, &julia);
 }
 
 /// Whether an Endeavor runtime has been precompiled in `depot` (JULIA_DEPOT_PATH, whose first
@@ -954,7 +958,7 @@ fn precompile_command(julia: &str, runtime: &Path, depot: &str, key: &str) -> Op
         .arg("--startup-file=no")
         .arg(format!("--project={}", runtime.display()))
         .args(["-e", &script])
-        .env("JULIA_DEPOT_PATH", depot)
+        .env("JULIA_DEPOT_PATH", crate::paths::with_user_depot(depot))
         .env("JULIA_LOAD_PATH", if cfg!(windows) { "@;@stdlib" } else { "@:@stdlib" })
         .env("ENDEAVOR_RUNTIME", runtime)
         .env("ENDEAVOR_PRECOMPILED", key)

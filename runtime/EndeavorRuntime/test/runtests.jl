@@ -961,4 +961,33 @@ end
         end
     end
 
+@testset "registries in the user's depot are updated before a notebook opens (#367)" begin
+    git(args...) = run(pipeline(`git $args`; stdout = devnull, stderr = devnull))
+    root = mktempdir()
+    remote, work = joinpath(root, "Lab.git"), joinpath(root, "work")
+    ours, theirs = joinpath(root, "ours"), joinpath(root, "theirs")
+    mkpath(joinpath(ours, "registries"))
+    git("init", "-q", "--bare", remote)
+    git("init", "-q", work)
+    uuid = "0d6a8e8b-3a83-4a77-9f36-5f6a4d8d1b2a"
+    write(joinpath(work, "Registry.toml"), "name = \"Lab\"\nuuid = \"$uuid\"\nrepo = \"file://$remote\"\n\n[packages]\n")
+    git("-C", work, "-c", "user.name=t", "-c", "user.email=t@t", "add", ".")
+    git("-C", work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "registry")
+    git("-C", work, "push", "-q", remote, "HEAD:refs/heads/main")
+    git("clone", "-q", "--branch", "main", remote, joinpath(theirs, "registries", "Lab"))
+    # A version registered from another computer: a new commit on the registry's remote.
+    write(joinpath(work, "Registry.toml"), read(joinpath(work, "Registry.toml"), String) * "# v2\n")
+    git("-C", work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "new version")
+    git("-C", work, "push", "-q", remote, "HEAD:refs/heads/main")
+    head(dir) = readchomp(`git -C $dir rev-parse HEAD`)
+    @test head(joinpath(theirs, "registries", "Lab")) != head(work)
+    @test EndeavorRuntime.update_user_registries(; cooldown = 0, depots = [ours, theirs]) == 1
+    @test head(joinpath(theirs, "registries", "Lab")) == head(work)
+    # Once per cooldown: a second open soon after doesn't fetch again.
+    @test EndeavorRuntime.update_user_registries(; cooldown = 3600, depots = [ours, theirs]) == 0
+    # One we have too is left to Pkg's own update of ours.
+    cp(joinpath(theirs, "registries", "Lab"), joinpath(ours, "registries", "Lab"))
+    @test EndeavorRuntime.update_user_registries(; cooldown = 0, depots = [ours, theirs]) == 0
+end
+
 end

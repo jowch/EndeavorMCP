@@ -10,7 +10,7 @@ installed that, delete it once `endeavor` is on your `PATH`.
 
 ## Install the program by hand
 
-You need Julia 1.11 or newer, or nothing: when no `julia` is on your login
+You need Julia 1.12 or newer, or nothing: when no `julia` is on your login
 shell's `PATH`, Endeavor downloads its own pinned Julia (1.12.6) into
 `~/.cache/endeavor/` the first time a Julia notebook is opened. If you only use
 R notebooks, Endeavor never needs Julia.
@@ -189,7 +189,7 @@ status` shows what is running and where.
 | `--port PORT` | The port on `127.0.0.1`. Fix it so your `ssh -L` line stays the same | A free port |
 | `--julia PATH` | The `julia` to use, `auto` or `own`. `own` is Endeavor's own Julia 1.12.6 only, never the one on your PATH | `auto`: your login shell's `julia` (on Windows, the first `julia.exe` on the PATH), else Endeavor's own. Endeavor's own is juliaup's channel for 1.12.6 when you have juliaup (Endeavor adds it, and on Windows installs juliaup first), else a download into `~/.cache/endeavor/` |
 | `--julia-shell LINE` | A shell line that puts `julia` on the `PATH`, such as `'module load julia/1.12'` | |
-| `--r PATH` | The `Rscript` for R notebooks (not open to agents yet), or `auto`. On a Mac with no R, Endeavor can install its own R 4.6.1 once you agree | `auto`: Endeavor's own R if it's installed, else your login shell's `Rscript` |
+| `--r PATH` | The `Rscript` for R notebooks (not open to agents yet), or `auto`. On a Mac with no R, Endeavor can install its own R 4.6.1 once you agree | `auto`: your login shell's `Rscript`, else Endeavor's own R if it's installed (looked for once, when the runtime starts) |
 | `--r-shell LINE` | A shell line that puts `Rscript` on the `PATH`, such as `'module load R/4.4'`. It runs each time R starts, so what else it sets up (libraries, a compiler) is there too | |
 | `--depot DEPOT` | `JULIA_DEPOT_PATH` for the runtime | `~/.cache/endeavor/depot:`, or `$SCRATCH/endeavor/depot:` when `$SCRATCH` is set |
 | `--idle-stop HOURS` | Stop a notebook nobody has used for this long. `0` never stops one | `48` |
@@ -197,8 +197,10 @@ status` shows what is running and where.
 | `--state-dir DIR` | Where the runtime keeps `runtime.json`, its token and `runtime.log` | `~/.local/state/endeavor/serve/<host name>` |
 
 The default depot is the one the app uses on servers, so packages installed
-for one are there for the other. The trailing `:` puts your own `~/.julia`
-behind it, read-only.
+for one are there for the other. A trailing `:` puts your own depot behind
+it (the first entry of your `JULIA_DEPOT_PATH`, else `~/.julia`), so your
+registries and packages are found. Packages Endeavor installs go into the
+first entry, not into yours.
 
 Use `--host-tools` when your agent runs on another computer, such as your
 laptop, and its own file and shell tools can't see this machine. Without

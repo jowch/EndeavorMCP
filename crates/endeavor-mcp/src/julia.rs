@@ -13,11 +13,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// Needed by runtime/Project.toml's `[sources]` section.
-const MIN_JULIA: (u32, u32) = (1, 11);
+/// The oldest Julia the runtime starts on: its Manifest.toml is resolved on 1.12, and 1.11's
+/// Pkg can't instantiate it (#370). `--julia auto` passes over an older one for Endeavor's own.
+/// The app reads it from here (`min_version`), so this is the one place to change it.
+const MIN_JULIA: (u32, u32) = (1, 12);
 
 /// Endeavor's own Julia, the tested version, pinned with the official tarballs'
-/// SHA-256 and size (bump all with the app's own in src/runtime.rs).
+/// SHA-256 and size. The app reads it from here; bump it with the cloud script
+/// (scripts/cloud-setup.sh and Endeavor's copy) and e2e.yml's `version`.
 pub const JULIA_VERSION: &str = "1.12.6";
 /// About how much Julia's Windows download is (its x64 zip), for the consent question there.
 const WINDOWS_SIZE: u64 = 300_000_000;
@@ -65,6 +68,16 @@ pub enum Source {
 }
 
 impl Source {
+    /// The VALUE of `--julia VALUE` that means this, or None for a shell line (`--julia-shell`).
+    pub fn value(&self) -> Option<String> {
+        match self {
+            Source::Path(path) => Some(path.clone()),
+            Source::Auto => Some("auto".into()),
+            Source::Own => Some("own".into()),
+            Source::Shell(_) => None,
+        }
+    }
+
     /// What `--julia VALUE` means: `auto`, `own`, or a path (a julia called `own` is `./own`).
     pub fn from_value(value: String) -> Source {
         match value.as_str() {
@@ -103,11 +116,18 @@ impl Failure {
 /// The julia binary and its version ("1.12.6"). `progress` hears about a
 /// download, which only happens when `download` is true.
 pub fn find(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> Result<(String, String), Failure> {
-    let (path, version) = found(source, download, progress)?;
-    Ok((real_julia(path), version))
+    find_whose(source, download, progress).map(|(path, version, _)| (path, version))
 }
 
-fn found(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> Result<(String, String), Failure> {
+/// `find`, and whether the Julia is Endeavor's own (`--julia own`, or `auto` with none of the
+/// user's), so the runtime can say which one it started.
+pub fn find_whose(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> Result<(String, String, bool), Failure> {
+    let endeavors = std::cell::Cell::new(false);
+    let (path, version) = found(source, download, &endeavors, progress)?;
+    Ok((real_julia(path), version, endeavors.get()))
+}
+
+fn found(source: &Source, download: bool, endeavors: &std::cell::Cell<bool>, progress: &mut dyn FnMut(String)) -> Result<(String, String), Failure> {
     match source {
         Source::Path(path) => {
             let path = expand_home(path);
@@ -129,11 +149,13 @@ fn found(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> R
             {
                 return Ok((path, version));
             }
+            endeavors.set(true);
             let path = own_julia(download, progress)?;
             let version = checked_version(&path, "Endeavor's Julia doesn't run on this machine.")?;
             Ok((path, version))
         }
         Source::Own => {
+            endeavors.set(true);
             let path = own_julia(download, progress)?;
             let version = checked_version(&path, "Endeavor's Julia doesn't run on this machine.")?;
             if version != JULIA_VERSION {
@@ -141,6 +163,81 @@ fn found(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> R
             }
             Ok((path, version))
         }
+    }
+}
+
+/// The user's own Julia, which `--julia auto` runs before Endeavor's: the login shell's `julia` (on
+/// Windows the PATH's), with its version, or why it can't be used (too old, doesn't run), in which
+/// case `auto` runs Endeavor's. None when there is none.
+pub fn users_julia() -> Option<Result<(String, String), String>> {
+    let path = path_julia()?;
+    Some(checked_version(&path, &format!("Found {path}, but it doesn't run.")).map(|version| (real_julia(path), version)))
+}
+
+/// Which Julia the app's Settings ask for on this computer. The library decides what that runs
+/// (`choose`), so the app and a server pick Julia the same way.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Preference {
+    /// The user's own Julia when they have one new enough, else Endeavor's (`--julia auto`).
+    #[default]
+    Auto,
+    /// Endeavor's own Julia, the pinned version, even when the user has one (`--julia own`).
+    Endeavors,
+    /// This julia, while it runs and is new enough; else as `Auto`.
+    Path(PathBuf),
+}
+
+/// What a julia the user chose turned out to be.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Chosen {
+    /// It runs and is new enough; its version, e.g. "1.12.6".
+    Usable(String),
+    /// Nothing is at the path any more.
+    Gone,
+    /// Something is there, but it didn't answer as Julia does.
+    NotJulia,
+    /// Julia, but older than Endeavor needs; its version.
+    TooOld(String),
+}
+
+/// Run the chosen file once to read its version (blocking; Julia answers in well under a second).
+pub fn check_chosen(path: &Path) -> Chosen {
+    if !path.is_file() {
+        return Chosen::Gone;
+    }
+    let mut command = Command::new(path);
+    crate::client::no_window(&mut command);
+    match command.arg("--version").stdin(Stdio::null()).output() {
+        Ok(out) if out.status.success() => chosen_from_version(&String::from_utf8_lossy(&out.stdout)),
+        _ => Chosen::NotJulia,
+    }
+}
+
+/// `julia --version`'s answer, as a check of the chosen file.
+fn chosen_from_version(text: &str) -> Chosen {
+    let Some(version) = text.trim().strip_prefix("julia version ") else { return Chosen::NotJulia };
+    match parse_version(version) {
+        Some(v) if v < MIN_JULIA => Chosen::TooOld(version.to_owned()),
+        Some(_) => Chosen::Usable(version.to_owned()),
+        None => Chosen::NotJulia,
+    }
+}
+
+/// The oldest Julia Endeavor runs, for saying so ("1.12").
+pub fn min_version() -> String {
+    format!("{}.{}", MIN_JULIA.0, MIN_JULIA.1)
+}
+
+/// The `--julia` a preference gives the runtime: a chosen julia that can't be used counts as
+/// `Auto`. `chosen` is `check_chosen`'s answer for a `Path`, when it has been asked.
+pub fn choose(preference: &Preference, chosen: Option<&Chosen>) -> Source {
+    match preference {
+        Preference::Auto => Source::Auto,
+        Preference::Endeavors => Source::Own,
+        Preference::Path(path) => match chosen.cloned().unwrap_or_else(|| check_chosen(path)) {
+            Chosen::Usable(_) => Source::Path(path.display().to_string()),
+            _ => Source::Auto,
+        },
     }
 }
 
@@ -169,15 +266,16 @@ fn julia_in(path: &std::ffi::OsStr) -> Option<String> {
     std::env::split_paths(path).map(|dir| dir.join("julia.exe")).find(|exe| exe.is_file()).map(|exe| exe.display().to_string())
 }
 
-/// juliaup's `julia.exe` (the Store app's alias, or juliaup's own launcher)
-/// only starts the real one. Started through the alias, that launcher and the
-/// Julia under it run outside the core's job, so ending the core left Julia
-/// running (EndeavorMCP #55). Start the `julia.exe` in that Julia's own
-/// `Sys.BINDIR` instead. A julia.exe with Julia's library beside it is the
-/// real one already, and isn't asked. If asking fails, the path as found.
-#[cfg(windows)]
+/// juliaup's `julia` (its launcher, or on Windows the Store app's alias) only
+/// starts the real one, from the channel juliaup picks when it starts. Started
+/// through it, the version checked and the Julia run can differ, and on
+/// Windows that launcher and the Julia under it ran outside the core's job, so
+/// ending the core left Julia running (EndeavorMCP #55). Start the `julia` in
+/// that Julia's own `Sys.BINDIR` instead (only for juliaup's launcher: see
+/// `is_real_julia`). If asking
+/// fails, the path as found.
 fn real_julia(julia: String) -> String {
-    if Path::new(&julia).parent().is_some_and(|dir| dir.join("libjulia.dll").is_file()) {
+    if is_real_julia(Path::new(&julia)) {
         return julia;
     }
     let mut command = Command::new(&julia);
@@ -193,17 +291,23 @@ fn real_julia(julia: String) -> String {
     }
 }
 
-#[cfg(unix)]
-fn real_julia(julia: String) -> String {
-    julia
+/// Whether `julia` is the one to start as it is. On Windows: libjulia.dll beside it (anything else
+/// may be juliaup's launcher or alias). Elsewhere, anything but juliaup's launcher, which the `julia`
+/// on the PATH links to (`julialauncher`): a wrapper script someone put there is left alone, not run
+/// to ask where its Julia is.
+fn is_real_julia(julia: &Path) -> bool {
+    let julia = std::fs::canonicalize(julia).unwrap_or_else(|_| julia.to_path_buf());
+    if cfg!(windows) {
+        return julia.parent().is_some_and(|dir| dir.join("libjulia.dll").is_file());
+    }
+    !julia.file_name().is_some_and(|name| name.to_string_lossy().starts_with("julialauncher"))
 }
 
-/// The julia.exe in the `Sys.BINDIR` Julia printed (the last line: a startup
+/// The julia in the `Sys.BINDIR` Julia printed (the last line: a startup
 /// message may come first).
-#[cfg_attr(unix, allow(dead_code))]
 fn bindir_julia(printed: &str) -> Option<std::path::PathBuf> {
     let bindir = printed.lines().map(str::trim).rfind(|l| !l.is_empty())?;
-    Some(Path::new(bindir).join("julia.exe"))
+    Some(Path::new(bindir).join(if cfg!(windows) { "julia.exe" } else { "julia" }))
 }
 
 /// The last absolute path a login shell prints for `script` (profiles can
@@ -367,7 +471,7 @@ fn added_mark() -> Option<PathBuf> {
 }
 
 /// The official tarball for this machine: its URL, SHA-256 and size.
-fn tarball() -> Result<(&'static str, &'static str, u64), String> {
+pub fn tarball() -> Result<(&'static str, &'static str, u64), String> {
     let (os, arch) = (uname("-s"), uname("-m").replace("arm64", "aarch64"));
     let &(_, _, url, sha256, size) = TARBALLS
         .iter()
@@ -496,6 +600,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_chosen_julia_is_checked_by_its_version() {
+        assert_eq!(chosen_from_version("julia version 1.12.6\n"), Chosen::Usable("1.12.6".into()));
+        assert_eq!(chosen_from_version("julia version 1.13.4\n"), Chosen::Usable("1.13.4".into()));
+        assert_eq!(chosen_from_version("julia version 1.11.9\n"), Chosen::TooOld("1.11.9".into()), "#370");
+        assert_eq!(chosen_from_version("Python 3.12.1\n"), Chosen::NotJulia);
+        assert_eq!(chosen_from_version(""), Chosen::NotJulia);
+        assert_eq!(min_version(), "1.12");
+    }
+
+    #[test]
+    fn a_preference_chooses_the_runtimes_julia() {
+        assert_eq!(choose(&Preference::Auto, None), Source::Auto, "yours, else Endeavor's");
+        assert_eq!(choose(&Preference::Endeavors, None), Source::Own);
+        let path = Preference::Path("/opt/julia/bin/julia".into());
+        assert_eq!(choose(&path, Some(&Chosen::Usable("1.13.4".into()))), Source::Path("/opt/julia/bin/julia".into()));
+        for broken in [Chosen::Gone, Chosen::NotJulia, Chosen::TooOld("1.11.9".into())] {
+            assert_eq!(choose(&path, Some(&broken)), Source::Auto, "{broken:?} runs another");
+        }
+        assert_eq!(choose(&Preference::Path("/no/such/julia".into()), None), Source::Auto, "checked when not asked yet");
+        assert_eq!(Source::Auto.value().as_deref(), Some("auto"));
+        assert_eq!(Source::Own.value().as_deref(), Some("own"));
+        assert_eq!(Source::Shell("module load julia".into()).value(), None);
+    }
+
+    #[test]
     fn versions_and_home_paths() {
         assert_eq!(parse_version("1.12.6"), Some((1, 12)));
         assert!(parse_version("1.10.4").unwrap() < MIN_JULIA);
@@ -517,11 +646,25 @@ mod tests {
 
     /// The cloud VMs' setup script installs this Julia and the pinned Rust too (Endeavor's docs/cloud.md).
     #[test]
-    fn juliaups_launcher_gives_way_to_the_julia_exe_in_its_bindir() {
-        let bindir = r"C:\Users\someone\.julia\juliaup\julia-1.12.6+0.x64.w64.mingw32\bin";
-        assert_eq!(bindir_julia(bindir), Some(Path::new(bindir).join("julia.exe")));
-        assert_eq!(bindir_julia(&format!("a startup message\n{bindir}\r\n")), Some(Path::new(bindir).join("julia.exe")));
+    fn juliaups_launcher_gives_way_to_the_julia_in_its_bindir() {
+        let (bindir, exe) = if cfg!(windows) {
+            (r"C:\Users\someone\.julia\juliaup\julia-1.12.6+0.x64.w64.mingw32\bin", "julia.exe")
+        } else {
+            ("/home/someone/.julia/juliaup/julia-1.12.6+0.x64.linux.gnu/bin", "julia")
+        };
+        assert_eq!(bindir_julia(bindir), Some(Path::new(bindir).join(exe)));
+        assert_eq!(bindir_julia(&format!("a startup message\n{bindir}\r\n")), Some(Path::new(bindir).join(exe)));
         assert_eq!(bindir_julia(" \n"), None);
+        // juliaup's launcher isn't Julia's own binary; Julia's, beside its library, is.
+        let root = crate::client::scratch("julia-libjulia");
+        std::fs::create_dir_all(root.join("launcher")).unwrap();
+        std::fs::create_dir_all(root.join("julia").join("bin")).unwrap();
+        let launcher = root.join("launcher").join(if cfg!(windows) { "julia.exe" } else { "julialauncher" });
+        std::fs::write(&launcher, "").unwrap();
+        std::fs::write(root.join("julia").join("bin").join(exe), "").unwrap();
+        std::fs::write(root.join("julia").join("bin").join("libjulia.dll"), "").unwrap();
+        assert!(!is_real_julia(&launcher));
+        assert!(is_real_julia(&root.join("julia").join("bin").join(exe)));
     }
 
     #[test]

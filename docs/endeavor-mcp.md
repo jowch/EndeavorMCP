@@ -64,7 +64,7 @@ of theirs (`module load julia`), then `julia` on the login shell's PATH
 no Julia found, it says how to install one (juliaup).
 
 - **Packages.** The runtime already uses its own package store first, with the
-  user's `~/.julia` behind it read-only (`src/runtime.rs`), so registries and
+  user's `~/.julia` behind it (`paths::with_user_depot`, #367), so registries and
   packages the user has are reused and nothing is written into `~/.julia`.
   Keep that: it stops our pins clashing with the user's environments.
 - **First run** still installs and precompiles the pinned Pluto the adapter
@@ -72,8 +72,9 @@ no Julia found, it says how to install one (juliaup).
 - **Many Julia versions.** The runtime's `Manifest.toml` is resolved for one
   Julia. Julia 1.11 and later read a version-named manifest when one exists
   (`Manifest-v1.11.toml`, `Manifest-v1.12.toml`), so ship one per supported
-  minor version and test each in CI. The helper already requires 1.11 or
-  later.
+  minor version and test each in CI. Until then the helper requires 1.12
+  or later, the Julia the manifest is resolved on (1.11 can't instantiate
+  it, #370).
 
 ## Transport: Streamable HTTP
 

@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "download_step", "structure_error", "EXTRA_FIX", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "input_line", "input_value", "moved_input_notes", "note_value", "json_value", "json_choice")
+wanted <- c("%||%", "package_step", "download_step", "structure_error", "EXTRA_FIX", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "input_line", "input_value", "moved_input_notes", "note_value", "json_value", "json_choice", "run_user_profile")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -238,6 +238,27 @@ check("a moved input notes its readers and theirs, not its own cell, another nam
       identical(notes, list(character(), note, note, character(), character())))
 check("an input_list() part reads as R code without the L",
       identical(A$note_value(list(n = 3L, method = "a")), 'list(n = 3, method = "a")'))
+
+# The user's R profile: run into the notebook's environment, and an error in it
+# is logged instead of stopping R (Rscript stops on one when R reads it itself).
+local({
+  dir <- tempfile("profile-"); dir.create(dir)
+  good <- file.path(dir, "good.Rprofile")
+  writeLines(c("options(endeavor_test_repos = 'here')", "from_profile <- 1", ".First <- function() assign('first_ran', TRUE, envir = globalenv())"), good)
+  bad <- file.path(dir, "bad.Rprofile")
+  writeLines(c("before_error <- 1", "stop('no such package')", "after_error <- 1"), bad)
+  env <- new.env()
+  check("a profile runs into the environment given", isTRUE(A$run_user_profile(good, env)) && identical(env$from_profile, 1) && identical(getOption("endeavor_test_repos"), "here"))
+  check("and its .First runs", isTRUE(get0("first_ran", globalenv())))
+  env <- new.env()
+  said <- character()
+  ran <- withCallingHandlers(A$run_user_profile(bad, env), message = function(m) { said <<- c(said, conditionMessage(m)); invokeRestart("muffleMessage") })
+  check("a profile that errors is logged, and R carries on", identical(ran, FALSE) && identical(env$before_error, 1) && is.null(env$after_error) && any(grepl("no such package", said)))
+  check("no profile named (Endeavor's own R): none runs", identical(A$run_user_profile(NA_character_, new.env()), FALSE))
+  check("a profile that isn't there: none runs", identical(A$run_user_profile(file.path(dir, "none"), new.env()), FALSE))
+  options(endeavor_test_repos = NULL); rm(list = intersect("first_ran", ls(globalenv())), envir = globalenv())
+  unlink(dir, recursive = TRUE)
+})
 
 cat(sprintf("\n%d passed, %d failed\n", passed, failed))
 if (failed > 0) quit(status = 1)

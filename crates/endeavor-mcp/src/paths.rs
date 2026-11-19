@@ -123,8 +123,8 @@ impl Env {
     }
 
     /// The depot the app's server installs use, so packages installed for one
-    /// serve the other; the trailing separator stacks the user's own depots
-    /// (~/.julia) behind it, read-only.
+    /// serve the other. The trailing separator asks for the user's own depot
+    /// (~/.julia) behind it, which `with_user_depot` puts in when Julia starts.
     pub fn depot(&self) -> String {
         if cfg!(windows) {
             return format!("{};", self.local.join("serve-depot").display());
@@ -167,6 +167,32 @@ pub(crate) fn plugin_bin_from(plugin_bin: &Path) -> PathBuf {
 /// A cluster's depot on its scratch folder, where home quotas are small.
 pub(crate) fn scratch_depot(scratch: &str) -> String {
     format!("{scratch}/endeavor/depot:")
+}
+
+/// The `JULIA_DEPOT_PATH` Julia is started with for `depot`. A trailing empty entry
+/// (`<ours>:`) gives Julia only its bundled depots, not the user's own (`~/.julia`), so
+/// the user's registries (a LocalRegistry, say), packages and compiled code went
+/// unseen (EndeavorMCP #367). Where `depot` ends with one, the user's depot goes in
+/// before it: the first entry of their own `JULIA_DEPOT_PATH` that isn't already in
+/// `depot`, else `~/.julia`. Julia still installs only into the first entry, ours.
+/// A `depot` without a trailing empty entry is a full list someone chose, and is kept.
+pub fn with_user_depot(depot: &str) -> String {
+    let home = std::env::home_dir().unwrap_or_default();
+    with_user_depot_from(depot, std::env::var("JULIA_DEPOT_PATH").ok().as_deref(), &home, if cfg!(windows) { ';' } else { ':' })
+}
+
+fn with_user_depot_from(depot: &str, theirs: Option<&str>, home: &Path, sep: char) -> String {
+    let Some(entries) = depot.strip_suffix(sep) else { return depot.to_owned() };
+    let ours: Vec<&str> = entries.split(sep).filter(|e| !e.is_empty()).collect();
+    if ours.is_empty() {
+        return depot.to_owned();
+    }
+    let default = (!home.as_os_str().is_empty()).then(|| home.join(".julia").display().to_string());
+    let user = theirs.into_iter().flat_map(|t| t.split(sep)).map(str::to_owned).find(|e| !e.is_empty() && !ours.contains(&e.as_str())).or(default);
+    match user {
+        Some(user) if !ours.contains(&user.as_str()) => format!("{entries}{sep}{user}{sep}"),
+        _ => depot.to_owned(),
+    }
 }
 
 /// Shell for the bootstrap script, run when the helper must be installed: sets
@@ -228,6 +254,23 @@ mod tests {
     fn the_depot_is_never_relative() {
         assert_eq!(Env::default().depot(), "/.cache/endeavor/depot:", "no home at all");
         assert_eq!(Env { home: "/home/ada".into(), ..Env::default() }.depot(), "/home/ada/.cache/endeavor/depot:");
+    }
+
+    #[test]
+    fn the_users_depot_goes_behind_ours() {
+        let home = Path::new("/home/ada");
+        let user = |depot, theirs| with_user_depot_from(depot, theirs, home, ':');
+        let julia = home.join(".julia").display().to_string();
+        assert_eq!(user("/d:", None), format!("/d:{julia}:"), "~/.julia, then Julia's bundled depots");
+        assert_eq!(user("/d:", Some("")), format!("/d:{julia}:"));
+        assert_eq!(user("/d:", Some("/work/jl:/other")), "/d:/work/jl:", "the first of the user's own");
+        assert_eq!(user("/d:", Some("/d:/work/jl")), "/d:/work/jl:", "not ours again (a shell this runtime started)");
+        let listed = format!("/d:{julia}:");
+        assert_eq!(with_user_depot_from(&listed, None, home, ':'), listed, "already there");
+        assert_eq!(user("/d:/e", None), "/d:/e", "a full list is kept");
+        assert_eq!(user(":", None), ":");
+        assert_eq!(with_user_depot_from("/d:", None, Path::new(""), ':'), "/d:", "no home");
+        assert_eq!(with_user_depot_from(r"C:\E\depot;", None, Path::new(r"C:\Users\ada"), ';'), format!(r"C:\E\depot;{};", Path::new(r"C:\Users\ada").join(".julia").display()));
     }
 
     #[cfg(unix)]

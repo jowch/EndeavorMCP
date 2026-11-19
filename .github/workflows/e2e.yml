@@ -8,6 +8,10 @@
 # The R job also runs every day: R notebooks install Ember's latest build from
 # r-universe, so a push to Ember's main reaches users at their next R start, and
 # a change there that breaks the adapter should show up here first.
+# The Julia tests run every day on the newest Julia too (julia-newest): the app
+# runs the user's own Julia when they have one, which juliaup moves to each new
+# release, so a release that breaks the runtime should show up here before users
+# hit it.
 # Because of those path filters, don't make this check required in branch
 # protection: a PR that changes none of them would wait for it forever.
 name: E2E
@@ -101,6 +105,39 @@ jobs:
             target/tmp/e2e-julia/depot
             target/tmp/e2e-serve/depot
           key: e2e-depots-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml') }}-${{ github.run_id }}
+
+  julia-newest:
+    name: e2e julia on Julia ${{ matrix.julia }}
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # '1' is the newest release (juliaup's `release`), 'pre' the newest pre-release.
+        julia: ['1', 'pre']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - name: Build
+        run: cargo build --locked -p endeavor-mcp --tests
+      # Fresh depots, no cache: a new Julia compiles everything anyway.
+      - name: Test
+        run: |
+          set -o pipefail
+          export ENDEAVOR_E2E_JULIA="$(command -v julia)"
+          julia --version
+          for test in e2e_julia e2e_serve; do
+            cargo test --locked -p endeavor-mcp --test "$test" -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/$test.log"
+            if grep -q 'SKIPPED:' "$RUNNER_TEMP/$test.log"; then
+              echo "::error::$test was skipped"
+              exit 1
+            fi
+          done
 
   r:
     name: e2e r

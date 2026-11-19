@@ -289,7 +289,7 @@ impl Bridge {
     /// `token` is the core's bearer token; `engine_token` the key to Julia's bridge (`Julia`).
     pub fn new(token: String, engine_token: String, depot: &str) -> Bridge {
         let shell_env = vec![
-            ("JULIA_DEPOT_PATH", Some(depot.to_owned())),
+            ("JULIA_DEPOT_PATH", Some(crate::paths::with_user_depot(depot))),
             ("ENDEAVOR_TOKEN", None),
             ("ENDEAVOR_STATE", None),
             ("ENDEAVOR_LAUNCHER", None),

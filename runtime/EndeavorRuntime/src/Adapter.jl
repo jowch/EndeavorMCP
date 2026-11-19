@@ -522,9 +522,42 @@ function _open_already(session, path::AbstractString)
     return any(nb -> isfile(nb.path) && realpath(nb.path) == realpath(tamed), values(session.notebooks))
 end
 
+# Registries in the user's own depot, behind ours (a LocalRegistry, say). Pkg updates only the
+# first depot's (`Pkg.Registry.update`'s `depots = [depots1()]`, which Pluto's package manager uses),
+# which is ours, so a version registered from another computer was never seen: "no versions left"
+# (#367). Before a notebook opens, at most once per `cooldown` seconds, the ones we don't also have
+# are updated where they are; one we have too (General) is ours to update, not the user's copy.
+const _USER_REGISTRIES_UPDATED = Ref(-Inf)
+
+function update_user_registries(; cooldown::Real = 3600, depots = DEPOT_PATH)
+    time() - _USER_REGISTRIES_UPDATED[] < cooldown && return 0
+    _USER_REGISTRIES_UPDATED[] = time()
+    length(depots) < 2 && return 0
+    ours = Set(r.uuid for r in Pkg.Registry.reachable_registries(; depots = [depots[1]]))
+    updated = 0
+    for depot in depots[2:end]
+        isdir(joinpath(depot, "registries")) || continue
+        theirs = [r for r in Pkg.Registry.reachable_registries(; depots = [depot]) if !(r.uuid in ours)]
+        isempty(theirs) && continue
+        try
+            Pkg.Registry.update([Pkg.Registry.RegistrySpec(; uuid = r.uuid) for r in theirs]; depots = [depot], io = stderr)
+            updated += length(theirs)
+        catch e
+            # Offline, or a registry that can't be reached: the copy there is used as it is.
+            @warn "Couldn't update the registries in $depot" exception = (e, catch_backtrace())
+        end
+    end
+    return updated
+end
+
 function open_notebook(session, path::AbstractString, run::Bool)
     # One already open says so (below), as it would with its Julia there.
     run && !_open_already(session, path) && _require_julia()
+    try
+        update_user_registries()
+    catch e
+        @warn "Couldn't update the user's registries" exception = (e, catch_backtrace())
+    end
     nb = try
         Pluto.SessionActions.open(session, path; run_async = true, execution_allowed = run)
     catch e

@@ -637,21 +637,28 @@ fn the_background_precompile_runs_once_per_runtime_folder_and_only_where_julia_r
     std::fs::create_dir_all(&runtime).unwrap();
     let depot = depot.display().to_string();
     let runs = std::cell::RefCell::new(Vec::new());
-    let try_it = || precompile_if_needed(&depot, &|| Some(runtime.clone()), &mut |r, key| runs.borrow_mut().push((r.to_path_buf(), key.to_string())));
+    let version = std::cell::RefCell::new("1.12.6");
+    let try_with = |julia: &dyn Fn() -> Option<(String, String)>| precompile_if_needed(&depot, &|| Some(runtime.clone()), julia, &mut |r, key, j| runs.borrow_mut().push((r.to_path_buf(), key.to_string(), j.to_string())));
+    let try_it = || try_with(&|| Some(("/j/julia".into(), version.borrow().to_string())));
     try_it();
     assert!(runs.borrow().is_empty(), "a fresh depot (a first install) starts no Julia");
     std::fs::create_dir_all(Path::new(&depot).join("compiled/v1.12/EndeavorRuntime")).unwrap();
+    try_with(&|| None);
+    assert!(runs.borrow().is_empty(), "no Julia found, nothing to run");
     try_it();
-    assert_eq!(*runs.borrow(), vec![(runtime.clone(), format!("{depot}\n"))], "after an update it runs");
-    std::fs::write(runtime.join(".precompiled"), format!("{depot}\n")).unwrap();
+    assert_eq!(*runs.borrow(), vec![(runtime.clone(), format!("{depot}\n1.12.6\n"), "/j/julia".into())], "after an update it runs");
+    std::fs::write(runtime.join(".precompiled"), format!("{depot}\n1.12.6\n")).unwrap();
     try_it();
-    assert_eq!(runs.borrow().len(), 1, "a folder done for this depot isn't done again");
-    std::fs::write(runtime.join(".precompiled"), "/another/depot\n").unwrap();
+    assert_eq!(runs.borrow().len(), 1, "a folder done for this depot and Julia isn't done again");
+    *version.borrow_mut() = "1.13.4";
     try_it();
-    assert_eq!(runs.borrow().len(), 2, "one done for another depot is");
+    assert_eq!(runs.borrow().len(), 2, "a new Julia version does it again");
+    std::fs::write(runtime.join(".precompiled"), "/another/depot\n1.13.4\n").unwrap();
+    try_it();
+    assert_eq!(runs.borrow().len(), 3, "one done for another depot is");
     std::fs::write(runtime.join(".precompile-failed"), "").unwrap();
     try_it();
-    assert_eq!(runs.borrow().len(), 2, "a failure in the last day isn't retried");
+    assert_eq!(runs.borrow().len(), 3, "a failure in the last day isn't retried");
 }
 
 #[test]
