@@ -1248,6 +1248,7 @@ impl Relay {
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
             let sink = |reply: String| {
+                let reply = if tool.as_deref().is_some_and(crate::views::is_view_tool) { reply } else { self.consent.reply_said(reply) };
                 self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, in_browser, reply)))
             };
             match self.post(&route, line, &sink) {

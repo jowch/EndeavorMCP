@@ -1945,6 +1945,10 @@ fn installing_message(nb: &Snapshot) -> String {
     }
 }
 
+/// What the asking message tells the agent to do. The plugin's front puts its own words in its place
+/// where it asks the user itself (`standalone::consent`).
+pub(crate) const ASK_STEP: &str = "Stop here and ask the user whether to download it, then end your reply. approve_install doesn't ask the user: it is their yes, so call it only once they have answered yes in a later message.";
+
 /// What the agent hears while an R notebook's install waits for an OK before a large download
 /// (Ember #37): what it would download and how much, and that the user decides. Only the user
 /// can say yes to it, so the agent asks them and doesn't wait.
@@ -1967,8 +1971,7 @@ fn asking_message(nb: &Snapshot) -> String {
     let total = sized(&download["bytes"]).map(|size| format!(", {size} in all")).unwrap_or_default();
     format!(
         "Before this notebook's cells can run, R has to download {which}{total}. A download this large waits for the user's OK, \
-         so nothing is installing and the cells stay queued. Stop here and ask the user whether to download it, then end your reply. \
-         approve_install doesn't ask the user: it is their yes, so call it only once they have answered yes in a later message. \
+         so nothing is installing and the cells stay queued. {ASK_STEP} \
          The page's own button does the same. Don't call read_cell to wait: nothing changes until then."
     )
 }

@@ -31,6 +31,9 @@ const ASK_IN_CHAT: &str = "It doesn't ask the user: calling it is the user's yes
 /// The same where the front asks the user itself: asking in the chat too would have them say yes twice.
 const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that names what downloads and its size, and nothing downloads unless they say yes there. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or close the dialog, the call fails with `download_declined` or `download_not_answered`.";
 
+/// The runtime's asking step (`notebooks::ASK_STEP`) where the front asks the user itself.
+const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
+
 #[derive(Default)]
 pub(super) struct Consent {
     /// The client said in `initialize` that it can show a form.
@@ -91,6 +94,16 @@ impl Consent {
             }
         }
         to_json(&parsed)
+    }
+
+    /// A runtime's reply to a call, with its asking message telling the agent that Endeavor asks the
+    /// user, where it does. The step's words need no escaping, so they read the same in the reply's
+    /// JSON. A runtime from another build whose words differ keeps its own: the user is asked twice.
+    pub(super) fn reply_said(&self, reply: String) -> String {
+        if !self.can_ask() || !reply.contains(crate::notebooks::ASK_STEP) {
+            return reply;
+        }
+        reply.replace(crate::notebooks::ASK_STEP, ASK_STEP_IN_DIALOG)
     }
 
     /// If `message` is the client's answer to one of the front's questions, hand it to the call that
@@ -358,6 +371,16 @@ mod tests {
         let approve = shown["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "approve_install").unwrap();
         let text = approve["description"].as_str().unwrap();
         assert!(text.contains(ASKED_IN_DIALOG) && !text.contains(ASK_IN_CHAT), "{text}");
+    }
+
+    #[test]
+    fn where_it_asks_the_asking_message_says_so() {
+        let reply = |text: &str| to_json(&json!({ "jsonrpc": "2.0", "id": 4, "result": { "content": [{ "type": "text", "text": to_json(&json!({ "message": text })) }] } }));
+        let asking = format!("R has to download ALL. {} The page's own button does the same.", crate::notebooks::ASK_STEP);
+        let consent = Consent::default();
+        assert_eq!(consent.reply_said(reply(&asking)), reply(&asking));
+        consent.learn_client(&initialize(json!({ "form": {} })));
+        assert_eq!(consent.reply_said(reply(&asking)), reply(&format!("R has to download ALL. {ASK_STEP_IN_DIALOG} The page's own button does the same.")));
     }
 
     #[test]
