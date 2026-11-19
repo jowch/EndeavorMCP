@@ -10,7 +10,7 @@ installed that, delete it once `endeavor` is on your `PATH`.
 
 ## Install the program by hand
 
-You need Julia 1.11 or newer, or nothing: when no `julia` is on your login
+You need Julia 1.12 or newer, or nothing: when no `julia` is on your login
 shell's `PATH`, Endeavor downloads its own pinned Julia (1.12.6) into
 `~/.cache/endeavor/` the first time a Julia notebook is opened. If you only use
 R notebooks, Endeavor never needs Julia.

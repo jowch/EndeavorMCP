@@ -13,8 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// Needed by runtime/Project.toml's `[sources]` section.
-const MIN_JULIA: (u32, u32) = (1, 11);
+/// The oldest Julia the runtime starts on: its Manifest.toml is resolved on 1.12, and 1.11's
+/// Pkg can't instantiate it (#370). `--julia auto` passes over an older one for Endeavor's own.
+/// Keep the app's `MIN_JULIA` (src/runtime.rs) the same.
+const MIN_JULIA: (u32, u32) = (1, 12);
 
 /// Endeavor's own Julia, the tested version, pinned with the official tarballs'
 /// SHA-256 and size (bump all with the app's own in src/runtime.rs).

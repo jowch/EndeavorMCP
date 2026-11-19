@@ -72,8 +72,9 @@ no Julia found, it says how to install one (juliaup).
 - **Many Julia versions.** The runtime's `Manifest.toml` is resolved for one
   Julia. Julia 1.11 and later read a version-named manifest when one exists
   (`Manifest-v1.11.toml`, `Manifest-v1.12.toml`), so ship one per supported
-  minor version and test each in CI. The helper already requires 1.11 or
-  later.
+  minor version and test each in CI. Until then the helper requires 1.12
+  or later, the Julia the manifest is resolved on (1.11 can't instantiate
+  it, #370).
 
 ## Transport: Streamable HTTP
 
