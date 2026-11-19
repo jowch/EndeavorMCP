@@ -504,6 +504,20 @@ Next:
   A notebook whose process ended while it started can be restarted, from the app
   or from Pluto's own restart on its page, and its cells run (#194). Before, the restart failed with the start's error and
   its cells stayed queued until the notebook was stopped and opened again.
+- The user's own Julia and R first (#367, #370). The app on this computer now
+  runs `--julia auto` like servers and the plugin: the user's Julia (login
+  shell, juliaup) when it's 1.12 or newer, else Endeavor's. The app's
+  Settings give a `julia::Preference` and `julia::choose` decides, so the
+  choice lives here, not in the app. The user's depot goes behind ours
+  (`paths::with_user_depot`): a trailing `:` alone gave Julia only its bundled
+  depots, so a LocalRegistry and the user's packages were never found. R
+  notebooks read the user's `~/.Renviron` and `~/.Rprofile` (no more
+  `--vanilla`), and the user's R runs ahead of Endeavor's own R. Julia 1.11
+  is refused (the runtime's manifest doesn't instantiate on it). E2E runs the
+  Julia tests daily on the newest release and pre-release. Not done: a
+  registry in the user's depot is updated only by their own Julia (Pkg
+  updates the first depot's), so a version registered from another computer
+  shows up after their next `]up` or `Pkg.Registry.update()`.
 - Endeavor's own Julia (#96). `--julia own` uses only the pinned Julia
   (1.12.6), never the PATH's. Where the computer has juliaup, Endeavor's own
   Julia is juliaup's channel for that version, which Endeavor adds
