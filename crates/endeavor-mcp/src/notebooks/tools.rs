@@ -641,6 +641,9 @@ impl Call<'_> {
                 let mut entry = json!({ "cell_id": id, "output_summary": summary });
                 if let Some(error) = &cell.error {
                     entry["error"] = error.clone();
+                    if let Some(fix) = self.defined_elsewhere(&nb, id, cell) {
+                        entry["defined_elsewhere"] = json!(fix);
+                    }
                 }
                 if let Some(text) = self.output_text(&nb, id)? {
                     entry["output_text"] = json!(cut(&text, max));
@@ -880,7 +883,10 @@ impl Call<'_> {
         if let Some(text) = self.output_text(&nb, &cell)? {
             out.insert("output_text".into(), json!(text));
         }
-        let asks = nb.prompted().filter(|asks| **asks == cell || nb.cells.get(&cell).is_some_and(|c| c.running || c.queued)).cloned();
+        if let Some(fix) = nb.cells.get(&cell).and_then(|c| self.defined_elsewhere(&nb, &cell, c)) {
+            out.insert("defined_elsewhere".into(), json!(fix));
+        }
+        let asks =nb.prompted().filter(|asks| **asks == cell || nb.cells.get(&cell).is_some_and(|c| c.running || c.queued)).cloned();
         if let Some(asks) = asks {
             // The cell asking, or one queued behind it.
             if asks != cell {
@@ -1275,6 +1281,11 @@ impl Call<'_> {
         if left_out > 0 {
             result["markdown_cells_left_out"] = left_out.into();
         }
+        // Said again where the agent reads the code it describes: Haiku 4.5 read the code after
+        // open_notebook's note and described it as if it had run (#163).
+        if !nb.execution_allowed {
+            result["note"] = json!(NOT_RUN);
+        }
         Ok(result)
     }
 
@@ -1325,6 +1336,27 @@ impl Call<'_> {
             })
             .collect();
         Ok(Value::Array(found))
+    }
+
+    /// For a Pluto cell that fails with "Multiple definitions for x", which other cells define x
+    /// and what to do, beside its error. Haiku 4.5 put a second `using StatsPlots` in a later cell
+    /// and left both erroring (#242); the error alone doesn't say where the other one is.
+    fn defined_elsewhere(&self, nb: &Snapshot, id: &str, cell: &Cell) -> Option<String> {
+        let msg = cell.error.as_ref()?["msg"].as_str()?;
+        let names = msg.strip_prefix("Multiple definitions for ")?.split(['.', '\n']).next()?;
+        let names: Vec<&str> = names.split(", ").flat_map(|n| n.split(" and ")).map(str::trim).filter(|n| !n.is_empty()).collect();
+        let graph = self.nbs.graph(&nb.id, GraphQuery::default()).ok()?;
+        let each: Vec<String> = names
+            .iter()
+            .filter_map(|name| {
+                let others: Vec<&str> = graph.cells.iter().filter(|n| n.id != id && n.definitions.iter().any(|d| d == name)).map(|n| n.id.as_str()).collect();
+                (!others.is_empty()).then(|| format!("`{name}` is also defined in {}", others.join(", ")))
+            })
+            .collect();
+        (!each.is_empty()).then(|| format!(
+            "{}. A name can be defined in only one cell, so both cells fail. Keep one definition and remove the other; for a package, keep its `using` or `import` in one cell only.",
+            each.join("; ")
+        ))
     }
 
     fn validate_cell(&self) -> Result<Value, String> {
@@ -1931,8 +1963,9 @@ fn asking_message(nb: &Snapshot) -> String {
     let total = sized(&download["bytes"]).map(|size| format!(", {size} in all")).unwrap_or_default();
     format!(
         "Before this notebook's cells can run, R has to download {which}{total}. A download this large waits for the user's OK, \
-         so nothing is installing and the cells stay queued. Ask the user whether to download it, and call approve_install only after they say yes; \
-         the page's own button does the same. Don't call read_cell to wait: nothing changes until then."
+         so nothing is installing and the cells stay queued. Stop here and ask the user whether to download it, then end your reply. \
+         approve_install doesn't ask the user: it is their yes, so call it only once they have answered yes in a later message. \
+         The page's own button does the same. Don't call read_cell to wait: nothing changes until then."
     )
 }
 

@@ -1052,6 +1052,23 @@ fn what_a_julia_cell_printed_and_logged_reaches_the_agent() {
 }
 
 #[test]
+fn a_name_defined_in_two_cells_says_where_the_other_is() {
+    // Pluto's "Multiple definitions" error doesn't say which cell is the other: Haiku 4.5 put a
+    // second `using StatsPlots` in a later cell and left both erroring (#242).
+    const Z: &str = "33333333-3333-3333-3333-333333333333";
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "x = 2"), (Z, "z = 3")]);
+    let error = "Multiple definitions for x.\n\nCombine all definitions into a single reactive cell using a `begin ... end` block.";
+    s.engine.with(NB, |nb| nb.cells.iter_mut().filter(|c| c.id != Z).for_each(|c| (c.errored, c.output) = (true, error.into())));
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
+    let fix = read["defined_elsewhere"].as_str().unwrap_or_default();
+    assert!(fix.starts_with(&format!("`x` is also defined in {X}.")) && fix.contains("keep its `using`"), "{read}");
+    // Another error says nothing of the kind.
+    s.engine.with(NB, |nb| nb.cells.iter_mut().for_each(|c| (c.errored, c.output) = (c.id == Z, if c.id == Z { "UndefVarError: `q` not defined".into() } else { String::new() })));
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Z })).unwrap().get("defined_elsewhere"), None);
+}
+
+#[test]
 fn a_julia_cells_controls_and_a_result_from_a_moved_one_reach_the_agent() {
     // A widget's value isn't saved: a result read after the user moved it isn't what a rerun of
     // the file gives. The runtime lists the widget under `inputs`, and notes the cells that used
@@ -2354,6 +2371,11 @@ fn opening_and_making_notebooks() {
     let previewed = s.call("", "open_notebook", json!({ "path": format!("{dir}{SEP}nb1.jl") })).unwrap();
     assert_eq!((&previewed["execution_allowed"], previewed.get("warnings"), &previewed["note"]), (&json!(false), None, &json!(super::tools::NOT_RUN)));
     assert_eq!(previewed.get("on_cell_change"), None);
+    // Said again where the agent reads the code it then describes (#163), and not once it may run.
+    let code = s.call("", "read_notebook_code", json!({ "notebook_id": previewed["notebook_id"] })).unwrap();
+    assert_eq!(code["note"], json!(super::tools::NOT_RUN), "{code}");
+    let code = s.call("", "read_notebook_code", json!({ "notebook_id": opened["notebook_id"] })).unwrap();
+    assert_eq!(code.get("note"), None, "{code}");
     // A notebook in Ember's lazy mode says so (#196).
     let lazy = format!("{dir}{SEP}lazy.jl");
     std::fs::copy(format!("{dir}{SEP}nb1.jl"), &lazy).unwrap();
@@ -3251,7 +3273,7 @@ fn an_r_install_waiting_for_an_ok_says_to_ask_the_user_and_nothing_waits_for_it(
     assert!(began.elapsed() < Duration::from_secs(1), "it didn't wait");
     assert_eq!((&read["queued"], &read["packages"]), (&json!(true), &asking));
     let message = read["message"].as_str().unwrap();
-    for part in ["BSgenome.Hsapiens.UCSC.hg38 1.4.5 (870 MB), GO.db 3.22.0 (400 MB), org.Hs.eg.db 3.22.0 (size unknown), 1.3 GB in all", "Ask the user", "approve_install only after they say yes", "Don't call read_cell to wait"] {
+    for part in ["BSgenome.Hsapiens.UCSC.hg38 1.4.5 (870 MB), GO.db 3.22.0 (400 MB), org.Hs.eg.db 3.22.0 (size unknown), 1.3 GB in all", "ask the user whether to download it, then end your reply", "call it only once they have answered yes", "Don't call read_cell to wait"] {
         assert!(message.contains(part), "{part}: {message}");
     }
 
@@ -3263,14 +3285,14 @@ fn an_r_install_waiting_for_an_ok_says_to_ask_the_user_and_nothing_waits_for_it(
     let ran = s.call("9", "submit_changes", json!({ "notebook_id": R, "wait_for_completion": true })).unwrap();
     assert!(began.elapsed() < Duration::from_secs(2), "it didn't wait: {ran}");
     assert_eq!((&ran["execution"]["still_running"], &ran["packages"]), (&json!([Y]), &asking), "{ran}");
-    assert!(ran["message"].as_str().unwrap().contains("approve_install only after they say yes"), "{ran}");
+    assert!(ran["message"].as_str().unwrap().contains("call it only once they have answered yes"), "{ran}");
     // With nothing staged, a waited call waits for the session's own run, but not while that
     // run waits on the user's OK.
     let began = Instant::now();
     let again = s.call("9", "submit_changes", json!({ "notebook_id": R, "wait_for_completion": true })).unwrap();
     assert!(began.elapsed() < Duration::from_secs(2), "it didn't wait: {again}");
     assert!(again["execution"]["still_running"].as_array().unwrap().contains(&json!(Y)), "{again}");
-    assert!(again["message"].as_str().unwrap().contains("approve_install only after they say yes"), "{again}");
+    assert!(again["message"].as_str().unwrap().contains("call it only once they have answered yes"), "{again}");
     assert_eq!((&again["execution"]["status"], &again["warnings"]), (&json!("running"), &json!([])), "it didn't run out of time: {again}");
 
     // Cells that don't need the held packages still run while Ember asks. While one runs, a read
