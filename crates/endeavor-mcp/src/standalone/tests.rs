@@ -715,3 +715,30 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
     assert!(!out.lines().iter().any(|l| l.contains("elicitation/create")), "{:?}", out.lines());
     assert_eq!(approvals(), 2);
 }
+
+#[cfg(unix)]
+#[test]
+fn approve_install_asks_when_the_runtime_cant_be_looked_at() {
+    // A runtime the front can't reach now may be by the call itself, which reconnects: the front can't
+    // tell that nothing waits, so it asks, without the sizes.
+    let (port, seen) = fake_core();
+    let (relay, out) = ready_relay(port, &seen, true);
+    relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"claude-code"}}}"#);
+    out.clear();
+    // The runtime was replaced by one whose port answers nothing.
+    let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::os::unix::process::parent_id(), "started": null, "token": "other", "port": gone });
+    std::fs::write(relay.options.state_dir.join("runtime.json"), record.to_string()).unwrap();
+    let calling = { let relay = relay.clone(); std::thread::spawn(move || relay.handle(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"approve_install","arguments":{"notebook_id":"1b2c3d4e-0000-4000-8000-000000000001"}}}"#)) };
+    let question = loop {
+        if let Some(line) = out.lines().into_iter().find(|l| l.contains("elicitation/create")) {
+            break serde_json::from_str::<Value>(&line).unwrap();
+        }
+        assert!(!calling.is_finished(), "not asked: {:?}", out.lines());
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(question["params"]["message"].as_str().unwrap().contains("some large Bioconductor data packages"), "{question}");
+    relay.handle(&json!({ "jsonrpc": "2.0", "id": question["id"], "result": { "action": "decline" } }).to_string());
+    calling.join().unwrap();
+    assert!(!seen.lock().unwrap().iter().any(|(_, body)| body.contains("approve_install")));
+}

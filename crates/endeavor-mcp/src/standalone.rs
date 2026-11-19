@@ -1227,7 +1227,8 @@ impl Relay {
         // Nothing downloads unless the user says yes to it themselves, where the client can ask them.
         // Only a download that waits for an OK is asked about, with what the runtime says it is.
         if tool.as_deref() == Some("approve_install") && id.is_some() && self.consent.can_ask() {
-            let waiting = self.waiting_download(message["params"]["arguments"]["notebook_id"].as_str().unwrap_or_default(), deadline);
+            self.consent.looking(&message);
+            let waiting = self.waiting_download(&message["params"]["arguments"]["notebook_id"], deadline);
             match self.consent.ask(&message, waiting, &|line| self.write(line)) {
                 consent::Asked::No(result) => return self.answer_call(&message, tool.as_deref(), result),
                 consent::Asked::Dropped => return,
@@ -1260,9 +1261,16 @@ impl Relay {
     }
 
     /// What `notebook`'s install waits for, from the runtime's own `list_notebooks`. With no runtime
-    /// running, nothing can wait.
-    fn waiting_download(&self, notebook: &str, deadline: machines::Deadline) -> consent::Waiting {
-        let Ok(route) = self.route(Need::Look, deadline) else { return consent::Waiting::Nothing };
+    /// there, nothing can wait. A runtime that can't be reached now may be by the call itself, which
+    /// reconnects and `Look` doesn't, so the front can't tell then.
+    fn waiting_download(&self, notebook: &Value, deadline: machines::Deadline) -> consent::Waiting {
+        // The user waits for the dialog meanwhile; a look that takes longer asks without the sizes.
+        let deadline = machines::Deadline::after(deadline.left().min(Duration::from_secs(10)));
+        let route = match self.route(Need::Look, deadline) {
+            Ok(route) => route,
+            Err(unready) if unready.nothing_runs() => return consent::Waiting::Nothing,
+            Err(_) => return consent::Waiting::Unknown,
+        };
         let id = "endeavor-look";
         let look = to_json(&json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
         let listed = Mutex::new(None);

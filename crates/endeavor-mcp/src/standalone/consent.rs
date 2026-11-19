@@ -21,6 +21,9 @@ const ANSWER_WAIT: Duration = Duration::from_secs(30 * 60);
 /// The start of the ids of the front's own requests to the client, which its answers carry back.
 const ID_PREFIX: &str = "endeavor-consent-";
 
+/// A call cancelled before its question went out.
+const CANCELLED: &str = "cancelled";
+
 /// What `approve_install`'s description says of the user's yes where no dialog follows: the agent
 /// asks in the chat.
 const ASK_IN_CHAT: &str = "It doesn't ask the user: calling it is the user's yes. Ask them first, end your reply, and call it only once they have said yes in a later message; never on your own.";
@@ -35,8 +38,9 @@ pub(super) struct Consent {
     next: AtomicU64,
     /// The questions out to the client, by request id.
     waiting: Mutex<HashMap<String, mpsc::Sender<Value>>>,
-    /// The question each waiting call asked, by the call's id (as JSON), for a cancel of the call.
-    calls: Mutex<HashMap<String, String>>,
+    /// The question each waiting call asked, by the call's id (as JSON), for a cancel of the call;
+    /// none yet while the front looks at what it would download.
+    calls: Mutex<HashMap<String, Option<String>>>,
 }
 
 /// What a notebook's install waits for, as the runtime's `list_notebooks` says it.
@@ -102,15 +106,28 @@ impl Consent {
         true
     }
 
+    /// `call` is on its way to `ask`: a cancel from now on is the front's, not the runtime's.
+    pub(super) fn looking(&self, call: &Value) {
+        self.calls.lock().unwrap().insert(to_json(&call["id"]), None);
+    }
+
     /// If `message` cancels a call that waits for the user's answer, end the wait: nothing downloads.
     /// Whether it did; the runtime never saw that call.
     pub(super) fn take_cancel(&self, message: &Value) -> bool {
         if message["method"] != "notifications/cancelled" {
             return false;
         }
-        let Some(question) = self.calls.lock().unwrap().remove(&to_json(&message["params"]["requestId"])) else { return false };
-        if let Some(waiting) = self.waiting.lock().unwrap().remove(&question) {
-            let _ = waiting.send(json!({ "cancelled": true }));
+        let mut calls = self.calls.lock().unwrap();
+        let Some(question) = calls.get_mut(&to_json(&message["params"]["requestId"])) else { return false };
+        match question.as_deref() {
+            Some(CANCELLED) => {}
+            Some(asked) => {
+                if let Some(waiting) = self.waiting.lock().unwrap().remove(asked) {
+                    let _ = waiting.send(json!({ "cancelled": true }));
+                }
+            }
+            // Cancelled while the front looks: `ask` finds it marked and asks nothing.
+            None => *question = Some(CANCELLED.to_owned()),
         }
         true
     }
@@ -118,6 +135,11 @@ impl Consent {
     /// Before `approve_install` reaches the runtime: ask the user, through `write`, whether to make
     /// the download `waiting`.
     pub(super) fn ask(&self, call: &Value, waiting: Waiting, write: &dyn Fn(&str)) -> Asked {
+        let call_id = to_json(&call["id"]);
+        let cancelled = self.calls.lock().unwrap().remove(&call_id).flatten().is_some();
+        if cancelled {
+            return Asked::Dropped;
+        }
         if !self.can_ask() {
             return Asked::Unasked;
         }
@@ -127,10 +149,12 @@ impl Consent {
             Waiting::Unknown => "some large Bioconductor data packages".to_owned(),
         };
         let id = format!("{ID_PREFIX}{}", self.next.fetch_add(1, Ordering::SeqCst) + 1);
-        let call_id = to_json(&call["id"]);
         let (answered, answer) = mpsc::channel();
+        // Under the calls' lock, so that a cancel either marks the call or finds its question.
+        let mut calls = self.calls.lock().unwrap();
         self.waiting.lock().unwrap().insert(id.clone(), answered);
-        self.calls.lock().unwrap().insert(call_id.clone(), id.clone());
+        calls.insert(call_id.clone(), Some(id.clone()));
+        drop(calls);
         let question = format!("R needs to download {what} before this notebook's cells can run. Download it now?");
         write(&to_json(&json!({
             "jsonrpc": "2.0", "id": id, "method": "elicitation/create",
@@ -167,14 +191,16 @@ impl Consent {
 
 /// What `list_notebooks`' reply says `notebook`'s install waits for. A notebook it doesn't list, or
 /// one in safe preview, waits for nothing the call could give: the runtime refuses it.
-pub(super) fn waiting_in(listed: &str, notebook: &str) -> Waiting {
+pub(super) fn waiting_in(listed: &str, notebook: &Value) -> Waiting {
     let Ok(parsed) = serde_json::from_str::<Value>(listed) else { return Waiting::Unknown };
     if parsed["result"]["isError"] == true {
         return Waiting::Unknown;
     }
     let Some(fields) = parsed["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str::<Value>(text).ok()) else { return Waiting::Unknown };
     let Some(notebooks) = fields.as_array().or_else(|| fields["notebooks"].as_array()) else { return Waiting::Unknown };
-    let Some(nb) = notebooks.iter().find(|nb| nb["notebook_id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(notebook.trim()))) else { return Waiting::Nothing };
+    // The id as the runtime reads it.
+    let Some(notebook) = crate::notebooks::uuid_value(notebook) else { return Waiting::Nothing };
+    let Some(nb) = notebooks.iter().find(|nb| crate::notebooks::uuid_value(&nb["notebook_id"]).as_ref() == Some(&notebook)) else { return Waiting::Nothing };
     if nb["packages"]["step"] == "asking" && nb["execution_allowed"] != false { Waiting::Asking(nb["packages"]["download"].clone()) } else { Waiting::Nothing }
 }
 
@@ -203,7 +229,6 @@ fn what(download: &Value) -> String {
     let total = if each.len() > 1 { sized(&download["bytes"]).map(|size| format!(", {size} in all")).unwrap_or_default() } else { String::new() };
     format!("{}{total}", each.join(", "))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -294,6 +319,18 @@ mod tests {
     }
 
     #[test]
+    fn a_call_cancelled_while_the_front_looks_is_never_asked_about() {
+        let consent = Consent::default();
+        consent.learn_client(&initialize(json!({})));
+        consent.looking(&call());
+        let cancel = json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 9 } });
+        assert!(consent.take_cancel(&cancel) && consent.take_cancel(&cancel));
+        assert!(matches!(consent.ask(&call(), all(), &|_| panic!("asked")), Asked::Dropped));
+        // Done with: a later cancel of the same id is the runtime's again.
+        assert!(!consent.take_cancel(&cancel));
+    }
+
+    #[test]
     fn a_client_that_cant_show_one_gets_the_call_as_before() {
         for elicitation in [Value::Null, json!({ "url": {} })] {
             let consent = Consent::default();
@@ -327,12 +364,15 @@ mod tests {
     fn the_runtimes_list_says_what_waits() {
         let listed = |notebooks: Value| to_json(&json!({ "jsonrpc": "2.0", "id": "x", "result": { "content": [{ "type": "text", "text": to_json(&notebooks) }] } }));
         let asking = json!({ "step": "asking", "download": { "bytes": 5 } });
-        let nb = |packages: Value, allowed: bool| json!({ "notebook_id": "AB-12", "execution_allowed": allowed, "packages": packages });
-        assert!(matches!(waiting_in(&listed(json!([nb(asking.clone(), true)])), "ab-12"), Waiting::Asking(download) if download["bytes"] == 5));
-        assert!(matches!(waiting_in(&listed(json!([nb(asking.clone(), false)])), "AB-12"), Waiting::Nothing), "safe preview");
-        assert!(matches!(waiting_in(&listed(json!([nb(json!({ "step": "installing" }), true)])), "AB-12"), Waiting::Nothing));
-        assert!(matches!(waiting_in(&listed(json!([nb(asking, true)])), "CD-34"), Waiting::Nothing), "another notebook");
-        assert!(matches!(waiting_in("ran", "AB-12"), Waiting::Unknown));
+        let id = "1b2c3d4e-0000-4000-8000-00000000000a";
+        let nb = |packages: Value, allowed: bool| json!({ "notebook_id": id, "execution_allowed": allowed, "packages": packages });
+        // The id as the runtime reads it: in capitals too.
+        assert!(matches!(waiting_in(&listed(json!([nb(asking.clone(), true)])), &json!(id.to_uppercase())), Waiting::Asking(download) if download["bytes"] == 5));
+        assert!(matches!(waiting_in(&listed(json!([nb(asking.clone(), false)])), &json!(id)), Waiting::Nothing), "safe preview");
+        assert!(matches!(waiting_in(&listed(json!([nb(json!({ "step": "installing" }), true)])), &json!(id)), Waiting::Nothing));
+        assert!(matches!(waiting_in(&listed(json!([nb(asking.clone(), true)])), &json!("1b2c3d4e-0000-4000-8000-00000000000b")), Waiting::Nothing), "another notebook");
+        assert!(matches!(waiting_in(&listed(json!([nb(asking, true)])), &json!("nb")), Waiting::Nothing), "not an id");
+        assert!(matches!(waiting_in("ran", &json!(id)), Waiting::Unknown));
     }
 
     #[test]
