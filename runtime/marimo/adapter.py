@@ -420,11 +420,17 @@ class Notebook:
             c["output"] = d["output"]
             c["errored"] = d["output"].get("channel") == "marimo-error"
             # Marked here, as marimo reports the error, so no read sees it between the run and the install.
-            if c["errored"] and d["cell_id"] in self.watched and self.missing_modules([d["cell_id"]]):
+            if c["errored"] and d["cell_id"] in self.watched and (self.missing_modules([d["cell_id"]]) or self.raised_by_awaiting(d["cell_id"])):
                 c["awaiting_install"] = True
         console = d.get("console")
         if console:
             c["console"] += console if isinstance(console, list) else [console]
+
+    def raised_by_awaiting(self, cid):
+        """Whether the cell failed only because an ancestor did, and that ancestor waits for its package."""
+        out = self.cells[cid].get("output") or {}
+        raised = [e.get("raising_cell") for e in (out.get("data") if isinstance(out.get("data"), list) else [])]
+        return bool(raised) and all(r in self.cells and self.cells[r].get("awaiting_install") for r in raised)
 
     def missing_modules(self, cells):
         """The modules the cells failed to import, which nobody tried to install yet."""
@@ -456,7 +462,12 @@ class Notebook:
             "try:\n    async with ctx:\n" + \
             "".join(f"        ctx.packages.add(names.get({m!r}, {m!r}))\n" for m in sorted(modules)) + \
             "finally:\n    os.environ.pop('UV_EXCLUDE_NEWER', None)\n"
-        rerun = sorted({c for cs in modules.values() for c in cs}, key=self.order.index)
+        # The importers, and the run's cells that failed only because an importer did: marimo's lazy mode
+        # wouldn't run those again with the importer, and they'd keep showing its error.
+        rerun = {c for cs in modules.values() for c in cs}
+        rerun |= {c for c in cells if c in self.cells and self.cells[c].get("awaiting_install")}
+        order = graph(self)["order"]
+        rerun = sorted(rerun, key=lambda c: (order.index(c) if c in order else len(order), self.order.index(c)))
         for c in rerun:
             self.cells[c]["status"], self.cells[c]["queued_by_us"], self.cells[c]["awaiting_install"] = "queued", True, True
         self.installing = {"packages": sorted(modules), "started": time.time()}

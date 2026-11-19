@@ -333,7 +333,11 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
         // Run as an agent usually does, without waiting, then read: the read waits through the install and
         // the rerun, and never shows the ModuleNotFoundError the first run hit (smoke N7 with Haiku, 11-19).
-        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import boto3\nboto3.__version__", "run_after": true }));
+        // The cell that uses the import waits too, and runs again after it: it doesn't keep its
+        // "an ancestor raised" (smoke P1, 11-19).
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import boto3" }));
+        let user = agent.ok("add_cell", json!({ "notebook_id": id, "code": "boto3.__version__", "after_cell_id": cell }))["cell_id"].as_str().unwrap().to_owned();
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": false }));
         // The install is under way (slowed by ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS) and says what it installs.
         let began = Instant::now();
         let installing = loop {
@@ -345,14 +349,16 @@ fn a_python_notebook_through_the_runtime() {
             std::thread::sleep(Duration::from_millis(100));
         };
         assert!(installing["packages"]["packages"].as_array().is_some_and(|p| p.iter().any(|p| p == "boto3")), "the install says it installs boto3: {installing}");
-        let mut read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+        let mut read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": user }));
         for _ in 0..20 {
             assert!(read["errored"] == false, "a cell waiting for its package doesn't show the import error: {read}");
             if read["queued"] != true && read["running"] != true {
                 break;
             }
-            read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+            read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": user }));
         }
+        let importer = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+        assert!(importer["errored"] == false, "{importer}");
         let version = expected.trim_start_matches("boto3==");
         assert!(read["output"].as_str().unwrap_or_default().contains(version), "boto3 {version}, as of {DATE}: {read}");
         let header = std::fs::read_to_string(folder.join(&name)).unwrap();
@@ -362,8 +368,11 @@ fn a_python_notebook_through_the_runtime() {
         let opened = agent.ok("open_notebook", json!({ "path": name }));
         let id = opened["notebook_id"].clone();
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
-        agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": true }));
-        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+        // A reload gives marimo's cells new ids (#353); the cell that uses boto3 is still the third.
+        let user = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"][2].as_str().unwrap().to_owned();
+        agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": user }));
+        agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": user, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": user }));
         assert!(read["errored"] == false && read["output"].as_str().unwrap_or_default().contains(version), "{read}");
     });
 
