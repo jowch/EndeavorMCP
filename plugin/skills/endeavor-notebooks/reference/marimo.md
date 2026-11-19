@@ -15,7 +15,7 @@ Read this when the notebook is a marimo notebook (a `.py` file with `app = marim
 
 ## Runs
 
-- Python notebooks are always lazy: a run marks the cells that depend on it `stale` and doesn't run them. The result warns `lazy_mode` and lists the stale cells in `stale_cells`. Running a cell runs its stale or unrun ancestors first. Run the cells the user needs current.
+- A run takes the cells that depend on the cells you ran, as in Julia, and runs a cell's stale or unrun ancestors first. A run from marimo's own page is lazy: it marks the cells below `stale` and doesn't run them. Run a stale cell when the user needs it current.
 - After the notebook opens or restarts, every cell is `not_run` and has no output until it runs. Run the cells you need, or `run_all_cells`.
 - A cell that stops because a cell it depends on failed has an error whose `msg` starts "Ancestor raised", and `cells` names the cell that failed. Fix that cell first.
 
