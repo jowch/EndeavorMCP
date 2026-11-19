@@ -46,12 +46,17 @@ The agent is kept apart from whoever started the run:
   session or its memory.
 - It uses only the project's Claude settings (`--setting-sources
   project,local`), so the user's own plugins, MCP servers and hooks stay out.
+- It doesn't load the signed-in account's claude.ai connectors
+  (`ENABLE_CLAUDEAI_MCP_SERVERS=false`). The setting sources don't cover them.
 - It has only the notebook tools and `Read`, `Glob`, `Grep`, `Skill` and
   `ToolSearch` (`--tools`). `Write`, `Edit` and `Bash` don't exist for it.
 
-The runner checks Claude's first event for each of these. If the agent had
-another tool, server or plugin, or a shared memory folder, the attempt fails
-as a problem with the harness, not the agent. A Claude Code cloud session can
+The runner checks Claude's first event in each turn for each of these, and
+every tool the agent called. If the agent had or called another tool, or had
+another server or plugin, or a shared memory folder, the attempt fails as a
+problem with the harness, not the agent. A server that connects late (the
+claude.ai connectors do) is missing from the first turn's event, so a task with
+one message only shows it in what the agent called. A Claude Code cloud session can
 run the suite: it has Julia, and Claude uses the sign-in in `~/.claude`.
 
 ## How a task runs

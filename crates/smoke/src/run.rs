@@ -538,6 +538,9 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
         .current_dir(project)
         .env_clear()
         .envs(agent_env())
+        // The signed-in account's claude.ai connectors: `--setting-sources` doesn't keep them out, and they
+        // load after the first turn has started, so only a later turn's first event lists them.
+        .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
         .env("ENDEAVOR_BIN", exe)
         .env("SMOKE_ENDEAVOR", endeavor)
         .env("SMOKE_WORK", work)
@@ -659,6 +662,11 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
             }
             _ => {}
         }
+    }
+    // A server that connects after a turn's first event isn't in it: what the agent called catches that.
+    let foreign: Vec<&String> = run.tools.iter().filter(|t| !BUILT_IN_TOOLS.contains(&t.as_str()) && !t.starts_with(&format!("{OUR_SERVER}__"))).collect();
+    if run.problem.is_none() && !foreign.is_empty() {
+        run.problem = Some(format!("the agent called other tools: {foreign:?}"));
     }
     run
 }
