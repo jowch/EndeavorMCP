@@ -2138,8 +2138,12 @@ fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fail
     std::fs::remove_file(dir.join("hold")).unwrap();
     let retried: serde_json::Value = serde_json::from_str(&app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/start_julia"}"#)).unwrap();
     assert_eq!(retried["result"]["state"], "starting", "{retried}");
-    wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
+    wait_for("Julia to be ready", || julia_status(&core)["state"] == "ready");
     assert_eq!(julia_pids(&dir).len(), 2, "a second Julia");
+    // It says which Julia it started, so the app needn't work that out itself.
+    let ready = julia_status(&core);
+    assert_eq!((ready["julia"]["path"].as_str(), ready["julia"]["endeavors"].as_bool()), (Some(julia.to_str().unwrap()), Some(false)), "{ready}");
+    assert!(ready["julia"]["version"].as_str().is_some_and(|v| !v.is_empty()), "{ready}");
 }
 
 #[test]
@@ -2239,7 +2243,7 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
 
         // Once Julia is ready the call goes through, and it was the last one the yes covered.
         std::fs::remove_file(dir.join("hold")).unwrap();
-        wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
+        wait_for("Julia to be ready", || julia_status(&core)["state"] == "ready");
         let created = create("7");
         assert_ne!(created["error"], "julia_starting", "{created}");
         assert_eq!(asked().len(), 8, "the call Julia held needed no new card");
@@ -2256,7 +2260,7 @@ fn the_app_can_start_julia_before_anything_needs_it() {
     let julia = serving_julia(&dir, &bridge);
     let core = Core::start_when_needed(&dir, &julia);
     app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/start_julia"}"#);
-    wait_for("Julia to be ready", || julia_status(&core) == serde_json::json!({ "state": "ready" }));
+    wait_for("Julia to be ready", || julia_status(&core)["state"] == "ready");
     app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/start_julia"}"#);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(julia_pids(&dir).len(), 1, "a running Julia isn't started again");

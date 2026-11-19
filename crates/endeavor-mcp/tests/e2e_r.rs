@@ -313,7 +313,10 @@ fn an_r_notebook_through_the_runtime() {
         };
         // R runs. A newer Ember published since the last run may still be installing for the next
         // start, which r_status says with `updating` (#206).
-        let status = app_call(port, &token, "endeavor/r_status")["result"].clone();
+        let mut status = app_call(port, &token, "endeavor/r_status")["result"].clone();
+        // It says which R runs, so the app needn't work that out.
+        let r = status.as_object_mut().unwrap().remove("r").unwrap_or_default();
+        assert!(r["rscript"].as_str().is_some_and(|p| !p.is_empty()) && r["endeavors"] == false, "{r}");
         assert!(status == json!({ "state": "ready" }) || status == json!({ "state": "ready", "updating": true }), "{status}");
         // A warning here is `ember_previous`: Ember's newest build didn't work, which the daily run is for.
         assert_eq!(opened.get("warnings"), None, "{opened}");

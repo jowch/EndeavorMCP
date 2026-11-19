@@ -61,6 +61,19 @@ impl Source {
         }
     }
 
+    /// The Rscript this runs, as a path where it's known (the chosen one, Endeavor's own, the one the
+    /// login shell found), else as `describe` says it: for the app to show (`endeavor/r_status`).
+    pub fn rscript(&self) -> String {
+        match self {
+            Source::Path(path) => path.clone(),
+            Source::Auto => match own_in_use() {
+                Some(own) => own.display().to_string(),
+                None => users_rscript().unwrap_or_else(|| self.describe()),
+            },
+            Source::Shell(_) => self.describe(),
+        }
+    }
+
     /// `Rscript ARGS`. Through the user's shell, the arguments are passed in the
     /// environment, which every shell reads the same way (sh, bash, zsh, fish,
     /// csh and tcsh), and not as the script's own arguments, which they don't. A
@@ -210,7 +223,6 @@ pub fn own_offered() -> Option<wire::Item> {
     own_item_for(macos_version(), &crate::julia::uname("-m"), &crate::paths::Env::here())
 }
 
-/// Endeavor's own Rscript, if it's installed.
 /// Endeavor's own R when `--r auto` runs it: installed here, and the login shell finds no Rscript
 /// of the user's. Someone who installs R after Endeavor's gets theirs (from the runtime's next
 /// start: it's looked for once).
@@ -232,6 +244,7 @@ fn users_rscript() -> Option<String> {
     output.status.success().then(|| stdout.lines().rev().map(str::trim).find(|l| l.starts_with('/')).map(str::to_owned)).flatten()
 }
 
+/// Endeavor's own Rscript, if it's installed.
 fn own_rscript() -> Option<PathBuf> {
     let env = crate::paths::Env::here();
     if env.home.as_os_str().is_empty() {

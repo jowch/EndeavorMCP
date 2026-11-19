@@ -423,6 +423,8 @@ struct JuliaNow {
     said: bool,
     /// How Julia ended, if the one started last did.
     exited: Option<ExitStatus>,
+    /// The Julia the last start found: its path, version, and whether it's Endeavor's own.
+    started: Option<(String, String, bool)>,
 }
 
 /// Finds and starts Julia (`julia boot.jl`, with Pluto) when it's first needed, once at a time.
@@ -469,7 +471,7 @@ impl JuliaStarter {
             #[cfg(unix)]
             mask: None,
             spawn: Spawner::new(),
-            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), began: std::time::Instant::now(), said: false, exited: None }),
+            now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), began: std::time::Instant::now(), said: false, exited: None, started: None }),
             changed: std::sync::Condvar::new(),
             pid: 0.into(),
             stopping: false.into(),
@@ -584,10 +586,12 @@ impl JuliaStarter {
     /// Where Julia is, for the app (`endeavor/julia_status`), without starting it: `not_started`,
     /// `starting` with the step in words and how many seconds since the last sign of progress, `ready`,
     /// or `failed` with the error's code and why. Reading a failure here doesn't count as saying it: the
-    /// agent's next call that needs Julia still hears why. The app's Retry is `start_now`.
+    /// agent's next call that needs Julia still hears why. The app's Retry is `start_now`. Once a
+    /// start has found Julia, `julia` says which (`path`, `version`, `endeavors`): the app shows it
+    /// rather than working out for itself which Julia `--julia` picks.
     fn status(&self) -> Value {
         let now = self.now.lock().unwrap();
-        match &now.phase {
+        let mut status = match &now.phase {
             Phase::Idle => json!({ "state": "not_started" }),
             Phase::Starting(step) => json!({ "state": "starting", "step": step, "quiet_seconds": now.moved.elapsed().as_secs() }),
             Phase::Ready => json!({ "state": "ready" }),
@@ -595,7 +599,11 @@ impl JuliaStarter {
                 let (code, message) = why.split_once("::").unwrap_or(("julia_failed", why.as_str()));
                 json!({ "state": "failed", "code": code, "message": message })
             }
+        };
+        if let (Some((path, version, endeavors)), false) = (&now.started, matches!(now.phase, Phase::Idle)) {
+            status["julia"] = json!({ "path": path, "version": version, "endeavors": endeavors });
         }
+        status
     }
 
     /// Start Julia now, for the app (`endeavor/start_julia`): its Retry after a failure, which then counts
@@ -613,11 +621,12 @@ impl JuliaStarter {
     /// Find Julia, start it, and wait until its bridge answers; then have Pluto suggest the notebooks' folder.
     fn start(&self, served: &Arc<Served>, warm: bool) -> Result<JuliaReady, String> {
         let install = !warm && self.install.load(std::sync::atomic::Ordering::SeqCst);
-        let found = crate::julia::find(&self.source, install, &mut |line| {
+        self.now.lock().unwrap().started = None;
+        let found = crate::julia::find_whose(&self.source, install, &mut |line| {
             eprintln!("{line}");
             self.step(line);
         });
-        let (julia, version) = found.map_err(|failure| match failure {
+        let (julia, version, endeavors) = found.map_err(|failure| match failure {
             crate::julia::Failure::Missing(item) => format!(
                 "julia_not_found::Julia wasn't found here, and Endeavor may download its own copy only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` again with `install: true`."
             ),
@@ -626,6 +635,7 @@ impl JuliaStarter {
         if self.when_needed {
             eprintln!("[ Info: Starting Julia {version} ({julia})");
         }
+        self.now.lock().unwrap().started = Some((julia.clone(), version.clone(), endeavors));
         self.step(format!("Julia {version} is starting and loading Pluto"));
         let _ = std::fs::remove_file(&self.state);
         let mut command = julia_command(&julia, &self.runtime, &self.depot, &self.token, &self.launcher, &self.state)?;
@@ -1095,9 +1105,18 @@ impl RStarter {
     }
 
     /// Where R notebooks' setup is, for the app (`endeavor/r_status`), without starting anything (see
-    /// `r_status`). Whoever waits for it, the agent included.
+    /// `r_status`). Whoever waits for it, the agent included. While R runs, `r` says which R it is
+    /// (`rscript`, and `endeavors` for Endeavor's own), so the app shows it instead of working it out.
     fn status(&self) -> Value {
         let running = self.child.lock().unwrap().as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+        let mut status = self.status_of(running);
+        if running {
+            status["r"] = json!({ "rscript": self.r.rscript(), "endeavors": self.r.own().is_some() });
+        }
+        status
+    }
+
+    fn status_of(&self, running: bool) -> Value {
         let folder = self.ember_folder();
         let own = self.own_install.lock().unwrap();
         let ember = self.install.lock().unwrap();
