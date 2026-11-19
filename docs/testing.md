@@ -7,7 +7,9 @@ runs those two on Linux for each PR or push that changes `crates/`, `runtime/`,
 `plugin/`, `Cargo.toml`, `Cargo.lock` or `rust-toolchain.toml`, and can be
 started by hand from the Actions tab. It is
 separate from CI, so CI's checks don't wait for it, and it fails when a test
-skips for want of Julia. The agent smoke suite, which runs fixed notebook
+skips for want of Julia. Every day it also runs them on the newest Julia
+release and the newest pre-release, since the app runs the user's own Julia
+when they have one. The agent smoke suite, which runs fixed notebook
 tasks through Claude Code, is in [smoke.md](smoke.md), with what to do
 with a user's report on the "The agent did something wrong" issue form.
 Endeavor's own checks,
