@@ -978,8 +978,20 @@ class Adapter:
             if result["accepted"] and wait:
                 result.update(completed=[], timed_out=[])
             return result
-        run = await self.start_run(nb, cells)
-        result["dependents"] = []
+        # marimo runs lazily here (no autorun, so opening a notebook runs nothing), which would leave the
+        # cells below a run stale, or showing the error it fixed. Pluto reruns them, and the tools say a run
+        # does: the run takes them too, in the graph's order, and the core is told which.
+        g = graph(nb, edges=True)
+        down = {d["cell_id"]: d["downstream"] for d in g["cells"]}
+        dependents, todo = [], list(cells)
+        while todo:
+            for d in down.get(todo.pop(), []):
+                if d not in cells and d not in dependents:
+                    dependents.append(d)
+                    todo.append(d)
+        ran = sorted(cells + dependents, key=lambda c: (g["order"].index(c) if c in g["order"] else len(g["order"]), nb.order.index(c)))
+        run = await self.start_run(nb, ran)
+        result["dependents"] = [c for c in ran if c in dependents]
         if not wait:
             result["run"] = run
             return result
@@ -990,7 +1002,7 @@ class Adapter:
                 await asyncio.wait_for(done.wait(), float(timeout or 60))
             except asyncio.TimeoutError:
                 pass
-        left = self.unfinished(nb, cells) if done is not None and not done.is_set() else []
+        left = self.unfinished(nb, ran) if done is not None and not done.is_set() else []
         result["process_status"] = nb.process_status()
         result["completed"] = [c for c in cells if c not in left]
         result["timed_out"] = self.unfinished(nb, list(nb.order)) if left else []

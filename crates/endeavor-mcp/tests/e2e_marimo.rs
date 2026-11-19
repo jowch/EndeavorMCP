@@ -283,6 +283,13 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": c, "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }));
         assert!(read["output"].as_str().unwrap_or_default().contains("84"), "{read}");
+        // A run takes the cells below it, as in Pluto: marimo's lazy mode alone would leave them stale
+        // (smoke P2 with Haiku, 11-19).
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0] }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "code": "x = 50" }));
+        let ran = agent.ok("submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }));
+        assert!(read["stale"] == false && read["output"].as_str().unwrap_or_default().contains("102"), "the cell two below ran again: {read}\n{ran}");
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": c, "code": "1 / 0" }));
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": c, "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }));
