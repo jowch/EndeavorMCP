@@ -260,11 +260,13 @@ mod tests {
     fn the_users_depot_goes_behind_ours() {
         let home = Path::new("/home/ada");
         let user = |depot, theirs| with_user_depot_from(depot, theirs, home, ':');
-        assert_eq!(user("/d:", None), "/d:/home/ada/.julia:", "~/.julia, then Julia's bundled depots");
-        assert_eq!(user("/d:", Some("")), "/d:/home/ada/.julia:");
+        let julia = home.join(".julia").display().to_string();
+        assert_eq!(user("/d:", None), format!("/d:{julia}:"), "~/.julia, then Julia's bundled depots");
+        assert_eq!(user("/d:", Some("")), format!("/d:{julia}:"));
         assert_eq!(user("/d:", Some("/work/jl:/other")), "/d:/work/jl:", "the first of the user's own");
         assert_eq!(user("/d:", Some("/d:/work/jl")), "/d:/work/jl:", "not ours again (a shell this runtime started)");
-        assert_eq!(user("/d:/home/ada/.julia:", None), "/d:/home/ada/.julia:", "already there");
+        let listed = format!("/d:{julia}:");
+        assert_eq!(with_user_depot_from(&listed, None, home, ':'), listed, "already there");
         assert_eq!(user("/d:/e", None), "/d:/e", "a full list is kept");
         assert_eq!(user(":", None), ":");
         assert_eq!(with_user_depot_from("/d:", None, Path::new(""), ':'), "/d:", "no home");
