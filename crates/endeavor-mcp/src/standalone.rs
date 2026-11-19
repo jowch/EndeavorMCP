@@ -36,6 +36,7 @@ use machines::Need;
 use target::{Local, Target};
 
 mod browser;
+mod consent;
 mod machines;
 mod projects;
 mod status;
@@ -821,6 +822,8 @@ struct Relay {
     meta_logged: Mutex<(Vec<String>, u32)>,
     /// The salt of those fingerprints, made per process, so a log doesn't let anyone check a guessed value.
     meta_salt: std::collections::hash_map::RandomState,
+    /// The user's own OK for a large R download, asked by the front (`consent`).
+    consent: consent::Consent,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -1030,6 +1033,7 @@ impl Relay {
             views: Default::default(),
             meta_logged: Mutex::default(),
             meta_salt: Default::default(),
+            consent: Default::default(),
             out: Mutex::new(out),
         }
     }
@@ -1114,12 +1118,17 @@ impl Relay {
 
     fn handle(self: &Arc<Self>, line: &str) {
         // The call's whole time, from the moment it arrived: every wait for a runtime comes out of it.
-        let deadline = machines::Deadline::after(start_wait());
+        let mut deadline = machines::Deadline::after(start_wait());
         let Ok(message) = serde_json::from_str::<Value>(line) else {
             return self.write(&to_json(&json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } })));
         };
+        // The client's answer to the front's own question, which no runtime asked.
+        if self.consent.take_answer(&message) {
+            return;
+        }
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
         if message["method"] == "initialize" {
+            self.consent.learn_client(&message);
             let draws = crate::views::client_draws_views(&message);
             self.views.store(draws, std::sync::atomic::Ordering::SeqCst);
             // Which client this is and whether it says it draws views: a host's log shows only method names.
@@ -1211,6 +1220,14 @@ impl Relay {
             }
         };
         // These two use a runtime that is running, and start none.
+        // Nothing downloads unless the user says yes to it themselves, where the client can ask them.
+        if tool.as_deref() == Some("approve_install") && id.is_some() {
+            if let consent::Asked::No(result) = self.consent.ask(&message, &|line| self.write(line)) {
+                return self.answer_call(&message, tool.as_deref(), result);
+            }
+            // The user's time to answer isn't the runtime's to start in.
+            deadline = machines::Deadline::after(start_wait());
+        }
         let need = match tool.as_deref() {
             Some("session_status") => Need::Peek,
             Some("list_notebooks") => Need::Look,
@@ -1221,7 +1238,10 @@ impl Relay {
                 Ok(route) => route,
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
-            let sink = |reply: String| self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, in_browser, reply)));
+            let sink = |reply: String| {
+                self.consent.learn_reply(&message, &reply);
+                self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, in_browser, reply)))
+            };
             match self.post(&route, line, &sink) {
                 Ok(()) => return,
                 Err(Sent::NotConnected(e)) if attempt == 0 => {

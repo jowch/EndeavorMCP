@@ -337,6 +337,9 @@ impl Out {
     fn lines(&self) -> Vec<String> {
         String::from_utf8(self.0.lock().unwrap().clone()).unwrap().lines().map(str::to_owned).collect()
     }
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
 }
 
 /// A stand-in for the runtime's `/mcp`: answers `tools/call` `session_status` as JSON,
@@ -640,4 +643,38 @@ fn the_background_precompile_runs_once_per_runtime_folder_and_only_where_julia_r
     std::fs::write(runtime.join(".precompile-failed"), "").unwrap();
     try_it();
     assert_eq!(runs.borrow().len(), 2, "a failure in the last day isn't retried");
+}
+
+#[test]
+fn approve_install_asks_the_user_first_where_the_client_can() {
+    // Haiku 4.5 approved large R downloads before the user said yes (#285): a client that can show a
+    // form gets Endeavor's own question first, and a no never reaches the runtime.
+    let (port, seen) = fake_core();
+    let (relay, out) = ready_relay(port, &seen, true);
+    relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"claude-code"}}}"#);
+    let call = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"approve_install","arguments":{"notebook_id":"nb"}}}"#;
+    let ask = |answer: &'static str| {
+        let calling = { let relay = relay.clone(); std::thread::spawn(move || relay.handle(call)) };
+        let question = loop {
+            if let Some(line) = out.lines().into_iter().find(|l| l.contains("elicitation/create")) {
+                break serde_json::from_str::<Value>(&line).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        out.clear();
+        relay.handle(&json!({ "jsonrpc": "2.0", "id": question["id"], "result": { "action": answer } }).to_string());
+        calling.join().unwrap();
+        let reply: Value = out.lines().iter().map(|l| serde_json::from_str::<Value>(l).unwrap()).find(|r| r["id"] == 5).expect("the call's reply");
+        out.clear();
+        reply
+    };
+    let declined = ask("decline");
+    assert_eq!(declined["result"]["isError"], true, "{declined}");
+    assert!(declined["result"]["content"][0]["text"].as_str().unwrap().contains("said no"), "{declined}");
+    assert!(!seen.lock().unwrap().iter().any(|(_, body)| body.contains("approve_install")), "a no doesn't reach the runtime");
+    // A yes passes the call on, as it came; the answer itself goes nowhere.
+    ask("accept");
+    let bodies: Vec<String> = seen.lock().unwrap().iter().map(|(_, body)| body.clone()).collect();
+    assert_eq!(bodies.iter().filter(|b| b.contains("approve_install")).count(), 1, "{bodies:?}");
+    assert!(!bodies.iter().any(|b| b.contains("\"action\"")), "{bodies:?}");
 }
