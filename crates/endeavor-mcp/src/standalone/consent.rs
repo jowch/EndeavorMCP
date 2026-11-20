@@ -92,15 +92,15 @@ const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog tha
 const MACHINE_SWAPS: &[(&str, &str)] = &[
     (
         "ask the user, and call again with `install` true only if they agree",
-        "Endeavor then asks the user itself, at once, in a dialog that names it, and installs it only on their yes; first write one line telling the user that Endeavor is asking for their OK in a dialog, and for what, then make the call in the same reply; don't ask in the chat",
+        "Endeavor then asks the user itself, at once, in a dialog that names it, during that same call, and installs it only on their yes. So before the call, write one line telling the user that Endeavor may ask for their OK in a dialog before it installs anything there; don't ask in the chat",
     ),
     (
         "`needs_install`: ask the user, and call again with `install` true only if they agree to what the result names",
-        "`needs_install` doesn't come back: Endeavor asks the user itself, at once, in a dialog that names what it installs, and installs it only on their yes; first write one line telling the user that Endeavor is asking for their OK in a dialog, and for what, then make the call in the same reply; don't ask in the chat",
+        "`needs_install` doesn't come back: Endeavor asks the user itself, at once, in a dialog that names what it installs, during that same call, and installs it only on their yes. So before the call, write one line telling the user that Endeavor may ask for their OK in a dialog before it installs anything there; don't ask in the chat",
     ),
     (
         "the result is `needs_install`: ask the user, and set `install` only if they agree",
-        "Endeavor asks the user itself, at once, in a dialog, and installs it only on their yes; first write one line telling the user that Endeavor is asking for their OK in a dialog, and for what, then make the call in the same reply; don't ask in the chat",
+        "Endeavor asks the user itself, at once, in a dialog, during that same call, and installs it only on their yes. So before the call, write one line telling the user that Endeavor may ask for their OK in a dialog before it installs anything there; don't ask in the chat",
     ),
     ("Only after the user agreed to what `needs_install` named; never on a first call.", "Not needed: where something has to be installed, Endeavor asks the user in a dialog and installs only on their yes."),
     ("Only after the user agreed; this call only; never on a first call.", "Where something has to be installed, Endeavor asks the user in a dialog and installs only on their yes; set it only for what a notebook tool's message asks for, such as Julia or R not found."),

@@ -968,7 +968,9 @@ impl Call<'_> {
         }
         if interactive {
             interactive_picture(&mut meta);
-        } else if mime.starts_with("image/") {
+        } else {
+            // Any picture the runtime didn't find scripts or controls in, whatever its MIME type:
+            // a plot can come back as HTML that wraps its PNG (#407's smoke run).
             // A picture with no controls (a PNG, an SVG, an animated GIF), such as Plots.jl's default (GR) backend draws: Haiku promised hover
             // and zoom on one (#407).
             meta["interactive"] = json!(false);
