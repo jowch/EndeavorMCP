@@ -37,13 +37,13 @@ const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that t
 const ASKED_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size, and nothing downloads unless they click Install there or use the button on the notebook's page. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or haven't answered yet, the call fails with `download_declined` or `download_not_answered`.";
 
 /// The same where no one can be asked: no dialog, and no browser to open.
-const CANT_ASK: &str = "Endeavor can't ask the user from this app (no dialog, and no browser it can open), so calling it downloads nothing: tell the user what would download and its size, and that they can approve it with the button on the notebook's page.";
+const CANT_ASK: &str = "Endeavor can't ask the user from this app (no dialog, and no browser it can open), so calling it downloads nothing: tell the user what would download and its size, and that they can approve it with the button on the notebook's page. Its link is the notebook's browser_url from open_notebook or list_notebooks; where that page is on another computer, the note that came with it says how to reach it.";
 
 /// The runtime's asking step where Endeavor asks the user on a page in their browser.
 const ASK_STEP_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first. The notebook's page also has a button for it.";
 
 /// The same where no one can be asked.
-const ASK_STEP_CANT: &str = "Endeavor can't ask the user from this app, so approve_install downloads nothing here: tell the user what would download and its size, and that they can approve it with the button on the notebook's page, then end your reply.";
+const ASK_STEP_CANT: &str = "Endeavor can't ask the user from this app, so approve_install downloads nothing here: tell the user what would download and its size, and that they can approve it with the button on the notebook's page, then end your reply. Its link is the notebook's browser_url from open_notebook or list_notebooks; where that page is on another computer, the note that came with it says how to reach it.";
 
 /// The runtime's asking step (`notebooks::ASK_STEP`) where the front asks the user itself.
 const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first. The notebook's page also has a button for it.";
@@ -116,12 +116,12 @@ pub(super) struct Consent {
 
 /// What a notebook's install waits for, as the runtime's `list_notebooks` says it.
 pub(super) enum Waiting {
-    /// The user's OK for this download (`packages.download`).
-    Asking(Value),
+    /// The user's OK for this download (`packages.download`), for the notebook whose file is `name`.
+    Asking { download: Value, name: String },
     /// Nothing: the runtime refuses the call, and no one need be asked.
     Nothing,
-    /// The front couldn't tell.
-    Unknown,
+    /// The front couldn't tell: what downloads, or for which notebook (the agent's id is all it has).
+    Unknown(String),
 }
 
 /// What the user said.
@@ -195,15 +195,15 @@ impl Consent {
         reply.replace(crate::notebooks::ASK_STEP, step)
     }
 
-    /// What the user is asked before `approve_install` makes the download `waiting`; none when
-    /// nothing waits for their OK.
+    /// What the user is asked before `approve_install` makes the download `waiting`, naming the
+    /// notebook, so a yes on one notebook's page is never another's (#389); none when nothing waits
+    /// for their OK.
     pub(super) fn download_question(waiting: &Waiting) -> Option<String> {
-        let what = match waiting {
+        Some(match waiting {
             Waiting::Nothing => return None,
-            Waiting::Asking(download) => what(download),
-            Waiting::Unknown => "some large Bioconductor data packages".to_owned(),
-        };
-        Some(format!("R needs to download {what} before this notebook's cells can run. Download it now?"))
+            Waiting::Asking { download, name } => format!("R needs to download {} before the cells of the notebook {name} can run. Download it now?", what(download)),
+            Waiting::Unknown(id) => format!("R needs to download some large Bioconductor data packages before the cells of the notebook with id {id} can run. Endeavor couldn't tell which packages or their size. Download them now?"),
+        })
     }
 
     /// Before `approve_install` reaches the runtime where the client can't show a dialog (#388): the
@@ -214,7 +214,9 @@ impl Consent {
         let Some(question) = Consent::download_question(&waiting) else {
             return if self.not_asking(call) { Asked::Dropped } else { Asked::Unasked };
         };
-        let clicked = if page { pages.ask(&question, wait, &|| self.cancelled(call), open) } else { Clicked::NoBrowser };
+        // A yes to a question that can't say what downloads is for this call only.
+        let hold = matches!(waiting, Waiting::Asking { .. });
+        let clicked = if page { pages.ask(&question, hold, wait, &|| self.cancelled(call), open) } else { Clicked::NoBrowser };
         if self.not_asking(call) || clicked == Clicked::Dropped {
             return Asked::Dropped;
         }
@@ -223,7 +225,7 @@ impl Consent {
             Clicked::Dropped => return Asked::Dropped,
             Clicked::Declined => "download_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing downloads and the cells that need it stay queued. Endeavor won't ask them about it again for 10 minutes: until then, approve_install gets this same answer. Tell the user, and don't call it again unless they ask. If they change their mind, the page they answered has an Install button, and the notebook's page has its own: once they say they clicked one, call approve_install again.",
             Clicked::NotYet => "download_not_answered::Endeavor opened a page in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user to answer that page, and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes. The notebook's page also has its own button.",
-            Clicked::NoBrowser => "download_cant_ask::Endeavor can't ask the user from this app: it can neither show its dialog nor open a page in their browser. So nothing downloads, and calling approve_install again won't download it. Tell the user what would download and its size, and that they can approve it with the button on the notebook's page. Don't work around it.",
+            Clicked::NoBrowser => "download_cant_ask::Endeavor can't ask the user from this app: it can neither show its dialog nor open a page in their browser. So nothing downloads, and calling approve_install again won't download it. Tell the user what would download and its size, and that they can approve it with the button on the notebook's page: its link is the notebook's browser_url from open_notebook or list_notebooks, and where that page is on another computer, the note that came with it says how to reach it. Don't work around it.",
         };
         Asked::No(tool_error(why, false))
     }
@@ -377,19 +379,29 @@ enum Answer {
     Failed(String),
 }
 
+/// When the front can't tell what `notebook`'s install waits for: an id that isn't one waits for
+/// nothing the call could give (the runtime refuses it), and any other is named as the runtime reads it.
+pub(super) fn unknown(notebook: &Value) -> Waiting {
+    crate::notebooks::uuid_value(notebook).map_or(Waiting::Nothing, Waiting::Unknown)
+}
+
 /// What `list_notebooks`' reply says `notebook`'s install waits for. A notebook it doesn't list, or
 /// one in safe preview, waits for nothing the call could give: the runtime refuses it.
 pub(super) fn waiting_in(listed: &str, notebook: &Value) -> Waiting {
-    let Ok(parsed) = serde_json::from_str::<Value>(listed) else { return Waiting::Unknown };
+    let Ok(parsed) = serde_json::from_str::<Value>(listed) else { return unknown(notebook) };
     if parsed["result"]["isError"] == true {
-        return Waiting::Unknown;
+        return unknown(notebook);
     }
-    let Some(fields) = parsed["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str::<Value>(text).ok()) else { return Waiting::Unknown };
-    let Some(notebooks) = fields.as_array().or_else(|| fields["notebooks"].as_array()) else { return Waiting::Unknown };
+    let Some(fields) = parsed["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str::<Value>(text).ok()) else { return unknown(notebook) };
+    let Some(notebooks) = fields.as_array().or_else(|| fields["notebooks"].as_array()) else { return unknown(notebook) };
     // The id as the runtime reads it.
     let Some(notebook) = crate::notebooks::uuid_value(notebook) else { return Waiting::Nothing };
     let Some(nb) = notebooks.iter().find(|nb| crate::notebooks::uuid_value(&nb["notebook_id"]).as_ref() == Some(&notebook)) else { return Waiting::Nothing };
-    if nb["packages"]["step"] == "asking" && nb["execution_allowed"] != false { Waiting::Asking(nb["packages"]["download"].clone()) } else { Waiting::Nothing }
+    if nb["packages"]["step"] != "asking" || nb["execution_allowed"] == false {
+        return Waiting::Nothing;
+    }
+    let name = nb["path"].as_str().and_then(|path| std::path::Path::new(path).file_name()).map(|name| name.to_string_lossy().into_owned());
+    Waiting::Asking { download: nb["packages"]["download"].clone(), name: name.unwrap_or(notebook) }
 }
 
 /// What a download lists, as the runtime's asking message says it: "ALL 1.44.0 (11 MB)", and the
@@ -432,7 +444,7 @@ mod tests {
     }
 
     fn all() -> Waiting {
-        Waiting::Asking(json!({ "bytes": 11385380, "packages": [{ "package": "ALL", "version": "1.44.0", "bytes": 11385380 }] }))
+        Waiting::Asking { download: json!({ "bytes": 11385380, "packages": [{ "package": "ALL", "version": "1.44.0", "bytes": 11385380 }] }), name: "leukemia.R".to_owned() }
     }
 
     /// Ask, with the client answering `answer` (or an error) to whatever it is sent; what it was sent.
@@ -513,7 +525,7 @@ mod tests {
         assert!(matches!(result, Asked::Yes));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["method"], "elicitation/create");
-        assert_eq!(sent[0]["params"]["message"], "R needs to download ALL 1.44.0 (11 MB) before this notebook's cells can run. Download it now?");
+        assert_eq!(sent[0]["params"]["message"], "R needs to download ALL 1.44.0 (11 MB) before the cells of the notebook leukemia.R can run. Download it now?");
         // A no, a closed dialog or an error downloads nothing, and the agent hears which.
         for (answer, kind) in [(Some(json!({ "action": "decline" })), "said no"), (Some(json!({ "action": "cancel" })), "without answering. That dialog was in the app they talk to you in, and it is gone now"), (None, "Method not found")] {
             let (result, _) = asked(consent.clone(), all(), answer);
@@ -522,8 +534,8 @@ mod tests {
             assert!(result["content"][0]["text"].as_str().unwrap().contains(kind), "{result}");
         }
         // Not knowing what it would download, it still asks; with nothing waiting, it doesn't.
-        let (_, sent) = asked(consent.clone(), Waiting::Unknown, Some(json!({ "action": "decline" })));
-        assert!(sent[0]["params"]["message"].as_str().unwrap().contains("some large Bioconductor data packages"));
+        let (_, sent) = asked(consent.clone(), Waiting::Unknown("nb-7".into()), Some(json!({ "action": "decline" })));
+        assert!(sent[0]["params"]["message"].as_str().unwrap().contains("some large Bioconductor data packages before the cells of the notebook with id nb-7"));
         let (result, sent) = asked(consent, Waiting::Nothing, None);
         assert!(matches!(result, Asked::Unasked) && sent.is_empty());
     }
@@ -649,6 +661,21 @@ mod tests {
         socket.read_to_string(&mut String::new()).unwrap();
         assert!(matches!(ask(all(), true), Asked::Yes));
         assert_eq!(opened.lock().unwrap().len(), 1);
+        // The yes held is for that notebook only: the same download for another notebook gets its own page (#389).
+        let Waiting::Asking { download, .. } = all() else { unreachable!() };
+        let other = Waiting::Asking { download, name: "other.R".to_owned() };
+        assert!(error(ask(other, true)).contains("download_not_answered"));
+        assert_eq!(opened.lock().unwrap().len(), 2);
+        // A yes to a question that can't say what downloads holds for no later call.
+        let vague = || Waiting::Unknown("1b2c3d4e-0000-4000-8000-00000000000a".to_owned());
+        assert!(error(ask(vague(), true)).contains("download_not_answered"));
+        let url = opened.lock().unwrap()[2].clone();
+        let (port, path) = url.strip_prefix("http://127.0.0.1:").unwrap().split_once('/').unwrap();
+        let mut socket = std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+        write!(socket, "POST /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        socket.read_to_string(&mut String::new()).unwrap();
+        assert!(matches!(ask(vague(), true), Asked::Yes), "the click answers the next call");
+        assert!(error(ask(vague(), true)).contains("download_not_answered"), "and only that one");
     }
 
     #[test]
@@ -656,14 +683,14 @@ mod tests {
         let listed = |notebooks: Value| to_json(&json!({ "jsonrpc": "2.0", "id": "x", "result": { "content": [{ "type": "text", "text": to_json(&notebooks) }] } }));
         let asking = json!({ "step": "asking", "download": { "bytes": 5 } });
         let id = "1b2c3d4e-0000-4000-8000-00000000000a";
-        let nb = |packages: Value, allowed: bool| json!({ "notebook_id": id, "execution_allowed": allowed, "packages": packages });
+        let nb = |packages: Value, allowed: bool| json!({ "notebook_id": id, "path": "/data/leukemia.R", "execution_allowed": allowed, "packages": packages });
         // The id as the runtime reads it: in capitals too.
-        assert!(matches!(waiting_in(&listed(json!([nb(asking.clone(), true)])), &json!(id.to_uppercase())), Waiting::Asking(download) if download["bytes"] == 5));
+        assert!(matches!(waiting_in(&listed(json!([nb(asking.clone(), true)])), &json!(id.to_uppercase())), Waiting::Asking { download, name } if download["bytes"] == 5 && name == "leukemia.R"));
         assert!(matches!(waiting_in(&listed(json!([nb(asking.clone(), false)])), &json!(id)), Waiting::Nothing), "safe preview");
         assert!(matches!(waiting_in(&listed(json!([nb(json!({ "step": "installing" }), true)])), &json!(id)), Waiting::Nothing));
         assert!(matches!(waiting_in(&listed(json!([nb(asking.clone(), true)])), &json!("1b2c3d4e-0000-4000-8000-00000000000b")), Waiting::Nothing), "another notebook");
         assert!(matches!(waiting_in(&listed(json!([nb(asking, true)])), &json!("nb")), Waiting::Nothing), "not an id");
-        assert!(matches!(waiting_in("ran", &json!(id)), Waiting::Unknown));
+        assert!(matches!(waiting_in("ran", &json!(id)), Waiting::Unknown(_)));
     }
 
     #[test]

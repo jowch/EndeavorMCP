@@ -427,7 +427,7 @@ const INSTALL_SHARE: Duration = Duration::from_secs(20);
 
 /// The least an install after a click is given, however late the click came: one that runs out says
 /// to call again, and the user's yes holds for that call (`install_page::SETTLED`).
-const MIN_INSTALL: Duration = Duration::from_secs(5);
+pub(super) const MIN_INSTALL: Duration = Duration::from_secs(5);
 
 /// How long a call waits for the user's click on the install page: under the 60 s that some clients
 /// give a tool call. A debug build takes `ENDEAVOR_TEST_PAGE_WAIT_MS`.
@@ -1188,7 +1188,7 @@ impl Relay {
     /// time within `PAGE_CALL` from `began`; one that has stopped waiting finds the click on its next try.
     fn ask_on_page(&self, message: &Value, question: &str, again: &str, began: Instant) -> Result<bool, String> {
         let wait = page_wait().min(PAGE_CALL.saturating_sub(began.elapsed() + INSTALL_SHARE));
-        let clicked = self.pages.ask(question, wait, &|| self.consent.cancelled(message), &open_page);
+        let clicked = self.pages.ask(question, true, wait, &|| self.consent.cancelled(message), &open_page);
         if self.consent.not_asking(message) || clicked == Clicked::Dropped {
             return Ok(false);
         }

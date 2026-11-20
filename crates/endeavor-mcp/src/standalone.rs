@@ -1252,7 +1252,8 @@ impl Relay {
             let began = Instant::now();
             self.consent.looking(&message);
             let waiting = self.waiting_download(&message["params"]["arguments"]["notebook_id"], deadline);
-            let asked = if self.consent.can_ask() {
+            let dialog = self.consent.can_ask();
+            let asked = if dialog {
                 self.consent.ask(&message, waiting, &|line| self.write(line))
             } else {
                 // The click and the call after it within what a client gives a call (`machines::PAGE_CALL`).
@@ -1262,7 +1263,9 @@ impl Relay {
             match asked {
                 consent::Asked::No(result) => return self.answer_call(&message, tool.as_deref(), result),
                 consent::Asked::Dropped => return,
-                consent::Asked::Yes => deadline = machines::Deadline::after(start_wait()),
+                // After a click, the call gets what's left of the client's budget for it.
+                consent::Asked::Yes if dialog => deadline = machines::Deadline::after(start_wait()),
+                consent::Asked::Yes => deadline = machines::Deadline::after(machines::PAGE_CALL.saturating_sub(began.elapsed()).max(machines::MIN_INSTALL)),
                 consent::Asked::Unasked => {}
             }
         }
@@ -1300,7 +1303,7 @@ impl Relay {
         let route = match self.route(Need::Look, deadline) {
             Ok(route) => route,
             Err(unready) if unready.nothing_runs() => return consent::Waiting::Nothing,
-            Err(_) => return consent::Waiting::Unknown,
+            Err(_) => return consent::unknown(notebook),
         };
         let id = "endeavor-look";
         let look = to_json(&json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
@@ -1311,9 +1314,9 @@ impl Relay {
             }
         };
         if self.post(&route, &look, &sink).is_err() {
-            return consent::Waiting::Unknown;
+            return consent::unknown(notebook);
         }
-        listed.into_inner().unwrap().map_or(consent::Waiting::Unknown, |listed| consent::waiting_in(&listed, notebook))
+        listed.into_inner().unwrap().map_or_else(|| consent::unknown(notebook), |listed| consent::waiting_in(&listed, notebook))
     }
 
     /// A runtime's reply to the agent's call, with no token in its `browser_url` (a runtime from

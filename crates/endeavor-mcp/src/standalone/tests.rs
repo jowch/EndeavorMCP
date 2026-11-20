@@ -666,7 +666,7 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
     // Haiku 4.5 approved large R downloads before the user said yes (#285): a client that can show a
     // form gets Endeavor's own question first, and a no never reaches the runtime.
     let nb = "1b2c3d4e-0000-4000-8000-000000000001";
-    let listed = json!([{ "notebook_id": nb, "execution_allowed": true, "packages": { "step": "asking", "download": { "bytes": 11385380, "packages": [{ "package": "ALL", "version": "1.44.0", "bytes": 11385380 }] } } }]);
+    let listed = json!([{ "notebook_id": nb, "path": "/data/leukemia.R", "execution_allowed": true, "packages": { "step": "asking", "download": { "bytes": 11385380, "packages": [{ "package": "ALL", "version": "1.44.0", "bytes": 11385380 }] } } }]);
     let (port, seen) = fake_core_listing(&listed.to_string());
     let (relay, out) = ready_relay(port, &seen, true);
     relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"claude-code"}}}"#);
@@ -687,7 +687,7 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
     let ask = |id: u64, answer: &'static str| {
         let calling = { let relay = relay.clone(); let line = call(id, nb); std::thread::spawn(move || relay.handle(&line)) };
         let question = question();
-        assert_eq!(question["params"]["message"], "R needs to download ALL 1.44.0 (11 MB) before this notebook's cells can run. Download it now?");
+        assert_eq!(question["params"]["message"], "R needs to download ALL 1.44.0 (11 MB) before the cells of the notebook leukemia.R can run. Download it now?");
         out.clear();
         relay.handle(&json!({ "jsonrpc": "2.0", "id": question["id"], "result": { "action": answer } }).to_string());
         calling.join().unwrap();
