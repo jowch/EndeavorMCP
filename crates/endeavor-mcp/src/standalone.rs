@@ -1245,12 +1245,21 @@ impl Relay {
                 self.write(&self.decorate(&message, tool.as_deref(), tool_failure(id, &message, &why)));
             }
         };
-        // Nothing downloads unless the user says yes to it themselves, where the client can ask them.
-        // Only a download that waits for an OK is asked about, with what the runtime says it is.
-        if tool.as_deref() == Some("approve_install") && id.is_some() && self.consent.can_ask() {
+        // Nothing downloads unless the user says yes to it themselves: in a dialog where the client
+        // can show one, else on a page in their browser (#388), else not at all. Only a download that
+        // waits for an OK is asked about, with what the runtime says it is.
+        if tool.as_deref() == Some("approve_install") && id.is_some() {
+            let began = Instant::now();
             self.consent.looking(&message);
             let waiting = self.waiting_download(&message["params"]["arguments"]["notebook_id"], deadline);
-            match self.consent.ask(&message, waiting, &|line| self.write(line)) {
+            let asked = if self.consent.can_ask() {
+                self.consent.ask(&message, waiting, &|line| self.write(line))
+            } else {
+                // The click and the call after it within what a client gives a call (`machines::PAGE_CALL`).
+                let wait = machines::page_wait().min(machines::PAGE_CALL.saturating_sub(began.elapsed() + Duration::from_secs(10)));
+                self.consent.ask_on_page(&message, waiting, self.page_shows(), wait, &self.pages, &machines::open_page)
+            };
+            match asked {
                 consent::Asked::No(result) => return self.answer_call(&message, tool.as_deref(), result),
                 consent::Asked::Dropped => return,
                 consent::Asked::Yes => deadline = machines::Deadline::after(start_wait()),
@@ -1269,7 +1278,7 @@ impl Relay {
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
             let sink = |reply: String| {
-                let reply = if tool.as_deref().is_some_and(crate::views::is_view_tool) { reply } else { self.consent.reply_said(reply) };
+                let reply = if tool.as_deref().is_some_and(crate::views::is_view_tool) { reply } else { self.consent.reply_said(reply, self.page_shows()) };
                 self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, in_browser, reply)))
             };
             match self.post(&route, line, &sink) {

@@ -49,6 +49,10 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   the browser's history) and could install things itself anyway. The front's
   log says whether each client shows dialogs (`[ Info: Client …: shows
   dialogs: yes|no`).
+  The same page asks before `approve_install` passes an R notebook's large
+  download on, where the client can't show a dialog (#388); with no browser
+  either, `approve_install` downloads nothing (`download_cant_ask`) and the
+  user approves it with the notebook page's own button.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
 - The notebook view (`views.rs`, interface 36; R notebooks interface 38): a client that draws MCP App

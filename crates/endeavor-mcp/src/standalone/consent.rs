@@ -3,8 +3,9 @@
 //! user's yes. The app holds that call for the user in every mode; the plugin has no app, and the
 //! agent was trusted to ask first. Haiku 4.5 often didn't ("Let me approve that for you"). So where
 //! the client can show a form (MCP elicitation), the front asks the user before it passes the call
-//! on, and nothing downloads unless they say yes there. A client that can't show one gets the call
-//! as before.
+//! on, and nothing downloads unless they say yes there. A client that can't show one has them
+//! asked on a page in their browser (`install_page`, #388), and with no browser, nothing downloads
+//! through the agent: the notebook page's own button is the user's way.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,6 +31,19 @@ const ASK_IN_CHAT: &str = "It doesn't ask the user: calling it is the user's yes
 
 /// The same where the front asks the user itself: asking in the chat too would have them say yes twice.
 const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size, and nothing downloads unless they say yes there or with the button on the notebook's page. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or close the dialog, the call fails with `download_declined` or `download_not_answered`.";
+
+/// `approve_install`'s words where the client can't show a dialog and Endeavor asks the user on a
+/// page in their browser instead (#388).
+const ASKED_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size, and nothing downloads unless they click Install there or use the button on the notebook's page. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or haven't answered yet, the call fails with `download_declined` or `download_not_answered`.";
+
+/// The same where no one can be asked: no dialog, and no browser to open.
+const CANT_ASK: &str = "Endeavor can't ask the user from this app (no dialog, and no browser it can open), so calling it downloads nothing: tell the user what would download and its size, and that they can approve it with the button on the notebook's page.";
+
+/// The runtime's asking step where Endeavor asks the user on a page in their browser.
+const ASK_STEP_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first. The notebook's page also has a button for it.";
+
+/// The same where no one can be asked.
+const ASK_STEP_CANT: &str = "Endeavor can't ask the user from this app, so approve_install downloads nothing here: tell the user what would download and its size, and that they can approve it with the button on the notebook's page, then end your reply.";
 
 /// The runtime's asking step (`notebooks::ASK_STEP`) where the front asks the user itself.
 const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first. The notebook's page also has a button for it.";
@@ -146,6 +160,8 @@ impl Consent {
         for tool in tools.iter_mut() {
             let swaps: &[(&str, &str)] = match tool["name"].as_str() {
                 Some("approve_install") if dialog => &[(ASK_IN_CHAT, ASKED_IN_DIALOG)],
+                Some("approve_install") if page => &[(ASK_IN_CHAT, ASKED_ON_PAGE)],
+                Some("approve_install") => &[(ASK_IN_CHAT, CANT_ASK)],
                 Some("add_machine" | "use_machine" | "stop_machine") if dialog => MACHINE_SWAPS,
                 Some("add_machine" | "use_machine" | "stop_machine") if page => MACHINE_PAGE_SWAPS,
                 Some("add_machine" | "use_machine" | "stop_machine") => MACHINE_CANT_SWAPS,
@@ -165,11 +181,51 @@ impl Consent {
     /// A runtime's reply to a call, with its asking message telling the agent that Endeavor asks the
     /// user, where it does. The step's words need no escaping, so they read the same in the reply's
     /// JSON. A runtime from another build whose words differ keeps its own: the user is asked twice.
-    pub(super) fn reply_said(&self, reply: String) -> String {
-        if !self.can_ask() || !reply.contains(crate::notebooks::ASK_STEP) {
+    pub(super) fn reply_said(&self, reply: String, page: bool) -> String {
+        if !reply.contains(crate::notebooks::ASK_STEP) {
             return reply;
         }
-        reply.replace(crate::notebooks::ASK_STEP, ASK_STEP_IN_DIALOG)
+        let step = if self.can_ask() {
+            ASK_STEP_IN_DIALOG
+        } else if page {
+            ASK_STEP_ON_PAGE
+        } else {
+            ASK_STEP_CANT
+        };
+        reply.replace(crate::notebooks::ASK_STEP, step)
+    }
+
+    /// What the user is asked before `approve_install` makes the download `waiting`; none when
+    /// nothing waits for their OK.
+    pub(super) fn download_question(waiting: &Waiting) -> Option<String> {
+        let what = match waiting {
+            Waiting::Nothing => return None,
+            Waiting::Asking(download) => what(download),
+            Waiting::Unknown => "some large Bioconductor data packages".to_owned(),
+        };
+        Some(format!("R needs to download {what} before this notebook's cells can run. Download it now?"))
+    }
+
+    /// Before `approve_install` reaches the runtime where the client can't show a dialog (#388): the
+    /// user's click on a page in their browser, through `pages`, waiting up to `wait`. `page` says
+    /// whether a browser can be opened. As `ask` answers.
+    pub(super) fn ask_on_page(&self, call: &Value, waiting: Waiting, page: bool, wait: std::time::Duration, pages: &super::install_page::Pages, open: &dyn Fn(&str) -> bool) -> Asked {
+        use super::install_page::Clicked;
+        let Some(question) = Consent::download_question(&waiting) else {
+            return if self.not_asking(call) { Asked::Dropped } else { Asked::Unasked };
+        };
+        let clicked = if page { pages.ask(&question, wait, &|| self.cancelled(call), open) } else { Clicked::NoBrowser };
+        if self.not_asking(call) || clicked == Clicked::Dropped {
+            return Asked::Dropped;
+        }
+        let why = match clicked {
+            Clicked::Install => return Asked::Yes,
+            Clicked::Dropped => return Asked::Dropped,
+            Clicked::Declined => "download_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing downloads and the cells that need it stay queued. Endeavor won't ask them about it again for 10 minutes: until then, approve_install gets this same answer. Tell the user, and don't call it again unless they ask. If they change their mind, the page they answered has an Install button, and the notebook's page has its own: once they say they clicked one, call approve_install again.",
+            Clicked::NotYet => "download_not_answered::Endeavor opened a page in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user to answer that page, and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes. The notebook's page also has its own button.",
+            Clicked::NoBrowser => "download_cant_ask::Endeavor can't ask the user from this app: it can neither show its dialog nor open a page in their browser. So nothing downloads, and calling approve_install again won't download it. Tell the user what would download and its size, and that they can approve it with the button on the notebook's page. Don't work around it.",
+        };
+        Asked::No(tool_error(why, false))
     }
 
     /// If `message` is the client's answer to one of the front's questions, hand it to the call that
@@ -214,13 +270,7 @@ impl Consent {
     /// Before `approve_install` reaches the runtime: ask the user, through `write`, whether to make
     /// the download `waiting`.
     pub(super) fn ask(&self, call: &Value, waiting: Waiting, write: &dyn Fn(&str)) -> Asked {
-        let what = match &waiting {
-            _ if !self.can_ask() => None,
-            Waiting::Nothing => None,
-            Waiting::Asking(download) => Some(what(download)),
-            Waiting::Unknown => Some("some large Bioconductor data packages".to_owned()),
-        };
-        let question = what.map(|what| format!("R needs to download {what} before this notebook's cells can run. Download it now?"));
+        let question = if self.can_ask() { Consent::download_question(&waiting) } else { None };
         let why = match self.question(call, question.as_deref(), write) {
             Answer::Yes => return Asked::Yes,
             Answer::Unasked => return Asked::Unasked,
@@ -510,14 +560,15 @@ mod tests {
     }
 
     #[test]
-    fn a_client_that_cant_show_one_gets_the_call_as_before() {
+    fn a_client_that_cant_show_one_isnt_sent_a_dialog() {
         for elicitation in [Value::Null, json!({ "url": {} })] {
             let consent = Consent::default();
             consent.learn_client(&initialize(elicitation));
             assert!(matches!(consent.ask(&call(), all(), &|_| panic!("asked")), Asked::Unasked));
+            // approve_install says where it asks instead (#388): on a page, or nowhere.
             let listed = to_json(&json!({ "result": { "tools": [{ "name": "approve_install", "description": ASK_IN_CHAT }] } }));
-            assert_eq!(consent.tools_listed(listed.clone(), false), listed, "approve_install is as it was");
-            assert_eq!(consent.tools_listed(listed.clone(), true), listed, "a page is only for the machine tools");
+            let description = |page: bool| serde_json::from_str::<Value>(&consent.tools_listed(listed.clone(), page)).unwrap()["result"]["tools"][0]["description"].as_str().unwrap().to_owned();
+            assert_eq!((description(true), description(false)), (ASKED_ON_PAGE.to_owned(), CANT_ASK.to_owned()));
         }
         // An empty object is the form, as 2025-06-18 has it.
         let consent = Consent::default();
@@ -545,12 +596,59 @@ mod tests {
         let reply = |text: &str| to_json(&json!({ "jsonrpc": "2.0", "id": 4, "result": { "content": [{ "type": "text", "text": to_json(&json!({ "message": text })) }] } }));
         let asking = format!("R has to download ALL. {} Don't call read_cell to wait.", crate::notebooks::ASK_STEP);
         let consent = Consent::default();
-        assert_eq!(consent.reply_said(reply(&asking)), reply(&asking));
+        assert_eq!(consent.reply_said(reply(&asking), true), reply(&format!("R has to download ALL. {ASK_STEP_ON_PAGE} Don't call read_cell to wait.")));
+        assert_eq!(consent.reply_said(reply(&asking), false), reply(&format!("R has to download ALL. {ASK_STEP_CANT} Don't call read_cell to wait.")));
+        assert_eq!(consent.reply_said(reply("ran"), false), reply("ran"));
         consent.learn_client(&initialize(json!({ "form": {} })));
-        let said = consent.reply_said(reply(&asking));
+        let said = consent.reply_said(reply(&asking), true);
         assert_eq!(said, reply(&format!("R has to download ALL. {ASK_STEP_IN_DIALOG} Don't call read_cell to wait.")));
         // It says where the dialog is, and the page's button is still there.
         assert!(said.contains("The notebook's page also has a button for it.") && !said.contains("The page's own button does the same."), "{said}");
+    }
+
+    #[test]
+    fn without_a_dialog_a_download_waits_for_the_pages_button() {
+        use std::io::{Read, Write};
+        let consent = Consent::default();
+        consent.learn_client(&initialize(Value::Null));
+        let pages = super::super::install_page::Pages::default();
+        let opened = Mutex::new(Vec::<String>::new());
+        let open = |url: &str| {
+            opened.lock().unwrap().push(url.to_owned());
+            true
+        };
+        let ask = |waiting: Waiting, page: bool| {
+            consent.looking(&call());
+            consent.ask_on_page(&call(), waiting, page, Duration::from_millis(50), &pages, &open)
+        };
+        let error = |asked: Asked| match asked {
+            Asked::No(result) => result["content"][0]["text"].as_str().unwrap().to_owned(),
+            _ => panic!("not refused"),
+        };
+        // Nothing waits: the call goes on, and no page opens.
+        assert!(matches!(ask(Waiting::Nothing, true), Asked::Unasked));
+        // No browser: nothing downloads, and the agent hears where the user can approve it.
+        let cant = error(ask(all(), false));
+        assert!(cant.contains("download_cant_ask") && cant.contains("button on the notebook's page"), "{cant}");
+        assert!(opened.lock().unwrap().is_empty());
+        // A page names the download; unanswered, nothing downloads.
+        let waiting = error(ask(all(), true));
+        assert!(waiting.contains("download_not_answered") && !waiting.contains("http"), "{waiting}");
+        let url = opened.lock().unwrap()[0].clone();
+        // The user's click on the page is the yes.
+        let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+        let (port, path) = rest.split_once('/').unwrap();
+        let mut socket = std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+        write!(socket, "GET /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").unwrap();
+        let mut page = String::new();
+        socket.read_to_string(&mut page).unwrap();
+        assert!(page.contains("ALL 1.44.0 (11 MB)"), "{page}");
+        let body = "answer=install";
+        let mut socket = std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+        write!(socket, "POST /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        socket.read_to_string(&mut String::new()).unwrap();
+        assert!(matches!(ask(all(), true), Asked::Yes));
+        assert_eq!(opened.lock().unwrap().len(), 1);
     }
 
     #[test]

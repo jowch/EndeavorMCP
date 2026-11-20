@@ -397,7 +397,7 @@ fn asked_on_page(text: &str) -> String {
 }
 
 /// Open an install page in the user's browser (`Relay::page_shows`).
-fn open_page(url: &str) -> bool {
+pub(super) fn open_page(url: &str) -> bool {
     if let Some(file) = test_var("ENDEAVOR_TEST_INSTALL_PAGES").filter(|file| !file.is_empty()) {
         use std::io::Write;
         return std::fs::OpenOptions::new().create(true).append(true).open(file).and_then(|mut f| writeln!(f, "{url}")).is_ok();
@@ -420,7 +420,7 @@ fn cant_ask(text: &str) -> String {
 
 /// The most a call that asks on a page takes, click and install together: under the 60 s that
 /// Codex gives a tool call.
-const PAGE_CALL: Duration = Duration::from_secs(55);
+pub(super) const PAGE_CALL: Duration = Duration::from_secs(55);
 
 /// The part of `PAGE_CALL` kept for the install after the click.
 const INSTALL_SHARE: Duration = Duration::from_secs(20);
@@ -431,7 +431,7 @@ const MIN_INSTALL: Duration = Duration::from_secs(5);
 
 /// How long a call waits for the user's click on the install page: under the 60 s that some clients
 /// give a tool call. A debug build takes `ENDEAVOR_TEST_PAGE_WAIT_MS`.
-fn page_wait() -> Duration {
+pub(super) fn page_wait() -> Duration {
     test_var("ENDEAVOR_TEST_PAGE_WAIT_MS").and_then(|ms| ms.to_str()?.parse().ok()).map_or(Duration::from_secs(45), Duration::from_millis)
 }
 
