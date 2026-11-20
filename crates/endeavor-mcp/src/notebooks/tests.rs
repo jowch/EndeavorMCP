@@ -1101,7 +1101,7 @@ fn an_r_package_that_failed_to_install_says_to_stop_and_tell_the_user() {
     let read = s.call("", "read_cell", json!({ "notebook_id": R, "cell_id": X })).unwrap();
     let said = read["install_failed"].as_str().unwrap_or_default();
     assert_eq!(said, crate::notebooks::tools::INSTALL_FAILED, "{read}");
-    assert!(said.contains("don't rerun") && said.contains("install the package from a cell") && said.contains("didn't compute it"), "{said}");
+    assert!(said.contains("don't rerun") && said.contains("install the package from a cell yourself") && said.contains("ask you to try again, run the cell once more") && said.contains("didn't compute it"), "{said}");
     assert_eq!(s.call("", "read_cell", json!({ "notebook_id": R, "cell_id": Y })).unwrap().get("install_failed"), None);
 }
 

@@ -1967,7 +1967,7 @@ fn installing_message(nb: &Snapshot) -> String {
 /// What the asking message tells the agent to do. The plugin's front puts its own words in its place
 /// where it asks the user itself (`standalone::consent`).
 /// What to do about an R package Ember couldn't install (`install_failed`).
-pub(crate) const INSTALL_FAILED: &str = "Ember couldn't install a package this cell needs; the error says why. Trying again gets the same failure: don't rerun the notebook, restart R, or install the package from a cell (an install in a cell also skips the user's OK for a large download). Tell the user plainly which package failed and the error's reason, and stop there. If you answer their question anyway, say the notebook didn't compute it.";
+pub(crate) const INSTALL_FAILED: &str = "Ember couldn't install a package this cell needs; the error says why. Trying again on your own gets the same failure: don't rerun the notebook, restart R, or install the package from a cell yourself (an install there also skips the user's OK for a large download). Tell the user plainly which package failed and the error's reason, and stop there. If they fix the cause (a system library, disk space, the network) and ask you to try again, run the cell once more. If you answer their question anyway, say the notebook didn't compute it.";
 
 pub(crate) const ASK_STEP: &str = "Stop here and ask the user whether to download it, then end your reply. approve_install doesn't ask the user: it is their yes, so call it only once they have answered yes in a later message. The page's own button does the same.";
 
