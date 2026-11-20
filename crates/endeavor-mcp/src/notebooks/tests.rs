@@ -522,6 +522,10 @@ impl Engine {
                 let code = &nb.cells[at].code;
                 if code.contains("widget") {
                     json!({ "png": "iVBORw==", "mime": "text/html", "source": "embedded image" })
+                } else if code.contains("scripted html") {
+                    json!({ "png": Value::Null, "mime": "text/html", "interactive": true })
+                } else if code.contains("plotly") {
+                    json!({ "png": "iVBORw==", "mime": "text/html", "interactive": true })
                 } else if code.contains("html") {
                     json!({ "png": Value::Null, "mime": "text/html" })
                 } else {
@@ -2192,6 +2196,29 @@ fn view_cell_output_sends_the_png_the_engine_renders() {
     // While it reruns, the output it had is still there to show.
     s.engine.with(NB, |nb| (nb.cells[1].not_run, nb.cells[1].running, nb.cells[1].output) = (false, true, "1".into()));
     assert!(view(Y).err().unwrap().contains("has no PNG rendering"));
+}
+
+#[test]
+fn view_cell_output_says_an_interactive_output_was_not_seen_working() {
+    // Haiku claimed hover and zoom worked, with and without a picture, and switched packages
+    // to get one, though the skill said not to (#393's smoke runs): the result says it.
+    const Z: &str = "33333333-3333-3333-3333-333333333333";
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "plotly(x)"), (Y, "scripted html"), (Z, "html")]);
+    let view = |cell: &str| s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": cell }), &Folder::Process, Instant::now());
+    let Reply::Image { meta, .. } = view(X).unwrap() else { panic!("no image") };
+    assert_eq!(meta["interactive"], true);
+    assert_eq!(meta["message"], super::tools::INTERACTIVE_PICTURE);
+    let unseen = view(Y).err().unwrap();
+    assert_eq!(unseen, format!("ArgumentError: no_image::Cell {Y}: its output (text/html) has no PNG rendering; read_cell shows it as text. {}", super::tools::INTERACTIVE_UNSEEN));
+    let error = json!({ "isError": true, "content": [{ "type": "text", "text": json!({ "error": "no_image", "message": unseen.split_once("no_image::").unwrap().1 }).to_string() }] });
+    assert!(super::tools::snapshot_may_help(&error), "the app's picture can still stand in");
+    // HTML with no scripts or controls, such as Markdown, says nothing of the kind.
+    assert_eq!(view(Z).err(), Some(format!("ArgumentError: no_image::Cell {Z}: its output (text/html) has no PNG rendering; read_cell shows it as text")));
+    // The app's picture of the notebook in place of either keeps the warning.
+    let shot = super::tools::screenshot_result(Y, "iVBORw==".into(), &error).unwrap();
+    let said: Value = serde_json::from_str(shot["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!((said["interactive"].clone(), said["message"].clone(), said["shown_as"].clone()), (json!(true), json!(super::tools::INTERACTIVE_PICTURE), json!("text/html")));
 }
 
 #[test]

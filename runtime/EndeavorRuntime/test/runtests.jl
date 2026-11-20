@@ -382,6 +382,18 @@ end
         @test EndeavorRuntime._embedded_png_b64(figure) == plot
     end
 
+    # view_cell_output tells the agent it hasn't seen an interactive output work (#393).
+    @testset "interactive HTML: scripts and controls, not Markdown" begin
+        html(body) = Pluto.CellOutput(; body, mime=MIME("text/html"))
+        @test EndeavorRuntime._interactive_html(html("<div id='p'></div><SCRIPT src='plotly.js'></SCRIPT>"))
+        @test EndeavorRuntime._interactive_html(html("<bond def=\"n\"><input type=range></bond>"))
+        @test EndeavorRuntime._interactive_html(html("<canvas width=300></canvas>"))
+        @test !EndeavorRuntime._interactive_html(html("<div class=\"markdown\"><h1>Plot</h1><p>A <code>script</code> tag: &lt;script&gt;</p></div>"))
+        @test !EndeavorRuntime._interactive_html(html("<table><tr><td>1</td></tr></table>"))
+        @test !EndeavorRuntime._interactive_html(Pluto.CellOutput(; body="<script>", mime=MIME("text/plain")))
+        @test EndeavorRuntime._interactive_html(html("<p>" ^ 3_000_000 * "<script>"))
+    end
+
     @testset "validation parses as Pluto does" begin
         session, nb, cells = make_session_with_notebook("x = 1")
         errors = EndeavorRuntime._parse_validation_errors(nb, cells[1], "a = 1\nb = 2")
