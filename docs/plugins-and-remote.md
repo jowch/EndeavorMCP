@@ -870,7 +870,9 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
 - **Build.** The first line of `launch/release-key`. With a key, that build is
   fetched if missing and never replaced, and checked against the SHA-256 lines
   that follow the key in `release-key`, not against the release's checksum
-  file, so a tampered release is caught as well as a damaged download (#98).
+  file, so a release changed after the pin is caught as well as a damaged
+  download (#98). The sums are what the Publish step published, so the pin
+  vouches for the release as it was when pinned, not before.
   A `release-key` with only the key (pinned before the sums were written)
   falls back to the release's checksum file. With none, the newest one already
   there (`bin/.newest`, which must be a hex key like the others, else it is
@@ -1094,8 +1096,8 @@ agents).
   `--wra`) and line breaks are refused, by the front and again by the helper
   before it calls `sbatch`.
 - The plugins check their download against the SHA-256 that `main`'s
-  `release-key` pins for each platform, so a tampered release can't give
-  them a different binary (#98). The rest still trust the release: the helper
+  `release-key` pins for each platform, so a release changed after the pin
+  can't give them a different binary (#98). The rest still trust the release: the helper
   fetched for a server of another platform is checked against the release's
   SHA-256 before it is kept, and again each time it is used, and so are the
   install scripts' downloads and `endeavor update`'s. Those guard against a

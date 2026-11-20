@@ -239,6 +239,13 @@ fn a_pinned_build_is_checked_against_the_pins_checksums_not_the_releases() {
     assert!(!run.ok && run.stderr.contains(&format!("list no binary of build {OTHER} for {}", platform())), "{}", run.stderr);
     place.pin(OTHER);
     assert!(place.launch(&[]).ok);
+
+    // A Windows checkout can give release-key CRLF line ends.
+    let place = Place::new("pinned-sums-crlf");
+    place.publish(OTHER, &platform(), "", BIN, &sha(b"not read"));
+    std::fs::write(place.dir.join("plugin/launch/release-key"), format!("{OTHER}\r\n{}  endeavor-{OTHER}-{}\r\n", sha(BIN), platform())).unwrap();
+    let run = place.launch(&[]);
+    assert!(run.ok, "{}", run.stderr);
 }
 
 #[test]

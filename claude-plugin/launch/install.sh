@@ -20,7 +20,7 @@
 # --sums FILE gives the checksums to check against, in sha256sum's form (other
 # lines are ignored). The launcher passes its release-key, where the Helpers
 # pin job writes each platform's SHA-256 under the key. Then the check doesn't
-# depend on the release, and catches a tampered release as well as a damaged
+# depend on the release, and catches a release changed after the pin as well as a damaged
 # download. A FILE with no checksums in it (a pin from before they were
 # written) counts as none.
 #
@@ -268,9 +268,10 @@ is_missing() {
 }
 
 name=endeavor-$key-$platform$suffix
-# sum_of FILE: the SHA-256 FILE lists for $name, if any.
+# sum_of FILE: the SHA-256 FILE lists for $name, if any. A Windows checkout
+# can give release-key CRLF line ends.
 sum_of() {
-  awk -v n="$name" '{ f = $2; sub(/^\*/, "", f); if (f == n && $1 ~ /^[0-9a-fA-F]+$/ && length($1) == 64) { print tolower($1); exit } }' "$1"
+  awk -v n="$name" '{ sub(/\r$/, ""); f = $2; sub(/^\*/, "", f); if (f == n && $1 ~ /^[0-9a-fA-F]+$/ && length($1) == 64) { print tolower($1); exit } }' "$1"
 }
 pinned=
 if [ -n "$sums" ] && grep -Eq '^[0-9a-fA-F]{64} [ *]' "$sums"; then

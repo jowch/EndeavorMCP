@@ -131,7 +131,10 @@
 
         $new = Join-Path $tmp 'endeavor.exe'
         Get-Release $name $new 900
-        $have = (Get-FileHash -Algorithm SHA256 -LiteralPath $new).Hash.ToLower()
+        # .NET's SHA256 rather than Get-FileHash, which Windows PowerShell 5.1 defines in a script module that
+        # doesn't load when PSModulePath names PowerShell 7's modules (a 5.1 started from pwsh).
+        $stream = [IO.File]::OpenRead($new)
+        try { $have = (-join ([Security.Cryptography.SHA256]::Create().ComputeHash($stream) | ForEach-Object { $_.ToString('x2') })) } finally { $stream.Close() }
         if ($have -ne $want) {
             throw "The download from $release/$name doesn't match its checksum (SHA-256 $have, expected $want). It was deleted; nothing was installed."
         }

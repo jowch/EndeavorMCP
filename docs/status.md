@@ -192,8 +192,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
 - The plugins check their download against checksums pinned in this
   repository: the Helpers pin job writes each platform's SHA-256 under the
   key in `release-key`, and the launcher passes them to `install.sh`
-  (`--sums`), so a tampered release is caught, not only a damaged download
-  (#98). A binary published under a key is never replaced. The install
+  (`--sums`), so a release changed after the pin is caught, not only a
+  damaged download (#98). A binary published under a key is never replaced. The install
   scripts run by hand, `endeavor update` and the helpers fetched for servers
   still check against the release's own checksum file.
 - `endeavor update` replaces the binary from the Helpers release with the
