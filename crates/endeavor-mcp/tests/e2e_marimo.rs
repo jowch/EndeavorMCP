@@ -365,6 +365,57 @@ fn a_python_notebook_through_the_runtime() {
         assert!(read["output"].as_str().unwrap_or_default().contains('3'), "{read}");
     });
 
+    step("headings keep their own code when the file changes under marimo", || {
+        // marimo writes `mo.md("## A")` to its file as `mo.md("""\n## A\n""")`. When the file then changes under
+        // it (a package added to its header), marimo pairs its cells with the file's by similar code, and with the
+        // agent's form in memory it gave one heading's code to another (L1 on Haiku, 11-20).
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let made = agent.ok("new_notebook", json!({ "path": "headings.py" }));
+        let nb = made["notebook_id"].clone();
+        let mut last = made["cell_ids"][0].as_str().unwrap().to_owned();
+        agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": last }));
+        agent.ok("edit_cell", json!({ "notebook_id": nb, "cell_id": last, "code": "import marimo as mo" }));
+        let titles = ["Data Overview", "Data Cleaning", "Growth Curves by Strain", "Cleaned Growth Curves", "Data Quality"];
+        let mut headings = Vec::new();
+        for (i, title) in titles.iter().enumerate() {
+            let added = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": last, "code": format!("mo.md(\"## {title}\")"), "folded": true }));
+            let heading = added["cell_id"].as_str().unwrap().to_owned();
+            assert_eq!(added["code"], format!("mo.md(\"\"\"\n## {title}\n\"\"\")"), "the reply gives the code as kept: {added}");
+            last = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": heading, "code": format!("v{i} = {i}\nv{i}") }))["cell_id"].as_str().unwrap().to_owned();
+            headings.push(heading);
+        }
+        agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": true }));
+        // Editing a heading straight after adding it needs no new read: the core knows the code as kept.
+        let edited = agent.ok("edit_cell", json!({ "notebook_id": nb, "cell_id": headings[4], "code": "mo.md(\"## Data Quality Checks\")" }));
+        assert_eq!(edited["code"], "mo.md(\"\"\"\n## Data Quality Checks\n\"\"\")", "{edited}");
+        // edit_cells gives each cell's code that was kept in another form.
+        agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": headings[3] }));
+        let both = agent.ok("edit_cells", json!({ "notebook_id": nb, "cells": [{ "cell_id": headings[3], "code": "mo.md(\"## Cleaned Growth Curves\")" }] }));
+        assert_eq!(both["code"][&headings[3]], "mo.md(\"\"\"\n## Cleaned Growth Curves\n\"\"\")", "{both}");
+        // marimo's file would turn the backslashes of LaTeX into escapes (`\a` is a bell): that cell is kept as sent.
+        let latex = r#"mo.md("$\\alpha + \\beta$")"#;
+        let added = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": last, "code": latex }));
+        assert!(added.get("code").is_none(), "kept as sent: {added}");
+        let math = added["cell_id"].as_str().unwrap().to_owned();
+        agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": math, "include_code": true }));
+        assert_eq!(read["code"], latex, "{read}");
+        assert!(!read.to_string().contains('\u{7}'), "no bell in the output: {read}");
+        let file = folder.join("headings.py");
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, text.replacen("# ///\n", "# ///\n# touched by the test\n", 1)).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        let mut titles = titles.to_vec();
+        titles[4] = "Data Quality Checks";
+        for (heading, title) in headings.iter().zip(titles) {
+            let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": heading, "include_code": true }));
+            assert!(read["code"].as_str().unwrap_or_default().contains(&format!("## {title}\n")), "{title}: {read}");
+            assert_eq!(read["output_text"].as_str().or(read["output"].as_str()).unwrap_or_default().trim(), title, "{read}");
+        }
+        agent.ok("close_notebook", json!({ "notebook_id": nb }));
+    });
+
     step("a typo's import installs nothing without the user's OK", || {
         // PyPI isn't curated: `import pandsa` would install whatever is published under that name (#355).
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };

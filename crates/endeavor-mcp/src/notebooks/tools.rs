@@ -995,10 +995,15 @@ impl Call<'_> {
         ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
         let applied = self.apply(&nb.id, ops)?;
         let code = code.as_str().unwrap_or_default();
-        self.edited(&nb.id, &applied, &cell, &before, code);
+        // The engine may keep the code in another form (marimo's file form): the owner knows that one.
+        let stored = kept_code(&applied, &cell, code);
+        self.edited(&nb.id, &applied, &cell, &before, &stored);
         let ran = self.run_or_stage(&nb, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "edit_cell", "cell_id": cell }), ran, None)?;
         receipt.extend(self.changed_cell_json(&after, &cell));
+        if stored != code {
+            receipt.insert("code".to_owned(), json!(stored));
+        }
         Ok(Value::Object(receipt))
     }
 
@@ -1038,8 +1043,15 @@ impl Call<'_> {
             ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
         }
         let applied = self.apply(&nb.id, ops)?;
+        // Each cell's code where the engine kept it in another form (marimo's file form), as edit_cell gives it.
+        let mut reformed = Map::new();
         for (edit, cell) in edits.iter().zip(&cells) {
-            self.edited(&nb.id, &applied, cell, &nb.cells[cell].code, edit["code"].as_str().unwrap_or_default());
+            let code = edit["code"].as_str().unwrap_or_default();
+            let stored = kept_code(&applied, cell, code);
+            self.edited(&nb.id, &applied, cell, &nb.cells[cell].code, &stored);
+            if stored != code {
+                reformed.insert(cell.clone(), json!(stored));
+            }
         }
         self.mark_pending(&nb.id, &cells);
         let mutation = json!({ "type": "edit_cells", "cell_ids": cells });
@@ -1047,6 +1059,9 @@ impl Call<'_> {
         // Each cell's fold after the edits, as `edit_cell`'s `code_folded` says its cell's.
         let folds: Map<String, Value> = cells.iter().filter_map(|c| Some((c.clone(), json!(after.cells.get(c)?.folded)))).collect();
         receipt["mutation"]["code_folded"] = Value::Object(folds);
+        if !reformed.is_empty() {
+            receipt.insert("code".to_owned(), Value::Object(reformed));
+        }
         Ok(Value::Object(receipt))
     }
 
@@ -2314,6 +2329,12 @@ pub(super) fn cut_middle(text: &str, max: usize, end: usize, rest: &str) -> Stri
 
 /// Where the rest of an output `read_cell` cut is: nowhere a tool reaches.
 const OUTPUT_REST: &str = "No tool shows them: to see a part, run a cell that picks it out, such as its first or last lines.";
+
+/// A cell's code as the engine kept it after an edit that sent `sent`: the engine's `apply` reply names it in
+/// `codes` when it keeps code in another form (marimo, `file_form`); Pluto and R keep it as sent.
+fn kept_code(applied: &Value, cell: &str, sent: &str) -> String {
+    applied["codes"][cell].as_str().unwrap_or(sent).to_owned()
+}
 
 /// What `view_cell_output` tells the agent about an interactive output (an HTML one with scripts or
 /// controls, `_interactive_html` in `Output.jl`) that it has no picture of, and one it has a picture of.
