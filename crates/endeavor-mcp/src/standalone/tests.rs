@@ -23,6 +23,7 @@ fn serve_without_flags_uses_this_folder_and_per_host_state() {
         parsed("serve").unwrap(),
         Command::Serve(Options {
             state_dir: PathBuf::from("/home/ada/.local/state/endeavor/serve/lab3"),
+            older_state_dir: Some(PathBuf::from("/home/ada/.cache/endeavor/state")),
             cache: PathBuf::from("/home/ada/.cache/endeavor/serve"),
             julia: julia::Source::Auto,
             julia_when_needed: true,
@@ -41,6 +42,27 @@ fn serve_without_flags_uses_this_folder_and_per_host_state() {
         (options.depot.as_str(), options.state_dir, options.cache),
         ("/scratch/ada/endeavor/depot:", PathBuf::from("/xdg/state/endeavor/serve/lab3"), PathBuf::from("/xdg/cache/endeavor/serve"))
     );
+}
+
+/// `mcp` lives long and starts its runtime again after a stop: with no `--state-dir` it uses the app's older
+/// folder only while a runtime there is alive, and the plugin's folder once it stops (#434).
+#[cfg(unix)]
+#[test]
+fn mcp_without_a_state_dir_asks_again_which_folder_before_each_use() {
+    let home = crate::client::scratch("mcp-older-folder");
+    let env = Env { home: home.clone(), node: crate::hostname(), ..env() };
+    let Ok(Command::Mcp(options)) = parse(&["mcp".to_owned()], &env) else { panic!() };
+    let old = home.join(".cache/endeavor/state");
+    assert_eq!(options.state_dir(), env.state_dir(), "nothing in the older folder");
+    std::fs::create_dir_all(&old).unwrap();
+    let me = serde_json::json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "started": crate::own_start_time(), "boot": crate::own_boot(), "token": "t", "port": 1 });
+    std::fs::write(old.join("runtime.json"), me.to_string()).unwrap();
+    assert_eq!(options.state_dir(), old, "alive there: kept");
+    assert_eq!(runtime_args(&options, false).state_dir, old);
+    std::fs::remove_file(old.join("runtime.json")).unwrap();
+    assert_eq!(options.state_dir(), env.state_dir(), "once it stops, the plugin's folder, without a new `mcp`");
+    let Ok(Command::Mcp(named)) = parse(&["mcp", "--state-dir", "/s"].map(String::from), &env) else { panic!() };
+    assert_eq!((named.state_dir(), named.older_state_dir), (PathBuf::from("/s"), None), "a folder that is named is the one used");
 }
 
 #[test]

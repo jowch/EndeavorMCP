@@ -405,6 +405,46 @@ fn without_a_state_dir_a_runtime_alive_in_the_apps_older_folder_is_kept_until_it
     assert!(said.contains(&xdg.join("endeavor/serve").join(this_host()).display().to_string()), "once it stops, the plugin's folder: {said}");
 }
 
+/// Restart Julia after the runtime in the app's older folder stopped: the start goes over the same
+/// connection, and is in the plugin's folder, not again in the older one (#434).
+#[test]
+fn without_a_state_dir_a_restart_after_the_older_folders_runtime_stopped_is_in_the_plugins_folder() {
+    let dir = state_dir("apps-old-folder-restart");
+    let (home, xdg) = (dir.join("home"), dir.join("xdg"));
+    let (old, folder) = (home.join(".cache/endeavor/state"), xdg.join("endeavor/serve").join(this_host()));
+    std::fs::create_dir_all(&old).unwrap();
+    let runtime = FakeRuntime::start(&old, &this_host());
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    let endeavor = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+        command.args(args).env("HOME", &home).env("XDG_STATE_HOME", &xdg);
+        command
+    };
+    let mut helper = Helper::spawn(endeavor(&["connect", "--julia", julia.to_str().unwrap(), "--runtime", "/nonexistent", "--depot", "/nonexistent"]));
+    let ToApp::Ready { pid, reattached, .. } = helper.start_runtime() else { panic!("expected Ready") };
+    assert_eq!((pid, reattached), (runtime.pid, true), "the one in the older folder is joined");
+
+    let stop = endeavor(&["stop"]).output().unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    assert!(matches!(helper.next(), ToApp::Died { .. }), "the app hears it stopped");
+    assert_eq!(check(&helper, 1), RuntimeState::NotRunning, "nothing runs in either folder");
+
+    helper.request_start(None, true);
+    assert!(matches!(helper.next(), ToApp::Found { .. }));
+    let ToApp::Ready { pid, reattached, .. } = helper.after_progress() else { panic!("expected Ready") };
+    assert!(!reattached);
+    assert_eq!(common::read_json(&folder.join("runtime.json"))["pid"].as_u64(), Some(pid as u64), "started in the plugin's folder");
+    assert!(!old.join("runtime.json").exists() && !old.join("runtime.log").exists(), "nothing of it in the older folder");
+    assert!(matches!(check(&helper, 2), RuntimeState::Running { .. }), "the check looks in the plugin's folder too");
+
+    let stop = helper.request_stop();
+    assert_eq!(helper.next(), ToApp::Stopped { id: stop });
+    assert!(!folder.join("runtime.json").exists());
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
 /// The next message that isn't about how the start is going.
 fn after_start(helper: &Helper) -> ToApp {
     loop {
