@@ -1137,6 +1137,7 @@ impl Relay {
     }
 
     fn handle(self: &Arc<Self>, line: &str) {
+        let rewritten: String;
         // The call's whole time, from the moment it arrived: every wait for a runtime comes out of it.
         let mut deadline = machines::Deadline::after(start_wait());
         let Ok(message) = serde_json::from_str::<Value>(line) else {
@@ -1184,7 +1185,7 @@ impl Relay {
         let mut message = message;
         let mut in_browser = false;
         let stripped;
-        let line = match message["params"]["arguments"].as_object_mut() {
+        let mut line = match message["params"]["arguments"].as_object_mut() {
             Some(arguments) if views && matches!(tool.as_deref(), Some("new_notebook" | "open_notebook")) && arguments.get(crate::views::IN_BROWSER).is_some_and(Value::is_boolean) => {
                 in_browser = arguments.remove(crate::views::IN_BROWSER) == Some(Value::Bool(true));
                 stripped = to_json(&message);
@@ -1254,6 +1255,7 @@ impl Relay {
             let began = Instant::now();
             self.consent.looking(&message);
             let waiting = self.waiting_download(&message["params"]["arguments"]["notebook_id"], deadline);
+            let seen = consent::Consent::seen_packages(&waiting);
             let page = self.page_shows();
             // An answer the user gave on the page still holds (10 minutes): it is the answer, with
             // no dialog first, which would ask them again what they said.
@@ -1272,6 +1274,7 @@ impl Relay {
                 let wait = consent::ANSWER_WAIT.saturating_sub(began.elapsed());
                 asked = self.consent.ask_on_page(&message, waiting, page, wait, &self.pages, &machines::open_page, &|line| self.write(line));
             }
+            let yes = matches!(asked, consent::Asked::Yes);
             match asked {
                 consent::Asked::No(result) => return self.answer_call(&message, tool.as_deref(), result),
                 consent::Asked::Dropped => return,
@@ -1283,6 +1286,16 @@ impl Relay {
                 // never passes on as if they had said yes.
                 consent::Asked::NoDialog | consent::Asked::Silent => return self.answer_call(&message, tool.as_deref(), consent::download_cant_ask()),
             }
+            // The yes is to the packages the question named, the same in the dialog and on the
+            // page: the runtime approves only those of what the agent's call names. A call no yes
+            // named packages for (nothing waited when the front looked, or it couldn't tell what
+            // did, or R's download) names none, so a package held since approves nothing
+            // unseen; R's download goes by the download, not by names.
+            let seen = if yes { seen } else { None };
+            let mut call = message.clone();
+            call["params"]["arguments"]["packages"] = crate::notebooks::seen_packages(message["params"]["arguments"].get("packages"), &seen.unwrap_or_else(|| json!([])));
+            rewritten = to_json(&call);
+            line = &rewritten;
         }
         // These two use a runtime that is running, and start none.
         let need = match tool.as_deref() {

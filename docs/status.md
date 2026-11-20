@@ -63,7 +63,13 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   Pluto adds it (#397): its cells stay queued, `packages.step` is `asking`
   with `new`, and `approve_install` is the user's yes, asked about in the
   same dialog or page; its yes holds for those packages while the notebook
-  is open. Packages the notebook already has install as before. The same
+  is open. The yes covers only the packages the user was shown: the dialog,
+  the page and the app's card pass their names on (`approve_install`'s
+  `packages`, interface 43), and a package the notebook came to need after
+  the question asks again (#418). A call the front passes on with no yes to
+  names (nothing waited when it looked, or it couldn't tell what did) names
+  none, so it approves nothing. Python notebooks ask the same way (#355).
+  Packages the notebook already has install as before. The same
   gate holds when the notebook leaves safe preview (`allow_execution`) and
   when `open_notebook` runs it, so a file with no environment of its own adds
   nothing unasked. Runs in the

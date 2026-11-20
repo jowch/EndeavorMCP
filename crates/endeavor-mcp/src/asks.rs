@@ -59,6 +59,9 @@ pub struct Answer {
     /// Cells the user's own run reached while the call waited, each with its
     /// `last_run` before that run (`[{cell_id, last_run}]`).
     pub user_ran: Value,
+    /// For `approve_install`: the packages the user's card named (`["Makie"]`), so the yes covers
+    /// those and no package held since (#418); none from an app that names none.
+    pub packages: Option<Value>,
 }
 
 /// How a wait ended.
@@ -211,7 +214,7 @@ mod tests {
         // A cancellation of the call that stopped waiting names no ask now.
         assert!(!asks.cancel("1", &json!(7)));
         // The same call again waits on the same ask, and gets the answer given meanwhile.
-        asks.answer(id, Answer { allow: true, user_ran: json!([]) }).unwrap();
+        asks.answer(id, Answer { allow: true, user_ran: json!([]), packages: None }).unwrap();
         assert_eq!(asks.add(ask("1", &json!(8), "execute_cell", &cell)), id);
         assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Answered(Answer { allow: true, .. })));
         assert!(asks.list().is_empty());
@@ -257,7 +260,7 @@ mod tests {
         assert!(next != id && next != theirs);
         let shown: Vec<u64> = asks.list().iter().map(|a| a["id"].as_u64().unwrap()).collect();
         assert_eq!(shown, [theirs, next]);
-        assert!(asks.answer(id, Answer { allow: true, user_ran: json!([]) }).is_err(), "nothing waits on it any more");
+        assert!(asks.answer(id, Answer { allow: true, user_ran: json!([]), packages: None }).is_err(), "nothing waits on it any more");
     }
 
     #[test]
@@ -272,7 +275,7 @@ mod tests {
         // A read, or an edit that isn't held: the agent went on, so an approval given now can't reach a later run.
         assert!(asks.moved_on("1", "edit_cell", &json!({ "notebook_id": "n", "cell_id": "a", "code": "2" })));
         assert!(asks.list().is_empty());
-        assert!(asks.answer(id, Answer { allow: true, user_ran: json!([]) }).is_err());
+        assert!(asks.answer(id, Answer { allow: true, user_ran: json!([]), packages: None }).is_err());
         assert_ne!(asks.add(ask("1", &json!(8), "execute_cell", &cell)), id, "the next run asks afresh");
     }
 
@@ -283,7 +286,7 @@ mod tests {
         let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
         assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered));
         // The user allows the card raised for the code as it was; the code changes (another session, say).
-        asks.answer(id, Answer { allow: true, user_ran: json!([]) }).unwrap();
+        asks.answer(id, Answer { allow: true, user_ran: json!([]), packages: None }).unwrap();
         let request = json!(8);
         let again = asks.add(Ask { code: Some(2), ..ask("1", &request, "execute_cell", &cell) });
         assert_ne!(again, id, "the approval was for other code");
@@ -298,14 +301,14 @@ mod tests {
         let id = asks.add(ask("1", &json!(7), "execute_cell", &cell));
         assert!(matches!(asks.wait(id, &|| false, soon()), Outcome::Unanswered));
         // As the app refuses what is still up when the turn ends.
-        asks.answer(id, Answer { allow: false, user_ran: json!([]) }).unwrap();
+        asks.answer(id, Answer { allow: false, user_ran: json!([]), packages: None }).unwrap();
         assert!(asks.list().is_empty());
         let again = asks.add(ask("1", &json!(8), "execute_cell", &cell));
         assert_ne!(again, id);
         assert!(matches!(asks.wait(again, &|| false, soon()), Outcome::Unanswered), "no refusal carried over");
         // A refusal while a call waits is still that call's answer.
         assert_eq!(asks.add(ask("1", &json!(9), "execute_cell", &cell)), again);
-        asks.answer(again, Answer { allow: false, user_ran: json!([]) }).unwrap();
+        asks.answer(again, Answer { allow: false, user_ran: json!([]), packages: None }).unwrap();
         assert!(matches!(asks.wait(again, &|| false, soon()), Outcome::Answered(Answer { allow: false, .. })));
     }
 

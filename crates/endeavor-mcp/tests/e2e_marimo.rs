@@ -402,8 +402,27 @@ fn a_python_notebook_through_the_runtime() {
         assert!(read["errored"] == false && read["queued"] == true, "a cell waiting for an OK doesn't show the import error: {read}");
         assert!(read["message"].as_str().unwrap_or_default().contains("Python has to install packages this notebook doesn't have yet: boto3"), "{read}");
         assert!(!header(&folder.join(&name)).contains("boto3"), "nothing installed before the OK");
-        let approved = agent.ok("approve_install", json!({ "notebook_id": id }));
-        assert!(approved["approved"] == true && approved["packages"] == json!(["boto3"]), "{approved}");
+        // A yes to a question that named other packages approves nothing (#418).
+        let stale = agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["pandas"] }));
+        assert!(stale["approved"] == false && stale["asking"] == json!(["boto3"]), "{stale}");
+        assert!(stale["message"].as_str().unwrap_or_default().contains("Nothing was approved"), "{stale}");
+        assert!(until(&mut agent, "asking")["download"]["packages"] == json!([{ "package": "boto3" }]), "it still asks");
+        // The notebook comes to need another package before the user's yes to boto3: the yes covers boto3
+        // only (names compare as PyPI's do), and the other asks on its own.
+        let extra = agent.ok("add_cell", json!({ "notebook_id": id, "code": "import endeavor_e2e_absent", "after_cell_id": user }))["cell_id"].as_str().unwrap().to_owned();
+        agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": extra, "wait_for_completion": false }));
+        let began = Instant::now();
+        while until(&mut agent, "asking")["download"]["packages"].as_array().map_or(0, Vec::len) < 2 && began.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let approved = agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["Boto3"] }));
+        assert!(approved["approved"] == true && approved["packages"] == json!(["boto3"]) && approved["asking"] == json!(["endeavor_e2e_absent"]), "{approved}");
+        assert!(approved["message"].as_str().unwrap_or_default().contains("needs their OK of its own"), "{approved}");
+        assert!(until(&mut agent, "asking")["download"]["packages"] == json!([{ "package": "endeavor_e2e_absent" }]), "the other still asks");
+        assert!(!header(&folder.join(&name)).contains("boto3"), "nothing installed while one waits");
+        // The other is dropped: boto3, which the user said yes to, installs on the next run without asking.
+        agent.ok("delete_cell", json!({ "notebook_id": id, "cell_id": extra }));
+        agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": false }));
         // The install is under way (slowed by ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS) and says what it installs.
         let installing = until(&mut agent, "installing");
         assert!(installing["packages"].as_array().is_some_and(|p| p.iter().any(|p| p == "boto3")), "the install says it installs boto3: {installing}");

@@ -1905,17 +1905,33 @@ impl Call<'_> {
     fn approve_install(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         if matches!(self.nbs.backend_of(&nb.id), Backend::Pluto | Backend::Marimo) {
-            let mut result = self.nbs.call("approve_install", json!({ "notebook_id": nb.id, "timeout": TIMEOUT_SECONDS }))?;
+            // The packages the user said yes to, where the yes named them (#418): the runtime
+            // approves only those, and asks again about any held since.
+            let mut call = json!({ "notebook_id": nb.id, "timeout": TIMEOUT_SECONDS });
+            if let Some(packages) = self.args.get("packages").filter(|p| p.is_array()) {
+                call["packages"] = packages.clone();
+            }
+            let mut result = self.nbs.call("approve_install", call)?;
             self.nbs.publish();
             let cells: HashSet<String> = result["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
             self.nbs.with_state(&nb.id, |state| {
-                if !self.owner.is_empty() {
+                // A yes that approved nothing started nothing.
+                if !self.owner.is_empty() && result["approved"] != false {
                     state.started.push(Started { owner: self.owner.to_owned(), run: result["run"].as_str().map(str::to_owned), cells, follows: HashMap::new() });
                 }
             });
             result["notebook_id"] = json!(nb.id);
             result["message"] = json!(if result["asking"].is_array() {
-                installing_message(&self.nbs.snapshot(&nb.id)?)
+                let again = installing_message(&self.nbs.snapshot(&nb.id)?);
+                let list = |key: &str| result[key].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", ");
+                // The yes named fewer packages than wait now (#418): the rest ask on their own.
+                if result["approved"] == true {
+                    format!("The user's yes covers {}. The notebook also needs {}, added since they were asked, which needs their OK of its own before anything installs. {again}", list("packages"), list("asking"))
+                } else if result["approved"] == false {
+                    format!("Nothing was approved: what waits changed since the user was asked, and it is now {}. {again}", list("asking"))
+                } else {
+                    again
+                }
             } else {
                 "The packages are approved and install now: the queued cells run once they are ready, and a read of one waits for them.".to_owned()
             });

@@ -3903,3 +3903,13 @@ fn a_cell_waiting_on_a_prompt_ends_the_wait_says_what_it_asks_and_takes_an_answe
     let read = s.call("7", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     assert_eq!((&read["errored"], read.get("waiting_for_input")), (&json!(true), None), "{read}");
 }
+
+#[test]
+fn a_yes_covers_the_packages_the_user_saw_that_the_call_names() {
+    let seen = json!(["CSV", "typing-extensions"]);
+    assert_eq!(seen_packages(None, &seen), seen, "a call that names none: what the user saw");
+    assert_eq!(seen_packages(Some(&json!(["csv", "JSON"])), &seen), json!(["CSV"]), "never one the user didn't see");
+    assert_eq!(seen_packages(Some(&json!(["Typing_Extensions"])), &seen), json!(["typing-extensions"]), "as PyPI compares names");
+    assert_eq!(seen_packages(Some(&json!(["Example"])), &seen), json!([]));
+    assert_eq!(seen_packages(Some(&json!("CSV")), &seen), seen, "not a list: ignored");
+}

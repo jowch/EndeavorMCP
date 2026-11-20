@@ -723,6 +723,44 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
     assert_eq!(approvals(), 2);
 }
 
+#[test]
+fn a_yes_to_new_packages_passes_on_the_names_the_dialog_showed() {
+    // The yes is to what the question named (#418): the runtime approves only those, so a package
+    // the notebook came to need after the question asks again.
+    let nb = "1b2c3d4e-0000-4000-8000-000000000001";
+    let listed = json!([{ "notebook_id": nb, "path": "/data/a.jl", "execution_allowed": true, "packages": { "step": "asking", "new": true, "download": { "bytes": null, "packages": [{ "package": "CSV" }] } } }]);
+    let (port, seen) = fake_core_listing(&listed.to_string());
+    let (relay, out) = ready_relay(port, &seen, true);
+    relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"claude-code"}}}"#);
+    out.clear();
+    let forwarded = |agent: Value| {
+        let line = json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "approve_install", "arguments": agent } }).to_string();
+        let calling = { let relay = relay.clone(); std::thread::spawn(move || relay.handle(&line)) };
+        let question = loop {
+            if let Some(line) = out.lines().into_iter().find(|l| l.contains("elicitation/create")) {
+                break serde_json::from_str::<Value>(&line).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(question["params"]["message"].as_str().unwrap().contains("install CSV, new to the notebook"), "{question}");
+        out.clear();
+        relay.handle(&json!({ "jsonrpc": "2.0", "id": question["id"], "result": { "action": "accept" } }).to_string());
+        calling.join().unwrap();
+        out.clear();
+        let bodies: Vec<Value> = seen.lock().unwrap().iter().filter(|(_, b)| b.contains("approve_install")).map(|(_, b)| serde_json::from_str(b).unwrap()).collect();
+        bodies.last().unwrap()["params"]["arguments"].clone()
+    };
+    assert_eq!(forwarded(json!({ "notebook_id": nb }))["packages"], json!(["CSV"]));
+    // The agent's own list can narrow the yes, never widen it.
+    assert_eq!(forwarded(json!({ "notebook_id": nb, "packages": ["CSV", "JSON"] }))["packages"], json!(["CSV"]));
+    // Nothing waited when the front looked, so no one was asked: the call names no packages, and one
+    // held since approves nothing unseen.
+    relay.handle(&json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "approve_install", "arguments": { "notebook_id": "1b2c3d4e-0000-4000-8000-000000000002", "packages": ["JSON"] } } }).to_string());
+    assert!(!out.lines().iter().any(|l| l.contains("elicitation/create")));
+    let last: Value = serde_json::from_str(&seen.lock().unwrap().iter().rfind(|(_, b)| b.contains("approve_install")).unwrap().1).unwrap();
+    assert_eq!(last["params"]["arguments"]["packages"], json!([]), "{last}");
+}
+
 #[cfg(unix)]
 #[test]
 fn approve_install_asks_when_the_runtime_cant_be_looked_at() {
