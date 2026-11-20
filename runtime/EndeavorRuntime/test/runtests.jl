@@ -441,7 +441,7 @@ end
         write(joinpath(project, "Project.toml"), "[deps]\nEndeavorRuntimeWarm = \"$uuid\"\n\n[sources]\nEndeavorRuntimeWarm = {path = \"EndeavorRuntimeWarm\"}\n")
         write(joinpath(project, "Manifest.toml"), "julia_version = \"$VERSION\"\nmanifest_format = \"2.0\"\n\n[[deps.EndeavorRuntimeWarm]]\npath = \"EndeavorRuntimeWarm\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
         sep = Sys.iswindows() ? ';' : ':'
-        julia(script) = addenv(`$(Base.julia_cmd()) --startup-file=no --project=$project -e $script`,
+        julia(script; at=project) = addenv(`$(Base.julia_cmd()) --startup-file=no --project=$at -e $script`,
             "JULIA_DEPOT_PATH" => depot * sep, "JULIA_LOAD_PATH" => join(["@", "@stdlib"], sep))
         check = "exit(Base.isprecompiled(Base.identify_package(\"EndeavorRuntimeWarm\")) ? 0 : 1)"
         @test success(julia("using EndeavorRuntimeWarm"))
@@ -471,13 +471,24 @@ end
             @test endeavor_drop_unreadable_caches(joinpath(home, ".julia"); readable=_ -> false, log=devnull) == String[]
         end
         @test isfile(mine)
-        # The failure itself (#372): a `--w-------` cache file. Root reads any file, so not as root.
+        # The failure itself (#372). Julia calls one unreadable cache file stale and compiles over
+        # it, but beside a second cache file of the package (another runtime folder compiled into
+        # the same depot, as each update makes) every load opens it to sort them, and throws,
+        # every time. Root reads any file, so not as root.
         if !Sys.iswindows() && ccall(:geteuid, Cuint, ()) != 0
-            ji = only(filter(p -> endswith(p, ".ji") && p != temp, readdir(dir; join=true)))
+            second = joinpath(mktempdir(), "second")
+            cp(project, second)
+            @test success(julia("using EndeavorRuntimeWarm"; at=second))
+            jis = filter(p -> endswith(p, ".ji") && p != temp, readdir(dir; join=true))
+            @test length(jis) == 2
+            ji = first(jis)
             chmod(ji, 0o200)
-            @test !success(pipeline(julia(check); stderr=devnull))
+            for _ in 1:2
+                @test !success(pipeline(julia("using EndeavorRuntimeWarm"); stderr=devnull))
+            end
             @test ji in endeavor_drop_unreadable_caches(depot; log=devnull)
             @test success(julia("using EndeavorRuntimeWarm"))
+            @test success(julia("using EndeavorRuntimeWarm"; at=second))
             @test success(julia(check))
         end
     end
