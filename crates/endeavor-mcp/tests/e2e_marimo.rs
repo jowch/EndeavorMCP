@@ -265,18 +265,28 @@ fn a_python_notebook_through_the_runtime() {
         id
     });
 
-    let order = step("read, then run in order; an edit in safe preview is refused", || {
+    let order = step("read, then run in order; an edit in safe preview goes to the file and keeps its ids", || {
         let order = agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"].clone();
         let order: Vec<String> = order.as_array().unwrap().iter().map(|id| id.as_str().unwrap().to_owned()).collect();
         assert_eq!(order.len(), 2, "{order:?}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0] }));
         assert_eq!(read["code"], "x = 20", "{read}");
-        // ponytail: marimo has no session in safe preview, so nothing can save an edit (#351).
-        let (failed, refused) = agent.call("edit_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "code": "x = 41" }));
-        assert!(failed || refused.get("error").is_some(), "{refused}");
-        agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
-        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0] }));
+        // In safe preview marimo has no session: an edit is written with marimo's own save, and nothing builds (#351).
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "code": "x = 41" }));
+        let added = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "w = 1", "after_cell_id": order[0] }))["cell_id"].as_str().unwrap().to_owned();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("x = 41") && saved.contains("w = 1") && saved.contains("#     \"marimo==0.25.1\","), "the preview saved the edits and kept the header: {saved}");
+        let preview: Value = agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"].clone();
+        assert_eq!(preview.as_array().unwrap().len(), 3, "{preview}");
+        agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
+        // marimo numbers a file's cells by position when it loads it; the ids the preview gave out still hold.
+        assert_eq!(agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"], preview, "the ids survive going live");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "include_code": true }));
+        assert_eq!(read["code"], "x = 41", "{read}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": added, "include_code": true }));
+        assert_eq!(read["code"], "w = 1", "{read}");
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": added, "code": "w = 2" }));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("w = 2"), "the live session knows the added cell by its preview id");
         // The ancestor was edited and never ran: the run takes it first.
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": order[1], "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[1] }));
@@ -305,6 +315,24 @@ fn a_python_notebook_through_the_runtime() {
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }));
         assert_eq!(read["errored"], true, "{read}");
         assert!(read.to_string().contains("ZeroDivisionError"), "{read}");
+    });
+
+    step("a preview that leaves no cell where it was still keeps its ids", || {
+        // Every cell moves: the first is deleted, so marimo's ids for the file share none with the preview's.
+        std::fs::write(folder.join("shift.py"), GROWTH).unwrap();
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let id = agent.ok("open_notebook", json!({ "path": "shift.py" }))["notebook_id"].clone();
+        let before = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].clone();
+        agent.ok("delete_cell", json!({ "notebook_id": id, "cell_id": before[0] }));
+        agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": before[1] }));
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": before[1], "code": "y = 7\ny" }));
+        agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
+        assert_eq!(agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"], json!([before[1]]));
+        agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": before[1], "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": before[1] }));
+        assert!(read["errored"] == false && read["output"].as_str().unwrap_or_default().contains('7'), "{read}");
+        agent.ok("close_notebook", json!({ "notebook_id": id }));
     });
 
     step("a new notebook pins marimo and a package date", || {
