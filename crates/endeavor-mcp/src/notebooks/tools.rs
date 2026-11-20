@@ -644,6 +644,9 @@ impl Call<'_> {
                     if let Some(fix) = self.defined_elsewhere(&nb, id, cell) {
                         entry["defined_elsewhere"] = json!(fix);
                     }
+                    if let Some(said) = self.install_failed(&nb, cell) {
+                        entry["install_failed"] = json!(said);
+                    }
                 }
                 if let Some(text) = self.output_text(&nb, id)? {
                     entry["output_text"] = json!(cut(&text, max));
@@ -885,6 +888,9 @@ impl Call<'_> {
         }
         if let Some(fix) = nb.cells.get(&cell).and_then(|c| self.defined_elsewhere(&nb, &cell, c)) {
             out.insert("defined_elsewhere".into(), json!(fix));
+        }
+        if let Some(said) = nb.cells.get(&cell).and_then(|c| self.install_failed(&nb, c)) {
+            out.insert("install_failed".into(), json!(said));
         }
         let asks = nb.prompted().filter(|asks| **asks == cell || nb.cells.get(&cell).is_some_and(|c| c.running || c.queued)).cloned();
         if let Some(asks) = asks {
@@ -1361,6 +1367,19 @@ impl Call<'_> {
             "{}. A name can be defined in only one cell, so each cell that defines it fails. Keep one definition and remove the other; for a package, keep its `using` or `import` in one cell only.",
             each.join("; ")
         ))
+    }
+
+    /// For an R cell that fails because Ember couldn't install a package it needs, what to do beside
+    /// its error. After Posit's broken Rsamtools build failed an install (#390), Haiku 4.5 restarted
+    /// R and reran three times, put an install of BiocManager into a cell, and gave the answer from
+    /// memory (#394). Ember's error is `missing_package`, like a package the code doesn't name, whose
+    /// fix is a rerun; this one has none.
+    fn install_failed(&self, nb: &Snapshot, cell: &Cell) -> Option<&'static str> {
+        if self.nbs.backend_of(&nb.id) != Backend::Ember {
+            return None;
+        }
+        let error = cell.error.as_ref()?;
+        (error["kind"] == "missing_package" && error["msg"].as_str()?.contains("install failed")).then_some(INSTALL_FAILED)
     }
 
     fn validate_cell(&self) -> Result<Value, String> {
@@ -1947,6 +1966,9 @@ fn installing_message(nb: &Snapshot) -> String {
 
 /// What the asking message tells the agent to do. The plugin's front puts its own words in its place
 /// where it asks the user itself (`standalone::consent`).
+/// What to do about an R package Ember couldn't install (`install_failed`).
+pub(crate) const INSTALL_FAILED: &str = "Ember couldn't install a package this cell needs; the error says why. Trying again on your own gets the same failure: don't rerun the notebook, restart R, or install the package from a cell yourself (an install there also skips the user's OK for a large download). Tell the user plainly which package failed and the error's reason, and stop there. If they fix the cause (a system library, disk space, the network) and ask you to try again, run the cell once more. If you answer their question anyway, say the notebook didn't compute it.";
+
 pub(crate) const ASK_STEP: &str = "Stop here and ask the user whether to download it, then end your reply. approve_install doesn't ask the user: it is their yes, so call it only once they have answered yes in a later message. The page's own button does the same.";
 
 /// What the agent hears while an R notebook's install waits for an OK before a large download
