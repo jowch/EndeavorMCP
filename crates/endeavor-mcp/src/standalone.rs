@@ -90,8 +90,11 @@ pub(crate) enum Command {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Options {
-    /// The runtime's `runtime.json`, token and log.
+    /// The runtime's `runtime.json`, token and log. Read through `state_dir()`.
     state_dir: PathBuf,
+    /// With no `--state-dir`, the app's older folder (`Env::apps_old_state_dir`), used instead of
+    /// `state_dir` while a runtime alive on this machine is recorded there (`runtime::or_older`).
+    older_state_dir: Option<PathBuf>,
     /// Where `runtime/` is unpacked, a folder per version.
     cache: PathBuf,
     julia: julia::Source,
@@ -180,11 +183,15 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
-    let state_dir = state_dir.unwrap_or_else(|| runtime::default_state_dir(env));
+    // `mcp` lives long and starts its runtime again after a stop, so it decides between the two folders
+    // before each start (`Options::state_dir`); the others decide once (#434).
+    let older_state_dir = state_dir.is_none().then(|| env.apps_old_state_dir()).flatten();
+    let state_dir = state_dir.unwrap_or_else(|| env.state_dir());
+    let now = || runtime::or_older(&state_dir, older_state_dir.as_deref());
     match command.as_str() {
-        "stop" => return Ok(Command::Stop { state_dir, force }),
-        "status" => return Ok(Command::Status { state_dir, json }),
-        "open" => return Ok(Command::Open { state_dir }),
+        "stop" => return Ok(Command::Stop { state_dir: now(), force }),
+        "status" => return Ok(Command::Status { state_dir: now(), json }),
+        "open" => return Ok(Command::Open { state_dir: now() }),
         _ => {}
     }
     let folder = match folder {
@@ -196,6 +203,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     };
     let options = Options {
         state_dir,
+        older_state_dir,
         cache: env.cache(),
         julia: julia.unwrap_or(julia::Source::Auto),
         julia_when_needed: !(cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_JULIA_AT_START").is_some()),
@@ -351,9 +359,18 @@ pub(crate) fn lease_locked(marker: std::fs::File) -> Lease {
     Lease { _marker: marker }
 }
 
+impl Options {
+    /// The state folder now: `state_dir`, or while a runtime alive here is recorded in the app's older
+    /// folder, that one. Asked again each time, so a start after that runtime stopped is in `state_dir`.
+    pub(crate) fn state_dir(&self) -> PathBuf {
+        runtime::or_older(&self.state_dir, self.older_state_dir.as_deref())
+    }
+}
+
 fn runtime_args(options: &Options, exit_idle: bool) -> Args {
     Args {
-        state_dir: options.state_dir.clone(),
+        state_dir: options.state_dir(),
+        unnamed: None,
         julia: options.julia.clone(),
         julia_when_needed: options.julia_when_needed,
         r: options.r.clone(),
@@ -407,7 +424,7 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
         Outcome::Failed(message) => Err(message),
         Outcome::Died { status, log_tail } => {
             let tail = log_tail[log_tail.len().saturating_sub(8)..].join("\n");
-            Err(format!("Endeavor stopped while starting ({status}). The end of {}:\n{tail}", options.state_dir.join("runtime.log").display()))
+            Err(format!("Endeavor stopped while starting ({status}). The end of {}:\n{tail}", args.state_dir.join("runtime.log").display()))
         }
         Outcome::Cancelled => Err("Stopped before Endeavor was ready.".into()),
         Outcome::NothingRunning => Err("Endeavor isn't running.".into()),
@@ -683,7 +700,7 @@ fn serve(options: Options) -> ! {
         eprintln!("endeavor: {e}");
         std::process::exit(1)
     });
-    let dir = &options.state_dir;
+    let dir = &options.state_dir();
     let started_with = options.folder.as_ref().map(|folder| folder.display().to_string()).unwrap_or_default();
     let (folder, project) = recorded_folder(dir).unwrap_or_else(|| (started_with.clone(), true));
     if !up.started {
@@ -1387,7 +1404,7 @@ impl Relay {
         // user's computer already.)
         let var = |name: &str| std::env::var(name).ok();
         if route.host.is_none() && !in_view && !browser::shows(var) {
-            let open = crate::core::open_command(&self.options.state_dir);
+            let open = crate::core::open_command(&self.options.state_dir());
             fields.insert("browser_note".into(), browser::note(&crate::hostname(), route.port, &open).into());
         }
         fields.insert("browser_url".into(), url.into());

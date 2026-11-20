@@ -70,9 +70,16 @@ pub(crate) fn look(dir: &Path, any_node: bool, ping: bool) -> Looked {
 /// that one, so the app's open notebooks aren't opened again by a second runtime. Once it stops, the
 /// next start is in `state_dir` (#110).
 pub(crate) fn default_state_dir(env: &crate::paths::Env) -> std::path::PathBuf {
-    match env.apps_old_state_dir() {
-        Some(old) if look(&old, false, false).alive().is_some() => old,
-        _ => env.state_dir(),
+    or_older(&env.state_dir(), env.apps_old_state_dir().as_deref())
+}
+
+/// `dir`, or while a runtime alive on this machine is recorded in `older`, that one (`default_state_dir`).
+/// Asked again before each start a long-lived process makes, not only when it begins: once the runtime in
+/// the older folder stops, a restart over the same connection goes to `dir` (#434).
+pub(crate) fn or_older(dir: &Path, older: Option<&Path>) -> std::path::PathBuf {
+    match older {
+        Some(old) if look(old, false, false).alive().is_some() => old.to_path_buf(),
+        _ => dir.to_path_buf(),
     }
 }
 

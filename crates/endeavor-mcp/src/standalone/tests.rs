@@ -23,6 +23,7 @@ fn serve_without_flags_uses_this_folder_and_per_host_state() {
         parsed("serve").unwrap(),
         Command::Serve(Options {
             state_dir: PathBuf::from("/home/ada/.local/state/endeavor/serve/lab3"),
+            older_state_dir: Some(PathBuf::from("/home/ada/.cache/endeavor/state")),
             cache: PathBuf::from("/home/ada/.cache/endeavor/serve"),
             julia: julia::Source::Auto,
             julia_when_needed: true,
@@ -41,6 +42,27 @@ fn serve_without_flags_uses_this_folder_and_per_host_state() {
         (options.depot.as_str(), options.state_dir, options.cache),
         ("/scratch/ada/endeavor/depot:", PathBuf::from("/xdg/state/endeavor/serve/lab3"), PathBuf::from("/xdg/cache/endeavor/serve"))
     );
+}
+
+/// `mcp` lives long and starts its runtime again after a stop: with no `--state-dir` it uses the app's older
+/// folder only while a runtime there is alive, and the plugin's folder once it stops (#434).
+#[cfg(unix)]
+#[test]
+fn mcp_without_a_state_dir_asks_again_which_folder_before_each_use() {
+    let home = crate::client::scratch("mcp-older-folder");
+    let env = Env { home: home.clone(), node: crate::hostname(), ..env() };
+    let Ok(Command::Mcp(options)) = parse(&["mcp".to_owned()], &env) else { panic!() };
+    let old = home.join(".cache/endeavor/state");
+    assert_eq!(options.state_dir(), env.state_dir(), "nothing in the older folder");
+    std::fs::create_dir_all(&old).unwrap();
+    let me = serde_json::json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "started": crate::own_start_time(), "boot": crate::own_boot(), "token": "t", "port": 1 });
+    std::fs::write(old.join("runtime.json"), me.to_string()).unwrap();
+    assert_eq!(options.state_dir(), old, "alive there: kept");
+    assert_eq!(runtime_args(&options, false).state_dir, old);
+    std::fs::remove_file(old.join("runtime.json")).unwrap();
+    assert_eq!(options.state_dir(), env.state_dir(), "once it stops, the plugin's folder, without a new `mcp`");
+    let Ok(Command::Mcp(named)) = parse(&["mcp", "--state-dir", "/s"].map(String::from), &env) else { panic!() };
+    assert_eq!((named.state_dir(), named.older_state_dir), (PathBuf::from("/s"), None), "a folder that is named is the one used");
 }
 
 #[test]
@@ -470,6 +492,31 @@ fn a_runtime_replaced_by_another_process_is_noticed_and_the_new_one_is_found() {
     assert_eq!(target::Provider::status(&*relay.local).state, crate::client::State::Connected, "the one that was attached to is forgotten");
     let crate::client::Outcome::Ready(after) = target::Provider::ensure(&*relay.local, crate::client::Want::Attach { install: false }, Duration::ZERO, false) else { panic!("the new runtime wasn't found") };
     assert_eq!((after.pid, after.token.as_str()), (other, "other"));
+}
+
+/// `mcp` keeps the folder of the runtime it uses while it uses it: one that an app of before #110 starts in
+/// the older folder meanwhile doesn't make it look gone. Once it is gone, the folder is decided again (#434).
+#[cfg(unix)]
+#[test]
+fn mcp_keeps_its_runtimes_folder_while_ready_and_decides_again_once_it_is_gone() {
+    let (port, _seen) = fake_core();
+    let (dir, old) = (crate::client::scratch("pinned-plugins"), crate::client::scratch("pinned-older"));
+    let me = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "started": null, "token": "t0k", "port": port });
+    std::fs::write(dir.join("runtime.json"), me.to_string()).unwrap();
+    let Ok(Command::Mcp(mut options)) = parsed("mcp") else { panic!() };
+    (options.state_dir, options.older_state_dir) = (dir.clone(), Some(old.clone()));
+    let local = target::Local::new(options);
+    let crate::client::Outcome::Ready(ready) = target::Provider::ensure(&local, crate::client::Want::Attach { install: false }, Duration::ZERO, false) else { panic!("the runtime wasn't found") };
+    assert_eq!(ready.pid, std::process::id());
+
+    let other = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::os::unix::process::parent_id(), "started": null, "token": "other", "port": port });
+    std::fs::write(old.join("runtime.json"), other.to_string()).unwrap();
+    assert!(matches!(target::Provider::status(&local).state, crate::client::State::Ready(r) if r.pid == std::process::id()), "still its own runtime");
+    assert_eq!(local.state_dir(), dir);
+
+    std::fs::remove_file(dir.join("runtime.json")).unwrap();
+    assert_eq!(target::Provider::status(&local).state, crate::client::State::Connected, "its runtime is gone");
+    assert_eq!(local.state_dir(), old, "and the folder is decided again: the older one, where one is alive now");
 }
 
 #[test]

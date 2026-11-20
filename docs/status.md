@@ -221,6 +221,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   state folder named use the plugin's folder, or while a runtime the app
   started in its older `~/.cache/endeavor/state` is alive on that machine,
   that one, so the app and the plugin on a server can share one runtime (#110).
+  A connection or an `mcp` that began while that runtime was alive starts its
+  next runtime in the plugin's folder once it stops, not in the older one (#434).
   The app still names its older folder until it moves its pin.
   Since 2026-10-30 a client that sets `Listener::set_restart` (the app) gives
   its agent `request_restart`: the listener adds it to `tools/list` and answers

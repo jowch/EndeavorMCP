@@ -94,6 +94,10 @@ const LOG_TAIL: usize = 40;
 
 struct Args {
     state_dir: PathBuf,
+    /// No `--state-dir` was given to the process launcher: the plugin's folder, and the app's older one
+    /// (`runtime::or_older`). `state_dir` is worked out again from them whenever no runtime is attached,
+    /// so that a runtime in the older folder is kept only while it is alive (#434).
+    unnamed: Option<(PathBuf, Option<PathBuf>)>,
     julia: julia::Source,
     /// `--julia-when-needed`: Julia isn't looked for before the runtime starts, and starts the first
     /// time something needs it (see `core`). On a cluster it is still found on the login node, where
@@ -308,7 +312,7 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some(prompt) if prompt != "connect" && [wire::askpass::SOCKET_ENV, wire::askpass::ADDRESS_ENV].iter().any(|v| std::env::var_os(v).is_some()) => askpass::run(prompt),
         _ => {}
     }
-    let args = match parse_args(argv) {
+    let mut args = match parse_args(argv) {
         Ok(args) => args,
         Err(e) => {
             eprintln!("{e}\n{USAGE}");
@@ -317,7 +321,7 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
     };
     block_sigusr1();
     let mux = stdout_mux();
-    let Err(message) = serve(&args, &mux);
+    let Err(message) = serve(&mut args, &mux);
     eprintln!("endeavor: {message}");
     let _ = mux.send(&ToApp::Error { message }.frame());
     std::process::exit(1);
@@ -378,11 +382,14 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
+    let env = paths::Env::here();
+    let unnamed = (state_dir.is_none() && launcher == Launcher::Process).then(|| (env.state_dir(), env.apps_old_state_dir()));
     Ok(Args {
-        state_dir: state_dir.unwrap_or_else(|| match launcher {
-            Launcher::Process => runtime::default_state_dir(&paths::Env::here()),
-            Launcher::Slurm => paths::Env::here().cluster_state_dir(),
+        state_dir: state_dir.unwrap_or_else(|| match &unnamed {
+            Some((dir, older)) => runtime::or_older(dir, older.as_deref()),
+            None => env.cluster_state_dir(),
         }),
+        unnamed,
         julia: julia.ok_or("--julia or --julia-shell is required")?,
         julia_when_needed,
         r: r.unwrap_or_default(),
@@ -417,16 +424,21 @@ fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
 
 /// Say hello, then serve the app until it detaches or goes away, starting,
 /// stopping and relaying to the runtime as it asks. Returns only on failure.
-fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String> {
+fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String> {
     make_state_dir(&args.state_dir)?;
     let (events, rx) = mpsc::channel();
     let mut inbox = Inbox { rx, later: VecDeque::new() };
     let routes: Routes = Arc::new(RwLock::new(Route::None));
     let parts = Parts::default();
+    // The folder of the runtime attached, if one is; else it is decided when it is used (`state_dir_now`).
+    let attached_dir: Arc<RwLock<Option<PathBuf>>> = Arc::default();
     let answer: Answer = {
-        let (dir, launcher, any_node, parts) = (args.state_dir.clone(), args.launcher, args.any_node, parts.clone());
+        let (attached_dir, named, unnamed, launcher, any_node, parts) = (attached_dir.clone(), args.state_dir.clone(), args.unnamed.clone(), args.launcher, args.any_node, parts.clone());
         Arc::new(move |request| match request {
-            wire::files::Request::Runtime => wire::files::Reply::Runtime { runtime: check(&dir, launcher, any_node) },
+            wire::files::Request::Runtime => {
+                let dir = attached_dir.read().unwrap().clone().unwrap_or_else(|| state_dir_now(&unnamed, &named));
+                wire::files::Reply::Runtime { runtime: check(&dir, launcher, any_node) }
+            }
             wire::files::Request::Write { folder, path, offset, last, .. } => parts.track(folder, path, *offset, *last, || wire::files::answer(request)),
             other => wire::files::answer(other),
         })
@@ -439,6 +451,7 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
 
     let mut attached: Option<Attached> = None;
     loop {
+        *attached_dir.write().unwrap() = attached.as_ref().map(|_| args.state_dir.clone());
         let event = inbox.next();
         match event {
             Event::App(ToHelper::StartRuntime { id, job, engine, install, attach_only }) => {
@@ -446,6 +459,7 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                     let _ = mux.send(&attached.ready(id, true).frame());
                     continue;
                 }
+                repick_state_dir(args)?;
                 let result = match args.launcher {
                     Launcher::Process => attach(args, mux, &mut inbox, &events, &parts, &engine, install, attach_only),
                     Launcher::Slurm => slurm::attach(args, mux, &mut inbox, &events, &parts, job.unwrap_or_default(), &engine, install, attach_only),
@@ -472,7 +486,7 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
                         attached = Some(runtime);
                         why
                     }),
-                    None => stop_recorded(args, &mut inbox, &events, force),
+                    None => repick_state_dir(args).and_then(|()| stop_recorded(args, &mut inbox, &events, force)),
                 };
                 answer_stops(mux, &mut inbox, id, force, &stopped);
             }
@@ -515,6 +529,27 @@ fn serve(args: &Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String
             }
         }
     }
+}
+
+/// The state folder as `connect` would pick it now: `named` when `--state-dir` was given (or on a cluster),
+/// else the plugin's folder, or the app's older one while a runtime there is alive (`Args::unnamed`).
+fn state_dir_now(unnamed: &Option<(PathBuf, Option<PathBuf>)>, named: &Path) -> PathBuf {
+    match unnamed {
+        Some((dir, older)) => runtime::or_older(dir, older.as_deref()),
+        None => named.to_path_buf(),
+    }
+}
+
+/// With no runtime attached, decide the state folder for the start or stop about to happen, at that
+/// moment: the app's Restart Julia after the runtime in the app's older folder stopped starts in the
+/// plugin's folder, and a start or check after the plugin started one there finds it (#434).
+fn repick_state_dir(args: &mut Args) -> Result<(), String> {
+    let now = state_dir_now(&args.unnamed, &args.state_dir);
+    if now != args.state_dir {
+        make_state_dir(&now)?;
+        args.state_dir = now;
+    }
+    Ok(())
 }
 
 /// Answer the `Stop` with this id, and the ones said during it, which have the same outcome: they are

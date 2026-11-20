@@ -3,6 +3,7 @@
 //! `Local` finds, starts and ends the runtime in the state folder directly, and a machine's is its
 //! `client::Session`. Both answer with the same `Outcome` and `Status`.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
@@ -116,6 +117,9 @@ pub(super) struct Local {
     builds: Mutex<Builds>,
     /// The runtime whose network settings were checked (`network_differs`).
     network_checked: Mutex<Option<u32>>,
+    /// The state folder of the runtime this session started or found (`state_dir`), kept while it is
+    /// starting or ready, so that one alive in the other folder never makes it look gone (#434).
+    pinned: Mutex<Option<PathBuf>>,
 }
 
 /// What `Local::other_build` has done so far.
@@ -154,7 +158,20 @@ enum Phase {
 
 impl Local {
     pub(super) fn new(options: Options) -> Local {
-        Local { options, state: Arc::new((Mutex::new(Phase::Idle), Condvar::new())), builds: Mutex::default(), network_checked: Mutex::default() }
+        Local { options, state: Arc::new((Mutex::new(Phase::Idle), Condvar::new())), builds: Mutex::default(), network_checked: Mutex::default(), pinned: Mutex::default() }
+    }
+
+    /// The state folder: the one of the runtime this session is starting or uses, else as `Options::state_dir`
+    /// decides it now. With no `--state-dir` that is the app's older folder only while a runtime there is alive.
+    pub(super) fn state_dir(&self) -> PathBuf {
+        let pinned = self.pinned.lock().unwrap().clone();
+        pinned.unwrap_or_else(|| self.options.state_dir())
+    }
+
+    /// Back to `Phase::Idle`: the folder is decided again at the next start or look.
+    fn idle(&self, phase: &mut Phase) {
+        *phase = Phase::Idle;
+        *self.pinned.lock().unwrap() = None;
     }
 
     /// This front lists its own build's tools, and the runtime it found running here (`runtime`) runs the
@@ -168,7 +185,7 @@ impl Local {
         if !runtime.reattached || builds.checked == Some(runtime.pid) {
             return OtherBuild::Fine;
         }
-        let dir = &self.options.state_dir;
+        let dir = &self.state_dir();
         let Some(state) = crate::read_state(dir).filter(|state| state.pid as u32 == runtime.pid) else { return OtherBuild::Fine };
         let this = crate::embedded::BUILD_VERSION;
         if state.usable_as_is() {
@@ -203,7 +220,7 @@ impl Local {
         if !runtime.reattached || *checked == Some(runtime.pid) {
             return None;
         }
-        let state = crate::read_state(&self.options.state_dir).filter(|state| state.pid as u32 == runtime.pid)?;
+        let state = crate::read_state(&self.state_dir()).filter(|state| state.pid as u32 == runtime.pid)?;
         *checked = Some(runtime.pid);
         let recorded = state.network?;
         let ours = crate::network_settings();
@@ -223,18 +240,17 @@ impl Local {
             Phase::Ready(runtime) => Some(runtime.pid),
             _ => None,
         };
-        let gone = ready.is_some_and(|pid| !matches!(runtime::look(&self.options.state_dir, false, false), Looked::Running(state, _) if state.pid as u32 == pid));
+        let gone = ready.is_some_and(|pid| !matches!(runtime::look(&self.state_dir(), false, false), Looked::Running(state, _) if state.pid as u32 == pid));
         let mut phase = self.state.0.lock().unwrap();
         if gone && matches!(&*phase, Phase::Ready(runtime) if Some(runtime.pid) == ready) {
-            *phase = Phase::Idle;
+            self.idle(&mut phase);
         }
         phase
     }
 
     /// The runtime recorded in the state folder, if there is one; none is started. One that is alive and
     /// doesn't answer is asked again for up to `wait`, and counts as stuck once `silent_wait` has passed.
-    fn look(&self, wait: Duration) -> Outcome {
-        let dir = &self.options.state_dir;
+    fn look(&self, dir: &Path, wait: Duration) -> Outcome {
         let looked_at = Instant::now();
         // Before the look: a core writes its record before it lets go of the lock.
         let starting = runtime::lock_state(dir).is_held();
@@ -250,7 +266,7 @@ impl Local {
             // A start another process has under way is a start under way, not nothing.
             Looked::NotRunning | Looked::Dead(_) | Looked::Silent(_) if starting => Outcome::StillWorking("Another process is starting Endeavor".into()),
             Looked::NotRunning | Looked::Dead(_) => Outcome::NothingRunning,
-            Looked::Running(state, port) => Outcome::Ready(announce(&self.options, &state, port, false)),
+            Looked::Running(state, port) => Outcome::Ready(announce(dir, &state, port, false)),
             Looked::OtherNode(state) => Outcome::Failed(runtime::other_node_text(&state.node)),
             Looked::Older(_) => Outcome::Failed(super::OLDER_RUNTIME_HERE.into()),
             Looked::Silent(state) if looked_at.elapsed() >= runtime::silent_wait() => Outcome::Failed(runtime::silent_text(state.pid)),
@@ -259,7 +275,10 @@ impl Local {
     }
 
     fn begin(&self) {
-        let (options, state) = (self.options.clone(), self.state.clone());
+        let dir = self.state_dir();
+        *self.pinned.lock().unwrap() = Some(dir.clone());
+        let options = Options { state_dir: dir, older_state_dir: None, ..self.options.clone() };
+        let state = self.state.clone();
         std::thread::spawn(move || {
             let progress = |line: &str| {
                 eprintln!("{line}");
@@ -268,7 +287,7 @@ impl Local {
                 }
             };
             let next = match super::start_or_reuse(&options, true, &progress, &|| false) {
-                Ok(up) => Phase::Ready(Box::new(announce(&options, &up.state, up.port, up.started))),
+                Ok(up) => Phase::Ready(Box::new(announce(&options.state_dir, &up.state, up.port, up.started))),
                 Err(e) => {
                     eprintln!("endeavor: {e}");
                     Phase::Failed(e)
@@ -301,9 +320,9 @@ pub(super) fn network_notice(differ: &[&str]) -> String {
 /// A runtime that was found or started, as the session uses it. The user is told on stderr where the
 /// notebooks are, and when another build started it. Not with the token: agents' clients keep stderr in
 /// their logs.
-fn announce(options: &Options, state: &crate::State, port: u16, started: bool) -> RuntimeInfo {
+fn announce(dir: &Path, state: &crate::State, port: u16, started: bool) -> RuntimeInfo {
     eprintln!("Endeavor's notebooks: http://localhost:{port}/ (`endeavor open` lets a browser in)");
-    if let Some(message) = (!started).then(|| super::other_build(&options.state_dir)).flatten() {
+    if let Some(message) = (!started).then(|| super::other_build(dir)).flatten() {
         eprintln!("endeavor: {message}");
     }
     let page_token = state.page_token.as_deref().unwrap_or(&state.token);
@@ -328,7 +347,7 @@ impl Provider for Local {
         let until = Instant::now() + wait;
         let mut phase = self.phase();
         if retry && matches!(*phase, Phase::Failed(_)) {
-            *phase = Phase::Idle;
+            self.idle(&mut phase);
         }
         loop {
             match &*phase {
@@ -344,7 +363,8 @@ impl Provider for Local {
                 // Looked at with the phase let go: a runtime that is slow to answer holds up no other call.
                 Phase::Idle if matches!(want, Want::Attach { .. }) => {
                     drop(phase);
-                    let outcome = self.look(until.saturating_duration_since(Instant::now()));
+                    let dir = self.state_dir();
+                    let outcome = self.look(&dir, until.saturating_duration_since(Instant::now()));
                     // A start another process has under way is waited for, like one of this process's.
                     let left = until.saturating_duration_since(Instant::now());
                     if matches!(outcome, Outcome::StillWorking(_)) && !left.is_zero() {
@@ -356,6 +376,7 @@ impl Provider for Local {
                         let mut phase = self.state.0.lock().unwrap();
                         if matches!(*phase, Phase::Idle) {
                             *phase = Phase::Ready(Box::new(runtime.clone()));
+                            *self.pinned.lock().unwrap() = Some(dir);
                         }
                     }
                     return outcome;
@@ -371,7 +392,7 @@ impl Provider for Local {
     fn status(&self) -> Status {
         let (state, step) = match &*self.phase() {
             // A start another process has under way is a start under way.
-            Phase::Idle if runtime::lock_state(&self.options.state_dir).is_held() => (State::Starting { queue: None }, None),
+            Phase::Idle if runtime::lock_state(&self.state_dir()).is_held() => (State::Starting { queue: None }, None),
             Phase::Idle => (State::Connected, None),
             Phase::Starting(step) => (State::Starting { queue: None }, Some(step.clone()).filter(|step| !step.is_empty())),
             Phase::Ready(runtime) => (State::Ready((**runtime).clone()), None),
@@ -381,7 +402,7 @@ impl Provider for Local {
     }
 
     fn stop(&self, force: bool) -> Result<(), String> {
-        let dir = &self.options.state_dir;
+        let dir = &self.state_dir();
         // First, so that a start another process has under way is waited for, not missed.
         let starting = super::stop_lock(dir)?;
         let (events, _) = mpsc::channel();
@@ -406,11 +427,11 @@ impl Provider for Local {
                 phase = self.state.1.wait_timeout(phase, until.saturating_duration_since(Instant::now())).unwrap().0;
             }
             if matches!(*phase, Phase::Failed(_)) {
-                *phase = Phase::Idle;
+                self.idle(&mut phase);
             }
         }
         if matches!(*phase, Phase::Ready(_)) {
-            *phase = Phase::Idle;
+            self.idle(&mut phase);
         }
         Ok(())
     }

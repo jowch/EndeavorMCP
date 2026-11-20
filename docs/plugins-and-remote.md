@@ -438,7 +438,11 @@ Built here: helpers attach together, and `endeavor connect` without
 older folder, `~/.cache/endeavor/state`, is alive on that server, `connect`,
 `serve`, `mcp`, `status` and `stop` without `--state-dir` use that one
 instead, so the app's open notebooks aren't opened again by a second runtime;
-once it stops, the next start is in `serve`'s folder (#110). Only that
+once it stops, the next start is in `serve`'s folder (#110). `connect` and
+`mcp` keep the folder of the runtime they use while they use it, and with
+none they decide again at each check, start and stop. So a restart over the
+same connection after that runtime stopped is in `serve`'s folder, and a
+connection that only browsed finds a runtime the plugin started there (#434). Only that
 default folder is looked at: an app set up with its own install folder kept
 its runtime in `<that folder>/state`, which isn't. Not built yet: the app's
 side. Until it is, the app names its older folder, so if the plugin started a
