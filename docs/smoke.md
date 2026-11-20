@@ -52,11 +52,13 @@ The agent is kept apart from whoever started the run:
   `ToolSearch` (`--tools`). `Write`, `Edit` and `Bash` don't exist for it.
 
 The runner checks Claude's first event in each turn for each of these, and
-every tool the agent called. If the agent had or called another tool, or had
+every tool the agent used. If the agent had or used another tool, or had
 another server or plugin, or a shared memory folder, the attempt fails as a
 problem with the harness, not the agent. A server that connects late (the
 claude.ai connectors do) is missing from the first turn's event, so a task with
-one message only shows it in what the agent called. A Claude Code cloud session can
+one message only shows it in what the agent used. A call Claude Code refused
+because the agent hasn't got that tool (`Bash`, say) isn't counted here: that is
+the agent's mistake, and the task's own checks judge it. A Claude Code cloud session can
 run the suite: it has Julia, and Claude uses the sign-in in `~/.claude`.
 
 ## How a task runs
