@@ -969,7 +969,7 @@ impl Call<'_> {
         if interactive {
             interactive_picture(&mut meta);
         } else if mime.starts_with("image/") {
-            // A plain image, such as Plots.jl's default (GR) backend draws: Haiku promised hover
+            // A picture with no controls (a PNG, an SVG, an animated GIF), such as Plots.jl's default (GR) backend draws: Haiku promised hover
             // and zoom on one (#407).
             meta["interactive"] = json!(false);
             meta["message"] = json!(match meta["message"].as_str() {
@@ -2282,7 +2282,7 @@ pub(crate) const INTERACTIVE_UNSEEN: &str = "It is interactive (it has scripts o
 pub(crate) const INTERACTIVE_PICTURE: &str = "This output is interactive (it has scripts or controls). The picture shows how it looks, not that its controls work: you haven't seen them work. In your answer, ask the user to check that its hover, zoom or other controls work, and don't describe them as working. Keep it as it is, and don't switch plotting packages.";
 
 /// What `view_cell_output` tells the agent about a plain image output (#407).
-pub(crate) const STATIC_PICTURE: &str = "This output is a still image: it has no hover, zoom or other controls. Don't describe it as interactive. If the user asked for an interactive plot, say this one isn't.";
+pub(crate) const STATIC_PICTURE: &str = "This output is a picture with no controls: it has no hover, zoom or other controls of its own. Don't describe it as interactive. If the user asked for an interactive plot, say this one isn't.";
 
 /// Marks a picture of an interactive output as one, with what the agent may say about it after
 /// any message the picture already has.
