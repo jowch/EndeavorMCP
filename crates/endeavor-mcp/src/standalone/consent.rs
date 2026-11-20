@@ -39,18 +39,18 @@ const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog tha
 const MACHINE_SWAPS: &[(&str, &str)] = &[
     (
         "ask the user, and call again with `install` true only if they agree",
-        "Endeavor asks the user itself, in a dialog that names it, when you call again with `install` true, so tell the user it needs their OK and call again; don't ask in the chat first",
+        "Endeavor then asks the user itself, at once, in a dialog that names it, and installs it only on their yes; don't ask in the chat first",
     ),
     (
         "`needs_install`: ask the user, and call again with `install` true only if they agree to what the result names",
-        "`needs_install`: tell the user it needs their OK and call again with `install` true; Endeavor asks the user itself, in a dialog that names what it installs, so don't ask in the chat first",
+        "`needs_install` doesn't come back: Endeavor asks the user itself, at once, in a dialog that names what it installs, and installs it only on their yes; don't ask in the chat first",
     ),
     (
         "the result is `needs_install`: ask the user, and set `install` only if they agree",
-        "the result is `needs_install`: tell the user it needs their OK and call again with `install` true; Endeavor asks the user itself in a dialog, so don't ask in the chat first",
+        "Endeavor asks the user itself, at once, in a dialog, and installs it only on their yes; don't ask in the chat first",
     ),
-    ("Only after the user agreed to what `needs_install` named; never on a first call.", "Endeavor asks the user in a dialog first and installs only on their yes."),
-    ("Only after the user agreed; this call only; never on a first call.", "Endeavor asks the user in a dialog first and installs only on their yes; this call only."),
+    ("Only after the user agreed to what `needs_install` named; never on a first call.", "Not needed: where something has to be installed, Endeavor asks the user in a dialog and installs only on their yes."),
+    ("Only after the user agreed; this call only; never on a first call.", "Where something has to be installed, Endeavor asks the user in a dialog and installs only on their yes; set it only for what a notebook tool's message asks for, such as Julia or R not found."),
 ];
 
 #[derive(Default)]

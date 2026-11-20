@@ -371,7 +371,7 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
 /// The step of `install_text` that has the agent ask in the chat, and what it says instead where
 /// Endeavor asks the user itself in a dialog (#378).
 const ASK_IN_CHAT: &str = "Ask the user whether Endeavor may do that. Only if they agree, call ";
-const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what it installs: tell the user it needs their OK, then call ";
+const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what it installs, as soon as a call needs it: tell the user it needs their OK, then call ";
 const CALL_END_IN_CHAT: &str = " and `install: true`.";
 const CALL_END_IN_DIALOG: &str = " and `install: true` now; don't ask in the chat first.";
 
@@ -1021,7 +1021,7 @@ impl Relay {
         let dialog = self.consent.can_ask();
         // Nothing installs on the user's machines unless they say yes to it themselves, where the
         // client can ask them (#378): the agent's `install: true` alone isn't their yes.
-        let result = if dialog && tool != "list_machines" && arguments["install"] == true {
+        let result = if dialog && tool != "list_machines" {
             match self.install_asked(message, tool, &arguments, deadline) {
                 Some(result) => result,
                 None => return,
@@ -1050,12 +1050,14 @@ impl Relay {
         }
     }
 
-    /// A machine tool's call with `install: true`, where the client can show a form: the same call
-    /// without it first, which installs nothing and says what would be installed. Only if something
-    /// would be, the user is asked in a dialog that names it, and the call goes ahead with `install`
-    /// only on their yes. `use_machine` on a runtime that runs already gives it leave to download
-    /// Julia (or, on this computer, install R) when a notebook needs it: that is asked about too.
-    /// None when the client cancelled the call: it gets no reply.
+    /// A machine tool's call where the client can show a form: the call without `install` first,
+    /// which installs nothing and says what would be installed. Only if something would be, the user
+    /// is asked in a dialog that names it, then and there, whether or not the agent set `install`, and
+    /// the call goes ahead with `install` only on their yes. An agent that was to call again for the
+    /// install often didn't, so the dialog never came (#380's smoke runs). `use_machine` with
+    /// `install: true` on a runtime that runs already gives it leave to download Julia (or, on this
+    /// computer, install R) when a notebook needs it: that is asked about too. None when the client
+    /// cancelled the call: it gets no reply.
     fn install_asked(self: &Arc<Self>, message: &Value, tool: &str, arguments: &Value, deadline: Deadline) -> Option<Result<Value, String>> {
         self.consent.looking(message);
         let mut look = arguments.clone();
@@ -1070,15 +1072,17 @@ impl Relay {
                 let items: Vec<wire::Item> = serde_json::from_value(result["install"]["items"].clone()).unwrap_or_default();
                 Some(install_question(&name, &items, tool))
             }
-            Ok(result) if tool == "use_machine" && result["ready"] == true => Some(leave_question(&machine)),
+            Ok(result) if tool == "use_machine" && arguments["install"] == true && result["ready"] == true => Some(leave_question(&machine)),
             _ => None,
         };
         let Some(question) = question else {
             return (!self.consent.not_asking(message)).then_some(looked);
         };
         let again = format!("`{tool}` again");
+        let mut install = arguments.clone();
+        install["install"] = true.into();
         match self.consent.ask_install(message, &question, &again, &|line| self.write(line)) {
-            Ok(true) => Some(self.run_machine_tool(tool, arguments, Deadline::after(super::start_wait()))),
+            Ok(true) => Some(self.run_machine_tool(tool, &install, Deadline::after(super::start_wait()))),
             Ok(false) => None,
             // The session moved in the look, which installed nothing: the agent hears both.
             Err(refused) if tool == "use_machine" && looked.as_ref().is_ok_and(|r| r["ready"] == true) => {

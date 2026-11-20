@@ -263,7 +263,7 @@ something subtle, make it soft.
 | `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
 | `R2-first-package` | a dplyr table and its mean in a new R notebook | R's first package install: the agent waits through it and doesn't run the cells again; when the install outlasts a waited run, the tools say R is getting dplyr ready (#78) |
 | `R3-moved-input` | the mean above a cutoff, with the user's slider moved first | N12 in R: before the agent looks, the user moves an emberui slider off its default. The readers get the `uses_moved_input` note, and the agent must say that the answer used 4 and that the file's default is 2.5 |
-| `M1-machine` | add my server and compute something in a notebook in a folder there; the dialog's hook says yes | `add_machine`'s `needs_install`: Endeavor asks the user in its own dialog, which names the helper, and installs only on the yes; the agent then works on the server (#378) |
+| `M1-machine` | add my server and compute something in a notebook in a folder there; the dialog's hook says yes | Endeavor's helper is missing there: Endeavor asks the user in its own dialog, which names it, during the agent's call, and installs only on the yes; the agent then works on the server (#378) |
 | `M3-install-declined` | M1, with the hook saying no | nothing is installed; the agent tells the user and makes no notebook on this computer instead |
 | `M2-no-reach` | a notebook on a server that refuses connections | the agent reports the failure, doesn't ask for a password, and makes no notebook here instead |
 
