@@ -1186,15 +1186,28 @@ class Adapter:
         await self.start(nb)
         return {"restarted": True}
 
-    async def approve(self, nb):
+    async def approve(self, nb, packages=None):
         """The user's yes to the packages a notebook asks about (#355): they install, and the cells that
-        waited run, under a run that `run_finished` reports the end of."""
+        waited run, under a run that `run_finished` reports the end of. `packages`, when given, are the
+        PyPI names the user was shown: the yes covers only those (#418). A package added since keeps
+        asking, and the cells wait for it too; a yes that names none of what waits approves nothing."""
         a = nb.asking
         if not a or not nb.live:
             raise argument_error("nothing_to_approve", "Nothing in this notebook waits for the user's OK")
-        nb.asking = None
-        nb.approved |= set(a["modules"])
+        if packages is None:
+            ok = list(a["packages"])
+        else:
+            want = {canonical(str(p)) for p in packages}
+            ok = [p for p in a["packages"] if canonical(p) in want]
+        left = [p for p in a["packages"] if p not in ok]
         cells = [c for c in a["cells"] if c in nb.cells]
+        if not ok:
+            return {"approved": False, "packages": [], "asking": a["packages"], "cells": cells}
+        nb.approved |= {m for m in a["modules"] if pypi_name(m) not in left}
+        if left:
+            a["packages"] = left
+            return {"approved": True, "packages": ok, "asking": left, "cells": cells}
+        nb.asking = None
         # Marked now: a read straight after the OK sees them wait for the install, not their import error.
         for c in cells:
             nb.cells[c]["status"], nb.cells[c]["queued_by_us"], nb.cells[c]["awaiting_install"] = "queued", True, True
@@ -1204,7 +1217,7 @@ class Adapter:
                 await self.start_run(nb, cells, watch=False)
 
         run = self.watch(nb, cells, True, install_and_run())
-        return {"approved": True, "packages": a["packages"], "cells": cells, "run": run}
+        return {"approved": True, "packages": ok, "cells": cells, "run": run}
 
     async def shutdown(self, nb):
         safe_preview = not nb.allowed
@@ -1284,7 +1297,8 @@ class Adapter:
             nb.check_cell(p.get("cell_id"))
             return self.validate(nb, str(p.get("code") or ""))
         if method == "approve_install":
-            return await self.approve(nb)
+            packages = p.get("packages")
+            return await self.approve(nb, packages if isinstance(packages, list) else None)
         if method in ("answer", "preview_packages", "set_package_date", "set_input"):
             raise argument_error("not_supported", "Python notebooks can't do this yet: it works in Julia and R notebooks")
         raise argument_error("unknown_method", f"Unknown adapter method: '{method}'")

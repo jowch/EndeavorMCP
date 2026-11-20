@@ -1005,6 +1005,40 @@ fn a_held_call_answers_as_an_event_stream_at_once() {
 }
 
 #[test]
+fn a_yes_on_the_apps_card_approves_only_the_packages_the_card_named() {
+    let dir = state_dir("core-approve-names");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    const NB: &str = "aaaaaaaa-0000-0000-0000-000000000002";
+    bridge.set_notebooks(vec![serde_json::json!({
+        "notebook_id": NB, "path": "/n/a.jl", "cell_order": [], "execution_allowed": true, "safe_preview": false, "pending_run": [], "cells": [],
+    })]);
+    // The app's agent: its yes is the card's.
+    let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Client", "app")];
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{"owner":"7","policy":"auto","asks":true}}"#);
+    let mut events = core.connect();
+    let mut reader = BufReader::new(events.try_clone().unwrap());
+    write!(events, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
+    event_where(&mut reader, |_| true);
+    let sent = || {
+        bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).map(|s| serde_json::from_slice::<serde_json::Value>(&s.body).unwrap()).filter(|c| c["method"] == "approve_install").collect::<Vec<_>>()
+    };
+    let call = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "approve_install", "arguments": { "notebook_id": NB, "packages": ["CSV", "JSON"] } } }).to_string();
+    std::thread::scope(|scope| {
+        // The card named CSV only: JSON, which the agent names too, came after it, and the yes doesn't cover it (#418).
+        let waits = scope.spawn(|| mcp(&core, &call, &caller).1);
+        let ask = event_where(&mut reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()))["asks"][0].clone();
+        assert_eq!(ask["tool"], "approve_install");
+        assert!(sent().is_empty(), "not before the answer");
+        app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":3,"method":"endeavor/answer_run","params":{{"id":{},"allow":true,"user_ran":[],"packages":["csv"]}}}}"#, ask["id"]));
+        waits.join().unwrap();
+    });
+    let sent = sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["params"]["packages"], serde_json::json!(["csv"]), "{sent:?}");
+}
+
+#[test]
 fn in_manual_an_edit_waits_for_the_users_answer() {
     let dir = state_dir("core-manual");
     let bridge = FakeBridge::start(&dir);

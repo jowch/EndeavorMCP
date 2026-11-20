@@ -275,14 +275,26 @@ end
 forget_packages!(notebook_id::UUID) = lock(() -> (delete!(_ASKING, notebook_id); delete!(_APPROVED, notebook_id)), _ASKING_LOCK)
 
 # The user's yes to the packages a notebook asks about: they install, and the
-# held cells run.
-function approve_install!(session, nb, timeout::Real)
-    a = lock(() -> pop!(_ASKING, nb.notebook_id, nothing), _ASKING_LOCK)
+# held cells run. `packages`, when given, are the ones the user was shown: the
+# yes covers only those (#418). A package added since asks again, and the held
+# cells wait for that too; a yes that names none of what waits approves nothing.
+function approve_install!(session, nb, timeout::Real; packages=nothing)
+    seen = packages === nothing ? nothing : Set(String[string(p) for p in packages])
+    a, ok = lock(_ASKING_LOCK) do
+        a = get(_ASKING, nb.notebook_id, nothing)
+        a === nothing && return (nothing, String[])
+        ok = seen === nothing ? a.packages : filter(in(seen), a.packages)
+        isempty(ok) && return (a, ok)
+        delete!(_ASKING, nb.notebook_id)
+        union!(get!(Set{String}, _APPROVED, nb.notebook_id), ok)
+        (a, ok)
+    end
     a === nothing && throw(ArgumentError("nothing_to_approve::Nothing in this notebook waits for the user's OK"))
-    lock(() -> union!(get!(Set{String}, _APPROVED, nb.notebook_id), a.packages), _ASKING_LOCK)
+    cells = [string(c.cell_id) for c in a.cells]
+    isempty(ok) && return Dict{String,Any}("approved" => false, "packages" => String[], "asking" => a.packages, "cells" => cells)
     # Still asks about a package that is new since the question.
     ran = run_cells!(session, nb, a.cells; wait=false, timeout, ask_new=true)
-    return merge!(Dict{String,Any}("approved" => true, "packages" => a.packages, "cells" => [string(c.cell_id) for c in a.cells]), ran)
+    return merge!(Dict{String,Any}("approved" => true, "packages" => ok, "cells" => cells), ran)
 end
 
 function _asking_step(nb)
@@ -715,7 +727,7 @@ function adapter_call(session, method::AbstractString, params)
     method == "shutdown" && return shutdown_notebook!(session, nb)
     method == "apply" && return apply!(session, nb, params["ops"])
     method == "run" && return run_cells!(session, nb, [_adapter_cell(nb, c) for c in params["cells"]]; wait=params["wait"], timeout=params["timeout"], ask_new=get(params, "ask_new", false))
-    method == "approve_install" && return approve_install!(session, nb, get(params, "timeout", 30))
+    method == "approve_install" && return approve_install!(session, nb, get(params, "timeout", 30); packages=get(params, "packages", nothing))
     method == "interrupt" && return interrupt!(session, nb)
     method == "restart" && return restart!(session, nb, params["timeout"]; ask_new=get(params, "ask_new", false))
     method == "allow_execution" && return allow_execution!(session, nb, params["run"], params["timeout"]; ask_new=get(params, "ask_new", false))

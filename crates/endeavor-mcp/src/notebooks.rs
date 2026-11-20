@@ -1715,6 +1715,24 @@ fn parse_uuid(text: &str) -> Option<String> {
     valid.then(|| text.to_ascii_lowercase())
 }
 
+/// The packages an `approve_install` covers once the user's yes names `seen` (#418): those of
+/// `asked` (the call's own `packages`, if it has any) that the user saw too, so a yes never widens
+/// what the call asked for. Names compare as PyPI's do (case, `-`, `_`, `.`), and the names that
+/// go on are the ones the user saw.
+pub(crate) fn seen_packages(asked: Option<&Value>, seen: &Value) -> Value {
+    let names = |v: &Value| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
+    // Case and `-`, `_`, `.` aside, as PyPI compares; what goes on is the name the user saw.
+    let key = |name: &str| name.to_lowercase().replace(['_', '.'], "-");
+    let seen = names(seen);
+    match asked.filter(|a| a.is_array()) {
+        Some(asked) => {
+            let asked: Vec<String> = names(asked).iter().map(|p| key(p)).collect();
+            json!(seen.into_iter().filter(|p| asked.contains(&key(p))).collect::<Vec<_>>())
+        }
+        None => json!(seen),
+    }
+}
+
 /// A JSON value as Julia's `UUID(value)` takes it: a UUID string, or a
 /// whole number (a Bool is 0 or 1).
 pub(crate) fn uuid_value(value: &Value) -> Option<String> {

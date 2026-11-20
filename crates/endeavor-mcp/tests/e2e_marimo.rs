@@ -402,7 +402,13 @@ fn a_python_notebook_through_the_runtime() {
         assert!(read["errored"] == false && read["queued"] == true, "a cell waiting for an OK doesn't show the import error: {read}");
         assert!(read["message"].as_str().unwrap_or_default().contains("Python has to install packages this notebook doesn't have yet: boto3"), "{read}");
         assert!(!header(&folder.join(&name)).contains("boto3"), "nothing installed before the OK");
-        let approved = agent.ok("approve_install", json!({ "notebook_id": id }));
+        // A yes to a question that named other packages approves nothing (#418).
+        let stale = agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["pandas"] }));
+        assert!(stale["approved"] == false && stale["asking"] == json!(["boto3"]), "{stale}");
+        assert!(stale["message"].as_str().unwrap_or_default().contains("Nothing was approved"), "{stale}");
+        assert!(until(&mut agent, "asking")["download"]["packages"] == json!([{ "package": "boto3" }]), "it still asks");
+        // The names compare as PyPI's do.
+        let approved = agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["Boto3"] }));
         assert!(approved["approved"] == true && approved["packages"] == json!(["boto3"]), "{approved}");
         // The install is under way (slowed by ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS) and says what it installs.
         let installing = until(&mut agent, "installing");

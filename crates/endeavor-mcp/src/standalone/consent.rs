@@ -276,6 +276,18 @@ impl Consent {
         })
     }
 
+    /// The new packages `download_question` names, which a yes to it approves and no others (#418):
+    /// the call that goes on carries them, so a package added after the question asks again. None
+    /// for R's download, which asks about what downloads, not about names.
+    pub(super) fn seen_packages(waiting: &Waiting) -> Option<Value> {
+        match waiting {
+            Waiting::Asking { download, .. } if download["new"] == true => {
+                Some(download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).map(Value::from).collect())
+            }
+            _ => None,
+        }
+    }
+
     /// Before `approve_install` reaches the runtime where the client can't show a dialog (#388): the
     /// user's click on a page in their browser, through `pages`, waiting up to `wait`. `page` says
     /// whether a browser can be opened. As `ask` answers.
@@ -659,6 +671,15 @@ mod tests {
 
     fn all() -> Waiting {
         Waiting::Asking { download: json!({ "bytes": 11385380, "packages": [{ "package": "ALL", "version": "1.44.0", "bytes": 11385380 }] }), name: "leukemia.R".to_owned() }
+    }
+
+    #[test]
+    fn a_yes_to_new_packages_names_those_the_question_named_and_an_r_download_none() {
+        let new = Waiting::Asking { download: json!({ "new": true, "packages": [{ "package": "CSV" }, { "package": "JSON" }] }), name: "a.jl".to_owned() };
+        assert_eq!(Consent::seen_packages(&new), Some(json!(["CSV", "JSON"])));
+        assert!(Consent::download_question(&new).unwrap().contains("CSV, JSON"), "the names the question shows");
+        assert_eq!(Consent::seen_packages(&all()), None);
+        assert_eq!(Consent::seen_packages(&Waiting::Nothing), None);
     }
 
     /// Ask, with the client answering `answer` (or an error) to whatever it is sent; what it was sent.

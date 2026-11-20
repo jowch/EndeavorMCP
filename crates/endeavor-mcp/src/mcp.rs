@@ -402,7 +402,11 @@ impl Bridge {
                 self.policies.lock().unwrap().insert(owner, Policy { policy, asks, edits });
             }
             "endeavor/answer_run" => {
-                let given = Answer { allow: params["allow"] == true, user_ran: params.get("user_ran").cloned().unwrap_or_else(|| json!([])) };
+                let given = Answer {
+                    allow: params["allow"] == true,
+                    user_ran: params.get("user_ran").cloned().unwrap_or_else(|| json!([])),
+                    packages: params.get("packages").filter(|p| p.is_array()).cloned(),
+                };
                 let id = params["id"].as_u64().ok_or_else(|| "ArgumentError: invalid_argument::id must be a number".to_owned());
                 return Some(answer(id.and_then(|id| self.notebooks.asks.answer(id, given)).map(|()| json!({}))));
             }
@@ -594,7 +598,7 @@ impl Bridge {
         // differently, not a host-tool mistake (its own tools, not these) or a
         // refusal that already says exactly what to do.
         let help = !caller.has_skills;
-        let (name, arguments) = match call_parts(params, help, false) {
+        let (name, mut arguments) = match call_parts(params, help, false) {
             Ok(call) => call,
             Err(result) => return result,
         };
@@ -639,7 +643,7 @@ impl Bridge {
             // was asked once. The call then waits for that one and can't start another.
             let started = host_tools::started(name, &arguments, &shell);
             if started.is_none()
-                && let Err(result) = self.ask_first(call, name, &arguments)
+                && let Err(result) = self.ask_first(call, name, &mut arguments)
             {
                 return result;
             }
@@ -656,7 +660,7 @@ impl Bridge {
         if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments, &folder) {
             return tool_error(&refusal, help);
         }
-        let run = match self.ask_first(call, name, &arguments) {
+        let run = match self.ask_first(call, name, &mut arguments) {
             Ok(run) => run,
             Err(result) => return result,
         };
@@ -720,7 +724,7 @@ impl Bridge {
     /// (`asks_first`). Whether it runs as asked; false for an edit the user
     /// didn't let run in Ask to run, which is made but not run. Otherwise the
     /// call's result: refused, cancelled, or with no app to ask.
-    fn ask_first(&self, call: &Call, tool: &str, arguments: &Value) -> Result<bool, Value> {
+    fn ask_first(&self, call: &Call, tool: &str, arguments: &mut Value) -> Result<bool, Value> {
         let owner = &call.caller.owner;
         let (held, edits) = match self.policies.lock().unwrap().get(owner) {
             Some(p) if p.asks => (asks_first(tool, arguments, &p.policy, p.edits), p.edits),
@@ -755,7 +759,13 @@ impl Bridge {
         let outcome = self.notebooks.asks.wait(id, call.gone, deadline);
         self.notebooks.publish();
         match outcome {
-            Outcome::Answered(Answer { allow: true, user_ran }) => {
+            Outcome::Answered(Answer { allow: true, user_ran, packages }) => {
+                // The yes covers the packages the user's card named, and no package held since (#418).
+                if tool == "approve_install"
+                    && let Some(packages) = packages
+                {
+                    arguments["packages"] = crate::notebooks::seen_packages(arguments.get("packages"), &packages);
+                }
                 if matches!(tool, "open_notebook" | "new_notebook") {
                     self.starting_calls.lock().unwrap().insert(owner.clone(), (tool.to_owned(), arguments.clone(), Instant::now()));
                 }
@@ -1408,7 +1418,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (42, "41002f1d5cab4d9c"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (43, "83a03363ad0d42c5"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1455,7 +1465,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (42, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (43, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

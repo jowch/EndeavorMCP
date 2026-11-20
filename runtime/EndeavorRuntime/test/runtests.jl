@@ -846,6 +846,18 @@ end
             @test adapter("approve_install", Dict("notebook_id" => nid)) == Dict("error" => "ArgumentError: nothing_to_approve::Nothing in this notebook waits for the user's OK")
             # Once in the notebook, it asks nothing.
             @test !haskey(run_asking([pkg]), "asking")
+            # A yes covers the packages the user was shown (#418): one that names none of what waits approves nothing.
+            two = insert("using JSON, CSV", 4)
+            @test run_asking([two])["asking"] == ["CSV", "JSON"]
+            stale = result("approve_install", Dict("notebook_id" => nid, "timeout" => 60, "packages" => ["Example"]))
+            @test (stale["approved"], stale["asking"]) == (false, ["CSV", "JSON"]) && nb.cells_dict[UUID(two)].queued
+            # Asked about JSON when CSV came since: the yes covers JSON, and CSV asks on its own.
+            partial = result("approve_install", Dict("notebook_id" => nid, "timeout" => 60, "packages" => ["JSON"]))
+            @test (partial["approved"], partial["packages"], partial["asking"]) == (true, ["JSON"], ["CSV"])
+            @test nb.cells_dict[UUID(two)].queued && !haskey(Pluto.PkgCompat.project(nb.nbpkg_ctx).dependencies, "JSON")
+            @test [p["package"] for p in result("snapshot", Dict("notebook_id" => nid))["packages"]["download"]["packages"]] == ["CSV"]
+            result("interrupt", Dict("notebook_id" => nid))
+            result("apply", ops(Dict("op" => "delete", "cell_id" => two)))
             result("apply", ops(Dict("op" => "delete", "cell_id" => pkg), Dict("op" => "delete", "cell_id" => stdlib)))
             result("run", Dict("notebook_id" => nid, "cells" => [], "wait" => true, "timeout" => 60))
 

@@ -675,11 +675,18 @@
     "name": "apply_package_update"
   },
   {
-    "description": "Say yes to an install that waits for the user's OK. In an R notebook, an install whose Bioconductor annotation and experiment-data packages add up to more than 500 MB (Ember's default limit) stops before downloading anything. In a Julia notebook, a run whose cells use a package the notebook doesn't have yet (not in its environment) stops before installing it. Either way the cells wait, queued, with `packages.step` `asking` and `packages.download` listing the packages (and an R download's sizes; a Julia notebook's has `packages.new`). It doesn't ask the user: calling it is the user's yes. Ask them first, end your reply, and call it only once they have said yes in a later message; never on your own. Refused with `nothing_to_approve` when no install is waiting for an OK, or the notebook isn't allowed to run yet. The packages then install and the queued cells run.",
+    "description": "Say yes to an install that waits for the user's OK. In an R notebook, an install whose Bioconductor annotation and experiment-data packages add up to more than 500 MB (Ember's default limit) stops before downloading anything. In a Julia or Python notebook, a run whose cells use a package the notebook doesn't have yet (not in its environment) stops before installing it. Either way the cells wait, queued, with `packages.step` `asking` and `packages.download` listing the packages (and an R download's sizes; a Julia or Python notebook's has `packages.new`). It doesn't ask the user: calling it is the user's yes. Ask them first, end your reply, and call it only once they have said yes in a later message; never on your own. Refused with `nothing_to_approve` when no install is waiting for an OK, or the notebook isn't allowed to run yet. The packages then install and the queued cells run. With `packages`, only those are approved: a package the notebook came to need since the user was asked waits for their OK of its own, and the result's `asking` names it.",
     "inputSchema": {
       "properties": {
         "notebook_id": {
           "type": "string"
+        },
+        "packages": {
+          "description": "The packages the user said yes to, as `packages.download` named them when you asked. Leave it out for the packages that wait.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
