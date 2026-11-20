@@ -49,8 +49,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   the browser's history) and could install things itself anyway. The front's
   log says whether each client shows dialogs (`[ Info: Client …: shows
   dialogs: yes|no`). A client can say it shows them and not: one that answers
-  the dialog with an error, or closes it in under 0.7 s, before anyone could
-  read it (`claude -p` does), is taken for one without dialogs from then on,
+  the dialog with "Method not found", or with another error or a close in
+  under 0.7 s, before anyone could read it (`claude -p` closes it so), is taken for one without dialogs from then on,
   and that call asks on the page instead (if it would have opened one). Which
   clients really show the dialog is still to be checked by hand (#381).
   The same page asks before `approve_install` passes an R notebook's large

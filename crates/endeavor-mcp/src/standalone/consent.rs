@@ -135,6 +135,15 @@ pub(super) enum Waiting {
 }
 
 /// What the user said.
+/// Where the user can be asked about a download neither in a dialog nor on a page.
+const DOWNLOAD_CANT_ASK: &str = "download_cant_ask::Endeavor can't ask the user from this app: it can neither show its dialog nor open a page in their browser. So nothing downloads, and calling approve_install again won't download it. Tell the user what would download and its size, and that they can approve it with the button on the notebook's page: its link is the notebook's browser_url from open_notebook or list_notebooks, and where that page is on another computer, the note that came with it says how to reach it. Don't work around it.";
+
+/// `approve_install`'s refusal where no one was asked: what passes on to the runtime is only ever
+/// the user's yes.
+pub(super) fn download_cant_ask() -> Value {
+    tool_error(DOWNLOAD_CANT_ASK, false)
+}
+
 pub(super) enum Asked {
     /// They said yes: pass the call on.
     Yes,
@@ -237,7 +246,7 @@ impl Consent {
             Clicked::Dropped => return Asked::Dropped,
             Clicked::Declined => "download_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing downloads and the cells that need it stay queued. Endeavor won't ask them about it again for 10 minutes: until then, approve_install gets this same answer. Tell the user, and don't call it again unless they ask. If they change their mind, the page they answered has an Install button, and the notebook's page has its own: once they say they clicked one, call approve_install again.",
             Clicked::NotYet => "download_not_answered::Endeavor opened a page in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user to answer that page, and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes. The notebook's page also has its own button.",
-            Clicked::NoBrowser => "download_cant_ask::Endeavor can't ask the user from this app: it can neither show its dialog nor open a page in their browser. So nothing downloads, and calling approve_install again won't download it. Tell the user what would download and its size, and that they can approve it with the button on the notebook's page: its link is the notebook's browser_url from open_notebook or list_notebooks, and where that page is on another computer, the note that came with it says how to reach it. Don't work around it.",
+            Clicked::NoBrowser => DOWNLOAD_CANT_ASK,
         };
         Asked::No(tool_error(why, false))
     }
@@ -361,7 +370,10 @@ impl Consent {
         // page, this call too, so the call stays the front's to cancel.
         let shown = match (action.as_str(), &answer) {
             ("cancel", _) => sent.elapsed() >= DIALOG_GONE,
-            (_, Some(answer)) => answer.get("error").is_none(),
+            // Only an error that says the client has no dialog, or that comes before anyone could
+            // have seen one: a later error (a dialog that broke while up) is no reason to stop
+            // asking in dialogs for good.
+            (_, Some(answer)) => answer.get("error").is_none_or(|error| error["code"] != -32601 && sent.elapsed() >= DIALOG_GONE),
             _ => true,
         };
         let mut calls = self.calls.lock().unwrap();
@@ -612,6 +624,31 @@ mod tests {
         answering.join().unwrap();
         assert_eq!(install, Err(NO_DIALOG.to_owned()));
         assert!(!consent.can_ask());
+        // Another error is no dialog only when it comes at once: one that comes after a dialog could
+        // have been up (it broke) keeps the client's dialogs.
+        let other_error = |after: Duration| {
+            let consent = Arc::new(Consent::default());
+            consent.learn_client(&initialize(json!({ "form": {} })));
+            let consent2 = consent.clone();
+            let (to_client, client) = mpsc::channel::<String>();
+            let answering = std::thread::spawn(move || {
+                for line in client {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    if request.get("id").is_some() {
+                        std::thread::sleep(after);
+                        assert!(consent2.take_answer(&json!({ "jsonrpc": "2.0", "id": request["id"], "error": { "code": -32603, "message": "Internal error" } })));
+                    }
+                }
+            });
+            consent.looking(&call());
+            let got = consent.ask(&call(), all(), &|line| to_client.send(line.to_owned()).unwrap());
+            drop(to_client);
+            answering.join().unwrap();
+            (got, consent.can_ask())
+        };
+        assert!(matches!(other_error(Duration::ZERO), (Asked::NoDialog, false)));
+        let (got, dialogs) = other_error(DIALOG_GONE + Duration::from_millis(50));
+        assert!(dialogs && !matches!(got, Asked::NoDialog | Asked::Yes), "a late error isn't a yes or the end of dialogs");
     }
 
     #[test]

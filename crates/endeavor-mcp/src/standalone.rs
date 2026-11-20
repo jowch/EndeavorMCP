@@ -1267,7 +1267,10 @@ impl Relay {
                 // After a click, the call gets what's left of the client's budget for it.
                 consent::Asked::Yes if dialog => deadline = machines::Deadline::after(start_wait()),
                 consent::Asked::Yes => deadline = machines::Deadline::after(machines::PAGE_CALL.saturating_sub(began.elapsed()).max(machines::MIN_INSTALL)),
-                consent::Asked::Unasked | consent::Asked::NoDialog => {}
+                consent::Asked::Unasked => {}
+                // Not reached (`ask_on_page` answers for itself), but a call nobody asked about
+                // never passes on as if they had said yes.
+                consent::Asked::NoDialog => return self.answer_call(&message, tool.as_deref(), consent::download_cant_ask()),
             }
         }
         // These two use a runtime that is running, and start none.
