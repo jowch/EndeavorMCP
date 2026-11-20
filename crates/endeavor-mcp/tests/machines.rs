@@ -2290,6 +2290,34 @@ fn where_the_client_cant_show_a_dialog_the_user_says_yes_on_a_page_in_their_brow
 }
 
 #[test]
+fn a_client_that_says_it_shows_dialogs_and_doesnt_gets_the_page() {
+    // A client can say it shows forms and answer the front's dialog with an error, or close it at
+    // once, without showing it (#381). The front asks on the page from then on.
+    let place = Place::bare("no-dialog-shown", &[("ENDEAVOR_TEST_PAGE_WAIT_MS", "1500")]);
+    let julia = place.julia.display().to_string();
+    let mut front = place.front();
+    front.dialog = Some("error");
+    front.click_pages(Some("install"));
+    front.initialize();
+    // The first look tries the dialog, gets the error, and opens no page: the agent hasn't set `install`.
+    let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!(first["state"], "needs_install", "{first}");
+    assert_eq!(front.asked.len(), 1);
+    assert!(front.pages.lock().unwrap().is_empty(), "a look opens no page");
+    assert!(text(&first).contains("on a page that it opens in their browser"), "the agent hears where the user is asked now: {first}");
+    // The tools say so too.
+    let listed = front.request("tools/list", json!({}));
+    let add = listed["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "add_machine").unwrap().clone();
+    assert!(add["inputSchema"]["properties"]["install"]["description"].as_str().unwrap().contains("on a page in their browser"), "{add}");
+    // `install: true` asks on the page, never in the dialog again, and the click installs it.
+    let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert_eq!((done["state"].as_str(), done["saved"].clone()), (Some("connected"), json!(true)), "{done}");
+    assert_eq!(front.asked.len(), 1, "no second dialog");
+    assert_eq!(front.pages.lock().unwrap().len(), 1);
+    assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
+}
+
+#[test]
 fn without_a_dialog_or_a_browser_nothing_is_installed() {
     let place = Place::bare("no-browser-install", &[]);
     let mut command = julia_when_needed_front(&place, &["--folder", &place.project.display().to_string()], &[]);

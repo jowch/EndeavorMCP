@@ -48,10 +48,15 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   shell on the same computer can find the link (the opener's command line,
   the browser's history) and could install things itself anyway. The front's
   log says whether each client shows dialogs (`[ Info: Client …: shows
-  dialogs: yes|no`).
+  dialogs: yes|no`). A client can say it shows them and not: one that answers
+  the dialog with an error, or closes it in under 0.7 s, before anyone could
+  read it (`claude -p` does), is taken for one without dialogs from then on,
+  and that call asks on the page instead (if it would have opened one). Which
+  clients really show the dialog is still to be checked by hand (#381).
   The same page asks before `approve_install` passes an R notebook's large
   download on, where the client can't show a dialog (#388). Its question
-  names the notebook, so a held yes is for that notebook only; when the front
+  names the notebook by its whole path, so a held yes is for that notebook
+  only, even beside another with the same file name; when the front
   can't read what downloads, the question says so and its yes holds for one
   call. With no browser either, `approve_install` downloads nothing
   (`download_cant_ask`) and the user approves it with the notebook page's own

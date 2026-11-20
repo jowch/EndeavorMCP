@@ -1081,6 +1081,8 @@ impl Relay {
         } else {
             self.run_machine_tool(tool, &arguments, deadline)
         };
+        // A client that said it shows dialogs and didn't is told about the page from this call on.
+        let dialog = dialog && self.consent.can_ask();
         let page = !dialog && self.page_shows();
         let result = match result {
             Ok(mut result) => {
@@ -1156,15 +1158,22 @@ impl Relay {
         let again = format!("`{tool}` again");
         let mut install = arguments.clone();
         install["install"] = true.into();
-        let dialog = self.consent.can_ask();
-        let asked = if dialog {
-            self.consent.ask_install(message, &question, &again, &|line| self.write(line))
-        } else if self.page_shows() {
-            self.ask_on_page(message, &question, &again, began)
-        } else {
-            self.consent.not_asking(message);
-            Err(CANT_ASK_ERROR.to_owned())
-        };
+        let mut dialog = self.consent.can_ask();
+        let mut asked = if dialog { self.consent.ask_install(message, &question, &again, &|line| self.write(line)) } else { Err(super::consent::NO_DIALOG.to_owned()) };
+        // No dialog, or one the client said it would show and didn't (#381): the page.
+        if asked.as_ref().is_err_and(|e| e == super::consent::NO_DIALOG) {
+            dialog = false;
+            // As for any client without dialogs, the page opens only once the agent sets `install`.
+            if !wants_install {
+                return (!self.consent.not_asking(message)).then_some(looked);
+            }
+            asked = if self.page_shows() {
+                self.ask_on_page(message, &question, &again, began)
+            } else {
+                self.consent.not_asking(message);
+                Err(CANT_ASK_ERROR.to_owned())
+            };
+        }
         // A client that can't show a dialog may give the call no more than a minute (Codex), and the
         // front alone waits for the click: the install gets what is left of that.
         let install_wait = if dialog { super::start_wait() } else { PAGE_CALL.saturating_sub(began.elapsed()).max(MIN_INSTALL) };
