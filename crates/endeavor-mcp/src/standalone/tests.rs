@@ -723,7 +723,6 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
     assert_eq!(approvals(), 2);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_yes_to_new_packages_passes_on_the_names_the_dialog_showed() {
     // The yes is to what the question named (#418): the runtime approves only those, so a package
@@ -754,8 +753,15 @@ fn a_yes_to_new_packages_passes_on_the_names_the_dialog_showed() {
     assert_eq!(forwarded(json!({ "notebook_id": nb }))["packages"], json!(["CSV"]));
     // The agent's own list can narrow the yes, never widen it.
     assert_eq!(forwarded(json!({ "notebook_id": nb, "packages": ["CSV", "JSON"] }))["packages"], json!(["CSV"]));
+    // Nothing waited when the front looked, so no one was asked: the call names no packages, and one
+    // held since approves nothing unseen.
+    relay.handle(&json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "approve_install", "arguments": { "notebook_id": "1b2c3d4e-0000-4000-8000-000000000002", "packages": ["JSON"] } } }).to_string());
+    assert!(!out.lines().iter().any(|l| l.contains("elicitation/create")));
+    let last: Value = serde_json::from_str(&seen.lock().unwrap().iter().rfind(|(_, b)| b.contains("approve_install")).unwrap().1).unwrap();
+    assert_eq!(last["params"]["arguments"]["packages"], json!([]), "{last}");
 }
 
+#[cfg(unix)]
 #[test]
 fn approve_install_asks_when_the_runtime_cant_be_looked_at() {
     // A runtime the front can't reach now may be by the call itself, which reconnects: the front can't

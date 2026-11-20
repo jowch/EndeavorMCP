@@ -1287,13 +1287,15 @@ impl Relay {
                 consent::Asked::NoDialog | consent::Asked::Silent => return self.answer_call(&message, tool.as_deref(), consent::download_cant_ask()),
             }
             // The yes is to the packages the question named, the same in the dialog and on the
-            // page: the runtime approves only those of what the agent's call names.
-            if let (true, Some(seen)) = (yes, seen) {
-                let mut call = message.clone();
-                call["params"]["arguments"]["packages"] = crate::notebooks::seen_packages(message["params"]["arguments"].get("packages"), &seen);
-                rewritten = to_json(&call);
-                line = &rewritten;
-            }
+            // page: the runtime approves only those of what the agent's call names. A call no yes
+            // named packages for (nothing waited when the front looked, or it couldn't tell what
+            // did, or R's download) names none, so a package held since approves nothing
+            // unseen; R's download goes by the download, not by names.
+            let seen = if yes { seen } else { None };
+            let mut call = message.clone();
+            call["params"]["arguments"]["packages"] = crate::notebooks::seen_packages(message["params"]["arguments"].get("packages"), &seen.unwrap_or_else(|| json!([])));
+            rewritten = to_json(&call);
+            line = &rewritten;
         }
         // These two use a runtime that is running, and start none.
         let need = match tool.as_deref() {
