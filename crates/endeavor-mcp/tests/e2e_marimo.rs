@@ -416,6 +416,44 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("close_notebook", json!({ "notebook_id": nb }));
     });
 
+    step("headings from a hand-written file keep their own code when the file changes under marimo", || {
+        // A file written by hand keeps `mo.md("## A")` as written; marimo's first save writes it triple-quoted.
+        // Kept as written in the session, six such headings were paired with each other's code by marimo's
+        // reload after a change to the file (#442).
+        let titles = ["Setup", "Data Loading", "Data Cleaning", "Growth Curves by Strain", "Data Quality Checks", "Summary"];
+        let mut text = String::from("# /// script\n# requires-python = \">=3.10\"\n# dependencies = [\n#     \"marimo==0.25.1\",\n# ]\n# ///\n\nimport marimo\n\n__generated_with = \"0.25.1\"\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    import marimo as mo\n    return (mo,)\n\n");
+        for (i, title) in titles.iter().enumerate() {
+            text += &format!("\n@app.cell\ndef _(mo):\n    mo.md(\"## {title}\")\n    return\n\n\n@app.cell\ndef _():\n    v{i} = {i}\n    v{i}\n    return\n\n");
+        }
+        text += "\nif __name__ == \"__main__\":\n    app.run()\n";
+        let file = folder.join("handwritten.py");
+        std::fs::write(&file, text).unwrap();
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let id = agent.ok("open_notebook", json!({ "path": "handwritten.py" }))["notebook_id"].clone();
+        let order: Vec<String> = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_owned()).collect();
+        let headings: Vec<String> = (0..titles.len()).map(|i| order[1 + 2 * i].clone()).collect();
+        // Read in safe preview, the heading is already in the file's form, so an edit after going live needs no new read.
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": headings[5], "include_code": true }));
+        assert_eq!(read["code"], "mo.md(\"\"\"\n## Summary\n\"\"\")", "{read}");
+        agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
+        agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": headings[5], "code": "mo.md(\"## Summary of results\")" }));
+        agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(saved.contains("mo.md(\"\"\"\n    ## Data Cleaning\n    \"\"\")"), "marimo saved the file in its form: {saved}");
+        std::fs::write(&file, saved.replacen("# ///\n", "# ///\n# touched by the test\n", 1)).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        let mut titles = titles.to_vec();
+        titles[5] = "Summary of results";
+        for (heading, title) in headings.iter().zip(titles) {
+            let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": heading, "include_code": true }));
+            assert!(read["code"].as_str().unwrap_or_default().contains(&format!("## {title}\n")), "{title}: {read}");
+            assert_eq!(read["output_text"].as_str().or(read["output"].as_str()).unwrap_or_default().trim(), title, "{read}");
+        }
+        agent.ok("close_notebook", json!({ "notebook_id": id }));
+    });
+
     step("a typo's import installs nothing without the user's OK", || {
         // PyPI isn't curated: `import pandsa` would install whatever is published under that name (#355).
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };

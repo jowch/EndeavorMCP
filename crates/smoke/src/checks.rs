@@ -216,7 +216,8 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
         // file changed under marimo and its reload gave headings each other's code (#431).
         "headings_own_output" => {
             let headed: Vec<(&crate::mcp::Cell, String)> = ev.notebooks.iter().flat_map(|n| &n.cells).filter_map(|c| heading(&c.code).map(|h| (c, h))).collect();
-            let wrong: Vec<String> = headed.iter().filter(|(c, h)| !c.output.contains(h.as_str())).map(|(c, h)| format!("{h}: {:?}", clip(&c.output, 80))).collect();
+            // The heading alone, as text or as an HTML element: "Data" mustn't pass for "Data Checks".
+            let wrong: Vec<String> = headed.iter().filter(|(c, h)| c.output.trim() != h.as_str() && !c.output.contains(&format!(">{h}<"))).map(|(c, h)| format!("{h}: {:?}", clip(&c.output, 80))).collect();
             if headed.is_empty() {
                 Err("no heading cell".into())
             } else if wrong.is_empty() {
@@ -635,6 +636,8 @@ mod tests {
         assert!(judge(&own));
         let swapped = nb(&[("mo.md(\"## Data\")", "<h2>Summary</h2>"), ("mo.md(\"## Summary\")", "<h2>Data</h2>")]);
         assert!(!judge(&swapped), "L1's swap");
+        assert!(!judge(&nb(&[("mo.md(\"## Data\")", "Data Checks"), ("mo.md(\"## Data Checks\")", "Data")])), "a swap between headings that share a start");
+        assert!(judge(&nb(&[("mo.md(\"## Data\")", "Data")])), "as text");
         assert!(!judge(&nb(&[("x = 1", "1")])), "no heading at all");
         assert_eq!(super::heading("md\"\"\"\n# Growth curves\n\"\"\""), Some("Growth curves".into()));
         assert_eq!(super::heading("mo.md(r\"\"\"\n$\\alpha$\n\"\"\")"), None);
