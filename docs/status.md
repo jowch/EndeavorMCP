@@ -77,8 +77,9 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   only, even beside another with the same file name; when the front
   can't read what downloads, the question says so and its yes holds for one
   call. With no browser either, `approve_install` downloads nothing
-  (`download_cant_ask`) and the user approves it with the notebook page's own
-  button. A client connected straight to `endeavor serve` over HTTP has no
+  (`download_cant_ask`), and it can't be approved there: the agent says so and
+  sends the user to the Endeavor desktop app or to a new Claude Code session in
+  a terminal. The notebook's page has no approve button (#402). A client connected straight to `endeavor serve` over HTTP has no
   front to ask for it, so the runtime refuses its `approve_install` the same
   way (#391); only a caller that says it is the app (`X-Endeavor-Client:
   app`, its card asks) or a front that asks (`X-Endeavor-Consent: front`)
