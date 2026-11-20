@@ -389,7 +389,19 @@ fn a_python_notebook_through_the_runtime() {
         // Editing a heading straight after adding it needs no new read: the core knows the code as kept.
         let edited = agent.ok("edit_cell", json!({ "notebook_id": nb, "cell_id": headings[4], "code": "mo.md(\"## Data Quality Checks\")" }));
         assert_eq!(edited["code"], "mo.md(\"\"\"\n## Data Quality Checks\n\"\"\")", "{edited}");
+        // edit_cells gives each cell's code that was kept in another form.
+        agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": headings[3] }));
+        let both = agent.ok("edit_cells", json!({ "notebook_id": nb, "cells": [{ "cell_id": headings[3], "code": "mo.md(\"## Cleaned Growth Curves\")" }] }));
+        assert_eq!(both["code"][&headings[3]], "mo.md(\"\"\"\n## Cleaned Growth Curves\n\"\"\")", "{both}");
+        // marimo's file would turn the backslashes of LaTeX into escapes (`\a` is a bell): that cell is kept as sent.
+        let latex = r#"mo.md("$\\alpha + \\beta$")"#;
+        let added = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": last, "code": latex }));
+        assert!(added.get("code").is_none(), "kept as sent: {added}");
+        let math = added["cell_id"].as_str().unwrap().to_owned();
         agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": math, "include_code": true }));
+        assert_eq!(read["code"], latex, "{read}");
+        assert!(!read.to_string().contains('\u{7}'), "no bell in the output: {read}");
         let file = folder.join("headings.py");
         let text = std::fs::read_to_string(&file).unwrap();
         std::fs::write(&file, text.replacen("# ///\n", "# ///\n# touched by the test\n", 1)).unwrap();
