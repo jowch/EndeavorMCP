@@ -212,6 +212,19 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             let found = ev.notebooks.iter().flat_map(|n| &n.cells).any(|c| texts.iter().all(|t| c.code.contains(t.as_str())) && !not.iter().any(|t| c.code.contains(t.as_str())));
             if found { Ok(String::new()) } else { Err("no cell's code has them".into()) }
         }
+        // Every Markdown cell with a heading shows its own heading: what L1 on Haiku broke when the
+        // file changed under marimo and its reload gave headings each other's code (#431).
+        "headings_own_output" => {
+            let headed: Vec<(&crate::mcp::Cell, String)> = ev.notebooks.iter().flat_map(|n| &n.cells).filter_map(|c| heading(&c.code).map(|h| (c, h))).collect();
+            let wrong: Vec<String> = headed.iter().filter(|(c, h)| !c.output.contains(h.as_str())).map(|(c, h)| format!("{h}: {:?}", clip(&c.output, 80))).collect();
+            if headed.is_empty() {
+                Err("no heading cell".into())
+            } else if wrong.is_empty() {
+                Ok(format!("{} headings", headed.len()))
+            } else {
+                Err(wrong.join("; "))
+            }
+        }
         // No cell's code contains any of `texts` (a package installed by another way than the user's OK).
         "code_lacks" => {
             let texts = str_list("texts");
@@ -422,6 +435,19 @@ fn settled(output: &str) -> String {
     output.lines().filter(|l| !FIRST_TIME.contains(&l.trim())).collect::<Vec<_>>().join("\n").trim_end().to_owned()
 }
 
+/// The first heading's text in a Markdown cell (`mo.md(...)`, `md"..."`), or None for another cell.
+fn heading(code: &str) -> Option<String> {
+    let code = code.trim_start();
+    if !(code.starts_with("mo.md(") || code.starts_with("md\"")) {
+        return None;
+    }
+    code.lines().find_map(|line| {
+        let line = line.trim().trim_start_matches(|c: char| c != '#');
+        let text = line.trim_start_matches('#').trim().trim_end_matches(|c| c == '"' || c == ')').trim();
+        (line.starts_with('#') && !text.is_empty()).then(|| text.to_owned())
+    })
+}
+
 fn first_line(code: &str) -> &str {
     code.lines().next().unwrap_or_default()
 }
@@ -599,6 +625,19 @@ mod tests {
         assert!(!ask(json!({ "check": "asked_user", "texts": ["Julia"] }), &questions));
         assert!(!ask(json!({ "check": "asked_user" }), &[]), "never asked");
         assert!(ask(json!({ "check": "asked_user", "min": 0, "max": 0 }), &[]));
+    }
+
+    #[test]
+    fn each_heading_shows_its_own_text() {
+        let nb = |cells: &[(&str, &str)]| [Notebook { path: "/p/a.py".into(), execution_allowed: true, cells: cells.iter().map(|(code, output)| crate::mcp::Cell { code: (*code).into(), output: (*output).into(), ..Default::default() }).collect() }];
+        let judge = |notebooks: &[Notebook]| run(&json!({ "check": "headings_own_output" }), &Evidence { calls: &[], notebooks, agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[], questions: &[], pages: &[] }).passed;
+        let own = nb(&[("mo.md(\"## Data\")", "<h2 id=\"data\">Data</h2>"), ("mo.md(\"\"\"\n## Next steps\n\"\"\")", "<h2>Next steps</h2>"), ("x = 1", "1")]);
+        assert!(judge(&own));
+        let swapped = nb(&[("mo.md(\"## Data\")", "<h2>Summary</h2>"), ("mo.md(\"## Summary\")", "<h2>Data</h2>")]);
+        assert!(!judge(&swapped), "L1's swap");
+        assert!(!judge(&nb(&[("x = 1", "1")])), "no heading at all");
+        assert_eq!(super::heading("md\"\"\"\n# Growth curves\n\"\"\""), Some("Growth curves".into()));
+        assert_eq!(super::heading("mo.md(r\"\"\"\n$\\alpha$\n\"\"\")"), None);
     }
 
     #[test]

@@ -1,1 +1,1 @@
-{ "open": ["report.py"] }
+{ "open": ["report.py"], "dialog": { "new_packages": ["tabulate"] } }

@@ -1,5 +1,5 @@
 {
-  "about": "Headings in an open marimo notebook, written with plain quotes: the agent edits one and adds one, and is likely to write mo.md(\"...\"), which marimo's file keeps as a triple-quoted string. The engine stores marimo's form and says so in the reply's `code` (#431), so the session, the file and a reload agree and each heading keeps its own code and output. Tags: already_open, markdown, python.",
+  "about": "Headings in an open marimo notebook, written with plain quotes: the agent renames one, adds one, and adds a cell that needs a new package (tabulate). The install changes the file's header under marimo, whose reload then pairs cells by similar code: with headings in a form the file doesn't keep, it gave them each other's code (L1 on Haiku, #431). Every heading must still show its own text. Tags: already_open, markdown, install, python.",
   "checks": [
     { "check": "notebooks", "count": 1, "ending": ".py" },
     { "check": "no_errored_cells" },
@@ -10,6 +10,9 @@
     { "check": "output_contains", "texts": ["Summary"] },
     { "check": "output_contains", "texts": ["The total is 43."] },
     { "check": "reply_contains", "texts": ["\"code\":\"mo.md(\\\"\\\"\\\""], "soft": true },
+    { "check": "code_contains", "texts": ["tabulate"] },
+    { "check": "asked_user", "texts": ["tabulate"] },
+    { "check": "headings_own_output" },
     { "check": "agent_tools_not_used", "tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"] },
     { "check": "reproducible" }
   ]
