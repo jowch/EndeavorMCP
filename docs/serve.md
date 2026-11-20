@@ -39,7 +39,8 @@ changes none itself; the Windows script adds the folder to your user `PATH`
 and says so. It needs no administrator rights and no `sudo`. It trusts the
 release the way `curl | sh` always does: the checksum file comes from the
 same release as the binary, so the check catches a damaged download and not a
-tampered release.
+tampered release. (The plugins check theirs against checksums pinned in this
+repository instead.)
 
 To build from source instead, install Rust 1.89 or newer, then run:
 

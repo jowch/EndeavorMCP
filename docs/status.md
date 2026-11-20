@@ -185,7 +185,17 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   true. Not yet run with deleting on (dry runs only, 2026-10-09). An installed
   binary whose build has lost its Linux files can't set up a new server ([#77](https://github.com/jowch/EndeavorMCP/issues/77)).
 - `scripts/install.sh` (tested against a fake release and the public one) and
-  `scripts/install.ps1` (not run) install the newest build.
+  `scripts/install.ps1` (run in CI under Windows PowerShell 5.1 against a
+  release behind http redirects) install the newest build. Under 5.1,
+  `install.ps1` follows redirects by hand and refuses one from https to
+  anything else (that refusal isn't tested: it needs a TLS server).
+- The plugins check their download against checksums pinned in this
+  repository: the Helpers pin job writes each platform's SHA-256 under the
+  key in `release-key`, and the launcher passes them to `install.sh`
+  (`--sums`), so a release changed after the pin is caught, not only a
+  damaged download (#98). A binary published under a key is never replaced. The install
+  scripts run by hand, `endeavor update` and the helpers fetched for servers
+  still check against the release's own checksum file.
 - `endeavor update` replaces the binary from the Helpers release with the
   newest build on Linux, macOS and Windows (tested for Linux's logic and the
   Windows rename on Linux; not run on a Mac or Windows). `endeavor --version`

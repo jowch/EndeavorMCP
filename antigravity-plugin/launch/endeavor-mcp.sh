@@ -11,6 +11,9 @@
 # asking the network, and --fetch-only looks for a newer one. Unpinned, a start
 # also asks for a newer one in the background, once a day, after starting the
 # server; the result applies from the next start.
+# The lines after the key, written by the Helpers pin job, are each
+# platform's SHA-256 in sha256sum's form; a pinned download is checked against
+# them rather than against the release's own checksum file.
 #
 # Binaries live in ${XDG_DATA_HOME:-~/.local/share}/endeavor/bin/<key>/, the
 # same for every agent (XDG_DATA_HOME counts only if it is an absolute path).
@@ -180,7 +183,7 @@ if [ ! -f "$here/install.sh" ]; then
 fi
 status=0
 if [ -n "$key" ]; then
-  have || sh "$here/install.sh" --quiet --into "$base" --key "$key" </dev/null || status=$?
+  have || sh "$here/install.sh" --quiet --into "$base" --key "$key" --sums "$here/release-key" </dev/null || status=$?
 else
   : >"$base/.checked" 2>/dev/null || true
   sh "$here/install.sh" --quiet --into "$base" </dev/null || true

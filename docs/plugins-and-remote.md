@@ -868,7 +868,13 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
   puts a binary where a normal start would run it, and `bin/.newest` is
   never written from it.
 - **Build.** The first line of `launch/release-key`. With a key, that build is
-  fetched if missing and never replaced. With none, the newest one already
+  fetched if missing and never replaced, and checked against the SHA-256 lines
+  that follow the key in `release-key`, not against the release's checksum
+  file, so a release changed after the pin is caught as well as a damaged
+  download (#98). The sums are what the Publish step published, so the pin
+  vouches for the release as it was when pinned, not before.
+  A `release-key` with only the key (pinned before the sums were written)
+  falls back to the release's checksum file. With none, the newest one already
   there (`bin/.newest`, which must be a hex key like the others, else it is
   ignored) is run with no network use; the network is asked when none is
   there, by `--fetch-only`, and once a day after a start: the launcher
@@ -877,7 +883,7 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
   output), recorded by `bin/.checked`. The result applies from the next
   start. Claude Code's hook and the other harnesses thus converge.
 - **Fetching** is the plugin's own copy of `install.sh` with `--quiet --into
-  <bin> [--key <key>]`: the download and its checksum check, then a rename
+  <bin> [--key <key> --sums release-key]`: the download and its checksum check, then a rename
   into `<bin>/<key>/`, so a binary there is always complete. `--quiet` sends
   everything to stderr. Stdout belongs to the MCP server, so nothing is
   printed there before the exec.
@@ -914,8 +920,9 @@ plugin's build, or gets it, then runs `endeavor mcp` with its arguments.
   the headers and a download that went through a redirect to anything else is
   thrown away. Wget2 (`wget` on Fedora 40 and later) prints no headers under
   `-q`, so from an https address it gets `--https-enforce=hard` instead. The same goes for the helper fetched for a server and for
-  `endeavor update`. PowerShell 5.1's `install.ps1` has no such check yet
-  (#98).
+  `endeavor update`. `install.ps1` under PowerShell 7 relies on .NET, which
+  never follows https to http; under Windows PowerShell 5.1 it follows each
+  redirect by hand and refuses one away from https (#98).
 - `ENDEAVOR_BIN` names a binary to run instead (`docs/testing.md`).
 - `endeavor update` leaves a binary in `<bin>` (or `bin-from/…`) alone and
   says the plugin manages it, and how to fetch the newest now.
@@ -955,7 +962,9 @@ into a text file.
 `release-key` is not in `plugin/`, because that folder is hashed into the
 build's key. Nobody edits it by hand: after a push to `main` has built on every
 platform, the Helpers workflow's pin job writes that build's key to
-`scripts/release-key` and the copies and pushes the commit to `main`. Until
+`scripts/release-key`, with each platform's SHA-256 as the Publish step
+published it on the lines after (sha256sum's form), and the copies, and
+pushes the commit to `main`. It pins nothing if a platform's line is missing. Until
 then, and if a platform's build fails, the plugins keep the last complete build:
 it exists, but its embedded skills can be older than the plugin's (by an hour
 or two when the macOS builds queue). A run pins only a build of newer source
@@ -1086,12 +1095,17 @@ agents).
   word is never taken as the script), and `--wrap` (also as `--wr` or
   `--wra`) and line breaks are refused, by the front and again by the helper
   before it calls `sbatch`.
-- The helper fetched for a server of another platform is checked against the
-  release's SHA-256 before it is kept, and again each time it is used. The
-  checksum file comes from the same release as the binary, so this guards
-  against a damaged download and not a tampered release. The same holds for
-  the install scripts and `endeavor update`. The app sends its bundled helper
-  unchecked.
+- The plugins check their download against the SHA-256 that `main`'s
+  `release-key` pins for each platform, so a release changed after the pin
+  can't give them a different binary (#98). The rest still trust the release: the helper
+  fetched for a server of another platform is checked against the release's
+  SHA-256 before it is kept, and again each time it is used, and so are the
+  install scripts' downloads and `endeavor update`'s. Those guard against a
+  damaged download and not a tampered release. The app sends its bundled
+  helper unchecked.
+- A binary published under a key is never replaced: a later run of the same
+  key adds only the platforms the release lacks, since builds aren't
+  byte-for-byte reproducible and the plugins pin each one's SHA-256.
 - A Helpers run whose macOS or Windows build failed keeps the checksums an
   earlier run of the same key published for them, since those builds stay in
   the release.

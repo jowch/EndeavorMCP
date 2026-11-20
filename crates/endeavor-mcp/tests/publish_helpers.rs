@@ -69,6 +69,7 @@ esac
             .env("KEY", KEY)
             .env("GITHUB_REF", "refs/heads/main")
             .env("GITHUB_SHA", "0000000")
+            .env("GITHUB_OUTPUT", self.dir.join("output"))
             .output()
             .unwrap()
     }
@@ -108,16 +109,27 @@ fn a_run_whose_mac_and_windows_builds_failed_keeps_the_checksums_an_earlier_run_
 }
 
 #[test]
-fn a_run_that_built_everything_lists_only_its_own_checksums() {
-    let earlier = ALL.iter().map(|p| format!("{}  {}\n", sha(format!("old {p}").as_bytes()), name(p))).collect::<String>();
-    let run = Run::new("full", &ALL, &[(&format!("endeavor-{KEY}.sha256"), earlier.as_bytes())]);
+fn a_binary_already_published_under_the_key_is_never_replaced() {
+    // The plugins pin each build's checksums, so a re-run of a key leaves what it published alone.
+    let earlier = ALL.iter().filter(|p| **p != "windows-x86_64").map(|p| format!("{}  {}\n", sha(format!("old {p}").as_bytes()), name(p))).collect::<String>();
+    let mut files: Vec<(String, Vec<u8>)> = ALL.iter().filter(|p| **p != "windows-x86_64").map(|p| (name(p), format!("old {p}").into_bytes())).collect();
+    // A file the checksum file doesn't list isn't trusted to be the key's, so it is replaced.
+    files.push((name("windows-x86_64"), b"stray".to_vec()));
+    files.push((format!("endeavor-{KEY}.sha256"), earlier.into_bytes()));
+    let earlier: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+    let run = Run::new("full", &ALL, &earlier);
     let out = run.publish();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let want: Vec<(String, String)> = ALL.iter().map(|p| (sha(format!("new {p}").as_bytes()), name(p))).collect();
+    let kept = |p: &str| p != "windows-x86_64";
+    let want: Vec<(String, String)> = ALL.iter().map(|p| (sha(if kept(p) { format!("old {p}") } else { format!("new {p}") }.as_bytes()), name(p))).collect();
     assert_eq!(run.sums(), want);
     for p in ALL {
-        assert_eq!(std::fs::read(run.dir.join("release").join(name(p))).unwrap(), format!("new {p}").into_bytes());
+        assert_eq!(std::fs::read(run.dir.join("release").join(name(p))).unwrap(), if kept(p) { format!("old {p}") } else { format!("new {p}") }.into_bytes(), "{p}");
     }
+    // The step's output `sums` is the checksum file, for the pin job.
+    let output = std::fs::read_to_string(run.dir.join("output")).unwrap();
+    let file = std::fs::read_to_string(run.dir.join(format!("release/endeavor-{KEY}.sha256"))).unwrap();
+    assert_eq!(output, format!("sums<<ENDEAVOR_SUMS\n{file}ENDEAVOR_SUMS\n"));
 }
 
 #[test]

@@ -17,10 +17,17 @@
 # and with no --key BASE/.newest is set to the key LATEST named. --quiet
 # writes everything to stderr, since stdout belongs to the MCP server.
 #
+# --sums FILE gives the checksums to check against, in sha256sum's form (other
+# lines are ignored). The launcher passes its release-key, where the Helpers
+# pin job writes each platform's SHA-256 under the key. Then the check doesn't
+# depend on the release, and catches a release changed after the pin as well as a damaged
+# download. A FILE with no checksums in it (a pin from before they were
+# written) counts as none.
+#
 # ENDEAVOR_RELEASE_URL replaces the release's address (for tests and
-# development; file:// works). The checksum file comes from the same release as
-# the binary, so the check catches a damaged download and not a tampered
-# release.
+# development; file:// works). Without --sums, the checksum file comes from
+# the same release as the binary, so the check catches a damaged download and
+# not a tampered release.
 set -eu
 
 release=${ENDEAVOR_RELEASE_URL:-https://github.com/jowch/EndeavorMCP/releases/download/helpers}
@@ -29,6 +36,7 @@ dir=${ENDEAVOR_INSTALL_DIR:-}
 into=
 key=
 quiet=
+sums=
 
 fail() {
   echo "install.sh: $*" >&2
@@ -63,6 +71,11 @@ while [ $# -gt 0 ]; do
       key=$2
       shift 2
       ;;
+    --sums)
+      [ $# -ge 2 ] || fail "--sums needs a file."
+      sums=$2
+      shift 2
+      ;;
     --quiet)
       quiet=1
       shift
@@ -79,6 +92,8 @@ done
 if [ -n "$key" ] && ! is_key "$key"; then
   fail "--key '$key' isn't a build's key."
 fi
+[ -z "$sums" ] || [ -n "$key" ] || fail "--sums needs --key: the checksums are for one build."
+[ -z "$sums" ] || [ -r "$sums" ] || fail "can't read $sums."
 default_dir=
 if [ -n "$into" ]; then
   dir=$into
@@ -253,14 +268,26 @@ is_missing() {
 }
 
 name=endeavor-$key-$platform$suffix
-if ! fetch "$release/endeavor-$key.sha256" "$tmp/sums"; then
-  if [ -z "$newest" ] && fetch "$release/LATEST" >/dev/null 2>&1; then
-    not_held
+# sum_of FILE: the SHA-256 FILE lists for $name, if any. A Windows checkout
+# can give release-key CRLF line ends.
+sum_of() {
+  awk -v n="$name" '{ sub(/\r$/, ""); f = $2; sub(/^\*/, "", f); if (f == n && $1 ~ /^[0-9a-fA-F]+$/ && length($1) == 64) { print tolower($1); exit } }' "$1"
+}
+pinned=
+if [ -n "$sums" ] && grep -Eq '^[0-9a-fA-F]{64} [ *]' "$sums"; then
+  pinned=1
+  want=$(sum_of "$sums")
+  [ -n "$want" ] || fail "the checksums in $sums list no binary of build $key for $platform."
+else
+  if ! fetch "$release/endeavor-$key.sha256" "$tmp/sums"; then
+    if [ -z "$newest" ] && fetch "$release/LATEST" >/dev/null 2>&1; then
+      not_held
+    fi
+    fail "couldn't download $release/endeavor-$key.sha256."
   fi
-  fail "couldn't download $release/endeavor-$key.sha256."
+  want=$(sum_of "$tmp/sums")
+  [ -n "$want" ] || fail "the newest build ($key) has no binary for $platform."
 fi
-want=$(awk -v n="endeavor-$key-$platform$suffix" '{ f = $2; sub(/^\*/, "", f); if (f == n) { print tolower($1); exit } }' "$tmp/sums")
-[ -n "$want" ] || fail "the newest build ($key) has no binary for $platform."
 
 status=0
 fetch "$release/$name" "$tmp/$exe" || status=$?
@@ -270,6 +297,9 @@ if [ "$status" -ne 0 ]; then
 fi
 have=$(sha256 "$tmp/$exe")
 if [ "$have" != "$want" ]; then
+  if [ -n "$pinned" ]; then
+    fail "the download from $release/$name doesn't match the checksum the plugin pins (SHA-256 $have, expected $want). It was deleted; nothing was installed."
+  fi
   fail "the download from $release/$name doesn't match its checksum (SHA-256 $have, expected $want). It was deleted; nothing was installed."
 fi
 
