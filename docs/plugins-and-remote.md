@@ -434,9 +434,13 @@ result says so.
 ## Sharing a runtime
 
 Built here: helpers attach together, and `endeavor connect` without
-`--state-dir` uses `serve`'s folder. Not built: the app's side. The app
-still passes a folder of its own, and a helper from an older build still
-makes another older one exit.
+`--state-dir` uses `serve`'s folder. While a runtime the app started in its
+older folder, `~/.cache/endeavor/state`, is alive on that server, `connect`,
+`serve`, `mcp`, `status` and `stop` without `--state-dir` use that one
+instead, so the app's open notebooks aren't opened again by a second runtime;
+once it stops, the next start is in `serve`'s folder (#110). Not built yet:
+the app's side. The app still passes its older folder by name, and a helper
+from an older build still makes another older one exit.
 
 **One runtime on a server, however it started.** `serve`, `mcp` and
 `endeavor connect` find a runtime with the same code (`existing` in

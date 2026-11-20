@@ -637,6 +637,21 @@ fn the_default_state_folders_are_looked_in_when_none_is_given() {
     assert_eq!(needs(&Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() }).running, Some(Running::Job { id: "99".into(), listed: true }));
 }
 
+/// With no state folder given, a plain server's runtime that the app started in its older folder,
+/// `~/.cache/endeavor/state`, is the one reported while it is alive, as the helper would use it (#110).
+#[test]
+fn a_runtime_alive_in_the_apps_older_folder_is_reported_when_no_state_folder_is_given() {
+    let place = Place::new("no-install-apps-old");
+    let runtime = FakeRuntime::start(&place.home.join(".cache/endeavor/state"));
+    let pid = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(place.home.join(".cache/endeavor/state/runtime.json")).unwrap()).unwrap()["pid"].as_u64().unwrap() as u32;
+    let options = Options { allow_install: false, root: String::new(), state: String::new(), ..place.options() };
+    let needs = || connect(&Server::default(), &looking(&place, None), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    assert_eq!(needs().running, Some(Running::Process { pid, checked: true }));
+    drop(runtime);
+    wait_gone(pid);
+    assert_eq!(needs().running, None, "once it has stopped, the plugin's folder, where nothing runs");
+}
+
 #[test]
 fn only_a_complete_helper_of_another_build_makes_it_an_update() {
     let place = Place::new("no-install-older");
