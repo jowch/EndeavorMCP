@@ -454,10 +454,12 @@ end
         other = joinpath(depot, "compiled", "v0.0", "Other", "x.ji")
         temp = joinpath(dir, "jl_abc.ji")
         write(other, "x"); write(temp, "x")
+        # A native image's debug bundle (macOS makes one) goes with it; here one stands in everywhere.
+        mkpath(stem * ".dylib.dSYM")
         unreadable = Set([ji, other, temp])
         @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
         removed = endeavor_drop_unreadable_caches(depot; readable=p -> !(p in unreadable), log=devnull)
-        @test ji in removed && all(p -> startswith(p, stem * "."), removed)
+        @test ji in removed && stem * ".dylib.dSYM" in removed && all(p -> startswith(p, stem * "."), removed)
         @test !isfile(ji) && isfile(other) && isfile(temp)
         @test !any(p -> startswith(p, stem * "."), readdir(dir; join=true))
         @test !success(julia(check))
