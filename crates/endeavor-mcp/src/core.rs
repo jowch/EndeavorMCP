@@ -2808,7 +2808,9 @@ mod tests {
         let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
         let text = |reply: &Value| reply["result"]["content"][0]["text"].as_str().unwrap_or_default().to_owned();
         let description = |reply: &Value| reply["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "approve_install").unwrap()["description"].as_str().unwrap().to_owned();
-        for straight in ["X-Endeavor-Client: plugin\r\n", "X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: yes\r\n"] {
+        // `serving` is a runtime the app started: a client that says nothing is answered as the app's,
+        // but no one asks for it, and it is the one `serve` sets up.
+        for straight in ["", "X-Endeavor-Client: plugin\r\n", "X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: yes\r\n"] {
             let refused = mcp_post(port, straight, &approve);
             assert_eq!(refused["result"]["isError"], true, "{refused}");
             assert!(text(&refused).contains("\"download_cant_ask\"") && text(&refused).contains("browser_url"), "{refused}");

@@ -256,8 +256,13 @@ pub struct Caller {
     /// says which (`app` or `plugin`); a caller that doesn't say is taken as the runtime's starter was, so
     /// the app and the plugin can share one runtime and each still gets its own answers (#110).
     pub app: bool,
-    /// The caller is a front that asks the user itself before it passes `approve_install` on
-    /// (`X-Endeavor-Consent: front`): in a dialog, or on a page in their browser (#285, #389).
+    /// Someone asks the user before this caller's `approve_install` reaches the runtime, as the
+    /// caller itself says: the app, with its card (`X-Endeavor-Client: app`), or a front, in a dialog
+    /// or on a page in their browser (`X-Endeavor-Consent: front`, #285, #389). Only what the caller
+    /// sends counts, never the runtime's starter (`app`'s default), so a client `serve` set up on a
+    /// runtime the app started isn't taken for the app here (#391). Each header is a declaration,
+    /// not a check: it stops an agent's own yes, since a model can't add headers to its client's
+    /// requests, not a client configured to send one. No text an agent reads names them.
     pub consent: bool,
 }
 
@@ -298,14 +303,14 @@ impl Caller {
             "plugin" => false,
             _ => app_runtime,
         };
-        let consent = header("X-Endeavor-Consent") == "front";
+        let consent = header("X-Endeavor-Consent") == "front" || header("X-Endeavor-Client") == "app";
         Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several, app, consent }
     }
 
     /// No one asks the user before this caller's `approve_install`: not the app (its card), not a
     /// front (its dialog or page). Its call alone would be the yes, so it is refused (#391).
     fn no_one_asks(&self) -> bool {
-        !self.app && !self.front && !self.consent
+        !self.front && !self.consent
     }
 }
 
@@ -497,7 +502,8 @@ impl Bridge {
                 return Some(answer(self.notebooks.new_for(&owner, &folder)));
             }
             method if JULIA_CALLS.contains(&method) => return None,
-            _ => return Some(self.dispatch(&message, &Caller { app: true, ..Caller::default() }, &|| false).unwrap_or_else(|| "{}".into())),
+            // The app's own call: the user's click there.
+            _ => return Some(self.dispatch(&message, &Caller { app: true, consent: true, ..Caller::default() }, &|| false).unwrap_or_else(|| "{}".into())),
         }
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
@@ -1467,6 +1473,9 @@ mod tests {
             assert!(Caller::of(&head("X-Endeavor-Client: plugin\r\n"), app_runtime).no_one_asks());
             assert!(!Caller::of(&head("X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: front\r\n"), app_runtime).no_one_asks());
             assert!(!Caller::of(&head("X-Endeavor-Client: app\r\n"), app_runtime).no_one_asks());
+            // A client that doesn't say is the starter's for its answers, but not for consent: on a
+            // runtime the app started it is still one no one asks for.
+            assert!(Caller::of(&head(""), app_runtime).no_one_asks());
         }
         // Its replies say the notebook page's button is the way, not the chat.
         let asking = to_json(&json!({ "text": format!("R has to download ALL. {} Don't call read_cell to wait.", notebooks::ASK_STEP) }));
