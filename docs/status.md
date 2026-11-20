@@ -58,6 +58,19 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   the dialog stays up until then, for the dialog's full 30 minutes. An
   answer on the page that still holds is given without a new dialog. Which clients really show the
   dialog is still to be checked by hand (#381).
+  A Julia notebook's run whose cells use a package the notebook doesn't
+  have yet (not in its Project.toml, not a standard library) stops before
+  Pluto adds it (#397): its cells stay queued, `packages.step` is `asking`
+  with `new`, and `approve_install` is the user's yes, asked about in the
+  same dialog or page; its yes holds for those packages while the notebook
+  is open. Packages the notebook already has install as before. The same
+  gate holds when the notebook leaves safe preview (`allow_execution`) and
+  when `open_notebook` runs it, so a file with no environment of its own adds
+  nothing unasked. Runs in the
+  app's Auto mode don't ask. A plugin client's own auto mode can't be seen
+  from Endeavor (Claude Code doesn't tell an MCP server its permission
+  mode), so those runs ask. The app's card for a Julia `approve_install`
+  still uses R's download wording (an app follow-up).
   The same page asks before `approve_install` passes an R notebook's large
   download on, where the client can't show a dialog (#388). Its question
   names the notebook by its whole path, so a held yes is for that notebook

@@ -816,6 +816,39 @@ end
             @test result("run", Dict("notebook_id" => nid, "cells" => [], "wait" => false, "timeout" => 60))["accepted"]
             @test string.(nb.cell_order) == [X, Y] && !haskey(nb.cells_dict, UUID(z))
 
+            # A package the notebook doesn't have yet waits for the user's OK where the caller asks
+            # (#397): the cell stays queued, and the snapshot says what would be added.
+            run_asking(cells) = result("run", Dict("notebook_id" => nid, "cells" => cells, "wait" => true, "timeout" => 60, "ask_new" => true))
+            stdlib = insert("using Dates", 2)
+            @test !haskey(run_asking([stdlib]), "asking")
+            pkg = insert("using Example", 3)
+            asked = run_asking([pkg])
+            @test (asked["asking"], asked["completed"], asked["timed_out"]) == (["Example"], [], [pkg])
+            @test nb.cells_dict[UUID(pkg)].queued
+            step = result("snapshot", Dict("notebook_id" => nid))["packages"]
+            @test (step["step"], step["new"], [p["package"] for p in step["download"]["packages"]]) == ("asking", true, ["Example"])
+            @test !haskey(Pluto.PkgCompat.project(nb.nbpkg_ctx).dependencies, "Example")
+            # An edit that drops it asks nothing: the held cell runs.
+            result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "nothing")))
+            @test !haskey(run_asking([pkg]), "asking")
+            @test result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing
+            # Asked again, and stopped: the cell isn't queued any more.
+            result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "using Example")))
+            @test run_asking([pkg])["asking"] == ["Example"]
+            @test result("interrupt", Dict("notebook_id" => nid))["interrupted"] == true
+            @test !nb.cells_dict[UUID(pkg)].queued && result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing
+            # The user's yes: it installs, and the cell runs.
+            @test run_asking([pkg])["asking"] == ["Example"]
+            approved = result("approve_install", Dict("notebook_id" => nid, "timeout" => 60))
+            @test (approved["approved"], approved["packages"], approved["cells"]) == (true, ["Example"], [pkg])
+            @test pkg in next_note("run_finished"; nid)["cells"]
+            @test haskey(Pluto.PkgCompat.project(nb.nbpkg_ctx).dependencies, "Example") && !nb.cells_dict[UUID(pkg)].errored
+            @test adapter("approve_install", Dict("notebook_id" => nid)) == Dict("error" => "ArgumentError: nothing_to_approve::Nothing in this notebook waits for the user's OK")
+            # Once in the notebook, it asks nothing.
+            @test !haskey(run_asking([pkg]), "asking")
+            result("apply", ops(Dict("op" => "delete", "cell_id" => pkg), Dict("op" => "delete", "cell_id" => stdlib)))
+            result("run", Dict("notebook_id" => nid, "cells" => [], "wait" => true, "timeout" => 60))
+
             @test result("validate", Dict("notebook_id" => nid, "cell_id" => X, "code" => "a = 1\nb = 2"))["errors"][1]["type"] == "pluto_multi_expression"
             @test result("validate", Dict("notebook_id" => nid, "cell_id" => X, "code" => "a = 1"))["errors"] == []
             @test result("render_png", Dict("notebook_id" => nid, "cell_id" => X)) == Dict("png" => nothing, "mime" => "text/plain")
@@ -848,6 +881,30 @@ end
             @test X in finished["cells"] && finished["run"] == allowed["run"]
             @test result("allow_execution", Dict("notebook_id" => previewed, "run" => false, "timeout" => 60)) ==
                   Dict("already_allowed" => true, "ran" => false, "process_status" => "ready")
+
+            # A file with no environment of its own: every package it uses is new, and neither leaving
+            # safe preview nor an open that runs it adds one unasked (#397).
+            function envless()
+                path = joinpath(mktempdir(), "envless.jl")
+                write(path, "### A Pluto.jl notebook ###\n# v0.20.0\n\nusing Markdown\nusing InteractiveUtils\n\n" *
+                    "# ╔═╡ 00000000-0000-0000-0000-000000000397\nusing Example\n\n" *
+                    "# ╔═╡ Cell order:\n# ╠═00000000-0000-0000-0000-000000000397\n")
+                return path
+            end
+            held = "00000000-0000-0000-0000-000000000397"
+            gated = result("open", Dict("path" => envless(), "run" => false))["notebook_id"]
+            allowed = result("allow_execution", Dict("notebook_id" => gated, "run" => true, "timeout" => 60, "ask_new" => true))
+            @test (allowed["ran"], allowed["asking"]) == (true, ["Example"])
+            gated_nb = EndeavorRuntime.standalone_session().notebooks[UUID(gated)]
+            @test gated_nb.cells_dict[UUID(held)].queued && result("snapshot", Dict("notebook_id" => gated))["packages"]["step"] == "asking"
+            @test gated_nb.nbpkg_ctx === nothing || !haskey(Pluto.PkgCompat.project(gated_nb.nbpkg_ctx).dependencies, "Example")
+            @test adapter("shutdown", Dict("notebook_id" => gated)) == Dict("result" => Dict("safe_preview" => false))
+            opened = result("open", Dict("path" => envless(), "run" => true, "timeout" => 60, "ask_new" => true))
+            @test opened["asking"] == ["Example"]
+            opened_nb = EndeavorRuntime.standalone_session().notebooks[UUID(opened["notebook_id"])]
+            @test opened_nb.cells_dict[UUID(held)].queued && Pluto.will_run_code(opened_nb)
+            @test opened_nb.nbpkg_ctx === nothing || !haskey(Pluto.PkgCompat.project(opened_nb.nbpkg_ctx).dependencies, "Example")
+            adapter("shutdown", Dict("notebook_id" => opened["notebook_id"]))
 
             # Julia's own folder gone, as juliaup leaves the version it updated past: what would start a
             # process says why and what to do, before anything stops. The running process lives on.

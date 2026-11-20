@@ -402,7 +402,7 @@ impl Call<'_> {
         let needed: Vec<String> = upstream.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).cloned().collect();
         let cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
         let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
-        let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout }))?;
+        let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout, "ask_new": self.nbs.asks_new_packages(self.owner) }))?;
         self.ran(nb, targets, &upstream, needed, cells, &reply, wait, &staged)
     }
 
@@ -1092,7 +1092,7 @@ impl Call<'_> {
         });
         self.note_changed(&nb.id, &cell);
         // Pluto's reactive cleanup of what the cell defined, not waited for.
-        self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": [], "wait": false, "timeout": TIMEOUT_SECONDS }))?;
+        self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": [], "wait": false, "timeout": TIMEOUT_SECONDS, "ask_new": self.nbs.asks_new_packages(self.owner) }))?;
         let warnings = vec!["async_execution::cell deletion cleanup queued".to_owned()];
         Ok(Value::Object(self.receipt(&nb.id, json!({ "type": "delete_cell", "cell_id": cell }), &[], warnings, Some("completed"))?.0))
     }
@@ -1432,7 +1432,7 @@ impl Call<'_> {
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
         let key = format!("open {}", canonical_path(path).unwrap_or_else(|_| path.clone()));
         // A call made again while an open is under way gets that open, run as that one asked.
-        let (opened, run) = match self.nbs.open_waited("open", json!({ "path": path, "run": run }), key, self.run_wait(), &format!("Opening '{path}'")) {
+        let (opened, run) = match self.nbs.open_waited("open", json!({ "path": path, "run": run, "ask_new": self.nbs.asks_new_packages(self.owner), "timeout": TIMEOUT_SECONDS }), key, self.run_wait(), &format!("Opening '{path}'")) {
             Ok((opened, params)) => (opened, params["run"] == true),
             Err(error) if already_open(&error) => return self.join(path).unwrap_or(Err(error)),
             Err(error) => return Err(error),
@@ -1458,6 +1458,14 @@ impl Call<'_> {
         }
         let id = opened["notebook_id"].as_str().unwrap_or_default();
         self.nbs.opened_by(self.owner, opened["path"].as_str().unwrap_or_default(), id);
+        // The open's run waits for the user's OK to a package the file doesn't have (#397).
+        if run && opened["asking"].is_array()
+            && let Ok(nb) = self.nbs.snapshot(id)
+        {
+            result["packages"] = nb.packages.clone().unwrap_or_default();
+            result["message"] = json!(installing_message(&nb));
+            return Ok(result);
+        }
         // The open's run of the whole notebook is the session's, as allow_execution's is (#170): a
         // read or a waited submit waits for it (#331). Pluto marks every cell queued as it opens
         // and names no run, so the run goes on while one of its cells hasn't finished.
@@ -1610,7 +1618,7 @@ impl Call<'_> {
                 }));
             }
         }
-        let params = json!({ "notebook_id": id, "run": run, "timeout": TIMEOUT_SECONDS });
+        let params = json!({ "notebook_id": id, "run": run, "timeout": TIMEOUT_SECONDS, "ask_new": self.nbs.asks_new_packages(self.owner) });
         let why = "a new Julia process starts for it, and its packages may need installing";
         let (allowed, _) = self.nbs.waited("allow_execution", params, key, self.run_wait(), &format!("Starting the notebook is taking longer than one call waits: {why}"))?;
         let ran = allowed["ran"] == true;
@@ -1618,6 +1626,13 @@ impl Call<'_> {
             "notebook_id": id, "execution_allowed": true, "already_allowed": allowed["already_allowed"], "ran": ran,
             "process_status": allowed["process_status"],
         });
+        // Its run waits for the user's OK to a package the notebook doesn't have (#397).
+        if ran && allowed["asking"].is_array() {
+            let nb = self.notebook()?;
+            result["packages"] = nb.packages.clone().unwrap_or_default();
+            result["message"] = json!(installing_message(&nb));
+            return Ok(result);
+        }
         if ran {
             let nb = self.notebook()?;
             self.nbs.with_state(&nb.id, |state| state.prune(&nb));
@@ -1704,12 +1719,18 @@ impl Call<'_> {
     fn restart_notebook(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         let running: Vec<String> = nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running)).cloned().collect();
-        let reply = self.nbs.restart(&nb.id)?;
+        let reply = self.nbs.restart(&nb.id, self.nbs.asks_new_packages(self.owner))?;
         if reply["restarted"] != true {
             return Ok(json!({ "notebook_id": nb.id, "restarted": false, "message": "The notebook is already restarting. Read a cell to wait for it." }));
         }
         let now = self.nbs.snapshot(&nb.id)?;
         let mut result = json!({ "notebook_id": nb.id, "restarted": true, "process_status": now.process_status });
+        // The restart's run waits for the user's OK to a new package (#397).
+        if now.asking() {
+            result["packages"] = now.packages.clone().unwrap_or_default();
+            result["message"] = json!(installing_message(&now));
+            return Ok(result);
+        }
         result["message"] = json!(match self.nbs.backend_of(&nb.id) {
             Backend::Pluto => {
                 self.nbs.with_state(&nb.id, |state| {
@@ -1866,12 +1887,30 @@ impl Call<'_> {
     }
 
     /// The user's OK for an R notebook's install that stopped before a large download (Ember
-    /// #37's `approve_install`). The tool's description and the asking message say to call it
-    /// only after the user said yes. Refused when no install waits for one.
+    /// #37's `approve_install`), or a Julia notebook's run that stopped before a package the
+    /// notebook doesn't have yet (#397). The tool's description and the asking message say to call
+    /// it only after the user said yes. Refused when no install waits for one.
     fn approve_install(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
+        if self.nbs.backend_of(&nb.id) == Backend::Pluto {
+            let mut result = self.nbs.call("approve_install", json!({ "notebook_id": nb.id, "timeout": TIMEOUT_SECONDS }))?;
+            self.nbs.publish();
+            let cells: HashSet<String> = result["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            self.nbs.with_state(&nb.id, |state| {
+                if !self.owner.is_empty() {
+                    state.started.push(Started { owner: self.owner.to_owned(), run: result["run"].as_str().map(str::to_owned), cells, follows: HashMap::new() });
+                }
+            });
+            result["notebook_id"] = json!(nb.id);
+            result["message"] = json!(if result["asking"].is_array() {
+                installing_message(&self.nbs.snapshot(&nb.id)?)
+            } else {
+                "The packages are approved and install now: the queued cells run once they are ready, and a read of one waits for them.".to_owned()
+            });
+            return Ok(result);
+        }
         if self.nbs.backend_of(&nb.id) != Backend::Ember {
-            return Err(argument_error("not_r_notebook::Only an R notebook asks before a large download. A Julia notebook's packages install through Pkg"));
+            return Err(argument_error("not_r_notebook::Only R and Julia notebooks ask before an install"));
         }
         let mut result = self.nbs.call("approve_install", json!({ "notebook_id": nb.id }))?;
         self.nbs.publish();
@@ -1977,13 +2016,23 @@ pub(crate) const INSTALL_FAILED: &str = "Ember couldn't install a package this c
 
 /// What the asking message tells the agent to do. The plugin's front puts its own words in its place
 /// where it asks the user itself (`standalone::consent`).
-pub(crate) const ASK_STEP: &str = "Stop here and ask the user whether to download it, then end your reply. approve_install doesn't ask the user: it is their yes, so call it only once they have answered yes in a later message. The page's own button does the same.";
+pub(crate) const ASK_STEP: &str = "Stop here and ask the user whether to install it, then end your reply. approve_install doesn't ask the user: it is their yes, so call it only once they have answered yes in a later message.";
 
 /// What the agent hears while an R notebook's install waits for an OK before a large download
 /// (Ember #37): what it would download and how much, and that the user decides. Only the user
 /// can say yes to it, so the agent asks them and doesn't wait.
 fn asking_message(nb: &Snapshot) -> String {
     let download = nb.packages.as_ref().map(|p| p["download"].clone()).unwrap_or_default();
+    // A Julia notebook's run that would add packages it doesn't have yet (#397).
+    if nb.packages.as_ref().is_some_and(|p| p["new"] == true) {
+        let names: Vec<&str> = download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).collect();
+        let which = if names.is_empty() { "packages".to_owned() } else { names.join(", ") };
+        return format!(
+            "Before these cells can run, Julia has to install packages this notebook doesn't have yet: {which}, with what they need. \
+             A new package waits for the user's OK, so nothing is installing and the cells stay queued. {ASK_STEP} \
+             Don't call read_cell to wait: nothing changes until then. If they would rather not install them, use packages the notebook already has, and run again."
+        );
+    }
     let sized = |bytes: &Value| bytes.as_f64().map(|b| if b >= 1e9 { format!("{:.1} GB", b / 1e9) } else { format!("{:.0} MB", b / 1e6) });
     let each: Vec<String> = download["packages"]
         .as_array()

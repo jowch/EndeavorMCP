@@ -31,9 +31,21 @@ above = filter(>(cutoff), yields)
 # ╔═╡ 5c1d2e3f-0a4b-4c6d-8e9f-1a2b3c4d5e05
 md"Mean yield above the cutoff: $(round(sum(above) / length(above), digits=2)) t/ha, from $(length(above)) plots"
 
+# ╔═╡ 00000000-0000-0000-0000-000000000001
+PLUTO_PROJECT_TOML_CONTENTS = """
+[deps]
+PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
+"""
+
+# ╔═╡ 00000000-0000-0000-0000-000000000002
+PLUTO_MANIFEST_TOML_CONTENTS = """
+"""
+
 # ╔═╡ Cell order:
 # ╠═5c1d2e3f-0a4b-4c6d-8e9f-1a2b3c4d5e01
 # ╠═5c1d2e3f-0a4b-4c6d-8e9f-1a2b3c4d5e02
 # ╠═5c1d2e3f-0a4b-4c6d-8e9f-1a2b3c4d5e03
 # ╠═5c1d2e3f-0a4b-4c6d-8e9f-1a2b3c4d5e04
 # ╠═5c1d2e3f-0a4b-4c6d-8e9f-1a2b3c4d5e05
+# ╟─00000000-0000-0000-0000-000000000001
+# ╟─00000000-0000-0000-0000-000000000002

@@ -331,6 +331,9 @@ pub struct Notebooks {
     /// Each agent session's notebook kind, when its client said it (`endeavor/set_session_folder`'s
     /// `kind`): the engine of a `new_notebook` without a path. Pluto's for a session with none.
     kinds: Mutex<HashMap<String, Backend>>,
+    /// The sessions in the app's Auto mode, whose runs install a Julia notebook's new packages
+    /// without asking the user (#397). Every other caller's ask first.
+    auto: Mutex<HashSet<String>>,
     /// Opens and creations under way or not yet collected, by what they open (`open_waited`).
     openings: Mutex<HashMap<String, Arc<Opening>>>,
     /// Agents' calls on a notebook under way (`running`): owner, JSON-RPC id, notebook, and
@@ -640,6 +643,7 @@ impl Notebooks {
             build: OnceLock::new(),
             exits_when_idle: false,
             kinds: Mutex::default(),
+            auto: Mutex::default(),
             openings: Mutex::default(),
             runs: Mutex::default(),
         }
@@ -1145,6 +1149,19 @@ impl Notebooks {
         };
     }
 
+    /// Whether session `owner` is in the app's Auto mode (`endeavor/set_policy`).
+    pub fn set_auto(&self, owner: &str, auto: bool) {
+        let mut sessions = self.auto.lock().unwrap();
+        if auto { sessions.insert(owner.to_owned()) } else { sessions.remove(owner) };
+    }
+
+    /// Whether a run of session `owner`'s asks the user before a Julia notebook adds a package it
+    /// doesn't have yet (#397): everywhere but the app's Auto mode. A plugin client's own auto mode
+    /// isn't known here, so it asks.
+    pub fn asks_new_packages(&self, owner: &str) -> bool {
+        !self.auto.lock().unwrap().contains(owner)
+    }
+
     /// Session `owner`'s notebook kind, if its client said it.
     pub fn kind(&self, owner: &str) -> Option<Backend> {
         self.kinds.lock().unwrap().get(owner).copied()
@@ -1497,10 +1514,10 @@ impl Notebooks {
     /// every cell runs; refused in safe preview. The notebook stays open with
     /// the same cells, so the core keeps all it knows of it; its pending cells
     /// stop being pending as they run.
-    pub fn restart(&self, notebook_id: &str) -> Result<Value, String> {
+    pub fn restart(&self, notebook_id: &str, ask_new: bool) -> Result<Value, String> {
         // The runs sessions started end with the old process; the restart's run is no session's.
         self.with_state(notebook_id, |state| state.started.clear());
-        let result = self.call("restart", json!({ "notebook_id": notebook_id, "timeout": tools::TIMEOUT_SECONDS }))?;
+        let result = self.call("restart", json!({ "notebook_id": notebook_id, "timeout": tools::TIMEOUT_SECONDS, "ask_new": ask_new }))?;
         self.publish();
         Ok(result)
     }
