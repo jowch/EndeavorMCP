@@ -70,9 +70,11 @@ fn post(port: u16, token: &str, session: Option<&str>, message: &Value) -> (Stri
     socket.set_read_timeout(Some(Duration::from_secs(600))).unwrap();
     let body = message.to_string();
     let session = session.map_or(String::new(), |id| format!("Mcp-Session-Id: {id}\r\n"));
+    // The agent stands in for a client behind the plugin's front, which asks the user itself: so its
+    // approve_install is the user's yes (#392).
     write!(
         socket,
-        "POST /mcp HTTP/1.0\r\nHost: localhost:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\n{session}Content-Length: {}\r\n\r\n{body}",
+        "POST /mcp HTTP/1.0\r\nHost: localhost:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nX-Endeavor-Consent: front\r\n{session}Content-Length: {}\r\n\r\n{body}",
         body.len()
     )
     .unwrap();
@@ -131,6 +133,12 @@ fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
     let result = f();
     eprintln!("   {:.1}s", started.elapsed().as_secs_f64());
     result
+}
+
+/// A notebook's PEP 723 header, where marimo writes what it installs.
+fn header(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap();
+    text.split("\n# ///\n").next().unwrap_or_default().to_owned()
 }
 
 fn has_uv() -> bool {
@@ -312,6 +320,33 @@ fn a_python_notebook_through_the_runtime() {
         assert!(read["output"].as_str().unwrap_or_default().contains('3'), "{read}");
     });
 
+    step("a typo's import installs nothing without the user's OK", || {
+        // PyPI isn't curated: `import pandsa` would install whatever is published under that name (#355).
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let made = agent.ok("new_notebook", json!({ "path": "typo.py" }));
+        let id = made["notebook_id"].clone();
+        let cell = made["cell_ids"][0].as_str().unwrap().to_owned();
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import pandsa" }));
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": true }));
+        assert_eq!(ran["packages"]["step"], "asking", "{ran}");
+        assert_eq!(ran["packages"]["download"]["packages"], json!([{ "package": "pandsa" }]), "{ran}");
+        assert!(ran["message"].as_str().unwrap_or_default().contains("pandsa"), "{ran}");
+        assert!(!header(&folder.join("typo.py")).contains("pandsa"), "nothing installed");
+        // The agent fixes the typo and runs again: nothing new, nothing asks, and the cell runs.
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import json\njson.dumps(1)" }));
+        // It runs at once: a cell that waits for an OK isn't waited for as a run (#355).
+        let began = Instant::now();
+        let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": true }));
+        assert!(began.elapsed() < Duration::from_secs(15), "{:?}", began.elapsed());
+        assert!(ran.get("packages").is_none_or(Value::is_null), "{ran}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+        assert!(read["errored"] == false && read["output"].as_str().unwrap_or_default().contains('1'), "{read}");
+        let refused = agent.call("approve_install", json!({ "notebook_id": id }));
+        assert!(refused.0 && refused.1.to_string().contains("nothing_to_approve"), "{refused:?}");
+        agent.ok("close_notebook", json!({ "notebook_id": id }));
+    });
+
     step("an install keeps to the notebook's package date", || {
         // marimo installs with `uv pip install`, which reads no header; the date has to reach it. boto3 has a
         // release most days, so the newest is never the one of a date weeks back.
@@ -345,17 +380,32 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import boto3" }));
         let user = agent.ok("add_cell", json!({ "notebook_id": id, "code": "boto3.__version__", "after_cell_id": cell }))["cell_id"].as_str().unwrap().to_owned();
         agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": false }));
-        // The install is under way (slowed by ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS) and says what it installs.
-        let began = Instant::now();
-        let installing = loop {
+        let packages = |agent: &mut Agent| {
             let listed = agent.ok("list_notebooks", json!({}));
-            let nb = listed.as_array().unwrap().iter().find(|n| n["notebook_id"] == id).unwrap().clone();
-            if nb["packages"].is_object() || began.elapsed() > Duration::from_secs(20) {
-                break nb;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+            listed.as_array().unwrap().iter().find(|n| n["notebook_id"] == id).unwrap()["packages"].clone()
         };
-        assert!(installing["packages"]["packages"].as_array().is_some_and(|p| p.iter().any(|p| p == "boto3")), "the install says it installs boto3: {installing}");
+        let until = |agent: &mut Agent, step: &str| {
+            let began = Instant::now();
+            loop {
+                let now = packages(agent);
+                if now["step"] == step || began.elapsed() > Duration::from_secs(30) {
+                    break now;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        // boto3 is new to the notebook: nothing installs until the user's OK (#355), and the cells wait.
+        let asking = until(&mut agent, "asking");
+        assert!(asking["new"] == true && asking["download"]["packages"] == json!([{ "package": "boto3" }]), "it asks about boto3: {asking}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": user }));
+        assert!(read["errored"] == false && read["queued"] == true, "a cell waiting for an OK doesn't show the import error: {read}");
+        assert!(read["message"].as_str().unwrap_or_default().contains("Python has to install packages this notebook doesn't have yet: boto3"), "{read}");
+        assert!(!header(&folder.join(&name)).contains("boto3"), "nothing installed before the OK");
+        let approved = agent.ok("approve_install", json!({ "notebook_id": id }));
+        assert!(approved["approved"] == true && approved["packages"] == json!(["boto3"]), "{approved}");
+        // The install is under way (slowed by ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS) and says what it installs.
+        let installing = until(&mut agent, "installing");
+        assert!(installing["packages"].as_array().is_some_and(|p| p.iter().any(|p| p == "boto3")), "the install says it installs boto3: {installing}");
         let mut read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": user }));
         for _ in 0..20 {
             assert!(read["errored"] == false, "a cell waiting for its package doesn't show the import error: {read}");
