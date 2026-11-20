@@ -31,8 +31,15 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   otherwise). The agent needn't call again: when it had to, Haiku 4.5 often
   said a dialog would come and stopped (#380's smoke runs). There the tools'
   descriptions tell the agent not to ask in the chat as well. Haiku 4.5 installed before the user's yes in 2 of 3 smoke
-  runs before this (#378). A client that can't show a dialog gets the old
-  behavior: the agent asks in the chat.
+  runs before this (#378). A client that can't show a dialog doesn't take the
+  agent's word either (#381): there a call with `install: true` opens a page
+  in the user's browser (`standalone/install_page.rs`, on 127.0.0.1 behind a
+  one-time secret that never reaches the agent) that names what it would
+  install, and installs only once they click Install. The call waits 45 s for
+  the click; a later call finds it. A look without `install` opens no page.
+  Without a browser to open (a front over ssh or with no display), nothing is
+  installed (`install_not_answered`). The front's log says whether each
+  client shows dialogs (`[ Info: Client …: shows dialogs: yes|no`).
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
 - The notebook view (`views.rs`, interface 36; R notebooks interface 38): a client that draws MCP App
