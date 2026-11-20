@@ -995,11 +995,21 @@ impl Call<'_> {
         ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
         let applied = self.apply(&nb.id, ops)?;
         let code = code.as_str().unwrap_or_default();
-        self.edited(&nb.id, &applied, &cell, &before, code);
+        // The engine may keep the code in another form (marimo's file form): the owner knows that one.
+        let stored = self.stored_code(&nb.id, &cell, code)?;
+        self.edited(&nb.id, &applied, &cell, &before, &stored);
         let ran = self.run_or_stage(&nb, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "edit_cell", "cell_id": cell }), ran, None)?;
         receipt.extend(self.changed_cell_json(&after, &cell));
+        if stored != code {
+            receipt.insert("code".to_owned(), json!(stored));
+        }
         Ok(Value::Object(receipt))
+    }
+
+    /// A cell's code as the engine kept it after an edit that sent `sent`.
+    fn stored_code(&self, id: &str, cell: &str, sent: &str) -> Result<String, String> {
+        Ok(self.nbs.snapshot(id)?.cells.get(cell).map_or_else(|| sent.to_owned(), |c| c.code.clone()))
     }
 
     /// What the core keeps of an edit the tools made (`applied`, the
@@ -1038,8 +1048,10 @@ impl Call<'_> {
             ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
         }
         let applied = self.apply(&nb.id, ops)?;
+        let stored = self.nbs.snapshot(&nb.id)?;
         for (edit, cell) in edits.iter().zip(&cells) {
-            self.edited(&nb.id, &applied, cell, &nb.cells[cell].code, edit["code"].as_str().unwrap_or_default());
+            let code = edit["code"].as_str().unwrap_or_default();
+            self.edited(&nb.id, &applied, cell, &nb.cells[cell].code, stored.cells.get(cell).map_or(code, |c| c.code.as_str()));
         }
         self.mark_pending(&nb.id, &cells);
         let mutation = json!({ "type": "edit_cells", "cell_ids": cells });

@@ -249,6 +249,21 @@ class Marimo:
 # ---- Notebooks ---------------------------------------------------------------
 
 
+def file_form(code):
+    """A cell's code as marimo's file gives it back: a `mo.md("...")` cell is written with triple quotes, and a
+    blank line loses its spaces. Our copy and marimo's session keep this form, not the agent's, so that they
+    match the file. When they don't, marimo's reload after the file changes under it (a package added to its
+    header) pairs cells by similar code, and can give one heading's code to another (L1 on Haiku, 11-20)."""
+    from marimo._ast import codegen
+    from marimo._ast.cell import CellConfig
+    from marimo._ast.parse import parse_notebook
+    try:
+        cells = parse_notebook(codegen.generate_filecontents([code], ["_"], [CellConfig()])).cells
+    except Exception:  # noqa: BLE001 - code marimo can't write is kept as it came
+        return code
+    return cells[0].code if len(cells) == 1 else code
+
+
 def new_cell(code, name=""):
     return {"code": code, "name": name, "status": "idle", "ran_code": None, "stale": False, "output": None,
             "console": [], "errored": False, "started": 0.0, "last_run": 0.0, "runtime": 0.0, "hide_code": False}
@@ -1075,11 +1090,11 @@ class Adapter:
         for op in ops:
             kind = op.get("op", "")
             if kind == "set_code":
-                changes.append({"type": "set-code", "cellId": nb.check_cell(op["cell_id"]), "code": str(op.get("code", ""))})
+                changes.append({"type": "set-code", "cellId": nb.check_cell(op["cell_id"]), "code": file_form(str(op.get("code", "")))})
             elif kind == "insert":
                 cid = new_id(nb, inserted)
                 i = max(0, min(int(op.get("index", len(order))), len(order)))
-                change = {"type": "create-cell", "cellId": cid, "code": str(op.get("code", "")), "name": "_",
+                change = {"type": "create-cell", "cellId": cid, "code": file_form(str(op.get("code", ""))), "name": "_",
                           "config": {"column": None, "disabled": False, "hide_code": bool(op.get("folded")), "expand_output": False}}
                 if i > 0:
                     change["after"] = order[i - 1]

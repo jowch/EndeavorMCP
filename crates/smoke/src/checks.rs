@@ -278,7 +278,7 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                         None => differ.push(format!("{}: gone", first_line(&cell.code))),
                         Some(a) if a.errored != cell.errored => differ.push(format!("{}: errored {} then {}", first_line(&cell.code), cell.errored, a.errored)),
                         Some(a) if is_picture(&cell.output) && is_picture(&a.output) => {}
-                        Some(a) if a.output.trim_end() != cell.output.trim_end() => {
+                        Some(a) if settled(&a.output) != settled(&cell.output) => {
                             differ.push(format!("{}: {:?} then {:?}", first_line(&cell.code), clip(&cell.output, 120), clip(&a.output, 120)))
                         }
                         Some(_) => {}
@@ -415,6 +415,13 @@ fn same_code(a: &str, b: &str) -> bool {
     a.lines().map(str::trim_end).eq(b.lines().map(str::trim_end))
 }
 
+/// An output without what a package prints only the first time it runs on a computer, which the
+/// re-run, on the same computer, doesn't print again.
+fn settled(output: &str) -> String {
+    const FIRST_TIME: [&str; 1] = ["Matplotlib is building the font cache; this may take a moment."];
+    output.lines().filter(|l| !FIRST_TIME.contains(&l.trim())).collect::<Vec<_>>().join("\n").trim_end().to_owned()
+}
+
 fn first_line(code: &str) -> &str {
     code.lines().next().unwrap_or_default()
 }
@@ -545,6 +552,10 @@ mod tests {
         assert!(run(&json!({ "check": "reproducible" }), &ev).passed, "marimo's file drops the spaces on a blank line: still the same cell");
         let ev = Evidence { calls: &[], notebooks: &spaced, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1\nb", "c = 1", "d = 1"])])), turns: &[], server_files: &[], questions: &[], pages: &[] };
         assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "but not a line that went missing");
+        let mut cached = left.clone();
+        cached[0].cells[0].output = "Matplotlib is building the font cache; this may take a moment.\n1".into();
+        let ev = Evidence { calls: &[], notebooks: &cached, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(left.to_vec())), turns: &[], server_files: &[], questions: &[], pages: &[] };
+        assert!(run(&json!({ "check": "reproducible" }), &ev).passed, "a first-time notice the re-run doesn't print isn't a difference");
         let busy = [notebook(&[("c", "", true)])];
         let ev = Evidence { calls: &[], notebooks: &busy, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("c", "3", false)])])), turns: &[], server_files: &[], questions: &[], pages: &[] };
         assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "nothing compared fails");
