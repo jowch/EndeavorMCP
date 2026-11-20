@@ -78,13 +78,13 @@ pub(super) const CHANGED_MIND: &str = "If they want it now, the only way is the 
 const CANT_ASK: &str = "Endeavor can't ask the user from this app (no dialog, and no browser it can open), so calling it downloads nothing: tell the user what would download and its size, and that they can approve it with the button on the notebook's page. Its link is the notebook's browser_url from open_notebook or list_notebooks; where that page is on another computer, the note that came with it says how to reach it.";
 
 /// The runtime's asking step where Endeavor asks the user on a page in their browser.
-const ASK_STEP_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
+const ASK_STEP_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what it would install: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
 
 /// The same where no one can be asked.
 const ASK_STEP_CANT: &str = "Endeavor can't ask the user from this app, so approve_install downloads nothing here: tell the user what would download and its size, and that they can approve it with the button on the notebook's page, then end your reply. Its link is the notebook's browser_url from open_notebook or list_notebooks; where that page is on another computer, the note that came with it says how to reach it.";
 
 /// The runtime's asking step (`notebooks::ASK_STEP`) where the front asks the user itself.
-const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
+const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what it would install: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
 
 /// The machine tools' words about asking the user before `install: true`, and what they say where
 /// the front asks the user itself (#378). Each chat wording is in machine_tools.json (a test checks).
@@ -263,6 +263,11 @@ impl Consent {
     pub(super) fn download_question(waiting: &Waiting) -> Option<String> {
         Some(match waiting {
             Waiting::Nothing => return None,
+            // A Julia notebook's run that would add packages it doesn't have yet (#397).
+            Waiting::Asking { download, name } if name.ends_with(".jl") => {
+                let names: Vec<&str> = download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).collect();
+                format!("Julia needs to install {}, new to the notebook {name}, before its cells can run. Install {} now?", names.join(", "), if names.len() == 1 { "it" } else { "them" })
+            }
             Waiting::Asking { download, name } => format!("R needs to download {} before the cells of the notebook {name} can run. Download it now?", what(download)),
             Waiting::Unknown(id) => format!("R needs to download some large Bioconductor data packages before the cells of the notebook with id {id} can run. Endeavor couldn't tell which packages or their size. Download them now?"),
         })
@@ -1055,6 +1060,13 @@ mod tests {
         let elsewhere = json!({ "notebook_id": id, "path": "/other/leukemia.R", "execution_allowed": true, "packages": asking });
         let question = |listed: String| Consent::download_question(&waiting_in(&listed, &json!(id))).unwrap();
         assert_ne!(question(listed(json!([nb(asking.clone(), true)]))), question(listed(json!([elsewhere]))));
+    }
+
+    #[test]
+    fn a_julia_notebooks_new_packages_are_asked_about_by_name() {
+        // #397: no size, nothing to download in R's sense; the packages and the notebook.
+        let waiting = Waiting::Asking { download: json!({ "bytes": null, "packages": [{ "package": "Makie" }, { "package": "WGLMakie" }] }), name: "/data/plots.jl".to_owned() };
+        assert_eq!(Consent::download_question(&waiting).unwrap(), "Julia needs to install Makie, WGLMakie, new to the notebook /data/plots.jl, before its cells can run. Install them now?");
     }
 
     #[test]

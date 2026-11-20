@@ -239,6 +239,67 @@ function _package_step(nb)
     )
 end
 
+# Asking before a new package (#397): a run whose cells would make Pluto add a
+# package the notebook doesn't have yet (not in its Project.toml, not a
+# standard library) waits for the user's OK instead of running, when the
+# caller says new packages ask (`ask_new`). Its cells stay queued, and the
+# snapshot's `packages` says `asking`, with the packages, as an R notebook's
+# large download does; `approve_install` is the OK, and the cells run. A yes
+# holds for those packages in this notebook while it is open. A notebook that
+# manages its own environment (`Pkg.activate`) adds nothing, so asks nothing.
+const _ASKING = Dict{UUID,Any}()        # notebook => (cells = the held cells, packages)
+const _APPROVED = Dict{UUID,Set{String}}()  # notebook => packages the user said yes to
+const _ASKING_LOCK = ReentrantLock()
+
+function new_packages(nb)
+    ctx = nb.nbpkg_ctx
+    ctx === nothing && return String[]
+    have = Set(String.(keys(Pluto.PkgCompat.project(ctx).dependencies)))
+    approved = lock(() -> get(_APPROVED, nb.notebook_id, Set{String}()), _ASKING_LOCK)
+    topology = Pluto.updated_topology(nb.topology, nb, nb.cells)
+    uses = String.(collect(Pluto.external_package_names(topology)))
+    sort!(filter(p -> p ∉ have && p ∉ approved && !Pluto.PkgCompat.is_stdlib(p) && Pluto.PkgCompat.package_exists(p), uses))
+end
+
+_asking(nb) = lock(() -> get(_ASKING, nb.notebook_id, nothing), _ASKING_LOCK)
+
+function _forget_asking!(nb)
+    held = lock(_ASKING_LOCK) do
+        a = pop!(_ASKING, nb.notebook_id, nothing)
+        a === nothing ? Pluto.Cell[] : a.cells
+    end
+    isempty(held) || _release_cells!(nb, held)
+    return nothing
+end
+
+forget_packages!(notebook_id::UUID) = lock(() -> (delete!(_ASKING, notebook_id); delete!(_APPROVED, notebook_id)), _ASKING_LOCK)
+
+# The user's yes to the packages a notebook asks about: they install, and the
+# held cells run.
+function approve_install!(session, nb, timeout::Real)
+    a = lock(() -> pop!(_ASKING, nb.notebook_id, nothing), _ASKING_LOCK)
+    a === nothing && throw(ArgumentError("nothing_to_approve::Nothing in this notebook waits for the user's OK"))
+    lock(() -> union!(get!(Set{String}, _APPROVED, nb.notebook_id), a.packages), _ASKING_LOCK)
+    # Still asks about a package that is new since the question.
+    ran = run_cells!(session, nb, a.cells; wait=false, timeout, ask_new=true)
+    return merge!(Dict{String,Any}("approved" => true, "packages" => a.packages, "cells" => [string(c.cell_id) for c in a.cells]), ran)
+end
+
+function _asking_step(nb)
+    a = _asking(nb)
+    a === nothing && return nothing
+    # The user ran a cell on the notebook's page, which added them, or the code changed so that
+    # nothing new is used: nothing waits for an OK any more.
+    if isempty(new_packages(nb))
+        _forget_asking!(nb)
+        return nothing
+    end
+    Dict{String,Any}(
+        "step" => "asking", "new" => true, "packages" => a.packages, "seconds" => 0, "last_line" => nothing,
+        "download" => Dict{String,Any}("bytes" => nothing, "packages" => [Dict{String,Any}("package" => p) for p in a.packages]),
+    )
+end
+
 function snapshot(nb; controls = Dict{String,Any}())
     moved = moved_input_notes(nb, controls)
     cell(id) = _snapshot_cell(nb.cells_dict[id]; inputs = get(controls, string(id), nothing), moved = get(moved, string(id), String[]))
@@ -250,7 +311,7 @@ function snapshot(nb; controls = Dict{String,Any}())
         "execution_allowed" => Pluto.will_run_code(nb),
         "safe_preview"      => nb.process_status === Pluto.ProcessStatus.waiting_for_permission,
         "exited"            => exited_cells(nb),
-        "packages"          => package_step(nb),
+        "packages"          => something(_asking_step(nb), Some(package_step(nb))),
         "cells"          => [cell(id) for id in nb.cell_order],
     )
 end
@@ -360,8 +421,25 @@ end
 # were running if its process ended by itself meanwhile. A run that goes on,
 # waited for or not, is watched (`_watch_run!`): the reply's `run` names it,
 # and a `run_finished` notification with that `run` says when it ends.
-function run_cells!(session, nb, cells; wait::Bool, timeout::Real)
+function run_cells!(session, nb, cells; wait::Bool, timeout::Real, ask_new::Bool=false)
     accepted = Pluto.will_run_code(nb)
+    # A notebook that asks already holds these cells too, and asks again with
+    # what is new now (an edit may have dropped or added a package).
+    if accepted && (ask_new || _asking(nb) !== nothing)
+        held = lock(() -> (a = get(_ASKING, nb.notebook_id, nothing); a === nothing ? Pluto.Cell[] : a.cells), _ASKING_LOCK)
+        # Less any held cell deleted since.
+        cells = unique!(filter(c -> haskey(nb.cells_dict, c.cell_id), vcat(held, collect(cells))))
+        new = isempty(cells) ? String[] : new_packages(nb)
+        if !isempty(new)
+            foreach(c -> c.queued = true, cells)
+            lock(() -> _ASKING[nb.notebook_id] = (cells = cells, packages = new), _ASKING_LOCK)
+            notify_state!(nb)
+            _notify_browser(session, nb)
+            return Dict{String,Any}("accepted" => true, "asking" => new, "process_status" => string(nb.process_status),
+                                    "completed" => String[], "timed_out" => [string(c.cell_id) for c in cells])
+        end
+        lock(() -> delete!(_ASKING, nb.notebook_id), _ASKING_LOCK)
+    end
     # Pluto marks cells queued only inside its run task, after package sync;
     # mark them now, as its own run button does, so a caller that looks right
     # away sees them waiting.
@@ -438,7 +516,7 @@ end
 
 # Pluto's own Restart: a new process, then every cell runs. Refused in safe
 # preview, where allow_execution starts the notebook.
-function restart!(session, nb, timeout::Real)
+function restart!(session, nb, timeout::Real; ask_new::Bool=false)
     ps = nb.process_status
     ps === Pluto.ProcessStatus.waiting_for_permission &&
         throw(ArgumentError("execution_blocked::The notebook is in safe preview; Run notebook starts it"))
@@ -454,8 +532,10 @@ function restart!(session, nb, timeout::Real)
     Pluto.SessionActions.shutdown(session, nb; keep_in_session=true, async=true, verbose=false)
     nb.process_status = Pluto.ProcessStatus.starting
     _notify_browser(session, nb)
-    run_cells!(session, nb, collect(nb.cells); wait=false, timeout)
-    return Dict{String,Any}("restarted" => true)
+    ran = run_cells!(session, nb, collect(nb.cells); wait=false, timeout, ask_new)
+    result = Dict{String,Any}("restarted" => true)
+    haskey(ran, "asking") && (result["asking"] = ran["asking"])
+    return result
 end
 
 # Drop the notebook's start from Pluto's workspaces if it failed (its process ended before Pluto
@@ -612,9 +692,10 @@ function adapter_call(session, method::AbstractString, params)
                                       edges=get(params, "edges", false), packages=get(params, "packages", false))
     method == "shutdown" && return shutdown_notebook!(session, nb)
     method == "apply" && return apply!(session, nb, params["ops"])
-    method == "run" && return run_cells!(session, nb, [_adapter_cell(nb, c) for c in params["cells"]]; wait=params["wait"], timeout=params["timeout"])
+    method == "run" && return run_cells!(session, nb, [_adapter_cell(nb, c) for c in params["cells"]]; wait=params["wait"], timeout=params["timeout"], ask_new=get(params, "ask_new", false))
+    method == "approve_install" && return approve_install!(session, nb, get(params, "timeout", 30))
     method == "interrupt" && return interrupt!(session, nb)
-    method == "restart" && return restart!(session, nb, params["timeout"])
+    method == "restart" && return restart!(session, nb, params["timeout"]; ask_new=get(params, "ask_new", false))
     method == "allow_execution" && return allow_execution!(session, nb, params["run"], params["timeout"])
     method == "move" && return move!(session, nb, params["path"])
     method == "render_text" && return render_text(session, nb, _adapter_cell(nb, params["cell_id"]))

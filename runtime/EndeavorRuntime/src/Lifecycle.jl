@@ -98,6 +98,7 @@ function _handle_pluto_event(event)::Nothing
         if sess === nothing || !haskey(sess.notebooks, nb.notebook_id)
             forget_topology!(nb.notebook_id)
             forget_controls!(nb.notebook_id)
+            forget_packages!(nb.notebook_id)
             lock(() -> (delete!(_WATCHED, nb.notebook_id); delete!(_EXITED, nb.notebook_id); delete!(_INTERRUPTED, nb.notebook_id)), _NOTIFY_LOCK)
             _notify_notebook!("notebook_shut_down", nb)
         else
@@ -233,6 +234,12 @@ it skips the cells queued after one Stop interrupts (#179: before, nothing was
 interrupted, and every cell ran).
 """
 function interrupt!(session, nb)
+    # Cells that wait for the user's OK to a new package stop waiting.
+    if _asking(nb) !== nothing
+        _forget_asking!(nb)
+        _notify_browser(session, nb)
+        return Dict{String,Any}("interrupted" => true)
+    end
     task = get(Pluto.WorkspaceManager.active_workspaces, nb.notebook_id, nothing)
     if (task === nothing || !istaskdone(task)) && Pluto.will_run_code(nb) && any(_unfinished, nb.cells)
         # Pluto's run clears this when it ends.

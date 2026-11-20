@@ -426,6 +426,14 @@ impl Engine {
                     }
                     return Ok(reply);
                 }
+                // A package the notebook doesn't have yet waits for the user's OK where the caller asks (#397).
+                if params["ask_new"] == true && nb.cells.iter().any(|c| cells.contains(&c.id) && c.code.contains("using Example")) {
+                    for cell in nb.cells.iter_mut().filter(|c| cells.contains(&c.id)) {
+                        cell.queued = true;
+                    }
+                    nb.packages = Some(json!({ "step": "asking", "new": true, "packages": ["Example"], "seconds": 0, "last_line": null, "download": { "bytes": null, "packages": [{ "package": "Example" }] } }));
+                    return Ok(json!({ "accepted": true, "asking": ["Example"], "process_status": "ready", "completed": [], "timed_out": cells }));
+                }
                 // `crash()` takes the notebook's process down while it runs.
                 if let Some(cell) = nb.cells.iter().find(|c| cells.contains(&c.id) && c.code.contains("crash()")) {
                     nb.exited = Some(vec![cell.id.clone()]);
@@ -2899,10 +2907,10 @@ fn the_apps_notebook_actions_restart_move_file_info_and_new_notebook() {
     s.edit("", &id(1), Y, "y = x + 1");
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([Y]));
     s.seconds(1.0);
-    assert_eq!(s.notebooks.restart(&id(1)), Ok(json!({ "restarted": true })));
+    assert_eq!(s.notebooks.restart(&id(1), false), Ok(json!({ "restarted": true })));
     assert_eq!(s.call("", "list_notebooks", json!({})).unwrap()[0]["pending_run"], json!([]));
-    assert_eq!(s.notebooks.restart(&id(2)), Err("ArgumentError: execution_blocked::The notebook is in safe preview; Run notebook starts it".into()));
-    assert_eq!(s.notebooks.restart("nope"), Err("KeyError: key \"notebook_not_found::No notebook with id 'nope' in the current session\" not found".into()));
+    assert_eq!(s.notebooks.restart(&id(2), false), Err("ArgumentError: execution_blocked::The notebook is in safe preview; Run notebook starts it".into()));
+    assert_eq!(s.notebooks.restart("nope", false), Err("KeyError: key \"notebook_not_found::No notebook with id 'nope' in the current session\" not found".into()));
 
     // A move takes the sessions bound to the notebook, and an idle-stopped entry for it, along.
     s.notebooks.bind("a", &paths[0]);
@@ -3358,7 +3366,7 @@ fn an_r_install_waiting_for_an_ok_says_to_ask_the_user_and_nothing_waits_for_it(
     assert!(began.elapsed() < Duration::from_secs(1), "it didn't wait");
     assert_eq!((&read["queued"], &read["packages"]), (&json!(true), &asking));
     let message = read["message"].as_str().unwrap();
-    for part in ["BSgenome.Hsapiens.UCSC.hg38 1.4.5 (870 MB), GO.db 3.22.0 (400 MB), org.Hs.eg.db 3.22.0 (size unknown), 1.3 GB in all", "ask the user whether to download it, then end your reply", "call it only once they have answered yes", "Don't call read_cell to wait"] {
+    for part in ["BSgenome.Hsapiens.UCSC.hg38 1.4.5 (870 MB), GO.db 3.22.0 (400 MB), org.Hs.eg.db 3.22.0 (size unknown), 1.3 GB in all", "ask the user whether to install it, then end your reply", "call it only once they have answered yes", "Don't call read_cell to wait"] {
         assert!(message.contains(part), "{part}: {message}");
     }
 
@@ -3407,10 +3415,32 @@ fn an_r_install_waiting_for_an_ok_says_to_ask_the_user_and_nothing_waits_for_it(
     let refused = s.call("9", "approve_install", json!({ "notebook_id": R })).unwrap_err();
     assert!(refused.contains("nothing_to_approve"), "{refused}");
 
-    // A Julia notebook never asks.
+    // A Julia notebook with nothing waiting has nothing to approve.
     s.engine.open(NB, "/n/a.jl", &[(Y, "y = 1")]);
     let julia = s.call("7", "approve_install", json!({ "notebook_id": NB })).unwrap_err();
-    assert!(julia.contains("not_r_notebook"), "{julia}");
+    assert!(julia.contains("nothing_to_approve"), "{julia}");
+}
+
+#[test]
+fn a_julia_run_that_adds_a_package_asks_first_except_in_auto_mode() {
+    // Haiku's `using Makie, WGLMakie` installed them with no one asked (#397).
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "using Example"), (Y, "y = 1")]);
+    let ran = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let message = ran["message"].as_str().unwrap();
+    assert!(message.contains("Julia has to install packages this notebook doesn't have yet: Example") && message.contains(super::tools::ASK_STEP), "{ran}");
+    assert!(!message.contains("download"), "a new package isn't a download: {message}");
+    assert_eq!(ran["packages"]["step"], "asking", "{ran}");
+    let approved = s.call("7", "approve_install", json!({ "notebook_id": NB })).unwrap();
+    assert!(approved["approved"] == true && approved["message"].as_str().unwrap().contains("packages are approved"), "{approved}");
+
+    // The app's Auto mode doesn't ask: the run goes ahead.
+    s.notebooks.set_auto("8", true);
+    s.engine.open("22222222-0000-4000-8000-000000000002", "/n/b.jl", &[(X, "using Example")]);
+    let ran = s.call("8", "execute_cell", json!({ "notebook_id": "22222222-0000-4000-8000-000000000002", "cell_id": X })).unwrap();
+    assert!(ran.get("packages").is_none() && !ran.to_string().contains("asking"), "{ran}");
+    s.notebooks.set_auto("8", false);
+    assert!(s.notebooks.asks_new_packages("8"));
 }
 
 #[test]
@@ -3522,7 +3552,7 @@ fn a_stop_interrupts_the_sessions_own_run() {
     s.notebooks.stop_for("7", NB, false);
     assert_eq!(interrupts(), 2, "after the process ended");
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
-    s.notebooks.restart(NB).unwrap();
+    s.notebooks.restart(NB, false).unwrap();
     s.notebooks.stop_for("7", NB, false);
     assert_eq!(interrupts(), 2, "after the app's Restart");
     // Nor is a waited run that finished within the wait.

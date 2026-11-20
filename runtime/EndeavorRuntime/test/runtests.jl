@@ -816,6 +816,39 @@ end
             @test result("run", Dict("notebook_id" => nid, "cells" => [], "wait" => false, "timeout" => 60))["accepted"]
             @test string.(nb.cell_order) == [X, Y] && !haskey(nb.cells_dict, UUID(z))
 
+            # A package the notebook doesn't have yet waits for the user's OK where the caller asks
+            # (#397): the cell stays queued, and the snapshot says what would be added.
+            run_asking(cells) = result("run", Dict("notebook_id" => nid, "cells" => cells, "wait" => true, "timeout" => 60, "ask_new" => true))
+            stdlib = insert("using Dates", 2)
+            @test !haskey(run_asking([stdlib]), "asking")
+            pkg = insert("using Example", 3)
+            asked = run_asking([pkg])
+            @test (asked["asking"], asked["completed"], asked["timed_out"]) == (["Example"], [], [pkg])
+            @test nb.cells_dict[UUID(pkg)].queued
+            step = result("snapshot", Dict("notebook_id" => nid))["packages"]
+            @test (step["step"], step["new"], [p["package"] for p in step["download"]["packages"]]) == ("asking", true, ["Example"])
+            @test !haskey(Pluto.PkgCompat.project(nb.nbpkg_ctx).dependencies, "Example")
+            # An edit that drops it asks nothing: the held cell runs.
+            result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "nothing")))
+            @test !haskey(run_asking([pkg]), "asking")
+            @test result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing
+            # Asked again, and stopped: the cell isn't queued any more.
+            result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "using Example")))
+            @test run_asking([pkg])["asking"] == ["Example"]
+            @test result("interrupt", Dict("notebook_id" => nid))["interrupted"] == true
+            @test !nb.cells_dict[UUID(pkg)].queued && result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing
+            # The user's yes: it installs, and the cell runs.
+            @test run_asking([pkg])["asking"] == ["Example"]
+            approved = result("approve_install", Dict("notebook_id" => nid, "timeout" => 60))
+            @test (approved["approved"], approved["packages"], approved["cells"]) == (true, ["Example"], [pkg])
+            @test pkg in next_note("run_finished"; nid)["cells"]
+            @test haskey(Pluto.PkgCompat.project(nb.nbpkg_ctx).dependencies, "Example") && !nb.cells_dict[UUID(pkg)].errored
+            @test adapter("approve_install", Dict("notebook_id" => nid)) == Dict("error" => "ArgumentError: nothing_to_approve::Nothing in this notebook waits for the user's OK")
+            # Once in the notebook, it asks nothing.
+            @test !haskey(run_asking([pkg]), "asking")
+            result("apply", ops(Dict("op" => "delete", "cell_id" => pkg), Dict("op" => "delete", "cell_id" => stdlib)))
+            result("run", Dict("notebook_id" => nid, "cells" => [], "wait" => true, "timeout" => 60))
+
             @test result("validate", Dict("notebook_id" => nid, "cell_id" => X, "code" => "a = 1\nb = 2"))["errors"][1]["type"] == "pluto_multi_expression"
             @test result("validate", Dict("notebook_id" => nid, "cell_id" => X, "code" => "a = 1"))["errors"] == []
             @test result("render_png", Dict("notebook_id" => nid, "cell_id" => X)) == Dict("png" => nothing, "mime" => "text/plain")

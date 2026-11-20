@@ -398,6 +398,7 @@ impl Bridge {
                 eprintln!("[ Info: Session {owner} policy: {policy}{what}");
                 // A yes was given under the mode it was asked in.
                 self.starting_calls.lock().unwrap().remove(&owner);
+                self.notebooks.set_auto(&owner, policy == "auto");
                 self.policies.lock().unwrap().insert(owner, Policy { policy, asks, edits });
             }
             "endeavor/answer_run" => {
@@ -478,7 +479,8 @@ impl Bridge {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                 return Some(answer(self.notebooks.run_preview(&text("tool", ""), &arguments)));
             }
-            "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", "")))),
+            // The user's own Restart: what it adds is theirs.
+            "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", ""), false))),
             "endeavor/restore_cells" => return Some(answer(self.notebooks.restore_cells(&text("notebook_id", ""), &params["cells"]))),
             // The user pressed Stop in the app, which the runtime hears of no other way when no call is
             // under way: interrupt the session's runs that are still going. Answered at once with the
