@@ -498,8 +498,23 @@ fn rerun(notebooks: &[crate::mcp::Notebook], task: &Path, work: &Path, project: 
         if let Some((_, agents)) = paths.iter().find(|(path, _)| Path::new(path) == Path::new(&nb.path)) {
             nb.path = agents.clone();
         }
+        for cell in &mut nb.cells {
+            cell.output = in_agents_folder(&cell.output, &copy, project);
+        }
     }
     Ok(again)
+}
+
+/// A re-run's output with its project folder written as the agent's, so a cell that prints its own
+/// folder (`@__DIR__`, a saved figure's path) compares the same (#440). macOS's temporary folders
+/// show as /var/... or /private/var/..., so both spellings are replaced.
+fn in_agents_folder(output: &str, copy: &Path, project: &Path) -> String {
+    let (copy, project) = (copy.display().to_string(), project.display().to_string());
+    let mut out = output.replace(&copy, &project);
+    if let Some(short) = copy.strip_prefix("/private") {
+        out = out.replace(short, project.strip_prefix("/private").unwrap_or(&project));
+    }
+    out
 }
 
 /// Notebooks as a result shows them: each cell's first line, state and output, cut short.
@@ -991,6 +1006,14 @@ fn utc_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rerun_prints_its_folder_as_the_agents() {
+        let (copy, project) = (Path::new("/private/var/f/L1J/attempt-1/rerun/project"), Path::new("/private/var/f/L1J/attempt-1/project"));
+        assert_eq!(super::in_agents_folder("/private/var/f/L1J/attempt-1/rerun/project/fig.png", copy, project), "/private/var/f/L1J/attempt-1/project/fig.png");
+        assert_eq!(super::in_agents_folder("\"/var/f/L1J/attempt-1/rerun/project/fig.png\"", copy, project), "\"/var/f/L1J/attempt-1/project/fig.png\"");
+        assert_eq!(super::in_agents_folder("74.08", copy, project), "74.08");
+    }
 
     #[test]
     fn a_task_folder_waits_for_the_processes_that_name_a_path_in_it() {

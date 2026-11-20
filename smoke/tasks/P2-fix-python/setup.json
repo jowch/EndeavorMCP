@@ -1,1 +1,1 @@
-{ "open": ["analysis.py"] }
+{ "open": ["analysis.py"], "dialog": { "new_packages": ["numpy", "pandas"] } }

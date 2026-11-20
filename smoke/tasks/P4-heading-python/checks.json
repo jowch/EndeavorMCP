@@ -1,0 +1,16 @@
+{
+  "about": "Headings in an open marimo notebook, written with plain quotes: the agent edits one and adds one, and is likely to write mo.md(\"...\"), which marimo's file keeps as a triple-quoted string. The engine stores marimo's form and says so in the reply's `code` (#431), so the session, the file and a reload agree and each heading keeps its own code and output. Tags: already_open, markdown, python.",
+  "checks": [
+    { "check": "notebooks", "count": 1, "ending": ".py" },
+    { "check": "no_errored_cells" },
+    { "check": "code_contains", "texts": ["Summary"] },
+    { "check": "code_contains", "texts": ["Next steps"] },
+    { "check": "code_lacks", "texts": ["Results"] },
+    { "check": "code_contains", "texts": ["sum(counts)"] },
+    { "check": "output_contains", "texts": ["Summary"] },
+    { "check": "output_contains", "texts": ["The total is 43."] },
+    { "check": "reply_contains", "texts": ["\"code\":\"mo.md(\\\"\\\"\\\""], "soft": true },
+    { "check": "agent_tools_not_used", "tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"] },
+    { "check": "reproducible" }
+  ]
+}
