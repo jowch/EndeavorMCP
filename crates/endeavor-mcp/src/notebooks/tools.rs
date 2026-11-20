@@ -2041,6 +2041,19 @@ fn asking_message(nb: &Snapshot) -> String {
         let names: Vec<&str> = download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).collect();
         let which = if names.is_empty() { "packages".to_owned() } else { names.join(", ") };
         let language = super::engines::language(super::engines::of_path(&nb.path));
+        // A name a letter or two from a widely used package's is likely a typo (#416).
+        let near: Vec<String> = download["packages"].as_array().into_iter().flatten()
+            .filter_map(|p| Some(format!("{} is close to {}, a widely used package", p["package"].as_str()?, p["close_to"].as_str()?)))
+            .collect();
+        if !near.is_empty() {
+            return format!(
+                "Before these cells can run, {language} has to install packages this notebook doesn't have yet: {which}. {}. \
+                 Nothing is installing, and the cells stay queued. If an import is a typo, fix it, run the cell again, and tell the user you fixed it; don't ask them to install it. \
+                 If it isn't (the user asked for that name, or it is meant), name the package it is close to when you tell the user about the install, so they can check the spelling. {ASK_STEP} \
+                 Don't call read_cell to wait: nothing changes until then.",
+                near.join("; ")
+            );
+        }
         return format!(
             "Before these cells can run, {language} has to install packages this notebook doesn't have yet: {which}, with what they need. \
              A new package waits for the user's OK, so nothing is installing and the cells stay queued. {ASK_STEP} \

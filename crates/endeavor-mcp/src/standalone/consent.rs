@@ -269,7 +269,7 @@ impl Consent {
             Waiting::Asking { download, name } if download["new"] == true => {
                 let names: Vec<&str> = download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).collect();
                 let language = crate::notebooks::engines::language(crate::notebooks::engines::of_path(name));
-                format!("{language} needs to install {}, new to the notebook {name}, before its cells can run. Install {} now?", names.join(", "), if names.len() == 1 { "it" } else { "them" })
+                format!("{language} needs to install {}, new to the notebook {name}, before its cells can run.{} Install {} now?", names.join(", "), near_misses(download), if names.len() == 1 { "it" } else { "them" })
             }
             Waiting::Asking { download, name } => format!("R needs to download {} before the cells of the notebook {name} can run. Download it now?", what(download)),
             Waiting::Unknown(id) => format!("R needs to download some large Bioconductor data packages before the cells of the notebook with id {id} can run. Endeavor couldn't tell which packages or their size. Download them now?"),
@@ -604,6 +604,17 @@ pub(super) fn waiting_in(listed: &str, notebook: &Value) -> Waiting {
         download["new"] = true.into();
     }
     Waiting::Asking { download, name: name.unwrap_or(notebook) }
+}
+
+/// The packages of a download that are a letter or two from a widely used one (#416), as a sentence
+/// for the question: " pandsa isn't pandas: check the import for a typo." Empty when there are none.
+pub(crate) fn near_misses(download: &Value) -> String {
+    download["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some(format!(" {} isn't {}: check the import for a typo.", p["package"].as_str()?, p["close_to"].as_str()?)))
+        .collect()
 }
 
 /// What a download lists, as the runtime's asking message says it: "ALL 1.44.0 (11 MB)", and the
@@ -1089,6 +1100,11 @@ mod tests {
         let listed = json!({ "result": { "content": [{ "type": "text", "text": json!([{ "notebook_id": "00000000-0000-0000-0000-000000000355", "path": "/data/typo.py", "execution_allowed": true, "packages": packages }]).to_string() }] } }).to_string();
         let waiting = waiting_in(&listed, &json!("00000000-0000-0000-0000-000000000355"));
         assert_eq!(Consent::download_question(&waiting).unwrap(), "Python needs to install pandsa, new to the notebook /data/typo.py, before its cells can run. Install it now?");
+        // A name a letter or two from a widely used package's says so (#416).
+        let close = listed.replace(r#"{\"package\":\"pandsa\"}"#, r#"{\"package\":\"pandsa\",\"close_to\":\"pandas\"}"#);
+        assert_ne!(close, listed);
+        let waiting = waiting_in(&close, &json!("00000000-0000-0000-0000-000000000355"));
+        assert_eq!(Consent::download_question(&waiting).unwrap(), "Python needs to install pandsa, new to the notebook /data/typo.py, before its cells can run. pandsa isn't pandas: check the import for a typo. Install it now?");
     }
 
     #[test]
