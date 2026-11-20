@@ -1375,7 +1375,8 @@ impl Relay {
         let _ = socket.set_nodelay(true);
         let mut head = format!(
             // `X-Endeavor-Client`: the plugin's answers, on a runtime the app started too (`mcp::Caller::app`).
-            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nX-Endeavor-Session: {}\r\nX-Endeavor-Client: plugin\r\nContent-Length: {}\r\n",
+            // `X-Endeavor-Consent`: the front asks the user before `approve_install` (`mcp::Caller::consent`).
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nX-Endeavor-Session: {}\r\nX-Endeavor-Client: plugin\r\nX-Endeavor-Consent: front\r\nContent-Length: {}\r\n",
             self.session,
             body.len()
         );

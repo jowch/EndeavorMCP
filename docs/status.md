@@ -55,7 +55,16 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   can't read what downloads, the question says so and its yes holds for one
   call. With no browser either, `approve_install` downloads nothing
   (`download_cant_ask`) and the user approves it with the notebook page's own
-  button.
+  button. A client connected straight to `endeavor serve` over HTTP has no
+  front to ask for it, so the runtime refuses its `approve_install` the same
+  way (#391); only a caller that says it is the app (`X-Endeavor-Client:
+  app`, its card asks) or a front that asks (`X-Endeavor-Consent: front`)
+  gets the call through. A caller that says neither is refused even on a
+  runtime the app started. These headers are a declaration, not a check:
+  they stop an agent saying yes for the user (a model can't add headers to
+  its client's requests), not a client someone configured to send them, and
+  no text an agent reads names them. Asking such a client in
+  a dialog would need server-to-client requests on `/mcp`, which aren't built.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
 - The notebook view (`views.rs`, interface 36; R notebooks interface 38): a client that draws MCP App
