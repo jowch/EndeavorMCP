@@ -1458,6 +1458,8 @@ struct MarimoStarter {
     state: PathBuf,
     /// The engines' key, which the adapter's bridge takes: not the MCP bearer token.
     token: String,
+    /// The core runs on the user's own computer (`--own-r`, which the app passes only there).
+    this_computer: bool,
     #[cfg(unix)]
     mask: Option<libc::sigset_t>,
     spawn: Spawner,
@@ -1472,6 +1474,7 @@ impl MarimoStarter {
             requirements: folder.join("requirements.txt"),
             state: args.state_dir.join(MARIMO_STATE),
             token: token.to_owned(),
+            this_computer: args.own_r,
             #[cfg(unix)]
             mask: None,
             spawn: Spawner::new(),
@@ -1484,9 +1487,11 @@ impl MarimoStarter {
         if cfg!(windows) {
             return Err("unsupported::Python notebooks don't work on Windows yet".into());
         }
-        // ponytail: the app has no pane for marimo's page yet, and a server's runtime has no uv set up (#354).
-        if served.bridge.standalone.is_none() {
-            return Err("unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet in the Endeavor app or on a server".into());
+        // ponytail: a server's runtime has no uv set up (#354). A runtime on this computer is the plugin's
+        // (standalone) or the app's (`--own-r`); the app's own sessions are refused per caller (#358,
+        // `mcp::PYTHON_NOT_IN_APP`), and the plugin's may use the app's runtime.
+        if served.bridge.standalone.is_none() && !self.this_computer {
+            return Err("unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet on a server".into());
         }
         let uv = find_uv().ok_or_else(|| "python_not_found::Python notebooks need uv, which isn't installed. Install it (https://docs.astral.sh/uv/getting-started/installation/), then try again.".to_owned())?;
         let _ = std::fs::remove_file(&self.state);

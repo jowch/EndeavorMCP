@@ -387,7 +387,9 @@ Next:
   since opening one builds its environment; the proxy decodes a path before it
   matches the refusals, as marimo's server does. A new notebook's header also
   holds Python to the minor version it was made with (interface 42). The app's
-  runtime and a server's refuse Python notebooks for now. Not on Windows. Known
+  sessions and a server's runtime refuse Python notebooks for now; the refusal
+  goes by the caller, so a plugin session that shares the app's runtime on this
+  computer opens them, and an app session on the plugin's runtime doesn't (#358). Not on Windows. Known
   gaps: an opened notebook can't be changed in safe preview (#351), no tool moves
   the package date (#352), ids shift after a reload (#353), `set_input` and
   `view_cell_output` of HTML aren't there, and uv isn't installed for the user
