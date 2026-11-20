@@ -157,6 +157,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+    outputs:
+      sums: ${{ steps.publish.outputs.sums }}
     steps:
       # build.rs embeds runtime/ and plugin/ as checked in; Windows would check them out with CRLF, and the key covers LF.
       - name: Git
@@ -180,6 +182,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: sh scripts/prune-helpers.sh --delete --above 700 || echo "::warning::Pruning the Helpers release failed; see this step's log."
       - name: Publish
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           KEY: ${{ needs.key.outputs.key }}
@@ -191,7 +194,9 @@ jobs:
           exit 1
 
   # Points the plugins at this build: commits the key to scripts/release-key
-  # and the plugins' launch/ copies on main. Only when every platform built,
+  # and the plugins' launch/ copies on main, with each platform's SHA-256 as
+  # published under it on the lines after, so the plugins check their download
+  # against main rather than against the release (#98). Only when every platform built,
   # because the plugins run on macOS and Windows too; otherwise the plugins
   # keep naming the last complete build. The commit touches no helper source,
   # so it doesn't start this workflow again, and a push made with the
@@ -221,9 +226,18 @@ jobs:
       - name: Pin the build
         env:
           KEY: ${{ needs.key.outputs.key }}
+          SUMS: ${{ needs.publish.outputs.sums }}
         shell: bash
         run: |
           set -e
+          # Every platform the plugins run on must have its checksum.
+          for name in linux-x86_64 linux-aarch64 darwin-x86_64 darwin-aarch64 windows-x86_64.exe; do
+            if ! printf '%s\n' "$SUMS" | grep -Eq "^[0-9a-f]{64}  endeavor-$KEY-$name\$"; then
+              echo "The published checksums have no line for endeavor-$KEY-$name, so nothing is pinned:" >&2
+              printf '%s\n' "$SUMS" >&2
+              exit 1
+            fi
+          done
           for try in 1 2 3 4 5; do
             git fetch -q origin main
             git checkout -q -B main origin/main
@@ -236,7 +250,7 @@ jobs:
               echo "main already pins a build of $from, which isn't older than this run's $GITHUB_SHA; nothing to pin."
               exit 0
             fi
-            printf '%s\n' "$KEY" > scripts/release-key
+            { printf '%s\n' "$KEY"; printf '%s\n' "$SUMS" | grep -E "^[0-9a-f]{64}  endeavor-$KEY-" | LC_ALL=C sort -k2; } > scripts/release-key
             sh scripts/plugins.sh sync
             if git diff --quiet; then
               echo "The plugins already name build $KEY."

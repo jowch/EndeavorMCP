@@ -18,6 +18,10 @@
 # file:// address or a folder works). The checksum file comes from the same
 # release as the binary, so the check catches a damaged download and not a
 # tampered release.
+# From an https address, a redirect is followed only to https. PowerShell 7
+# (.NET's HttpClient) refuses any other itself; Windows PowerShell 5.1's
+# Invoke-WebRequest has no such switch, so there each redirect is followed by
+# hand and one away from https is refused.
 & {
     param([string]$Dir = $env:ENDEAVOR_INSTALL_DIR)
 
@@ -45,6 +49,51 @@
     }
     $Dir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Dir)
 
+    # Download URL to FILE under Windows PowerShell 5.1, following up to 10
+    # redirects by hand, none of them from https to anything else, and giving
+    # up after SECS seconds in all.
+    function Save-Url([string]$Url, [string]$File, [int]$Secs) {
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $at = [Uri]$Url
+        $secure = $at.Scheme -eq 'https'
+        for ($hops = 0; ; $hops++) {
+            if ($secure -and $at.Scheme -ne 'https') { throw "it was redirected to $at, which isn't https, so nothing was downloaded" }
+            if ($hops -gt 10) { throw "it was redirected more than 10 times" }
+            $left = [Math]::Max(1, $Secs - [int]$clock.Elapsed.TotalSeconds)
+            $req = [Net.HttpWebRequest]::Create($at)
+            $req.AllowAutoRedirect = $false
+            $req.Timeout = $left * 1000
+            $req.ReadWriteTimeout = [Math]::Min($left, 60) * 1000
+            # An error status comes as a WebException (inside PowerShell's own) holding the response.
+            try { $resp = $req.GetResponse() } catch {
+                $e = $_.Exception
+                while ($e -and -not ($e -is [Net.WebException])) { $e = $e.InnerException }
+                if (-not $e -or -not $e.Response) { throw }
+                $resp = $e.Response
+            }
+            try {
+                $code = [int]$resp.StatusCode
+                if ($code -ge 300 -and $code -lt 400) {
+                    $to = $resp.Headers['Location']
+                    if (-not $to) { throw "the server answered $code with no address to go to" }
+                    $at = New-Object Uri($at, $to)
+                    continue
+                }
+                if ($code -ne 200) { throw "the server answered $code $($resp.StatusDescription)" }
+                $in = $resp.GetResponseStream()
+                $out = [IO.File]::Create($File)
+                try {
+                    $buf = New-Object byte[] 65536
+                    while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                        if ($clock.Elapsed.TotalSeconds -gt $Secs) { throw "it took over $Secs seconds" }
+                        $out.Write($buf, 0, $n)
+                    }
+                } finally { $out.Close(); $in.Close() }
+                return
+            } finally { $resp.Close() }
+        }
+    }
+
     # Fetch NAME from the release to FILE, giving up after SECS seconds (a build is about 5 MB).
     function Get-Release([string]$Name, [string]$File, [int]$Secs = 60) {
         $url = "$release/$Name"
@@ -53,8 +102,10 @@
                 Copy-Item -LiteralPath ([Uri]$url).LocalPath -Destination $File
             } elseif ($release -match '^[A-Za-z]:\\|^\\\\') {
                 Copy-Item -LiteralPath (Join-Path $release $Name) -Destination $File
-            } else {
+            } elseif ($PSVersionTable.PSEdition -eq 'Core') {
                 Invoke-WebRequest -UseBasicParsing -TimeoutSec $Secs -Uri $url -OutFile $File
+            } else {
+                Save-Url $url $File $Secs
             }
         } catch {
             throw "Couldn't download $url ($($_.Exception.Message))."

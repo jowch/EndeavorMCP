@@ -212,6 +212,36 @@ fn a_pinned_key_is_fetched_whatever_latest_says_and_never_replaced() {
 }
 
 #[test]
+fn a_pinned_build_is_checked_against_the_pins_checksums_not_the_releases() {
+    // The release was tampered with: its binary and its checksum file agree, but the pin's checksum is the real build's.
+    let place = Place::new("pinned-sums");
+    let tampered: &[u8] = b"#!/bin/sh\necho tampered\n";
+    place.publish(OTHER, &platform(), "", tampered, &sha(tampered));
+    let pin = |sum: &str| std::fs::write(place.dir.join("plugin/launch/release-key"), format!("{OTHER}\n{}  endeavor-{OTHER}-other\n{sum}  endeavor-{OTHER}-{}\n", sha(b"other"), platform())).unwrap();
+    pin(&sha(BIN));
+    let run = place.launch(&[]);
+    assert!(!run.ok && run.stdout.is_empty());
+    assert!(run.stderr.contains("doesn't match the checksum the plugin pins") && run.stderr.contains("nothing was installed"), "{}", run.stderr);
+    assert!(!place.data().join(OTHER).join("endeavor").exists());
+
+    // The real build, and the release's checksum file gone: the pin's checksum is all it needs.
+    place.publish(OTHER, &platform(), "", BIN, &sha(b"not read"));
+    std::fs::remove_file(place.dir.join(format!("release/endeavor-{OTHER}.sha256"))).unwrap();
+    let run = place.launch(&[]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(std::fs::read(place.data().join(OTHER).join("endeavor")).unwrap(), BIN);
+
+    // A pin whose checksums leave out this platform fails plainly, and a pin from before checksums (the key alone) still works.
+    let place = Place::new("pinned-sums-other");
+    place.publish(OTHER, &platform(), "", BIN, &sha(BIN));
+    std::fs::write(place.dir.join("plugin/launch/release-key"), format!("{OTHER}\n{}  endeavor-{OTHER}-other\n", sha(b"other"))).unwrap();
+    let run = place.launch(&[]);
+    assert!(!run.ok && run.stderr.contains(&format!("list no binary of build {OTHER} for {}", platform())), "{}", run.stderr);
+    place.pin(OTHER);
+    assert!(place.launch(&[]).ok);
+}
+
+#[test]
 fn a_pinned_build_the_release_doesnt_hold_says_to_wait_or_update() {
     let place = Place::new("removed");
     place.release(KEY);
@@ -238,6 +268,13 @@ fn a_pinned_build_whose_binary_was_removed_says_to_wait_or_update_too() {
     place.publish(OTHER, &platform(), "", BIN, &sha(BIN));
     std::fs::remove_file(place.dir.join(format!("release/endeavor-{OTHER}-{}", platform()))).unwrap();
     place.pin(OTHER);
+    let run = place.launch(&[]);
+    assert!(!run.ok && run.stdout.is_empty());
+    let last = run.stderr.lines().last().unwrap();
+    assert!(last.starts_with(&format!("endeavor: the release doesn't hold build {OTHER}")) && last.contains("update the plugin"), "{}", run.stderr);
+
+    // The same with the checksum pinned, which never asks for the release's checksum file.
+    std::fs::write(place.dir.join("plugin/launch/release-key"), format!("{OTHER}\n{}  endeavor-{OTHER}-{}\n", sha(BIN), platform())).unwrap();
     let run = place.launch(&[]);
     assert!(!run.ok && run.stdout.is_empty());
     let last = run.stderr.lines().last().unwrap();
@@ -378,6 +415,8 @@ fn install_sh_takes_a_key_and_with_quiet_writes_nothing_to_stdout() {
     assert!(quiet.ok && quiet.stdout.is_empty(), "{}", quiet.stdout);
     assert!(into.join(KEY).join("endeavor").exists() && !into.join(".newest").exists());
 
+    let sums = place.install(&["--sums", place.dir.join("plugin/launch/release-key").to_str().unwrap()]);
+    assert!(!sums.ok && sums.stderr.contains("--sums needs --key"), "{}", sums.stderr);
     let bad = place.install(&["--key", "../x"]);
     assert!(!bad.ok && bad.stderr.contains("isn't a build's key"), "{}", bad.stderr);
     let unknown = place.install(&["--key", "ffffffffffff", "--dir", dir.to_str().unwrap()]);
