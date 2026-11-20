@@ -649,9 +649,12 @@ function open_notebook(session, path::AbstractString, run::Bool; ask_new::Bool=f
     gate = run && ask_new
     nb = try
         # Pluto's own run on open adds every package the file uses: where new ones ask (#397),
-        # it opens as a safe preview and leaves it through the gate. That open's load must be
-        # over first, or it finds the notebook allowed to run and adds them after all.
-        Pluto.SessionActions.open(session, path; run_async = !gate, execution_allowed = run && !gate)
+        # it opens as a safe preview and leaves it through the gate. A safe preview's load is over
+        # before the open answers (it runs nothing, so it is quick): one still loading when it
+        # leaves the preview, here or by an allow_execution sent at once, would find the notebook
+        # allowed to run and add them after all.
+        allowed = run && !gate
+        Pluto.SessionActions.open(session, path; run_async = allowed, execution_allowed = allowed)
     catch e
         # Printing this exception walks the whole Notebook and never finishes.
         e isa Pluto.SessionActions.NotebookIsRunningException || rethrow()
