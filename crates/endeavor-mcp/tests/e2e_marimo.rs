@@ -10,6 +10,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -508,5 +510,78 @@ fn a_python_notebook_through_the_runtime() {
             std::thread::sleep(Duration::from_millis(200));
         }
         assert!(!state.join("marimo.json").exists());
+    });
+}
+
+/// The app's runtime on this computer (`connect --own-r`, as the app starts it) and a plugin session that
+/// shares it (#358): the plugin's session opens a Python notebook there, through the core's own marimo,
+/// and the app's own sessions are refused one.
+#[test]
+#[ignore = "starts real marimo: cargo test -p endeavor-mcp --test e2e_marimo -- --ignored"]
+fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
+    use common::helper::Helper;
+    if !has_uv() {
+        eprintln!("SKIPPED: no uv.");
+        return;
+    }
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-marimo-app");
+    if let Some(pid) = recorded_pid(&work.join("state")) {
+        // SAFETY: plain syscall.
+        unsafe { libc::kill(-pid, libc::SIGTERM) };
+    }
+    let state = fresh(work.join("state"));
+    let folder = fresh(work.join("project"));
+    let _cleanup = Cleanup { state: state.clone(), children: Vec::new() };
+    std::fs::write(folder.join("growth.py"), GROWTH).unwrap();
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime").canonicalize().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+    command
+        .args(["connect", "--state-dir"])
+        .arg(&state)
+        .args(["--julia", work.join("no julia here").to_str().unwrap(), "--julia-when-needed", "--runtime"])
+        .arg(&runtime)
+        .args(["--depot", &format!("{}:", work.join("depot").display()), "--own-r", "--any-node", "--quit-with-client"])
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("XDG_STATE_HOME", work.join("state-home"))
+        .env("XDG_CONFIG_HOME", work.join("config"));
+    let helper = Helper::spawn(command);
+    helper.hello();
+    helper.request_start(None, false);
+    let token = step("the app's runtime starts without Julia", || loop {
+        match helper.next_within(Duration::from_secs(120)) {
+            wire::ToApp::Ready { token, .. } => break token,
+            wire::ToApp::Found { .. } | wire::ToApp::Progress { .. } => {}
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    });
+    let call = |client: &str, name: &str, arguments: Value| {
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } }).to_string();
+        let mut socket = helper.connect();
+        socket.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+        write!(
+            socket,
+            "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nX-Endeavor-Session: {client}-1\r\nX-Endeavor-Client: {client}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut reply = String::new();
+        socket.read_to_string(&mut reply).unwrap();
+        let reply: Value = serde_json::from_str(reply.split_once("\r\n\r\n").map_or("", |(_, b)| b)).unwrap_or_else(|_| panic!("{reply}"));
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap_or_default().to_owned();
+        (reply["result"]["isError"] == true, text)
+    };
+    let path = folder.join("growth.py");
+    let path = path.to_str().unwrap();
+    step("the app's session is refused the Python notebook", || {
+        let (failed, text) = call("app", "open_notebook", json!({ "path": path }));
+        assert!(failed && text.contains("not yet in the Endeavor app"), "{text}");
+    });
+    step("the plugin's session opens it there", || {
+        let (failed, text) = call("plugin", "open_notebook", json!({ "path": path }));
+        assert!(!failed, "{text}");
+        let opened: Value = serde_json::from_str(&text).unwrap();
+        assert!(opened["notebook_id"].is_string(), "{opened}");
+        let (failed, text) = call("plugin", "get_cell_order", json!({ "notebook_id": opened["notebook_id"] }));
+        assert!(!failed && text.contains("cell_ids"), "marimo answers through the app's core: {text}");
     });
 }

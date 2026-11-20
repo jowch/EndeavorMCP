@@ -131,6 +131,23 @@ pub(crate) fn refuses_r_for_want_of_it(tool: &str, arguments: &Value, result: &V
         && result["content"].as_array().is_some_and(|content| content.iter().any(|c| c["text"].as_str().is_some_and(|text| text.contains("must end in .jl") && !text.contains("or .R"))))
 }
 
+/// What the app's sessions get for a Python notebook, which the app can't show yet.
+pub(crate) const PYTHON_NOT_IN_APP: &str = "ArgumentError: unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet in the Endeavor app";
+
+/// Whether `tool` with `arguments` opens or makes a Python notebook: by its path, else (a new
+/// notebook with none) by the session's kind.
+fn opens_python(tool: &str, arguments: &Value, kind: Option<wire::backend::Backend>) -> bool {
+    use wire::backend::Backend;
+    match tool {
+        "open_notebook" => arguments["path"].as_str().is_some_and(|path| crate::notebooks::engines::of_path(path) == Backend::Marimo),
+        "new_notebook" => match arguments["path"].as_str() {
+            Some(path) => crate::notebooks::engines::of_path(path) == Backend::Marimo,
+            None => kind == Some(Backend::Marimo),
+        },
+        _ => false,
+    }
+}
+
 /// Whether a call to `tool` changes the notebook: what Manual asks about
 /// even when runs don't ask.
 pub fn changes_notebook(tool: &str) -> bool {
@@ -504,6 +521,11 @@ impl Bridge {
             "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
             "endeavor/new_notebook" => {
                 let owner = text("owner", "");
+                // The app's New notebook, in the session's kind: never Python, which it can't show yet
+                // (the agent's own calls are refused in `refusal`, #358). Its chip doesn't offer Python today.
+                if opens_python("new_notebook", &json!({}), self.notebooks.kind(&owner)) {
+                    return Some(answer(Err(PYTHON_NOT_IN_APP.to_owned())));
+                }
                 let folder = self.folder(&owner);
                 return Some(answer(self.notebooks.new_for(&owner, &folder)));
             }
@@ -791,6 +813,14 @@ impl Bridge {
         }
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(host_tool_refusal(tool));
+        }
+        // ponytail: the app has no pane for marimo's page yet (Endeavor #1). Refused by caller, not by
+        // runtime, since the app and the plugin may share one (#358): the plugin's sessions open Python
+        // notebooks on the app's runtime too, and the app's never do on the plugin's.
+        // Only opening or making one is refused: an app session is bound to its one notebook
+        // (`endeavor/set_notebook`), so it never reaches a Python notebook a plugin session opened.
+        if caller.app && opens_python(tool, arguments, self.notebooks.kind(&caller.owner)) {
+            return Some(PYTHON_NOT_IN_APP.to_owned());
         }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
         if plan && (WRITE_TOOLS.contains(&tool) || runs_code(tool, arguments)) {
@@ -1411,6 +1441,17 @@ mod tests {
         assert!(!refuses_r_for_want_of_it("new_notebook", &r, &now), "a core with R notebooks");
         assert!(!refuses_r_for_want_of_it("new_notebook", &r, &refused("unsupported::R notebooks aren't running in this runtime")));
         assert!(!refuses_r_for_want_of_it("new_notebook", &r, &json!({ "content": [{ "type": "text", "text": "must end in .jl" }], "isError": false })), "not an error");
+    }
+
+    #[test]
+    fn a_python_notebook_is_one_by_its_path_or_for_a_new_one_by_the_sessions_kind() {
+        use wire::backend::Backend;
+        assert!(opens_python("open_notebook", &json!({ "path": "/w/a.py" }), None));
+        assert!(!opens_python("open_notebook", &json!({ "path": "/w/a.jl" }), Some(Backend::Marimo)));
+        assert!(opens_python("new_notebook", &json!({}), Some(Backend::Marimo)));
+        assert!(!opens_python("new_notebook", &json!({}), Some(Backend::Ember)));
+        assert!(!opens_python("new_notebook", &json!({ "path": "/w/a.R" }), Some(Backend::Marimo)), "the path decides");
+        assert!(!opens_python("read_cell", &json!({ "path": "/w/a.py" }), None));
     }
 
     #[test]

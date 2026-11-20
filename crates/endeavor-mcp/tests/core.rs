@@ -1143,6 +1143,33 @@ fn an_agent_in_the_app_gets_r_notebooks() {
 }
 
 #[test]
+fn python_notebooks_are_refused_to_the_apps_sessions_and_not_to_the_plugins_on_one_runtime() {
+    // The app has no pane for marimo's page yet; the plugin's sessions may share the app's runtime (#358).
+    let dir = state_dir("core-python-callers");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let call = |id: u32, name: &str, path: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"path":"{path}"}}}}}}"#);
+    let text = |reply: &str| {
+        let reply: serde_json::Value = serde_json::from_str(reply).unwrap();
+        reply["result"]["content"][0]["text"].as_str().unwrap_or_default().to_owned()
+    };
+    let app = [("X-Endeavor-Session", "7"), ("X-Endeavor-Client", "app")];
+    let plugin = [("X-Endeavor-Session", "8"), ("X-Endeavor-Client", "plugin")];
+    for (id, tool) in [(1, "open_notebook"), (2, "new_notebook")] {
+        let refused = text(&mcp(&core, &call(id, tool, "/w/fit.py"), &app).1);
+        assert!(refused.contains(r#""error":"unsupported""#) && refused.contains("not yet in the Endeavor app"), "{tool}: {refused}");
+        let theirs = text(&mcp(&core, &call(id + 10, tool, "/w/fit.py"), &plugin).1);
+        assert!(!theirs.contains("not yet in the Endeavor app"), "the plugin's {tool} isn't refused for the app's sake: {theirs}");
+    }
+    // A Julia notebook is the app's as before.
+    assert!(!text(&mcp(&core, &call(3, "open_notebook", "/w/fit.jl"), &app).1).contains("not yet in the Endeavor app"));
+    // The app's own New notebook, in a session of the Python kind, makes none either.
+    app_call(&core, r#"{"jsonrpc":"2.0","id":4,"method":"endeavor/set_session_folder","params":{"owner":"7","folder":"/w","kind":"python"}}"#);
+    let made = app_call(&core, r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/new_notebook","params":{"owner":"7"}}"#);
+    assert!(made.contains("unsupported") && made.contains("not yet in the Endeavor app"), "{made}");
+}
+
+#[test]
 fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let dir = state_dir("core-policy");
     let bridge = FakeBridge::start(&dir);
