@@ -54,8 +54,9 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   and that call asks on the page instead (if it would have opened one). A
   client can also take the dialog and never answer it (`claude -p` does): a
   dialog with no answer in 20 s gets the page as well, where a browser can be
-  opened, and whichever the user answers first counts; the dialog stays up
-  until then, for the dialog's full 30 minutes. Which clients really show the
+  opened, and whichever the user answers first counts (the other is taken down);
+  the dialog stays up until then, for the dialog's full 30 minutes. An
+  answer on the page that still holds is given without a new dialog. Which clients really show the
   dialog is still to be checked by hand (#381).
   The same page asks before `approve_install` passes an R notebook's large
   download on, where the client can't show a dialog (#388). Its question

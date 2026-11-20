@@ -1158,9 +1158,18 @@ impl Relay {
         let again = format!("`{tool}` again");
         let mut install = arguments.clone();
         install["install"] = true.into();
-        let mut dialog = self.consent.can_ask();
         let page = self.page_shows();
-        let mut asked = if dialog { self.consent.ask_install(message, &question, &again, page, &|line| self.write(line)) } else { Err(super::consent::NO_DIALOG.to_owned()) };
+        // An answer the user gave on the page still holds (10 minutes): it is the answer, with no
+        // dialog first, which would ask them again what they said.
+        let held = page && self.pages.held(&question);
+        let mut dialog = self.consent.can_ask() && !held;
+        let mut asked = if held {
+            self.ask_on_page(message, &question, &again, Duration::ZERO)
+        } else if dialog {
+            self.consent.ask_install(message, &question, &again, page, &|line| self.write(line))
+        } else {
+            Err(super::consent::NO_DIALOG.to_owned())
+        };
         // A dialog with no answer yet, which may not be up at all (`claude -p`): the page asks as
         // well, for as long as the dialog would have waited, and the first answer counts. The user
         // is being asked already, so this opens the page with or without `install`.
@@ -1208,7 +1217,8 @@ impl Relay {
     /// answers first counts.
     fn ask_on_page(&self, message: &Value, question: &str, again: &str, wait: Duration) -> Result<bool, String> {
         let clicked = self.pages.ask(question, true, wait, &|| self.consent.cancelled(message) || self.consent.dialog_answered(message), &open_page);
-        if let Some(answer) = self.consent.install_answer_after_page(message, again, &|line| self.write(line)) {
+        if let Some(answer) = self.consent.install_answer_after_page(message, again, matches!(clicked, Clicked::Install | Clicked::Declined), &|line| self.write(line)) {
+            self.pages.retire(question);
             self.consent.not_asking(message);
             return answer;
         }
@@ -1219,7 +1229,7 @@ impl Relay {
             Clicked::Install => return Ok(true),
             Clicked::Dropped => return Ok(false),
             Clicked::Declined => format!("install_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing was installed. Endeavor won't ask them about it again for 10 minutes: until then, {again} with `install: true` gets this same answer. Tell the user, and don't call again unless they ask for it. If they change their mind, the page they answered has an Install button: once they say they clicked it, call {again} with `install: true`."),
-            Clicked::NotYet => format!("install_not_answered::Endeavor opened a page in the user's browser that names what it would install, and it installs it only once they click Install there. They haven't answered yet, so nothing was installed. Tell the user to answer that page, and end your reply. Once they say they clicked Install, call {again} with `install: true`, and it installs without asking again: their click holds for 10 minutes."),
+            Clicked::NotYet => format!("install_not_answered::Endeavor opened a web page (not a dialog) in the user's browser that names what it would install, and it installs it only once they click Install there. They haven't answered yet, so nothing was installed. Tell the user that a web page is open in their browser and to answer it there (don't call it a dialog), and end your reply. Once they say they clicked Install, call {again} with `install: true`, and it installs without asking again: their click holds for 10 minutes."),
             Clicked::NoBrowser => CANT_ASK_ERROR.to_owned(),
         })
     }

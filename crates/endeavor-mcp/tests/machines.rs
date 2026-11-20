@@ -2333,10 +2333,33 @@ fn a_dialog_that_goes_unanswered_gets_the_page_too() {
     assert_eq!(front.asked.len(), 1);
     assert_eq!(front.pages.lock().unwrap().len(), 1);
     assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
+    // The page answered first, so the dialog is taken down.
+    let dialog = front.asked[0]["id"].clone();
+    assert!(front.notes.iter().any(|n| n["method"] == "notifications/cancelled" && n["params"]["requestId"] == dialog), "{:?}", front.notes);
     // Silence isn't the end of dialogs: the tools still say Endeavor asks in one.
     let listed = front.request("tools/list", json!({}));
     let add = listed["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "add_machine").unwrap().clone();
     assert!(add["inputSchema"]["properties"]["install"]["description"].as_str().unwrap().contains("Endeavor asks the user in a dialog"), "{add}");
+}
+
+#[test]
+fn a_no_on_the_page_holds_without_a_new_dialog() {
+    // The #396 smoke runs: after a no on the page, the agent's retry got a new dialog before the
+    // held no, though the no says Endeavor won't ask again for 10 minutes. A dialog that shows
+    // would ask the user again what they just said.
+    let place = Place::bare("held-no", &[("ENDEAVOR_TEST_DIALOG_SILENT_MS", "300")]);
+    let julia = place.julia.display().to_string();
+    let mut front = place.front();
+    front.dialog = Some("silent");
+    front.click_pages(Some("decline"));
+    front.initialize();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert!(failed && said["error"] == "install_declined", "{said}");
+    assert_eq!((front.asked.len(), front.pages.lock().unwrap().len()), (1, 1));
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert!(failed && said["error"] == "install_declined" && text(&said).contains("10 minutes"), "{said}");
+    assert_eq!((front.asked.len(), front.pages.lock().unwrap().len()), (1, 1), "no new dialog or page");
+    assert!(!place.dir.join("root").exists(), "nothing was installed");
 }
 
 #[test]
