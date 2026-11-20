@@ -257,6 +257,10 @@ makes it reported only: a failed soft check doesn't fail the task.
 | `page_opened` `path`, `min` (1), `max` | Endeavor opened a page in the stand-in browser (`"browser": true`) between `min` and `max` times, counting only links that contain `path` |
 | `agent_tools_not_used` `tools` | the agent didn't use these tools of its own (read from Claude's transcript) |
 
+`"when_reply": [texts]` on any check makes it apply only when some tool reply contains every one of
+`texts`; otherwise it passes as not applying. N7 and L1 use it so that `asked_user` is needed only when
+a Julia run was held for new packages: the agent may pick Python, where nothing asks.
+
 An unknown check fails. A check on the last message is loose by design: it
 looks for one of several phrasings. When a phrase check would decide
 something subtle, make it soft.

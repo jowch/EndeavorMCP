@@ -40,6 +40,17 @@ pub struct Outcome {
 pub fn run(spec: &Value, ev: &Evidence) -> Outcome {
     let kind = spec["check"].as_str().unwrap_or_default();
     let soft = spec["soft"] == true;
+    // `when_reply`: the check applies only if some tool reply contains every one of these texts (a Julia
+    // run held for new packages); otherwise it doesn't apply, and passes as such.
+    let applies = spec["when_reply"].as_array().is_none_or(|texts| {
+        ev.calls.iter().any(|c| {
+            let reply = c.reply.to_string();
+            texts.iter().filter_map(Value::as_str).all(|t| reply.contains(t))
+        })
+    });
+    if !applies {
+        return Outcome { name: describe(kind, spec), soft, passed: true, detail: "doesn't apply: no tool reply has the when_reply texts".into() };
+    }
     let (passed, detail) = match check(kind, spec, ev) {
         Ok(detail) => (true, detail),
         Err(detail) => (false, detail),
@@ -583,6 +594,12 @@ mod tests {
         assert!(!opened(json!({ "check": "page_opened", "path": "/install/" }), &[]), "no page opened");
         assert!(!opened(json!({ "check": "page_opened", "path": "/notebook/" }), &pages));
         let lacks = json!({ "check": "code_lacks", "texts": ["Pkg.", "Conda"] });
+        let asks = json!({ "check": "asked_user", "when_reply": ["this notebook doesn't have yet"] });
+        assert!(run(&asks, &Evidence { calls: &[], notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[], questions: &[], pages: &[] }).passed, "no Julia run was held: nothing to ask");
+        let asking = calls(&[("submit_changes", json!({}), json!({ "message": "Before these cells can run, Julia has to install packages this notebook doesn't have yet: Plots" }))]);
+        let ev = |questions: &[String]| run(&asks, &Evidence { calls: &asking, notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[], questions, pages: &[] }).passed;
+        assert!(!ev(&[]), "held, and the user was never asked");
+        assert!(ev(&["Julia needs to install Plots, new to the notebook /p/a.jl, before its cells can run. Install it now?".to_owned()]));
         assert!(judge(lacks.clone(), &held(vec![cell("using Plots", "", true, false)])));
         assert!(!judge(lacks, &held(vec![cell("import Pkg; Pkg.add(\"Plots\")", "", false, false)])));
     }
