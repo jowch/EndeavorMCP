@@ -67,7 +67,7 @@ impl Here {
             plugin_bin: env.plugin_bin(),
             server_root: env.server_root(),
             release: release::base_url(),
-            state_dir: env.state_dir(),
+            state_dir: crate::runtime::default_state_dir(&env),
         })
     }
 }

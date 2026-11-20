@@ -64,6 +64,18 @@ pub(crate) fn look(dir: &Path, any_node: bool, ping: bool) -> Looked {
     }
 }
 
+/// The state folder of a runtime on this machine when none is named (`serve`, `mcp`, `stop`, `status`,
+/// `open`, `update` and a server's `connect`): `Env::state_dir`, the plugin's and now the app's, or while
+/// a runtime alive on this machine is recorded in the app's older folder (`Env::apps_old_state_dir`),
+/// that one, so the app's open notebooks aren't opened again by a second runtime. Once it stops, the
+/// next start is in `state_dir` (#110).
+pub(crate) fn default_state_dir(env: &crate::paths::Env) -> std::path::PathBuf {
+    match env.apps_old_state_dir() {
+        Some(old) if look(&old, false, false).alive().is_some() => old,
+        _ => env.state_dir(),
+    }
+}
+
 /// Whether the runtime on `port` answers its calls.
 fn answers(port: u16, token: &str) -> bool {
     crate::bridge_call(port, crate::CALL, token, "ping").is_ok_and(|status| status == 200)
@@ -903,6 +915,29 @@ mod tests {
             }
         });
         assert!(!other.alive(), "the process that is recorded is ended");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_apps_older_folder_is_used_while_a_runtime_of_this_node_there_is_alive() {
+        let home = crate::client::scratch("apps-old-folder");
+        let env = crate::paths::Env { home: home.clone(), node: crate::hostname(), ..crate::paths::Env::default() };
+        let old = env.apps_old_state_dir().unwrap();
+        assert_eq!(old, home.join(".cache/endeavor/state"), "where the bootstrap script put it");
+        assert_eq!(default_state_dir(&env), env.state_dir(), "no folder");
+        std::fs::create_dir_all(&old).unwrap();
+        assert_eq!(default_state_dir(&env), env.state_dir(), "no record");
+        record_started(&old, i32::MAX, None, 1);
+        assert_eq!(default_state_dir(&env), env.state_dir(), "a runtime that is gone");
+        let me = Core::this();
+        record_started(&old, me.pid, me.started.map(|started| started + 1), 1);
+        assert_eq!(default_state_dir(&env), env.state_dir(), "its pid is another process now");
+        let state = serde_json::json!({ "launcher": "process", "node": "another-node", "pid": me.pid, "token": "t", "port": 1 });
+        std::fs::write(old.join("runtime.json"), state.to_string()).unwrap();
+        assert_eq!(default_state_dir(&env), env.state_dir(), "another node's, through a shared home");
+        record_started(&old, me.pid, me.started, 1);
+        assert_eq!(default_state_dir(&env), old, "alive here: it keeps being used");
+        assert_eq!(crate::paths::Env { home: PathBuf::new(), ..env }.apps_old_state_dir(), None, "no home");
     }
 
     #[test]

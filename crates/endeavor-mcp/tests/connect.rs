@@ -14,7 +14,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::helper::Helper;
 use wire::files::{Reply, Request, RuntimeState};
@@ -367,6 +367,42 @@ fn without_a_state_dir_the_helper_uses_the_folder_serve_and_mcp_use() {
     assert_eq!((pid, reattached), (runtime.pid, true));
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
+}
+
+/// The app kept a server's runtime in `~/.cache/endeavor/state` before it used the plugin's folder (#110):
+/// while one there is alive, the helper, `status` and `stop` keep to it, so the app's notebooks aren't
+/// opened again in a second runtime.
+#[test]
+fn without_a_state_dir_a_runtime_alive_in_the_apps_older_folder_is_kept_until_it_stops() {
+    let dir = state_dir("apps-old-folder");
+    let (home, xdg) = (dir.join("home"), dir.join("xdg"));
+    let old = home.join(".cache/endeavor/state");
+    std::fs::create_dir_all(&old).unwrap();
+    let runtime = FakeRuntime::start(&old, &this_host());
+    let endeavor = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+        command.args(args).env("HOME", &home).env("XDG_STATE_HOME", &xdg);
+        command
+    };
+    let mut helper = Helper::spawn(endeavor(&["connect", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent", "--depot", "/nonexistent"]));
+    let ToApp::Ready { pid, reattached, .. } = helper.start_runtime() else { panic!("expected Ready") };
+    assert_eq!((pid, reattached), (runtime.pid, true));
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+
+    let status = endeavor(&["status", "--json"]).output().unwrap();
+    let said = String::from_utf8_lossy(&status.stdout);
+    assert!(said.contains(&old.display().to_string()), "{said}");
+    let stop = endeavor(&["stop"]).output().unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    let until = Instant::now() + Duration::from_secs(10);
+    while runtime.alive() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!runtime.alive(), "stop ends the one in the older folder");
+    let status = endeavor(&["status", "--json"]).output().unwrap();
+    let said = String::from_utf8_lossy(&status.stdout);
+    assert!(said.contains(&xdg.join("endeavor/serve").join(this_host()).display().to_string()), "once it stops, the plugin's folder: {said}");
 }
 
 /// The next message that isn't about how the start is going.

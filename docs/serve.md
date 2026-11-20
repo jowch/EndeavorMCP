@@ -195,7 +195,7 @@ status` shows what is running and where.
 | `--depot DEPOT` | `JULIA_DEPOT_PATH` for the runtime | `~/.cache/endeavor/depot:`, or `$SCRATCH/endeavor/depot:` when `$SCRATCH` is set |
 | `--idle-stop HOURS` | Stop a notebook nobody has used for this long. `0` never stops one | `48` |
 | `--host-tools` | Give every agent session `list_folder`, `read_file` and `run_shell` on this machine (`serve` only) | Off |
-| `--state-dir DIR` | Where the runtime keeps `runtime.json`, its token and `runtime.log` | `~/.local/state/endeavor/serve/<host name>` |
+| `--state-dir DIR` | Where the runtime keeps `runtime.json`, its token and `runtime.log` | `~/.local/state/endeavor/serve/<host name>`, or `~/.cache/endeavor/state` while a runtime the Endeavor app started there on a server is still running |
 
 The default depot is the one the app uses on servers, so packages installed
 for one are there for the other. A trailing `:` puts your own depot behind

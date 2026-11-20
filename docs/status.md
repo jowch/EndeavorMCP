@@ -217,6 +217,11 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   it, from the front and from the app's relay (`client::Listener`). A kept
   older runtime still isn't told to the app's agent up front, and a pathless
   `new_notebook` in an R session on one makes a Pluto notebook (#239).
+  Since 2026-11-20 `connect`, `serve`, `mcp`, `status` and `stop` with no
+  state folder named use the plugin's folder, or while a runtime the app
+  started in its older `~/.cache/endeavor/state` is alive on that machine,
+  that one, so the app and the plugin on a server can share one runtime (#110).
+  The app still names its older folder until it moves its pin.
   Since 2026-10-30 a client that sets `Listener::set_restart` (the app) gives
   its agent `request_restart`: the listener adds it to `tools/list` and answers
   it itself, whatever build the runtime is and while the runtime is away, by

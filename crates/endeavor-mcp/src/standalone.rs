@@ -180,7 +180,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
-    let state_dir = state_dir.unwrap_or_else(|| env.state_dir());
+    let state_dir = state_dir.unwrap_or_else(|| runtime::default_state_dir(env));
     match command.as_str() {
         "stop" => return Ok(Command::Stop { state_dir, force }),
         "status" => return Ok(Command::Status { state_dir, json }),
