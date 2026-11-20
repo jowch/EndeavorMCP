@@ -443,7 +443,7 @@ fn heading(code: &str) -> Option<String> {
     }
     code.lines().find_map(|line| {
         let line = line.trim().trim_start_matches(|c: char| c != '#');
-        let text = line.trim_start_matches('#').trim().trim_end_matches(|c| c == '"' || c == ')').trim();
+        let text = line.trim_start_matches('#').trim().trim_end_matches(['"', ')']).trim();
         (line.starts_with('#') && !text.is_empty()).then(|| text.to_owned())
     })
 }
