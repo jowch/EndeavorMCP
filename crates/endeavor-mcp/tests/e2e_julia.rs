@@ -367,6 +367,31 @@ fn the_runtime_end_to_end() {
         (notebook, path, cell)
     });
 
+    step("a staged edit runs against the notebook as it last ran: a fixed conflict and a removed name", || {
+        let ok = |rt: &mut Runtime, name: &str, args: Value| rt.ok(MAC, name, args);
+        let a = ok(&mut rt, "add_cell", json!({ "notebook_id": notebook, "code": "twice = 1", "after_cell_id": cell }))["cell_id"].as_str().unwrap().to_owned();
+        let b = ok(&mut rt, "add_cell", json!({ "notebook_id": notebook, "code": "twice = 2", "after_cell_id": a }))["cell_id"].as_str().unwrap().to_owned();
+        ok(&mut rt, "submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        assert_eq!(ok(&mut rt, "read_cell", json!({ "notebook_id": notebook, "cell_id": a }))["errored"], true, "both define it");
+        ok(&mut rt, "read_cell", json!({ "notebook_id": notebook, "cell_id": b }));
+        ok(&mut rt, "edit_cell", json!({ "notebook_id": notebook, "cell_id": b, "code": "once = 2" }));
+        ok(&mut rt, "submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        let read = ok(&mut rt, "read_cell", json!({ "notebook_id": notebook, "cell_id": a }));
+        assert_eq!((&read["errored"], &read["output"]), (&json!(false), &json!("1")), "the other cell of the fixed conflict ran again: {read}");
+        let t = ok(&mut rt, "add_cell", json!({ "notebook_id": notebook, "code": "named = 5", "after_cell_id": b }))["cell_id"].as_str().unwrap().to_owned();
+        let u = ok(&mut rt, "add_cell", json!({ "notebook_id": notebook, "code": "named + 1", "after_cell_id": t }))["cell_id"].as_str().unwrap().to_owned();
+        ok(&mut rt, "submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        assert_eq!(ok(&mut rt, "read_cell", json!({ "notebook_id": notebook, "cell_id": u }))["output"], "6");
+        ok(&mut rt, "read_cell", json!({ "notebook_id": notebook, "cell_id": t }));
+        ok(&mut rt, "edit_cell", json!({ "notebook_id": notebook, "cell_id": t, "code": "renamed = 5" }));
+        ok(&mut rt, "submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        let read = ok(&mut rt, "read_cell", json!({ "notebook_id": notebook, "cell_id": u }));
+        assert!(read["errored"] == true && read.to_string().contains("UndefVarError"), "a name the edit removed is gone, as on a fresh run: {read}");
+        for c in [&a, &b, &t, &u] {
+            ok(&mut rt, "delete_cell", json!({ "notebook_id": notebook, "cell_id": c }));
+        }
+    });
+
     step("Pluto's page and WebSocket, as a browser reaches them", || {
         let (token, pages) = (rt.token.clone(), rt.pages.clone());
         assert_eq!(rt.get(&format!("/edit?id={notebook}&token={token}"), "").0, "HTTP/1.1 401 Unauthorized", "the bearer token doesn't let a browser in");

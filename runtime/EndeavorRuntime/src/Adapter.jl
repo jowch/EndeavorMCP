@@ -20,6 +20,13 @@ const _NOTIFY_SUBSCRIBERS = Set{Channel{String}}()
 const _SEQ = Ref(0)
 # Each notebook's dependency graph as last announced.
 const _TOPOLOGY_SENT = Dict{UUID,Any}()
+# Cells the tools edited or added and that haven't run since, per notebook, and
+# the topology with their new code (`current_topology`). Pluto's own topology
+# stays as of the last run: a run compares it with the new one to know what the
+# edits changed, as a run from Pluto's page does. Analysing a staged edit into
+# `nb.topology` left that comparison empty, so a run after it didn't run the
+# other cell of a conflict it fixed, nor drop a name it removed (L1 on Haiku, 11-20).
+const _STAGED = Dict{UUID,Any}()
 
 function notify!(method::AbstractString, params::AbstractDict)::Nothing
     lock(_NOTIFY_LOCK) do
@@ -43,8 +50,9 @@ function notify_state!(nb)::Nothing
         ) for c in nb.cells],
     ))
     changed = lock(_NOTIFY_LOCK) do
-        get(_TOPOLOGY_SENT, nb.notebook_id, nothing) === nb.topology && return false
-        _TOPOLOGY_SENT[nb.notebook_id] = nb.topology
+        topology = current_topology(nb)
+        get(_TOPOLOGY_SENT, nb.notebook_id, nothing) === topology && return false
+        _TOPOLOGY_SENT[nb.notebook_id] = topology
         true
     end
     changed && _notify_notebook!("topology_changed", nb)
@@ -52,8 +60,37 @@ function notify_state!(nb)::Nothing
 end
 
 function forget_topology!(notebook_id::UUID)
-    lock(() -> delete!(_TOPOLOGY_SENT, notebook_id), _NOTIFY_LOCK)
+    lock(() -> (delete!(_TOPOLOGY_SENT, notebook_id); delete!(_STAGED, notebook_id)), _NOTIFY_LOCK)
     return nothing
+end
+
+# Stage cells whose code the tools changed, for `current_topology`.
+function _stage!(nb, cells)
+    lock(_NOTIFY_LOCK) do
+        staged = get!(() -> (cells = Set{Pluto.Cell}(), base = nothing, topology = nothing), _STAGED, nb.notebook_id)
+        _STAGED[nb.notebook_id] = (cells = union!(staged.cells, cells), base = nothing, topology = nothing)
+    end
+    return nothing
+end
+
+# The notebook's topology with the staged edits analysed: Pluto's own (as of
+# the last run) when none is left. A staged cell drops out once a run (ours or
+# the page's) has analysed its current code, or once it is deleted.
+function current_topology(nb)
+    lock(_NOTIFY_LOCK) do
+        staged = get(_STAGED, nb.notebook_id, nothing)
+        staged === nothing && return nb.topology
+        base = nb.topology
+        left = filter(c -> haskey(nb.cells_dict, c.cell_id) && base.codes[c].code != c.code, staged.cells)
+        if isempty(left)
+            delete!(_STAGED, nb.notebook_id)
+            return base
+        end
+        staged.base === base && staged.topology !== nothing && left == staged.cells && return staged.topology
+        topology = Pluto.updated_topology(base, nb, collect(left))
+        _STAGED[nb.notebook_id] = (cells = left, base = base, topology = topology)
+        return topology
+    end
 end
 
 "End every open notification stream (e.g. when the bridge stops)."
@@ -329,15 +366,15 @@ function snapshot(nb; controls = Dict{String,Any}())
     )
 end
 
-# Pluto's dependency data as of the last run or staged edit (no reanalysis),
+# Pluto's dependency data with the staged edits (`current_topology`),
 # cells in the order Pluto analysed them. `fresh` analyses the notebook as it is
 # now without keeping the result; `refresh` first updates the dependency cache
 # Pluto's page shows; `edges` adds each cell's direct upstream and downstream
 # cells; `packages` the packages each loads (`using`/`import`), sorted.
 function graph(nb; fresh::Bool=false, refresh::Bool=false, edges::Bool=false, packages::Bool=false)
     refresh && Pluto.update_dependency_cache!(nb)
-    topology = fresh ? Pluto.updated_topology(nb.topology, nb, nb.cells) : nb.topology
-    order = fresh ? Pluto.PlutoDependencyExplorer.topological_order(topology) : Pluto.topological_order(nb)
+    topology = fresh ? Pluto.updated_topology(nb.topology, nb, nb.cells) : current_topology(nb)
+    order = fresh || topology !== nb.topology ? Pluto.PlutoDependencyExplorer.topological_order(topology) : Pluto.topological_order(nb)
     names(syms) = sort!(string.(collect(syms)))
     ids(cells) = [string(c.cell_id) for c in cells]
     function cell(c)
@@ -380,7 +417,7 @@ _adapter_cell(nb, id) = nb.cells_dict[UUID(id)]
 # index of the new order, deletes a cell, moves one to an index, or folds one. A
 # set_code with `expected` is refused, before any op applies, if the cell's code
 # isn't that. Pluto's page diffs `cell_order` by reference, so each change
-# assigns a new vector. Cells whose code changed are analysed; the file is
+# assigns a new vector. Cells whose code changed are staged (`_stage!`); the file is
 # saved and the page updated.
 function apply!(session, nb, ops)
     for op in ops
@@ -421,10 +458,27 @@ function apply!(session, nb, ops)
             throw(ArgumentError("unknown_op::Unknown op: '$kind'"))
         end
     end
-    isempty(changed) || (nb.topology = Pluto.updated_topology(nb.topology, nb, changed))
+    isempty(changed) || _stage!(nb, changed)
     Pluto.save_notebook(session, nb)
     _notify_browser(session, nb)
     return Dict{String,Any}("inserted" => inserted, "seq" => _next_seq!())
+end
+
+# A run's cells and the staged cells (`_stage!`) downstream of them, which the
+# run reaches and runs anyway. Pluto analyses only a run's own cells, so a staged
+# cell left out would be missing from the run (a new cell) or run with its old
+# names still defined (an edited one).
+function _with_staged_downstream(nb, cells)
+    topology = current_topology(nb)
+    staged = lock(() -> (s = get(_STAGED, nb.notebook_id, nothing); s === nothing ? Pluto.Cell[] : collect(s.cells)), _NOTIFY_LOCK)
+    isempty(staged) && return cells
+    # Reached through the staged edits, or through what a staged cell used before them.
+    reached = Set{Pluto.Cell}()
+    for t in (topology, nb.topology)
+        order = Pluto.PlutoDependencyExplorer.topological_order(t, collect(cells))
+        union!(reached, order.runnable, keys(order.errable))
+    end
+    return vcat(collect(cells), [c for c in staged if c in reached && !(c in cells)])
 end
 
 # Run cells; none is Pluto's reactive cleanup after a delete. Not accepted when
@@ -456,8 +510,9 @@ function run_cells!(session, nb, cells; wait::Bool, timeout::Real, ask_new::Bool
     # Pluto marks cells queued only inside its run task, after package sync;
     # mark them now, as its own run button does, so a caller that looks right
     # away sees them waiting.
-    accepted && foreach(c -> c.queued = true, cells)
-    run = Pluto.update_save_run!(session, nb, cells; run_async=true, save=true)
+    roots = _with_staged_downstream(nb, cells)
+    accepted && foreach(c -> c.queued = true, roots)
+    run = Pluto.update_save_run!(session, nb, roots; run_async=true, save=true)
     result = Dict{String,Any}("accepted" => accepted, "process_status" => string(nb.process_status))
     if accepted && wait
         over = _wait_over(() -> _run_over(session, nb, run), timeout)
@@ -466,7 +521,7 @@ function run_cells!(session, nb, cells; wait::Bool, timeout::Real, ask_new::Bool
         if exited !== nothing
             result["exited"] = exited
         elseif over && istaskfailed(run)
-            _release_cells!(nb, cells)
+            _release_cells!(nb, roots)
             fetch(run)
         end
         result["completed"] = [string(c.cell_id) for c in cells if !_unfinished(c)]
