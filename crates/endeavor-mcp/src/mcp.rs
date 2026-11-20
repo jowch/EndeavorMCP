@@ -273,13 +273,13 @@ pub(crate) const ASK_IN_CHAT: &str = "It doesn't ask the user: calling it is the
 
 /// `approve_install`'s description for a caller that no one asks for: a client connected to `serve`
 /// over HTTP, with no front between them (#391).
-const NO_ONE_ASKS: &str = "Endeavor can't ask the user over this connection (a client connected straight to `endeavor serve`), so calling it downloads nothing: tell the user what would download and its size, and that they can approve it with the button on the notebook's page. Its link is the notebook's browser_url from open_notebook or list_notebooks.";
+const NO_ONE_ASKS: &str = "Endeavor can't ask the user over this connection (a client connected straight to `endeavor serve`), so it can't be approved here: calling it installs nothing. Tell the user what it would install and its size where known, that it needs their OK, and that it can be approved only from a client connected through `endeavor mcp` that shows Endeavor's dialog, such as a new Claude Code session in a terminal (not `claude -p`), or from the Endeavor desktop app (a program they install, not a web page): they close this notebook here, then open its file in the app, which asks them. The notebook's page (its browser_url) can't approve it either: it has no button for this, so don't send them there to approve it. Don't work around it.";
 
 /// The runtime's asking step (`notebooks::ASK_STEP`) for such a caller.
-const ASK_STEP_NO_ONE: &str = "Endeavor can't ask the user over this connection, so approve_install downloads nothing here: tell the user what would download and its size, and that they can approve it with the button on the notebook's page, then end your reply. Its link is the notebook's browser_url from open_notebook or list_notebooks.";
+const ASK_STEP_NO_ONE: &str = "Endeavor can't ask the user over this connection, so this can't be approved here: approve_install installs nothing. Tell the user what it would install and its size where known, that it needs their OK, and that it can be approved only from a client connected through `endeavor mcp` that shows Endeavor's dialog, such as a new Claude Code session in a terminal (not `claude -p`), or from the Endeavor desktop app (a program they install, not a web page): they close this notebook here, then open its file in the app, which asks them. The notebook's page (its browser_url) can't approve it either: it has no button for this, so don't send them there to approve it. Then end your reply.";
 
 /// What `approve_install` answers such a caller: nothing downloads.
-const NO_ONE_ASKS_ERROR: &str = "download_cant_ask::Endeavor can't ask the user over this connection: this client is connected straight to `endeavor serve`, which can neither show Endeavor's dialog nor open a page in their browser. So nothing downloads, and calling approve_install again won't download it. Tell the user what would download and its size, and that they can approve it with the button on the notebook's page: its link is the notebook's browser_url from open_notebook or list_notebooks. Don't work around it.";
+const NO_ONE_ASKS_ERROR: &str = "download_cant_ask::Endeavor can't ask the user over this connection: this client is connected straight to `endeavor serve`, which can neither show Endeavor's dialog nor open a page in their browser, and no dialog was shown. So this can't be approved here: nothing is installed, and calling approve_install again won't change that. Tell the user what it would install and its size where known, that it needs their OK, and that it can be approved only from a client connected through `endeavor mcp` that shows Endeavor's dialog, such as a new Claude Code session in a terminal (not `claude -p`), or from the Endeavor desktop app (a program they install, not a web page): they close this notebook here, then open its file in the app, which asks them. The notebook's page (its browser_url) can't approve it either: it has no button for this, so don't send them there to approve it. Don't work around it.";
 
 /// A name that goes in a header or a message: printable characters only,
 /// trimmed, at most `LABEL_MAX` of them. None if nothing is left.
@@ -1479,7 +1479,7 @@ mod tests {
             // runtime the app started it is still one no one asks for.
             assert!(Caller::of(&head(""), app_runtime).no_one_asks());
         }
-        // Its replies say the notebook page's button is the way, not the chat.
+        // Its replies say this can't be approved over this connection, and where it can be.
         let asking = to_json(&json!({ "text": format!("R has to download ALL. {} Don't call read_cell to wait.", notebooks::ASK_STEP) }));
         let said = no_one_asks_said(asking);
         assert!(said.contains(ASK_STEP_NO_ONE) && !said.contains(notebooks::ASK_STEP), "{said}");

@@ -34,7 +34,7 @@ pub(crate) fn shows(var: impl Fn(&str) -> Option<String>) -> bool {
 pub(crate) fn note(host: &str, port: u16, open: &str) -> String {
     format!(
         "No browser could be opened on {host}, so the notebook did not open for the user. \
-Give them `browser_url` to open in their browser, and don't say it is open. \
+Give them `browser_url` to open in their browser, and don't say it is open: that page shows the notebook, but it can't approve an install. \
 If the page asks to let the browser in, they run `{open}` in a terminal on {host} and open the link it prints. \
 Only if the address doesn't load at all, their browser is on another computer: there they run `ssh -L {port}:localhost:{port} {host}` \
 (with the name they use to ssh to {host}), keep it open, and open `browser_url` again. \
