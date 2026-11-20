@@ -2126,7 +2126,8 @@ fn add_machine_only_looks_until_told_to_install() {
     assert_eq!(first["install"]["items"][0]["kind"], "helper", "{first}");
     assert_eq!(first["install"]["running"], json!({ "process": core_pid }), "{first}");
     let message = first["message"].as_str().unwrap();
-    assert!(message.contains("`install: true`") && message.contains("Ask the user") && message.contains("MB") && message.contains("already running"), "{message}");
+    assert!(message.contains("`install: true` now") && message.contains("on a page that it opens in their browser") && message.contains("MB") && message.contains("already running"), "{message}");
+    assert!(!message.contains("Ask the user") && !message.contains("http://"), "the page's link never reaches the agent: {message}");
     assert!(message.contains(&place.dir.join("root").display().to_string()), "where it would go: {message}");
     assert!(!place.dir.join("root").exists(), "nothing was installed");
     assert!(place.helpers().is_empty());
@@ -2232,6 +2233,86 @@ fn where_the_client_can_show_a_dialog_the_user_says_yes_to_an_install_there() {
 }
 
 #[test]
+fn where_the_client_cant_show_a_dialog_the_user_says_yes_on_a_page_in_their_browser() {
+    // Without a dialog, the agent's `install: true` was the user's yes, and Haiku 4.5 gave it in the
+    // same turn (#378, #381). The yes now comes from a page the front opens in the user's browser.
+    let place = Place::bare("page-install", &[("ENDEAVOR_TEST_PAGE_WAIT_MS", "1500")]);
+    let julia = place.julia.display().to_string();
+    let mut front = place.front();
+    front.click_pages(None);
+    front.initialize();
+    // The tools say Endeavor asks on a page, so the agent doesn't ask in the chat too.
+    let listed = front.request("tools/list", json!({}));
+    for tool in listed["result"]["tools"].as_array().unwrap().iter().filter(|t| t["inputSchema"]["properties"]["install"].is_object()) {
+        let (description, install) = (tool["description"].as_str().unwrap(), tool["inputSchema"]["properties"]["install"]["description"].as_str().unwrap());
+        assert!(install.contains("on a page in their browser") && !install.contains("never on a first call"), "{}: {install}", tool["name"]);
+        assert!(description.contains("click Install there; don't ask in the chat first") && !description.contains("ask the user, and"), "{}: {description}", tool["name"]);
+    }
+    // A look opens no page.
+    let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!(first["state"], "needs_install", "{first}");
+    assert!(front.pages.lock().unwrap().is_empty(), "a look asks nothing");
+
+    // `install: true` opens the page, and with no click in the time the call waits, nothing is installed.
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert!(failed && said["error"] == "install_not_answered" && text(&said).contains("haven't answered yet"), "{said}");
+    let page = front.pages.lock().unwrap()[0].clone();
+    assert!(!text(&said).contains(&page) && !text(&said).contains("http://"), "the link never reaches the agent: {said}");
+    assert!(!place.dir.join("root").exists(), "nothing was installed");
+    assert!(!place.machines().path().exists(), "nothing was saved");
+    // Asked again at once, the same page stands: no second tab.
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert!(failed && said["error"] == "install_not_answered", "{said}");
+    assert_eq!(front.pages.lock().unwrap().len(), 1);
+    assert!(!place.dir.join("root").exists());
+
+    // A yes, clicked after the call stopped waiting: the next call installs without asking again.
+    let (status, shown) = common::front::click(&page, "install");
+    assert!(status == 200 && shown.contains("You said yes"), "{status}: {shown}");
+    let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert_eq!((done["state"].as_str(), done["saved"].clone()), (Some("connected"), json!(true)), "{done}");
+    assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
+    assert_eq!(front.pages.lock().unwrap().len(), 1);
+
+    // On a runtime that runs, `install: true` is leave to download Julia later: asked about on a page too.
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["state"], "ready", "{used}");
+    front.click_pages(Some("decline"));
+    let declined = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
+    assert_eq!((declined["state"].as_str(), declined["install_declined"].clone()), (Some("ready"), json!(true)), "{declined}");
+    assert!(text(&declined).contains("clicked Don't install") && text(&declined).contains("10 minutes"), "{declined}");
+    assert_eq!(front.pages.lock().unwrap().len(), 2);
+    // An agent that asks again at once gets the same no, and the user gets no new page.
+    front.click_pages(Some("install"));
+    let again = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
+    assert_eq!(again["install_declined"], true, "{again}");
+    assert_eq!(front.pages.lock().unwrap().len(), 2, "no new page after a no");
+}
+
+#[test]
+fn without_a_dialog_or_a_browser_nothing_is_installed() {
+    let place = Place::bare("no-browser-install", &[]);
+    let mut command = julia_when_needed_front(&place, &["--folder", &place.project.display().to_string()], &[]);
+    // A test front always has its pages file; this one has none, and opens no browser.
+    command.env("ENDEAVOR_TEST_INSTALL_PAGES", "");
+    let mut front = common::front::Front::spawn(command);
+    front.initialize();
+    // The agent hears before it asks the user for a yes that couldn't be used.
+    let listed = front.request("tools/list", json!({}));
+    for tool in listed["result"]["tools"].as_array().unwrap().iter().filter(|t| t["inputSchema"]["properties"]["install"].is_object()) {
+        let install = tool["inputSchema"]["properties"]["install"]["description"].as_str().unwrap();
+        assert!(install.contains("Installs nothing from this app"), "{}: {install}", tool["name"]);
+    }
+    let julia = place.julia.display().to_string();
+    let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    let message = text(&first);
+    assert!(first["state"] == "needs_install" && message.contains("can't install it from this app") && message.contains("MB") && !message.contains("Ask the user"), "{first}");
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert!(failed && said["error"] == "install_cant_ask" && text(&said).contains("calling again won't install it") && text(&said).contains("don't make the notebook on this computer instead"), "{said}");
+    assert!(!place.dir.join("root").exists(), "nothing was installed");
+}
+
+#[test]
 fn a_helper_of_an_older_build_is_an_update_that_needs_the_user_too() {
     let place = Place::new("older-helper");
     place.add_lab();
@@ -2313,15 +2394,18 @@ fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
 }
 
 #[test]
-fn add_machine_with_install_connects_once_and_without_it_does_not_install() {
+fn add_machine_with_install_looks_once_and_installs_once() {
+    // The agent's `install: true` isn't the user's yes (#381): the front looks first, without it, to
+    // ask the user about what it names, and connects with the install allowed only on their yes.
     let place = Place::bare("install-once", &[("ENDEAVOR_TEST_ASK", "echo connect >> {dir}/connects")]);
     let mut front = place.front();
     front.initialize();
     let julia = place.julia.display().to_string();
     let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
     assert_eq!(done["state"], "connected", "{done}");
+    assert_eq!(front.pages.lock().unwrap().len(), 1, "the user was asked once");
     let connects = std::fs::read_to_string(place.dir.join("connects")).unwrap();
-    assert_eq!(connects.lines().count(), 1, "one connection, allowed from the start: {connects:?}\n{:?}", front.said());
+    assert_eq!(connects.lines().count(), 2, "the look, then the install: {connects:?}\n{:?}", front.said());
 }
 
 #[test]

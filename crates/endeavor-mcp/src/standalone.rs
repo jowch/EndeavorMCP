@@ -37,6 +37,7 @@ use target::{Local, Target};
 
 mod browser;
 mod consent;
+mod install_page;
 mod machines;
 mod projects;
 mod status;
@@ -824,6 +825,8 @@ struct Relay {
     meta_salt: std::collections::hash_map::RandomState,
     /// The user's own OK for a large R download, asked by the front (`consent`).
     consent: consent::Consent,
+    /// The user's own yes to an install on a machine, where the client can't show a dialog (`install_page`).
+    pages: install_page::Pages,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -1050,6 +1053,7 @@ impl Relay {
             meta_logged: Mutex::default(),
             meta_salt: Default::default(),
             consent: Default::default(),
+            pages: Default::default(),
             out: Mutex::new(out),
         }
     }
@@ -1153,7 +1157,8 @@ impl Relay {
             self.views.store(draws, std::sync::atomic::Ordering::SeqCst);
             // Which client this is and whether it says it draws views: a host's log shows only method names.
             let client = &message["params"]["clientInfo"];
-            eprintln!("[ Info: Client {} {}: draws views: {}", client["name"].as_str().unwrap_or("?"), client["version"].as_str().unwrap_or("?"), if draws { "yes" } else { "no" });
+            let dialogs = if self.consent.can_ask() { "yes" } else { "no" };
+            eprintln!("[ Info: Client {} {}: draws views: {}; shows dialogs: {dialogs}", client["name"].as_str().unwrap_or("?"), client["version"].as_str().unwrap_or("?"), if draws { "yes" } else { "no" });
         }
         let views = self.views.load(std::sync::atomic::Ordering::SeqCst);
         if let Some(reply) = crate::mcp::answer_locally(&message, self.options.skills_plugin, self.options.folder.is_none(), views) {
@@ -1161,7 +1166,7 @@ impl Relay {
                 let negotiated: Value = serde_json::from_str(&reply).unwrap_or_default();
                 *self.protocol.lock().unwrap() = negotiated["result"]["protocolVersion"].as_str().map(str::to_owned);
             }
-            let reply = if message["method"] == "tools/list" { self.consent.tools_listed(reply) } else { reply };
+            let reply = if message["method"] == "tools/list" { self.consent.tools_listed(reply, self.page_shows()) } else { reply };
             return self.write(&reply);
         }
         // The runtime has nothing to do with it.

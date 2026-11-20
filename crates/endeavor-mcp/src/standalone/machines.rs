@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use wire::slurm::{Partition, Resources, check_extra_flag};
 
+use super::install_page::Clicked;
 use super::projects::Remembered;
 use super::target::{OtherBuild, Provider, Target, local_server};
 use super::{Relay, Route, tool_failure};
@@ -382,6 +383,56 @@ fn asked_in_dialog(text: &str) -> String {
     let rest = &text[at + ASK_IN_CHAT.len()..];
     let Some(end) = rest.find(CALL_END_IN_CHAT) else { return text.to_owned() };
     format!("{}{ASKED_IN_DIALOG}{}{CALL_END_IN_DIALOG}{}", &text[..at], &rest[..end], &rest[end + CALL_END_IN_CHAT.len()..])
+}
+
+/// The same, where Endeavor asks the user on a page in their browser (#381).
+const ASKED_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what it installs, once a call has `install: true`: tell the user it needs their OK, then call ";
+
+/// A machine tool's `message` where Endeavor asks the user on a page in their browser.
+fn asked_on_page(text: &str) -> String {
+    let Some(at) = text.find(ASK_IN_CHAT) else { return text.to_owned() };
+    let rest = &text[at + ASK_IN_CHAT.len()..];
+    let Some(end) = rest.find(CALL_END_IN_CHAT) else { return text.to_owned() };
+    format!("{}{ASKED_ON_PAGE}{}{CALL_END_IN_DIALOG}{}", &text[..at], &rest[..end], &rest[end + CALL_END_IN_CHAT.len()..])
+}
+
+/// Open an install page in the user's browser (`Relay::page_shows`).
+fn open_page(url: &str) -> bool {
+    if let Some(file) = test_var("ENDEAVOR_TEST_INSTALL_PAGES").filter(|file| !file.is_empty()) {
+        use std::io::Write;
+        return std::fs::OpenOptions::new().create(true).append(true).open(file).and_then(|mut f| writeln!(f, "{url}")).is_ok();
+    }
+    super::browser::open(url)
+}
+
+/// Where no one can be asked: neither a dialog nor a page in the browser.
+const CANT_ASK: &str = "Endeavor can't install it from this app: it asks the user itself before it installs anything, and here it can neither show its dialog nor open a page in their browser. Setting `install` installs nothing here. Tell the user what it needs and where; to install it, they can ask for it from Claude Code in a terminal (not `claude -p`), which shows Endeavor's dialog, or from an app whose Endeavor runs on a computer that can open their browser. Don't work around it: don't make the notebook on this computer instead, and don't suggest commands or settings that these messages don't name; there are none that install it from here.";
+
+const CANT_ASK_ERROR: &str = "install_cant_ask::Endeavor can't install it from this app: it asks the user itself before it installs anything, and here it can neither show its dialog nor open a page in their browser. Nothing was installed, and calling again won't install it. Tell the user what it needs and where; to install it, they can ask for it from Claude Code in a terminal (not `claude -p`), which shows Endeavor's dialog, or from an app whose Endeavor runs on a computer that can open their browser. Don't work around it: don't make the notebook on this computer instead, and don't suggest commands or settings that these messages don't name; there are none that install it from here.";
+
+/// A machine tool's `message` where no one can be asked: its asking step says so instead.
+fn cant_ask(text: &str) -> String {
+    let Some(at) = text.find(ASK_IN_CHAT) else { return text.to_owned() };
+    let rest = &text[at + ASK_IN_CHAT.len()..];
+    let Some(end) = rest.find(CALL_END_IN_CHAT) else { return text.to_owned() };
+    format!("{}{CANT_ASK}{}", &text[..at], &rest[end + CALL_END_IN_CHAT.len()..])
+}
+
+/// The most a call that asks on a page takes, click and install together: under the 60 s that
+/// Codex gives a tool call.
+const PAGE_CALL: Duration = Duration::from_secs(55);
+
+/// The part of `PAGE_CALL` kept for the install after the click.
+const INSTALL_SHARE: Duration = Duration::from_secs(20);
+
+/// The least an install after a click is given, however late the click came: one that runs out says
+/// to call again, and the user's yes holds for that call (`install_page::SETTLED`).
+const MIN_INSTALL: Duration = Duration::from_secs(5);
+
+/// How long a call waits for the user's click on the install page: under the 60 s that some clients
+/// give a tool call. A debug build takes `ENDEAVOR_TEST_PAGE_WAIT_MS`.
+fn page_wait() -> Duration {
+    test_var("ENDEAVOR_TEST_PAGE_WAIT_MS").and_then(|ms| ms.to_str()?.parse().ok()).map_or(Duration::from_secs(45), Duration::from_millis)
 }
 
 /// What the dialog asks before a machine tool installs `items` on machine `name`.
@@ -1019,9 +1070,10 @@ impl Relay {
             Err(result) => return self.answer_call(message, Some(tool), result),
         };
         let dialog = self.consent.can_ask();
-        // Nothing installs on the user's machines unless they say yes to it themselves, where the
-        // client can ask them (#378): the agent's `install: true` alone isn't their yes.
-        let result = if dialog && tool != "list_machines" {
+        // Nothing installs on the user's machines unless they say yes to it themselves (#378, #381):
+        // the agent's `install: true` alone isn't their yes. Where the client can't show a dialog,
+        // they say it on a page in their browser.
+        let result = if tool != "list_machines" {
             match self.install_asked(message, tool, &arguments, deadline) {
                 Some(result) => result,
                 None => return,
@@ -1029,10 +1081,18 @@ impl Relay {
         } else {
             self.run_machine_tool(tool, &arguments, deadline)
         };
+        let page = !dialog && self.page_shows();
         let result = match result {
             Ok(mut result) => {
-                if dialog && let Some(text) = result["message"].as_str() {
-                    result["message"] = asked_in_dialog(text).into();
+                if let Some(text) = result["message"].as_str() {
+                    result["message"] = if dialog {
+                        asked_in_dialog(text)
+                    } else if page {
+                        asked_on_page(text)
+                    } else {
+                        cant_ask(text)
+                    }
+                    .into();
                 }
                 text_result(&to_json(&result))
             }
@@ -1050,7 +1110,13 @@ impl Relay {
         }
     }
 
-    /// A machine tool's call where the client can show a form: the call without `install` first,
+    /// Whether the user can be asked on a page in their browser (`install_page`). A debug build with
+    /// `ENDEAVOR_TEST_INSTALL_PAGES` set to a file adds each page's link to it instead, for a test to click.
+    pub(super) fn page_shows(&self) -> bool {
+        test_var("ENDEAVOR_TEST_INSTALL_PAGES").is_some_and(|file| !file.is_empty()) || super::browser::shows(|name| std::env::var(name).ok())
+    }
+
+    /// A machine tool's call: the call without `install` first,
     /// which installs nothing and says what would be installed. Only if something would be, the user
     /// is asked in a dialog that names it, then and there, whether or not the agent set `install`, and
     /// the call goes ahead with `install` only on their yes. An agent that was to call again for the
@@ -1059,6 +1125,12 @@ impl Relay {
     /// computer, install R) when a notebook needs it: that is asked about too. None when the client
     /// cancelled the call: it gets no reply.
     fn install_asked(self: &Arc<Self>, message: &Value, tool: &str, arguments: &Value, deadline: Deadline) -> Option<Result<Value, String>> {
+        let began = Instant::now();
+        // Checked before the look, which leaves `install` out.
+        let wants_install = match flag_arg(arguments, "install") {
+            Ok(install) => install,
+            Err(e) => return Some(Err(e)),
+        };
         self.consent.looking(message);
         let mut look = arguments.clone();
         if let Some(fields) = look.as_object_mut() {
@@ -1072,17 +1144,32 @@ impl Relay {
                 let items: Vec<wire::Item> = serde_json::from_value(result["install"]["items"].clone()).unwrap_or_default();
                 Some(install_question(&name, &items, tool))
             }
-            Ok(result) if tool == "use_machine" && arguments["install"] == true && result["ready"] == true => Some(leave_question(&machine)),
+            Ok(result) if tool == "use_machine" && wants_install && result["ready"] == true => Some(leave_question(&machine)),
             _ => None,
         };
+        // Where the client can't show a dialog, the user is asked on a page, and only once the agent
+        // sets `install`: a page that opens on every look would open one for each question the agent asks.
+        let question = question.filter(|_| self.consent.can_ask() || wants_install);
         let Some(question) = question else {
             return (!self.consent.not_asking(message)).then_some(looked);
         };
         let again = format!("`{tool}` again");
         let mut install = arguments.clone();
         install["install"] = true.into();
-        match self.consent.ask_install(message, &question, &again, &|line| self.write(line)) {
-            Ok(true) => Some(self.run_machine_tool(tool, &install, Deadline::after(super::start_wait()))),
+        let dialog = self.consent.can_ask();
+        let asked = if dialog {
+            self.consent.ask_install(message, &question, &again, &|line| self.write(line))
+        } else if self.page_shows() {
+            self.ask_on_page(message, &question, &again, began)
+        } else {
+            self.consent.not_asking(message);
+            Err(CANT_ASK_ERROR.to_owned())
+        };
+        // A client that can't show a dialog may give the call no more than a minute (Codex), and the
+        // front alone waits for the click: the install gets what is left of that.
+        let install_wait = if dialog { super::start_wait() } else { PAGE_CALL.saturating_sub(began.elapsed()).max(MIN_INSTALL) };
+        match asked {
+            Ok(true) => Some(self.run_machine_tool(tool, &install, Deadline::after(install_wait))),
             Ok(false) => None,
             // The session moved in the look, which installed nothing: the agent hears both.
             Err(refused) if tool == "use_machine" && looked.as_ref().is_ok_and(|r| r["ready"] == true) => {
@@ -1094,6 +1181,24 @@ impl Relay {
             }
             Err(refused) => Some(Err(refused)),
         }
+    }
+
+    /// `ask_install`'s answer where the client can't show a dialog: the user's click on a page that
+    /// the front opens in their browser (#381). The call waits for it while it leaves the install
+    /// time within `PAGE_CALL` from `began`; one that has stopped waiting finds the click on its next try.
+    fn ask_on_page(&self, message: &Value, question: &str, again: &str, began: Instant) -> Result<bool, String> {
+        let wait = page_wait().min(PAGE_CALL.saturating_sub(began.elapsed() + INSTALL_SHARE));
+        let clicked = self.pages.ask(question, wait, &|| self.consent.cancelled(message), &open_page);
+        if self.consent.not_asking(message) || clicked == Clicked::Dropped {
+            return Ok(false);
+        }
+        Err(match clicked {
+            Clicked::Install => return Ok(true),
+            Clicked::Dropped => return Ok(false),
+            Clicked::Declined => format!("install_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing was installed. Endeavor won't ask them about it again for 10 minutes: until then, {again} with `install: true` gets this same answer. Tell the user, and don't call again unless they ask for it. If they change their mind, the page they answered has an Install button: once they say they clicked it, call {again} with `install: true`."),
+            Clicked::NotYet => format!("install_not_answered::Endeavor opened a page in the user's browser that names what it would install, and it installs it only once they click Install there. They haven't answered yet, so nothing was installed. Tell the user to answer that page, and end your reply. Once they say they clicked Install, call {again} with `install: true`, and it installs without asking again: their click holds for 10 minutes."),
+            Clicked::NoBrowser => CANT_ASK_ERROR.to_owned(),
+        })
     }
 
     /// Answer request `message` with `result`, a tool call's result.

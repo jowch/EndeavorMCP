@@ -31,8 +31,24 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   otherwise). The agent needn't call again: when it had to, Haiku 4.5 often
   said a dialog would come and stopped (#380's smoke runs). There the tools'
   descriptions tell the agent not to ask in the chat as well. Haiku 4.5 installed before the user's yes in 2 of 3 smoke
-  runs before this (#378). A client that can't show a dialog gets the old
-  behavior: the agent asks in the chat.
+  runs before this (#378). A client that can't show a dialog doesn't take the
+  agent's word either (#381): there a call with `install: true` opens a page
+  in the user's browser (`standalone/install_page.rs`, on 127.0.0.1 behind a
+  one-time secret that never reaches the agent) that names what it would
+  install, and installs only once they click Install. Click and install fit
+  in 55 s (Codex gives a tool call 60 s), so the call waits 35 s for the
+  click; a later call finds it, and a yes holds for the same question for 10
+  minutes. A no can become a yes with the answered page's own button. A no holds as long, without
+  a new page, and an unanswered page opens again at most once, so an agent
+  that keeps calling can't wear the user down. A look without `install` opens
+  no page. Without a browser to open (a front over ssh or with no display),
+  the tools and `needs_install` say nothing can be installed from that app,
+  and `install: true` fails with `install_cant_ask`. The page stops an agent
+  that says yes for the user, not one working against them: an agent with a
+  shell on the same computer can find the link (the opener's command line,
+  the browser's history) and could install things itself anyway. The front's
+  log says whether each client shows dialogs (`[ Info: Client …: shows
+  dialogs: yes|no`).
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
 - The notebook view (`views.rs`, interface 36; R notebooks interface 38): a client that draws MCP App

@@ -53,6 +53,41 @@ const MACHINE_SWAPS: &[(&str, &str)] = &[
     ("Only after the user agreed; this call only; never on a first call.", "Where something has to be installed, Endeavor asks the user in a dialog and installs only on their yes; set it only for what a notebook tool's message asks for, such as Julia or R not found."),
 ];
 
+/// The same where the client can't show a dialog and Endeavor asks the user on a page in their
+/// browser (#381): the agent still sets `install`, and that opens the page.
+const MACHINE_PAGE_SWAPS: &[(&str, &str)] = &[
+    (
+        "ask the user, and call again with `install` true only if they agree",
+        "call again with `install` true: Endeavor then asks the user itself, on a page that it opens in their browser and that names it, and installs it only once they click Install there; don't ask in the chat first",
+    ),
+    (
+        "`needs_install`: ask the user, and call again with `install` true only if they agree to what the result names",
+        "`needs_install`: call again with `install` true, and Endeavor asks the user itself, on a page that it opens in their browser and that names what it installs, and installs it only once they click Install there; don't ask in the chat first",
+    ),
+    (
+        "the result is `needs_install`: ask the user, and set `install` only if they agree",
+        "the result is `needs_install`: set `install`, and Endeavor asks the user itself, on a page in their browser, and installs it only once they click Install there; don't ask in the chat first",
+    ),
+    ("Only after the user agreed to what `needs_install` named; never on a first call.", "After `needs_install`. Endeavor then asks the user on a page in their browser and installs only once they click Install there."),
+    ("Only after the user agreed; this call only; never on a first call.", "Endeavor then asks the user on a page in their browser and installs only once they click Install there; set it after `needs_install`, or for what a notebook tool's message asks for, such as Julia or R not found."),
+];
+
+/// The same where the client can't show a dialog and no browser can be opened: no one can be asked,
+/// so nothing is installed, and the agent hears so before it asks the user for a yes it can't use.
+const MACHINE_CANT_SWAPS: &[(&str, &str)] = &[
+    (
+        "ask the user, and call again with `install` true only if they agree",
+        "tell the user what it names: Endeavor can't install it from this app, because it can neither show its dialog nor open a page in their browser to ask them",
+    ),
+    (
+        "`needs_install`: ask the user, and call again with `install` true only if they agree to what the result names",
+        "`needs_install`: tell the user what it names; Endeavor can't install it from this app, because it can neither show its dialog nor open a page in their browser to ask them",
+    ),
+    ("the result is `needs_install`: ask the user, and set `install` only if they agree", "the result is `needs_install`: tell the user; Endeavor can't install it from this app"),
+    ("Only after the user agreed to what `needs_install` named; never on a first call.", "Installs nothing from this app: Endeavor can't ask the user here."),
+    ("Only after the user agreed; this call only; never on a first call.", "Installs nothing from this app: Endeavor can't ask the user here."),
+];
+
 #[derive(Default)]
 pub(super) struct Consent {
     /// The client said in `initialize` that it can show a form.
@@ -100,17 +135,20 @@ impl Consent {
         self.can_ask.load(Ordering::SeqCst)
     }
 
-    /// `tools/list`'s reply, with `approve_install` saying that Endeavor asks the user, where it does.
-    pub(super) fn tools_listed(&self, reply: String) -> String {
-        if !self.can_ask() {
-            return reply;
-        }
+    /// `tools/list`'s reply, with `approve_install` and the machine tools saying that Endeavor asks
+    /// the user, where it does: in a dialog, or for the machine tools, on a page in their browser
+    /// where the client can't show one and `page` says a browser can be opened. Where neither can
+    /// be, the machine tools say they install nothing.
+    pub(super) fn tools_listed(&self, reply: String, page: bool) -> String {
+        let dialog = self.can_ask();
         let Ok(mut parsed) = serde_json::from_str::<Value>(&reply) else { return reply };
         let Some(tools) = parsed["result"]["tools"].as_array_mut() else { return reply };
         for tool in tools.iter_mut() {
             let swaps: &[(&str, &str)] = match tool["name"].as_str() {
-                Some("approve_install") => &[(ASK_IN_CHAT, ASKED_IN_DIALOG)],
-                Some("add_machine" | "use_machine" | "stop_machine") => MACHINE_SWAPS,
+                Some("approve_install") if dialog => &[(ASK_IN_CHAT, ASKED_IN_DIALOG)],
+                Some("add_machine" | "use_machine" | "stop_machine") if dialog => MACHINE_SWAPS,
+                Some("add_machine" | "use_machine" | "stop_machine") if page => MACHINE_PAGE_SWAPS,
+                Some("add_machine" | "use_machine" | "stop_machine") => MACHINE_CANT_SWAPS,
                 _ => continue,
             };
             for pointer in ["/description", "/inputSchema/properties/install/description"] {
@@ -210,6 +248,11 @@ impl Consent {
             Answer::TimedOut => format!("install_not_answered::Endeavor asked the user in a dialog in the app they talk to you in and got no answer, so nothing was installed. Ask the user in the chat; if they want it, call {again} with `install: true`, and it asks them once more."),
             Answer::Failed(error) => format!("install_not_answered::Endeavor couldn't ask the user ({error}), so nothing was installed. Ask the user in the chat; if they want it, call {again} with `install: true`."),
         })
+    }
+
+    /// Whether the client cancelled `call` since `looking`.
+    pub(super) fn cancelled(&self, call: &Value) -> bool {
+        self.calls.lock().unwrap().get(&to_json(&call["id"])).is_some_and(|question| question.as_deref() == Some(CANCELLED))
     }
 
     /// `call` was on its way to `ask` or `ask_install` (`looking`), and nothing needs asking: forget
@@ -373,7 +416,7 @@ mod tests {
 
     #[test]
     fn every_machine_wording_swapped_where_a_dialog_asks_is_in_the_tools() {
-        for (chat, _) in MACHINE_SWAPS {
+        for (chat, _) in MACHINE_SWAPS.iter().chain(MACHINE_PAGE_SWAPS).chain(MACHINE_CANT_SWAPS) {
             assert!(crate::mcp::MACHINE_TOOLS_JSON.contains(chat), "machine_tools.json no longer says: {chat}");
         }
     }
@@ -473,7 +516,8 @@ mod tests {
             consent.learn_client(&initialize(elicitation));
             assert!(matches!(consent.ask(&call(), all(), &|_| panic!("asked")), Asked::Unasked));
             let listed = to_json(&json!({ "result": { "tools": [{ "name": "approve_install", "description": ASK_IN_CHAT }] } }));
-            assert_eq!(consent.tools_listed(listed.clone()), listed);
+            assert_eq!(consent.tools_listed(listed.clone(), false), listed, "approve_install is as it was");
+            assert_eq!(consent.tools_listed(listed.clone(), true), listed, "a page is only for the machine tools");
         }
         // An empty object is the form, as 2025-06-18 has it.
         let consent = Consent::default();
@@ -490,7 +534,7 @@ mod tests {
         consent.learn_client(&initialize(json!({ "form": {} })));
         let tools: Value = serde_json::from_str(crate::mcp::NOTEBOOK_TOOLS_JSON).unwrap();
         let listed = to_json(&json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": tools } }));
-        let shown: Value = serde_json::from_str(&consent.tools_listed(listed)).unwrap();
+        let shown: Value = serde_json::from_str(&consent.tools_listed(listed, false)).unwrap();
         let approve = shown["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "approve_install").unwrap();
         let text = approve["description"].as_str().unwrap();
         assert!(text.contains(ASKED_IN_DIALOG) && !text.contains(ASK_IN_CHAT), "{text}");
