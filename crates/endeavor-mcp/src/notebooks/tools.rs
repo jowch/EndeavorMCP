@@ -2041,6 +2041,23 @@ fn asking_message(nb: &Snapshot) -> String {
         let names: Vec<&str> = download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).collect();
         let which = if names.is_empty() { "packages".to_owned() } else { names.join(", ") };
         let language = super::engines::language(super::engines::of_path(&nb.path));
+        // A name a letter or two from a widely used package's is likely a typo (#416).
+        let near: Vec<(&str, &str)> = download["packages"].as_array().into_iter().flatten()
+            .filter_map(|p| Some((p["package"].as_str()?, p["close_to"].as_str()?)))
+            .collect();
+        if !near.is_empty() {
+            // Only a hint: real packages sit close to common ones (pysam and pyyaml), so the agent
+            // changes an import only where it meant the other package.
+            let each: Vec<String> = near.iter().map(|(name, close)| format!(
+                "{name} is close to {close}, a widely used package. If you meant {close}, change the import to it, run the cell again, and tell the user you changed it. \
+                 If you meant {name} (or the user asked for it), keep it, and say that it is close to {close} when you tell the user about the install"
+            )).collect();
+            return format!(
+                "Before these cells can run, {language} has to install packages this notebook doesn't have yet: {which}. Nothing is installing, and the cells stay queued. {}. \
+                 Otherwise: {ASK_STEP} Don't call read_cell to wait: nothing changes until then.",
+                each.join(". ")
+            );
+        }
         return format!(
             "Before these cells can run, {language} has to install packages this notebook doesn't have yet: {which}, with what they need. \
              A new package waits for the user's OK, so nothing is installing and the cells stay queued. {ASK_STEP} \

@@ -369,6 +369,9 @@ Next:
   A package new to the notebook (not in its header) waits for the user's OK
   first, as in Julia (#355): the cells stay queued, `packages.step` is
   `asking`, and `approve_install` installs it; the app's Auto mode doesn't ask.
+  A name a letter away from a widely used package's (a short list in the
+  adapter, no network; same first letter, not a prefix of it) gets a hint in
+  the question and the agent's message (#416).
   marimo runs them lazily, so opening one runs nothing and a run from marimo's
   page marks the cells below stale; an agent's run takes them too, as in Pluto.
   marimo allows one editing page per notebook, so

@@ -464,11 +464,14 @@ class Notebook:
         rerun = self.rerun_for(modules, cells)
         if ask_new:
             have = header_packages(self.path)
-            new = sorted({pypi_name(m) for m in modules if m not in self.approved and canonical(pypi_name(m)) not in have})
+            fresh = [m for m in modules if m not in self.approved and canonical(pypi_name(m)) not in have]
+            new = sorted({pypi_name(m) for m in fresh})
             if new:
                 held = [c for c in (self.asking or {}).get("cells", []) if c in self.cells]
                 modules = sorted(set(modules) | set((self.asking or {}).get("modules", [])))
-                self.asking = {"modules": modules, "packages": new, "cells": self.in_order(set(held) | set(rerun))}
+                # A name a letter or two from a widely used package's: likely a typo (#416).
+                near = {pypi_name(m): n for m in fresh if (n := near_miss(m))}
+                self.asking = {"modules": modules, "packages": new, "near": near, "cells": self.in_order(set(held) | set(rerun))}
                 return False
         return await self.install_modules(modules, rerun)
 
@@ -587,9 +590,9 @@ class Notebook:
                 self.asking = None
         if self.asking and not self.installing:
             # As a Julia notebook's new packages ask (#397): the front asks the user with these names.
-            packages = self.asking["packages"]
+            packages, near = self.asking["packages"], self.asking.get("near") or {}
             return {"step": "asking", "new": True, "packages": packages, "seconds": 0, "last_line": None,
-                    "download": {"bytes": None, "packages": [{"package": p} for p in packages]}}
+                    "download": {"bytes": None, "packages": [{"package": p, **({"close_to": near[p]} if p in near else {})} for p in packages]}}
         if not self.installing and not any(self.waits_for_install(c) for c in self.order):
             return None
         started = (self.installing or {}).get("started", time.time())
@@ -706,6 +709,74 @@ def header_packages(path):
 def canonical(name):
     """A PyPI name as PEP 503 compares it."""
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+# Import names of widely used packages, for `near_miss` (#416): a new name a letter or two from one of
+# these is likely a typo, and PyPI has typosquats of exactly these. Kept small and shipped here, so
+# the check needs no network. A name on the list is never flagged.
+COMMON_MODULES = frozenset("""
+aiohttp altair anndata anthropic anyio apache_beam arrow astropy attr attrs awkward
+bcrypt biopython black bokeh boto3 botocore bs4 cachetools catboost certifi cffi chardet
+charset_normalizer click cloudpickle colorama cryptography cupy cv2 cycler dash dask
+datasets dateutil decorator deltalake diffusers dill distributed django docker docutils
+duckdb einops elasticsearch emoji faker fastapi fastparquet filelock fiona flask
+fsspec gensim geopandas google graphviz great_tables grpc gspread h5py httpx huggingface_hub
+hvplot hypothesis idna imageio imblearn ipykernel ipython ipywidgets isodate jax jaxlib jinja2
+jmespath joblib jsonschema jupyter keras kiwisolver langchain librosa lightgbm llvmlite lxml
+markdown marimo matplotlib mlflow more_itertools mpmath msgpack multidict mypy narwhals
+nbformat networkx nltk numba numexpr numpy oauthlib onnx openai openpyxl optuna orjson
+packaging pandas pandera paramiko patsy pendulum pillow PIL platformdirs plotly plotnine
+pluggy polars prophet protobuf psutil psycopg psycopg2 pyarrow pydantic pydeck pygments pyjanitor
+pymc pymongo pyodbc pyogrio pyparsing pyproj pyspark pytest pytz pyvista pywt pyyaml qrcode
+rasterio ray redis regex reportlab requests rich rpy2 ruamel s3fs scanpy scikit-image
+scikit-learn scipy seaborn selenium setuptools shap shapely simplejson six skimage sklearn
+slack_sdk snowflake soundfile spacy sqlalchemy sqlmodel statsmodels streamlit sympy tabulate
+tenacity tensorboard tensorflow termcolor threadpoolctl tifffile tiktoken toml tomli toolz torch
+torchaudio torchvision tornado tqdm transformers typer typing_extensions tzdata ujson umap
+urllib3 uvicorn vega_datasets virtualenv wandb websockets werkzeug wheel xarray xgboost xlrd
+xlsxwriter yaml yarl zarr
+""".split())
+
+
+def near_miss(module):
+    """The widely used package `module` may be a typo of, or None. Only a hint, for the question and
+    the agent: the user still decides. Kept narrow, since real packages sit close to common ones
+    (pysam and pyyaml, nilearn and sklearn, boto and boto3): the same first letter, neither name the
+    start of the other, and one edit for a name under 8 letters, two from 8 up; or the same name but
+    for case, `-` or `_`."""
+    if module in COMMON_MODULES:
+        return None
+    low = module.lower()
+    plain = re.sub(r"[-_.]", "", low)
+    best = None
+    for c in COMMON_MODULES:
+        other = c.lower()
+        if plain == re.sub(r"[-_.]", "", other):
+            d = 0
+        elif low[:1] != other[:1] or low.startswith(other) or other.startswith(low):
+            continue
+        else:
+            d = edits(low, other)
+            if d > (1 if len(low) < 8 else 2):
+                continue
+        if best is None or (d, c) < best:
+            best = (d, c)
+    return best and best[1]
+
+
+def edits(a, b):
+    """The edit distance between two names, a swap of neighbours counting as one edit."""
+    if abs(len(a) - len(b)) > 2:
+        return 3
+    prev2, prev = None, list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+            if prev2 is not None and i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        prev2, prev = prev, cur
+    return prev[len(b)]
 
 
 def pypi_name(module):

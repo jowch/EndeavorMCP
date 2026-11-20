@@ -330,8 +330,9 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import pandsa" }));
         let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": true }));
         assert_eq!(ran["packages"]["step"], "asking", "{ran}");
-        assert_eq!(ran["packages"]["download"]["packages"], json!([{ "package": "pandsa" }]), "{ran}");
-        assert!(ran["message"].as_str().unwrap_or_default().contains("pandsa"), "{ran}");
+        // pandsa is a letter swap from pandas, which the question and the message say (#416).
+        assert_eq!(ran["packages"]["download"]["packages"], json!([{ "package": "pandsa", "close_to": "pandas" }]), "{ran}");
+        assert!(ran["message"].as_str().unwrap_or_default().contains("pandsa is close to pandas, a widely used package"), "{ran}");
         assert!(!header(&folder.join("typo.py")).contains("pandsa"), "nothing installed");
         // The agent fixes the typo and runs again: nothing new, nothing asks, and the cell runs.
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import json\njson.dumps(1)" }));
