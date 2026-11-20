@@ -63,23 +63,28 @@ const CANCELLED: &str = "cancelled";
 use crate::mcp::ASK_IN_CHAT;
 
 /// The same where the front asks the user itself: asking in the chat too would have them say yes twice.
-const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size, and nothing downloads unless they say yes there or with the button on the notebook's page. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or close the dialog, the call fails with `download_declined` or `download_not_answered`.";
+const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size, and nothing downloads unless they say yes there. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or close the dialog, the call fails with `download_declined` or `download_not_answered`.";
 
 /// `approve_install`'s words where the client can't show a dialog and Endeavor asks the user on a
 /// page in their browser instead (#388).
-const ASKED_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size, and nothing downloads unless they click Install there or use the button on the notebook's page. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or haven't answered yet, the call fails with `download_declined` or `download_not_answered`.";
+const ASKED_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size, and nothing downloads unless they click Install there. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or haven't answered yet, the call fails with `download_declined` or `download_not_answered`.";
+
+/// The start of the answer when the user asks again after a no on the page.
+pub(super) const HELD_NO: &str = "The user already clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, less than 10 minutes ago, so nothing was installed, and ";
+/// What a user who changed their mind after a no on the page can do.
+pub(super) const CHANGED_MIND: &str = "If they want it now, the only way is the Install button under \"Changed your mind?\" on that same page, if it is still open in their browser: tell them that once, plainly, and call again once they say they clicked it. Don't invent another way.";
 
 /// The same where no one can be asked: no dialog, and no browser to open.
 const CANT_ASK: &str = "Endeavor can't ask the user from this app (no dialog, and no browser it can open), so calling it downloads nothing: tell the user what would download and its size, and that they can approve it with the button on the notebook's page. Its link is the notebook's browser_url from open_notebook or list_notebooks; where that page is on another computer, the note that came with it says how to reach it.";
 
 /// The runtime's asking step where Endeavor asks the user on a page in their browser.
-const ASK_STEP_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first. The notebook's page also has a button for it.";
+const ASK_STEP_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
 
 /// The same where no one can be asked.
 const ASK_STEP_CANT: &str = "Endeavor can't ask the user from this app, so approve_install downloads nothing here: tell the user what would download and its size, and that they can approve it with the button on the notebook's page, then end your reply. Its link is the notebook's browser_url from open_notebook or list_notebooks; where that page is on another computer, the note that came with it says how to reach it.";
 
 /// The runtime's asking step (`notebooks::ASK_STEP`) where the front asks the user itself.
-const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first. The notebook's page also has a button for it.";
+const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
 
 /// The machine tools' words about asking the user before `install: true`, and what they say where
 /// the front asks the user itself (#378). Each chat wording is in machine_tools.json (a test checks).
@@ -280,6 +285,8 @@ impl Consent {
         };
         // A yes to a question that can't say what downloads is for this call only.
         let hold = matches!(waiting, Waiting::Asking { .. });
+        // A no the user gave on an earlier call: the agent is asking again, so the user wants it now.
+        let again_after_no = page && pages.held(&question);
         let clicked = if page { pages.ask(&question, hold, wait, &|| self.cancelled(call) || self.dialog_answered(call), open) } else { Clicked::NoBrowser };
         if let Some(asked) = self.download_answer_after_page(call, matches!(clicked, Clicked::Install | Clicked::Declined), write) {
             pages.retire(&question);
@@ -292,8 +299,9 @@ impl Consent {
         let why = match clicked {
             Clicked::Install => return Asked::Yes,
             Clicked::Dropped => return Asked::Dropped,
-            Clicked::Declined => "download_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing downloads and the cells that need it stay queued. Endeavor won't ask them about it again for 10 minutes: until then, approve_install gets this same answer. Tell the user, and don't call it again unless they ask. If they change their mind, the page they answered has an Install button, and the notebook's page has its own: once they say they clicked one, call approve_install again.",
-            Clicked::NotYet => "download_not_answered::Endeavor opened a web page (not a dialog) in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user that a web page is open in their browser and to answer it there (don't call it a dialog), and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes. The notebook's page also has its own button.",
+            Clicked::Declined if again_after_no => return Asked::No(tool_error(&format!("download_declined::The user already clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, less than 10 minutes ago, so nothing downloads, the cells that need it stay queued, and calling approve_install gets this same answer until those 10 minutes pass. {}", CHANGED_MIND), false)),
+            Clicked::Declined => "download_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing downloads and the cells that need it stay queued. Their no stands for 10 minutes: until then, calling approve_install gets this same answer. In your reply, say plainly that nothing was downloaded, and stop there. Don't mention the page, the browser or a button, don't ask them to reconsider, and don't call approve_install again unless they ask for the download themselves. After the 10 minutes, a new approve_install call asks them again.",
+            Clicked::NotYet => "download_not_answered::Endeavor opened a web page (not a dialog) in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user that a web page is open in their browser and to answer it there (don't call it a dialog), and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes.",
             Clicked::NoBrowser => DOWNLOAD_CANT_ASK,
         };
         Asked::No(tool_error(why, false))
@@ -407,8 +415,8 @@ fn download_answer(answer: Answer) -> Asked {
             Answer::NoDialog => return Asked::NoDialog,
             Answer::Silent => return Asked::Silent,
             Answer::Declined => "download_declined::The user said no in Endeavor's download dialog, which the app they talk to you in showed, so nothing downloads and the cells that need it stay queued. Tell the user; call approve_install again only if they ask for the download.".to_owned(),
-            Answer::Closed => "download_not_answered::The user closed Endeavor's download dialog without answering. That dialog was in the app they talk to you in, and it is gone now. Nothing downloads and the cells that need it stay queued. Ask the user in the chat whether to download it; if they say yes, call approve_install again, and the same dialog asks them once more. The notebook's page also has its own button that approves it.".to_owned(),
-            Answer::TimedOut => "download_not_answered::Endeavor asked the user in a dialog and got no answer in 30 minutes, so it took the dialog down and nothing downloads. No dialog is showing now: don't tell the user to answer one. Ask them in the chat whether to download it; if they want it, call approve_install again, and it asks them once more. The notebook's page also has its own button that approves it.".to_owned(),
+            Answer::Closed => "download_not_answered::The user closed Endeavor's download dialog without answering. That dialog was in the app they talk to you in, and it is gone now. Nothing downloads and the cells that need it stay queued. Ask the user in the chat whether to download it; if they say yes, call approve_install again, and the same dialog asks them once more.".to_owned(),
+            Answer::TimedOut => "download_not_answered::Endeavor asked the user in a dialog and got no answer in 30 minutes, so it took the dialog down and nothing downloads. No dialog is showing now: don't tell the user to answer one. Ask them in the chat whether to download it; if they want it, call approve_install again, and it asks them once more.".to_owned(),
             Answer::Failed(error) => format!("download_not_answered::Endeavor couldn't ask the user ({error}), so nothing downloads. Ask the user in the chat; if they want it, call approve_install again."),
         };
         Asked::No(tool_error(&why, false))
@@ -883,8 +891,8 @@ mod tests {
         consent.learn_client(&initialize(json!({ "form": {} })));
         let said = consent.reply_said(reply(&asking), true);
         assert_eq!(said, reply(&format!("R has to download ALL. {ASK_STEP_IN_DIALOG} Don't call read_cell to wait.")));
-        // It says where the dialog is, and the page's button is still there.
-        assert!(said.contains("The notebook's page also has a button for it.") && !said.contains("The page's own button does the same."), "{said}");
+        // It says where the dialog is, and promises no button on the notebook's page: there is none.
+        assert!(!said.contains("button"), "{said}");
     }
 
     #[test]
@@ -938,6 +946,17 @@ mod tests {
             write!(socket, "POST /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
             socket.read_to_string(&mut String::new()).unwrap();
             assert!(!pages.held(&Consent::download_question(&all()).unwrap()), "a retired page holds no yes");
+            // A click that landed just before the page was retired holds nothing either.
+            let question = "Install the thing now?";
+            assert!(matches!(pages.ask(question, true, Duration::ZERO, &|| false, &open), super::super::install_page::Clicked::NotYet));
+            let url = opened.lock().unwrap().last().unwrap().clone();
+            let (port, path) = url.strip_prefix("http://127.0.0.1:").unwrap().split_once('/').unwrap();
+            let mut socket = std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+            write!(socket, "POST /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            socket.read_to_string(&mut String::new()).unwrap();
+            assert!(pages.held(question));
+            pages.retire(question);
+            assert!(!pages.held(question), "the dialog's answer is the only one standing");
         }
         drop(to_client);
         let sent = answering.join().unwrap();

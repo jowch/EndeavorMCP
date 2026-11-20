@@ -122,9 +122,12 @@ impl Pages {
     }
 
     /// The user answered `question` elsewhere (in the dialog that was up beside the page): its
-    /// unanswered page goes, so that it can't answer it again, perhaps the other way.
+    /// page goes, and any click on it, so that it can't answer it again, perhaps the other way.
     pub(super) fn retire(&self, question: &str) {
-        self.shared.state.lock().unwrap().pages.retain(|_, page| page.question != question || page.answer.is_some());
+        let mut state = self.shared.state.lock().unwrap();
+        state.pages.retain(|_, page| page.question != question);
+        // A click that landed as the dialog answered: the dialog's answer is the one that stands.
+        state.said.remove(question);
     }
 
     pub(super) fn ask(&self, question: &str, hold: bool, wait: Duration, cancelled: &dyn Fn() -> bool, open: &dyn Fn(&str) -> bool) -> Clicked {

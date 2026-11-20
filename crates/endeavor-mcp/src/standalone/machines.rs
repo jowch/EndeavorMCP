@@ -1160,7 +1160,10 @@ impl Relay {
         install["install"] = true.into();
         let page = self.page_shows();
         // An answer the user gave on the page still holds (10 minutes): it is the answer, with no
-        // dialog first, which would ask them again what they said.
+        // dialog first, which would ask them again what they said. A held Install installs even on
+        // a look without `install`, for a client with dialogs, as a yes in its dialog does: the user
+        // clicked it for this question. A client without dialogs only gets here once `question`
+        // passed the `wants_install` filter above.
         let held = page && self.pages.held(&question);
         let mut dialog = self.consent.can_ask() && !held;
         let mut asked = if held {
@@ -1216,6 +1219,8 @@ impl Relay {
     /// After a silent dialog (`consent::SILENT`), the dialog is still up, and whichever the user
     /// answers first counts.
     fn ask_on_page(&self, message: &Value, question: &str, again: &str, wait: Duration) -> Result<bool, String> {
+        // A no the user gave on an earlier call: the agent is asking again, so the user wants it now.
+        let again_after_no = self.pages.held(question);
         let clicked = self.pages.ask(question, true, wait, &|| self.consent.cancelled(message) || self.consent.dialog_answered(message), &open_page);
         if let Some(answer) = self.consent.install_answer_after_page(message, again, matches!(clicked, Clicked::Install | Clicked::Declined), &|line| self.write(line)) {
             self.pages.retire(question);
@@ -1228,7 +1233,8 @@ impl Relay {
         Err(match clicked {
             Clicked::Install => return Ok(true),
             Clicked::Dropped => return Ok(false),
-            Clicked::Declined => format!("install_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing was installed. Endeavor won't ask them about it again for 10 minutes: until then, {again} with `install: true` gets this same answer. Tell the user, and don't call again unless they ask for it. If they change their mind, the page they answered has an Install button: once they say they clicked it, call {again} with `install: true`."),
+            Clicked::Declined if again_after_no => format!("install_declined::{}{again} with `install: true` gets this same answer until those 10 minutes pass. {}", super::consent::HELD_NO, super::consent::CHANGED_MIND),
+            Clicked::Declined => format!("install_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing was installed. Their no stands for 10 minutes: until then, {again} with `install: true` gets this same answer. In your reply, say plainly that nothing was installed, and stop there. Don't mention the page, the browser or a button, don't ask them to reconsider, and don't call again unless they ask for it themselves. After the 10 minutes, a new {again} call asks them again."),
             Clicked::NotYet => format!("install_not_answered::Endeavor opened a web page (not a dialog) in the user's browser that names what it would install, and it installs it only once they click Install there. They haven't answered yet, so nothing was installed. Tell the user that a web page is open in their browser and to answer it there (don't call it a dialog), and end your reply. Once they say they clicked Install, call {again} with `install: true`, and it installs without asking again: their click holds for 10 minutes."),
             Clicked::NoBrowser => CANT_ASK_ERROR.to_owned(),
         })
