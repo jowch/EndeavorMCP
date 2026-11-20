@@ -568,7 +568,8 @@ impl Call<'_> {
             if cells.iter().zip(&marks).all(|(cell, mark)| ran(cell, mark)) {
                 return Ok(true);
             }
-            if !cells.iter().any(|c| c.running || c.queued) || Instant::now() > deadline {
+            // Cells that wait for the user's OK to a package don't run by themselves (#355).
+            if !cells.iter().any(|c| c.running || c.queued) || now.held() || Instant::now() > deadline {
                 return Ok(false);
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -1898,11 +1899,12 @@ impl Call<'_> {
 
     /// The user's OK for an R notebook's install that stopped before a large download (Ember
     /// #37's `approve_install`), or a Julia notebook's run that stopped before a package the
-    /// notebook doesn't have yet (#397). The tool's description and the asking message say to call
-    /// it only after the user said yes. Refused when no install waits for one.
+    /// notebook doesn't have yet (#397), or a Python notebook's import of one (#355). The tool's
+    /// description and the asking message say to call it only after the user said yes. Refused when
+    /// no install waits for one.
     fn approve_install(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
-        if self.nbs.backend_of(&nb.id) == Backend::Pluto {
+        if matches!(self.nbs.backend_of(&nb.id), Backend::Pluto | Backend::Marimo) {
             let mut result = self.nbs.call("approve_install", json!({ "notebook_id": nb.id, "timeout": TIMEOUT_SECONDS }))?;
             self.nbs.publish();
             let cells: HashSet<String> = result["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
@@ -1920,7 +1922,7 @@ impl Call<'_> {
             return Ok(result);
         }
         if self.nbs.backend_of(&nb.id) != Backend::Ember {
-            return Err(argument_error("not_r_notebook::Only R and Julia notebooks ask before an install"));
+            return Err(argument_error("not_r_notebook::Only Julia, R and Python notebooks ask before an install"));
         }
         let mut result = self.nbs.call("approve_install", json!({ "notebook_id": nb.id }))?;
         self.nbs.publish();
@@ -2033,12 +2035,14 @@ pub(crate) const ASK_STEP: &str = "Stop here and ask the user whether to install
 /// can say yes to it, so the agent asks them and doesn't wait.
 fn asking_message(nb: &Snapshot) -> String {
     let download = nb.packages.as_ref().map(|p| p["download"].clone()).unwrap_or_default();
-    // A Julia notebook's run that would add packages it doesn't have yet (#397).
+    // A Julia notebook's run that would add packages it doesn't have yet (#397), or a Python
+    // notebook's import of one (#355).
     if nb.packages.as_ref().is_some_and(|p| p["new"] == true) {
         let names: Vec<&str> = download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).collect();
         let which = if names.is_empty() { "packages".to_owned() } else { names.join(", ") };
+        let language = super::engines::language(super::engines::of_path(&nb.path));
         return format!(
-            "Before these cells can run, Julia has to install packages this notebook doesn't have yet: {which}, with what they need. \
+            "Before these cells can run, {language} has to install packages this notebook doesn't have yet: {which}, with what they need. \
              A new package waits for the user's OK, so nothing is installing and the cells stay queued. {ASK_STEP} \
              Don't call read_cell to wait: nothing changes until then. If they would rather not install them, use packages the notebook already has, and run again."
         );

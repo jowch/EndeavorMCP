@@ -263,6 +263,10 @@ class Notebook:
         # An agent's run's cells (`watch_run`), and the install under way for some of them: a cell that
         # failed to import a package we'll install reads as queued until it runs again.
         self.watched, self.installing = collections.Counter(), None
+        # A run's import of a package new to the notebook waits for the user's OK (#355), as a Julia
+        # notebook's does (#397): the modules to install, their PyPI names, and the cells that wait.
+        # `approve_install` is the OK; a yes holds for those modules while the notebook is open.
+        self.asking, self.approved = None, set()
         self.ws = None
         # The watch's own consumer id, which edits are sent as (`go_live`).
         self.watcher = None
@@ -404,6 +408,11 @@ class Notebook:
         status = d.get("status")
         if status:
             if status == "running" and c["status"] != "running":
+                # A cell that waits for an OK and runs anyway (from marimo's page) waits no more.
+                if self.asking and d["cell_id"] in self.asking["cells"]:
+                    self.asking["cells"].remove(d["cell_id"])
+                    if not self.asking["cells"]:
+                        self.asking = None
                 c["started"] = d.get("timestamp") or time.time()
                 c["console"] = []
                 c["ran_code"] = c["code"]
@@ -443,13 +452,39 @@ class Notebook:
                     found.setdefault(m.group(1), []).append(c)
         return found
 
-    async def install(self, cells):
+    async def install(self, cells, ask_new=False):
         """Cells of an agent's run failed to import a package the notebook's environment lacks: add it
         (marimo puts it in the file's header with its exact version) and run them again, as a Julia
-        notebook installs a package on `using`. Each module is tried once."""
+        notebook installs a package on `using`. Each module is tried once. With `ask_new`, a package
+        new to the notebook (not in its header, and not approved yet) waits for the user's OK instead:
+        PyPI isn't curated, so a typo such as `import pandsa` would install whatever has that name."""
         modules = self.missing_modules(cells)
         if not modules:
             return False
+        rerun = self.rerun_for(modules, cells)
+        if ask_new:
+            have = header_packages(self.path)
+            new = sorted({pypi_name(m) for m in modules if m not in self.approved and canonical(pypi_name(m)) not in have})
+            if new:
+                held = [c for c in (self.asking or {}).get("cells", []) if c in self.cells]
+                modules = sorted(set(modules) | set((self.asking or {}).get("modules", [])))
+                self.asking = {"modules": modules, "packages": new, "cells": self.in_order(set(held) | set(rerun))}
+                return False
+        return await self.install_modules(modules, rerun)
+
+    def rerun_for(self, modules, cells):
+        """The importers, and the run's cells that failed only because an importer did: marimo's lazy mode
+        wouldn't run those again with the importer, and they'd keep showing its error."""
+        rerun = {c for cs in modules.values() for c in cs}
+        rerun |= {c for c in cells if c in self.cells and self.cells[c].get("awaiting_install")}
+        return self.in_order(rerun)
+
+    def in_order(self, cells):
+        order = graph(self)["order"]
+        return sorted(cells, key=lambda c: (order.index(c) if c in order else len(order), self.order.index(c)))
+
+    async def install_modules(self, modules, rerun):
+        """Install `modules` into the notebook's environment, with `rerun` marked as waiting for them."""
         self.missing |= set(modules)
         # marimo 0.25.1 adds a sandboxed notebook's package with `uv add --script`, which keeps to the
         # header's date (e2e_marimo checks it). Its other way in, `uv pip install`, reads no header and
@@ -462,12 +497,7 @@ class Notebook:
             "try:\n    async with ctx:\n" + \
             "".join(f"        ctx.packages.add(names.get({m!r}, {m!r}))\n" for m in sorted(modules)) + \
             "finally:\n    os.environ.pop('UV_EXCLUDE_NEWER', None)\n"
-        # The importers, and the run's cells that failed only because an importer did: marimo's lazy mode
-        # wouldn't run those again with the importer, and they'd keep showing its error.
-        rerun = {c for cs in modules.values() for c in cs}
-        rerun |= {c for c in cells if c in self.cells and self.cells[c].get("awaiting_install")}
-        order = graph(self)["order"]
-        rerun = sorted(rerun, key=lambda c: (order.index(c) if c in order else len(order), self.order.index(c)))
+        rerun = [c for c in rerun if c in self.cells]
         for c in rerun:
             self.cells[c]["status"], self.cells[c]["queued_by_us"], self.cells[c]["awaiting_install"] = "queued", True, True
         self.installing = {"packages": sorted(modules), "started": time.time()}
@@ -508,9 +538,11 @@ class Notebook:
                 "queued": c["status"] == "queued" or waiting, "errored": c["errored"] and not waiting}
 
     def waits_for_install(self, cid):
-        """The cell failed to import a package that is being, or is about to be, installed for it."""
+        """The cell failed to import a package that is being, or is about to be, installed for it, or
+        that waits for the user's OK."""
         c = self.cells[cid]
-        return bool(c.get("awaiting_install")) and c["status"] != "running"
+        asked = bool(self.asking) and cid in self.asking["cells"]
+        return (bool(c.get("awaiting_install")) or asked) and c["status"] != "running"
 
     def process_status(self):
         if not self.allowed:
@@ -549,6 +581,15 @@ class Notebook:
 
     def install_state(self):
         """The package install under way, as the tools show a Julia or R one, or None."""
+        if self.asking and not self.installing:
+            self.asking["cells"] = [c for c in self.asking["cells"] if c in self.cells]
+            if not self.asking["cells"]:
+                self.asking = None
+        if self.asking and not self.installing:
+            # As a Julia notebook's new packages ask (#397): the front asks the user with these names.
+            packages = self.asking["packages"]
+            return {"step": "asking", "new": True, "packages": packages, "seconds": 0, "last_line": None,
+                    "download": {"bytes": None, "packages": [{"package": p} for p in packages]}}
         if not self.installing and not any(self.waits_for_install(c) for c in self.order):
             return None
         started = (self.installing or {}).get("started", time.time())
@@ -645,6 +686,32 @@ def package_date(path):
     block = re.search(r"^# /// script\s*$(.*?)^# ///\s*$", text, re.M | re.S)
     found = block and re.search(r'^#\s*exclude-newer\s*=\s*"([^"]+)"', block.group(1), re.M)
     return found.group(1) if found else None
+
+
+def header_packages(path):
+    """The package names a notebook's PEP 723 header lists in `dependencies`, canonical (`canonical`)."""
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return set()
+    block = re.search(r"^# /// script\s*$(.*?)^# ///\s*$", text, re.M | re.S)
+    if not block:
+        return set()
+    body = "\n".join(line[1:].lstrip(" ") if line.startswith("#") else line for line in block.group(1).splitlines())
+    deps = re.search(r"^dependencies\s*=\s*\[(.*?)\]", body, re.M | re.S)
+    names = re.findall(r'["\']\s*([A-Za-z0-9][A-Za-z0-9._-]*)', deps.group(1)) if deps else []
+    return {canonical(n) for n in names}
+
+
+def canonical(name):
+    """A PyPI name as PEP 503 compares it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pypi_name(module):
+    """The PyPI name marimo installs for an import of `module`: its own mapping, else the module's name."""
+    from marimo._runtime.packages.module_name_to_pypi_name import module_name_to_pypi_name
+    return module_name_to_pypi_name().get(module, module)
 
 
 def json_text(data):
@@ -842,14 +909,14 @@ class Adapter:
             nb.allowed = False
             raise argument_error("python_failed", f"marimo couldn't start this notebook: {e}") from e
 
-    async def allow(self, nb, run_all):
+    async def allow(self, nb, run_all, ask_new=False):
         if nb.allowed:
             return {"already_allowed": True, "ran": False, "process_status": nb.process_status()}
         nb.allowed = True
         await self.start(nb)
         result = {"already_allowed": False, "ran": bool(run_all), "process_status": nb.process_status()}
         if run_all:
-            result["run"] = await self.start_run(nb, list(nb.order))
+            result["run"] = await self.start_run(nb, list(nb.order), ask_new=ask_new)
         return result
 
     async def apply(self, nb, ops):
@@ -913,7 +980,7 @@ class Adapter:
             "configs": [{"column": None, "disabled": False, "hide_code": c["hide_code"], "expand_output": False} for c in cells],
             "filename": nb.path, "persist": True})
 
-    async def start_run(self, nb, cells, watch=True):
+    async def start_run(self, nb, cells, watch=True, ask_new=False):
         sid = await nb.session_id()
         for c in cells:
             # Marked now: a read straight after the call sees the run, not the cell as it was.
@@ -922,12 +989,15 @@ class Adapter:
                 nb.cells[c]["queued_by_us"] = True
         code = CODE_MODE + "async with ctx:\n" + "".join(f"    ctx.run_cell({c!r})\n" for c in cells)
         asyncio.create_task(self.background(nb, code, cells))
+        return self.watch(nb, cells, ask_new) if watch else None
+
+    def watch(self, nb, cells, ask_new, first=None):
+        """A run of `cells` that `run_finished` reports the end of, after `first` where given."""
         self.runs += 1
         run = f"py-run-{self.runs}"
-        if watch:
-            nb.watched.update(cells)
-            self.done[run] = asyncio.Event()
-            asyncio.create_task(self.watch_run(nb, cells, run))
+        nb.watched.update(cells)
+        self.done[run] = asyncio.Event()
+        asyncio.create_task(self.watch_run(nb, cells, run, ask_new, first))
         return run
 
     async def background(self, nb, code, cells):
@@ -947,9 +1017,11 @@ class Adapter:
     def unfinished(self, nb, cells):
         return [c for c in cells if c in nb.cells and nb.cells[c]["status"] in ("queued", "running")]
 
-    async def watch_run(self, nb, cells, run):
+    async def watch_run(self, nb, cells, run, ask_new=False, first=None):
         try:
-            await self.watch_cells(nb, cells)
+            if first is not None:
+                await first
+            await self.watch_cells(nb, cells, ask_new)
         finally:
             nb.watched.subtract(cells)
             for c in cells:
@@ -961,19 +1033,24 @@ class Adapter:
         self.done.pop(run, asyncio.Event()).set()
         self.notify("run_finished", notebook_id=nb.id, run=run, cells=[c for c in cells if c in nb.cells])
 
-    async def watch_cells(self, nb, cells):
+    async def watch_cells(self, nb, cells, ask_new=False):
         while True:
             while self.unfinished(nb, cells) and nb.id in self.notebooks:
                 await asyncio.sleep(0.2)
-            rerun = nb.id in self.notebooks and await nb.install(cells)
+            rerun = nb.id in self.notebooks and await nb.install(cells, ask_new)
             if not rerun:
                 break
             await self.start_run(nb, rerun, watch=False)
             await asyncio.sleep(0.3)
 
-    async def run(self, nb, cells, wait, timeout):
+    async def run(self, nb, cells, wait, timeout, ask_new=False):
         cells = [nb.check_cell(c) for c in cells]
         result = {"accepted": nb.allowed and nb.live, "process_status": nb.process_status()}
+        # The cells that wait for an OK run with these, and ask again for what is new then: an edit may
+        # have dropped the import, or the user added the package another way.
+        if result["accepted"] and nb.asking:
+            cells = [c for c in nb.asking["cells"] if c in nb.cells and c not in cells] + cells
+            nb.asking = None
         if not result["accepted"] or not cells:
             if result["accepted"] and wait:
                 result.update(completed=[], timed_out=[])
@@ -990,7 +1067,7 @@ class Adapter:
                     dependents.append(d)
                     todo.append(d)
         ran = sorted(cells + dependents, key=lambda c: (g["order"].index(c) if c in g["order"] else len(g["order"]), nb.order.index(c)))
-        run = await self.start_run(nb, ran)
+        run = await self.start_run(nb, ran, ask_new=ask_new)
         result["dependents"] = [c for c in ran if c in dependents]
         if not wait:
             result["run"] = run
@@ -1003,15 +1080,21 @@ class Adapter:
             except asyncio.TimeoutError:
                 pass
         left = self.unfinished(nb, ran) if done is not None and not done.is_set() else []
+        if nb.asking:
+            # As a Julia run that asks answers: its cells wait, so none finished.
+            left = sorted(set(left) | {c for c in ran if c in nb.asking["cells"]}, key=ran.index)
+            result["asking"] = nb.asking["packages"]
         result["process_status"] = nb.process_status()
         result["completed"] = [c for c in cells if c not in left]
-        result["timed_out"] = self.unfinished(nb, list(nb.order)) if left else []
+        result["timed_out"] = sorted(set(self.unfinished(nb, list(nb.order))) | set(left), key=nb.order.index) if left else []
         if left:
             result["run"] = run
         return result
 
     async def interrupt(self, nb):
-        busy = bool(self.unfinished(nb, list(nb.order)))
+        busy = bool(self.unfinished(nb, list(nb.order))) or bool(nb.asking)
+        # Cells that wait for an OK stop waiting: they show their import error again.
+        nb.asking = None
         if nb.live:
             await self.marimo.post("/api/kernel/interrupt", await nb.session_id(), {})
         return {"interrupted": busy}
@@ -1026,11 +1109,31 @@ class Adapter:
             await nb.ws.close()
         if nb.watch:
             await nb.watch
-        nb.closing, nb.live = False, False
+        nb.closing, nb.live, nb.asking = False, False, None
         for c in nb.cells.values():
             c.update(status="idle", ran_code=None, stale=False, output=None, console=[], errored=False, last_run=0.0, runtime=0.0, awaiting_install=False)
         await self.start(nb)
         return {"restarted": True}
+
+    async def approve(self, nb):
+        """The user's yes to the packages a notebook asks about (#355): they install, and the cells that
+        waited run, under a run that `run_finished` reports the end of."""
+        a = nb.asking
+        if not a or not nb.live:
+            raise argument_error("nothing_to_approve", "Nothing in this notebook waits for the user's OK")
+        nb.asking = None
+        nb.approved |= set(a["modules"])
+        cells = [c for c in a["cells"] if c in nb.cells]
+        # Marked now: a read straight after the OK sees them wait for the install, not their import error.
+        for c in cells:
+            nb.cells[c]["status"], nb.cells[c]["queued_by_us"], nb.cells[c]["awaiting_install"] = "queued", True, True
+
+        async def install_and_run():
+            if await nb.install_modules(a["modules"], cells):
+                await self.start_run(nb, cells, watch=False)
+
+        run = self.watch(nb, cells, True, install_and_run())
+        return {"approved": True, "packages": a["packages"], "cells": cells, "run": run}
 
     async def shutdown(self, nb):
         safe_preview = not nb.allowed
@@ -1091,9 +1194,9 @@ class Adapter:
         if method == "apply":
             return await self.apply(nb, p.get("ops") or [])
         if method == "run":
-            return await self.run(nb, p.get("cells") or [], bool(p.get("wait")), p.get("timeout"))
+            return await self.run(nb, p.get("cells") or [], bool(p.get("wait")), p.get("timeout"), bool(p.get("ask_new")))
         if method == "allow_execution":
-            return await self.allow(nb, bool(p.get("run")))
+            return await self.allow(nb, bool(p.get("run")), bool(p.get("ask_new")))
         if method == "interrupt":
             return await self.interrupt(nb)
         if method == "restart":
@@ -1109,7 +1212,9 @@ class Adapter:
         if method == "validate":
             nb.check_cell(p.get("cell_id"))
             return self.validate(nb, str(p.get("code") or ""))
-        if method in ("answer", "preview_packages", "set_package_date", "set_input", "approve_install"):
+        if method == "approve_install":
+            return await self.approve(nb)
+        if method in ("answer", "preview_packages", "set_package_date", "set_input"):
             raise argument_error("not_supported", "Python notebooks can't do this yet: it works in Julia and R notebooks")
         raise argument_error("unknown_method", f"Unknown adapter method: '{method}'")
 

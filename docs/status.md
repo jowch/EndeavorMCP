@@ -57,7 +57,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   opened, and whichever the user answers first counts (the other is taken down);
   the dialog stays up until then, for the dialog's full 30 minutes. An
   answer on the page that still holds is given without a new dialog. Which clients really show the
-  dialog is still to be checked by hand (#381).
+  dialog is still to be checked by hand (#26).
   A Julia notebook's run whose cells use a package the notebook doesn't
   have yet (not in its Project.toml, not a standard library) stops before
   Pluto adds it (#397): its cells stay queued, `packages.step` is `asking`
@@ -366,6 +366,9 @@ Next:
   runs every notebook in its own uv environment from the notebook's header; a new
   notebook's header pins marimo and an `exclude-newer` package date, and a
   package a run imports is installed and written there at its exact version.
+  A package new to the notebook (not in its header) waits for the user's OK
+  first, as in Julia (#355): the cells stay queued, `packages.step` is
+  `asking`, and `approve_install` installs it; the app's Auto mode doesn't ask.
   marimo runs them lazily, so opening one runs nothing and a run from marimo's
   page marks the cells below stale; an agent's run takes them too, as in Pluto.
   marimo allows one editing page per notebook, so

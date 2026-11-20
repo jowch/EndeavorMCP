@@ -264,12 +264,12 @@ impl Consent {
     pub(super) fn download_question(waiting: &Waiting) -> Option<String> {
         Some(match waiting {
             Waiting::Nothing => return None,
-            // A Julia notebook's run that would add packages it doesn't have yet (#397).
-            // A Julia notebook's new packages (#397), as the runtime marks them: the path may be
-            // only the id.
+            // A Julia notebook's new packages (#397), or a Python notebook's (#355), as the runtime
+            // marks them. The path may be only the id, which reads as Julia's.
             Waiting::Asking { download, name } if download["new"] == true => {
                 let names: Vec<&str> = download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).collect();
-                format!("Julia needs to install {}, new to the notebook {name}, before its cells can run. Install {} now?", names.join(", "), if names.len() == 1 { "it" } else { "them" })
+                let language = crate::notebooks::engines::language(crate::notebooks::engines::of_path(name));
+                format!("{language} needs to install {}, new to the notebook {name}, before its cells can run. Install {} now?", names.join(", "), if names.len() == 1 { "it" } else { "them" })
             }
             Waiting::Asking { download, name } => format!("R needs to download {} before the cells of the notebook {name} can run. Download it now?", what(download)),
             Waiting::Unknown(id) => format!("R needs to download some large Bioconductor data packages before the cells of the notebook with id {id} can run. Endeavor couldn't tell which packages or their size. Download them now?"),
@@ -1080,6 +1080,15 @@ mod tests {
         // Without its path, it is still Julia's question, naming the notebook by its id.
         let question = Consent::download_question(&waiting_in(&listed(""), &id)).unwrap();
         assert!(question.starts_with("Julia needs to install Makie, WGLMakie, new to the notebook 00000000-0000-0000-0000-000000000397,"), "{question}");
+    }
+
+    #[test]
+    fn a_python_notebooks_new_packages_are_asked_about_as_pythons() {
+        // #355: the names are PyPI's, and the question says Python's, by the notebook's file.
+        let packages = json!({ "step": "asking", "new": true, "download": { "bytes": null, "packages": [{ "package": "pandsa" }] } });
+        let listed = json!({ "result": { "content": [{ "type": "text", "text": json!([{ "notebook_id": "00000000-0000-0000-0000-000000000355", "path": "/data/typo.py", "execution_allowed": true, "packages": packages }]).to_string() }] } }).to_string();
+        let waiting = waiting_in(&listed, &json!("00000000-0000-0000-0000-000000000355"));
+        assert_eq!(Consent::download_question(&waiting).unwrap(), "Python needs to install pandsa, new to the notebook /data/typo.py, before its cells can run. Install it now?");
     }
 
     #[test]
