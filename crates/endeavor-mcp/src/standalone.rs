@@ -1254,8 +1254,11 @@ impl Relay {
             let began = Instant::now();
             self.consent.looking(&message);
             let waiting = self.waiting_download(&message["params"]["arguments"]["notebook_id"], deadline);
-            let mut dialog = self.consent.can_ask();
             let page = self.page_shows();
+            // An answer the user gave on the page still holds (10 minutes): it is the answer, with
+            // no dialog first, which would ask them again what they said.
+            let held = page && consent::Consent::download_question(&waiting).is_some_and(|question| self.pages.held(&question));
+            let mut dialog = self.consent.can_ask() && !held;
             let mut asked = if dialog { self.consent.ask(&message, waiting.clone(), page, &|line| self.write(line)) } else { consent::Asked::NoDialog };
             // No dialog, or one the client said it would show and didn't (#381): the page.
             if matches!(asked, consent::Asked::NoDialog) {

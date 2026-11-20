@@ -272,7 +272,7 @@ impl Consent {
     pub(super) fn ask_on_page(&self, call: &Value, waiting: Waiting, page: bool, wait: std::time::Duration, pages: &super::install_page::Pages, open: &dyn Fn(&str) -> bool, write: &dyn Fn(&str)) -> Asked {
         use super::install_page::Clicked;
         let Some(question) = Consent::download_question(&waiting) else {
-            if let Some(asked) = self.download_answer_after_page(call, write) {
+            if let Some(asked) = self.download_answer_after_page(call, false, write) {
                 self.not_asking(call);
                 return asked;
             }
@@ -281,7 +281,8 @@ impl Consent {
         // A yes to a question that can't say what downloads is for this call only.
         let hold = matches!(waiting, Waiting::Asking { .. });
         let clicked = if page { pages.ask(&question, hold, wait, &|| self.cancelled(call) || self.dialog_answered(call), open) } else { Clicked::NoBrowser };
-        if let Some(asked) = self.download_answer_after_page(call, write) {
+        if let Some(asked) = self.download_answer_after_page(call, matches!(clicked, Clicked::Install | Clicked::Declined), write) {
+            pages.retire(&question);
             self.not_asking(call);
             return asked;
         }
@@ -292,7 +293,7 @@ impl Consent {
             Clicked::Install => return Asked::Yes,
             Clicked::Dropped => return Asked::Dropped,
             Clicked::Declined => "download_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing downloads and the cells that need it stay queued. Endeavor won't ask them about it again for 10 minutes: until then, approve_install gets this same answer. Tell the user, and don't call it again unless they ask. If they change their mind, the page they answered has an Install button, and the notebook's page has its own: once they say they clicked one, call approve_install again.",
-            Clicked::NotYet => "download_not_answered::Endeavor opened a page in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user to answer that page, and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes. The notebook's page also has its own button.",
+            Clicked::NotYet => "download_not_answered::Endeavor opened a web page (not a dialog) in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user that a web page is open in their browser and to answer it there (don't call it a dialog), and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes. The notebook's page also has its own button.",
             Clicked::NoBrowser => DOWNLOAD_CANT_ASK,
         };
         Asked::No(tool_error(why, false))
@@ -351,13 +352,13 @@ impl Consent {
 
     /// After the page asked about a download while the dialog was up (`Asked::Silent`): the dialog's
     /// answer if it came first; none if the page's stands, and the dialog is taken down.
-    pub(super) fn download_answer_after_page(&self, call: &Value, write: &dyn Fn(&str)) -> Option<Asked> {
-        self.dialog_after_page(call, write).map(download_answer)
+    pub(super) fn download_answer_after_page(&self, call: &Value, page_answered: bool, write: &dyn Fn(&str)) -> Option<Asked> {
+        self.dialog_after_page(call, page_answered, write).map(download_answer)
     }
 
     /// As `download_answer_after_page`, for a machine install: as `ask_install` answers.
-    pub(super) fn install_answer_after_page(&self, call: &Value, again: &str, write: &dyn Fn(&str)) -> Option<Result<bool, String>> {
-        self.dialog_after_page(call, write).map(|answer| install_answer(answer, again))
+    pub(super) fn install_answer_after_page(&self, call: &Value, again: &str, page_answered: bool, write: &dyn Fn(&str)) -> Option<Result<bool, String>> {
+        self.dialog_after_page(call, page_answered, write).map(|answer| install_answer(answer, again))
     }
 
     /// Whether the dialog that stays up for `call` while the page asks has been answered (or the
@@ -371,10 +372,12 @@ impl Consent {
         dialog.answer.is_some()
     }
 
-    fn dialog_after_page(&self, call: &Value, write: &dyn Fn(&str)) -> Option<Answer> {
+    /// The dialog's answer, if it came first: where the page was answered (`page_answered`), only
+    /// one seen before the page's wait ended counts, so the first answer stands.
+    fn dialog_after_page(&self, call: &Value, page_answered: bool, write: &dyn Fn(&str)) -> Option<Answer> {
         let Silent { id, answers, answer } = self.silent.lock().unwrap().remove(&to_json(&call["id"]))?;
         self.waiting.lock().unwrap().remove(&id);
-        let answer = answer.or_else(|| answers.try_recv().ok());
+        let answer = if page_answered { answer } else { answer.or_else(|| answers.try_recv().ok()) };
         let Some(answer) = answer else {
             // The page answered first, or neither did: the dialog goes.
             write(&to_json(&json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": id } })));
@@ -925,6 +928,17 @@ mod tests {
         let Asked::No(result) = asked else { panic!("a no in the dialog is a no") };
         assert!(result["content"][0]["text"].as_str().unwrap().contains("said no"), "{result}");
         assert_eq!(opened.lock().unwrap().len(), 1, "the page asked too");
+        // The no in the dialog stands: the page is gone, and a click on it later answers nothing.
+        {
+            use std::io::{Read, Write};
+            let url = opened.lock().unwrap()[0].clone();
+            let (port, path) = url.strip_prefix("http://127.0.0.1:").unwrap().split_once('/').unwrap();
+            let body = "answer=install";
+            let mut socket = std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+            write!(socket, "POST /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            socket.read_to_string(&mut String::new()).unwrap();
+            assert!(!pages.held(&Consent::download_question(&all()).unwrap()), "a retired page holds no yes");
+        }
         drop(to_client);
         let sent = answering.join().unwrap();
         assert_eq!(sent.len(), 1, "the answered dialog isn't withdrawn: {sent:?}");

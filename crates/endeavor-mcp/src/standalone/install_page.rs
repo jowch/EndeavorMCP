@@ -113,6 +113,20 @@ impl Pages {
     /// `wait` for the answer, and stop waiting once `cancelled` says so. `open` opens a link in the
     /// user's browser, and says whether it could (`browser::open`). Without `hold`, a yes is for
     /// this call only: a question too vague to stand for later calls (#389).
+    /// Whether the user's answer to `question` on a page still holds: `ask` gives it at once, with
+    /// no page and no dialog first.
+    pub(super) fn held(&self, question: &str) -> bool {
+        let mut state = self.shared.state.lock().unwrap();
+        state.prune(settled());
+        state.answer(question).is_some()
+    }
+
+    /// The user answered `question` elsewhere (in the dialog that was up beside the page): its
+    /// unanswered page goes, so that it can't answer it again, perhaps the other way.
+    pub(super) fn retire(&self, question: &str) {
+        self.shared.state.lock().unwrap().pages.retain(|_, page| page.question != question || page.answer.is_some());
+    }
+
     pub(super) fn ask(&self, question: &str, hold: bool, wait: Duration, cancelled: &dyn Fn() -> bool, open: &dyn Fn(&str) -> bool) -> Clicked {
         self.ask_settled(question, hold, wait, settled(), cancelled, open)
     }

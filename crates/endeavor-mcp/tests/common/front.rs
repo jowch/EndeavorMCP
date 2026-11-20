@@ -26,6 +26,8 @@ pub struct Front {
     pub dialog: Option<&'static str>,
     /// The dialogs the front asked for, in order.
     pub asked: Vec<Value>,
+    /// The notifications the front sent, in order (`notifications/cancelled` takes a dialog down).
+    pub notes: Vec<Value>,
     /// What the user clicks on an install page the front opens in the browser, where the client
     /// can't show a dialog: "install" (the default, as a user who agreed) or "decline"; None clicks nothing.
     pub page: Arc<Mutex<Option<&'static str>>>,
@@ -106,7 +108,7 @@ impl Front {
                 }
             });
         }
-        Front { child: Some(child), stdin, replies, stderr, id: 0, dialog: None, asked: Vec::new(), page, pages, done }
+        Front { child: Some(child), stdin, replies, stderr, id: 0, dialog: None, asked: Vec::new(), notes: Vec::new(), page, pages, done }
     }
 
     /// Set what the user clicks on the install pages from now on.
@@ -136,6 +138,10 @@ impl Front {
                 } else {
                     self.send(json!({ "jsonrpc": "2.0", "id": reply["id"], "result": { "action": action, "content": {} } }));
                 }
+                continue;
+            }
+            if reply["id"].is_null() && reply["method"].is_string() {
+                self.notes.push(reply);
                 continue;
             }
             if reply["id"] == json!(id) {
