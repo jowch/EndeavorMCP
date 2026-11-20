@@ -22,6 +22,16 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   project remembers (`projects.json`) and the `endeavor-machines` skill are
   built and tested with a local shell for ssh, a stand-in Julia and fake
   Slurm (`tests/machines.rs`), and over real ssh and Julia in `e2e_machines`.
+  Where the client can show a dialog (MCP elicitation), a machine tool's
+  `install: true` doesn't install on the agent's word: the front first makes
+  the same call without it, and if that names something to install (or, on
+  `use_machine` with a runtime running, leave to download Julia or install R
+  later), it asks the user in a dialog that names it, and goes ahead only on
+  their yes (`install_declined`, `install_not_answered` otherwise). There the
+  tools' descriptions and `needs_install` tell the agent not to ask in the
+  chat as well. Haiku 4.5 installed before the user's yes in 2 of 3 smoke
+  runs before this (#378). A client that can't show a dialog gets the old
+  behavior: the agent asks in the chat.
 - One port per runtime is built and checked live on a Mac, a Linux server
   and a Slurm job ([one-port.md](one-port.md)).
 - The notebook view (`views.rs`, interface 36; R notebooks interface 38): a client that draws MCP App

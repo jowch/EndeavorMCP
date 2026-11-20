@@ -2175,6 +2175,64 @@ fn use_machine_installs_the_helper_only_when_told_to() {
 }
 
 #[test]
+fn where_the_client_can_show_a_dialog_the_user_says_yes_to_an_install_there() {
+    // Haiku 4.5 called add_machine with `install: true` straight after `needs_install`, before the
+    // user had answered (#378): where the client can show a form, Endeavor asks the user itself.
+    let place = Place::bare("dialog-install", &[]);
+    let julia = place.julia.display().to_string();
+    let mut front = place.front();
+    front.dialog = Some("decline");
+    front.initialize();
+    // The tools say Endeavor asks, so the agent doesn't ask in the chat too.
+    let listed = front.request("tools/list", json!({}));
+    for tool in listed["result"]["tools"].as_array().unwrap().iter().filter(|t| t["inputSchema"]["properties"]["install"].is_object()) {
+        let (description, install) = (tool["description"].as_str().unwrap(), tool["inputSchema"]["properties"]["install"]["description"].as_str().unwrap());
+        assert!(install.contains("asks the user in a dialog") && !install.contains("never on a first call"), "{}: {install}", tool["name"]);
+        assert!(description.contains("don't ask in the chat first") && !description.contains("ask the user, and"), "{}: {description}", tool["name"]);
+    }
+    let look = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!(look["state"], "needs_install", "{look}");
+    assert!(text(&look).contains("in a dialog") && text(&look).contains("don't ask in the chat first") && !text(&look).contains("Ask the user"), "{look}");
+    assert!(front.asked.is_empty(), "a look asks nothing");
+
+    // A no installs nothing and saves nothing.
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert!(failed && said["error"] == "install_declined", "{said}");
+    assert_eq!(front.asked.len(), 1);
+    let question = front.asked[0]["params"]["message"].as_str().unwrap().to_owned();
+    assert!(question.contains("Endeavor needs to install Endeavor's helper") && question.contains("MB") && question.contains("on lab") && question.ends_with("Install it now?"), "{question}");
+    assert!(!place.dir.join("root").exists(), "nothing was installed");
+    assert!(!place.machines().path().exists(), "nothing was saved");
+
+    // A yes installs it and adds the machine.
+    front.dialog = Some("accept");
+    let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert_eq!((done["state"].as_str(), done["saved"].clone()), (Some("connected"), json!(true)), "{done}");
+    assert_eq!(front.asked.len(), 2);
+    assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
+
+    // With nothing left to install, `install: true` asks nothing.
+    let again = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
+    assert_eq!(again["state"], "connected", "{again}");
+    assert_eq!(front.asked.len(), 2, "nothing to install, nothing asked");
+
+    // On a runtime that runs, `install: true` is leave to download Julia when a notebook needs it:
+    // that is asked too, and a no leaves the session on the machine without it.
+    let used = front.ok("use_machine", json!({ "machine": "lab" }));
+    assert_eq!(used["state"], "ready", "{used}");
+    front.dialog = Some("decline");
+    let declined = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
+    assert_eq!((declined["state"].as_str(), declined["install_declined"].clone()), (Some("ready"), json!(true)), "{declined}");
+    assert!(text(&declined).contains("said no"), "{declined}");
+    assert_eq!(front.asked.len(), 3);
+    assert!(front.asked[2]["params"]["message"].as_str().unwrap().contains("download its own copy of Julia"), "{}", front.asked[2]);
+    front.dialog = Some("accept");
+    let allowed = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
+    assert_eq!((allowed["state"].as_str(), allowed.get("install_declined")), (Some("ready"), None), "{allowed}");
+    assert_eq!(front.asked.len(), 4);
+}
+
+#[test]
 fn a_helper_of_an_older_build_is_an_update_that_needs_the_user_too() {
     let place = Place::new("older-helper");
     place.add_lab();
