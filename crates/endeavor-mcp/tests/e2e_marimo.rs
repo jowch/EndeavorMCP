@@ -321,6 +321,15 @@ fn a_python_notebook_through_the_runtime() {
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }));
         assert_eq!(read["errored"], true, "{read}");
         assert!(read.to_string().contains("ZeroDivisionError"), "{read}");
+        // Folding a live cell: marimo refuses a config change that leaves out a field (L1 on Haiku, 11-20).
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": c, "code": "z = y * 3\nz", "folded": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }));
+        assert_eq!(read["code_folded"], true, "{read}");
+        agent.ok("fold_cell", json!({ "notebook_id": notebook, "cell_id": c, "folded": false }));
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }))["code_folded"], false);
+        agent.ok("fold_cell", json!({ "notebook_id": notebook, "cell_id": c, "folded": true }));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("@app.cell(hide_code=True)\ndef _(y):\n    z = y * 3"), "marimo saved the fold: {saved}");
     });
 
     step("a preview that leaves no cell where it was still keeps its ids", || {
