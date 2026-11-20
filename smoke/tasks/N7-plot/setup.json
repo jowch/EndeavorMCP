@@ -1,0 +1,1 @@
+{ "dialog": { "new_packages": ["Plots", "PlotlyJS", "PlutoPlotly", "GR", "CairoMakie", "Makie"] } }

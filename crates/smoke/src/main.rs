@@ -3,6 +3,7 @@
 //!
 //!     endeavor-smoke run [--only N1,N4] [--out DIR] [--julia PATH] [--r PATH] [--skip-r] [--depot DEPOT] [--retries N] [--model MODEL]
 //!     endeavor-smoke mcp ARGS...    the recording proxy, started by the plugin as ENDEAVOR_BIN
+//!     endeavor-smoke dialog WORK    the user's answer to Endeavor's dialogs, a hook the runner sets up
 
 mod checks;
 mod inject;
@@ -17,6 +18,7 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("mcp") => proxy::main(&args[1..]),
         Some("run") => run::main(&args[1..]),
+        Some("dialog") => run::dialog_hook(&args[1..]),
         _ => {
             eprintln!("usage: endeavor-smoke run [--only IDS] [--out DIR] [--julia PATH] [--r PATH] [--skip-r] [--depot DEPOT] [--retries N] [--model MODEL]\n       endeavor-smoke mcp ARGS...   (the recording proxy; the runner sets it up)");
             2

@@ -1,1 +1,9 @@
-{ "long": true, "minutes": 75 }
+{
+  "long": true,
+  "minutes": 75,
+  "dialog": { "new_packages": [
+    "CSV", "DataFrames", "DataFramesMeta", "Chain", "CategoricalArrays", "PrettyTables",
+    "Plots", "StatsPlots", "PlotlyJS", "CairoMakie", "Makie", "AlgebraOfGraphics", "ColorSchemes", "Colors", "PlutoUI",
+    "StatsBase", "Distributions", "HypothesisTests", "GLM", "LsqFit", "Loess", "Interpolations", "Measurements"
+  ] }
+}
